@@ -383,6 +383,55 @@ async def test_upstream_protocol_runs_every_command_and_scores_pytest(task_asset
     assert result.test_output.startswith("[grading_protocol: upstream]")
 
 
+def test_parse_pytest_outer_counts_only_each_commands_final_summary() -> None:
+    nested = (
+        "collected 184 items\n"
+        "E   and: '========== 10 passed, 1 warning in 0.06s =========='\n"
+        "---- Captured stdout call ----\n"
+        "========================= 1 failed, 1 passed in 0.09s ==========================\n"
+        "============ 35 failed, 149 passed, 27 skipped in 126.57s (0:02:06) ============\n"
+    )
+    coloured = "\x1b[31m===== \x1b[31m\x1b[1m243 failed\x1b[0m, \x1b[32m408 passed\x1b[0m\x1b[31m in 4.28s\x1b[0m\x1b[31m =====\n"
+    quiet = "73 failed, 61 passed, 16 warnings, 4 errors in 1.80s\n"
+    frozen_clock = "============== 41 failed, 92 passed, 6 skipped in -467150442.48s ===============\n"
+    assert app_module._parse_pytest_outer([nested]) == (149, 35, 0)
+    assert app_module._parse_pytest_outer([coloured]) == (408, 243, 0)
+    assert app_module._parse_pytest_outer([quiet]) == (61, 73, 4)
+    assert app_module._parse_pytest_outer([frozen_clock]) == (92, 41, 0)
+    assert app_module._parse_pytest_outer([nested, quiet]) == (210, 108, 4)
+    assert app_module._parse_pytest_outer(["no summary at all"]) == (0, 0, 0)
+    # upstream's parser adds the nested summaries too
+    assert app_module._parse_pytest_upstream([nested])[0] == 160
+
+
+async def test_upstream_protocol_clean_reward_ignores_nested_summaries(task_assets: Path) -> None:
+    config = _config(task_assets).model_copy(update={"grading_protocol": "upstream"})
+    server = NL2RepoBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = [
+        _exec_result(0),
+        _exec_result(0),
+        _exec_result(0),  # pip install -e .
+        # a test that runs pytest itself prints "10 passed" before the outer summary; 7 tests collected, 5 stored
+        _exec_result(1, "E   10 passed in 0.1s\n10 passed in 0.1s\n===== 3 passed, 4 failed in 0.5s ====="),
+    ]
+
+    result = await server._run_verifier(sandbox, _resolved_task(task_assets), b"tar-bytes")
+
+    assert result.reward == 1.0  # upstream: (10 + 3) / 5, capped
+    assert result.clean_reward == 3 / 7  # outer summary over max(stored 5, collected 7)
+
+
+def test_clean_reward_excludes_vendored_targets_and_falls_back_on_failure() -> None:
+    graded = app_module.VerifierResult(evaluation_completed=True, reward=1.0, clean_reward=0.8)
+    failed = app_module.VerifierResult(evaluation_completed=False, reward=0.0)
+    exclude = app_module.NL2RepoBenchResourcesServerConfig.model_fields["clean_exclude_tasks"].default_factory()
+    assert set(exclude) == {"six", "tenacity", "typing_extensions", "more-Itertools"}
+    assert app_module._clean_reward_for("tenacity", graded, exclude) is None
+    assert app_module._clean_reward_for("aiofiles", graded, exclude) == 0.8
+    assert app_module._clean_reward_for("aiofiles", failed, exclude) == 0.0
+
+
 async def test_default_protocol_still_zeroes_on_install_failure(task_assets: Path) -> None:
     server = NL2RepoBenchResourcesServer(config=_config(task_assets), server_client=MagicMock(spec=ServerClient))
     sandbox = AsyncMock()
@@ -394,3 +443,98 @@ async def test_default_protocol_still_zeroes_on_install_failure(task_assets: Pat
     assert result.verifier_error == "install command failed: pip install -e ."
     assert result.tests_passed == 0
     assert result.reward == 0.0
+
+
+async def test_trace_only_saves_the_workspace_and_grades_nothing(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    config = _config(task_assets).model_copy(update={"trace_only": True, "save_workspace_dir": tmp_path / "ws"})
+    server = NL2RepoBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    agent_sandbox = AsyncMock()
+    agent_sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox"}
+    create = AsyncMock(side_effect=[agent_sandbox])  # a verifier sandbox would be a second call
+    monkeypatch.setattr(server, "_create_sandbox", create)
+    monkeypatch.setattr(server, "_collect_workspace", AsyncMock(return_value=(b"tar-bytes", None)))
+    run_verifier = AsyncMock()
+    monkeypatch.setattr(server, "_run_verifier", run_verifier)
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "s1"}
+
+    await server.seed_session(request, NL2RepoBenchSeedSessionRequest.model_validate(_request()))
+    response = await server.verify(request, NL2RepoBenchVerifyRequest.model_validate(_request()))
+
+    assert response.reward == 0.0 and response.evaluation_completed is False and response.verifier_error is None
+    assert response.model_dump()["graded"] is False
+    assert create.await_count == 1 and run_verifier.await_count == 0
+    assert (tmp_path / "ws" / "example-task" / "s1.tar.gz").read_bytes() == b"tar-bytes"
+
+
+async def test_task_workdir_is_where_the_agent_works(task_assets: Path, monkeypatch: MonkeyPatch) -> None:
+    (task_assets / "example-task" / "workdir.txt").write_text("/workspace/example\n", encoding="utf-8")
+    server = NL2RepoBenchResourcesServer(config=_config(task_assets), server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox"}
+    sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "s1"}
+
+    response = await server.seed_session(request, NL2RepoBenchSeedSessionRequest.model_validate(_request()))
+
+    assert response.workdir == "/workspace/example"
+    commands = [c.kwargs.get("command") or c.args[0] for c in sandbox.exec.await_args_list]
+    assert "mkdir -p /workspace/example" in commands
+    assert sandbox.upload.await_args.args[1] == "/workspace/example/start.md"
+    assert server._agent_sessions["s1"].workdir == "/workspace/example"
+    assert "-C /workspace/example ." in app_module._collect_command("/workspace/example")
+    assert app_module._collect_command("/workspace") == app_module._COLLECT_COMMAND
+
+
+async def test_sandbox_metadata_from_config_reaches_the_spec(task_assets: Path, monkeypatch: MonkeyPatch) -> None:
+    """nemo.nvidia.com/oom-kill: process (configs/nl2repobench.yaml) must reach OpenSandbox at creation."""
+    config = _config(task_assets).model_copy(
+        update={"sandbox_config": {"metadata": {"nemo.nvidia.com/oom-kill": "process"}}}
+    )
+    server = NL2RepoBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox"}
+    sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "s1"}
+    await server.seed_session(request, NL2RepoBenchSeedSessionRequest.model_validate(_request()))
+    assert sandbox.start.await_args.args[0].metadata["nemo.nvidia.com/oom-kill"] == "process"
+
+
+async def test_verify_image_registry_template_picks_the_grading_image(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """verify_image_registry_template (map:<json>) grades in the per-task image it names; the agent image is unchanged."""
+    verify_map = tmp_path / "verify_images.json"
+    verify_map.write_text('{"example-task": "registry.example/twins/example-task@sha256:abc"}')
+    config = _config(task_assets).model_copy(
+        update={
+            "agent_network_mode": "no_internet_preinstalled",
+            "verify_image_registry_template": f"map:{verify_map}",
+        }
+    )
+    server = NL2RepoBenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
+    created = MagicMock(return_value=sandbox)
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(app_module, "AsyncSandbox", created)
+    task = _resolve_task(NL2RepoBenchVerifyRequest.model_validate(_request()), server._task_store)
+    await server._create_sandbox(task, phase="verify")
+    await server._create_sandbox(task, phase="agent")
+    specs = [call.args[0] for call in sandbox.start.await_args_list]
+    assert specs[0].image == "registry.example/twins/example-task@sha256:abc"
+    assert specs[1].image == UPSTREAM_IMAGE

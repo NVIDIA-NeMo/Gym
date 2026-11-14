@@ -229,6 +229,94 @@ for b in glob.glob("/usr/local/bin/*"):
 print("workspace-install scrub removed", removed)
 PYEOF"""
 
+# no_internet_preinstalled + scrub_target_installs: remove the reference project ITSELF from the agent sandbox. An audit of
+# all 104 upstream images (2026-11-02) found the real implementation in 13 of them outside what the scrubs above reach,
+# and agents copied it into /workspace (paillier, pytorch-grad-cam, pytz, asteval all scored 1.0 that way):
+#   - pip installs from a local checkout, under a distribution name that is not the task name (paillier -> phe,
+#     pytorch-grad-cam -> grad_cam). Every such target install records direct_url.json {"url": "file:///<checkout>"};
+#     real dependencies come from an index and have no file:// URL (scikit-learn in the sklearn-pandas image does not).
+#   - `setup.py install` eggs named after the target, imported via easy-install.pth (pytz-2025.2-py3.10.egg).
+#   - the checkout itself left at the root (/project in asteval, /app in paillier, /jinja with the held-out tests).
+# Not reachable this way: targets vendored inside pip/setuptools (six, tenacity, typing_extensions, more_itertools);
+# deleting those breaks pip, so they need excluding from a clean score instead.
+# NL2REPO_SCRUB_PREFIX re-roots every path, for the unit tests only.
+_TARGET_INSTALL_SCRUB_COMMAND = r"""python3 - <<'PYEOF'
+import glob, json, os, re, shutil
+P = os.environ.get("NL2REPO_SCRUB_PREFIX", "")
+IDENTS = set("__IDENTS__".split())
+norm = lambda s: re.sub(r"[-_.]", "", s.lower())
+# Never deleted as a "checkout", whatever a direct_url.json says.
+KEEP = {"/", "/usr", "/usr/local", "/usr/lib", "/opt", "/tmp", "/root", "/home", "/bin", "/sbin", "/lib", "/lib64",
+        "/etc", "/var", "/srv", "/mnt", "/media", "/proc", "/sys", "/dev", "/boot", "/run", "/workspace"}
+removed = []
+
+def rm(path):
+    if os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path, ignore_errors=True)
+    elif os.path.lexists(path):
+        os.remove(path)
+    else:
+        return
+    removed.append(path[len(P):] or "/")
+
+roots = set(glob.glob(P + "/usr/local/lib/python3*/site-packages") + glob.glob(P + "/usr/lib/python3*/dist-packages")
+            + glob.glob(P + "/usr/local/lib/python3*/dist-packages") + glob.glob(P + "/usr/local/venv/lib/python3*/site-packages")
+            + glob.glob(P + "/openhands/micromamba/envs/*/lib/python3*/site-packages"))
+checkouts = {"/project"}
+for root in roots:
+    for di in glob.glob(root + "/*.dist-info"):
+        try:
+            url = json.load(open(di + "/direct_url.json")).get("url", "")
+        except (OSError, ValueError):
+            continue
+        if not url.startswith("file://"):
+            continue
+        checkouts.add(os.path.normpath(url[len("file://"):] or "/"))
+        tops = set()
+        if os.path.exists(di + "/RECORD"):
+            for line in open(di + "/RECORD"):
+                rel = line.split(",")[0]
+                path = os.path.normpath(os.path.join(root, rel))
+                if not path.startswith(di) and os.path.isfile(path):
+                    rm(path)
+                if not rel.startswith(".."):
+                    tops.add(os.path.join(root, rel.split("/")[0]))
+        for top in tops:  # package dirs the RECORD emptied, typically left holding only __pycache__
+            if os.path.isdir(top) and not any(f.endswith(".py") for _, _, fs in os.walk(top) for f in fs):
+                rm(top)
+        rm(di)
+    for egg in glob.glob(root + "/*.egg"):
+        if norm(re.sub(r"-\d.*$", "", os.path.basename(egg))) in IDENTS:
+            rm(egg)
+    # Target-named package dirs left with no code (only __pycache__/*.pyc, or nothing) after a RECORD-driven scrub
+    # (_WORKSPACE_INSTALL_SCRUB_COMMAND empties them by name but keeps the dir, so `import <target>` still succeeds
+    # as an empty namespace package). Dirs with any other file (.py, .so, data) are left alone.
+    for d in glob.glob(root + "/*/"):
+        d = d.rstrip("/")
+        if norm(os.path.basename(d)) in IDENTS and all(
+            f.endswith(".pyc") for _, _, fs in os.walk(d) for f in fs
+        ):
+            rm(d)
+    pth = root + "/easy-install.pth"
+    if os.path.isfile(pth):
+        lines = open(pth).read().splitlines(True)
+        keep = [l for l in lines if norm(re.sub(r"-\d.*$", "", os.path.basename(l.strip()))) not in IDENTS]
+        if keep != lines:
+            open(pth, "w").writelines(keep)
+            removed.append(pth[len(P):])
+# Root-level directories named after the target that hold a project (pyproject/setup files or tests).
+for entry in os.listdir(P + "/"):
+    full = "/" + entry
+    if norm(entry) in IDENTS and os.path.isdir(P + full) and any(
+        os.path.exists(P + full + "/" + m) for m in ("pyproject.toml", "setup.py", "setup.cfg", "tests", "test")
+    ):
+        checkouts.add(full)
+for d in sorted(checkouts):
+    if d not in KEEP and not d.startswith(("/usr/", "/proc/", "/sys/", "/workspace")):
+        rm(P + d)
+print("target-install scrub removed", len(removed), " ".join(removed[:40]))
+PYEOF"""
+
 # Timeout for the agent-side workspace collection tar command.
 WORKSPACE_COLLECT_TIMEOUT_S = 300.0
 # Per-command timeout for install/test commands run in the fresh verifier sandbox.
@@ -241,6 +329,12 @@ _WORKSPACE_EXCLUDES = "--exclude=.git --exclude=__pycache__ --exclude=.venv --ex
 # positional args (-C DIR .) — it must precede them or it's silently ignored
 # (older tar) or rejected outright (newer tar, exit code 2).
 _COLLECT_COMMAND = f"tar czf /tmp/workspace.tar.gz {_WORKSPACE_EXCLUDES} -C /workspace ."
+
+
+def _collect_command(workdir: str) -> str:
+    """_COLLECT_COMMAND for a task's own project directory (identical for /workspace)."""
+    return _COLLECT_COMMAND.replace("-C /workspace .", f"-C {shlex.quote(workdir)} .")
+
 
 # Upstream NL2RepoBench runs the agent in a generic, task-agnostic OpenHands
 # sandbox image - no pre-installed deps, no existing scaffold, nothing but
@@ -320,6 +414,35 @@ def _upstream_restore_command(
     )
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+# The outer session's summary line: "=== 41 failed, 92 passed, 1 error in 0.19s ===", also without the "=" bars (-q) and
+# with a negative duration (freezegun freezes the clock).
+_SUMMARY_LINE_RE = re.compile(r"^(?:=+ )?((?:\d+ [a-z]+(?:, )?)+) in -?[\d.]+s\b")
+# Upstream NL2RepoBench tasks whose real implementation ships vendored inside pip or setuptools in the task image, so
+# no scrub can remove it (agents read pip/_vendor/tenacity, pip/_vendor/six.py, setuptools/_vendor/typing_extensions.py
+# on 2026-11-02; setuptools/_vendor/more_itertools is in the more-itertools image). clean_reward is None for them.
+_UPSTREAM_VENDORED_TARGETS = ("six", "tenacity", "typing_extensions", "more-Itertools")
+
+
+def _parse_pytest_outer(pytest_outputs: list[str]) -> tuple[int, int, int]:
+    """Sum only the LAST summary line of each pytest command's output: the outer session's.
+
+    Upstream's parser (below) adds every line matching "N passed", which also counts the summaries that tests running
+    pytest themselves print into their failure output (pytest-cov: 510 "passed" against 184 tests, real outer result
+    149 passed / 35 failed)."""
+    passed = failed = errors = 0
+    for output in pytest_outputs:
+        last = None
+        for line in output.split("\n"):
+            if match := _SUMMARY_LINE_RE.match(_ANSI_RE.sub("", line)):
+                last = match.group(1)
+        if last is not None:
+            passed += int(m.group(1)) if (m := re.search(r"\b(\d+) passed", last)) else 0
+            failed += int(m.group(1)) if (m := re.search(r"\b(\d+) failed", last)) else 0
+            errors += int(m.group(1)) if (m := re.search(r"\b(\d+) errors?\b", last)) else 0
+    return passed, failed, errors
+
+
 def _parse_pytest_upstream(pytest_outputs: list[str]) -> tuple[int, int, int]:
     """Sum the first "N passed/failed/error" match of every line of every pytest command's output, like upstream."""
     passed = failed = errors = 0
@@ -367,10 +490,22 @@ class NL2RepoBenchResourcesServerConfig(BaseResourcesServerConfig):
     # under /workspace with a legacy `setup.py develop` / egg-link or editable install, e.g. task images built from the finished reference repo),
     # their console-script stubs, and pip caches. Off by default so existing eval behavior is byte-identical. Added 2026-10-24.
     scrub_workspace_installs: bool = False
+    # no_internet_preinstalled only: also remove the reference project itself - pip installs from a local file:// checkout,
+    # target-named eggs, and the checkout left at the root (/project, /app, /<task>). See _TARGET_INSTALL_SCRUB_COMMAND.
+    # Off by default so existing eval behavior is byte-identical. Added 2026-11-02.
+    scrub_target_installs: bool = False
+    # Tasks whose clean_reward is None (left out of mean/clean_reward): targets no scrub can remove. Defaults to the
+    # upstream tasks vendored inside pip/setuptools; set [] or another list for other task sets. Added 2026-11-02.
+    clean_exclude_tasks: list[str] = Field(default_factory=lambda: list(_UPSTREAM_VENDORED_TARGETS))
     # no_internet_preinstalled only: grade in verify_image_override instead of the agent's task image. Needed when the task
     # image ships the reference repo under /workspace (the verifier extracts the agent workspace over /workspace without
     # wiping it). Off by default. Added 2026-10-24.
     verify_with_override_image: bool = False
+    # Per-task grading image, resolved like task_image_registry_template ("map:<json path>" or a "{name}" template), in
+    # every mode, ahead of verify_image_override. For task sets whose grading image is not the agent's image: e.g. the
+    # NL2Repo "grading twins" (the task's grading image + a self-contained grader under /nl2repo/; the agent keeps the
+    # rollout image, which has no tests). None (default): unchanged. Added 2026-11-06.
+    verify_image_registry_template: str | None = None
     # "gym_strict" (default, original behavior): grade the agent's workspace as-is - its own setup.py/pyproject.toml and any
     # files it wrote at the held-out test paths stay, and the first failing non-final command zeroes the row.
     # "upstream": grade the way NL2RepoBench itself does (see _UPSTREAM_PACKAGE_FILES). Added 2026-10-27, after finding
@@ -392,6 +527,10 @@ class NL2RepoBenchResourcesServerConfig(BaseResourcesServerConfig):
     # (a different test_commands.json, a different verify image, etc.) can re-verify against the
     # already-generated code without re-running the agent/LLM at all.
     save_workspace_dir: Path | None = None
+    # Trace generation: run the agent and save its workspace (save_workspace_dir), but grade nothing. The row gets
+    # reward 0, graded=false, evaluation_completed=false; grade later from the saved workspace (for nl2repo-tasks: its
+    # own grade.py). Mirrors the ProgramBench resources server's trace-only mode. Added 2026-11-03.
+    trace_only: bool = False
 
 
 class NL2RepoBenchInstanceRequest(BaseModel):
@@ -429,6 +568,9 @@ class NL2RepoBenchVerifyResponse(BaseVerifyResponse):
     tests_error: int = 0
     test_case_count: int = 0
     success_rate: float = 0.0
+    # See VerifierResult.clean_reward. None for tasks in clean_exclude_tasks, so mean/clean_reward in the aggregate
+    # metrics is the clean score over the remaining tasks; `reward` stays the official, leaderboard-comparable one.
+    clean_reward: float | None = None
 
     workspace_bytes: int | None = None
     workspace_sha256: str | None = None
@@ -452,6 +594,11 @@ class VerifierResult(BaseModel):
     tests_error: int = 0
     test_case_count: int = 0
     success_rate: float = 0.0
+    # grading_protocol=upstream only: passed / max(test_case_count, collected) from each pytest command's outer summary
+    # line (_parse_pytest_outer), instead of upstream's sum of every "N passed" line over the stored count. Differs
+    # where tests run pytest themselves (pytest-cov 1.00 -> 0.81) or the stored count is stale (markupsafe: 39 stored,
+    # 80 collected). None until set; the gym_strict protocol uses its own last-summary parse, so it equals reward there.
+    clean_reward: float | None = None
 
 
 @dataclass
@@ -461,6 +608,7 @@ class AgentSandboxSession:
     sandbox: AsyncSandbox
     sandbox_handle: str
     sandbox_descriptor: dict[str, Any]
+    workdir: str = "/workspace"
 
 
 def _resolve_task_id(body: NL2RepoBenchInstanceRequest) -> str:
@@ -498,6 +646,14 @@ def _parse_pytest_summary(combined_output: str) -> tuple[int, int, int]:
     tests_failed = int(failed_matches[-1]) if failed_matches else 0
     tests_error = int(error_matches[-1]) if error_matches else 0
     return tests_passed, tests_failed, tests_error
+
+
+def _clean_reward_for(task_name: str, result: "VerifierResult", exclude: list[str]) -> float | None:
+    """None for excluded tasks (left out of mean/clean_reward); otherwise the clean score. Failure paths build a
+    VerifierResult without clean_reward and score 0 either way, so they fall back to reward."""
+    if task_name in exclude:
+        return None
+    return result.clean_reward if result.clean_reward is not None else result.reward
 
 
 def _compute_reward(tests_passed: int, test_case_count: int) -> float:
@@ -616,8 +772,11 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         # deciding factor exactly as before - this keeps block_target/official verify behavior
         # byte-identical to already-reported eval baselines, since those don't touch this branch.
         verify_image = (
-            task_image(task, registry_template=self.config.task_image_registry_template)
-            if mode == "no_internet_preinstalled" and not (self.config.verify_with_override_image and self.config.verify_image_override)
+            task_image(task, registry_template=self.config.verify_image_registry_template)
+            if self.config.verify_image_registry_template
+            else task_image(task, registry_template=self.config.task_image_registry_template)
+            if mode == "no_internet_preinstalled"
+            and not (self.config.verify_with_override_image and self.config.verify_image_override)
             else self.config.verify_image_override
             or task_image(task, registry_template=self.config.task_image_registry_template)
         )
@@ -672,10 +831,10 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             # all - so letting this call default to /workspace, the very directory
             # it's trying to create, fails with "working directory does not exist"
             # before mkdir ever runs. "/" is guaranteed to exist in any image.
-            mkdir_result = await sandbox.exec(command="mkdir -p /workspace", cwd="/", timeout_s=60)
+            mkdir_result = await sandbox.exec(command=f"mkdir -p {shlex.quote(task.workdir)}", cwd="/", timeout_s=60)
             if mkdir_result.return_code != 0:
                 raise RuntimeError(
-                    f"Failed to create /workspace in agent sandbox for {task_id(task)!r}: "
+                    f"Failed to create {task.workdir} in agent sandbox for {task_id(task)!r}: "
                     f"{mkdir_result.stderr or mkdir_result.stdout or '(no output)'}"
                 )
             if mode == "no_internet_preinstalled":
@@ -706,7 +865,7 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                 # side effect to work around - it is never supposed to have the real
                 # implementation available at all.
                 wipe_result = await sandbox.exec(
-                    command="find /workspace -mindepth 1 -delete && rm -rf /tmp/_reference_repo",
+                    command=f"find {shlex.quote(task.workdir)} -mindepth 1 -delete && rm -rf /tmp/_reference_repo",
                     cwd="/",
                     timeout_s=60,
                 )
@@ -747,6 +906,19 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                             f"Failed to scrub /workspace installs in agent sandbox for {task_id(task)!r}: "
                             f"{ws_scrub.stderr or ws_scrub.stdout or '(no output)'}"
                         )
+                if self.config.scrub_target_installs:
+                    target_scrub = await sandbox.exec(
+                        command=_TARGET_INSTALL_SCRUB_COMMAND.replace(
+                            "__IDENTS__", " ".join(derive_identifiers(task_id(task), task.test_commands.commands)[0])
+                        ),
+                        cwd="/",
+                        timeout_s=120,
+                    )
+                    if target_scrub.return_code != 0:
+                        raise RuntimeError(
+                            f"Failed to scrub the reference project's installs in agent sandbox for {task_id(task)!r}: "
+                            f"{target_scrub.stderr or target_scrub.stdout or '(no output)'}"
+                        )
             elif mode == "block_target":
                 await self._install_pip_git_guard(sandbox, task)
             elif mode == "block_target_v2":
@@ -755,7 +927,7 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                 f.write(task.start_md)
                 local_start_md_path = Path(f.name)
             try:
-                await sandbox.upload(local_start_md_path, "/workspace/start.md")
+                await sandbox.upload(local_start_md_path, f"{task.workdir}/start.md")
             finally:
                 local_start_md_path.unlink(missing_ok=True)
         return sandbox
@@ -875,6 +1047,7 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                 sandbox=sandbox,
                 sandbox_handle=sandbox_handle,
                 sandbox_descriptor=sandbox_descriptor,
+                workdir=task.workdir,
             )
             return NL2RepoBenchSeedSessionResponse(
                 sandbox_handle=sandbox_handle,
@@ -888,17 +1061,19 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                 # explicitly so opencode actually runs from where start.md was written,
                 # regardless of what the booted image's default happens to be. This
                 # sandbox is always phase="agent" (see _create_sandbox call above).
-                workdir="/workspace",
+                workdir=task.workdir,
             )
         except Exception:
             if sandbox is not None:
                 await self._stop_sandbox(sandbox, task_id=task_id(task), phase="failed-agent-seed")
             raise
 
-    async def _collect_workspace(self, sandbox: AsyncSandbox) -> tuple[bytes | None, str | None]:
-        """Tar up /workspace in the agent sandbox and download it. Returns (tar_bytes, error)."""
+    async def _collect_workspace(
+        self, sandbox: AsyncSandbox, workdir: str = "/workspace"
+    ) -> tuple[bytes | None, str | None]:
+        """Tar up the task's project directory in the agent sandbox and download it. Returns (tar_bytes, error)."""
 
-        result = await sandbox.exec(_COLLECT_COMMAND, timeout_s=WORKSPACE_COLLECT_TIMEOUT_S)
+        result = await sandbox.exec(_collect_command(workdir), cwd="/", timeout_s=WORKSPACE_COLLECT_TIMEOUT_S)
         if result.return_code != 0:
             details = ((result.stderr or "") + (result.stdout or "")).strip()
             return None, f"Workspace collection exited with code {result.return_code}: {details[-4000:]}"
@@ -960,7 +1135,9 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         commands = task.test_commands.commands
         for index, command in enumerate(commands):
             is_last = index == len(commands) - 1
-            run_command = f"export PYTHONPATH=/workspace${{PYTHONPATH:+:$PYTHONPATH}}; {command}" if upstream else command
+            run_command = (
+                f"export PYTHONPATH=/workspace${{PYTHONPATH:+:$PYTHONPATH}}; {command}" if upstream else command
+            )
             command_result = await sandbox.exec(run_command, cwd="/workspace", timeout_s=TEST_COMMAND_TIMEOUT_S)
             last_exit_code = command_result.return_code
             command_output = f"{command_result.stdout or ''}{command_result.stderr or ''}"
@@ -975,9 +1152,14 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                 break
 
         combined_output = ("\n" + "-" * 40 + "\n").join(output_parts)
+        clean_reward: float | None = None
         if upstream:
             # Parsed before the size cap below, so a long log can't hide a summary line.
             tests_passed, tests_failed, tests_error = _parse_pytest_upstream(pytest_outputs)
+            outer_passed, outer_failed, outer_error = _parse_pytest_outer(pytest_outputs)
+            clean_reward = _compute_reward(
+                outer_passed, max(task.test_case_count, outer_passed + outer_failed + outer_error)
+            )
             combined_output = f"[grading_protocol: upstream]\n{combined_output}"
         if len(combined_output) > TEST_OUTPUT_MAX_CHARS:
             combined_output = combined_output[-TEST_OUTPUT_MAX_CHARS:]
@@ -987,6 +1169,8 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
         if verifier_error is not None:
             tests_passed = 0
         reward = _compute_reward(tests_passed, task.test_case_count)
+        if clean_reward is None or verifier_error is not None:
+            clean_reward = reward
 
         return VerifierResult(
             evaluation_completed=True,
@@ -999,6 +1183,7 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             tests_error=tests_error,
             test_case_count=task.test_case_count,
             success_rate=reward,
+            clean_reward=clean_reward,
         )
 
     async def verify(self, request: Request, body: NL2RepoBenchVerifyRequest) -> NL2RepoBenchVerifyResponse:
@@ -1029,7 +1214,7 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                         f"NL2RepoBench session image {agent_session.image!r} does not match verify image "
                         f"{current_task_image!r}"
                     )
-                collected, collect_error = await self._collect_workspace(agent_session.sandbox)
+                collected, collect_error = await self._collect_workspace(agent_session.sandbox, agent_session.workdir)
                 if collect_error is not None:
                     workspace_error = collect_error
                 else:
@@ -1066,7 +1251,9 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             verifier_error=workspace_error,
             test_case_count=task.test_case_count,
         )
-        if workspace_error is None:
+        if workspace_error is None and self.config.trace_only:
+            result = VerifierResult(evaluation_completed=False, reward=0.0, test_case_count=task.test_case_count)
+        elif workspace_error is None:
             try:
                 started = monotonic()
                 sandbox = await self._create_sandbox(task, phase="verifier")
@@ -1096,10 +1283,12 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             log_dir.mkdir(parents=True, exist_ok=True)
             log_dir_str = str(log_dir)
 
+        clean_reward = _clean_reward_for(current_task_id, result, self.config.clean_exclude_tasks)
         return NL2RepoBenchVerifyResponse.model_validate(
             body.model_dump()
             | result.model_dump()
             | {
+                "clean_reward": clean_reward,
                 "task_id": current_task_id,
                 "sandbox_handle": sandbox_handle,
                 "workspace_bytes": workspace_bytes,
@@ -1111,6 +1300,7 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
                 "workspace_collection_time_s": workspace_collection_time_s,
                 "sandbox_start_time_s": sandbox_start_time_s,
                 "verification_time_s": verification_time_s,
+                "graded": not self.config.trace_only,
             }
         )
 

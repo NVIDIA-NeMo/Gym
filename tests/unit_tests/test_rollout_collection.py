@@ -2881,6 +2881,36 @@ class TestRolloutCollection:
         assert [result["case"] for result in captured["results"]] == ["new", "cached"]
         assert [row["x"] for row in captured["rows"]] == [0, 1]
 
+    def test_load_from_cache_lean_keeps_only_the_metrics_view(self, tmp_path: Path) -> None:
+        materialized = tmp_path / "output_materialized_inputs.jsonl"
+        materialized.write_bytes(
+            b"\n".join(orjson.dumps({"_ng_task_index": t, "_ng_rollout_index": 0, "input": True}) for t in (0, 1))
+            + b"\n"
+        )
+        full = {
+            "_ng_task_index": 0,
+            "_ng_rollout_index": 0,
+            "reward": 1.0,
+            "response": {"output": ["big"], "usage": {"output_tokens": 7}},
+            "responses_create_params": {"input": ["big"]},
+            "ng_agent_observations": ["big"],
+        }
+        output = tmp_path / "output.jsonl"
+        output.write_bytes(orjson.dumps(full) + b"\n")
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(tmp_path / "input.jsonl"), output_jsonl_fpath=str(output), limit=2
+        )
+
+        input_rows, rows, results, result_strs = RolloutCollectionHelper()._load_from_cache(config, lean=True)
+
+        assert [r["_ng_task_index"] for r in input_rows] == [1]
+        assert results == [
+            {"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0, "response": {"usage": {"output_tokens": 7}}}
+        ]
+        assert result_strs == []
+        # the default still returns the full records
+        assert RolloutCollectionHelper()._load_from_cache(config)[2] == [full]
+
     def test_load_from_cache(self, tmp_path: Path) -> None:
         input_jsonl_fpath = tmp_path / "input.jsonl"
         materialized_inputs_jsonl_fpath = tmp_path / "output_materialized_inputs.jsonl"

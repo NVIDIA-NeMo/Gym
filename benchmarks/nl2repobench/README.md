@@ -21,6 +21,15 @@ One resources server (`resources_servers/nl2repobench`) serves every combination
 | `block_target_v2` | generic image | source-hosting domains denied (GitHub etc.), PyPI open | `guard_v2.py`: real package/repo identifiers, subcommand-aware pip/git/curl/uv/apt wrappers, python/node code inspection, no `-m venv` |
 | `no_internet_preinstalled` | per-task image with dependencies preinstalled | deny-all except the model host | reference repo wiped before the first turn; its editable-install metadata and same-named cargo crates scrubbed |
 
+For `no_internet_preinstalled` on the upstream 104, also set `scrub_workspace_installs=true` and `scrub_target_installs=true` (both off by default). An audit of all 104 images (2026-11-02) found the real implementation in 13 of them beyond what the default wipe reaches, and agents copied it into `/workspace`:
+- pip/uv caches holding the target's wheel (arxiv-mcp-server): `scrub_workspace_installs`.
+- target installs whose distribution name is the task name (databases, gitingest, justext, stamina, wifiphisher): `scrub_workspace_installs` empties them and `scrub_target_installs` removes the leftover dirs.
+- installs from a local checkout under another name (paillier -> `phe`, pytorch-grad-cam -> `grad_cam`), a `setup.py install` egg (pytz), and checkouts left at the root (`/project` in asteval, `/app` in paillier, `/jinja` with the held-out tests): `scrub_target_installs`.
+
+Four targets ship vendored inside pip or setuptools in their images (six, tenacity, typing_extensions, more-itertools) and cannot be removed without breaking pip; exclude them when a leak-free score matters. Images that run as a non-root user without a writable home (more-itertools, pyautogui) also need `++...opencode_sandboxed_agent.opencode_data_home_in_tmp=true`.
+
+**Official vs clean score.** With `grading_protocol: upstream`, every row carries both. `reward` is NL2RepoBench's own scoring: every "N passed" line of the pytest output summed, over the stored test count, capped at 1. Use it to compare with published numbers. `clean_reward` counts only each pytest command's outer summary line, over the larger of the stored count and the outer run's passed+failed+errors. It is `None` for `clean_exclude_tasks`, which defaults to the four vendored targets above, so `mean/clean_reward` in the aggregate metrics is the clean score over the rest. The two differ where tests run pytest themselves (pytest-cov: 510 "passed" against 184 tests, 1.00 official, 0.81 clean) or the stored count is stale (parse: 96 stored, 131 run). On a 99-row DeepSeek V4.1 Flash run, 13 rows changed, all downward.
+
 On vahid_1016 tasks the guard identifiers come from the clone URL in `test_commands.json`; upstream tasks have no clone URL, so `block_target_v2` falls back to the task id there (the egress deny rules still apply).
 
 ## Combinations and status (what has actually been run)

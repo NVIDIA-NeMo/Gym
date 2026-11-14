@@ -850,6 +850,18 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         default=False,
         description="If the same command is run multiple times, check the materialized inputs and current outputs and remove the inputs that have already been run",
     )
+    lean_results_in_memory: bool = Field(
+        default=False,
+        description=(
+            "Keep only the metrics view of each finished rollout in memory (what /aggregate_metrics is sent: "
+            "the result without response, responses_create_params, observations, model-call capture or "
+            "trajectory, plus response.usage and response.incomplete_details). Every rollout is still "
+            "written to the output jsonl in full. Without it the collector holds every full rollout until "
+            "the run ends (and reads them all back on resume), so memory grows with the output file: a "
+            "7.5 GB rollouts.jsonl of agent traces held ~18 GB. Ignored when rollouts are uploaded to an "
+            "exporter, which needs the full records; run_from_config then returns the lean records too."
+        ),
+    )
     prompt_config: Optional[str] = Field(
         default=None,
         description="Path to a prompt YAML file. Builds responses_create_params.input from the template at rollout time. Mutually exclusive with pre-populated responses_create_params.input in the JSONL data.",
@@ -1030,6 +1042,32 @@ def _coverage_report(expected: int, scored: int, failure_counts: Counter, failur
         f"\nRollouts missing from the score: {missing} of {expected} materialized ({routed}see {failures_hint})"
         f"\nMetrics cover: {scored} of {expected} rollouts"
     )
+
+
+_METRICS_HEAVY_KEYS = (
+    "response",
+    "responses_create_params",
+    "ng_agent_observations",
+    "ng_model_call_capture",
+    NG_TRAJECTORY_KEY,
+)
+
+
+def _metrics_view(result: Dict) -> Dict:
+    """The part of a finished rollout that /aggregate_metrics reads: everything but the heavyweight
+    fields, keeping response.usage and response.incomplete_details when present."""
+    entry = {k: v for k, v in result.items() if k not in _METRICS_HEAVY_KEYS}
+    response = result.get("response") or {}
+    response_metadata = {}
+    usage = response.get("usage")
+    if usage is not None:
+        response_metadata["usage"] = usage
+    incomplete_details = response.get("incomplete_details")
+    if incomplete_details is not None:
+        response_metadata["incomplete_details"] = incomplete_details
+    if response_metadata:
+        entry["response"] = response_metadata
+    return entry
 
 
 class RolloutCollectionHelper(BaseModel):
@@ -1278,13 +1316,22 @@ class RolloutCollectionHelper(BaseModel):
         return rows
 
     def _load_from_cache(
-        self, config: RolloutCollectionConfig
+        self, config: RolloutCollectionConfig, lean: bool = False
     ) -> Tuple[List[Dict], List[Dict], List[Dict], List[List[str]]]:
         with config.materialized_jsonl_fpath.open() as f:
             original_input_rows = list(map(orjson.loads, tqdm(f, desc="Reading materialized input rows")))
         with Path(config.output_jsonl_fpath).open("rb") as f:
-            result_strs = [[line.strip()] for line in tqdm(f, desc="Reading existing output rows")]
-        results = [orjson.loads(p[0]) for p in result_strs]
+            if lean:
+                # One row at a time, so the full records (and their raw lines) are never all in memory.
+                result_strs = []
+                results = [
+                    _metrics_view(orjson.loads(line))
+                    for line in tqdm(f, desc="Reading existing output rows")
+                    if line.strip()
+                ]
+            else:
+                result_strs = [[line.strip()] for line in tqdm(f, desc="Reading existing output rows")]
+                results = [orjson.loads(p[0]) for p in result_strs]
 
         get_key = lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
 
@@ -1356,6 +1403,8 @@ class RolloutCollectionHelper(BaseModel):
     async def _run_from_config(self, config: RolloutCollectionConfig) -> Tuple[List[Dict]]:
         output_fpath = Path(config.output_jsonl_fpath)
         failures_fpath = failures_path_for(output_fpath)
+        # Exporters upload the full records at the end, so they keep them all in memory.
+        lean_results = config.lean_results_in_memory and not (config.upload_rollouts and get_exporters())
 
         # Create the output directory up front: every artifact this run writes (materialized inputs,
         # rollouts, failures sidecar, aggregate metrics) is derived from output_fpath and keeps its
@@ -1370,7 +1419,7 @@ class RolloutCollectionHelper(BaseModel):
                 rows,
                 results,
                 result_strs,
-            ) = self._load_from_cache(config)
+            ) = self._load_from_cache(config, lean=lean_results)
             persisted_rows = list(rows)
             persisted_results = list(results)
         else:
@@ -1569,9 +1618,12 @@ class RolloutCollectionHelper(BaseModel):
                             "mostly token-less data."
                         )
 
+            serialized = orjson.dumps(result)
+            if lean_results:
+                # Written in full below; only the metrics view stays in memory.
+                result = _metrics_view(result)
             rows.append(row)
             results.append(result)
-            serialized = orjson.dumps(result)
 
             if no_persist:
                 # kill_shaped: don't write anywhere. Set-difference on resume
@@ -1801,31 +1853,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         async def _fetch_agent_metrics(agent_name: str, agent_result_list: List[Dict]) -> Dict:
             # Strip heavyweight fields before sending, but preserve response.usage and response.incomplete_details if present.
-            stripped = []
-            for r in agent_result_list:
-                entry = {
-                    k: v
-                    for k, v in r.items()
-                    if k
-                    not in (
-                        "response",
-                        "responses_create_params",
-                        "ng_agent_observations",
-                        "ng_model_call_capture",
-                        NG_TRAJECTORY_KEY,
-                    )
-                }
-                response = r.get("response") or {}
-                response_metadata = {}
-                usage = response.get("usage")
-                if usage is not None:
-                    response_metadata["usage"] = usage
-                incomplete_details = response.get("incomplete_details")
-                if incomplete_details is not None:
-                    response_metadata["incomplete_details"] = incomplete_details
-                if response_metadata:
-                    entry["response"] = response_metadata
-                stripped.append(entry)
+            stripped = [_metrics_view(r) for r in agent_result_list]
 
             agg_request = AggregateMetricsRequest(verify_responses=stripped)
             agg_response = await server_client.post(

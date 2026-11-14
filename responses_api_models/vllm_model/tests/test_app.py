@@ -1838,6 +1838,28 @@ class TestApp:
 
         assert captured_params["value"] == expected_chat_completion_create_params
 
+    def test_max_http_attempts_reaches_every_client(self):
+        base = dict(
+            host="0.0.0.0",
+            port=8081,
+            base_url=["http://api.openai.com/v1", "http://api.openai.com/v2"],
+            api_key="dummy_key",  # pragma: allowlist secret
+            model="dummy_model",
+            entrypoint="",
+            name="",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+        )
+        default = VLLMModel(
+            config=VLLMModelConfig(**base), server_client=MagicMock(spec=ServerClient, global_config_dict={})
+        )
+        raised = VLLMModel(
+            config=VLLMModelConfig(**base, max_http_attempts=10),
+            server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+        )
+        assert [c.max_http_attempts for c in default._clients] == [3, 3]
+        assert [c.max_http_attempts for c in raised._clients] == [10, 10]
+
     def test_client_session_routing(self):
         config = VLLMModelConfig(
             host="0.0.0.0",
