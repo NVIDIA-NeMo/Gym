@@ -256,6 +256,18 @@ def evaluate_record(
             for call in bindings.matched_calls
         ):
             unobserved.append(spec.id)
+        if spec.id == "model_call_unparsed_tool_call" and any(
+            not _is_failed_attempt(call)
+            and not _is_length_refusal(call)
+            and (
+                not isinstance(call.get("request"), dict)
+                or (call["request"].get("tools") and not isinstance(call.get("response"), dict))
+            )
+            for call in bindings.matched_calls
+        ):
+            # A call without its request, or a tool-offering call without its response, cannot show whether tool
+            # markup leaked. Missing evidence is not a clean result; a fully observed call can still prove a leak.
+            unobserved.append(spec.id)
         try:
             findings.extend(_ROLLOUT_CHECKS[spec.id](record, trajectory, bindings, subject))
         except Exception as exc:

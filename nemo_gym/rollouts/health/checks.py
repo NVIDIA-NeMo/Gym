@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -946,6 +947,20 @@ def _is_repetition_stop(call: dict[str, Any]) -> bool:
 _TOOL_CALL_MARKUP = ("<tool_call>", "<function=", "[TOOL_CALLS]", "<|python_tag|>", "<|tool_call", "<｜tool▁call")
 
 
+# A structured call in a Responses output: an item of these types means the serving parser did its job. Outputs,
+# compaction and tool-definition carriers (mcp_list_tools) are not calls.
+_STRUCTURED_CALL_TYPES = (_AGENT_TOOL_CALL_TYPES - {"mcp_list_tools"}) | {
+    "apply_patch_call",
+    "shell_call",
+    "tool_search_call",
+    "program",
+}
+# Gym's model servers move a reasoning parser's output into Chat content as leading <think> blocks
+# (ChatCompletionsConverter._wrap_reasoning_in_think_tags). Only that leading wrapping is reasoning; a tag later in
+# the answer stays answer text.
+_LEADING_THINK_BLOCKS = re.compile(r"\A(?:<think>.*?</think>)+", re.DOTALL)
+
+
 def _text_parts(content: Any) -> list[str]:
     if isinstance(content, str):
         return [content]
@@ -958,7 +973,8 @@ def _text_parts(content: Any) -> list[str]:
 
 def _answer_texts_and_tool_call(response: dict[str, Any]) -> tuple[list[str], bool]:
     """The answer text of a saved response and whether it holds a structured tool call, in the Responses, Chat
-    Completions or Messages shape. Reasoning is not answer text."""
+    Completions or Messages shape. Reasoning, including the leading <think> blocks Gym wraps into Chat content, is
+    not answer text."""
     texts = _text_parts(response.get("output_text"))
     tool_call = False
     output = response.get("output")
@@ -967,7 +983,7 @@ def _answer_texts_and_tool_call(response: dict[str, Any]) -> tuple[list[str], bo
             continue
         if item.get("type") == "message":
             texts += _text_parts(item.get("content"))
-        else:
+        elif item.get("type") in _STRUCTURED_CALL_TYPES:
             tool_call = True
     content = response.get("content")
     texts += _text_parts(content)
@@ -976,7 +992,7 @@ def _answer_texts_and_tool_call(response: dict[str, Any]) -> tuple[list[str], bo
     choices = response.get("choices")
     for choice in choices if isinstance(choices, list) else []:
         message = choice.get("message") if isinstance(choice, dict) and isinstance(choice.get("message"), dict) else {}
-        texts += _text_parts(message.get("content"))
+        texts += [_LEADING_THINK_BLOCKS.sub("", text, count=1) for text in _text_parts(message.get("content"))]
         tool_call = tool_call or bool(message.get("tool_calls"))
     return texts, tool_call
 

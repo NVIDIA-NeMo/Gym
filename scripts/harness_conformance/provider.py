@@ -491,7 +491,17 @@ class Probe:
             answered = any(
                 item.get("type") == "message"
                 and item.get("role") == "assistant"
-                and any(part.get("text") == ANSWER for part in item.get("content", []) if isinstance(part, dict))
+                and any(
+                    part.get("text") == ANSWER
+                    # A Chat adapter joins this scenario's markup part and answer part into one text.
+                    or (
+                        self.scenario.tool_call_as_text
+                        and isinstance(part.get("text"), str)
+                        and part["text"].endswith("\n" + ANSWER)
+                    )
+                    for part in item.get("content", [])
+                    if isinstance(part, dict)
+                )
                 for item in output
             )
             # A harness that ends on a finish tool may never emit a final assistant message.
