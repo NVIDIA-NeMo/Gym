@@ -460,7 +460,14 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             provider_options=provider_options,
         )
         sandbox = AsyncSandbox(provider_config)
-        await sandbox.start(spec)
+        role = "agent" if task else "verifier"
+        await sandbox.start(
+            spec,
+            span_attributes={
+                "nemo.gym.sandbox.name": f"{self.config.name}/{role}",
+                "nemo.gym.sandbox.role": role,
+            },
+        )
         return sandbox
 
     def _verification_inputs(self, body: SWEBenchProInstanceRequest, patch: str) -> VerificationInputs:
