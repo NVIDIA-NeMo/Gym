@@ -98,4 +98,44 @@ gym env start \
   --config responses_api_models/vllm_model/configs/vllm_model.yaml
 ```
 
+## Agent network restrictions
+
+`enforce_agent_no_network: true` limits the agent's sandbox to the `sandbox_model_server` host. It
+needs the OpenSandbox provider and a model host reachable from the sandbox (`use_absolute_ip`); a
+loopback host fails at `seed_session`.
+
+The agent sandbox cannot download anything, and MCP tool hosts are blocked. With
+`swe_rebench_opencode.yaml`, set `preinstalled_opencode` or `remote_opencode_*`, or OpenCode's
+download fails at seed. `setup_command` also runs there, so it must not download anything; the
+Maven/Gradle mirror below is unreachable for the agent.
+
+## Sandbox toolchain setup
+
+Some images lack setup their build or test tools need inside a sandbox. Three `sandbox_config`
+keys add it to both the agent's and the evaluation sandbox:
+
+- `env`: extra environment variables (these win over the server's defaults).
+- `files`: sandbox path -> local source file, uploaded when the sandbox is created. Relative
+  sources resolve against the Gym repository root. A missing source fails at server startup. On a
+  path the evaluation also writes, the evaluation's file wins.
+- `setup_command`: a shell command run once after the sandbox starts. A non-zero exit stops the
+  sandbox and fails the request, so mark harmless steps with `|| true`. Uploaded files arrive
+  without the execute bit.
+
+For example, to point the agent's JVM builds at the Maven mirror the evaluation already uses and
+let Karma start Chrome as root with a small `/dev/shm`:
+
+```yaml
+sandbox_config:
+  env:
+    GRADLE_USER_HOME: /root/.gradle
+    CHROME_BIN: /tmp/chrome-wrapper.sh
+    CHROMIUM_BIN: /tmp/chrome-wrapper.sh
+  files:
+    /root/.m2/settings.xml: responses_api_agents/swe_agents/maven_mirror/settings.xml
+    /root/.gradle/init.d/nemo_gym_mirror.gradle: responses_api_agents/swe_agents/maven_mirror/init.gradle
+    /tmp/chrome-wrapper.sh: resources_servers/swebench/toolchain/chrome-wrapper.sh
+  setup_command: chmod +x /tmp/chrome-wrapper.sh
+```
+
 Upstream SWE-rebench code is MIT licensed. This adapter is Apache-2.0.

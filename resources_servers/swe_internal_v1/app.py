@@ -38,7 +38,7 @@ from fastapi import Request
 from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.client import SESSION_ID_KEY
-from nemo_gym.config import get_global_config_dict
+from nemo_gym.config import ModelServerRef, get_global_config_dict
 from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -68,6 +68,7 @@ from resources_servers.swe_internal_v1.verification import (
     run_verification,
     verification_files,
 )
+from resources_servers.swebench.agent_network import agent_network_policy, check_agent_network_config
 from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
 from resources_servers.swebench.patch_capture import (
     CaptureCommandError,
@@ -77,6 +78,7 @@ from resources_servers.swebench.patch_capture import (
     prepare_git_for_commits,
 )
 from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
+from resources_servers.swebench.sandbox_setup import read_sandbox_files, setup_command_runner
 
 
 class SweInternalV1ResourcesServerConfig(BaseResourcesServerConfig):
@@ -94,6 +96,10 @@ class SweInternalV1ResourcesServerConfig(BaseResourcesServerConfig):
     apply_anti_cheating: bool = True
     sandbox_provider: str
     sandbox_config: dict[str, Any]
+    # Deny the agent sandbox's egress except sandbox_model_server's host. Cannot be combined with
+    # provider_options.network_policy; evaluation sandboxes keep their network.
+    enforce_agent_no_network: bool = False
+    sandbox_model_server: ModelServerRef | None = None
 
 
 class SweInternalV1InstanceRequest(BaseModel):
@@ -166,6 +172,14 @@ class SweInternalV1ResourcesServer(SandboxSessionResourcesServer):
         self._session_id_to_sandbox: dict[str, AsyncSandbox] = {}
         self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
         self._session_id_to_base_commit: dict[str, str] = {}
+        # Read once, so a missing source fails at startup.
+        self._sandbox_files = read_sandbox_files(self.config.sandbox_config.get("files", {}))
+        if self.config.enforce_agent_no_network:
+            check_agent_network_config(
+                resolve_provider_config(self.config.sandbox_provider, get_global_config_dict()),
+                self.config.sandbox_model_server,
+                self.config.sandbox_config,
+            )
 
     def _inputs(self, body: SweInternalV1InstanceRequest, patch: str) -> VerificationInputs:
         return VerificationInputs(
@@ -202,13 +216,21 @@ class SweInternalV1ResourcesServer(SandboxSessionResourcesServer):
         if self.config.sandbox_config.get("derive_cpu_env", True):
             env = cpu_cap_env(sandbox_resources.cpu) | env
 
+        provider_options = dict(self.config.sandbox_config.get("provider_options", {}))
+        # Only task sandboxes carry a session_id; the agent works in them.
+        if self.config.enforce_agent_no_network and session_id is not None:
+            provider_options["network_policy"] = agent_network_policy(
+                provider_config, self.config.sandbox_model_server
+            )
+
         spec = SandboxSpec(
             image=body.image_ref,
             ttl_s=self.config.sandbox_config.get("ttl_s"),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s"),
             workdir=body.workdir,
             env=env,
-            files=files or {},
+            # The evaluation's own files win over sandbox_config.files on a shared path.
+            files=self._sandbox_files | (files or {}),
             metadata=provider_metadata
             | self.config.sandbox_config.get("metadata", {})
             | {
@@ -216,14 +238,18 @@ class SweInternalV1ResourcesServer(SandboxSessionResourcesServer):
                 "instance_id": body.instance_id[:63],
             },
             resources=sandbox_resources,
-            provider_options=self.config.sandbox_config.get("provider_options", {}),
+            provider_options=provider_options,
         )
         sandbox = AsyncSandbox(provider_config)
         if session_id is not None:
             self._session_id_to_sandbox[session_id] = sandbox
         if verifier_session_id is not None:
             self._verifier_sandboxes[verifier_session_id] = sandbox
-        await sandbox.start(spec)
+        setup_command = self.config.sandbox_config.get("setup_command")
+        if setup_command:
+            await sandbox.start_with_setup(spec, setup_command_runner(setup_command))
+        else:
+            await sandbox.start(spec)
         return sandbox
 
     async def _ensure_git_repo(self, sandbox: AsyncSandbox, workdir: str) -> None:
