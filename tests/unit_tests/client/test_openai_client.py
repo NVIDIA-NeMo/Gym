@@ -56,12 +56,18 @@ class TestOpenAIUtils:
         monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", debug_enabled)
         monkeypatch.setattr(openai_client_module, "raise_for_status", AsyncMock())
         client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")
-        request_kwargs = {"url": "https://example.com/v1/chat/completions", "json": {"model": "m"}}
+        # A streaming call carries its own ClientTimeout, which json cannot encode by itself.
+        request_kwargs = {
+            "url": "https://example.com/v1/responses",
+            "json": {"model": "m"},
+            "timeout": ClientTimeout(total=None, sock_read=5),
+        }
 
         await client._raise_for_status(SimpleNamespace(ok=False), request_kwargs)
 
         logged = "Request kwargs:" in capsys.readouterr().out
         assert logged is debug_enabled
+        assert request_kwargs["timeout"] == ClientTimeout(total=None, sock_read=5)
 
     async def test_create_embeddings_posts_to_embeddings_url(self, monkeypatch) -> None:
         client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.com/v1")

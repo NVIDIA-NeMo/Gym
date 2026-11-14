@@ -349,6 +349,19 @@ def _consume_terminal_sse_event(buffer: bytearray, dialect: str) -> Optional[str
             normalized = field + b": " + value.lstrip() if separator else line
             if normalized in terminal_lines:
                 return terminal_lines[normalized]
+        if dialect == "responses":
+            # The `event:` field is optional in SSE; some OpenAI-compatible gateways (e.g. LiteLLM)
+            # send only `data:` lines, so read the terminal type from the event payload too. An event's
+            # payload may span several `data:` lines; join them as _parse_sse_events does, so this check
+            # and the reconstructed response read the same payload.
+            data = b"\n".join(line[5:].lstrip() for line in lines if line.startswith(b"data:"))
+            try:
+                payload = json.loads(data) if data else None
+            except Exception:
+                payload = None
+            terminal = isinstance(payload, dict) and terminal_lines.get(b"event: " + str(payload.get("type")).encode())
+            if terminal:
+                return terminal
         if dialect == "chat":
             for line in lines:
                 if not line.startswith(b"data:"):

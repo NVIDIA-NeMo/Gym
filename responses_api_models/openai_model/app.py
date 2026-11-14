@@ -15,10 +15,12 @@
 import asyncio
 import logging
 import random
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import AsyncExitStack, asynccontextmanager, nullcontext
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, TypeVar
 
 from aiohttp import ClientResponseError
+from fastapi import HTTPException, Request
+from fastapi.responses import StreamingResponse
 from openai.types.shared import ReasoningEffort
 from pydantic import BaseModel, Field, model_validator
 
@@ -30,6 +32,7 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.models import BaseResponsesAPIModelConfig, Body, SimpleResponsesAPIModel
+from nemo_gym.models.token_capture import current_capture_context
 from nemo_gym.telemetry import MeteredSemaphore
 from responses_api_models.openai_model.provider_refusals import provider_refusal, refusal_response
 
@@ -255,6 +258,32 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
         ),
     )
 
+    responses_stream_passthrough: bool = Field(
+        default=False,
+        description=(
+            "Relay streaming /v1/responses requests to the upstream Responses endpoint as sent, "
+            "except that `model` becomes openai_model (extra_body fills absent fields), and "
+            "stream the upstream SSE back unchanged. For harnesses whose own requests Gym's "
+            "typed path cannot represent, such as the Codex CLI with its bundled model catalog "
+            "(code-mode tools in additional_tools items, which the typed path drops). Evaluation only: the "
+            "relay skips Gym's request sanitizer and token-ID capture; model-call capture still "
+            "records each exchange. Non-streaming requests keep the typed path. For a relayed "
+            "stream, upstream_request_timeout_seconds bounds the wait for the response headers and "
+            "for each read of the body, not the whole stream."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_passthrough(self) -> "SimpleModelServerConfig":
+        if self.responses_stream_passthrough and (
+            self.upstream_retry_policy.max_attempts > 1 or self.drop_input_reasoning_items
+        ):
+            raise ValueError(
+                "responses_stream_passthrough relays requests as sent: it supports neither a multi-attempt "
+                "upstream_retry_policy nor drop_input_reasoning_items"
+            )
+        return self
+
 
 class SimpleModelServer(SimpleResponsesAPIModel):
     config: SimpleModelServerConfig
@@ -376,6 +405,47 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             await asyncio.sleep(retry_wait)
 
         raise UpstreamRetriesExhaustedError(retry_policy.max_attempts, last_error) from last_error
+
+    async def responses_dispatch(self, request: Request, body: dict = Body()):
+        if self.config.responses_stream_passthrough and body.get("stream") is True:
+            return await self._relay_responses_stream(body)
+        return await super().responses_dispatch(request, body)
+
+    async def _relay_responses_stream(self, body: dict[str, Any]) -> StreamingResponse:
+        """Relay one streaming Responses call; see ``responses_stream_passthrough``."""
+        if current_capture_context() is not None:
+            raise HTTPException(422, "responses_stream_passthrough cannot capture training token IDs")
+        payload = self.config.extra_body | body
+        payload["model"] = self.config.openai_model
+        # The relay makes the one attempt a one-attempt policy allows; like _call_upstream, it waits out the
+        # policy's pre-request jitter before taking a provider slot.
+        jitter = self.config.upstream_retry_policy.pre_request_jitter_seconds
+        if jitter is not None:
+            await asyncio.sleep(random.uniform(*jitter))
+        slot = AsyncExitStack()
+        # Hold this server's provider slot until the relayed stream ends.
+        await slot.enter_async_context(self._upstream_request_slot())
+        try:
+            # The app's ClientResponseError handler applies propagate_upstream_http_status_codes
+            # (_should_propagate_upstream_http_error) to an error before the stream starts.
+            upstream = await self._client.create_response_stream(**payload)
+        except BaseException:
+            await slot.aclose()
+            raise
+
+        async def relay():
+            try:
+                async for chunk in upstream.content.iter_any():
+                    yield chunk
+            finally:
+                upstream.release()
+                await slot.aclose()
+
+        return StreamingResponse(
+            relay(),
+            status_code=upstream.status,
+            media_type=upstream.headers.get("Content-Type", "text/event-stream"),
+        )
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)

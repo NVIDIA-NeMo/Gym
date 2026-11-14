@@ -499,7 +499,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             "_max_num_tries": self.max_num_tries,
             "_max_connection_retries": connection_retries,
         }
-        if self.request_timeout_seconds is not None:
+        if self.request_timeout_seconds is not None and "timeout" not in request_kwargs:
             request_kwargs["timeout"] = ClientTimeout(
                 total=self.request_timeout_seconds,
                 connect=self.connect_timeout_seconds,
@@ -720,7 +720,9 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
     async def _raise_for_status(self, response: ClientResponse, request_kwargs: Dict[str, Any]) -> None:
         if not response.ok and is_global_aiohttp_client_request_debug_enabled():
-            print(f"Request kwargs: {json.dumps(request_kwargs)}")
+            # A diagnostic only: request_kwargs can hold transport objects such as a ClientTimeout, and a failure to
+            # serialize them must not replace the upstream error raised below.
+            print(f"Request kwargs: {json.dumps(request_kwargs, default=str)}")
 
         await _raise_exhausted(response, None, getattr(response, "_ng_attempt_failure", None))
 
@@ -775,6 +777,29 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
         await self._raise_for_status(response, request_kwargs)
         return await self._read_response_json(response)
+
+    async def create_response_stream(self, **kwargs) -> ClientResponse:
+        """POST a streaming ``/responses`` request and return the unread response.
+
+        Retries and error handling match ``create_response`` up to the response headers; the
+        caller relays the body (an SSE stream) and must release the response. A live stream can
+        outlast any total time limit, so ``request_timeout_seconds`` bounds the wait for the
+        response headers and for each read of the body instead of the whole attempt.
+        """
+        request_kwargs = dict(
+            url=f"{self.base_url}/responses",
+            json=kwargs,
+        )
+        if self.request_timeout_seconds is not None:
+            request_kwargs["timeout"] = ClientTimeout(
+                total=None,
+                connect=self.connect_timeout_seconds,
+                sock_read=self.request_timeout_seconds,
+            )
+        response = await self._request(method="POST", **request_kwargs)
+
+        await self._raise_for_status(response, request_kwargs)
+        return response
 
     async def create_tokenize(self, **kwargs):
         base_url = self.base_url.removesuffix("/v1")
