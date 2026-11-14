@@ -111,8 +111,9 @@ class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
 
     debug: bool = False
     # Many task test.sh files run pytest under set -e, so failing tests end the script before it writes
-    # reward.txt. With this on, such a run (non-zero exit, no reward.txt, a pytest summary counting failures
-    # or errors) is graded 0 instead of left ungraded; exits without a pytest summary stay ungraded.
+    # reward.txt. With this on, such a run (non-zero exit, no readable reward.txt, a pytest summary counting
+    # failures or errors) is graded 0 instead of left ungraded; exits without a pytest summary stay ungraded.
+    # Agentic IF masks a tb21 task result that is not completed, so there such a row becomes a scored 0.
     score_pytest_failures_without_reward: bool = True
 
     outcome_policy: TerminalBench21OutcomePolicyConfig = Field(
@@ -183,7 +184,7 @@ class TerminalBench21VerifyResponse(BaseVerifyResponse):
 
     task_name: str
     test_output: str
-    # True when the reward came from pytest's summary because test.sh exited before writing reward.txt.
+    # True when the reward came from pytest's summary because test.sh exited without a readable reward.txt.
     reward_from_pytest_summary: bool = False
     golden_patch_output: Optional[str]
 
