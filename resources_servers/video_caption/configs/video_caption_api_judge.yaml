@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+video_caption:
+  resources_servers:
+    video_caption:
+      entrypoint: app.py
+      num_workers: 1
+      judge_model_server: {type: responses_api_models, name: video_caption_judge}
+      judge_chat_completion_create_params:
+        messages: []
+        max_tokens: 20480
+        reasoning_effort: low
+      caption_tokenizer_path: ${oc.env:VIDEO_CAPTION_TOKENIZER_PATH,MISSING}
+      judge_endpoint_max_concurrency: 256
+      judge_max_retries: 2
+      judge_attempt_timeout_seconds: 1200
+      min_caption_tokens: 100
+      max_caption_tokens: 4000
+      visual_reward_type: recall
+      penalize_degeneration: false
+      domain: other
+      verified: false
+      description: Visual event recall, precision, or F1 with length and optional degeneration reward
+      value: Improve coverage and accuracy of visible events in video captions
+
+
+# Video caption reward with an OpenAI-compatible API judge (no judge GPUs). Same server settings as
+# video_caption.yaml; only the judge model server differs. The judge must support
+# chat.completions with a JSON-schema `response_format`.
+video_caption_judge:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.env:VIDEO_CAPTION_JUDGE_BASE_URL,MISSING}
+      openai_api_key: ${oc.env:VIDEO_CAPTION_JUDGE_API_KEY,MISSING}
+      openai_model: ${oc.env:VIDEO_CAPTION_JUDGE_MODEL,MISSING}
+
+video_caption_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 1
+      resources_server: {type: resources_servers, name: video_caption}
+      model_server: {type: responses_api_models, name: policy_model}
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/video_caption/data/example.jsonl
+        num_repeats: 1
+
+video_caption_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: video_caption_simple_agent
