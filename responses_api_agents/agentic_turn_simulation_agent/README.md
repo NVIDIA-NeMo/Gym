@@ -91,8 +91,13 @@ Cline sends them. A reply without a tool call gets Cline's own "no tools used" m
 Inherited: `skip_verification`, `skip_verification_reward`, `token_id_capture` (set `true` for training).
 
 Run it through this environment's config (`gym env start --resources-server agentic_turn_simulation`), not alone:
-every episode needs the session `/seed_session` opens on the resources server. Gym agent sessions are not supported:
-the agent is not in `AGENT_SESSION_AGENT_TYPES`, so Gym relays it through `/run`.
+every episode needs a session on the resources server. That config runs each rollout as an Environment Server episode
+(`single_agent_turn_legacy`): the environment seeds the resources session and an agent session, and the agent calls
+`/harness` and `/simulate_tool_call` through the session's direct HTTP grant (its URL, headers and cookies). A session
+seeded without a direct HTTP grant is refused (422). The agent's `/run`, which seeds the resources server itself, stays
+available behind the deprecated `legacy_agent` relay (`configs/agentic_turn_simulation_legacy_agent.yaml`). With
+Gym's rollout checkpointing on, an episode that a crash interrupts starts over from its input with a new resources
+session: the resources server is restart-only, and the episode loop records no checkpoint boundaries.
 
 ## Tests
 

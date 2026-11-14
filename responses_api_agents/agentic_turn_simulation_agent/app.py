@@ -11,6 +11,8 @@ README). Only its episode differs:
 * Cline rows (``cline_xml``) call tools as XML in the text, get all results back in one user message, and get
   Cline's "no tools used" error for a reply without a call.
 
+In an agent session (an Environment Server's episode) both routes go through the session's direct HTTP grant.
+
 ``response.metadata.stop_reason`` says what ended the turn (the resources server's ``masked_stop_reasons`` match
 these strings; README "What ends the turn" describes each): ``final_message`` (a reply without a tool call;
 ``empty_output`` when it has no message either), the stop tool's name (the call is kept, not run; the reply's
@@ -31,7 +33,14 @@ from typing import Any, NamedTuple, TypedDict
 
 from pydantic import Field, ValidationError
 
+from nemo_gym.agents import (
+    AgentCloseSessionResponse,
+    AgentSeedRejectedError,
+    AgentSeedSessionRequest,
+    AgentSessionState,
+)
 from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.client import request as http_request
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
@@ -53,7 +62,13 @@ from nemo_gym.trajectory import (
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.agentic_turn_simulation import cline_xml
 from resources_servers.agentic_turn_simulation.simulator import simulator_failure
-from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig, _cookies
+from responses_api_agents.simple_agent.app import (
+    SimpleAgent,
+    SimpleAgentConfig,
+    SimpleAgentSessionState,
+    _cookies,
+    _tools_base_url,
+)
 
 
 LOG = logging.getLogger(__name__)
@@ -273,6 +288,9 @@ class _Episode:
     budget: int | None
     resources_cookies: Any
     trajectory: _Trajectory
+    # An agent session's grant to the resources server, and the rollout prefix its calls name; None: /run's episode.
+    tool_access: DirectHTTPToolAccess | None = None
+    resources_prefix: str = ""
     budget_fixed: bool = False
     # The turn so far: the model's output items, and what went back to it (tool results, Cline's messages).
     outputs: list[Any] = field(default_factory=list)
@@ -288,6 +306,23 @@ class _Episode:
 
 class AgenticTurnSimulationAgent(SimpleAgent):
     config: AgenticTurnSimulationAgentConfig
+
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> SimpleAgentSessionState:
+        """simple_agent's session, refused (422) without a direct HTTP grant: /harness and /simulate_tool_call are
+        reached only through it, so every turn of such a session would fail."""
+        state = self._new_session_state(body)
+        if state.tool_access is None:
+            raise AgentSeedRejectedError(
+                "agentic_turn_simulation_agent needs a direct HTTP tool access to its resources server "
+                "(resources_tool_transports: [direct_http])"
+            )
+        return state
+
+    # simple_agent's close, unchanged: it returns the session's observations and resources cookies, and the
+    # Environment Server closes the resources session (and the simulator's workspace in it) after verify. Declared
+    # here because an agent that seeds sessions must also define their close (test_session_contract_repo).
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        return await super()._close_agent_session_state(state)
 
     async def _create_episode(
         self,
@@ -305,22 +340,22 @@ class AgenticTurnSimulationAgent(SimpleAgent):
         collect_trajectory: bool = False,
         activation: Activation | None = None,
     ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
-        # Only the legacy /run route is supported: every episode needs the session /seed_session opens on the resources
-        # server. The agent is not in AGENT_SESSION_AGENT_TYPES, so config composition relays it through /run; an
-        # agent session reaching here anyway is refused. `resources_prefix` and `activation` are not session marks:
-        # /run sets them too when Gym's rollout checkpointing is on. simple_agent's run() and responses() refuse
-        # execute_tools=false.
-        if in_session or tool_access is not None:
-            raise NotImplementedError("agentic_turn_simulation_agent supports only the legacy /run route")
+        # An agent session reaches the resources server only through its direct HTTP grant: the configured
+        # resources_server has no session for an Environment Server's episode. /run's episode calls the configured
+        # server with the cookies its seed set. `activation` is not used: a restored turn starts over from its input.
+        # simple_agent's run() and responses() refuse execute_tools=false.
+        if in_session and tool_access is None:
+            raise RuntimeError("agentic_turn_simulation_agent needs a direct HTTP tool access in an agent session")
         cfg = self.config
         body = self._strip_resource_only_metadata(body.model_copy(deep=True))
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
-        stop_tools, protocol = await self._row_harness(resources_server_cookies)
         ep = _Episode(
             body=body,
             budget=body.max_output_tokens,
             resources_cookies=resources_server_cookies,
+            tool_access=tool_access,
+            resources_prefix=resources_prefix if tool_access is not None else "",
             trajectory=_Trajectory(
                 collecting=collect_trajectory,
                 model_ref=cfg.model_server,
@@ -329,6 +364,7 @@ class AgenticTurnSimulationAgent(SimpleAgent):
                 rollout_id=rollout_id,
             ),
         )
+        stop_tools, protocol = await self._row_harness(ep)
         step = 0
         mistakes = 0  # cline_xml: consecutive replies without a tool call
         started = monotonic()
@@ -412,14 +448,29 @@ class AgenticTurnSimulationAgent(SimpleAgent):
         # responses() copies both cookie jars onto its reply: an empty one, not None, before any reply set it.
         return response, record, ep.model_cookies or {}, ep.resources_cookies or {}
 
-    async def _row_harness(self, cookies: Any) -> tuple[list[str], str]:
-        """The row's stop tools and tool-call protocol from /harness. A bare /v1/responses (no resources cookies) has
-        no session there (404): the config's stop tools and native calls. A 404 for cookies that /seed_session set
-        (the call reached another resources-server worker, with num_workers > 1, or the server restarted) raises,
-        since a Cline row run as native would be scored, not masked."""
-        http = await self.server_client.post(
-            server_name=self.config.resources_server.name, url_path="/harness", cookies=cookies
+    async def _resources_post(self, ep: _Episode, url_path: str, json: Any) -> Any:
+        """POST to the resources server: through an agent session's grant (its URL, headers and the session's
+        cookies), else to the configured server with the episode's cookies."""
+        if ep.tool_access is not None:
+            return await http_request(
+                method="POST",
+                url=f"{_tools_base_url(ep.tool_access, ep.resources_prefix)}{url_path}",
+                json=json,
+                cookies=ep.resources_cookies,
+                headers=dict(ep.tool_access.headers),
+                _internal=True,
+            )
+        return await self.server_client.post(
+            server_name=self.config.resources_server.name, url_path=url_path, json=json, cookies=ep.resources_cookies
         )
+
+    async def _row_harness(self, ep: _Episode) -> tuple[list[str], str]:
+        """The row's stop tools and tool-call protocol from /harness. A bare /v1/responses (no resources cookies) has
+        no session there (404): the config's stop tools and native calls. A 404 for cookies that a seed set (the call
+        reached another resources-server worker, with num_workers > 1, or the server restarted) raises, since a Cline
+        row run as native would be scored, not masked."""
+        http = await self._resources_post(ep, "/harness", None)
+        cookies = ep.resources_cookies
         if http.status == 404:
             if cookies:
                 detail = (await http.content.read()).decode(errors="replace")
@@ -520,11 +571,10 @@ class AgenticTurnSimulationAgent(SimpleAgent):
         started = (time(), perf_counter())
         attempts = self.config.simulate_max_attempts
         for attempt in range(1, attempts + 1):
-            http = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/simulate_tool_call",
-                json={"call_id": call.call_id, "name": call.name, "arguments": call.arguments, "turn": turn},
-                cookies=ep.resources_cookies,
+            http = await self._resources_post(
+                ep,
+                "/simulate_tool_call",
+                {"call_id": call.call_id, "name": call.name, "arguments": call.arguments, "turn": turn},
             )
             # Merged, as simple_agent does: an error reply sets no cookie, and the session must survive it.
             ep.resources_cookies = {**dict(ep.resources_cookies or {}), **_cookies(http)}
