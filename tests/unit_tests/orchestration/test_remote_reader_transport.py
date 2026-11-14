@@ -110,6 +110,16 @@ def test_only_a_reached_deadline_is_a_timeout_and_every_cause_keeps_the_exit_cod
     )
 
 
+def test_the_stderr_tail_survives_carriage_returns_from_progress_output():
+    err = "Updating files:  83%\rUpdating files: 100%\rerror: Required uv version `>=0.13.4` does not match"
+    output = f"__GYM_READER_BOUND:2\n__GYM_READER_RC:2\n__GYM_READER_ERR:{err}\n"
+    message, _ = slurm._reader_failure(output, 1.0)
+    assert message.endswith("does not match")
+    assert "\r" not in message
+    assert "Updating files:  83% Updating files: 100% error:" in message
+    assert "Required uv version" in message
+
+
 def test_a_timeout_is_retried_once_with_twice_the_bound(tmp_path, monkeypatch):
     monkeypatch.delenv("NEMO_GYM_REMOTE_READER_TIMEOUT_S", raising=False)
     monkeypatch.setattr(slurm, "_READER_FLOOR_S", 1)

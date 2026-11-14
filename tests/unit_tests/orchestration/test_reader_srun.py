@@ -6,6 +6,7 @@ import inspect
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -525,3 +526,44 @@ def test_a_remote_reader_takes_the_callers_uv_lock_timeout(
     assert exports == [f"export UV_LOCK_TIMEOUT={expected}"]
     # Exported after the cleared variables and before the reader runs (in its step or on the login host).
     assert command.index(exports[0]) > command.index("unset VIRTUAL_ENV UV_PYTHON PYTHONPATH PYTHONHOME")
+
+
+class _PlainLocalConnection(LocalConnection):
+    """A connection that does not hold the shell's input open (no watchdog), as a plain ``run`` does."""
+
+    holds_input = False
+
+
+@needs_setsid
+@pytest.mark.parametrize("separator", ["\r", "\n", "\r\n"], ids=["CR", "LF", "CRLF"])
+@pytest.mark.parametrize("started_step", [False, True], ids=["login-host", "step"])
+@pytest.mark.parametrize("connection", [LocalConnection, _PlainLocalConnection], ids=["held-input", "plain"])
+def test_reader_stderr_keeps_its_tail_whatever_line_ending_it_uses(
+    fake_slurm, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, connection, started_step: bool, separator: str
+) -> None:
+    # Both connections decode the report with text=True, which turns a CR into a newline: the report command must
+    # flatten CR and LF itself, or the stderr line ends at the first line ending.
+    fake_slurm(_STARTED_SRUN)
+    if not started_step:
+        monkeypatch.delenv("NEMO_GYM_REMOTE_READER_SRUN")
+    stderr = separator.join(["progress", "error: Required uv version does not match"])
+    script = f"printf '%s' {shlex.quote(stderr)} >&2; exit 2"
+    monkeypatch.setattr(slurm, "render_driver_entrypoint", lambda **_: "bash -c " + shlex.quote(script))
+    job = tmp_path / "job"
+    (job / "artifacts").mkdir(parents=True)
+    (job / "artifacts" / "rollouts.jsonl").write_bytes(b"")
+    (job / "artifacts" / "rollouts_failures.jsonl").write_bytes(b"")
+    stat = job.stat()
+    collected = CollectedEvidence(
+        materialized=[],
+        results=[],
+        failures=[],
+        managed_store=True,
+        source_job_identity=(str(job.resolve()), stat.st_dev, stat.st_ino),
+    )
+
+    result = slurm._remote_managed_evidence(connection(), collected, job, config())
+
+    assert result.managed_reader_unavailable is True
+    assert re.search(r"stderr: progress +error: Required uv version does not match$", result.managed_reader_error)
+    assert result.managed_reader_error.endswith("does not match")
