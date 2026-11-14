@@ -785,6 +785,21 @@ async def test_a_not_found_code_only_in_an_error_text_is_still_snapshot_not_foun
         await provider.create_from_snapshot("snap-1", SandboxSpec(image="python:3.12"))
 
 
+async def test_a_bare_404_to_a_create_from_a_snapshot_is_snapshot_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    """What a live service answers for a create from a deleted snapshot: HTTP 404 with no error code in the body."""
+    from opensandbox.exceptions import SandboxApiException
+
+    provider = _provider()
+    bare = SandboxApiException(message="Create sandbox failed: HTTP 404", status_code=404, request_id="33fdb7b4")
+    _failing_create_once(monkeypatch, provider, bare)
+
+    with pytest.raises(SandboxSnapshotNotFoundError, match="'snap-1'") as raised:
+        await provider.create_from_snapshot("snap-1", SandboxSpec(image="python:3.12"))
+
+    assert raised.value.snapshot_id == "snap-1"
+    assert isinstance(raised.value.__cause__, NgFailureEvent) and raised.value.__cause__.__cause__ is bare
+
+
 async def test_other_failures_to_create_from_a_snapshot_keep_their_type(monkeypatch: pytest.MonkeyPatch) -> None:
     from opensandbox.exceptions import SandboxApiException
     from opensandbox.exceptions.sandbox import SandboxError

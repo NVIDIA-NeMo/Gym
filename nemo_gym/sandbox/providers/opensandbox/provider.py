@@ -495,6 +495,21 @@ def _is_snapshot_not_found(error: BaseException) -> bool:
     return False
 
 
+def _is_http_not_found(error: BaseException) -> bool:
+    """Whether ``error``, or an error it was raised from or while handling, is an SDK error for an HTTP 404."""
+    seen: set[int] = set()
+    pending: list[BaseException] = [error]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if getattr(current, "status_code", None) == 404:
+            return True
+        pending.extend(link for link in (current.__cause__, current.__context__) if link is not None)
+    return False
+
+
 def _http_failure(status: int, body: str) -> str:
     """``HTTP <status>``, followed by the server's error body when it sent one."""
     return f"HTTP {status}: {body}" if body else f"HTTP {status}"
@@ -1808,13 +1823,16 @@ class OpenSandboxProvider:
     async def create_from_snapshot(self, snapshot_id: str, spec: SandboxSpec) -> SandboxHandle:
         """Create a sandbox from a snapshot: OpenSandbox takes ``snapshot_id`` in place of the image.
 
-        Raises ``SandboxSnapshotNotFoundError`` when the server answers that it has no such snapshot.
+        Raises ``SandboxSnapshotNotFoundError`` when the server answers that it has no such snapshot: with its
+        ``SNAPSHOT::NOT_FOUND`` code, or with a bare HTTP 404, which is what the service sends for a create from a
+        snapshot it has deleted. The create names nothing else that could be missing: the snapshot stands in for
+        the image. A snapshot whose delete was only just accepted can still create a sandbox for a short while.
         """
         fork = replace(spec, image=None, provider_options={**spec.provider_options, "snapshot_id": snapshot_id})
         try:
             return await self.create(fork)
         except Exception as error:
-            if _is_snapshot_not_found(error):
+            if _is_snapshot_not_found(error) or _is_http_not_found(error):
                 raise SandboxSnapshotNotFoundError(
                     f"OpenSandbox has no snapshot {snapshot_id!r}: {error}", snapshot_id=snapshot_id
                 ) from error
