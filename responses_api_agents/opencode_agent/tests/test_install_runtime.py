@@ -165,7 +165,7 @@ def test_rhel_certificate_bundle_does_not_require_root_or_package_manager(sandbo
     (root / "bin/apt-get").unlink()
     (root / "bin/rg").unlink()
     shutil.copy(root / "curl", root / "bin/curl")
-    result = run_installer(root, env | {"TEST_UID": "1000"})
+    result = run_installer(root, env | {"TEST_UID": "1000", "NG_OPENCODE_ALLOW_RIPGREP_DOWNLOAD": "1"})
     assert result.returncode == 19, result.stderr
     assert (root / "download.log").exists()
     assert not (root / "packages.log").exists()
@@ -201,9 +201,10 @@ def test_ripgrep_is_provisioned_even_with_a_cached_opencode(sandbox, cached):
     assert "OpenCode can download it on demand" not in result.stderr
 
 
+@pytest.mark.parametrize("download", [False, True])
 @pytest.mark.parametrize("cached", [False, True])
 @pytest.mark.parametrize("unavailable", ["nonroot", "no_manager", "apt_update", "apt_install", "apk"])
-def test_optional_ripgrep_failure_does_not_block_runtime(sandbox, cached, unavailable):
+def test_missing_ripgrep_fails_setup_unless_opencode_may_download_it(sandbox, download, cached, unavailable):
     root, env = sandbox
     (root / "bin/rg").unlink()
     shutil.copy(root / "curl", root / "bin/curl")
@@ -225,10 +226,20 @@ def test_optional_ripgrep_failure_does_not_block_runtime(sandbox, cached, unavai
     else:
         (root / "bin/apk").write_text("#!/bin/bash\nexit 100\n")
         (root / "bin/apk").chmod(0o755)
+    if download:
+        env["NG_OPENCODE_ALLOW_RIPGREP_DOWNLOAD"] = "1"
     result = run_installer(root, env)
-    assert result.returncode == (0 if cached else 19), result.stderr
-    assert "OpenCode can download it on demand" in result.stderr
-    assert (root / "download.log").exists() is not cached
+    if download:
+        assert result.returncode == (0 if cached else 19), result.stderr
+        assert "OpenCode can download it on demand" in result.stderr
+        assert (root / "download.log").exists() is not cached
+    else:
+        # Fails before OpenCode is downloaded or reused, naming every remedy.
+        assert result.returncode == 1, result.stderr
+        assert "OpenCode grep and glob tools need ripgrep" in result.stderr
+        assert "sandbox_ripgrep_path" in result.stderr and "sandbox_ripgrep_download" in result.stderr
+        assert not (root / "download.log").exists()
+        assert not (root / "runtime/ready").exists()
     if unavailable in {"nonroot", "no_manager"}:
         assert not (root / "packages.log").exists()
 

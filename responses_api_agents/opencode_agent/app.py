@@ -476,6 +476,9 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # Either is a file already inside the sandbox and requires its SHA-256, which is checked there.
     sandbox_ripgrep_path: str | None = None
     sandbox_ripgrep_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
+    # Sandbox sessions only. Without a pinned rg or one on the task PATH, setup fails; true lets OpenCode download
+    # ripgrep on demand instead, which works only where the sandbox can reach GitHub.
+    sandbox_ripgrep_download: bool = False
     sandbox_plugin_dependencies_path: str | None = None
     sandbox_plugin_dependencies_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
     # Sandbox sessions only. Absolute sandbox directory, outside the task workdir, where each activation's capture
@@ -1172,8 +1175,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 self._check_sandbox_setup(command, result)
             installer = f"{directory}/{RUNTIME_INSTALLER_FILE}"
             await sandbox.upload(RUNTIME_INSTALLER_SOURCE, installer)
-            # A pinned rg (below) replaces the installer's best-effort package install of ripgrep.
-            command = "NG_OPENCODE_SKIP_RIPGREP=1 " if ripgrep is not None else ""
+            # A pinned rg (below) replaces the installer's package install of ripgrep.
+            if ripgrep is not None:
+                command = "NG_OPENCODE_SKIP_RIPGREP=1 "
+            elif self.config.sandbox_ripgrep_download:
+                command = "NG_OPENCODE_ALLOW_RIPGREP_DOWNLOAD=1 "
+            else:
+                command = ""
             command += "bash " + " ".join(
                 quote(arg)
                 for arg in (

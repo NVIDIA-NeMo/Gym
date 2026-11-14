@@ -90,7 +90,7 @@ the runtime: set `sandbox_executable_path` and `sandbox_executable_sha256`, or u
 image that already holds the runtime at `/tmp/nemo-gym-opencode-runtime-<opencode_version>`
 (see [Offline sandbox runtimes](#offline-sandbox-runtimes-and-native-model-identity)).
 Without either, the seed is accepted and each attempt then fails downloading OpenCode.
-Preinstall `rg` too, since OpenCode otherwise tries to download ripgrep on demand.
+Preinstall or pin `rg` too: without one, setup fails (see below).
 Under `model_only`, a required MCP grant is refused at seed with a 422, since the
 policy would block its host; under `model_and_tools`, a grant at an address the
 sandbox cannot reach, such as loopback, refuses the seed. A borrowed sandbox relies on
@@ -103,10 +103,12 @@ needs Linux and Bash; it does not need Python. Missing Bash can be installed wit
 apt-get or apk when running as root; otherwise preinstall it.
 Online installation needs GitHub access, curl, tar, gzip and a Debian or RHEL CA
 bundle. Missing required packages are installed with apt-get or apk as root;
-non-root images must preinstall them. System `rg` is a best-effort optimization:
-setup tries apt-get or apk as root, but only warns if it is unavailable. OpenCode
-can then download ripgrep on demand; offline images should preinstall it, or pin one
-(see [Owner extensions](#owner-extensions)). Cached matching OpenCode runtimes need no
+non-root images must preinstall them. OpenCode's grep and glob tools need `rg`:
+setup tries apt-get or apk as root and fails if `rg` is still missing, since those
+tools would otherwise fail inside the trajectory with no failure recorded. Preinstall
+it, pin one (see [Owner extensions](#owner-extensions)), or set
+`sandbox_ripgrep_download: true` to let OpenCode download ripgrep on demand, which
+needs GitHub access from the sandbox. Cached matching OpenCode runtimes need no
 runtime download. A pinned binary is never downloaded. Task dependencies are preserved.
 
 Local and sandbox execution share `runtime.OPENCODE_VERSION` and the model-call
@@ -379,7 +381,7 @@ killer's), is a retryable setup error.
 
 | Item | Fields | Where it goes | How to build it |
 | --- | --- | --- | --- |
-| ripgrep | `sandbox_ripgrep_path`, `sandbox_ripgrep_sha256` | `XDG_CACHE_HOME/opencode/bin/rg` in the session's private directories, where OpenCode 1.17.11 looks after `PATH`; it stays off task shells' `PATH`. Must answer `--version`. Replaces the installer's best-effort package install | ripgrep 15.1.0, which OpenCode 1.17.11 would download (`ripgrep-15.1.0-<arch>-unknown-linux-musl`) |
+| ripgrep | `sandbox_ripgrep_path`, `sandbox_ripgrep_sha256` | `XDG_CACHE_HOME/opencode/bin/rg` in the session's private directories, where OpenCode 1.17.11 looks after `PATH`; it stays off task shells' `PATH`. Must answer `--version`. Replaces the installer's package install | ripgrep 15.1.0, which OpenCode 1.17.11 would download (`ripgrep-15.1.0-<arch>-unknown-linux-musl`) |
 | Plugin dependencies | `sandbox_plugin_dependencies_path`, `sandbox_plugin_dependencies_sha256` | Unpacked into `XDG_CONFIG_HOME/opencode` before launch by the sandbox's `tar`, once the agent server has checked a download of the verified copy: members must be files, folders or links that stay inside it, no member path or link target may pass through a link, and none may carry setuid, setgid or sticky bits; npm's `node_modules/.bin` links pass | See below |
 
 With any plugin configured (the adapter always configures `task_environment.mjs`),
