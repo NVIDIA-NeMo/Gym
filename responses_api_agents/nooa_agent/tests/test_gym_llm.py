@@ -723,6 +723,29 @@ def test_rejects_synchronous_policy_calls() -> None:
 
     with pytest.raises(RuntimeError, match="async"):
         llm.call([])
+    with pytest.raises(RuntimeError, match="async"):
+        llm._call_once([])
+
+
+@pytest.mark.asyncio
+async def test_one_request_hooks_send_the_same_gym_request() -> None:
+    # NOOA releases after the pinned one build UnifiedLLM.acall on _acall_once and refuse a subclass without it.
+    assert not GymResponsesLLM.__abstractmethods__
+    output = NeMoGymResponseOutputMessageForTraining(
+        id="msg-1",
+        content=[NeMoGymResponseOutputText(annotations=[], text="Cold", logprobs=[])],
+        prompt_token_ids=[1, 2],
+        generation_token_ids=[3],
+        generation_log_probs=[-0.2],
+    )
+    llm, client, state = make_llm(model_response(output))
+
+    result = await llm._acall_once([{"role": "user", "content": "Weather?"}], temperature=0.3)
+
+    assert result.content == "Cold"
+    assert client.post.await_args.kwargs["json"].temperature == 0.3
+    assert llm.calls == 1
+    assert [call.response_id for call in state.model_calls] == ["resp-1"]
 
 
 @pytest.mark.asyncio
