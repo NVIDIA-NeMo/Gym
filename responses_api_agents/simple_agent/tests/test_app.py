@@ -77,6 +77,8 @@ from nemo_gym.core import (
 from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_runtime import (
+    TOOL_CALL_ID_HEADER,
+    TOOL_ERROR_HEADER,
     AgentContext,
     AgentContextArtifact,
     AgentSessionParticipant,
@@ -144,8 +146,8 @@ def _make_agent(
     return agent_type(config=config, server_client=server_client), server_client
 
 
-def _mock_response(payload=None, *, status=200, content="") -> MagicMock:
-    response = MagicMock(status=status, cookies={}, ok=status < 400)
+def _mock_response(payload=None, *, status=200, content="", headers=None) -> MagicMock:
+    response = MagicMock(status=status, cookies={}, ok=status < 400, headers=headers or {})
     response.read = AsyncMock(return_value=json.dumps(payload or {}))
     response.content.read = AsyncMock(return_value=content.encode())
     return response
@@ -298,9 +300,10 @@ class TestApp:
         assert prefixed_response.status_code == 200
         assert prefixed_response.json()["_ng_trajectory"]["rollout_id"] == "0-0"
 
+    @pytest.mark.parametrize("error_result", [False, True], ids=["result", "error-result"])
     @pytest.mark.parametrize("observability_enabled", [False, True])
     async def test_agent_session_uses_seeded_direct_http_tool_access(
-        self, monkeypatch: MonkeyPatch, observability_enabled: bool
+        self, monkeypatch: MonkeyPatch, observability_enabled: bool, error_result: bool
     ) -> None:
         config = SimpleAgentConfig(
             host="0.0.0.0",
@@ -356,7 +359,11 @@ class TestApp:
                 ),
             ]
         )
-        tool_response = _mock_response(content='{"city":"San Francisco","weather_description":"cold"}')
+        # A tool's error result is a 200 over direct HTTP, so only the header marks it.
+        tool_response = _mock_response(
+            content='{"city":"San Francisco","weather_description":"cold"}',
+            headers={TOOL_ERROR_HEADER: "true"} if error_result else {},
+        )
         tool_response.cookies = {"session_id": MagicMock(value="updated-resource-cookie")}
         direct_request = AsyncMock(return_value=tool_response)
         monkeypatch.setattr("responses_api_agents.simple_agent.app.http_request", direct_request)
@@ -411,7 +418,7 @@ class TestApp:
             url="http://resources:8000/get_weather",
             json={"city": "San Francisco"},
             cookies={"session_id": "seeded-resource-cookie"},
-            headers={"X-Scoped-Access": "token"},
+            headers={"X-Scoped-Access": "token", TOOL_CALL_ID_HEADER: "call-1"},
             _internal=True,
         )
         assert [item.kwargs["server_name"] for item in server_client.post.await_args_list] == ["model", "model"]
@@ -431,7 +438,9 @@ class TestApp:
             assert [record["kind"] for record in observations["records"]] == ["agent_invocation", "tool_call"]
             tool = observations["records"][1]
             assert tool["tool_name"] == "get_weather"
-            assert tool["status"] == "completed"
+            assert (tool["status"], tool["error_type"]) == (
+                ("failed", "tool_error") if error_result else ("completed", None)
+            )
             assert tool["invocation_id"] == observations["records"][0]["invocation_id"]
             assert observations["source"] == "simple_agent"
         else:
