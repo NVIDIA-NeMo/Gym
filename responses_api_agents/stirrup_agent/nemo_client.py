@@ -201,6 +201,7 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         min_completion_tokens: int = _MIN_COMPLETION_TOKENS,
         prompt_estimator_truncate_history_thinking: Optional[bool] = None,
         truncation_recovery: bool = False,
+        strip_unparsed_tool_blocks: bool = True,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -217,6 +218,7 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         self._min_completion_tokens = min_completion_tokens
         self._prompt_estimator_truncate_history_thinking = prompt_estimator_truncate_history_thinking
         self._truncation_recovery = truncation_recovery
+        self._strip_unparsed_tool_blocks = strip_unparsed_tool_blocks
         # Set when the previous call exhausted its completion budget without
         # emitting a tool call; consumed by the very next generate().
         self._recover_from_truncation = False
@@ -326,7 +328,9 @@ class DynamicMaxTokensChatCompletionsClient(ChatCompletionsClient):
         messages: list[ChatMessage],
         tools: dict[str, Tool],
     ) -> AssistantMessage:
-        provider_messages = to_provider_openai_messages(messages)
+        provider_messages = to_provider_openai_messages(
+            messages, strip_unparsed_tool_blocks=self._strip_unparsed_tool_blocks
+        )
 
         # Recovery turn: the previous call spent its whole completion budget
         # thinking and never reached a tool call. Steer this one turn — thinking

@@ -65,7 +65,9 @@ def _strip_unparsed_tool_blocks(content: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
-def restore_tool_messages_for_model(messages: list[ChatMessage]) -> list[ChatMessage]:
+def restore_tool_messages_for_model(
+    messages: list[ChatMessage], *, strip_unparsed_tool_blocks: bool = True
+) -> list[ChatMessage]:
     """Return provider-valid history for OpenAI-compatible model calls.
 
     NeMoUserMessage intentionally presents tool results to the agent as user
@@ -73,6 +75,10 @@ def restore_tool_messages_for_model(messages: list[ChatMessage]) -> list[ChatMes
     however, require assistant messages with tool_calls to be followed by
     matching tool-role messages, so provider-bound serialization must restore
     those tool results first.
+
+    With ``strip_unparsed_tool_blocks`` off, assistant turns go back as the model
+    wrote them: training on recorded tokens needs each call to continue the
+    previous one exactly.
     """
     pending_tool_call_ids: set[str] = set()
     restored: list[ChatMessage] = []
@@ -81,7 +87,7 @@ def restore_tool_messages_for_model(messages: list[ChatMessage]) -> list[ChatMes
         if isinstance(message, AssistantMessage):
             pending_tool_call_ids = {tc.tool_call_id for tc in message.tool_calls if tc.tool_call_id}
             provider_message = message
-            if not message.tool_calls and isinstance(message.content, str):
+            if strip_unparsed_tool_blocks and not message.tool_calls and isinstance(message.content, str):
                 cleaned = _strip_unparsed_tool_blocks(message.content)
                 if cleaned != message.content:
                     provider_message = message.model_copy(update={"content": cleaned})
@@ -147,9 +153,12 @@ def _canonical_provider_message(message: dict[str, Any]) -> dict[str, Any]:
     return message
 
 
-def to_provider_openai_messages(messages: list[ChatMessage]) -> list[NeMoGymChatCompletionMessageParam]:
+def to_provider_openai_messages(
+    messages: list[ChatMessage], *, strip_unparsed_tool_blocks: bool = True
+) -> list[NeMoGymChatCompletionMessageParam]:
     """Serialize Stirrup history for an OpenAI-compatible provider."""
-    serialized = to_openai_messages(restore_tool_messages_for_model(messages))
+    restored = restore_tool_messages_for_model(messages, strip_unparsed_tool_blocks=strip_unparsed_tool_blocks)
+    serialized = to_openai_messages(restored)
     return cast("list[NeMoGymChatCompletionMessageParam]", [_canonical_provider_message(m) for m in serialized])
 
 

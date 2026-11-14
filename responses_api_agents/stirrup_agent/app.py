@@ -271,6 +271,24 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         "The generic default rejects only empty output; long-horizon benchmarks can require a "
         "more complete summary.",
     )
+    context_summarization_cutoff: Optional[float] = Field(
+        default=0.7,
+        gt=0,
+        description="Fraction of the context window at which Stirrup replaces the history with a summary (Stirrup's "
+        "own default, 0.7). None never summarizes: training on recorded tokens needs one unbroken history, so an "
+        "episode at the context limit ends there.",
+    )
+    recover_from_context_overflow: bool = Field(
+        default=True,
+        description="Let Stirrup unwind completed turns when a call overflows the context (its default). Off for "
+        "training, which needs the history as it was recorded.",
+    )
+    strip_unparsed_tool_blocks: bool = Field(
+        default=True,
+        description="Remove a tool-call block the provider's parser left in an assistant turn's text from the history "
+        "sent back to the model (stirrup_utils.restore_tool_messages_for_model). Off for training: each call must "
+        "continue the previous one as the model wrote it.",
+    )
     finish_tool_names: Optional[List[str]] = Field(
         default=None,
         description="Request tools that end the episode when they succeed. None uses Stirrup's own finish tool.",
@@ -413,6 +431,8 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             "stop_request_path": state.session.stop_request_path,
             "max_turns": self.config.agent_max_turns,
             "min_compaction_summary_words": self.config.min_compaction_summary_words,
+            "context_summarization_cutoff": self.config.context_summarization_cutoff,
+            "recover_from_context_overflow": self.config.recover_from_context_overflow,
             "client": {
                 "model": model_name,
                 # The sandbox reaches the Model Server directly; the rollout prefix keeps its calls correlated.
@@ -429,6 +449,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 "min_completion_tokens": self.config.min_completion_tokens,
                 "prompt_estimator_truncate_history_thinking": self.config.prompt_estimator_truncate_history_thinking,
                 "truncation_recovery": self.config.truncation_recovery,
+                "strip_unparsed_tool_blocks": self.config.strip_unparsed_tool_blocks,
             },
         }
         # A task row's own budget shortens the run; it never extends the configured one.

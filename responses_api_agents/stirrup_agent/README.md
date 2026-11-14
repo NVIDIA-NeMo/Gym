@@ -99,11 +99,19 @@ These are constructor arguments of `DynamicMaxTokensChatCompletionsClient`
 | `prompt_estimator_truncate_history_thinking` (client) | `None` | Estimator-only. When `True`, the character estimate drops completed reasoning from assistant turns before the last user turn, as Nemotron's template does. It is never sent to the provider and never changes the recorded history. |
 | `truncation_recovery` (client) | `False` | When `True`, a turn that uses its whole completion budget without a schema-valid tool call is followed by one turn that requests thinking off and appends a one-time instruction to act now. The instruction is sent to the model but not recorded in the trajectory. |
 | `min_compaction_summary_words` (agent) | `1` | Minimum word count for a context-compaction summary, counted after a leading `<think>` block is stripped. The agent makes up to 3 summary attempts (the last one without tools) and never replaces the history with an unusable summary: when every attempt is unusable, the episode ends as a failed response on the turns so far, classified `agent_invalid_output`, so it is graded as the model's result and not retried. |
+| `context_summarization_cutoff` (agent) | `0.7` | Fraction of the context window at which Stirrup replaces the history with a summary. `None` never summarizes: an episode that reaches the context limit ends there. |
+| `recover_from_context_overflow` (agent) | `True` | When `True`, Stirrup unwinds completed turns when a call overflows the context. |
+| `strip_unparsed_tool_blocks` (client) | `True` | When `True`, a tool-call block the provider's parser left in an assistant turn's text is removed from the history sent back to the model. |
 
 Thinking control (`enable_thinking`, and the thinking-off turn of
 `truncation_recovery`) is sent as `extra_body.chat_template_kwargs`. It only
 takes effect if the model server passes request `chat_template_kwargs` through
 to vLLM.
+
+Training on recorded tokens (NeMo RL's token capture) needs each model call to continue the previous one as the
+model wrote it. A summary, an unwind or a stripped block each change the history the model saw, so the next call
+matches no recorded call and capture rejects the rollout. A training config therefore sets all three off:
+`context_summarization_cutoff: null`, `recover_from_context_overflow: false`, `strip_unparsed_tool_blocks: false`.
 
 ## Licensing
 
