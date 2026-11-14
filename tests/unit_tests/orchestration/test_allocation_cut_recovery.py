@@ -785,3 +785,25 @@ def test_reservations_stay_unknown_when_the_coverage_names_no_writer_and_a_chain
     inspected = inspect_recovery(*_handle(job))
     assert inspected.decision.action.value == "stop"
     assert inspected.decision.counts["unknown"] == 2
+
+
+def test_an_installer_error_with_a_credential_never_leaves_the_run_host(tmp_path):
+    secret = "synthetic-install-secret"
+    job = tmp_path / "gym-job-x" / "gsm8k"
+    job.mkdir(parents=True)
+    (job / ".gym_chain_incomplete").write_text(
+        "Previous job 100 ended FAILED: driver_install_failed: fatal: unable to access "
+        f"'https://user:{secret}@example.invalid/gym.git/': Could not resolve host; the chain does not retry it; "
+        "see logs/driver-100.log\n"
+    )
+    raw = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", COLLECT_SCRIPT, str(job)], capture_output=True, text=True, check=True
+    )
+    assert secret not in raw.stdout
+    collected = CollectedEvidence.model_validate_json(raw.stdout)
+    # The typed failure and the driver-log reference stay; the raw log on the run host holds the detail.
+    assert "driver_install_failed" in collected.chain_continuation_note
+    assert "see logs/driver-100.log" in collected.chain_continuation_note
+    decision = decide_from_collected(collected, max_infra_retries=2, max_walltime_s=None, live_job=False)
+    assert secret not in decision.reason
+    assert "driver_install_failed" in decision.reason

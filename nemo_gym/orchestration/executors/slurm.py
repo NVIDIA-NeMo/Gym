@@ -56,11 +56,13 @@ from nemo_gym.orchestration.executors.connection import (
 from nemo_gym.orchestration.executors.git_ref import validate_gym_install_ref
 from nemo_gym.orchestration.executors.judge_profile import (
     JUDGE_POOL_NAME,
+    NO_CPU_PARTITION,
     JudgeProfileUnsupported,
     choose_judge_partition,
     is_cpu_only_submission,
     judge_execution_profile,
     judge_job_config,
+    placement_refusal,
     served_judge_placement,
     served_judge_profile,
 )
@@ -1840,7 +1842,7 @@ class SlurmExecutor(BaseExecutor):
                 "|| fail 'cannot stage judge driver'",
                 "_gym_submit_started=1",
                 _sbatch_command(benchmark, script_path).replace("sbatch --parsable", "sbatch --no-requeue --parsable"),
-                'if [ "$rc" != 0 ]; then fail "judge allocation not admitted"; fi',
+                'if [ "$rc" != 0 ]; then fail "judge allocation not admitted: $out"; fi',
                 "jid=$(printf '%s' \"$out\" | awk '{print $NF}' | cut -d';' -f1); [[ $jid =~ ^[0-9]+$ ]] || { printf '%s\\n' 'GYM_ACCOUNTING_UNKNOWN: rejudge submission acknowledgement unknown' > .gym_chain_incomplete; fail 'unknown job identity'; }",
                 'printf "%s\\n" "$jid" >> .gym_job_chain || fail "cannot preserve judge allocation accounting"',
                 "_gym_submit_confirmed=1",
@@ -1924,9 +1926,11 @@ class SlurmExecutor(BaseExecutor):
         """
         from nemo_gym.orchestration.executors.utils import flatten_run_args
 
-        def stopped(reason: str) -> RecoveryOutcome:
+        def stopped(reason: str, refusal: str | None = None) -> RecoveryOutcome:
             return RecoveryOutcome(
-                decision=decision.model_copy(update={"action": RecoveryAction.STOP, "reason": reason}),
+                decision=decision.model_copy(
+                    update={"action": RecoveryAction.STOP, "reason": reason, "judge_refusal": refusal}
+                ),
                 ok=False,
                 dispatched=None,
                 unsupported=reason,
@@ -1958,7 +1962,9 @@ class SlurmExecutor(BaseExecutor):
                     config, record.cluster, partition=judge_partition, reader_srun=os.environ.get(READER_SRUN_ENV)
                 )
         except JudgeProfileUnsupported as error:
-            return stopped(str(error))
+            return stopped(
+                str(error), "cpu_partition_unknown" if NO_CPU_PARTITION in str(error) else "unsupported_profile"
+            )
         install = config.driver.gym_install
         ref = repin if repin is not None else (install.ref if install is not None else None)
         if install is None or ref is None or ref != installed_gym_commit() or not re.fullmatch(r"[0-9a-f]{40}", ref):
@@ -2102,7 +2108,7 @@ class SlurmExecutor(BaseExecutor):
             f"(umask 077; printf %s {shlex.quote(script)} > {shlex.quote(str(script_path))}) "
             "|| fail 'cannot stage the judge driver'",
             _sbatch_command(benchmark, script_path).replace("sbatch --parsable", "sbatch --no-requeue --parsable"),
-            'if [ "$rc" != 0 ]; then fail "judge allocation not admitted"; fi',
+            'if [ "$rc" != 0 ]; then fail "judge allocation not admitted: $out"; fi',
             "jid=$(printf '%s' \"$out\" | awk '{print $NF}' | cut -d';' -f1)",
             # The queued job is journaled by id; an acknowledgement without one is journaled as such, so inspect
             # reports it and the next recovery's scheduler check finds the job by its working directory.
@@ -2113,10 +2119,13 @@ class SlurmExecutor(BaseExecutor):
             results = _parse_sbatch_results(conn.run(commands))
         except (RuntimeError, OSError) as error:
             text = str(error).strip()
-            return stopped(f"judge-only job was not queued: {text.splitlines()[-1] if text else type(error).__name__}")
+            text = text.splitlines()[-1] if text else type(error).__name__
+            return stopped(f"judge-only job was not queued: {text}", placement_refusal(text, placement is not None))
         job_id, error = results.get(benchmark, (None, "no scheduler acknowledgement"))
         if job_id is None:
-            return stopped(f"judge-only job was not admitted: {error}")
+            return stopped(
+                f"judge-only job was not admitted: {error}", placement_refusal(str(error), placement is not None)
+            )
         updated = job.model_copy(update={"job_id": job_id, "error": None})
         self.persist_record(record.with_benchmark(updated), conn.write_text)
         return RecoveryOutcome(

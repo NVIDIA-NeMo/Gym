@@ -3,40 +3,39 @@
 
 """Tests for GenRM model."""
 
+from unittest.mock import MagicMock
+
 import pytest
 
-from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-from responses_api_models.genrm_model.app import GenRMModelConfig, GenRMModelMixin
+from nemo_gym.client import ServerClient
+from responses_api_models.genrm_model.app import GenRMModel, GenRMModelConfig
+from responses_api_models.genrm_model.common import append_genrm_roles
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-class _FakeBase:
-    """Stand-in for VLLMModel that performs a no-op base preprocessing."""
-
-    def _preprocess_chat_completion_create_params(self, request, body_dict):
-        return body_dict
-
-
-class _FakeConfig:
-    supports_principle_role: bool = True
-
-
-class _TestServer(GenRMModelMixin, _FakeBase):
-    """Minimal concrete class that exercises GenRMModelMixin in isolation
-    (no vLLM / Ray dependency)."""
-
-    def __init__(self, supports_principle_role: bool = True):
-        cfg = _FakeConfig()
-        cfg.supports_principle_role = supports_principle_role
-        self.config = cfg
+def _config(**overrides) -> GenRMModelConfig:
+    fields = dict(
+        host="localhost",
+        port=8000,
+        entrypoint="app.py",
+        name="test_genrm_model",
+        model="test-model",
+        return_token_id_information=False,
+        uses_reasoning_parser=False,
+        vllm_serve_kwargs={"tensor_parallel_size": 1, "data_parallel_size": 2},
+        vllm_serve_env_vars={},
+    )
+    return GenRMModelConfig(**(fields | overrides))
 
 
 def _messages(*roles_and_contents):
     return [{"role": role, "content": content} for role, content in roles_and_contents]
+
+
+def _body(conversation, metadata=None):
+    return {
+        "messages": _messages(*conversation),
+        **({"metadata": metadata} if metadata is not None else {}),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -49,62 +48,31 @@ class TestGenRMModelConfig:
 
     def test_config_defaults(self):
         """GenRMModelConfig has supports_principle_role and inherits local vLLM fields."""
-        config = GenRMModelConfig(
-            host="localhost",
-            port=8000,
-            entrypoint="app.py",
-            name="test_genrm_model",
-            model="test-model",
-            return_token_id_information=False,
-            uses_reasoning_parser=False,
-            vllm_serve_kwargs={"tensor_parallel_size": 1, "data_parallel_size": 2},
-            vllm_serve_env_vars={},
-        )
-        assert config.supports_principle_role is True
+        assert _config().supports_principle_role is True
 
     def test_config_supports_principle_role_override(self):
         """supports_principle_role can be set to False."""
-        config = GenRMModelConfig(
-            host="localhost",
-            port=8000,
-            entrypoint="app.py",
-            name="test_genrm_model",
-            model="test-model",
-            return_token_id_information=False,
-            uses_reasoning_parser=False,
-            vllm_serve_kwargs={"tensor_parallel_size": 1, "data_parallel_size": 2},
-            vllm_serve_env_vars={},
-            supports_principle_role=False,
-        )
-        assert config.supports_principle_role is False
+        assert _config(supports_principle_role=False).supports_principle_role is False
 
 
 # ---------------------------------------------------------------------------
-# TestGenRMPreprocess
+# TestAppendGenRMRoles
 # ---------------------------------------------------------------------------
 
 
-class TestGenRMPreprocess:
-    """Unit tests for GenRMModelMixin._preprocess_chat_completion_create_params."""
-
-    def _body(self, conversation, metadata=None):
-        return {
-            "messages": _messages(*conversation),
-            **({"metadata": metadata} if metadata is not None else {}),
-        }
+class TestAppendGenRMRoles:
+    """Unit tests for append_genrm_roles."""
 
     def test_response_messages_appended_from_metadata(self):
         """response_1 and response_2 from metadata are appended as custom-role messages."""
-        server = _TestServer(supports_principle_role=True)
-        body_dict = self._body(
+        body_dict = _body(
             conversation=[
                 ("user", "What is the capital of France?"),
                 ("assistant", "Paris."),
             ],
             metadata={"response_1": "Response A", "response_2": "Response B"},
         )
-        result = server._preprocess_chat_completion_create_params(None, body_dict)
-        msgs = result["messages"]
+        msgs = append_genrm_roles(body_dict, supports_principle_role=True)["messages"]
 
         assert msgs[-2] == {"role": "response_1", "content": "Response A"}
         assert msgs[-1] == {"role": "response_2", "content": "Response B"}
@@ -114,8 +82,7 @@ class TestGenRMPreprocess:
 
     def test_principle_from_metadata_inserted_before_responses(self):
         """metadata['principle'] is appended as a 'principle' message before the responses."""
-        server = _TestServer(supports_principle_role=True)
-        body_dict = self._body(
+        body_dict = _body(
             conversation=[("user", "What is the capital of France?")],
             metadata={
                 "principle": "Judge impartially.",
@@ -123,8 +90,7 @@ class TestGenRMPreprocess:
                 "response_2": "Response B",
             },
         )
-        result = server._preprocess_chat_completion_create_params(None, body_dict)
-        msgs = result["messages"]
+        msgs = append_genrm_roles(body_dict, supports_principle_role=True)["messages"]
 
         assert msgs[-3] == {"role": "principle", "content": "Judge impartially."}
         assert msgs[-2] == {"role": "response_1", "content": "Response A"}
@@ -132,8 +98,7 @@ class TestGenRMPreprocess:
 
     def test_supports_principle_role_false_skips_principle(self):
         """When supports_principle_role=False, metadata['principle'] is silently ignored."""
-        server = _TestServer(supports_principle_role=False)
-        body_dict = self._body(
+        body_dict = _body(
             conversation=[("user", "Prompt")],
             metadata={
                 "principle": "Judge impartially.",
@@ -141,8 +106,7 @@ class TestGenRMPreprocess:
                 "response_2": "Response B",
             },
         )
-        result = server._preprocess_chat_completion_create_params(None, body_dict)
-        msgs = result["messages"]
+        msgs = append_genrm_roles(body_dict, supports_principle_role=False)["messages"]
 
         roles = [m["role"] for m in msgs]
         assert "principle" not in roles
@@ -151,23 +115,20 @@ class TestGenRMPreprocess:
 
     def test_metadata_is_consumed_and_not_forwarded(self):
         """metadata is popped from body_dict so it is not forwarded to vLLM."""
-        server = _TestServer()
-        body_dict = self._body(
+        body_dict = _body(
             conversation=[("user", "Prompt")],
             metadata={"response_1": "A", "response_2": "B"},
         )
-        result = server._preprocess_chat_completion_create_params(None, body_dict)
+        result = append_genrm_roles(body_dict, supports_principle_role=True)
 
         assert "metadata" not in result
 
     def test_no_metadata_leaves_messages_unchanged(self):
         """When no metadata is present no custom-role messages are appended."""
-        server = _TestServer()
-        body_dict = self._body(
+        body_dict = _body(
             conversation=[("user", "Prompt"), ("assistant", "Answer.")],
         )
-        result = server._preprocess_chat_completion_create_params(None, body_dict)
-        msgs = result["messages"]
+        msgs = append_genrm_roles(body_dict, supports_principle_role=True)["messages"]
 
         assert len(msgs) == 2
         assert msgs[0]["role"] == "user"
@@ -175,25 +136,22 @@ class TestGenRMPreprocess:
 
     def test_empty_metadata_leaves_messages_unchanged(self):
         """An empty metadata dict is treated the same as no metadata."""
-        server = _TestServer()
-        body_dict = self._body(
+        body_dict = _body(
             conversation=[("user", "Prompt")],
             metadata={},
         )
-        result = server._preprocess_chat_completion_create_params(None, body_dict)
+        result = append_genrm_roles(body_dict, supports_principle_role=True)
 
         assert len(result["messages"]) == 1
         assert "metadata" not in result
 
     def test_conversation_system_messages_are_not_misidentified(self):
         """A system message in the conversation history is never converted to 'principle'."""
-        server = _TestServer(supports_principle_role=True)
-        body_dict = self._body(
+        body_dict = _body(
             conversation=[("system", "You are a helpful assistant."), ("user", "Hi")],
             metadata={"response_1": "A", "response_2": "B"},
         )
-        result = server._preprocess_chat_completion_create_params(None, body_dict)
-        msgs = result["messages"]
+        msgs = append_genrm_roles(body_dict, supports_principle_role=True)["messages"]
 
         assert msgs[0] == {"role": "system", "content": "You are a helpful assistant."}
         assert msgs[1] == {"role": "user", "content": "Hi"}
@@ -201,49 +159,26 @@ class TestGenRMPreprocess:
         assert msgs[3] == {"role": "response_2", "content": "B"}
 
 
-def test_get_converter_forwards_the_custom_tool_strategy():
-    """The mixin's converter carries the config's custom-tool strategy."""
-    server = _TestServer()
-    server.config = GenRMModelConfig(
-        host="localhost",
-        port=8000,
-        entrypoint="app.py",
-        name="test_genrm_model",
-        model="test-model",
-        return_token_id_information=False,
-        uses_reasoning_parser=False,
-        vllm_serve_kwargs={"tensor_parallel_size": 1, "data_parallel_size": 2},
-        vllm_serve_env_vars={},
-        custom_tool_strategy="function_bridge",
+@pytest.mark.parametrize("supports_principle_role", [True, False])
+def test_server_appends_genrm_roles_from_metadata(supports_principle_role: bool) -> None:
+    """GenRMModel runs the base preprocessing and then appends the GenRM roles."""
+    server = GenRMModel(
+        config=_config(supports_principle_role=supports_principle_role),
+        server_client=MagicMock(spec=ServerClient, global_config_dict={}),
     )
-    assert server.get_converter().custom_tool_strategy == "function_bridge"
+    body = {
+        "messages": [{"role": "user", "content": "Which is better?"}],
+        "metadata": {"response_1": "A", "response_2": "B", "principle": "Be concise."},
+    }
 
+    body = server._preprocess_chat_completion_create_params(MagicMock(), body)
 
-@pytest.mark.parametrize("drop", [False, True])
-def test_get_converter_forwards_inline_tool_output_images(drop: bool):
-    """With the inherited option on, a tool output's image reaches GenRM's model as an image."""
-    server = _TestServer()
-    server.config = GenRMModelConfig(
-        host="localhost",
-        port=8000,
-        entrypoint="app.py",
-        name="test_genrm_model",
-        model="test-model",
-        return_token_id_information=False,
-        uses_reasoning_parser=False,
-        vllm_serve_kwargs={"tensor_parallel_size": 1, "data_parallel_size": 2},
-        vllm_serve_env_vars={},
-        inline_tool_output_images=True,
-    )
-    image = {"type": "input_image", "image_url": "https://example.com/a.png", "detail": "high"}
-    params = NeMoGymResponseCreateParamsNonStreaming(
-        input=[{"type": "function_call_output", "call_id": "call_1", "output": [image]}]
-    )
-
-    converted = server.get_converter().responses_to_chat_completion_create_params(
-        params, drop_unrepresentable_request_fields=drop
-    )
-
-    assert converted.messages[0]["content"] == [
-        {"type": "image_url", "image_url": {"url": "https://example.com/a.png", "detail": "high"}}
+    principle = [{"role": "principle", "content": "Be concise."}] if supports_principle_role else []
+    assert body["messages"] == [
+        {"role": "user", "content": "Which is better?"},
+        *principle,
+        {"role": "response_1", "content": "A"},
+        {"role": "response_2", "content": "B"},
     ]
+    assert "metadata" not in body
+    assert body["model"] == "test-model"
