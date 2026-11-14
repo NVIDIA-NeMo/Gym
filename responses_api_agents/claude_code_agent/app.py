@@ -112,6 +112,10 @@ fi
 # moves to the background (`run_in_background`) can therefore hold the run open long after the final answer, up to
 # the agent timeout. Keep commands in the foreground, where the Bash tool's own timeout bounds them.
 _HEADLESS_RUN_ENV = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
+# Claude Code 2.1.108 resends a failed model request ten times, up to 32 s apart (160-200 s in all), and treats 401
+# and 409 like a 5xx. It has no setting that leaves those out, so it sends each request once; the Model Server
+# already retries its own upstream failures.
+_MODEL_RETRY_ENV = {"CLAUDE_CODE_MAX_RETRIES": "0"}
 
 
 class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
@@ -371,6 +375,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 "IS_SANDBOX": "1",
                 "CLAUDE_CONFIG_DIR": str(claude_config_dir),
                 **_HEADLESS_RUN_ENV,
+                **_MODEL_RETRY_ENV,
             }
             if base_url:
                 env["ANTHROPIC_BASE_URL"] = base_url
@@ -774,6 +779,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             "DISABLE_AUTOUPDATER": "1",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
             **_HEADLESS_RUN_ENV,
+            **_MODEL_RETRY_ENV,
         }
         if base_url:
             env.update(

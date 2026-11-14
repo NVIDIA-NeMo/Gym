@@ -427,6 +427,7 @@ class TestRunClaudeCode:
             captured["dir_exists_during_run"] = (Path(config_dir) / "settings.json").is_file()
             captured["sandbox"] = env.get("IS_SANDBOX")
             captured["background_tasks_disabled"] = env.get("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS")
+            captured["max_retries"] = env.get("CLAUDE_CODE_MAX_RETRIES")
             return FakeProc()
 
         with (
@@ -440,6 +441,8 @@ class TestRunClaudeCode:
         assert "be terse" in captured["cmd"]
         assert captured["sandbox"] == "1"
         assert captured["background_tasks_disabled"] == "1"
+        # The CLI would resend a 401 or 409 like a 5xx; it sends each model request once.
+        assert captured["max_retries"] == "0"
         assert captured["dir_exists_during_run"] is True
         # config dir is removed after the run (no leakage between rollouts)
         assert not Path(captured["config_dir"]).exists()

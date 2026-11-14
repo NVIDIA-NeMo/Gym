@@ -216,6 +216,12 @@ The skills path is resolved like `input_jsonl_fpath` (relative paths check the w
 - Runs set `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, so Bash has no `run_in_background` option and every
   command runs in the foreground under the Bash tool's timeout. The CLI waits for background tasks before it
   exits, so a backgrounded command would hold the run open after the final answer.
+- Runs set `CLAUDE_CODE_MAX_RETRIES=0`, so the CLI sends each model request once. Claude Code 2.1.108 would
+  resend a failed request ten times, up to 32 seconds apart (160 to 200 seconds in all), and it resends a 401
+  and a 409 like a 5xx; no setting leaves those out. The Model Server still retries its own upstream failures,
+  and the Environment Server retries the episode after a 408, 425, 429 or 5xx. One native resend remains: after
+  a 404 when the stream is created, or a stream that fails midway, the CLI sends the request once more without
+  streaming.
 
 ## Sandbox execution
 
