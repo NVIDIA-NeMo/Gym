@@ -1275,6 +1275,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 status=invocation_status,
                 error_type=invocation_error,
                 gaps=gaps,
+                # One Codex process writes this session's records on one sandbox clock.
+                clock_domain=f"codex-wall:{uuid4().hex}",
+                agent_instance=f"codex-agent:{uuid4().hex}",
+                observation_schema_version="2.0",
             )
             state.observations = associate_codex_compaction_calls(
                 state.observations, state.model_attempts or [], model_ref=self.config.model_server
@@ -1678,7 +1682,14 @@ class CodexAgent(SimpleResponsesAPIAgent):
             observations = None
             if rollout_id is not None:
                 observations = read_codex_observations(
-                    codex_home, rollout_id, returncode=proc.returncode, timed_out=timed_out
+                    codex_home,
+                    rollout_id,
+                    returncode=proc.returncode,
+                    timed_out=timed_out,
+                    # This fresh CODEX_HOME is written by one local Codex process.
+                    clock_domain=f"codex-wall:{uuid4().hex}",
+                    agent_instance=f"codex-agent:{uuid4().hex}",
+                    observation_schema_version="2.0",
                 )
             return stdout.decode(errors="replace"), model, observations, timed_out
         finally:
