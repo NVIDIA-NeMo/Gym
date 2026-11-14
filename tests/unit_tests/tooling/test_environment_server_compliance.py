@@ -823,3 +823,84 @@ def test_an_agent_whose_seed_fails_is_reported_at_its_seed_hook_and_its_close_is
     assert finding["line"] == agent._seed_agent_session_state.__code__.co_firstlineno
     assert _filter_findings(results, "A5") == []
     assert "not applicable" not in capsys.readouterr().err
+
+
+def test_completed_findings_are_neutral_without_losing_their_evidence(tmp_path, monkeypatch):
+    monkeypatch.setenv("GITHUB_SHA", "sha")
+    component = "responses_api_agents/legacy"
+    finding = {"rule": "A1", "path": f"{component}/app.py", "line": 3, "message": "Keep | visible"}
+    _write_result(tmp_path, component, "failed", [finding])
+    _write_result(tmp_path, "responses_api_agents/clean", "passed")
+    artifact_url = "https://github.com/example/Gym/actions/runs/123/artifacts/456"
+
+    check = checks.compliance_check(
+        [component, "responses_api_agents/clean"],
+        artifacts=tmp_path,
+        sha="sha",
+        artifact_urls={ci.subject(component): artifact_url},
+    )
+
+    assert check["conclusion"] == "neutral"
+    assert check["output"]["title"] == "1 compliant, 1 with findings, 0 unavailable"
+    summary = check["output"]["summary"]
+    assert f"| {component} | with findings | A1 | [Download]({artifact_url}) |" in summary
+    assert f"- `{component}/app.py:3` **A1**: Keep &#124; visible" in summary
+    assert "Tested commit: `sha`" in summary
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        None,
+        "{",
+        "{}",
+        "[null]",
+        '[{"rule":"A1"}]',
+        '[{"rule":"","path":"agent/app.py","line":3,"message":"finding"}]',
+        '[{"rule":"A1","path":3,"line":3,"message":"finding"}]',
+        '[{"rule":"A1","path":"agent/app.py","line":3,"message":""}]',
+        '[{"rule":"A1","path":"agent/app.py","line":0,"message":"finding"}]',
+        '[{"rule":"A1","path":"agent/app.py","line":true,"message":"finding"}]',
+    ],
+    ids=[
+        "missing",
+        "corrupt",
+        "not-list",
+        "not-record",
+        "incomplete",
+        "blank-rule",
+        "invalid-path",
+        "blank-message",
+        "zero-line",
+        "boolean-line",
+    ],
+)
+def test_invalid_findings_artifacts_cannot_be_reported_as_advisory_success(tmp_path, monkeypatch, contents):
+    monkeypatch.setenv("GITHUB_SHA", "sha")
+    component = "responses_api_agents/legacy"
+    finding = {"rule": "A1", "path": f"{component}/app.py", "line": 3, "message": "finding"}
+    _write_result(tmp_path, component, "failed", [finding])
+    path = tmp_path / ci.subject(component) / ci.FINDINGS_FILE
+    if contents is None:
+        path.unlink()
+    else:
+        path.write_text(contents)
+
+    check = checks.compliance_check([component], artifacts=tmp_path, sha="sha")
+
+    assert check["conclusion"] == "failure"
+    assert check["output"]["title"] == "0 compliant, 0 with findings, 1 unavailable"
+    assert f"| {component} | unavailable | - |" in check["output"]["summary"]
+
+
+@pytest.mark.parametrize("status,has_findings", [("passed", True), ("failed", False)])
+def test_contradictory_component_receipts_are_unavailable(tmp_path, monkeypatch, status, has_findings):
+    monkeypatch.setenv("GITHUB_SHA", "sha")
+    component = "responses_api_agents/legacy"
+    finding = {"rule": "A1", "path": f"{component}/app.py", "line": 3, "message": "finding"}
+    _write_result(tmp_path, component, status, [finding] if has_findings else [])
+
+    check = checks.compliance_check([component], artifacts=tmp_path, sha="sha")
+
+    assert check["conclusion"] == "failure"
+    assert check["output"]["title"] == "0 compliant, 0 with findings, 1 unavailable"

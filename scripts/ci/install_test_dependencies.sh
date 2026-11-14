@@ -12,7 +12,7 @@ printf 'UV_PYTHON_INSTALL_DIR=%s/uv-python\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
 # ARC is leaner than the hosted Ubuntu image. Native extensions and Chromium
 # need these host libraries; the runner already supplies the S3 dataset mount.
 packages=(
-    git curl ca-certificates build-essential cmake
+    git curl ca-certificates build-essential cmake ripgrep
     libgl1 libglib2.0-0t64 libsm6 libxext6 libxrender1
     libnspr4 libnss3 libatk1.0-0t64 libatk-bridge2.0-0t64
     libcups2t64 libdbus-1-3 libdrm2 libxkbcommon0 libx11-6

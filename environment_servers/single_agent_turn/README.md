@@ -8,6 +8,34 @@ It seeds the Resources and agent sessions, plus a session on each configured too
 Use this server when one agent turn produces the response that Resources verifies.
 Other interaction patterns should define their own task input, episode result, and Environment Server implementation.
 
+### Verifier-requested activations
+
+An existing Resources verifier can request bounded follow-up activations without introducing another Environment
+Server. This is disabled by default. Enable it explicitly on `single_agent_turn` or `single_agent_turn_legacy`:
+
+```yaml
+verifier_continuation:
+  max_activations: 6
+```
+
+`max_activations` must be between 1 and 32. Resources and tool-server sessions stay open for the episode. Each
+activation uses a fresh agent session, and its close must explicitly confirm cleanup before verification runs.
+The verifier's optional `next_agent_request` is a complete, standard Responses request for the next activation;
+its absence ends the episode. Only the trusted verifier controls this field. An intermediate prefix may be masked
+while requesting another activation; it is not recorded as the episode's final score. No continuation request is
+sent to a harness, and the environment does not resend a failed agent activation.
+
+The verifier receives the current activation's request and response. The task identity, task data and agent context
+stay unchanged. The final result retains the original `responses_create_params`, the verifier's final response,
+all distinct agent observations, trajectories and verifier receipts, and usage summed over newly returned activations.
+Missing usage stays unknown. `agent_activations` and `verifier_calls` report how many completed calls ran.
+
+If the verifier still requests another activation at the limit, the episode is masked with
+`single_agent_turn:continuation_limit` and an incomplete response, rather than scoring the undecided prefix.
+The final result omits `next_agent_request`. This mode requires verification and cannot be combined with
+`skip_verification`. It marks the episode for restart before creating sessions; cross-round checkpoint restoration
+is not supported. The default single-activation protocol retains its existing checkpoint behavior.
+
 `/verify` receives the Resources Server's own flat verify body, the same one an Agent's `/run` sends: the task's `task_data` fields, `responses_create_params`, and the agent's `response`. The request carries the Resources session cookie from seeding, which identifies the episode, so an existing Resources Server verifies these episodes without changes. The verify response becomes the episode result, with the agent's session observations added as `ng_agent_observations`.
 
 Set `forward_agent_evidence: true` when the Resources verifier needs execution evidence, such as tool-use reward shaping. It defaults to `false`. When enabled, `/verify` also receives the available `ng_trajectory` and `ng_agent_observations`. This setting only controls the verifier request; saved episode results retain that evidence with either value.

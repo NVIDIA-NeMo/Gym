@@ -8,9 +8,11 @@ writes the benchmark JSONL and, for the tool server, the rows whose tasks bring 
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from benchmarks.partner_if.replay_assets import materialize_bundle, prepared_bundle_matches
 from nemo_gym.config import DownloadJsonlDatasetGitlabConfig
 from nemo_gym.data import download_jsonl_dataset
 
@@ -22,11 +24,16 @@ OUTPUT_FPATH = DATA_DIR / "partner_if_benchmark.jsonl"
 TOOLS_FPATH = DATA_DIR / "partner_if_tools.jsonl"
 
 DATASET_NAME = "partner_if"
-VERSION = "2.1.4"
+VERSION = "2.1.7"
 ARTIFACT = "partner_if.jsonl"
 # The registry download neither checks the HTTP status nor verifies content, so the digest guards both.
-SHA256 = "de0a0da01eb32eff7bac4275b866f6733895e65d0b617372d2eb52dda00fbbb6"  # pragma: allowlist secret
-ROW_COUNT = 25
+SHA256 = "2ecfb2e50b3bc5165356394dba7f73b53c255eb8b91e27996a3b10ab7b44cb9e"  # pragma: allowlist secret
+ROW_COUNT = 28
+REPLAY_ASSET_ARTIFACT = "partner_if_replay_assets.json"
+REPLAY_ASSET_SHA256 = "6aeb50eee500bc6d3a6ffe9d0ff29ad497f44f8044eb2eb0bd154b4adb53b3fd"  # pragma: allowlist secret - registry asset checksum
+REPLAY_ASSET_FPATH = DATA_DIR / REPLAY_ASSET_ARTIFACT
+REPLAY_PACKAGE_DIR = DATA_DIR / "ngc_replay/registry"
+REPLAY_FPATH = DATA_DIR / "ngc_replay/partner_if_ngc_replay.jsonl"
 
 
 def has_tool_backend(line: str) -> bool:
@@ -41,8 +48,19 @@ def jsonl_lines(text: str) -> list[str]:
 def is_prepared_data_current(fpath: Path) -> bool:
     """Whether the cached rows are the pinned release and the tool rows were split from them."""
     try:
-        return hashlib.sha256(Path(fpath).read_bytes()).hexdigest() == SHA256 and TOOLS_FPATH.is_file()
-    except OSError:
+        if hashlib.sha256(Path(fpath).read_bytes()).hexdigest() != SHA256 or not TOOLS_FPATH.is_file():
+            return False
+        replay_rows = [
+            line
+            for line in jsonl_lines(Path(fpath).read_text())
+            if json.loads(line)["verifier_metadata"]["partner_if"]["task_id"] == "pif_029"
+        ]
+        return not replay_rows or (
+            hashlib.sha256(REPLAY_ASSET_FPATH.read_bytes()).hexdigest() == REPLAY_ASSET_SHA256
+            and prepared_bundle_matches(REPLAY_ASSET_FPATH, REPLAY_PACKAGE_DIR)
+            and REPLAY_FPATH.read_text() == "".join(replay_rows)
+        )
+    except (OSError, ValueError, KeyError):
         return False
 
 
@@ -69,8 +87,36 @@ def prepare() -> Path:
         lines = jsonl_lines(source_fpath.read_text())
         if len(lines) != ROW_COUNT:
             raise ValueError(f"{DATASET_NAME} {VERSION} has {len(lines)} rows, not {ROW_COUNT}")
+        replay_rows = [
+            line for line in lines if json.loads(line)["verifier_metadata"]["partner_if"]["task_id"] == "pif_029"
+        ]
+        if replay_rows:
+            if len(replay_rows) != 1:
+                raise ValueError("Expected exactly one recorded-context task")
+            asset_source = Path(temporary_dir) / REPLAY_ASSET_ARTIFACT
+            download_jsonl_dataset(
+                DownloadJsonlDatasetGitlabConfig(
+                    dataset_name=DATASET_NAME,
+                    version=VERSION,
+                    artifact_fpath=REPLAY_ASSET_ARTIFACT,
+                    output_fpath=str(asset_source),
+                )
+            )
+            if hashlib.sha256(asset_source.read_bytes()).hexdigest() != REPLAY_ASSET_SHA256:
+                raise ValueError("Registry replay asset digest differs from the pinned release")
+            staged_package = Path(temporary_dir) / "replay-package"
+            materialize_bundle(asset_source, staged_package)
+            actor = json.loads((staged_package / "ngc-recorded-context/actor-params.json").read_text())
+            if actor != json.loads(replay_rows[0])["responses_create_params"]:
+                raise ValueError("Registry row and replay assets have different actor inputs")
         tools_fpath = Path(temporary_dir) / TOOLS_FPATH.name
         tools_fpath.write_text("".join(line for line in lines if has_tool_backend(line)))
+        if replay_rows:
+            REPLAY_PACKAGE_DIR.parent.mkdir(parents=True, exist_ok=True)
+            shutil.rmtree(REPLAY_PACKAGE_DIR, ignore_errors=True)
+            staged_package.replace(REPLAY_PACKAGE_DIR)
+            asset_source.replace(REPLAY_ASSET_FPATH)
+            REPLAY_FPATH.write_text("".join(replay_rows))
         tools_fpath.replace(TOOLS_FPATH)
         source_fpath.replace(OUTPUT_FPATH)
     return OUTPUT_FPATH

@@ -1,0 +1,47 @@
+{
+  "schema_version": "recorded-context-runtime-v1",
+  "input_hashes": {
+    "source-inventory.json": "c5f9c53c651d33cbc0791edeb8c2e7849b9e9ca4c4636c0fd8cdd195c85340a3",
+    "source-extra-v4.json.gz": "9774068707a6d61edd84648d43fe1bc9f1880116490d13ce871b04a4607879ef",
+    "bundle.json": "b6ea7ccac77a740bb9a1ae862295eb68445dd6965a6e6b098c5b373478a6a682",
+    "coverage-v2.json.gz": "dd64b8fc3288918465b23dcb18a9eae1b9b66d63ee2d941c8627355f6777d98a",
+    "temporal-world.json": "bdd482a12a4c5e04d389bfb237510e45ac6fcb9829dc93c0efb1d32ce799b22e",
+    "actor-params.json": "0495d83e7233c5c71b3686d48fff81c7d61438e3eee24cfd7708605aa43b1805",
+    "case.json": "0dbac60b5b16c397002e4ce039e1f536e0960636862254df40ce4618ee62bd78"
+  },
+  "source_root": "/opt/repos/exampleproject",
+  "source_schemas": {
+    "coverage": "synthetic-readonly-coverage-v1",
+    "inventory": "synthetic-source-inventory-v1",
+    "extra": "synthetic-source-extra-v1"
+  },
+  "probe_script": "/opt/agent/skills/registry-access/scripts/readonly_probe.py",
+  "path_aliases": {
+    "${AGENT_HOME:-/workspace/.agent-home}": "/opt/agent",
+    "/workspace/.agent-home/": "/opt/agent/"
+  },
+  "answer_paths": [
+    "/workspace/logs/answer.txt",
+    "/workspace/logs/answer.md"
+  ],
+  "workspace_prefix": "/workspace/logs/",
+  "status_script": "/opt/agent/scripts/status.py",
+  "session_id_path": "/workspace/session_id.txt",
+  "transcript_template": "/workspace/transcripts/{session_id}.jsonl",
+  "optional_runtime_paths": [
+    "/workspace/logs/optional-review.json"
+  ],
+  "get_wrappers": {
+    "/opt/agent/skills/staging-env-access/scripts/example_api_get.sh": "GET:api.example.invalid"
+  },
+  "ordering": {
+    "task_id": "pif_029",
+    "task_names": [
+      "pif_029",
+      "synthetic-ordering-example"
+    ],
+    "rubric_version": "synthetic-order-v1",
+    "criterion_id": "probe_before_prescription",
+    "probe_namespace": "sibling"
+  }
+}

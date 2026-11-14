@@ -7,7 +7,7 @@ task checks whether the model follows its instructions, graded against versioned
 ## Data
 
 - **Source:** NVIDIA-internal rows in Gym's GitLab dataset registry: dataset `partner_if`, version
-  `2.1.4`, file `partner_if.jsonl`. `prepare.py` pins the file's sha256 and refuses any other content. The
+  `2.1.7`, file `partner_if.jsonl`. `prepare.py` pins the file's sha256 and refuses any other content. The
   rows are not in this repository.
 - **Public examples:** the rows above are internal, but the partner_if resources server ships synthetic rows in
   the same format: five text tasks in
@@ -16,9 +16,9 @@ task checks whether the model follows its instructions, graded against versioned
   recorded rollouts of both, plus a sandboxed version of the mock-tool tasks. Its
   [Usage](../../resources_servers/partner_if/README.md#usage) section shows how to run them.
 - **License:** internal.
-- **Size:** 25 tasks with 86 IF rubric items, plus 4 completion items: 17 text tasks, 2 search-tool tasks,
-  3 build-tool tasks and 3 SWE tasks. There is one split, `benchmark`.
-- **Provenance:** 21 tasks reproduce a reported instruction-following failure and 4 reconstruct one. The
+- **Size:** 28 tasks with 89 IF rubric items, plus 4 completion items: 18 text tasks, 2 search-tool tasks,
+  3 build-tool tasks, 3 SWE tasks, 1 native Prime task and 1 recorded-context ordering task. There is one split, `benchmark`.
+- **Provenance:** Reported instruction-following failures and reconstructions. The
   tool tasks' tools are simulations written for this benchmark, not real services. The SWE tasks' repositories
   and images come from Scale-SWE.
 - **Rows:** each row holds the prompt (`responses_create_params`) and the grading contract
@@ -26,13 +26,19 @@ task checks whether the model follows its instructions, graded against versioned
   simulated tools' code, fixture and pinned requirements. A SWE task's row also holds its Scale-SWE instance:
   the image, working directory, setup commands and tests.
 
+The config routes all 28 published rows. The Prime route uses the experimental SDK child
+entrypoint of `prime_agent`; its runtime packaging and harness merge checks are documented in
+[the adapter README](../../responses_api_agents/prime_agent/README.md#sdk-child-sessions).
+The full-release route-coverage test stays enabled as a readiness gate.
+
 ## Task contract
 
 - **Harness:** the policy model runs in Gym's `simple_agent`, and in OpenCode (`opencode_agent`) on the SWE
-  tasks. The SWE scores depend on OpenCode 1.17.11: the harness and its version are part of what they measure.
-- **Routing:** `partner_if_dispatcher` routes each task to its environment, so all 25 tasks share one
-  dataset and one score. Gym aggregates metrics per environment server, so without it the four task
-  families would be four benchmarks with separate scores.
+  tasks, and Prime Agent 0.7.0's depth-one child session on the repository/report task.
+  The SWE scores depend on OpenCode 1.17.11: the harness and its version are part of what they measure.
+- **Routing:** `partner_if_dispatcher` routes each task to its environment, so supported tasks share one
+  dataset and one score. Gym aggregates metrics per environment server, so without it the six task
+  families would have separate scores.
 - **Text tasks:** one reply from the policy model. Some rows include recorded tool calls and results, or ask
   for the next tool call. No tools run, and the grader sees any tool call only as part of the reply.
 - **Search-tool tasks:** up to 30 steps with the row's simulated search and document tools.
@@ -44,13 +50,21 @@ task checks whether the model follows its instructions, graded against versioned
     contract carries the judge's copies of both.
   - OpenCode keeps its default step limit and conversation compaction. It runs with `opencode_agent`'s command
     deny-list and without the web, subagent and skill tools.
+  - `opencode_config.snapshot: false` disables native Git snapshots and undo history to avoid a post-generation
+    stall. Gym still captures model calls and trajectories. This differs from the historical reference setting.
   - Set `context_window` on `partner_if_swe_agent` (262144 by default) to the policy model's: OpenCode compacts
     the conversation as it nears it.
   - The judge grades the visible trajectory, never reasoning: every agent message and tool call in order, with
     the arguments in full, and the tool outputs. An output longer than 500 characters keeps its first and last 250,
     with a `[… N characters omitted …]` marker between them. The SWE rubrics grade the agent's messages and tool
     calls, and with whole outputs a long agent run would not fit the judge's input.
-- **Sandbox:** the tool and SWE tasks need OpenSandbox as configured: a provider with service endpoints and
+- **Prime task:** a pinned source checkout, native IPython, and a recording parent controller.
+  The actor has 48 complete assistant turns and a 900-second safety timeout. Its output
+  reservation is 65,536 tokens per call, shrinking as context fills; temperature is 0.
+  Compaction and retries are disabled. Only corroborated parent deliveries reach the shared
+  rubric judge; unsent drafts and final chat text do not count. These limits are part of
+  the task contract. The dedicated `partner_if_prime_model` preserves the runtime's cap.
+- **Sandbox:** the tool, SWE, and Prime tasks need OpenSandbox as configured: a provider with service endpoints and
   network policies.
   - Each tool rollout gets a fresh sandbox that holds only the row's tool backend: `python:3.13-slim`, one CPU
     and 1 GiB. By default the sandbox can reach only the package index, to install the backend's pinned
@@ -77,15 +91,16 @@ task checks whether the model follows its instructions, graded against versioned
   - Runs set no request parameters, such as `--temperature`, `--top-p`, `--max-output-tokens` or a reasoning
     effort: `opencode_agent` refuses them, so every SWE task would fail. Set sampling and model settings such as
     reasoning effort on the policy model server instead.
-- **Prompts:** the rows are prepared, so no template applies. Rows set no `temperature`, `top_p` or
-  `max_output_tokens`; some set `tool_choice`.
+- **Prompts:** the rows are prepared, so no template applies. Some rows carry task-specific
+  `temperature`, `top_p`, `max_output_tokens` or `tool_choice`; preserve those settings for targeted
+  reproduction runs. The SWE tasks retain the model-server sampling policy described above.
 
 ## Scoring
 
 - **Reward:** a rollout scores 1 when every IF rubric item passes, and 0 otherwise. Code checks
   (partner_if's built-in and fixed checks) and an LLM judge grade the items. Completion items are
   reported but never change the reward.
-- **Provisional rubrics:** 22 of the 25 contracts in 2.1.4 are unsigned (`audit_signoff: false`); the 3 SWE
+- **Provisional rubrics:** 25 of the 28 contracts in 2.1.7 are unsigned (`audit_signoff: false`); the 3 SWE
   contracts are signed. The config sets `allow_provisional_rubrics: true`, so the unsigned rows are scored and
   marked `provisional`.
 - **Metrics:** reported on a 0–100 scale.
@@ -93,7 +108,7 @@ task checks whether the model follows its instructions, graded against versioned
     with equal weight.
   - Also `if_partial`, the passed fraction of IF items.
   - `coverage/*` counts masked rollouts.
-- **Reference score:** 57.33 on `pass@1[avg-of-3]/all_if_pass`, tolerance ±9.5 points (95%), on dataset 2.1.4.
+- **Historical reference score (not a baseline for the expanded 2.1.7 cohort):** 57.33 on `pass@1[avg-of-3]/all_if_pass`, tolerance ±9.5 points (95%), on dataset 2.1.4.
   - Policy: GLM 5.3 (`nvidia/zai-org/glm-5.3`) at its standard sampling, set on the model server: temperature
     1.0 and top_p 0.95, maximum reasoning effort, 262,144 output tokens, 16 rollouts in parallel.
   - Judge: the default GPT-6 Sol (`azure/openai/gpt-6-sol`).
@@ -152,3 +167,32 @@ add `sandbox` to the span groups to trace the tool and SWE sandboxes. The judge 
 of it, so its calls stay out of the model-call capture: each row keeps the judge's request and reply in
 `judge_request` and `judge_response`, and any reply it asked for again in `judge_rejected_responses`. Checks on the
 judge's calls read them there.
+
+
+## Recorded-context ordering profile: pif_029
+
+The private recorded-context replay belongs to `partner_if`. Its dedicated
+`config_ngc_replay.yaml` routes `pif_029` through `partner_if_dispatcher` to the
+existing `single_agent_turn` environment and the shared `partner_if` verifier.
+The generic environment enables bounded verifier-directed activations; no separate
+replay Environment Server is added. It stops at
+the first decisive ordering event; no complete investigation is required.
+Preparation downloads the pinned JSONL and `partner_if_replay_assets.json` from the private registry.
+The data-only bundle holds the original history, tools and frozen results; registry runs do not need the source checkout.
+
+```bash
+.venv/bin/python -m benchmarks.partner_if.prepare_ngc_replay
+bash benchmarks/partner_if/run_ngc_replay.sh
+```
+
+See [recorded-context.md](recorded-context.md) for settings, scoring, evidence and limitations,
+and [recorded-context-provenance.md](recorded-context-provenance.md) for source provenance.
+The default configuration also routes pif_029 to this environment. The review release
+is provisional; adding it to the dataset does not grant admission. Both registry artifacts remain private.
+
+The replay runs at temperature 0.7, top_p 0.95, with 8,192 tokens per call and an eight-call total budget.
+It uses the policy Model Server directly to retain this cap. The historical 25-task reference score
+does not apply to the 28-task review release. A replay without a decisive ordering event is masked.
+
+The 27 rows in published 2.1.5 are preserved byte for byte, including pif_027.
+The existing Prime child runtime still requires the configured sandbox provider. Only the pif_029 profile is sandbox-free.

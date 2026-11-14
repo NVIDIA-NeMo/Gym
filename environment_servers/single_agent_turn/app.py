@@ -4,6 +4,7 @@
 """Resources-backed single-agent environment server."""
 
 import asyncio
+import json
 import logging
 from collections.abc import Callable, Sequence
 from typing import Any, Literal
@@ -49,6 +50,7 @@ from nemo_gym.core import (
     ModelFailureDetails,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
+    NeMoGymResponseUsage,
     NgFailureEvent,
     RequestFailureLog,
     model_sampling_path_segment,
@@ -126,6 +128,13 @@ class SessionHandles(BaseModel):
         )
 
 
+class VerifierContinuationConfig(BaseModel):
+    """Bound fresh activations requested by a trusted Resources verifier."""
+
+    model_config = ConfigDict(extra="forbid")
+    max_activations: int = Field(ge=1, le=32)
+
+
 class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
     """Bind Resources and Agent Servers for one agent turn."""
 
@@ -140,10 +149,170 @@ class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
     # keeps the tool servers its /run seeded.
     tool_servers: list[ResourcesServerRef] | None = None
     forward_agent_evidence: bool = False
+    verifier_continuation: VerifierContinuationConfig | None = None
     # Unset, each falls back to the bound agent's own setting, which also carries the global flag.
     # A pairing moved off the legacy_agent relay then keeps skipping as its agent's /run did.
     skip_verification: bool | None = None
     skip_verification_reward: float | None = None
+
+
+def _unique_evidence[T: BaseModel](records: Sequence[T]) -> list[T]:
+    """Retain identical receipts once without merging disagreeing observations."""
+    seen, result = set(), []
+    for record in records:
+        identity = json.dumps(record.model_dump(mode="json", context={"defer_v1_projection": True}), sort_keys=True)
+        if identity not in seen:
+            seen.add(identity)
+            result.append(record)
+    return result
+
+
+class _ContinuationEvidenceScope:
+    """Import session-local owners once, retaining exact cumulative receipt groups."""
+
+    def __init__(self) -> None:
+        self.groups: dict[str, dict[str, str]] = {}
+        self.imported_ids: set[str] = set()
+
+    def import_session(
+        self, session_id: str, bundle: AgentObservationBundle | None, trajectory: TrajectoryRecord | None
+    ) -> tuple[AgentObservationBundle | None, TrajectoryRecord | None]:
+        records = [*(bundle.records if bundle else []), *(bundle.gaps if bundle else [])]
+        if trajectory is not None:
+            records.extend(
+                [
+                    *trajectory.invocations,
+                    *trajectory.turns,
+                    *trajectory.tool_calls,
+                    *trajectory.gaps,
+                    *trajectory.model_calls,
+                ]
+            )
+        owners = {record.invocation_id for record in records if getattr(record, "invocation_id", None)}
+        if owners and owners <= self.imported_ids:
+            return bundle, trajectory  # A verify failure can return the already imported close receipts.
+        parents = {owner: owner for owner in owners}
+
+        def component(owner: str) -> str:
+            while parents[owner] != owner:
+                owner = parents[owner]
+            return owner
+
+        for record in records:
+            owner, parent = getattr(record, "invocation_id", None), getattr(record, "parent_invocation_id", None)
+            if owner in parents and parent in parents:
+                parents[component(owner)] = component(parent)
+        spans = {
+            (getattr(record, "agent_instance", None), record.span_id): record.invocation_id
+            for record in records
+            if getattr(record, "span_id", None) and getattr(record, "invocation_id", None)
+        }
+        grouped: dict[str, list[BaseModel]] = {component(owner): [] for owner in owners}
+        for record in records:
+            owner = getattr(record, "invocation_id", None) or getattr(record, "client_session_id", None)
+            if owner is None and getattr(record, "span_id", None):
+                owner = spans.get((record.agent_instance, record.span_id))
+            if owner in owners:
+                grouped[component(owner)].append(record)
+        invocation_map = {}
+        for owner, items in grouped.items():
+            identity = json.dumps(
+                sorted(
+                    {
+                        json.dumps(item.model_dump(mode="json", context={"defer_v1_projection": True}), sort_keys=True)
+                        for item in items
+                    }
+                )
+            )
+            if identity not in self.groups:
+                self.groups[identity] = {
+                    value: value
+                    if value == session_id or value.startswith(session_id + ":")
+                    else f"{session_id}:{value}"
+                    for value in owners
+                    if component(value) == owner
+                }
+                self.imported_ids.update(self.groups[identity].values())
+            invocation_map.update(self.groups[identity])
+
+        def imported[T: BaseModel](record: T) -> T:
+            updates = {}
+            for name in ("invocation_id", "parent_invocation_id", "client_session_id"):
+                if (value := getattr(record, name, None)) in invocation_map:
+                    updates[name] = invocation_map[value]
+            return record.model_copy(update=updates) if updates else record
+
+        if bundle is not None:
+            bundle = bundle.model_copy(
+                update={
+                    "records": [imported(item) for item in bundle.records],
+                    "gaps": [imported(item) for item in bundle.gaps],
+                }
+            )
+        if trajectory is not None:
+            trajectory = trajectory.model_copy(
+                update={
+                    name: [imported(item) for item in getattr(trajectory, name)]
+                    for name in ("invocations", "turns", "tool_calls", "model_calls", "gaps")
+                }
+            )
+        return bundle, trajectory
+
+
+def _continuation_evidence(
+    request: SingleAgentTurnRequest,
+    bundles: list[AgentObservationBundle],
+    trajectories: list[TrajectoryRecord],
+    verifiers: list[VerifierInvocation],
+) -> tuple[AgentObservationBundle | None, TrajectoryRecord | None]:
+    observations = None
+    if bundles:
+        observations = AgentObservationBundle(
+            schema_version="2.0" if any(bundle.schema_version == "2.0" for bundle in bundles) else "1.0",
+            source=bundles[0].source if len(bundles) == 1 else "single_agent_turn",
+            records=_unique_evidence([record for bundle in bundles for record in bundle.records]),
+            gaps=_unique_evidence([gap for bundle in bundles for gap in bundle.gaps]),
+        )
+    trajectory = None
+    if trajectories:
+        if len({item.schema_version for item in trajectories}) != 1:
+            raise ValueError("Verifier continuation cannot combine different trajectory schema versions")
+        if any(
+            item.task_id != request.task.task_id.task_id or item.rollout_id != request.episode_id.capture_key
+            for item in trajectories
+        ):
+            raise ValueError("Agent trajectory does not belong to this task and episode")
+        fields = {
+            name: _unique_evidence([record for item in trajectories for record in getattr(item, name)])
+            for name in ("invocations", "turns", "model_calls", "tool_calls", "gaps")
+        }
+        if trajectories[0].schema_version == "2.0":
+            spans = [(tool.agent_instance, tool.span_id) for tool in fields["tool_calls"]]
+            if len(spans) != len(set(spans)):
+                raise ValueError("Verifier continuation cannot combine conflicting canonical tool spans")
+        events = {}
+        for item in trajectories:
+            for identifier, event in item.failure_events.items():
+                if identifier in events and events[identifier] != event:
+                    raise ValueError("Agent trajectories disagree about a failure event")
+                events[identifier] = event
+        trajectory = TrajectoryRecord(
+            schema_version=trajectories[0].schema_version,
+            task_id=request.task.task_id.task_id,
+            rollout_id=request.episode_id.capture_key,
+            verifier_invocations=_unique_evidence(
+                [*[record for item in trajectories for record in item.verifier_invocations], *verifiers]
+            ),
+            failure_events=events,
+            **fields,
+        )
+    elif verifiers:
+        trajectory = TrajectoryRecord(
+            task_id=request.task.task_id.task_id,
+            rollout_id=request.episode_id.capture_key,
+            verifier_invocations=_unique_evidence(verifiers),
+        )
+    return observations, trajectory
 
 
 class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequest, SingleAgentTurnResponse]):
@@ -227,6 +396,8 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         request: SingleAgentTurnRequest,
         cleanup: CleanupContext,
     ) -> SingleAgentTurnResponse:
+        if self.config.verifier_continuation is not None:
+            return await self._run_verifier_continuation(request, cleanup)
         # Steps: seed → invoke the agent → close the agent → verify → return.
         # A boundary before each step names the next step, the sessions to reuse, and what that step needs,
         # so a replacement attempt that continues a checkpoint resumes at that step.
@@ -347,22 +518,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             return trajectory.model_dump(mode="json") if trajectory else None
 
         if stage == "verify":
-            action = agent_outcome_policy(agent_response, config=self.config.agent_outcome_policy)
-            cause = self._agent_failure(agent_response)
-            if agent_response.status == "failed" and AGENT_OUTCOME_METADATA_KEY in (agent_response.metadata or {}):
-                extra = agent_response.model_extra or {}
-                report = extra.get("failure_report")
-                # A report that selects nothing (e.g. a provider 400 without a Gym failure) keeps the policy action.
-                unselected = (
-                    isinstance(report, dict) and report.get("failure_id") is None and not report.get("omitted")
-                )
-                if cause is None and "failure_report" in extra and not unselected:
-                    action = OutcomeAction.FAIL
-                elif cause is not None and cause.failure_kind == MODEL_POLICY_RESPONSE_TIMEOUT:
-                    action = self._timeout_action(action)
-                elif cause is not None and cause.failure_kind == MODEL_REQUEST_ERROR and cause.http_status is None:
-                    # An enclosing HTTP 500 is not a provider verdict or evidence of an unexecuted request.
-                    action = action if self._model_request_not_sent(agent_response) else OutcomeAction.FAIL
+            action, cause = self._agent_verification_action(agent_response)
             if action == OutcomeAction.COUNT_AS_ZERO:
                 # Explicit policy completion is not a verifier execution.
                 report = FailureReport.model_validate(agent_response.model_extra["failure_report"])
@@ -440,6 +596,225 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 update={NG_AGENT_OBSERVATIONS_KEY: observations, NG_TRAJECTORY_KEY: trajectory}
             ),
         )
+
+    async def _run_verifier_continuation(
+        self, request: SingleAgentTurnRequest, cleanup: CleanupContext
+    ) -> SingleAgentTurnResponse:
+        """Run bounded fresh sessions, letting only the Resources verifier request another activation."""
+        limits = self.config.verifier_continuation
+        assert limits is not None
+        if self._skipped_verification_reward() is not None:
+            raise self._failure(
+                stage="seed", terminal=True, failure_reason="verifier_continuation requires verification"
+            )
+        # This protocol has no exported cross-round state yet. Mark it before any session or model work.
+        await self.checkpoint_restart(request)
+        handles = SessionHandles.new(self.tool_server_names)
+        cleanup.register_cleanup("resources session", lambda: self._close_resources(request, handles))
+        for name in handles.tool_sessions:
+            cleanup.register_cleanup(
+                f"{name} tool session", lambda name=name: self._close_tool_session(request, handles, name)
+            )
+        bundles: list[AgentObservationBundle] = []
+        trajectories: list[TrajectoryRecord] = []
+        verifiers: list[VerifierInvocation] = []
+        responses: list[NeMoGymResponse] = []
+        verifier_calls = 0
+        current = request
+        evidence_scope = _ContinuationEvidenceScope()
+
+        def evidence() -> tuple[AgentObservationBundle | None, TrajectoryRecord | None]:
+            return _continuation_evidence(request, bundles, trajectories, verifiers)
+
+        def retain_close(
+            session_id: str, close: AgentCloseSessionResponse, response: NeMoGymResponse | None = None
+        ) -> tuple[AgentObservationBundle | None, TrajectoryRecord | None]:
+            trajectory = close.trajectory
+            if trajectory is None and response is not None:
+                raw = (response.model_extra or {}).get("_ng_trajectory")
+                if raw is not None:
+                    trajectory = TrajectoryRecord.model_validate(raw)
+            observations, trajectory = evidence_scope.import_session(session_id, close.agent_observations, trajectory)
+            if observations is not None:
+                bundles.append(observations)
+            if trajectory is not None:
+                trajectories.append(trajectory)
+            return observations, trajectory
+
+        try:
+            seed = await self._seed_resources(request, handles)
+            accesses = await self._seed_tool_servers(request, handles)
+            for activation in range(1, limits.max_activations + 1):
+                turn = handles.model_copy(
+                    deep=True,
+                    update={"agent_session_id": f"agent-session-{uuid4().hex}", "agent_cookies": {}},
+                )
+                closed: list[AgentCloseSessionResponse] = []
+
+                async def close_agent(turn: SessionHandles = turn) -> None:
+                    close = await self._close_agent(request, turn)
+                    handles.resources_cookies = turn.resources_cookies
+                    handles.tool_sessions = turn.tool_sessions
+                    closed.append(close)
+                    if close.cleanup_confirmed is not True:
+                        raise RuntimeError(
+                            "Verifier continuation requires confirmed agent cleanup before verification"
+                        )
+
+                agent_cleanup = cleanup.register_cleanup(f"agent activation {activation}", close_agent)
+                response = None
+                try:
+                    await self._seed_agent(current, turn, seed, accesses)
+                    response = await self._invoke_agent(current, turn)
+                except BaseException:
+                    try:
+                        await agent_cleanup.close()
+                    except Exception:
+                        pass  # Final unwind retries the close without replacing the original failure.
+                    if closed:
+                        retain_close(turn.agent_session_id, closed[-1], response)
+                    raise
+                responses.append(response)
+                try:
+                    await agent_cleanup.close()
+                except Exception as error:
+                    if closed:
+                        retain_close(turn.agent_session_id, closed[-1], response)
+                    observations, trajectory = evidence()
+                    raise dependency_failure(
+                        error,
+                        stage="cleanup",
+                        partial_response=response,
+                        agent_observations=observations,
+                        trajectory=trajectory,
+                    ) from error
+                close = closed[-1]
+                current_observations, current_trajectory = retain_close(turn.agent_session_id, close, response)
+                # The verifier signs the response it receives. Final usage must already include every fresh call.
+                usage = (
+                    NeMoGymResponseUsage.sum_from_list([item.usage for item in responses])
+                    if all(item.usage is not None for item in responses)
+                    else None
+                )
+                verified_response = response.model_copy(update={"usage": usage})
+                action, cause = self._agent_verification_action(response)
+                if action == OutcomeAction.COUNT_AS_ZERO:
+                    report = FailureReport.model_validate(response.model_extra["failure_report"])
+                    verification = SingleAgentTurnResult.model_validate(
+                        self._verify_body(current, verified_response)
+                        | {
+                            "reward": 0.0,
+                            "_ng_failure_class": cause.failure_kind,
+                            "failure_kind": cause.failure_kind,
+                            "_ng_failure_terminal": True,
+                            "_ng_failure_counts_as_zero": True,
+                            **FailureReportRow.fields(report),
+                        }
+                    )
+                elif action != OutcomeAction.VERIFY:
+                    observations, trajectory = evidence()
+                    raise self._failure(
+                        stage="agent",
+                        failure_reason=response.error.message if response.error else "Agent reported failure",
+                        terminal=action == OutcomeAction.FAIL,
+                        failure_kind=cause.failure_kind if cause else None,
+                        partial_response=response,
+                        agent_observations=observations,
+                        trajectory=trajectory,
+                        verifier_invocations=_unique_evidence(verifiers),
+                    ) from cause
+                else:
+                    verifier_calls += 1
+                    verification = await self._verify(
+                        current, handles, verified_response, current_observations, current_trajectory
+                    )
+                verifiers.extend(verification.ng_verifier_invocations)
+                next_request = verification.next_agent_request
+                if next_request is None or activation == limits.max_activations:
+                    observations, trajectory = evidence()
+                    result = verification.model_copy(
+                        update={
+                            "next_agent_request": None,
+                            "responses_create_params": request.task.task_input.responses_create_params,
+                            "agent_activations": len(responses),
+                            "verifier_calls": verifier_calls,
+                            NG_AGENT_OBSERVATIONS_KEY: observations,
+                            NG_TRAJECTORY_KEY: trajectory,
+                            NG_VERIFIER_INVOCATIONS_KEY: _unique_evidence(verifiers),
+                        }
+                    )
+                    if next_request is not None:
+                        # Prefix grades remain historical receipts, not a verifier claim about this synthetic cap.
+                        result = SingleAgentTurnResult.model_validate(
+                            request.task.task_input.task_data
+                            | {
+                                "responses_create_params": request.task.task_input.responses_create_params,
+                                "reward": 0.0,
+                                "response": result.response.model_copy(update={"status": "incomplete"}),
+                                "mask_sample": True,
+                                "failure_kind": "single_agent_turn:continuation_limit",
+                                "failure_reason": "No terminal verifier result before max_activations",
+                                "evaluation_completed": False,
+                                "agent_activations": len(responses),
+                                "verifier_calls": verifier_calls,
+                                NG_AGENT_OBSERVATIONS_KEY: observations,
+                                NG_TRAJECTORY_KEY: trajectory,
+                            }
+                        )
+                    return SingleAgentTurnResponse(
+                        episode_id=request.episode_id,
+                        task_id=request.task.task_id,
+                        result=result,
+                        failure_report=FailureReportRow.report(result.model_dump(mode="json"))
+                        if (result.model_extra or {}).get("_ng_failure_counts_as_zero") is True
+                        else None,
+                    )
+                current = request.model_copy(
+                    update={
+                        "task": request.task.model_copy(
+                            update={
+                                "task_input": request.task.task_input.model_copy(
+                                    update={"responses_create_params": next_request}
+                                )
+                            }
+                        )
+                    }
+                )
+        except NgFailureEvent as failure:
+            # A failed verify can return its own grading receipts before raising.
+            extra = failure.episode_evidence
+            if extra.get("agent_observations") is not None:
+                bundles.append(AgentObservationBundle.model_validate(extra["agent_observations"]))
+            if extra.get("trajectory") is not None:
+                trajectories.append(TrajectoryRecord.model_validate(extra["trajectory"]))
+            verifiers.extend(
+                VerifierInvocation.model_validate(item) for item in extra.get("verifier_invocations") or []
+            )
+            observations, trajectory = evidence()
+            failure.episode_evidence.update(
+                agent_observations=observations,
+                trajectory=trajectory,
+                verifier_invocations=_unique_evidence(verifiers),
+            )
+            raise
+        raise RuntimeError("Verifier continuation produced no activation")
+
+    def _agent_verification_action(
+        self, agent_response: NeMoGymResponse
+    ) -> tuple[OutcomeAction, NgFailureEvent | None]:
+        action = agent_outcome_policy(agent_response, config=self.config.agent_outcome_policy)
+        cause = self._agent_failure(agent_response)
+        if agent_response.status == "failed" and AGENT_OUTCOME_METADATA_KEY in (agent_response.metadata or {}):
+            extra = agent_response.model_extra or {}
+            report = extra.get("failure_report")
+            unselected = isinstance(report, dict) and report.get("failure_id") is None and not report.get("omitted")
+            if cause is None and "failure_report" in extra and not unselected:
+                action = OutcomeAction.FAIL
+            elif cause is not None and cause.failure_kind == MODEL_POLICY_RESPONSE_TIMEOUT:
+                action = self._timeout_action(action)
+            elif cause is not None and cause.failure_kind == MODEL_REQUEST_ERROR and cause.http_status is None:
+                action = action if self._model_request_not_sent(agent_response) else OutcomeAction.FAIL
+        return action, cause
 
     async def seed_episode_sessions(
         self,

@@ -8,6 +8,8 @@ requires-python = ">=3.13.14"
 dependencies = [
     "nemo-gym[dev,sandbox]",
     "markdown-it-py>=3,<4",
+    # Ordering-verifier tests exercise real native replay captures in this isolated component.
+    "ripgrep-bin==15.2.0",
 ]
 
 [tool.uv]

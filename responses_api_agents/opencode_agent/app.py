@@ -327,6 +327,7 @@ def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | 
     The adapter owns the model, provider, prompt and plugins of a sandbox session, so it accepts only:
 
     - ``permission`` and ``tools``, OpenCode's tool access.
+    - ``snapshot`` (a boolean), OpenCode's file snapshots and undo history.
     - ``attachment``, OpenCode's image limits. A session that declares image input lifts them, and this restores them
       for an endpoint with image limits.
     - ``compaction.auto`` (a boolean). Automatic compaction summarizes the session and continues from the
@@ -338,12 +339,16 @@ def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | 
       Other agent fields would replace the adapter's prompt, model or sampling. Token capture recognizes that
       message (``nemo_gym.models.token_capture.harness_notes``) and keeps the calls after it chained.
     """
-    unsupported = sorted(opencode_config.keys() - {"permission", "tools", "attachment", "compaction", "agent"})
+    unsupported = sorted(
+        opencode_config.keys() - {"permission", "tools", "snapshot", "attachment", "compaction", "agent"}
+    )
     if unsupported:
         return (
-            "supports permission, tools, attachment, compaction.auto and agent.build.steps only; "
+            "supports permission, tools, snapshot, attachment, compaction.auto and agent.build.steps only; "
             f"unsupported: {unsupported}"
         )
+    if "snapshot" in opencode_config and type(opencode_config["snapshot"]) is not bool:
+        return "snapshot must be a boolean"
     compaction = opencode_config.get("compaction", {})
     if not isinstance(compaction, Mapping) or compaction.keys() - {"auto"}:
         return "compaction supports only auto"

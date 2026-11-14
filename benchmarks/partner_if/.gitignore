@@ -1,0 +1,3 @@
+/data/
+# Synthetic fixture; the repository's temp* rule must not hide it.
+!/tests/fixtures/replay/assets/ngc-recorded-context/temporal-world.json

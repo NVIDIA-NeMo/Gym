@@ -36,6 +36,7 @@ migration = load_migration()
         "langgraph_agent",
         "hermes_agent",
         "pi_agent",
+        "prime_agent",
         "pool_agent",
         "simple_strands_agent",
         "goose_agent",
@@ -61,7 +62,12 @@ def test_migration_respects_agent_session_templates(
         yaml.safe_dump(
             {
                 "my_agent": {
-                    "responses_api_agents": {agent_type: {"entrypoint": "app.py", "resources_server": resources}}
+                    "responses_api_agents": {
+                        agent_type: {
+                            "entrypoint": "child_app.py" if agent_type == "prime_agent" else "app.py",
+                            "resources_server": resources,
+                        }
+                    }
                 }
             }
         )
@@ -72,3 +78,9 @@ def test_migration_respects_agent_session_templates(
         assert config.read_text() == before
     else:
         assert _environment_servers(yaml.safe_load(config.read_text())) == {"my_agent": ["my_environment_server"]}
+
+
+def test_prime_host_entrypoint_still_requires_a_legacy_relay() -> None:
+    assert migration.needs_environment_server(
+        {"responses_api_agents": {"prime_agent": {"entrypoint": "app.py", "resources_server": None}}}
+    )

@@ -163,7 +163,9 @@ def needs_environment_server(instance: dict) -> bool:
     # Explicitly unbound templates for agent sessions do not use the compatibility /run route.
     # A legacy relay would conflict with the Environment Server supplied by composition.
     # An omitted binding can inherit Resources and must still migrate.
-    if agent_type in AGENT_SESSION_AGENT_TYPES and resources_server is None:
+    # Prime exposes sessions through a separate entrypoint; its default host CLI still needs a relay.
+    prime_child = agent_type == "prime_agent" and agent.get("entrypoint") == "child_app.py"
+    if (agent_type in AGENT_SESSION_AGENT_TYPES or prime_child) and resources_server is None:
         return False
     # Stirrup, Copilot, Droid and OpenHands run only in agent sessions and have no /run for a legacy relay to call.
     if agent_type in ("stirrup_agent", "copilot_agent", "droid_agent", "openhands_agent"):

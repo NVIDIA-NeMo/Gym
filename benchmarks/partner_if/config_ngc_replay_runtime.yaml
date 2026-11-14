@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Shared bounded replay wiring for the partner_if registry task.
+replay_package_dir: benchmarks/partner_if/data/ngc_replay/registry
+replay_runtime_contract_path: null
+replay_runtime_contract_sha256: null
+replay_artifacts: ${oc.env:PWD}/results/partner_if/ngc-recorded-context/live
+partner_if:
+  resources_servers:
+    partner_if:
+      ordering_artifacts_dir: ${replay_artifacts}
+      ordering_max_policy_calls: ${partner_if_ngc_replay_agent.responses_api_agents.ngc_recorded_context.replay.max_policy_calls}
+partner_if_ngc_replay_model:
+  _copy: policy_model
+  responses_api_models:
+    vllm_model:
+      sampling_overrides:
+        temperature: ${partner_if_ngc_replay_agent.responses_api_agents.ngc_recorded_context.replay.temperature}
+        top_p: ${partner_if_ngc_replay_agent.responses_api_agents.ngc_recorded_context.replay.top_p}
+        max_tokens: ${partner_if_ngc_replay_agent.responses_api_agents.ngc_recorded_context.replay.max_tokens}
+        max_completion_tokens: ${partner_if_ngc_replay_agent.responses_api_agents.ngc_recorded_context.replay.max_tokens}
+partner_if_ngc_replay_agent:
+  responses_api_agents:
+    ngc_recorded_context:
+      entrypoint: native_agent.py
+      resources_server:
+        type: resources_servers
+        name: partner_if
+      domain: instruction_following
+      verified: false
+      num_workers: 1
+      model: ${policy_model_name}
+      model_server:
+        type: responses_api_models
+        name: partner_if_ngc_replay_model
+      replay:
+        package_dir: ${replay_package_dir}
+        runtime_contract_path: ${replay_runtime_contract_path}
+        runtime_contract_sha256: ${replay_runtime_contract_sha256}
+        artifacts_dir: ${replay_artifacts}
+        coverage_profile: expanded-v4
+        evaluation_boundary: first_answer
+        temporal_history: true
+        capture_stdout: true
+        shell_control_flow: true
+        gym_reasoning_decode: true
+        missing_runtime_reads: true
+        max_new_turns: 6
+        max_policy_calls: 8
+        max_delegate_turns: 6
+        max_tokens: 8192
+        timeout_s: 180
+        temperature: 0.7
+        top_p: 0.95
+partner_if_ngc_replay_environment_server:
+  environment_servers:
+    single_agent_turn:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: partner_if
+      agent_server:
+        type: responses_api_agents
+        name: partner_if_ngc_replay_agent
+      resources_tool_transports: []
+      forward_agent_evidence: true
+      verifier_continuation:
+        max_activations: ${partner_if_ngc_replay_agent.responses_api_agents.ngc_recorded_context.replay.max_new_turns}
+      max_concurrent_episodes: 1
+      queue_timeout_seconds: 60
+      default_episode_timeout_seconds: 900
+      cleanup_timeout_seconds: 60
