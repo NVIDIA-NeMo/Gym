@@ -91,7 +91,7 @@ def test_explicit_names_and_invalid_selections(tmp_path, monkeypatch):
 )
 def test_benchmark_limits_resolve_defaults_and_client_overrides(overrides, steps, timeout):
     root = Path(preparation.__file__).resolve().parents[2]
-    config = OmegaConf.merge(OmegaConf.load(root / "benchmarks/terminal_bench_4/miniswe.yaml"), overrides)
+    config = OmegaConf.merge(OmegaConf.load(root / "benchmarks/terminal_bench_4/miniswe_legacy_agent.yaml"), overrides)
     agent = config.terminal_bench_4_miniswe.responses_api_agents.miniswe_sandboxed_agent
     harness = agent.harness
     assert harness.step_limit == steps
@@ -109,5 +109,27 @@ def test_benchmark_limits_resolve_defaults_and_client_overrides(overrides, steps
     ],
 )
 def test_agent_artifacts_follow_run_directory_unless_overridden(overrides, expected):
-    config = OmegaConf.merge(OmegaConf.load(preparation.BENCHMARK_DIR / "miniswe.yaml"), overrides)
+    config = OmegaConf.merge(OmegaConf.load(preparation.BENCHMARK_DIR / "miniswe_legacy_agent.yaml"), overrides)
     assert config.terminal_bench_4_miniswe.responses_api_agents.miniswe_sandboxed_agent.artifacts_dir == expected
+
+
+def test_harbor_profile_runs_the_entry_with_mini_swe():
+    from nemo_gym.data.tasks.harbor.prepare import harbor_benchmark
+
+    benchmark = harbor_benchmark(preparation.BENCHMARK_DIR / "miniswe.yaml")
+    assert benchmark.target == "terminal_bench_4"
+    assert (benchmark.agent.instance_name, benchmark.agent.impl_name) == ("mini_swe_agent",) * 2
+
+
+def test_a_variant_of_the_harbor_profile_keeps_its_server_settings(tmp_path: Path):
+    """The variant form `harbor_benchmark` asks for (repeat the target, include the preset) keeps the preset's
+    episode bound instead of the server's 21600 s default."""
+    from nemo_gym.data.tasks.harbor.prepare import harbor_benchmark
+
+    preset = preparation.BENCHMARK_DIR / "miniswe.yaml"
+    variant = tmp_path / "variant.yaml"
+    variant.write_text(json.dumps({"harbor_target": "terminal_bench_4", "config_paths": [str(preset)]}))
+    settings = harbor_benchmark(variant).agent.benchmark_settings
+    assert settings == harbor_benchmark(preset).agent.benchmark_settings
+    harbor = OmegaConf.create(settings).harbor_environment_server.environment_servers.harbor
+    assert harbor.default_episode_timeout_seconds == 54000
