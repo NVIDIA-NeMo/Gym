@@ -49,7 +49,7 @@ from nemo_gym.responses_converter import (
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
     split_responses_input_output_items,  # noqa: F401
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.server_utils import MAX_NUM_TRIES, SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
 from nemo_gym.token_id_capture import (
     current_capture_context,
 )
@@ -226,6 +226,9 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     # Connection-error retry bound applied to clients when endpoint_file is set.
     endpoint_connection_retries: Optional[int] = 8
+    # Tries per model call on a retryable HTTP status (429/502/503/504/...), 0.5 s apart. The default 3 ran out 96
+    # times in one NL2RepoBench run when the multiplexer relay answered 503 "response relay is at capacity".
+    max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
 
     # Expose the Gym session (one per rollout) as the backend's conversation id.
     # ``conversation_params`` is a TensorRT-LLM extension outside the OpenAI Chat Completions
@@ -342,6 +345,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 max_connection_retries=(
                     self.config.endpoint_connection_retries if self.config.endpoint_file else None
                 ),
+                max_http_attempts=self.config.max_http_attempts,
             )
             for base_url in self.config.base_url
         ]
@@ -1589,6 +1593,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 api_key=self.config.api_key,
                 default_headers=self.config.default_headers,
                 max_connection_retries=self.config.endpoint_connection_retries,
+                max_http_attempts=self.config.max_http_attempts,
             )
         ]
         # Every session re-resolves onto the new host.
