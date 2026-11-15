@@ -331,7 +331,8 @@ Compose group and the separate verifier, and lends the sandbox to
 session; each row carries the official instruction and the task's own agent budget. Model calls
 go through Gym's model server and are captured; token IDs and logprobs are not (see the agent's
 README). `--agent-type` runs another harness on the same tasks, with that harness's own shipped
-limits; only the episode bound and the server settings below carry over.
+limits; only the episode bound and the server settings below carry over. Only `mini_swe_agent`
+has been run on this entry, so other harnesses are unproven here.
 
 The defaults follow Harbor's built-in `mini-swe-agent`:
 
@@ -362,17 +363,22 @@ How the profile runs:
   under `/tmp`; every v0.1 agent image is Debian or Ubuntu based, and none sets `[agent].user`.
 - **Run budget.** Each task's own 8-hour budget bounds the agent; `++tbsci_agent_max_timeout_sec`
   can only shorten it.
-- **Episode bound.** 46800 seconds (`++tbsci_episode_timeout_sec`): harness setup (900
-  seconds, mini-SWE's install allowance), the 8-hour agent budget, the separate verifier's start
-  and the slowest verifier (12000 seconds).
+- **Episode bound.** 46800 seconds (`++tbsci_episode_timeout_sec`): the 1200-second
+  sandbox-ready wait, harness setup (900 seconds, mini-SWE's install allowance), the 8-hour agent
+  budget, the separate verifier's start (another ready wait) and the slowest verifier (12000
+  seconds) with its grace, 44130 seconds in all and 46755 seconds with every image-pull retry.
+- **Session close.** mini-SWE gets 300 seconds to return its trajectory when the session closes,
+  as Codex does; the default 60 seconds can be short for an 8-hour run.
 - **Verifier settings.** The entry's `dataset.toml` carries the verifier timeouts and the
   verifier CPUs and memory from [Deviations from the packages](#deviations-from-the-packages),
   and each package's no-network verifier restriction (see the entry's README).
 - **Deployment settings.** The preset sets the three sandbox labels from [Execution](#execution)
   (`nemo.nvidia.com/resources: custom`, `nemo.nvidia.com/oom-kill: process`,
-  `nemo.nvidia.com/s3-hostpath: 'false'`) and the resources server's 1200-second readiness wait
-  for lazily pulled images. It does not raise the disk limit: each sandbox's limit is the
-  package's `storage_mb`, where the resources server's presets raise it to 100 GiB.
+  `nemo.nvidia.com/s3-hostpath: 'false'`), the resources server's 1200-second readiness wait
+  for lazily pulled images, its 100 GiB disk limit (`++tbsci_min_disk_gib`, in place of each
+  package's `storage_mb`, which is at most 20 GiB) and its `resource_requests: limits`, so
+  OpenSandbox requests what each sandbox's limits allow. They apply to every sandbox the server
+  starts, the separate verifier's included.
 - **Compose tasks.** The Harbor route rejects three of the five tasks during preparation;
   the other two are untested. It does not apply the resources server's per-task Compose
   settings; see the entry's README.
@@ -510,6 +516,7 @@ the cell reaches the model server only through a proxy, also set
 ```sh
 gym dataset pull terminal_bench_science
 gym eval run --benchmark terminal_bench_science/miniswe --sandbox opensandbox \
+  --exclude-tasks inverse-lithography,noisy-blackbox-optimization,protein-active-learning \
   --model-type vllm_model --model-url http://MODEL_HOST:8000/v1 \
   --model MODEL_NAME --output results/tbsci/rollouts.jsonl --concurrency 8 \
   ++default_host=GYM_HOST_IP
@@ -517,10 +524,26 @@ gym eval run --benchmark terminal_bench_science/miniswe --sandbox opensandbox \
 
 The run prepares the pulled task folders first: it builds each task's agent, verifier and
 sidecar images and records them, unless they are already recorded (see the entry's
-[Images](../../environments/harbor/terminal_bench_science/README.md#images)). `--only-tasks` and
-`--exclude-tasks` select tasks. `gym dataset validate terminal_bench_science --sandbox
-opensandbox` runs every reference solution through the same separate verifier. The resources
-server's `tbsci_*` image, split-endpoint and verifier settings do not apply to this preset.
+[Images](../../environments/harbor/terminal_bench_science/README.md#images)). Preparation cannot
+load the three Compose tasks this route does not support (see the entry's
+[Known limits](../../environments/harbor/terminal_bench_science/README.md#known-limits)), and
+`gym eval run` refuses to start while any task is left out that way, so the command excludes
+them (`--skip-unloadable` runs the loadable subset instead). Either way the result covers at
+most 65 tasks ([Measurement contract](#measurement-contract)). `--only-tasks` and
+`--exclude-tasks` select tasks.
+
+Keep `--concurrency` at or below mini-SWE's 32 concurrent sessions. Harbor starts each task's
+clock once its sandbox is ready, so a task waiting for a free session spends its budget waiting.
+
+Run every reference solution through the same separate verifier with:
+
+```sh
+gym dataset validate terminal_bench_science --sandbox opensandbox \
+  --exclude-tasks inverse-lithography,noisy-blackbox-optimization,protein-active-learning
+```
+
+The resources server's `tbsci_*` image, split-endpoint and verifier settings do not apply to
+this preset.
 
 ### Resources-server presets
 

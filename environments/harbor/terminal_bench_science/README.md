@@ -4,15 +4,24 @@ The 70 Terminal-Bench-Science v0.1 tasks run as plain Harbor task folders throug
 server. The dataset comes from Harbor's package store, pinned by the same digest
 `benchmarks/terminal_bench_science/manifest.json` records for the resources server's presets, so both paths run the
 same packages; the pull records each task's content hash in `manifest.toml` and refuses a task folder that no longer
-matches it. The `terminal_bench_science/miniswe` benchmark runs this entry with mini-SWE
-(`gym eval run --benchmark terminal_bench_science/miniswe`; see `benchmarks/terminal_bench_science/README.md`).
+matches it. Run it through the `terminal_bench_science/miniswe` benchmark, which carries the server settings a
+full run needs (see `benchmarks/terminal_bench_science/README.md`, "Run"):
 
 ```sh
 gym dataset pull terminal_bench_science
-gym dataset validate terminal_bench_science --sandbox opensandbox
-gym eval run terminal_bench_science --agent mini_swe_agent/mini_swe_agent_sandboxed --sandbox opensandbox \
-  --model-type openai_model --model <model> --model-url <url>
+gym dataset validate terminal_bench_science --sandbox opensandbox \
+  --exclude-tasks inverse-lithography,noisy-blackbox-optimization,protein-active-learning
+gym eval run --benchmark terminal_bench_science/miniswe --sandbox opensandbox \
+  --exclude-tasks inverse-lithography,noisy-blackbox-optimization,protein-active-learning \
+  --model-type vllm_model --model <model> --model-url <url>
 ```
+
+Both commands refuse to start while preparation leaves a task out, so they exclude the three Compose tasks this
+route does not support (see Known limits). A direct `gym eval run terminal_bench_science --agent ...` runs without
+the benchmark's settings: the server's 21600-second episode cap would cut every 8-hour run short and retry it, and the
+run gets the default harness setup allowance, no sandbox labels or disk limit, and the harness's own step limit. Use
+it only for short smoke runs. `--agent-type` on the benchmark runs another harness with the same server settings;
+only `mini_swe_agent` has been run on this entry.
 
 `dataset.toml` here declares the source. The pull fetches it into this folder (the 70 task folders and `manifest.toml`
 are gitignored beside this README), and the commands above resolve the entry name to this folder.
@@ -46,11 +55,13 @@ recorded is skipped with the loader's message. The sandbox deployment must be ab
 - **Unsupported Compose tasks.** Preparation skips `inverse-lithography` (`fabricator.init`),
   `noisy-blackbox-optimization` (`init`, `pids_limit`, `read_only`, `cap_drop`) and `protein-active-learning`
   (`networks.task.internal: true`). The Harbor route rejects these settings and does not apply the resources
-  server's per-task Compose overrides or ignored settings. The skipped tasks have no rollout or reward and are
-  absent from the default score denominator. To select the supported subset explicitly, use
-  `--exclude-tasks inverse-lithography,noisy-blackbox-optimization,protein-active-learning` with `gym eval run`;
-  this remains a partial benchmark, not a full 70-task result.
+  server's per-task Compose overrides or ignored settings. `gym eval run` and `gym dataset validate` refuse to start
+  while these tasks are left out, so pass
+  `--exclude-tasks inverse-lithography,noisy-blackbox-optimization,protein-active-learning` (or `--skip-unloadable`
+  to `gym eval run`). The excluded tasks have no rollout or reward and are absent from the default score
+  denominator; the result is a partial benchmark, not a full 70-task result.
 - **Untested Compose tasks.** `longitudinal-clinical-agent` and `tamp-skill-planning` have no known Compose field
   rejection after image preparation, but neither has been run on this route. Their sidecars run as separate sandboxes.
-- **Disk.** A sandbox's disk limit is the package's `storage_mb`. The resources server raises the limit to 100 GiB
-  (`sandbox_min_disk_gib`); OpenSandbox evicts a sandbox that writes past its limit.
+- **Disk.** Without the benchmark's settings, a sandbox's disk limit is the package's `storage_mb` (at most 20 GiB);
+  OpenSandbox evicts a sandbox that writes past its limit. The `terminal_bench_science/miniswe` benchmark raises it to
+  100 GiB, as the resources server does.

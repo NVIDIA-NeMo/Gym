@@ -154,6 +154,7 @@ class TestSourceKey:
         config = read_dataset_config(PARENT_DIR / "environments" / "harbor" / "terminal_bench_science")
         manifest = json.loads((PARENT_DIR / "benchmarks" / "terminal_bench_science" / "manifest.json").read_text())
         assert config.source == f"harbor:{manifest['dataset']}@{manifest['ref']}"
+        assert (config.effective_type, config.license) == ("benchmark", "Apache 2.0")
         assert all(not task.environment and not task.artifacts for task in config.tasks.values())
         timeouts = {
             name: task.verifier["timeout_sec"] for name, task in config.tasks.items() if "timeout_sec" in task.verifier

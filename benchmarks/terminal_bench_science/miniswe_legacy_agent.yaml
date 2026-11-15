@@ -8,7 +8,7 @@ terminal_bench_science_miniswe:
     miniswe_sandboxed_agent:
       entrypoint: app.py
       domain: agent
-      description: mini-SWE 2.4.6 native bash profile on pinned Terminal-Bench-Science v0.1 resources.
+      description: mini-SWE 2.4.6's own agent loop over the legacy_agent /run relay on pinned Terminal-Bench-Science v0.1 resources.
       resources_server:
         type: resources_servers
         name: terminal_bench_science

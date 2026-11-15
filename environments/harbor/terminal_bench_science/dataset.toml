@@ -3,6 +3,8 @@
 # manifest.toml it writes are gitignored); `gym dataset validate terminal_bench_science` and
 # `gym eval run terminal_bench_science ...` then resolve the entry name to this folder.
 [gym]
+type = "benchmark"
+license = "Apache 2.0"
 # Harbor's package store, v0.1 (70 tasks), pinned by the digest benchmarks/terminal_bench_science/manifest.json
 # records for the resources server's preset, so both paths run the same packages.
 source = "harbor:terminal-bench-science/terminal-bench-science@sha256:91531bf50016a7c64f6cc60794a17c64c6b2c14858a8ae0de39ca16f2abd611a"
