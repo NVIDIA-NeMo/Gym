@@ -429,11 +429,18 @@ class TestMultiWorkerEntrypoint:
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not installed")
-def test_the_eval_script_reports_its_stderr_on_stdout_in_order() -> None:
-    """E2B returns a command's stdout and stderr apart: the graded region between the markers must hold both."""
-    header = build_eval_script(_inputs()).split("\ncd ", 1)[0]
+def test_the_eval_script_reports_its_stderr_on_stdout_in_order(tmp_path) -> None:
+    """Providers return a command's stdout and stderr apart: the script's redirect puts both on stdout, in order."""
+    header, found, _ = build_eval_script(_inputs()).partition("\ncd ")
+    assert found, "the eval script no longer begins its work with a cd line; update this split"
+    # Only the redirect may run here: never the real script, which resets a checkout.
+    assert [line for line in header.splitlines() if line and not line.startswith("#")] == ["exec 2>&1"]
     result = subprocess.run(
-        ["bash", "-c", header + "\necho first\necho second >&2\necho third\n"], capture_output=True, text=True
+        ["bash", "-c", header + "\necho first\necho second >&2\necho third\n"],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        timeout=30,
     )
     assert result.stdout.splitlines() == ["first", "second", "third"]
     assert result.stderr == ""

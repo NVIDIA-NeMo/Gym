@@ -367,15 +367,23 @@ async def test_a_commit_during_grading_exports_the_patch_alone_and_a_restore_gra
         verifying = asyncio.create_task(
             client.post("/ng-rollout/r/verify", json=verify_body(case), headers={"x-ng-checkpoint-close-follows": "1"})
         )
-        await asyncio.wait_for(grading.wait(), 5)
-        # A replayable verify does not hold up the checkpoint, and the patch is already captured.
-        prepared = await client.post("/ng-control/v1/checkpoint/prepare", json=control("c1"), headers=AUTH)
-        committed = await client.post(
-            "/ng-control/v1/checkpoint/commit", json=control("c1", checkpoint_dir=str(tmp_path / "ckpt")), headers=AUTH
-        )
-        await client.post("/ng-control/v1/checkpoint/resume", json=control("c1"), headers=AUTH)
-        finish.set()
-        await verifying
+        try:
+            async with asyncio.timeout(30):
+                await grading.wait()
+                # A replayable verify does not hold up the checkpoint, and the patch is already captured.
+                prepared = await client.post("/ng-control/v1/checkpoint/prepare", json=control("c1"), headers=AUTH)
+                committed = await client.post(
+                    "/ng-control/v1/checkpoint/commit",
+                    json=control("c1", checkpoint_dir=str(tmp_path / "ckpt")),
+                    headers=AUTH,
+                )
+                await client.post("/ng-control/v1/checkpoint/resume", json=control("c1"), headers=AUTH)
+        finally:
+            # Also when a line above fails: the grading must not stay parked behind the test.
+            finish.set()
+        async with asyncio.timeout(30):
+            graded = await verifying
+        assert graded.status_code == 200, graded.text
         # The environment server keeps the session cookie in its bookmark and sends it again after a restore.
         cookies = dict(client.cookies)
     assert prepared.json()["phase"] == "prepared", prepared.text
@@ -398,6 +406,65 @@ async def test_a_commit_during_grading_exports_the_patch_alone_and_a_restore_gra
     assert regraded.json()["model_patch"] == AGENT_SECTION
     assert captures(provider) == 1, "the restored session grades the patch it captured before the crash"
     assert graded_patches(case) == [AGENT_SECTION, AGENT_SECTION]
+
+
+@pytest.mark.parametrize("outcome", ["git_failure", "unavailable"])
+async def test_a_restore_keeps_the_outcome_of_a_capture_that_failed(case: Case, tmp_path: Path, outcome: str) -> None:
+    def failing(command: str) -> Optional[SandboxExecResult]:
+        if "status --porcelain" in command:
+            if outcome == "git_failure":
+                return SandboxExecResult(stdout="", stderr="fatal: not a git repository", return_code=128)
+            return SandboxExecResult(stdout="", stderr="gateway timeout", return_code=125, error_type="sandbox")
+        return git_results(command)
+
+    provider = FakeSnapshotProvider(failing)
+    config = checkpointing_config(tmp_path / "state")
+    server = make_server(case, provider, config)
+    async with http(server) as client:
+        await seed(client, episode_seed(case))
+        # The header keeps the session tracked until its close, so the commit below still exports it.
+        first = await client.post(
+            "/ng-rollout/r/verify", json=verify_body(case), headers={"x-ng-checkpoint-close-follows": "1"}
+        )
+        for operation, body in (
+            ("prepare", control("c1")),
+            ("commit", control("c1", checkpoint_dir=str(tmp_path / "ckpt"))),
+            ("resume", control("c1")),
+        ):
+            reply = await client.post(f"/ng-control/v1/checkpoint/{operation}", json=body, headers=AUTH)
+            assert reply.status_code == 200, reply.text
+        cookies = dict(client.cookies)
+    assert first.status_code == 200, first.text
+    assert provider.snapshots == {}, "a session past its capture exports its capture, not a sandbox"
+
+    # A capture run again would now succeed, so a verdict that changes shows the saved capture was not used.
+    provider._exec_results = git_results
+    restored = make_server(case, provider, config)
+    async with http(restored) as client:
+        client.cookies.update(cookies)
+        for operation, body in (
+            ("restore", control("r1", checkpoint_dir=str(tmp_path / "ckpt"), episode_ids=[{"rollout_id": "r"}])),
+            ("resume", control("r1")),
+        ):
+            reply = await client.post(f"/ng-control/v1/checkpoint/{operation}", json=body, headers=AUTH)
+            assert reply.status_code == 200, reply.text
+        async with asyncio.timeout(30):
+            again = await client.post("/ng-rollout/r-a1/verify", json=verify_body(case))
+
+    assert again.status_code == 200, again.text
+    attempts = sum("status --porcelain" in c for box in provider.boxes.values() for c in box["commands"])
+    assert attempts == 1, "the restored session does not capture again"
+    assert provider.created_from_image() == 1 and provider.live() == []
+    if outcome == "git_failure":
+        # A git failure is the agent's: the empty patch is graded again.
+        assert again.json()["patch_source"] == "none"
+        assert again.json()["error"].startswith("Failed to extract model patch")
+        assert again.json()["evaluation_completed"] is True
+        assert graded_patches(case) == ["", ""]
+    else:
+        # A capture the sandbox could not run is not evidence of an empty patch, before or after a restore.
+        assert again.json()["mask_sample"] is True and again.json()["evaluation_completed"] is False
+        assert graded_patches(case) == []
 
 
 async def test_a_restore_continues_in_a_fork_and_captures_against_the_saved_base(case: Case, tmp_path: Path) -> None:
@@ -490,73 +557,6 @@ async def test_swe_next_links_testbed_in_the_agent_and_grading_sandboxes(
     # The link comes before the repository is prepared in the agent's sandbox, and before grading in the other.
     assert agent_box["commands"][0] == "ln -sfn /workspace /testbed", agent_box["commands"][:3]
     assert "ln -sfn /workspace /testbed" in grading_box["commands"]
-
-
-class SpecRecording:
-    """Records the spec of every sandbox created from an image, and of every fork."""
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self.specs: list[Any] = []
-        self.fork_specs: list[Any] = []
-
-    async def create(self, spec: Any) -> Any:
-        self.specs.append(spec)
-        return await super().create(spec)
-
-    async def create_from_snapshot(self, snapshot_id: str, spec: Any) -> Any:
-        self.fork_specs.append(spec)
-        return await super().create_from_snapshot(snapshot_id, spec)
-
-
-class SpecRecordingSnapshotProvider(SpecRecording, FakeSnapshotProvider):
-    pass
-
-
-AGENT_NETWORK = {"defaultAction": "deny", "egress": [{"action": "allow", "target": "10.0.0.0/8"}]}
-
-
-async def test_the_agent_network_policy_limits_the_agent_sandbox_and_its_fork_but_not_grading(
-    case: Case, tmp_path: Path, monkeypatch: MonkeyPatch
-) -> None:
-    provider = SpecRecordingSnapshotProvider(git_results)
-    grading_specs: list[Any] = []
-
-    class Graders(FakeSandboxProvider):
-        async def create(self, spec: Any) -> Any:
-            grading_specs.append(spec)
-            return await super().create(spec)
-
-    monkeypatch.setattr(f"resources_servers.{case.name}.app.resolve_provider_config", lambda *_: Graders())
-    config = checkpointing_config(tmp_path / "state")
-    server = make_server(case, provider, config, agent_network_policy=AGENT_NETWORK)
-    async with http(server) as client:
-        await seed(client, episode_seed(case))
-        for operation, body in (
-            ("prepare", control("c1")),
-            ("commit", control("c1", checkpoint_dir=str(tmp_path / "ckpt"))),
-            ("resume", control("c1")),
-        ):
-            reply = await client.post(f"/ng-control/v1/checkpoint/{operation}", json=body, headers=AUTH)
-            assert reply.status_code == 200, reply.text
-        await client.post("/ng-rollout/r/verify", json=verify_body(case))
-
-    [agent_spec] = provider.specs
-    [grading_spec] = grading_specs
-    assert agent_spec.provider_options["network_policy"] == AGENT_NETWORK
-    assert "network_policy" not in (grading_spec.provider_options or {})
-
-    # The rule is recorded with the sandbox, so the fork a restore makes gets it too.
-    restored = make_server(case, provider, config, agent_network_policy=None)
-    async with http(restored) as client:
-        for operation, body in (
-            ("restore", control("r1", checkpoint_dir=str(tmp_path / "ckpt"), episode_ids=[{"rollout_id": "r"}])),
-            ("resume", control("r1")),
-        ):
-            reply = await client.post(f"/ng-control/v1/checkpoint/{operation}", json=body, headers=AUTH)
-            assert reply.status_code == 200, reply.text
-    [fork_spec] = provider.fork_specs
-    assert fork_spec.provider_options["network_policy"] == AGENT_NETWORK
 
 
 async def test_a_required_scrub_that_fails_fails_the_seed_and_stops_the_sandbox(case: Case, tmp_path: Path) -> None:
@@ -664,14 +664,130 @@ async def test_a_listing_the_provider_interrupted_fails_the_seed(case: Case, tmp
     assert provider.live() == []
 
 
-async def test_a_listing_that_runs_and_fails_still_gives_no_untracked_files(case: Case, tmp_path: Path) -> None:
-    def not_a_repository(command: str) -> Optional[SandboxExecResult]:
+async def test_a_listing_git_refuses_fails_the_seed(case: Case, tmp_path: Path) -> None:
+    # No list is not an empty list: the capture would count the image's own untracked files as the agent's.
+    def refused(command: str) -> Optional[SandboxExecResult]:
         if "ls-files --others" in command:
-            return SandboxExecResult(stdout="", stderr="fatal: not a git repository", return_code=128)
+            return SandboxExecResult(stdout="", stderr="fatal: detected dubious ownership", return_code=128)
         return git_results(command)
 
-    server = make_server(case, FakeSnapshotProvider(not_a_repository), checkpointing_config(tmp_path))
+    provider = FakeSnapshotProvider(refused)
+    server = make_server(case, provider, checkpointing_config(tmp_path))
+    body = episode_seed(case)
     async with http(server) as client:
-        await seed(client, episode_seed(case))
+        with pytest.raises(RuntimeError, match="could not list its pristine untracked files: exit 128"):
+            await client.post(
+                f"/ng-rollout/{body.episode_id.capture_key}/seed_session", json=body.model_dump(mode="json")
+            )
 
-    assert server._export_task_sandbox_state("rs-1")["pristine_untracked"] == []
+    assert provider.live() == []
+    assert "rs-1" not in server._session_id_to_sandbox
+
+
+RECORDING = [case.name for case in CASES if case.records_base_commit]
+
+
+@pytest.mark.parametrize("case", RECORDING, indirect=True)
+@pytest.mark.parametrize(
+    "head",
+    [
+        SandboxExecResult(stdout="", stderr="fatal: bad revision 'HEAD'", return_code=128),
+        SandboxExecResult(stdout="", stderr="", return_code=124, error_type="timeout"),
+        SandboxExecResult(stdout="\n", stderr=None, return_code=0),
+    ],
+    ids=["git-fails", "interrupted", "empty"],
+)
+async def test_a_seed_that_reads_no_base_commit_fails_and_stops_the_sandbox(
+    case: Case, tmp_path: Path, head: SandboxExecResult
+) -> None:
+    def no_head(command: str) -> Optional[SandboxExecResult]:
+        if command.rstrip().endswith("rev-parse HEAD"):
+            return head
+        return git_results(command)
+
+    provider = FakeSnapshotProvider(no_head)
+    server = make_server(case, provider, checkpointing_config(tmp_path))
+    body = episode_seed(case)
+    async with http(server) as client:
+        # The test transport re-raises the server's error instead of answering 500 as the server would.
+        with pytest.raises(RuntimeError, match="did not produce a base commit"):
+            await client.post(
+                f"/ng-rollout/{body.episode_id.capture_key}/seed_session", json=body.model_dump(mode="json")
+            )
+
+    assert provider.live() == []
+    assert "rs-1" not in server._session_id_to_base_commit and "rs-1" not in server._session_id_to_sandbox
+
+
+@pytest.mark.parametrize("case", RECORDING, indirect=True)
+async def test_a_seed_whose_base_commit_read_keeps_raising_fails_after_three_attempts(
+    case: Case, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    _no_retry_delay(monkeypatch)
+
+    def unreachable(command: str) -> Optional[SandboxExecResult]:
+        if command.rstrip().endswith("rev-parse HEAD"):
+            raise ConnectionError("502: The sandbox could not be reached")
+        return git_results(command)
+
+    provider = FakeSnapshotProvider(unreachable)
+    server = make_server(case, provider, checkpointing_config(tmp_path))
+    body = episode_seed(case)
+    async with http(server) as client:
+        with pytest.raises(ConnectionError, match="could not be reached"):
+            await client.post(
+                f"/ng-rollout/{body.episode_id.capture_key}/seed_session", json=body.model_dump(mode="json")
+            )
+
+    reads = sum(c.rstrip().endswith("rev-parse HEAD") for box in provider.boxes.values() for c in box["commands"])
+    assert reads == 3
+    assert provider.live() == []
+
+
+@pytest.mark.parametrize("case", ["swemer_v1", "swemer_v2"], indirect=True)
+async def test_a_repository_check_the_provider_interrupted_fails_the_seed_and_initialises_nothing(
+    case: Case, tmp_path: Path
+) -> None:
+    # Not an answer: initialising here would commit a snapshot on top of a repository that may exist.
+    def interrupted(command: str) -> Optional[SandboxExecResult]:
+        if "rev-parse --git-dir" in command:
+            return SandboxExecResult(stdout="", stderr="", return_code=124, error_type="timeout")
+        return git_results(command)
+
+    provider = FakeSnapshotProvider(interrupted)
+    server = make_server(case, provider, checkpointing_config(tmp_path))
+    body = episode_seed(case)
+    async with http(server) as client:
+        with pytest.raises(RuntimeError, match="could not check for a git repository: timeout"):
+            await client.post(
+                f"/ng-rollout/{body.episode_id.capture_key}/seed_session", json=body.model_dump(mode="json")
+            )
+
+    assert not any("git init" in c for box in provider.boxes.values() for c in box["commands"])
+    assert provider.live() == []
+
+
+async def test_a_seed_retries_the_first_command_a_new_sandbox_could_not_run(
+    case: Case, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """The very first command of a new sandbox is the one most likely to meet a gateway 502."""
+    _no_retry_delay(monkeypatch)
+    monkeypatch.setattr("resources_servers.swebench.anti_cheat.ANTI_CHEAT_RETRY_DELAY_S", 0.0)
+    refused: list[str] = []
+
+    def first_refused(command: str) -> Optional[SandboxExecResult]:
+        if not refused:
+            refused.append(command)
+            raise ConnectionError("502: The sandbox could not be reached")
+        return git_results(command)
+
+    provider = FakeSnapshotProvider(first_refused)
+    server = make_server(case, provider, checkpointing_config(tmp_path))
+    async with http(server) as client:
+        reply = await seed(client, episode_seed(case))
+
+    assert reply.status_code == 200, reply.text
+    [box] = provider.boxes.values()
+    # The command the sandbox refused was run again; swe_rebench's first operation is the retried scrub.
+    assert box["commands"].count(refused[0]) == 2, box["commands"][:4]
+    assert server._export_task_sandbox_state("rs-1") == capture_state(case)

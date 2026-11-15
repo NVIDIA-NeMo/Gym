@@ -258,7 +258,6 @@ class SWERebenchResourcesServer(RepoTaskSessionResourcesServer):
         )
         if session_id is not None:
             # On the provider every task sandbox shares, and registered for the session and its checkpoints.
-            spec = self.agent_sandbox_spec(spec)
             sandbox = self.new_task_sandbox(session_id, spec)
         else:
             sandbox = AsyncSandbox(provider_config)
