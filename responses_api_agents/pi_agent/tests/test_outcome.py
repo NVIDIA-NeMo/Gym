@@ -11,7 +11,7 @@ import pytest
 from aiohttp import ClientResponseError
 from fastapi.testclient import TestClient
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from responses_api_agents.pi_agent.tests.test_sandbox import _pinned_pi_package
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
 
@@ -94,7 +94,7 @@ def test_pinned_pi_classifies_model_server_http_error(
         raise error
 
     if delayed:
-        monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.001)
+        monkeypatch.setattr("nemo_gym.models.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.001)
     server._client = MagicMock(create_chat_completion=AsyncMock(side_effect=reject))
     with TestClient(server.setup_webserver()) as client:
         response = client.post(

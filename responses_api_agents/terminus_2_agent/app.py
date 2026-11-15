@@ -38,10 +38,10 @@ from harbor.environments.base import ExecResult
 from harbor.models.agent.context import AgentContext
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -51,7 +51,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.terminus_2_agent.llm import NemoGymLLM
 from responses_api_agents.terminus_2_agent.output import trajectory_to_responses
 
@@ -558,3 +559,6 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     Terminus2Agent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = Terminus2Agent.run_webserver()  # noqa: F401

@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxStatus
+from nemo_gym.sandbox import SandboxExecResult, SandboxStatus
 from responses_api_agents.mini_swe_agent_2.sandbox_environment import (
     MiniSWESandboxEnvironment,
     MiniSWESandboxEnvironmentConfig,

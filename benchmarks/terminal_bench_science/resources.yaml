@@ -50,6 +50,15 @@ terminal_bench_science:
         # Docker isolation that separate sandboxes cannot enforce. The Compose
         # tasks' services run without it, on one network (see README).
         compose_ignored_settings: [init, read_only, tmpfs, pids_limit, cap_drop, security_opt, networks]
+        # The non-root submission service cannot edit /etc/hosts or su. Its one
+        # peer URL is passed in ASSAY_STATUS (with the v0.1 default), resolved
+        # to the assay sandbox IP; null drops the image's explicit user (see README).
+        compose_service_overrides:
+          protein-active-learning:
+            submission:
+              environment: {ASSAY_STATUS: 'http://assay:8080/status'}
+              x-sandbox: {hosts: [], resolve_environment: [ASSAY_STATUS]}
+              user: null
         sandbox_provider:
           opensandbox:
             connection:
@@ -98,6 +107,13 @@ terminal_bench_science:
           # At its memory limit the cell otherwise ends the whole sandbox (memory.oom.group=1).
           # As under Docker, kill only the largest process and keep the sandbox running.
           nemo.nvidia.com/oom-kill: process
+          # Leave out the cell's shared read-only S3 bucket (/mnt/s3-data, data unrelated to the
+          # benchmark), which Docker sandboxes do not have and which agents otherwise search for answers.
+          nemo.nvidia.com/s3-hostpath: 'false'
+        # Packages declare 2-50 GiB of storage, which Harbor does not enforce on Docker. The cell
+        # evicts a sandbox that writes past its limit, so only the declared size is reserved and
+        # the limit is raised to this.
+        sandbox_min_disk_gib: ${oc.select:tbsci_min_disk_gib,100}
         # OpenSandbox renews this TTL while the episode is live; it bounds orphans only.
         sandbox_ttl_s: 28800
         sandbox_ready_timeout_s: 1200

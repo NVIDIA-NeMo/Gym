@@ -38,7 +38,7 @@ from finance_agent.get_agent import Parameters as UpstreamParameters
 from finance_agent.tools import VALID_TOOLS, SubmitFinalResult
 from omegaconf import OmegaConf
 
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from responses_api_agents.finance_agent.app import FinanceAgentConfig
 
 

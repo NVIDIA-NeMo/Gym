@@ -81,7 +81,7 @@ jobs:
         # Keep the helper on main so older release refs can still publish.
         # Artifact outages warn on ordinary publishes; periodic updates fail closed.
         run: |
-          ARGS=(--repo "$GITHUB_REPOSITORY" --page "$GITHUB_WORKSPACE/fern/versions/latest/pages/reference/trajectory-capabilities.mdx")
+          ARGS=(--repo "$GITHUB_REPOSITORY" --page "$GITHUB_WORKSPACE/fern/versions/latest/pages/observability/harness-conformance.mdx")
           if [[ "$GITHUB_EVENT_NAME" == 'workflow_run' ]]; then
             ARGS+=(--run-id "$SOURCE_RUN_ID" --run-attempt "$SOURCE_RUN_ATTEMPT" --strict)
           fi

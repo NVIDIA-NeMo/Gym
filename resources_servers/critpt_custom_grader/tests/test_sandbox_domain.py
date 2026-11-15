@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from nemo_gym.sandbox.providers.base import SandboxCreateError, SandboxExecResult, SandboxResources, SandboxSpec
+from nemo_gym.sandbox import SandboxCreateError, SandboxExecResult, SandboxResources, SandboxSpec
 from resources_servers.critpt_custom_grader import sandbox_domain as sd
 from resources_servers.critpt_custom_grader.runner import EXIT_COMPLETED, EXIT_WORKER_ABORTED, RESULT_BYTES_LIMIT
 from resources_servers.critpt_custom_grader.tests.support import (

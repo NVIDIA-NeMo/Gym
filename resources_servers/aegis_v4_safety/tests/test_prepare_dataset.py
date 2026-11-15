@@ -7,7 +7,7 @@ import json
 import pytest
 from scripts.prepare_dataset import convert
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
 
 def _args(tmp_path, **overrides):

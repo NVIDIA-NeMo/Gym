@@ -1,0 +1,8 @@
+# SkillsBench, no-skill condition: the committed entry for the 87 official tasks at the revision
+# benchmarks/skillsbench/prepare.py pins. `python -m benchmarks.skillsbench.prepare_harbor_env` writes the task
+# folders into this folder (they and the manifest.toml the loader writes are gitignored); `gym dataset validate
+# skillsbench_no_skill` and `gym eval run skillsbench_no_skill ...` then resolve the entry name to this folder.
+[gym]
+type = "benchmark"
+domain = "agent"
+license = "Apache 2.0"

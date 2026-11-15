@@ -28,13 +28,9 @@ from typing import Any
 
 from omegaconf import OmegaConf
 
-from nemo_gym.sandbox import (
-    AsyncSandbox,
-    SandboxPtySession,
-    SandboxSpec,
-    resolve_provider_config,
-    resolve_provider_metadata,
-)
+from nemo_gym.sandbox.api import AsyncSandbox
+from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.providers.base import SandboxPtySession, SandboxSpec
 
 
 DEFAULT_IMAGE = "docker.io/library/python:3.12-slim"

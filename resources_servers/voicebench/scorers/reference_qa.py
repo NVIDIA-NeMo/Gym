@@ -6,7 +6,7 @@ from collections import Counter
 
 from pydantic import JsonValue
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from resources_servers.voicebench.scorers.base import ScoringResult
 from resources_servers.voicebench.scorers.open_judge import JudgeSettings, OpenJudgeScorer, scoring_failure
 

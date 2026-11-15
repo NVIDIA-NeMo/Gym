@@ -27,16 +27,16 @@ import yaml
 from omegaconf import OmegaConf
 from starlette.requests import Request
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle
 from responses_api_agents.kilocode_agent.app import (
     KiloCodeAgent,
     KiloCodeAgentConfig,
@@ -247,6 +247,14 @@ class TestDeepMerge:
 
 
 class TestEnv:
+    def test_model_output_budget_overrides_inherited_cli_cap(self, monkeypatch) -> None:
+        monkeypatch.setenv("KILO_EXPERIMENTAL_OUTPUT_TOKEN_MAX", "1")
+        agent = _make_agent(
+            max_output_tokens=65536,
+            model_server={"type": "responses_api_models", "name": "policy_model"},
+        )
+        assert agent._env("/tmp/data", "/tmp/config")["KILO_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] == "65536"
+
     def test_env_passthrough_and_isolation(self) -> None:
         agent = _make_agent(openai_api_key="k", openai_base_url="https://x/v1", env={"FOO": "bar", "EMPTY": ""})
         env = agent._env("/tmp/data", "/tmp/config")
@@ -483,6 +491,16 @@ class TestLocalRunOutcome:
     def test_cli_error_event_fails(self, tmp_path) -> None:
         stdout = _events({"type": "error", "error": {"name": "APIError"}})
         self._assert_failed(self._respond(tmp_path, _fake_kilo(tmp_path, stdout=stdout)), "execution error")
+
+    def test_model_http_error_preserves_status(self, tmp_path) -> None:
+        error = {"name": "APIError", "data": {"message": "controlled model failure", "statusCode": 400}}
+        stdout = _events({"type": "error", "error": error})
+        response = self._respond(tmp_path, _fake_kilo(tmp_path, stdout=stdout, exit_code=1))
+        self._assert_failed(response, "controlled model failure")
+        assert json.loads(response.metadata["ng_agent_outcome"]) == {
+            "failure_kind": "model_request_error",
+            "status_code": 400,
+        }
 
     def test_rollout_calls_carry_observations_with_the_run_outcome(self, tmp_path) -> None:
         stdout = _events({"type": "error", "error": {"name": "APIError"}})

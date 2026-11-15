@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import tomllib
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -10,9 +11,9 @@ import yaml
 from harbor.agents.terminus_2.terminus_2 import Terminus2
 from harbor.models.agent.context import AgentContext
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.terminus_2_agent.app import (
     LocalEnvironment,
     LocalTmuxSession,
@@ -280,11 +281,15 @@ class TestConfig:
     def test_requirements_share_harbor_pin(self) -> None:
         agent_dir = Path(__file__).resolve().parent.parent
         terminus_requirement = next(
-            line for line in (agent_dir / "requirements.txt").read_text().splitlines() if line.startswith("harbor @")
+            line
+            for line in tomllib.loads((agent_dir / "pyproject.toml").read_text())["project"]["dependencies"]
+            if line.startswith("harbor @")
         )
         harbor_requirement = next(
             line
-            for line in (agent_dir.parent / "harbor_agent" / "requirements.txt").read_text().splitlines()
+            for line in tomllib.loads((agent_dir.parent / "harbor_agent" / "pyproject.toml").read_text())["project"][
+                "dependencies"
+            ]
             if line.startswith("harbor @")
         )
         assert terminus_requirement == harbor_requirement

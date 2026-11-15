@@ -125,6 +125,16 @@ def create_provider(config: Mapping[str, Any]) -> SandboxProvider:
     return provider_class(**dict(provider_kwargs))
 
 
+def provider_service_option_fields(name: str) -> frozenset[str]:
+    """The Compose service options (``tmpfs``, ``ulimits``, ``sysctls``, ``security_opt``) provider ``name`` can apply.
+
+    Read from the provider class's ``SERVICE_OPTION_FIELDS`` (see ``SupportsSandboxServiceOptions``), so
+    prepare can check a task against the deployment's provider without instantiating it. A provider
+    without the attribute applies none of them.
+    """
+    return frozenset(getattr(get_provider_class(name), "SERVICE_OPTION_FIELDS", frozenset()))
+
+
 def list_providers() -> list[str]:
     """List available provider names from all sources."""
     return sorted({*_PROVIDER_REGISTRY, *_BUILTIN_PROVIDER_LOADERS, *_entry_point_loaders()})

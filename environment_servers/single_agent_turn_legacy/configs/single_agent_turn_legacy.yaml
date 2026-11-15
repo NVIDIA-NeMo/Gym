@@ -10,5 +10,3 @@ single_agent_turn_legacy:
         name: ???
       max_concurrent_episodes: null
       queue_timeout_seconds: null
-      default_episode_timeout_seconds: 21600
-      cleanup_timeout_seconds: 180

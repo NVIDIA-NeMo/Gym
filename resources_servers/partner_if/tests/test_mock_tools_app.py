@@ -14,12 +14,16 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.base_resources_server import ResourcesSeedSessionRequest
-from nemo_gym.mcp_auto_exposure import harvest_tools
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient, SimpleServer, entrypoint_ray_enabled
-from nemo_gym.testing.session_conformance import check_resources_session_contract
-from nemo_gym.verifier_fixture import exercise_verifier_fixture, load_verifier_fixture
+from nemo_gym.client import ServerClient
+from nemo_gym.core import NeMoGymResponse
+from nemo_gym.server_runtime import (
+    ResourcesSeedSessionRequest,
+    SimpleServer,
+    check_resources_session_contract,
+    entrypoint_ray_enabled,
+    harvest_tools,
+)
+from nemo_gym.verification import exercise_verifier_fixture, load_verifier_fixture
 from resources_servers.partner_if import mock_tools_app as api
 from resources_servers.partner_if.evidence import MAX_EVIDENCE_CHARS
 from resources_servers.partner_if.example_tools import NotesBackend
@@ -484,7 +488,7 @@ def test_a_backend_lost_before_verify_masks_the_rollout(tmp_path, plugin, caplog
     assert "failed before verify" in caplog.text and "state lost" in caplog.text
 
 
-async def test_a_retired_session_frees_its_episode_and_stays_closed(server):
+async def test_a_retired_session_releases_its_episode_and_stays_fenced(server):
     resource, _, seed = server
     client = TestClient(resource.setup_webserver())
     client.post("/seed_session", json=seed)
@@ -493,9 +497,35 @@ async def test_a_retired_session_frees_its_episode_and_stays_closed(server):
     assert client.post("/seed_session", json=seed).status_code == 409
 
 
-async def test_closed_ids_are_remembered_for_the_close_retry_window(tmp_path, plugin, monkeypatch):
+@pytest.mark.parametrize("seed_first", [False, True])
+def test_close_retains_episode_identity_for_retries(server, seed_first):
+    resource, _, seed = server
+    client = TestClient(resource.setup_webserver())
+    if seed_first:
+        assert client.post("/seed_session", json=seed).status_code == 200
+    close = {key: seed[key] for key in ("resources_session_id", "episode_id")}
+    assert client.post("/close_session", json=close).status_code == 200
+    assert client.post("/close_session", json=close).status_code == 200
+    other = close | {"episode_id": {**close["episode_id"], "rollout_id": "other"}}
+    assert client.post("/close_session", json=other).status_code == 409
+    assert client.post("/seed_session", json=seed).status_code == 409
+
+
+async def test_retire_retains_a_known_episode_identity(server):
+    resource, _, seed = server
+    client = TestClient(resource.setup_webserver())
+    assert client.post("/seed_session", json=seed).status_code == 200
+    await resource.retire_session_state(seed["resources_session_id"])
+    close = {key: seed[key] for key in ("resources_session_id", "episode_id")}
+    other = close | {"episode_id": {**close["episode_id"], "rollout_id": "other"}}
+    assert client.post("/close_session", json=other).status_code == 409
+    assert client.post("/close_session", json=close).status_code == 200
+    assert client.post("/seed_session", json=seed).status_code == 409
+
+
+async def test_closed_ids_are_fenced_for_the_close_retry_window(tmp_path, plugin, monkeypatch):
     clock = [0.0]
-    monkeypatch.setattr("nemo_gym.base_resources_server.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: clock[0])
     resource = make_server(tmp_path, session_close_retry_window_seconds=10)
     client = TestClient(resource.setup_webserver())
     closed, retired = seed_for(row()), seed_for(row(), session="session-two")
@@ -505,9 +535,10 @@ async def test_closed_ids_are_remembered_for_the_close_retry_window(tmp_path, pl
     await resource.retire_session_state("session-two")
     clock[0] = 9.5
     assert [client.post("/seed_session", json=seed).status_code for seed in (closed, retired)] == [409, 409]
-    # No record outlives the routing claim on its ID, so with several workers every worker then treats it as new.
+    # No fence outlives its worker's ownership of the ID,
+    # so with several workers every worker then treats it as new.
     clock[0] = 10.0
-    assert len(resource._closed) == 0
+    assert len(resource._fences) == 0
     assert [client.post("/seed_session", json=seed).status_code for seed in (closed, retired)] == [200, 200]
 
 

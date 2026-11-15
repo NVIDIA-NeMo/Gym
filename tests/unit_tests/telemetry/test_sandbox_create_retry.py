@@ -50,7 +50,7 @@ def _retry_state(attempt: int = 1):
 )
 def test_provider_create_retry_callbacks_count_by_provider(collected_metrics, monkeypatch, module, provider):  # noqa: F811
     mod = pytest.importorskip(module)
-    monkeypatch.setattr(mod, "is_span_group_enabled", lambda group: True)
+    monkeypatch.setattr(mod, "is_metrics_exporter_active", lambda: True)
     mod._log_create_retry(_retry_state(1))
     mod._log_create_retry(_retry_state(2))
 
@@ -59,8 +59,8 @@ def test_provider_create_retry_callbacks_count_by_provider(collected_metrics, mo
     assert point.value == 2
 
 
-def test_provider_create_retry_is_silent_with_the_group_off(collected_metrics, monkeypatch):  # noqa: F811
+def test_provider_create_retry_is_silent_without_a_metrics_exporter(collected_metrics, monkeypatch):  # noqa: F811
     mod = pytest.importorskip("nemo_gym.sandbox.providers.opensandbox.provider")
-    monkeypatch.setattr(mod, "is_span_group_enabled", lambda group: False)
+    monkeypatch.setattr(mod, "is_metrics_exporter_active", lambda: False)
     mod._log_create_retry(_retry_state())
     assert RETRY not in collected_metrics()

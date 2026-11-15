@@ -37,7 +37,7 @@ hle_benchmark_equivalence_judge_model:
       entrypoint: app.py
       openai_base_url: https://inference-api.nvidia.com/v1
       openai_api_key: ${nv_inference_api_key}
-      openai_model: azure/openai/gpt-4o
+      openai_model: openai/openai/gpt-5.6-luna
 
 # AA-Omniscience judge.
 # TODO @bxyu-nvidia: Need to properly rename this and add this Gemini config.
