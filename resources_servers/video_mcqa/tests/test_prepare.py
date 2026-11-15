@@ -147,20 +147,13 @@ def test_v2_exports_preserve_the_exact_shared_types() -> None:
     assert v2_scoring.aggregate_scores is scoring.aggregate_scores
 
 
-def test_all_four_configs_keep_the_existing_harness_and_are_unverified() -> None:
+def test_single_turn_configs_keep_the_stock_harness_and_are_unverified() -> None:
     import yaml
 
     root = Path(__file__).parents[2]
     for benchmark in ("videomme_v1", "lvbench"):
-        for setting in ("single_turn", "agentic"):
-            config = yaml.safe_load((root / benchmark / "configs" / f"{benchmark}_{setting}.yaml").read_text())
-            resource_name = benchmark if setting == "single_turn" else benchmark + "_agentic_resources"
-            resource = config[resource_name]["resources_servers"][benchmark]
-            assert resource["verified"] is False and resource["entrypoint"] == "app.py"
-            agent = config[f"{benchmark}_{setting}"]["responses_api_agents"]
-            assert list(agent) == (["simple_agent"] if setting == "single_turn" else ["opencode_video_agent"])
-            if setting == "single_turn":
-                assert agent["simple_agent"]["max_steps"] == 1
-            else:
-                assert agent["opencode_video_agent"]["execution_failure_reward_zero"] is True
-                assert agent["opencode_video_agent"]["opencode_version"] == "1.17.11"
+        config = yaml.safe_load((root / benchmark / "configs" / f"{benchmark}_single_turn.yaml").read_text())
+        resource = config[benchmark]["resources_servers"][benchmark]
+        assert resource["verified"] is False and resource["entrypoint"] == "app.py"
+        agent = config[f"{benchmark}_single_turn"]["responses_api_agents"]
+        assert list(agent) == ["simple_agent"] and agent["simple_agent"]["max_steps"] == 1

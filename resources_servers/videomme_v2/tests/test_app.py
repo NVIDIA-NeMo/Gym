@@ -247,6 +247,26 @@ async def test_fixed_cohort_missing_and_masked_do_not_inflate_score(server) -> N
     assert result.agent_metrics["Video_MME_v2/outcomes/infrastructure_failure"] == 1
 
 
+async def test_a_row_gym_counts_as_zero_stays_missing(server) -> None:
+    correct = (await server.verify(body())).model_dump()
+    correct.update({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0})
+    # What Gym adds for a task it counts as zero: the task's dataset fields and reward 0, no verifier fields.
+    row = prepare_single_turn(question("shape-2"), expected_answer="B", video_url="https://example.invalid/shapes.mp4")
+    added = {
+        **{key: row[key] for key in ("task_id", "setting", "verifier_metadata")},
+        TASK_INDEX_KEY_NAME: 1,
+        ROLLOUT_INDEX_KEY_NAME: 0,
+        "reward": 0.0,
+        "mask_sample": False,
+    }
+    with_added = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[correct, added]))
+    alone = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[correct]))
+    measured = {key: value for key, value in with_added.key_metrics.items() if "Video_MME_v2" in key}
+    assert measured == {key: value for key, value in alone.key_metrics.items() if "Video_MME_v2" in key}
+    assert measured["Video_MME_v2/raw_acc"] == 50 and measured["Video_MME_v2/coverage"] == 0.5
+    assert measured["Video_MME_v2/is_complete"] is False
+
+
 async def test_empty_aggregate_is_provisional_not_a_finished_zero(server) -> None:
     result = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
     assert result.key_metrics["Video_MME_v2/coverage"] == 0

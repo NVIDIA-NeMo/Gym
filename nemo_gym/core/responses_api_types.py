@@ -403,9 +403,7 @@ class NeMoGymFunctionCallOutput(BaseModel):
 
     call_id: str
     caller: Optional[FunctionCallOutputCaller] = None
-    # The SDK's tool output types, plus the user-message content list with its
-    # validated video part. Backend support is opt-in.
-    output: Union[str, ResponseFunctionCallOutputItemListParam, NeMoGymResponseInputContentList]
+    output: Union[str, ResponseFunctionCallOutputItemListParam]
     type: Literal["function_call_output"] = "function_call_output"
     id: Optional[str] = None
     status: Optional[Literal["in_progress", "completed", "incomplete"]] = None
@@ -1443,13 +1441,7 @@ class NeMoGymChatCompletionToolMessageParam(ChatCompletionToolMessageParam):
     content: Required[
         Union[
             str,
-            List[
-                Union[
-                    NeMoGymChatCompletionContentPartTextParam,
-                    NeMoGymChatCompletionContentPartImageParam,
-                    NeMoGymChatCompletionContentPartVideoUrlParam,
-                ]
-            ],
+            List[Union[NeMoGymChatCompletionContentPartTextParam, NeMoGymChatCompletionContentPartImageParam]],
         ]
     ]
     # Not in the OpenAI SDK type. OpenHands' Message serializer includes name

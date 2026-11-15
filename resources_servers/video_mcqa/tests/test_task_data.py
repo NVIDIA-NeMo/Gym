@@ -3,7 +3,9 @@
 
 """The video servers' task-data schemas accept the rows their verifiers and agent accept, and no others."""
 
+import base64
 import dataclasses
+import hashlib
 import json
 from pathlib import Path
 
@@ -11,14 +13,12 @@ import pytest
 from pydantic import ValidationError
 
 from nemo_gym.data import TaskDataValidator, load_task_data_schema, validate_jsonl_rows
-from resources_servers.video_mcqa.app import VideoMCQAVerifyRequest
+from resources_servers.video_mcqa.app import AccuracyCohort, VideoMCQAVerifyRequest
 from resources_servers.video_mcqa.prepare import prepare_dataset
 from resources_servers.video_mcqa.task import VerifierMetadata, VideoQuestion, prepare_agentic, prepare_single_turn
 from resources_servers.video_mcqa.task_data import VideoBinding, VideoMCQATaskData
 from resources_servers.video_mcqa.tests.helpers import REVISION, lv_record, media, response, v1_record
-from resources_servers.videomme_v2.app import VideoMMEV2VerifyRequest
-from responses_api_agents.opencode_video_agent.app import OpenCodeVideoRunRequest
-from responses_api_agents.opencode_video_agent.app import VideoBinding as AgentVideoBinding
+from resources_servers.videomme_v2.app import CohortManifest, VideoMMEV2VerifyRequest
 
 
 SERVERS = Path(__file__).resolve().parents[2]
@@ -38,11 +38,9 @@ def report(owner: str, rows: list[dict]):
 
 
 def accepted_by_runtime(owner: str, row: dict) -> bool:
-    """Whether the owner's verify request and, for an agentic row, the video agent's run request accept it."""
+    """Whether the owner's verify request accepts the row."""
     try:
         WIRE[owner].model_validate({**row, "response": response()})
-        if row.get("setting") == "agentic":
-            OpenCodeVideoRunRequest.model_validate(row)
     except ValidationError:
         return False
     return True
@@ -111,13 +109,34 @@ def test_each_server_ships_its_schema(owner):
             schema.validate_python(flat)
 
 
-@pytest.mark.parametrize("owner", OWNERS)
+@pytest.mark.parametrize("owner", ["video_mcqa", *OWNERS])
 def test_committed_examples_validate_clean(owner):
     path = SERVERS / owner / "data" / "example.jsonl"
     result = validate_jsonl_rows(
         owner, load_task_data_schema(SERVERS / owner), str(path), path.read_text().splitlines()
     )
     assert result.rows == 5 and result.clean, result.summary()
+
+
+@pytest.mark.parametrize("owner", ["video_mcqa", *OWNERS])
+def test_committed_examples_embed_the_committed_clips_and_match_their_cohort(owner):
+    data = SERVERS / owner / "data"
+    rows = [json.loads(line) for line in (data / "example.jsonl").read_text().splitlines()]
+    cohort_type = CohortManifest if owner == "videomme_v2" else AccuracyCohort
+    cohort = cohort_type.model_validate_json((data / "example_cohort.json").read_text())
+    assert cohort.task_ids == tuple(row["task_id"] for row in rows)
+    assert (cohort.setting, cohort.num_repeats) == ("single_turn", 1)
+    for row in rows:
+        metadata = row["verifier_metadata"]
+        assert metadata["dataset_revision"] == cohort.dataset_revision
+        (video,) = [
+            part for part in row["responses_create_params"]["input"][0]["content"] if part["type"] == "input_video"
+        ]
+        prefix = "data:video/mp4;base64,"
+        assert video["video_url"].startswith(prefix)
+        clip = base64.b64decode(video["video_url"].removeprefix(prefix), validate=True)
+        assert hashlib.sha256(clip).hexdigest() == metadata["video_sha256"]
+        assert (SERVERS.parent / metadata["video_source"]).read_bytes() == clip
 
 
 @pytest.mark.parametrize("owner", OWNERS)
@@ -155,6 +174,20 @@ def _binding(**updates):
         _without("video_sha256"),
         lambda row: row.pop("setting"),
         lambda row: row["verifier_metadata"].update(expected_answer="Z"),
+    ],
+    ids=["no_expected_answer", "no_dataset_revision", "no_video_sha256", "no_setting", "unavailable_answer"],
+)
+def test_rows_the_runtime_refuses_fail_validation(tmp_path, owner, change):
+    row = prepared_rows(tmp_path, owner, "agentic")[0]
+    change(row)
+    assert not accepted_by_runtime(owner, row)
+    assert report(owner, [row]).error_rows == 1
+
+
+@pytest.mark.parametrize("owner", OWNERS)
+@pytest.mark.parametrize(
+    "change",
+    [
         lambda row: row.pop("video_binding"),
         _binding(sandbox_path="/etc/video.mp4"),
         _binding(sandbox_path="video/../../outside.mp4"),
@@ -162,11 +195,6 @@ def _binding(**updates):
         _binding(url="https://example.invalid/unexpected"),
     ],
     ids=[
-        "no_expected_answer",
-        "no_dataset_revision",
-        "no_video_sha256",
-        "no_setting",
-        "unavailable_answer",
         "agentic_without_binding",
         "absolute_binding_path",
         "escaping_binding_path",
@@ -174,10 +202,9 @@ def _binding(**updates):
         "unknown_binding_key",
     ],
 )
-def test_rows_the_runtime_refuses_fail_validation(tmp_path, owner, change):
+def test_malformed_video_bindings_fail_validation(tmp_path, owner, change):
     row = prepared_rows(tmp_path, owner, "agentic")[0]
     change(row)
-    assert not accepted_by_runtime(owner, row)
     assert report(owner, [row]).error_rows == 1
 
 
@@ -200,10 +227,6 @@ def test_schema_fields_match_the_runtime_models():
     # task_id is read in both places, so it is the one VerifierMetadata field not marked nested-only.
     assert marked == nested - {"task_id"}
     assert set(VideoMCQATaskData.model_fields) == nested | {"setting", "video_binding", "annotation_warnings"}
-    assert set(VideoBinding.model_fields) == set(AgentVideoBinding.model_fields)
-    assert set(OpenCodeVideoRunRequest.model_fields) & set(VideoMCQATaskData.model_fields) == {
-        "setting",
-        "video_binding",
-    }
+    assert set(VideoBinding.model_fields) == {"source", "sandbox_path", "sha256"}
     for request in WIRE.values():
         assert {"task_id", "setting", "verifier_metadata"} <= set(request.model_fields)

@@ -191,6 +191,10 @@ class VideoMMEV2ResourcesServer(SimpleResourcesServer):
             repeat = result.get(ROLLOUT_INDEX_KEY_NAME, 0)
             if type(repeat) is not int or not 0 <= repeat < cohort.num_repeats:
                 raise ValueError("Unexpected repeat index for the frozen cohort")
+            if "outcome" not in result:
+                # A row Gym adds to count a task as zero (count_failure_classes_as_zero,
+                # count_missing_rollouts_as_zero) has no verifier fields; the frozen cohort counts it as missing.
+                continue
             metadata = VerifierMetadata(**result["verifier_metadata"])
             self._validate_metadata(metadata)
             if result.get("task_id") != metadata.task_id or result.get("setting") != cohort.setting:

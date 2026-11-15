@@ -1,8 +1,9 @@
 # LVBench
 
 Evaluation-only support for [THUDM/LVBench](https://github.com/THUDM/LVBench),
-**not LongVideoBench**. Reuses the single-turn VideoAnyRes and sandboxed OpenCode
-agent without benchmark-specific system prompts or forced tool use.
+**not LongVideoBench**: single-turn video multiple-choice QA without
+benchmark-specific system prompts. An agentic setting is planned as a separate
+change; the verifier already accepts `setting: agentic` cohorts.
 
 ## Inputs and configuration
 
@@ -21,12 +22,12 @@ revision, explicit media inventory, output cohort and provenance receipts.
 | Setting | Config | Required cohort variable | Agent |
 | --- | --- | --- | --- |
 | Single-turn | `configs/lvbench_single_turn.yaml` | `lvbench_cohort_manifest` | `simple_agent`, one step |
-| Agentic | `configs/lvbench_agentic.yaml` | `lvbench_agentic_cohort_manifest` | `opencode_video_agent` |
 
-Compose these with a `policy_model` and the video runtime configuration,
-then use standard Gym run/eval/aggregate commands. Context/output, allowed video
-roots, sandbox image, runtime archive/hash, media profile and artifact directory
-are the same explicit runtime inputs used by the VideoMME-v2 integration.
+Compose the config with a `policy_model` such as the stock `vllm_model`, then
+use standard Gym run/eval/aggregate commands. The config runs `simple_agent`
+through a `single_agent_turn_legacy` Environment Server. Rows carry the video
+as a `data:` or `file://` URL; see
+[single-turn inputs](../video_mcqa/README.md#single-turn-inputs).
 
 ## Scores
 
@@ -42,6 +43,10 @@ with two labels contributes to both category denominators but once overall,
 matching the official scorer on a complete cohort. `/domain/<label>` provides
 an additional video-type breakdown. Category scores are not macro-averaged.
 
+The prompt asks for a boxed letter, and the default `boxed_only_v1` policy
+scores an unboxed answer as 0, unlike upstream's bare-letter answers, so these
+scores are not comparable to official LVBench results.
+
 Reference scorer: `lvbench/metrics/compute_accuracy.py` at official commit
 `518df47219862534dad39fa1373b4e7c862a4cd5`. Reference annotation snapshot:
 `0caedb92002cc268bad486449e551c76f0485670`. These are provenance
@@ -51,6 +56,7 @@ LVBench's [dataset terms](https://github.com/THUDM/LVBench#license) are
 CC-BY-NC-SA-4.0 with research-only/noncommercial restrictions. Do not treat this
 adapter's Apache-2.0 license as permission to train on or redistribute the data.
 No real benchmark text, answers, videos or upstream implementation are bundled;
-tests use invented examples. Runtime packaging, dataset registration and a full
-real-model EF baseline are not part of this adapter; configs are
-`verified: false`.
+tests use invented examples, and the five examples in `data/` are invented
+questions about synthetic clips ([example data](../video_mcqa/README.md#example-data)).
+Dataset registration and a full real-model EF baseline are not part of this
+adapter; configs are `verified: false`.

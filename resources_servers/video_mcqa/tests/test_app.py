@@ -15,6 +15,7 @@ from nemo_gym.server_utils import ServerClient
 from resources_servers.lvbench.app import LVBenchResourcesServer
 from resources_servers.video_mcqa.app import (
     AccuracyCohort,
+    VideoMCQAResourcesServer,
     VideoMCQAResourcesServerConfig,
     VideoMCQAVerifyRequest,
     final_assistant_text,
@@ -193,6 +194,27 @@ async def test_repeats_are_frozen_and_not_deduplicated(tmp_path) -> None:
     assert metrics.key_metrics["Video_MME/duration/short/raw_acc"] == 50
 
 
+@pytest.mark.parametrize("benchmark", ["videomme_v1", "lvbench"])
+async def test_a_row_gym_counts_as_zero_stays_missing(tmp_path, benchmark) -> None:
+    server, rows, _ = make_server(tmp_path, benchmark=benchmark)
+    result = await measured(server, rows[0])
+    # What Gym adds for a task it counts as zero: the task's dataset fields and reward 0, no verifier fields.
+    added = {
+        **{key: rows[1][key] for key in ("task_id", "setting", "verifier_metadata")},
+        TASK_INDEX_KEY_NAME: 1,
+        ROLLOUT_INDEX_KEY_NAME: 0,
+        "reward": 0.0,
+        "mask_sample": False,
+    }
+    with_added = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[result, added]))
+    alone = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[result]))
+    prefix = "Video_MME" if benchmark == "videomme_v1" else "LVBench"
+    measured_metrics = {key: value for key, value in with_added.key_metrics.items() if prefix in key}
+    assert measured_metrics == {key: value for key, value in alone.key_metrics.items() if prefix in key}
+    assert measured_metrics[f"{prefix}/raw_acc"] == 50 and measured_metrics[f"{prefix}/coverage"] == 0.5
+    assert measured_metrics[f"{prefix}/is_complete"] is False
+
+
 async def test_no_returned_results_is_provisional_not_perfect(tmp_path) -> None:
     server, _, _ = make_server(tmp_path)
     metrics = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
@@ -283,6 +305,23 @@ def test_benchmark_server_cannot_load_another_benchmarks_cohort(tmp_path) -> Non
     server, _, _ = make_server(tmp_path)
     with pytest.raises(ValueError, match="different benchmark"):
         LVBenchResourcesServer(config=server.config, server_client=server.server_client)
+
+
+@pytest.mark.parametrize("benchmark", ["videomme_v1", "lvbench"])
+async def test_shared_server_scores_the_benchmark_its_cohort_names(tmp_path, benchmark) -> None:
+    concrete, rows, _ = make_server(tmp_path, benchmark=benchmark)
+    server = VideoMCQAResourcesServer(config=concrete.config, server_client=concrete.server_client)
+    failed = response(status="failed", error={"code": "server_error", "message": "fixture"})
+    assert (await server.verify(request(rows[0], response=failed))).failure_kind == (
+        f"{benchmark}:infrastructure_failure"
+    )
+    result = await measured(server, rows[0])
+    assert result == await measured(concrete, rows[0])
+    metrics = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[result]))
+    expected = await concrete.aggregate_metrics(AggregateMetricsRequest(verify_responses=[result]))
+    prefix = "Video_MME" if benchmark == "videomme_v1" else "LVBench"
+    assert metrics.key_metrics[f"{prefix}/raw_acc"] == 50
+    assert metrics.key_metrics == expected.key_metrics
 
 
 def test_real_http_routes_and_model_visible_projection(tmp_path) -> None:

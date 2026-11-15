@@ -6,9 +6,9 @@
 import unittest
 from dataclasses import replace
 
-from resources_servers.videomme_v2.scoring import aggregate_scores, grade_answer
-from resources_servers.videomme_v2.task import VerifierMetadata
-from resources_servers.videomme_v2.tests.test_task import question
+from resources_servers.video_mcqa.scoring import aggregate_scores, grade_answer
+from resources_servers.video_mcqa.task import VerifierMetadata
+from resources_servers.video_mcqa.tests.test_task import question
 
 
 def metadata(task_id: str = "synthetic/one") -> VerifierMetadata:

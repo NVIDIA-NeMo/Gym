@@ -7,7 +7,7 @@ import json
 import unittest
 from dataclasses import FrozenInstanceError, replace
 
-from resources_servers.videomme_v2.task import (
+from resources_servers.video_mcqa.task import (
     VerifierMetadata,
     VideoQuestion,
     prepare_agentic,

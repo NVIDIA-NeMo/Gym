@@ -1,24 +1,21 @@
-# VideoMME-v2: VideoAnyRes single-turn and agentic video evaluation
+# VideoMME-v2: single-turn video evaluation
 
 This resources server provides the shared task/scoring primitives and a
-stateless Gym verifier. Its single-turn config uses the stock `simple_agent`
-with `max_steps: 1` and disables tools in each prepared model request.
-Single-turn means the **VideoAnyRes** adaptive video input, not a fixed
-frame count or a replay of agentic `watch_video` tool media. It performs one
-policy inference on the prepared video, followed by deterministic verification.
+stateless Gym verifier. Its single-turn config runs the stock `simple_agent`
+with `max_steps: 1` through a `single_agent_turn_legacy` Environment Server and
+disables tools in each prepared model request. It performs one policy inference
+on the prepared video, followed by deterministic verification, and reports Raw
+Acc and the official Nonlinear Score, overall and by L1/L2/L3, under
+`Video_MME_v2`.
 
-The agentic config instead selects `opencode_video_agent`, a narrow subclass of
-stock `opencode_sandboxed_agent`, with the optional `vllm_video_model` converter.
-It stages the raw video and a pinned self-contained visual-tool runtime inside
-the sandbox; stock OpenCode chooses tools/windows and keeps its native prompts
-and compaction. No benchmark-specific system prompt or forced tool call is added.
-This path has its own cohort (`setting: agentic`), result directory and metric
-namespace, `Video_MME_v2_agentic`. Single-turn uses `Video_MME_v2`.
-Both report Raw Acc and official Nonlinear Score, overall and by L1/L2/L3.
+An agentic setting (a sandboxed agent with video tools) is planned as a
+separate change. The verifier already accepts `setting: agentic` cohorts and
+reports them under their own namespace, `Video_MME_v2_agentic`.
 
-This is not an EF-certified benchmark: the portable VideoAnyRes preparation
-dependency, a registered dataset artifact and real-model acceptance are separate
-gates. No checkpoint, credential, benchmark question or media is included.
+This is not an EF-certified benchmark: a registered dataset artifact and a full
+real-model baseline are separate steps. No checkpoint, credential, benchmark
+question or benchmark video is included; the examples are invented questions
+about synthetic clips (see [Example data](#example-data)).
 
 ## Task boundary
 
@@ -28,8 +25,9 @@ and optional level/group. It has no gold-answer field.
 
 `prepare_single_turn()` emits one user turn containing an already-prepared
 `input_video` and question text. It does not choose sampling parameters.
-`prepare_agentic()` emits question text plus the bound sandbox video path; it
-does not force a tool call or add benchmark-specific system instructions.
+`prepare_agentic()` emits question text plus the bound sandbox video path for
+the planned agentic setting; it does not force a tool call or add
+benchmark-specific system instructions.
 
 Both builders return the standard `responses_create_params` /
 `verifier_metadata` separation. Gold and provenance stay in verifier metadata.
@@ -37,27 +35,58 @@ Changing the gold label while keeping the question/media fixed produces exactly
 the same model-facing request. Callers must forward **only**
 `responses_create_params` to the model, never the whole prepared row.
 
-## Single-turn media boundary
+## Single-turn inputs
 
-The preprocessing layer chooses full-video temporal coverage and spatial patch
-targets jointly under the model context budget. It uses VideoAnyRes sampling,
-two-frame grouping, the source aspect ratio and the native timestamp closure.
-The count includes visual placeholders, timestamps, wrappers and the
-non-video prompt, reserving space for the configured output. A fixed 64-frame
-or 576px policy is not an interchangeable implementation of this setting.
+Each row's user turn holds one `input_video` part and the question text. The
+stock `vllm_model` forwards the part to vLLM as a `video_url`, so a row can
+carry either URL form that vLLM accepts:
 
-Freeze the preparation policy and source hashes with each run. The resulting
-row is passed to stock Gym execution; neither this verifier nor `simple_agent`
-resamples the video. A run must also supply the JSON `cohort_manifest` referenced
-by `configs/videomme_v2_single_turn.yaml`, with a fixed dataset revision, expected
-task IDs, `setting: single_turn`, answer policy and repeat count.
+- a `data:video/mp4;base64,...` URL, which needs no server setup (the committed
+  examples use it);
+- a `file://` URL, which vLLM loads only when it starts with
+  `--allowed-local-media-path` and the file is under that directory on the
+  vLLM host's own disk.
 
-The prepared `input_video` is a NeMo-RL native video manifest, so the media it
-names (a frame cache or the source video) must be visible to serving, and
-preparation uses NeMo-RL's preprocessing modules; neither is bundled into Gym.
-The fixed-media NPZ tool path and OpenCode are outside the single-turn path.
-Agentic uses those visual tools, not VideoAnyRes resampling on each generation
-request.
+vLLM then chooses the frames. It samples 32 frames unless the server sets
+another count with `--media-io-kwargs`, for example
+`'{"video": {"fps": 2, "num_frames": 256}}'`.
+
+Gym has no preparation command for Video-MME v2 (`video_mcqa/prepare.py`
+covers VideoMME-v1 and LVBench). Build each row from the authors' annotation
+with `prepare_single_turn()`; `data/example.jsonl` shows the resulting shape:
+
+```python
+from resources_servers.video_mcqa.task import VideoQuestion, prepare_single_turn
+
+question = VideoQuestion(
+    task_id="videomme_v2:<question id>",
+    dataset_source="<annotation source URL>",
+    dataset_revision="<40-character annotation revision>",
+    video_id="<video id>",
+    video_source="<original video URL>",
+    video_sha256="<SHA-256 of the original video>",
+    question="<question text>",
+    options=("<option A>", "<option B>", "<option C>", "<option D>"),
+    level=None,  # or the question's level, 1-3
+    group_id=None,  # or its four-question group
+)
+row = prepare_single_turn(question, expected_answer="B", video_url="data:video/mp4;base64,...")
+```
+
+This adapter was built for VideoAnyRes preparation, which chooses full-video
+temporal coverage and spatial patch targets jointly under the model context
+budget (VideoAnyRes sampling, two-frame grouping, the source aspect ratio and
+the native timestamp closure) and emits a NeMo-RL native video manifest as the
+`input_video`. That preparation is in neither Gym nor NeMo-RL main. Runs with
+plain `data:` or `file://` URLs and vLLM's own frame sampling are not the
+VideoAnyRes protocol, and their scores are not comparable with VideoAnyRes
+runs.
+
+Freeze the preparation policy and source hashes with each run. Neither this
+verifier nor `simple_agent` resamples the video. A run must also supply the JSON
+`cohort_manifest` referenced by `configs/videomme_v2_single_turn.yaml`, with a
+fixed dataset revision, expected task IDs, `setting: single_turn`, answer policy
+and repeat count.
 
 ## Scoring boundary
 
@@ -123,17 +152,37 @@ denominators. `/coverage`, `/is_complete`, `/group_coverage` and
 `/nonlinear_complete` distinguish provisional results from complete results.
 No-answer, format-error and completed execution-failure attempts score zero.
 
-Results record their answer policy and outcome labels; they need not match
-other answer parsers on every edge case.
+Results record their answer policy and outcome labels. The prompt asks for a
+boxed letter, and `boxed_only_v1` scores an unboxed or conflicting answer
+as 0. The official script asks for a bare letter and takes the first A-H
+letter it finds, so these scores are not comparable to official Video-MME-v2
+results.
+
+Rows that Gym adds to count a task as zero (`count_failure_classes_as_zero`,
+`count_missing_rollouts_as_zero`) carry no verifier fields. Aggregation skips
+them, and the frozen cohort counts their tasks as missing.
+
+## Example data
+
+`data/example.jsonl` holds five invented questions about five synthetic
+4-second clips: a moving square, a blue background, one dot, a bar moving down
+and a counter that ends on 5. The clips are stored once, in
+`resources_servers/video_mcqa/data/example_videos/`. Each row inlines its clip
+as an MP4 `data:` URL; `video_source` names the committed file and
+`video_sha256` is its SHA-256. `data/example_cohort.json` freezes the five
+example task IDs, and `data/example_rollouts.jsonl` holds one real-model
+rollout per row. The model and serving setup are in the
+[shared README](../video_mcqa/README.md#example-data).
 
 ## CPU tests
 
 From the Gym repository root using Python 3.13.14 or later:
 
 ```bash
-python -m pytest resources_servers/videomme_v2/tests -q
+python -m pytest resources_servers/videomme_v2/tests resources_servers/video_mcqa/tests -q
 ```
 
+The shared parser, task and accuracy tests are in `video_mcqa/tests`.
 Fixtures are invented geometric-shape questions with `example.invalid` sources.
 Tests use Gym's standard test dependencies and exercise the actual response
 schemas, verifier, aggregate metrics and session contract in process. No
@@ -141,4 +190,7 @@ benchmark downloads, video decoder, external model endpoint, GPU or training
 framework is needed. These tests do not replace multimodal transport, actual
 model execution or EF onboarding acceptance.
 
-Code: Apache-2.0. No source dataset is redistributed by this component.
+The [official dataset terms](https://github.com/MME-Benchmarks/Video-MME-v2#-dataset)
+restrict use to academic research, prohibit commercial use and restrict redistribution.
+Code: Apache-2.0. No source dataset is redistributed by this component. The
+synthetic example clips are original to this repository (Apache-2.0).

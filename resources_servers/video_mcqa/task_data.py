@@ -4,11 +4,11 @@
 
 Mirrors the wire: ``VideoMCQAVerifyRequest`` and ``VideoMMEV2VerifyRequest`` read ``task_id`` and ``setting``
 top-level and ``verifier_metadata`` as task.py's ``VerifierMetadata``, whose fields (``task_id`` aside, which both
-places carry) only that container holds. Agentic rows also carry the ``video_binding`` that
-``OpenCodeVideoRunRequest`` (responses_api_agents/opencode_video_agent/app.py) requires; there its ``source`` must
-be an existing file on the agent host, so here it is only a path. ``annotation_warnings`` is preparation
-provenance (``duplicate_option_text``), outside model inputs. ``VideoMCQATaskData`` is the shared shape that
-VideoMME-v2 uses; ``TaskData`` adds the four-choice, ungrouped rule the VideoMME-v1/LVBench verifier enforces.
+places carry) only that container holds. Agentic rows (``prepare.py --setting agentic``) also carry a
+``video_binding`` for a sandboxed video agent, which is not part of this package; its ``source`` is only a path
+here. ``annotation_warnings`` is preparation provenance (``duplicate_option_text``), outside model inputs.
+``VideoMCQATaskData`` is the shared shape that VideoMME-v2 uses; ``TaskData`` adds the four-choice, ungrouped rule
+the VideoMME-v1/LVBench verifier enforces.
 """
 
 from pathlib import PurePosixPath
@@ -32,7 +32,7 @@ NestedText = Annotated[Text, Field(json_schema_extra=_NESTED)]
 
 
 class VideoBinding(BaseModel):
-    """The source video the OpenCode video agent checks and copies into its sandbox."""
+    """The source video a sandboxed video agent checks and copies into its sandbox."""
 
     model_config = ConfigDict(extra="forbid")
 

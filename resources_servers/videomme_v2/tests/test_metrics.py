@@ -9,6 +9,7 @@ from itertools import product
 import pytest
 from pydantic import ValidationError
 
+from resources_servers.video_mcqa.tests.test_scoring import metadata
 from resources_servers.videomme_v2.metrics import (
     MetricSlice,
     QuestionGroup,
@@ -17,7 +18,6 @@ from resources_servers.videomme_v2.metrics import (
     validate_metric_cohort,
 )
 from resources_servers.videomme_v2.scoring import grade_answer
-from resources_servers.videomme_v2.tests.test_scoring import metadata
 
 
 REVISION = "a" * 40

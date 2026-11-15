@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared fixed-cohort verifier for VideoMME-v1 and LVBench accuracy."""
+"""Shared fixed-cohort verifier for VideoMME-v1 and LVBench accuracy.
+
+Run directly (configs/video_mcqa_single_turn.yaml), it scores the benchmark its cohort names.
+"""
 
 from collections import Counter
 from pathlib import Path
@@ -20,6 +23,7 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME
 from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.video_mcqa.dataset import SOURCES, Benchmark, validate_subsets
 from resources_servers.video_mcqa.scoring import (
     EXECUTION_FAILURE_METADATA_KEY,
@@ -103,17 +107,17 @@ def final_assistant_text(response: NeMoGymResponse) -> str:
 
 
 class VideoMCQAResourcesServer(SimpleResourcesServer):
-    """Common deterministic verifier; concrete servers select only the benchmark."""
+    """Common deterministic verifier; concrete servers fix the benchmark, this one takes the cohort's."""
 
     config: VideoMCQAResourcesServerConfig
-    benchmark: ClassVar[Benchmark]
+    benchmark: ClassVar[Benchmark | None] = None
     checkpoint_verify: ClassVar[Literal["replay"]] = "replay"
     _cohort: AccuracyCohort = PrivateAttr()
 
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
         self._cohort = AccuracyCohort.model_validate_json(self.config.cohort_manifest.read_text(encoding="utf-8"))
-        if self._cohort.benchmark != self.benchmark:
+        if self.benchmark is not None and self._cohort.benchmark != self.benchmark:
             raise ValueError("Cohort belongs to a different benchmark resources server")
 
     def _validate_metadata(self, metadata: VerifierMetadata, *, setting: str) -> None:
@@ -167,7 +171,7 @@ class VideoMCQAResourcesServer(SimpleResourcesServer):
             **payload,
             reward=score.reward if score.reward is not None else 0.0,
             mask_sample=not score.evaluation_completed,
-            failure_kind=f"{self.benchmark}:{failure}" if failure else None,
+            failure_kind=f"{self._cohort.benchmark}:{failure}" if failure else None,
             failure_reason=reason,
             answer_policy=score.answer_policy,
             outcome=score.outcome,
@@ -182,6 +186,10 @@ class VideoMCQAResourcesServer(SimpleResourcesServer):
             repeat = result.get(ROLLOUT_INDEX_KEY_NAME, 0)
             if type(repeat) is not int or not 0 <= repeat < cohort.num_repeats:
                 raise ValueError("Unexpected repeat index for the frozen cohort")
+            if "outcome" not in result:
+                # A row Gym adds to count a task as zero (count_failure_classes_as_zero,
+                # count_missing_rollouts_as_zero) has no verifier fields; the frozen cohort counts it as missing.
+                continue
             metadata = VerifierMetadata(**result["verifier_metadata"])
             self._validate_metadata(metadata, setting=result.get("setting"))
             if result.get("task_id") != metadata.task_id or result.get("answer_policy") != cohort.answer_policy:
@@ -219,7 +227,7 @@ class VideoMCQAResourcesServer(SimpleResourcesServer):
         """
         cohort = self._cohort
         repeats = self._attempts(body)
-        metric = "Video_MME" if self.benchmark == "videomme_v1" else "LVBench"
+        metric = "Video_MME" if cohort.benchmark == "videomme_v1" else "LVBench"
         if cohort.setting == "agentic":
             metric += "_agentic"
         subsets: dict[str, tuple[str, ...]] = {metric: cohort.task_ids}
@@ -271,3 +279,9 @@ class VideoMCQAResourcesServer(SimpleResourcesServer):
             }
         )
         return metrics
+
+
+if __name__ == "__main__":
+    VideoMCQAResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = VideoMCQAResourcesServer.run_webserver()
