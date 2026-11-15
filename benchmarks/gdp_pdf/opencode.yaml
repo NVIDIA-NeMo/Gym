@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - resources_servers/gdp_pdf/configs/opencode.yaml
+  - resources_servers/gdp_pdf/configs/judge_model_openai.yaml
+
+gdp_pdf_opencode:
+  responses_api_agents:
+    opencode_agent:
+      datasets:
+        - name: gdp_pdf
+          type: benchmark
+          jsonl_fpath: benchmarks/gdp_pdf/data/gdp_pdf_opencode.jsonl
+          prepare_script: benchmarks/gdp_pdf/prepare_opencode.py
+          num_repeats: 5
+          license: MIT

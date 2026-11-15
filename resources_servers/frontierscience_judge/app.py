@@ -300,7 +300,10 @@ class FrontierScienceJudgeServer(SimpleResourcesServer):
                 response_model=NeMoGymChatCompletion,
             )
             if self.config.judge_mode == "research" and (
-                not chat_response.choices or chat_response.choices[0].finish_reason != "stop"
+                not chat_response.choices
+                or chat_response.choices[0].finish_reason != "stop"
+                or getattr(chat_response.choices[0], "native_finish_reason", None) == "repetition"
+                or getattr(chat_response.choices[0], "stop_reason", None) == "repetition_detected"
             ):
                 reason = chat_response.choices[0].finish_reason if chat_response.choices else "no choices"
                 raise JudgeError(f"FrontierScience Research judge did not complete: {reason}")

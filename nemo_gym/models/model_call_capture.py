@@ -460,7 +460,11 @@ def _reconstruct_anthropic_sse(events: list[dict[str, Any]]) -> Optional[dict[st
         etype = event.get("type")
         if etype == "message_start":
             msg = event.get("message") or {}
-            message = {k: msg.get(k) for k in ("id", "type", "role", "model", "stop_reason") if msg.get(k) is not None}
+            message = {
+                k: msg.get(k)
+                for k in ("id", "type", "role", "model", "stop_reason", "native_stop_reason", "native_finish_reason")
+                if msg.get(k) is not None
+            }
             usage.update(msg.get("usage") or {})
         elif etype == "content_block_start":
             blocks[event.get("index", len(blocks))] = dict(event.get("content_block") or {})
@@ -510,6 +514,8 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
     response_id: Optional[str] = None
     role = "assistant"
     finish_reason: Optional[str] = None
+    stop_reason: Optional[str | int] = None
+    native_finish_reason: Optional[str] = None
     saw_choice = False
     for chunk in events:
         model = chunk.get("model") or model
@@ -543,6 +549,10 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
                     slot["function"]["arguments"] += fn["arguments"]
             if choice.get("finish_reason"):
                 finish_reason = choice["finish_reason"]
+            if choice.get("stop_reason") is not None:
+                stop_reason = choice["stop_reason"]
+            if choice.get("native_finish_reason") is not None:
+                native_finish_reason = choice["native_finish_reason"]
     if not saw_choice:
         return None
     message: dict[str, Any] = {"role": role, "content": "".join(content_parts) or None}
@@ -557,6 +567,10 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
         "model": model,
         "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
     }
+    if stop_reason is not None:
+        result["choices"][0]["stop_reason"] = stop_reason
+    if native_finish_reason is not None:
+        result["choices"][0]["native_finish_reason"] = native_finish_reason
     if response_id is not None:
         result["id"] = response_id
     if usage:
