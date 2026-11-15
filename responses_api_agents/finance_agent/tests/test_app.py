@@ -35,6 +35,7 @@ from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
 )
+from responses_api_agents.finance_agent import app as finance_agent_app
 from responses_api_agents.finance_agent.app import (
     FinanceAgent,
     FinanceAgentConfig,
@@ -1534,3 +1535,70 @@ class TestRun:
         result = await agent.run(req, body)
         assert result.reward == 0.0
         assert result.response.id == "error"
+
+
+def _status_mock(status: int) -> MagicMock:
+    response = MagicMock()
+    response.ok = status < 400
+    response.status = status
+    response.content.read = AsyncMock(return_value=b'{"detail": "Could not reach the server worker"}')
+    return response
+
+
+class TestResourcesServerRetries:
+    @pytest.fixture(autouse=True)
+    def _no_waits(self, monkeypatch) -> list:
+        self.raised = []
+
+        async def fake_raise_for_status(response) -> None:
+            if not response.ok:
+                self.raised.append(response.status)
+                raise RuntimeError(f"status {response.status}")
+
+        self.sleeps = []
+
+        async def fake_sleep(delay: float) -> None:
+            self.sleeps.append(delay)
+
+        monkeypatch.setattr(finance_agent_app, "raise_for_status", fake_raise_for_status)
+        monkeypatch.setattr(finance_agent_app.asyncio, "sleep", fake_sleep)
+
+    @pytest.mark.asyncio
+    async def test_a_gateway_status_is_retried_until_it_succeeds(self) -> None:
+        agent, _ = _make_agent_and_client(_make_config(resources_server_retries=3))
+        ok = _status_mock(200)
+        agent.server_client.post = AsyncMock(side_effect=[_status_mock(502), _status_mock(504), ok])
+
+        assert await agent._post_resources_server("/verify", {"a": 1}, {}) is ok
+        assert agent.server_client.post.await_count == 3
+        assert all(call.kwargs["url_path"] == "/verify" for call in agent.server_client.post.await_args_list)
+        assert self.sleeps == [1.0, 2.0]
+        assert self.raised == []
+
+    @pytest.mark.asyncio
+    async def test_the_last_gateway_status_fails_the_call(self) -> None:
+        agent, _ = _make_agent_and_client(_make_config(resources_server_retries=1))
+        agent.server_client.post = AsyncMock(side_effect=[_status_mock(502), _status_mock(502)])
+
+        with pytest.raises(RuntimeError, match="status 502"):
+            await agent._post_resources_server("/verify", {}, {})
+        assert agent.server_client.post.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_other_statuses_are_not_retried(self) -> None:
+        agent, _ = _make_agent_and_client(_make_config(resources_server_retries=3))
+        agent.server_client.post = AsyncMock(side_effect=[_status_mock(500)])
+
+        with pytest.raises(RuntimeError, match="status 500"):
+            await agent._post_resources_server("/seed_session", {}, {})
+        assert agent.server_client.post.await_count == 1
+        assert self.sleeps == []
+
+    @pytest.mark.asyncio
+    async def test_no_retries_by_default(self) -> None:
+        agent, _ = _make_agent_and_client()
+        agent.server_client.post = AsyncMock(side_effect=[_status_mock(502)])
+
+        with pytest.raises(RuntimeError, match="status 502"):
+            await agent._post_resources_server("/verify", {}, {})
+        assert agent.server_client.post.await_count == 1

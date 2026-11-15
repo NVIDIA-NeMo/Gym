@@ -98,6 +98,9 @@ def _decoded_object(raw: str) -> Optional[dict]:
     return value if isinstance(value, dict) else None
 
 
+_RETRYABLE_RESOURCES_STATUSES = frozenset({502, 503, 504})
+
+
 class StopReason(str, Enum):
     """Why the loop ended.
 
@@ -167,6 +170,14 @@ class FinanceAgentConfig(BaseResponsesAPIAgentConfig):
     max_steps: Optional[int] = Field(
         default=None,
         description="Maximum model turns, or null for no turn cap.",
+    )
+    resources_server_retries: int = Field(
+        default=0,
+        ge=0,
+        description="Extra attempts at seed_session and verify when the resources server answers "
+        "502, 503 or 504, as a multi-worker server's session routing does when it cannot reach the "
+        "worker holding the session. Both calls must be safe to repeat on that server. "
+        "0 fails the rollout on the first such answer.",
     )
     done_tools: List[str] = Field(
         default_factory=lambda: ["submit_final_result"],
@@ -636,16 +647,36 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                 reward=0.0,
             )
 
+    async def _post_resources_server(self, url_path: str, json: Any, cookies: Any) -> Any:
+        """POST to the resources server, retrying the gateway statuses up to resources_server_retries times."""
+        attempts = self.config.resources_server_retries + 1
+        for attempt in range(1, attempts + 1):
+            response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path=url_path,
+                json=json,
+                cookies=cookies,
+            )
+            if response.ok or response.status not in _RETRYABLE_RESOURCES_STATUSES or attempt == attempts:
+                await raise_for_status(response)
+                return response
+            content = await response.content.read()
+            delay = min(2.0 ** (attempt - 1), 10.0)
+            logger.warning(
+                "%s returned %s (attempt %d/%d), retrying in %.0fs: %s",
+                url_path,
+                response.status,
+                attempt,
+                attempts,
+                delay,
+                content[:1000].decode(errors="replace"),
+            )
+            await asyncio.sleep(delay)
+
     async def _run_inner(self, request: Request, body: FinanceAgentRunRequest) -> FinanceAgentVerifyResponse:
         cookies = request.cookies
 
-        seed_session_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/seed_session",
-            json=body.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(seed_session_response)
+        seed_session_response = await self._post_resources_server("/seed_session", body.model_dump(), cookies)
         cookies = seed_session_response.cookies
 
         response = await self.server_client.post(
@@ -661,13 +692,7 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             body.model_dump() | {"response": await get_response_json(response)}
         )
 
-        verify_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=verify_request.model_dump(),
-            cookies=cookies,
-        )
-        await raise_for_status(verify_response)
+        verify_response = await self._post_resources_server("/verify", verify_request.model_dump(), cookies)
         return FinanceAgentVerifyResponse.model_validate(await get_response_json(verify_response))
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
