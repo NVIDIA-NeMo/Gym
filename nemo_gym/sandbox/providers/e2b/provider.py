@@ -48,6 +48,7 @@ started with.
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import math
@@ -67,6 +68,8 @@ from nemo_gym.sandbox.providers.base import (
     SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
+    SandboxSnapshotError,
+    SandboxSnapshotInfo,
     SandboxSnapshotNotFoundError,
     SandboxSpec,
     SandboxStatus,
@@ -171,6 +174,10 @@ _resource_warning_logged = False
 # Lease renewal: at most this many renewals at once, each cut off after this long.
 LEASE_RENEW_BATCH = 64
 LEASE_RENEW_TIMEOUT_S = 10.0
+# A lease is dropped only after this many renewal rounds in a row found no sandbox.
+LEASE_NOT_FOUND_ROUNDS = 2
+# How long ``aclose`` waits for the kills of sandboxes whose create was cancelled.
+DISCARD_DRAIN_TIMEOUT_S = 30.0
 
 # Waiting for a new sandbox to become reachable (``create.reachable_timeout_s``): each no-op probe is cut off after
 # REACHABLE_PROBE_TIMEOUT_S, and a 502 is retried after a delay that doubles up to REACHABLE_RETRY_MAX_DELAY_S.
@@ -188,7 +195,7 @@ class E2BSandboxUnreachableError(RuntimeError):
     ``SandboxUnreachableException``); the sandbox may still be alive."""
 
 
-class E2BSnapshotError(RuntimeError):
+class E2BSnapshotError(SandboxSnapshotError):
     """Raised when the installed e2b SDK or the service cannot snapshot a sandbox."""
 
 
@@ -246,6 +253,15 @@ def _network_options(network_policy: Any) -> dict[str, list[str]]:
             or not isinstance(rule.get("target"), str)
         ):
             raise ValueError(f"network_policy.egress rules need action allow|deny and a target string, got {rule!r}")
+        if rule["action"] == "deny":
+            # E2B's deny list takes addresses only; a host name there would be refused, or not enforced.
+            try:
+                ipaddress.ip_network(rule["target"], strict=False)
+            except ValueError:
+                raise ValueError(
+                    f"network_policy can deny only an IP address or CIDR block on E2B, not {rule['target']!r}: use "
+                    "defaultAction deny with allow rules"
+                ) from None
         targets[rule["action"]].append(rule["target"])
     if default == "deny":
         return {"deny_out": ["0.0.0.0/0"], "allow_out": targets["allow"]}
@@ -462,8 +478,9 @@ class E2BSnapshotConfig:
     """Snapshot settings."""
 
     # Send the checkpointer's snapshot names to the service. E2B files a named snapshot as a template of that name
-    # (an alias visible to the whole team), so names are off by default: snapshots are then unnamed, and the
-    # checkpointer releases them by the ids in its index; ``list_snapshots`` finds none by name.
+    # (an alias visible to the whole team), so names are off by default, which departs from the snapshot contract:
+    # snapshots are then unnamed, and ``list_snapshots`` finds none under a prefix. The checkpointer deletes what it
+    # indexed by id; a snapshot that never reached its index is then not found by name (see the provider README).
     send_names: bool = False
     # Create a sandbox from a snapshot with AgentENV's ``keepGuestClock`` extension parameter: the guest then keeps
     # the wall clock it had when the snapshot was taken, where the service otherwise sets it to the current time. A
@@ -485,6 +502,8 @@ class _Lease:
     sandbox: Any
     # Monotonic time the sandbox's own lifetime ends, or None for no limit.
     lifetime_end: float | None
+    # Renewal rounds in a row that found no sandbox.
+    not_found_rounds: int = 0
 
 
 class E2BProvider:
@@ -513,6 +532,8 @@ class E2BProvider:
         self._warned_resource_specs: set[str] = set()
         self._leases: dict[str, _Lease] = {}
         self._lease_task: asyncio.Task[None] | None = None
+        # Kills of sandboxes whose create was cancelled, run off the cancel's path; ``aclose`` waits for them.
+        self._discards: set[asyncio.Task[None]] = set()
         # Monotonic end of each new sandbox's grace period (``operations.new_sandbox_grace_s``), by sandbox id.
         self._new_until: dict[str, float] = {}
 
@@ -707,7 +728,7 @@ class E2BProvider:
         except E2BCreateError as error:
             if _is_not_found(error.__cause__, _require_e2b_sdk()) or _is_missing_template(error.__cause__):
                 raise SandboxSnapshotNotFoundError(
-                    f"E2B has no snapshot {snapshot_id!r}: {error.__cause__}"
+                    f"E2B has no snapshot {snapshot_id!r}: {error.__cause__}", snapshot_id=snapshot_id
                 ) from error
             raise
 
@@ -770,37 +791,46 @@ class E2BProvider:
         # covered.
         self._start_grace(str(sandbox.sandbox_id))
         self._hold_lease(sandbox, lifetime_s)
-        if self._create.reachable_timeout_s is not None:
-            try:
-                await self._wait_reachable(sandbox, self._create.reachable_timeout_s)
-            except Exception as exc:
-                LOGGER.warning(
-                    "e2b sandbox %s did not become reachable within %gs: %r",
-                    sandbox.sandbox_id,
-                    self._create.reachable_timeout_s,
-                    exc,
-                )
-                await self._discard(sandbox, "unreachable")
-                raise E2BCreateError(
-                    f"e2b sandbox {sandbox.sandbox_id} from template {template!r} was created but could not be "
-                    f"reached within {self._create.reachable_timeout_s:g}s: {exc}"
-                ) from exc
-        if self._create.restore_login_env:
-            # Also on a sandbox created from a snapshot, which has the hook already: writing it again is harmless, and
-            # it covers snapshots taken without it.
-            try:
-                await self._with_retries(
-                    lambda: sandbox.files.write(
-                        _LOGIN_ENV_HOOK_PATH, _LOGIN_ENV_HOOK, user="root", **self._request_params()
-                    ),
-                    operation="write login-shell hook",
-                )
-            except Exception as exc:
-                await self._discard(sandbox, "login-shell hook not written")
-                raise E2BCreateError(
-                    f"e2b sandbox {sandbox.sandbox_id} from template {template!r} was created but its login-shell "
-                    f"hook {_LOGIN_ENV_HOOK_PATH} could not be written: {exc}"
-                ) from exc
+        try:
+            if self._create.reachable_timeout_s is not None:
+                try:
+                    await self._wait_reachable(sandbox, self._create.reachable_timeout_s)
+                except Exception as exc:
+                    LOGGER.warning(
+                        "e2b sandbox %s did not become reachable within %gs: %r",
+                        sandbox.sandbox_id,
+                        self._create.reachable_timeout_s,
+                        exc,
+                    )
+                    await self._discard(sandbox, "unreachable")
+                    raise E2BCreateError(
+                        f"e2b sandbox {sandbox.sandbox_id} from template {template!r} was created but could not "
+                        f"be reached within {self._create.reachable_timeout_s:g}s: {exc}"
+                    ) from exc
+            if self._create.restore_login_env:
+                # Also on a sandbox created from a snapshot, which has the hook already: writing it again is
+                # harmless, and it covers snapshots taken without it.
+                try:
+                    await self._with_retries(
+                        lambda: sandbox.files.write(
+                            _LOGIN_ENV_HOOK_PATH, _LOGIN_ENV_HOOK, user="root", **self._request_params()
+                        ),
+                        operation="write login-shell hook",
+                    )
+                except Exception as exc:
+                    await self._discard(sandbox, "login-shell hook not written")
+                    raise E2BCreateError(
+                        f"e2b sandbox {sandbox.sandbox_id} from template {template!r} was created but its "
+                        f"login-shell hook {_LOGIN_ENV_HOOK_PATH} could not be written: {exc}"
+                    ) from exc
+        except asyncio.CancelledError:
+            # The caller gets no handle. Stop renewing at once and kill off the cancel's path, so the cancel is not
+            # held up by the kill's retries. A kill that never runs leaves the sandbox to its lease timeout.
+            self._leases.pop(str(sandbox.sandbox_id), None)
+            task = asyncio.create_task(self._discard(sandbox, "create cancelled"), name="e2b-discard-cancelled")
+            self._discards.add(task)
+            task.add_done_callback(self._discards.discard)
+            raise
         return SandboxHandle(sandbox_id=sandbox.sandbox_id, provider_name=self.name, raw=sandbox)
 
     async def _discard(self, sandbox: Any, reason: str) -> None:
@@ -945,10 +975,18 @@ class E2BProvider:
                 error, sandbox_id
             )
             if gone and not self._in_grace(sandbox_id):
+                lease.not_found_rounds += 1
+                if lease.not_found_rounds < LEASE_NOT_FOUND_ROUNDS:
+                    # A gateway replica can answer "not found" for a sandbox that runs (see KILL_RECHECK_DELAY_S),
+                    # and the lease outlasts a missed round.
+                    LOGGER.info("e2b sandbox %s not found on a lease renewal; checking again next round", sandbox_id)
+                    return
                 LOGGER.info("e2b sandbox %s is gone; stopping its lease", sandbox_id)
                 self._leases.pop(sandbox_id, None)
                 return
             LOGGER.warning("e2b lease renewal failed for sandbox %s; retrying next round: %r", sandbox_id, error)
+        else:
+            lease.not_found_rounds = 0
 
     async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
         """Return a descriptor for attaching to this sandbox from another process."""
@@ -1171,6 +1209,9 @@ class E2BProvider:
             self._lease_task.cancel()
             await asyncio.gather(self._lease_task, return_exceptions=True)
             self._lease_task = None
+        if self._discards:
+            # Bounded: a kill still running after this leaves its sandbox to the lease timeout.
+            await asyncio.wait(set(self._discards), timeout=DISCARD_DRAIN_TIMEOUT_S)
 
     # ------------------------------------------------------------- snapshots
 
@@ -1215,24 +1256,37 @@ class E2BProvider:
                 operation="delete_snapshot",
             )
         except Exception as error:
-            if not _is_not_found(error, e2b):
-                raise
+            if _is_not_found(error, e2b):
+                return
+            raise SandboxSnapshotError(
+                f"E2B could not delete snapshot {snapshot_id!r}: {error}", snapshot_id=snapshot_id
+            ) from error
 
-    async def list_snapshots(self, prefix: str) -> list[dict[str, Any]]:
-        """Every snapshot whose name starts with ``prefix``, filtered here: the service matches whole names only.
+    async def list_snapshots(self, prefix: str) -> list[SandboxSnapshotInfo]:
+        """Every snapshot one of whose names starts with ``prefix``; the service matches whole names only.
 
-        A snapshot's name is its template alias without the team namespace and tag. Unnamed snapshots (the default,
-        see ``snapshots.send_names``) never match a non-empty prefix.
+        A snapshot's name is its template alias without the team namespace and tag. One taken without a name has
+        ``name=None`` and matches only the empty prefix. Without ``snapshots.send_names`` this provider names no
+        snapshot, so a non-empty prefix finds none and the service is not asked. Raises ``SandboxSnapshotError`` when
+        the listing fails.
         """
+        if prefix and not self._snapshots.send_names:
+            return []
         e2b = _require_e2b_sdk()
-        paginator = e2b.AsyncSandbox.list_snapshots(**self._api_params())
-        found: list[dict[str, Any]] = []
-        while paginator.has_next:
-            for info in await paginator.next_items():
-                names = list(getattr(info, "names", None) or [])
-                name = names[0].rsplit("/", 1)[-1].split(":", 1)[0] if names else ""
-                if name.startswith(prefix):
-                    found.append({"id": str(info.snapshot_id), "name": name})
+        found: list[SandboxSnapshotInfo] = []
+        try:
+            paginator = e2b.AsyncSandbox.list_snapshots(**self._api_params())
+            while paginator.has_next:
+                for info in await paginator.next_items():
+                    names = [
+                        str(full_name).rsplit("/", 1)[-1].split(":", 1)[0]
+                        for full_name in getattr(info, "names", None) or []
+                    ]
+                    name = next((name for name in names if name.startswith(prefix)), None)
+                    if name is not None or (not prefix and not names):
+                        found.append(SandboxSnapshotInfo(snapshot_id=str(info.snapshot_id), name=name))
+        except Exception as error:
+            raise SandboxSnapshotError(f"E2B snapshot listing failed: {error}") from error
         return found
 
     # -------------------------------------------------------------- commands

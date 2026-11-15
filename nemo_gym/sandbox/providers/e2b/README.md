@@ -73,8 +73,9 @@ provisioning the remaining images.
 | Section | Important fields |
 | --- | --- |
 | `connection` | SDK credentials, hosted or gateway URLs, headers, proxy, and control-plane `request_timeout_s`. |
-| `create` | Default template/mapping, sandbox `timeout_s`, timeout action `auto_resume`, `secure`, `allow_internet_access`, `network` (`allow_out`/`deny_out`), `custom_extension_params` (AgentEnv `customExtensionParams`; creates through `POST /sandboxes`), and `strict_resources`. |
+| `create` | Default template/mapping, sandbox `timeout_s`, timeout action `auto_resume`, `secure`, `allow_internet_access`, `network` (`allow_out`/`deny_out`), `custom_extension_params` (AgentEnv `customExtensionParams`; creates through `POST /sandboxes`), `strict_resources`, the lease `lease_s`, the wait for a new sandbox `reachable_timeout_s`, and `restore_login_env`. |
 | `exec` | Fallback command timeout, default user, stream-open request timeout, background execution, and reconnect attempts. |
+| `snapshots` | `send_names` (send checkpoint snapshot names; off by default) and `keep_guest_clock` (AgentENV: a sandbox created from a snapshot keeps the snapshot's wall clock). |
 | `operations` | Retry count and exponential-backoff delays for safe, retryable operations, and `new_sandbox_grace_s`, the window in which a new sandbox's "not found" is retried rather than believed. |
 | `attribution` | Automatic `team` / `user` / `workload` / `run` metadata on every sandbox (on by default); see [Job Attribution](#job-attribution). |
 
@@ -160,14 +161,16 @@ metadata.
 - A command that runs out its timeout returns exit code 124 with `error_type="timeout"`, as on
   other providers, and the processes it left running are killed by an environment marker
   (`NEMO_GYM_E2B_EXEC`), never by process group: envd shares the group, and killing it ends the
-  sandbox. A timeout well before the deadline (a stream that could not open) still raises.
+  sandbox. A timeout before the deadline is a dropped stream: the command is reattached by pid, and
+  raises only when it cannot be.
 - A kill that finds no sandbox is checked again and repeated if the sandbox still runs.
 - A sandbox the gateway could not reach raises `E2BSandboxUnreachableError` from `exec`, and is
   retried by idempotent operations (connect, close, file transfer, snapshot delete).
 - With `create.reachable_timeout_s` (120 s in `agentenv.yaml`), a create or fork returns only once a
   no-op command reaches the new sandbox: AgentENV can report a sandbox created while its gateway
-  still answers 502. The no-op is retried on that 502 alone; a sandbox still unreachable at the
-  deadline is killed and the create raises `E2BCreateError`.
+  still answers 502. The no-op is retried on a 502 and on a 404 (a new sandbox can be unroutable for
+  a few seconds), for the whole timeout; a sandbox still unreachable at the deadline is killed and
+  the create raises `E2BCreateError`.
 - The SDK runs every command as `bash -l -c` and every terminal as `bash -i -l`. A process starts
   with its image's environment, but a Debian image's `/etc/profile` then resets `PATH`, so tools
   the image installed outside the default `PATH` (`/usr/local/go/bin`, `/usr/local/cargo/bin`,
@@ -187,13 +190,26 @@ the snapshot's template id, and its processes continue where they were, so the p
 is not an error.
 
 E2B files a *named* snapshot as a template alias visible to the whole team, so names are not sent
-by default (`snapshots.send_names: false`): checkpoint snapshots are released by the ids the
-checkpointer indexed, and `list_snapshots` finds unnamed snapshots under no prefix. Snapshots
-need an e2b SDK that has `AsyncSandbox.create_snapshot`.
+by default (`snapshots.send_names: false`). This departs from the snapshot contract, which asks a
+provider to keep the name a snapshot is taken with. With names off:
+
+- `list_snapshots(prefix)` finds nothing under a non-empty prefix and does not ask the service.
+- A checkpoint release still deletes every snapshot the checkpointer indexed, by id. Its sweep for
+  snapshots the index never recorded finds none: a snapshot whose reply was lost, or whose process
+  died before the index was written, stays on the service until it is deleted by id.
+- `scripts/agentenv_cleanup.py --snapshot-prefix` finds only snapshots taken with names on.
+
+Set `send_names: true` to keep names. A snapshot taken again under a name that exists becomes a
+new build of the same template.
+
+With `snapshots.keep_guest_clock` (on in `agentenv.yaml`), a sandbox created from a snapshot keeps
+the wall clock the snapshot was taken at. Snapshots need an e2b SDK that has
+`AsyncSandbox.create_snapshot`.
 
 `resource_requests` in `provider_options` (an OpenSandbox option many task configs set) is
 reported once and not applied. `network_policy` in OpenSandbox's shape maps onto E2B's `network`
-option: `defaultAction: deny` denies all egress except the `allow` targets.
+option: `defaultAction: deny` denies all egress except the `allow` targets. E2B can deny only an IP
+address or CIDR block, so a `deny` rule that names a host is refused.
 
 `configs/agentenv.yaml` is this provider pointed at an AgentENV cell, with kill-on-timeout, a
 lease and `exec.user: root`. If the cell serves a certificate the system does not trust, point
