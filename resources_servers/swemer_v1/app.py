@@ -235,7 +235,6 @@ class SwemerV1ResourcesServer(RepoTaskSessionResourcesServer):
         )
         if session_id is not None:
             # On the provider every task sandbox shares, and registered for the session and its checkpoints.
-            spec = self.agent_sandbox_spec(spec)
             sandbox = self.new_task_sandbox(session_id, spec)
         else:
             sandbox = AsyncSandbox(provider_config)
@@ -249,7 +248,13 @@ class SwemerV1ResourcesServer(RepoTaskSessionResourcesServer):
         ``seed_session`` always has a real base commit to diff the agent's changes against without
         disturbing the git history everywhere else.
         """
-        precheck = await sandbox.exec(f"git -C {shlex.quote(workdir)} rev-parse --git-dir")
+        # The first command in a new sandbox, which can refuse it for a few seconds; it only reads.
+        precheck = await exec_idempotent(
+            sandbox, f"git -C {shlex.quote(workdir)} rev-parse --git-dir", what="swemer_v1: checking for a repository"
+        )
+        if getattr(precheck, "error_type", None) is not None:
+            # Not an answer: initialising here would commit a snapshot on top of a repository that may exist.
+            raise RuntimeError(f"Task sandbox could not check for a git repository: {precheck.error_type}")
         if precheck.return_code == 0:
             return
         result = await sandbox.exec(

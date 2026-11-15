@@ -941,11 +941,36 @@ class TestLogParserPin:
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not installed")
-def test_the_eval_script_reports_its_stderr_on_stdout_in_order() -> None:
-    """E2B returns a command's stdout and stderr apart: the graded region between the markers must hold both."""
-    header = build_eval_script(_inputs()).split("\ncd ", 1)[0]
+def test_the_eval_script_reports_its_stderr_on_stdout_in_order(tmp_path) -> None:
+    """Providers return a command's stdout and stderr apart: the script's redirect puts both on stdout, in order."""
+    header, found, _ = build_eval_script(_inputs()).partition("\ncd ")
+    assert found, "the eval script no longer begins its work with a cd line; update this split"
+    # Only the redirect may run here: never the real script, which resets a checkout.
+    assert [line for line in header.splitlines() if line and not line.startswith("#")] == ["exec 2>&1"]
     result = subprocess.run(
-        ["bash", "-c", header + "\necho first\necho second >&2\necho third\n"], capture_output=True, text=True
+        ["bash", "-c", header + "\necho first\necho second >&2\necho third\n"],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+        timeout=30,
     )
     assert result.stdout.splitlines() == ["first", "second", "third"]
     assert result.stderr == ""
+
+
+def test_the_shipped_configs_require_the_anti_cheat_scrub() -> None:
+    """The only configs that turn it on: without the line, swe_rebench would hand out unscrubbed histories again."""
+    from pathlib import Path
+
+    import yaml
+
+    from resources_servers.swe_rebench.app import SWERebenchResourcesServerConfig
+
+    configs = Path(__file__).resolve().parent.parent / "configs"
+    resources = yaml.safe_load((configs / "swe_rebench_legacy_agent.yaml").read_text())
+    assert resources["swe_rebench_resources_server"]["resources_servers"]["swe_rebench"]["anti_cheat_required"] is True
+    # The episode default takes the resources server's settings from that file.
+    episode = yaml.safe_load((configs / "swe_rebench.yaml").read_text())
+    assert "resources_servers/swe_rebench/configs/swe_rebench_legacy_agent.yaml" in episode["config_paths"]
+    # Off unless a config asks for it: the other servers keep the scrub best effort.
+    assert SWERebenchResourcesServerConfig.model_fields["anti_cheat_required"].default is False
