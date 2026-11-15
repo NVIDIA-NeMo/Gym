@@ -532,8 +532,8 @@ handled in `opencode2/`:
 
 What OpenCode 2 does differently, and a recipe may notice:
 
-- Tools: `shell`, `read` (also lists directories), `write`, `edit`, `patch`, `glob`, `grep`, `subagent`,
-  `question`, `skill`, `webfetch` and `websearch`. Code Mode is off: the adapter denies its `execute` tool after
+- Tools: `shell`, `read` (also lists directories), `write`, `edit`, `glob`, `grep`, `subagent`, `question`,
+  `skill`, `webfetch` and `websearch` (the default permission profile hides the last two). Code Mode is off: the adapter denies its `execute` tool after
   every other `permission` rule, and the plugin removes the tools OpenCode offers only through it (OpenCode's own
   sessions, worktrees, models, schedules, artifacts and MCP resources, all `opencode_*`), which OpenCode 1 did not
   offer. `todowrite` is off in OpenCode 2 releases. MCP grants are direct tools named `<grant>_<tool>`
