@@ -242,6 +242,12 @@ async def test_a_restored_session_captures_its_patch_against_the_commit_it_was_s
             reply = await client.post(f"/ng-control/v1/checkpoint/{operation}", json=body, headers=auth(config))
             assert reply.status_code == 200, reply.text
 
+    # The agent committed its fix before the crash: HEAD moved in the sandbox, and so in every fork of it.
+    provider._exec_results = lambda command: (
+        SandboxExecResult(stdout="c0mm1773d\n", stderr=None, return_code=0)
+        if command.strip() == "git rev-parse HEAD"
+        else git_results(command)
+    )
     restored = make_server(provider, config)
     async with http(restored) as client:
         for operation, body in (
@@ -255,14 +261,18 @@ async def test_a_restored_session_captures_its_patch_against_the_commit_it_was_s
 
     assert verified.status_code == 200, verified.text
     assert verified.json()["model_patch"] == PATCH
-    [command] = [
-        command for box in provider.boxes.values() for command in box["commands"] if "git --no-pager diff" in command
+    [(box, command)] = [
+        (box, command)
+        for box in provider.boxes.values()
+        for command in box["commands"]
+        if "git --no-pager diff" in command
     ]
+    assert box["from_snapshot"] is not None, "the patch is captured in the fork"
     assert f"diff --cached {SEED_HEAD}" in command
     assert provider.created_from_image() == 1, "the replacement attempt's seed does not set the task up again"
 
 
-def test_a_golden_patch_server_holds_no_session_state() -> None:
+def test_a_golden_patch_server_is_restart_only_and_needs_no_state_dir() -> None:
     server = make_server(
         FakeSnapshotProvider(git_results),
         {"checkpoint": {"enabled": True, "control_auth_token": "t"}},
@@ -271,3 +281,19 @@ def test_a_golden_patch_server_holds_no_session_state() -> None:
     # No state_dir is needed: the server never seeds an episode session, so it checkpoints nothing.
     server.setup_webserver()
     assert server.checkpoint_participant.mode == "restart_only"
+
+
+async def test_an_agent_run_seed_replaces_the_task_sandbox_it_started_before() -> None:
+    provider = FakeSnapshotProvider(git_results)
+    server = make_server(provider, {})
+    async with http(server) as client:
+        first = await client.post("/seed_session", json=INSTANCE)
+        second = await client.post("/seed_session", json=INSTANCE)
+        live = provider.live()
+
+    assert first.status_code == 200 and second.status_code == 200, second.text
+    # The second seed stopped the first sandbox and dropped it from the checkpointer before registering its own.
+    assert first.json()["sandbox_handle"] != second.json()["sandbox_handle"]
+    assert live == [second.json()["sandbox_handle"]]
+    await server.shutdown()
+    assert provider.live() == []

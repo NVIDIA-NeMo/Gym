@@ -679,14 +679,18 @@ class TestFailureOnlyGrading:
 
 class TestEvalScriptCommand:
     @pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not installed")
-    def test_stderr_of_the_tests_stays_between_the_markers_when_only_stdout_is_read(self, tmp_path: Path) -> None:
-        """A provider that returns stdout and stderr apart (E2B) still yields one ordered graded region."""
+    def test_both_streams_of_the_tests_stay_between_the_trace_markers_when_only_stdout_is_read(
+        self, tmp_path: Path
+    ) -> None:
+        """The eval script prints its markers through bash's trace, on stderr, and the tests on either stream; a
+        provider that returns the streams apart must still see one ordered region."""
         script = tmp_path / "eval.sh"
         script.write_text(
-            f"echo '{START_TEST_OUTPUT}'\n"
-            "echo 'PASSED tests/test_a.py::test_one' >&2\n"
-            "echo 'FAILED tests/test_a.py::test_two'\n"
-            f"echo '{END_TEST_OUTPUT}'\n"
+            "set -uxo pipefail\n"
+            f": '{START_TEST_OUTPUT}'\n"
+            "echo 'PASSED tests/test_a.py::test_one'\n"
+            "echo 'FAILED tests/test_a.py::test_two' >&2\n"
+            f": '{END_TEST_OUTPUT}'\n"
         )
         command = EVAL_SCRIPT_COMMAND.replace("/eval.sh", str(script))
 
@@ -694,4 +698,6 @@ class TestEvalScriptCommand:
 
         assert result.stderr == ""
         region = result.stdout.split(START_TEST_OUTPUT)[1].split(END_TEST_OUTPUT)[0]
-        assert region.splitlines()[1:] == ["PASSED tests/test_a.py::test_one", "FAILED tests/test_a.py::test_two"]
+        # The trace lines start with "+"; the first element is the quote that closes the start marker's own line.
+        printed = [line for line in region.splitlines() if line and not line.startswith(("+", "'"))]
+        assert printed == ["PASSED tests/test_a.py::test_one", "FAILED tests/test_a.py::test_two"]

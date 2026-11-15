@@ -27,9 +27,10 @@ from nemo_gym.sandbox import AsyncSandbox
 from resources_servers.swebench.failure_only_grading import failure_only_suite_completed
 
 
-# The eval script's stderr joins its stdout, in order: test runners report on either stream, and the log parser
-# reads only the region between the start and end markers. A provider that returns a command's stdout and stderr
-# apart (E2B) would otherwise put every stderr line after the end marker.
+# The eval script's stderr joins its stdout, in order. SWE-bench's start and end markers are no-op commands that
+# reach the output only through bash's trace, on stderr, and the log parser reads the region between them. A
+# provider that returns a command's stdout and stderr apart (OpenSandbox, E2B) would otherwise put everything the
+# tests print on stdout before the start marker.
 EVAL_SCRIPT_COMMAND = "/bin/bash /eval.sh 2>&1"
 
 
@@ -410,6 +411,7 @@ fi""")
 def patch_swebench_multilingual_log_parsing(stdout: str, stderr: str, instance_id: str) -> Optional[str]:
     test_output = None
 
+    # Only for a command whose stderr comes back apart; EVAL_SCRIPT_COMMAND joins the streams itself.
     # For RuboCop tests in SWE Multilingual specifically, there is an issue with the logs parsing if the stdout and stderr returned is not interleaved.
     # We interleave the stderr inside the start and end tags in the stdout here instead. See `get_logs_eval`
     if "rubocop" in instance_id and START_TEST_OUTPUT in stderr:

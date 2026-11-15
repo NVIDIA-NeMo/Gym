@@ -561,7 +561,8 @@ Stderr:
         self._verifier_sandboxes[session_id] = eval_sandbox
         eval_sandbox_start_time_taken = monotonic() - verifier_sandbox_lifecycle_started_at
 
-        # A verify replayed after a restore may grade while the first one still runs: they must not share log files.
+        # One run id per grading: run_instance returns a report.json it finds in the run's log directory, so a verify
+        # repeated after a restore must not find what an earlier grading of the session left there.
         run_id = f"{session_id}-{uuid4().hex[:8]}"
         mock_container = DockerContainer(id=run_id, instance_id=test_spec.instance_id)
         mock_container._inner_container = eval_sandbox
@@ -628,7 +629,7 @@ Stderr:
         test_output = ""
         if test_output_fpaths:
             test_output_fpath = Path(test_output_fpaths[0])
-            test_output = test_output_fpath.read_text()
+            test_output = test_output_fpath.read_text(errors="replace")
 
         if self.config.clear_swebench_debug_logs:
             rmtree(str(log_dir), ignore_errors=True)
