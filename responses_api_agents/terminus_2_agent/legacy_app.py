@@ -80,7 +80,6 @@ class Terminus2LegacyAgent(Terminus2Agent):
         )
 
 
-
 if __name__ == "__main__":
     Terminus2LegacyAgent.run_webserver()
 elif is_nemo_gym_fastapi_entrypoint(__file__):
