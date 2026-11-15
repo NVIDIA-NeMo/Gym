@@ -57,6 +57,15 @@ final turn cannot reuse earlier analysis as its answer. Context overflow optiona
 (`truncate_on_overflow`), which is for eval only — during training the full trajectory has to be
 preserved for reward assignment.
 
+Two opt-in fields cover a resources server that briefly cannot answer `seed_session` or `verify`,
+for example a multi-worker server whose session routing answers 502 when it cannot reach the
+worker that holds the session:
+
+| Field | Effect | Default |
+|-------|--------|---------|
+| `resources_server_retries` | Extra attempts at `seed_session` and `verify` on 502, 503 or 504, with backoff of 1s, 2s, 4s, capped at 10s. Both calls must be safe to repeat on that server. | `0` |
+| `keep_response_on_verify_failure` | When `verify` still fails, return the generated rollout with reward 0 and the error in `verify_error`, instead of the empty error response a trainer cannot use. The 0 is not a grade. | `false` |
+
 # Licensing information
 Code: Apache 2.0
 Data: N/A
