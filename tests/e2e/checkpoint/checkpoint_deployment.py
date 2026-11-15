@@ -477,11 +477,28 @@ class Deployment:
 
     def stop(self) -> None:
         self.crash_gym()
+        self._kill_local_sandboxes()
         for name in ("backend", "sandbox_backend"):
             backend = self.procs.pop(name, None)
             if backend is not None:
                 backend.kill()
                 backend.wait()
+
+    def _kill_local_sandboxes(self) -> None:
+        """Kill what the local-directory sandboxes still run.
+
+        They outlive the servers, as a real sandbox would, and a harness a checkpoint paused waits for its continue
+        for ever: a test that fails between a prepare and its resume would leave it on the machine.
+        """
+        boxes = self.work_dir / "sandboxes" / "boxes"
+        if not boxes.is_dir():
+            return
+        if str(HERE / "local_sandbox") not in sys.path:
+            sys.path.insert(0, str(HERE / "local_sandbox"))
+        from local_sandbox_provider import kill_sandbox_processes
+
+        for box in boxes.glob("*.json"):
+            kill_sandbox_processes(box.stem)
 
     def _start(self, name: str) -> None:
         env = os.environ | {

@@ -13,10 +13,12 @@ snapshot does. Every process and server reads the same state from ``base_dir``, 
 """
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
 import signal
+import stat
 import time
 import uuid
 from collections.abc import Mapping
@@ -38,7 +40,19 @@ MARKER = "NG_LOCAL_SANDBOX"
 
 
 def kill_sandbox_processes(sandbox_id: str) -> int:
-    """SIGKILL every process that carries the sandbox's marker; return how many were found."""
+    """SIGKILL every process that carries the sandbox's marker, and those they forked meanwhile; return how many."""
+    total = 0
+    # A process forked while /proc was read is found by the next pass.
+    for _ in range(50):
+        found = _kill_marked(sandbox_id)
+        total += found
+        if not found:
+            break
+        time.sleep(0.02)
+    return total
+
+
+def _kill_marked(sandbox_id: str) -> int:
     found = 0
     needle = f"{MARKER}={sandbox_id}".encode()
     for entry in Path("/proc").iterdir():
@@ -49,12 +63,30 @@ def kill_sandbox_processes(sandbox_id: str) -> int:
         except OSError:
             continue
         if needle in environ.split(b"\0"):
-            found += 1
             try:
+                # A killed process stays listed until its parent reaps it: count only the ones still alive.
+                if (entry / "stat").read_text().rsplit(")", 1)[1].split()[0] == "Z":
+                    continue
                 os.kill(int(entry.name), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            except (OSError, IndexError):
+                continue
+            found += 1
     return found
+
+
+def _not_copied(directory: str, names: list[str]) -> list[str]:
+    """The entries of ``directory`` a snapshot leaves out: fifos and sockets, which a copy cannot hold, and files
+    that went away since the directory was listed."""
+    skipped = []
+    for name in names:
+        try:
+            mode = os.lstat(os.path.join(directory, name)).st_mode
+        except FileNotFoundError:
+            skipped.append(name)
+            continue
+        if stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode):
+            skipped.append(name)
+    return skipped
 
 
 class LocalDirPlainProvider:
@@ -116,7 +148,9 @@ class LocalDirPlainProvider:
         try:
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout_s)
         except TimeoutError:
-            os.killpg(process.pid, signal.SIGKILL)
+            # The command may have ended as the timeout fired.
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
             await process.wait()
             return SandboxExecResult(stdout=None, stderr=None, return_code=-1, error_type="timeout")
         except BaseException:
@@ -174,19 +208,25 @@ class LocalDirProvider(LocalDirPlainProvider):
     async def create_from_snapshot(self, snapshot_id: str, spec: SandboxSpec) -> SandboxHandle:
         meta_file = self.base / "snapshots" / snapshot_id / "meta.json"
         if not meta_file.exists():
-            raise SandboxSnapshotNotFoundError(f"snapshot {snapshot_id} does not exist")
+            raise SandboxSnapshotNotFoundError(f"snapshot {snapshot_id} does not exist", snapshot_id=snapshot_id)
         meta = json.loads(meta_file.read_text())
         path = Path(meta["path"])
-        # The sandbox the snapshot was taken from is set aside, with its processes, so the fork keeps its paths.
+        # Whatever sandbox is at the path the snapshot was taken from is set aside, with its processes, so the fork
+        # keeps its paths: the sandbox the snapshot was taken from or an earlier fork, running or stopped.
         for box_file in (self.base / "boxes").glob("*.json"):
             box = json.loads(box_file.read_text())
-            if box["path"] == str(path) and box["state"] == "running":
-                kill_sandbox_processes(box["id"])
-                aside = path.with_name(f"{path.name}.superseded-{uuid.uuid4().hex[:6]}")
+            if box["path"] != str(path):
+                continue
+            kill_sandbox_processes(box["id"])
+            aside = path.with_name(f"{path.name}.superseded-{uuid.uuid4().hex[:6]}")
+            if path.exists():
                 path.rename(aside)
-                box["path"] = str(aside)
-                self._save(box["id"], box)
-        shutil.copytree(self.base / "snapshots" / snapshot_id / "tree", path, symlinks=True)
+            box["path"] = str(aside)
+            self._save(box["id"], box)
+        if path.exists():
+            # No box names it: a crash fell between a rename and its save.
+            path.rename(path.with_name(f"{path.name}.superseded-{uuid.uuid4().hex[:6]}"))
+        await asyncio.to_thread(shutil.copytree, self.base / "snapshots" / snapshot_id / "tree", path, symlinks=True)
         sandbox_id = f"sb-{uuid.uuid4().hex[:8]}"
         self._save(sandbox_id, {"id": sandbox_id, "path": str(path), "state": "running", "from_snapshot": snapshot_id})
         return SandboxHandle(sandbox_id=sandbox_id, provider_name=self.name, raw=None)
@@ -195,8 +235,15 @@ class LocalDirProvider(LocalDirPlainProvider):
         box = self._running(handle.sandbox_id)
         snapshot_id = f"snap-{uuid.uuid4().hex[:8]}"
         directory = self.base / "snapshots" / snapshot_id
-        # Sockets and fifos of the supervisor cannot be copied; a container snapshot would not hold them either.
-        shutil.copytree(box["path"], directory / "tree", symlinks=True, ignore_dangling_symlinks=True)
+        try:
+            # Sockets and fifos cannot be copied; a container snapshot would not hold them either.
+            await asyncio.to_thread(
+                shutil.copytree, box["path"], directory / "tree", symlinks=True, ignore=_not_copied
+            )
+        except BaseException:
+            # A snapshot without meta.json is listed by nothing, so nothing would delete it.
+            shutil.rmtree(directory, ignore_errors=True)
+            raise
         (directory / "meta.json").write_text(
             json.dumps({"name": name or snapshot_id, "path": box["path"], "sandbox_id": handle.sandbox_id})
         )
@@ -204,15 +251,18 @@ class LocalDirProvider(LocalDirPlainProvider):
 
     async def wait_snapshot_ready(self, snapshot_id: str) -> None:
         if not (self.base / "snapshots" / snapshot_id / "meta.json").exists():
-            raise RuntimeError(f"snapshot {snapshot_id} does not exist")
+            raise SandboxSnapshotNotFoundError(f"snapshot {snapshot_id} does not exist", snapshot_id=snapshot_id)
 
     async def delete_snapshot(self, snapshot_id: str) -> None:
-        shutil.rmtree(self.base / "snapshots" / snapshot_id, ignore_errors=True)
+        await asyncio.to_thread(shutil.rmtree, self.base / "snapshots" / snapshot_id, ignore_errors=True)
 
     async def list_snapshots(self, prefix: str) -> list[SandboxSnapshotInfo]:
         listed = []
         for meta_file in (self.base / "snapshots").glob("*/meta.json"):
-            meta = json.loads(meta_file.read_text())
+            try:
+                meta = json.loads(meta_file.read_text())
+            except FileNotFoundError:  # deleted since it was listed
+                continue
             if meta["name"].startswith(prefix):
                 listed.append(
                     SandboxSnapshotInfo(
