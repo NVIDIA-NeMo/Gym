@@ -10,6 +10,7 @@ holds the grading after the capture, so a checkpoint can fall inside it.
 import asyncio
 import sys
 from pathlib import Path
+from shlex import quote
 from typing import Any, ClassVar
 
 from fastapi import Request
@@ -70,8 +71,8 @@ class WorkspaceOwnerResourcesServer(CheckpointedSandboxSessionResourcesServer):
         async def setup(sandbox: AsyncSandbox) -> None:
             nonlocal workdir
             result = await sandbox.exec(": > notes && pwd")
-            if result.return_code != 0:
-                raise RuntimeError(f"setup failed: {result.stderr}")
+            if result.error_type is not None or result.return_code != 0:
+                raise RuntimeError(f"setup failed: {result.error_type or result.stderr}")
             workdir = (result.stdout or "").strip()
 
         await self.new_task_sandbox(session_id, spec).start_with_setup(spec, setup)
@@ -98,7 +99,10 @@ class WorkspaceOwnerResourcesServer(CheckpointedSandboxSessionResourcesServer):
 
     async def _read_notes(self, session_id: str) -> list[str]:
         workdir = self._task_sessions[session_id].workdir
-        result = await self._session_id_to_sandbox[session_id].exec(f"cat {workdir}/notes")
+        result = await self._session_id_to_sandbox[session_id].exec(f"cat {quote(workdir + '/notes')}")
+        if result.error_type is not None or result.return_code != 0:
+            # Notes that cannot be read are not empty notes: an empty capture would be graded 0 at every replay.
+            raise RuntimeError(f"cannot read the notes: {result.error_type or result.stderr}")
         return (result.stdout or "").splitlines()
 
 

@@ -47,6 +47,7 @@ from nemo_gym.sandbox.access import DirectSandboxConnection  # noqa: E402
 from nemo_gym.sandbox.api import AsyncSandbox  # noqa: E402
 from nemo_gym.sandbox.config import resolve_provider_config  # noqa: E402
 from nemo_gym.sandbox.providers.registry import create_provider  # noqa: E402
+from nemo_gym.sandbox.utils import upload_text  # noqa: E402
 from nemo_gym.server_runtime._checkpoint.agent import Activation, RestoredAgentSession  # noqa: E402
 from nemo_gym.server_runtime.base_resources_server import BaseRunRequest, BaseVerifyResponse  # noqa: E402
 from nemo_gym.trajectory.trajectory_record import AgentInvocation, AgentObservationBundle, ObservationGap  # noqa: E402
@@ -114,12 +115,16 @@ class _Parking:
         await self._activation.wait_park_requested()
         if self._finish_on_park:
             session = self._state.session
-            await session.sandbox.exec(f"touch {quote(self._state.release_file)}", timeout_s=10)
+            released = await session.sandbox.exec(f"touch {quote(self._state.release_file)}", timeout_s=10)
+            if released.error_type is not None or released.return_code != 0:
+                raise RuntimeError(f"cannot release the harness: {released.error_type or released.stderr}")
             receipt = f"{session.session_dir}/{CLEANUP_RECEIPT_FILE}"
             for _ in range(600):
                 if (await session.sandbox.exec(f"[ -f {quote(receipt)} ]", timeout_s=10)).return_code == 0:
                     break
                 await asyncio.sleep(0.05)
+            else:
+                raise RuntimeError("the harness did not finish after its release file was written")
 
     async def boundary(self, snapshot: Any) -> None:
         await self._activation.boundary(snapshot)
@@ -157,21 +162,20 @@ class FakeHarnessAgent(SimpleResponsesAPIAgent):
         sandbox = await self._connect(body)
         workdir = body.sandbox_access.workdir
         root = str(PurePosixPath(workdir).parent / "harness" / uuid4().hex)
-        await self._install(sandbox, root)
+        try:
+            await self._install(sandbox, root)
+        except BaseException:
+            await sandbox.disconnect()
+            raise
         return FakeHarnessSession(
             request=body, session=self._session(sandbox, root, workdir), root=root, workdir=workdir
         )
 
     async def _install(self, sandbox: AsyncSandbox, root: str) -> None:
         result = await sandbox.exec(f"mkdir -p {quote(root)}", timeout_s=30)
-        if result.return_code != 0:
-            raise RuntimeError(f"cannot prepare the harness: {result.stderr}")
-        script = Path(f"/tmp/fake-harness-{uuid4().hex}.py")
-        script.write_text(HARNESS)
-        try:
-            await sandbox.upload(script, f"{root}/harness.py")
-        finally:
-            script.unlink(missing_ok=True)
+        if result.error_type is not None or result.return_code != 0:
+            raise RuntimeError(f"cannot prepare the harness: {result.error_type or result.stderr}")
+        await upload_text(sandbox, path=f"{root}/harness.py", text=HARNESS)
 
     async def responses(self, request: Request, body: Any = None) -> NeMoGymResponse:
         session_id = self._agent_session_id_from_request(request)
@@ -186,7 +190,13 @@ class FakeHarnessAgent(SimpleResponsesAPIAgent):
         if index is not None and index == state.completed_activation and state.completed_reply is not None:
             participant.answered_from_saved_reply(session_id, EpisodeId.from_capture_key(rollout_id))
             return NeMoGymResponse.model_validate(state.completed_reply)
-        if state.task is None:
+        failed = (
+            state.task is not None
+            and state.task.done()
+            and (state.task.cancelled() or state.task.exception() is not None)
+        )
+        if state.task is None or failed:
+            # An activation that failed is started again by its retry, not answered with the old error for ever.
             if state.session is None:
                 raise HTTPException(409, "restored session was not re-bound")
             state.task = asyncio.create_task(self._activate(state, index, rollout_id))
@@ -201,7 +211,9 @@ class FakeHarnessAgent(SimpleResponsesAPIAgent):
                 if state.launch_count > 0:
                     directory = f"{state.root}/launch-{state.launch_count + 1}"
                     await state.session.begin_activation(session_dir=directory, timeout=self.config.close_timeout_s)
-                    await state.session.sandbox.exec(f"mkdir -p {quote(directory)}", timeout_s=30)
+                    made = await state.session.sandbox.exec(f"mkdir -p {quote(directory)}", timeout_s=30)
+                    if made.error_type is not None or made.return_code != 0:
+                        raise RuntimeError(f"cannot prepare launch {directory}: {made.error_type or made.stderr}")
                 state.launch_count += 1
                 if self._failed_pauses < self.config.fail_pauses:
                     self._break_next_pause(state.session)
@@ -238,6 +250,10 @@ class FakeHarnessAgent(SimpleResponsesAPIAgent):
                 )
                 if isinstance(outcome, LaunchFinished):
                     break
+            receipt = state.session.cleanup
+            if receipt is not None and (receipt.get("return_code") not in (0, None) or receipt.get("timed_out")):
+                # A harness that died, for example on a failed model call, did not complete the activation.
+                raise RuntimeError(f"the fake harness did not finish: {receipt}")
             response = NeMoGymResponse(
                 id=f"resp_{uuid4().hex}",
                 created_at=int(time()),
@@ -268,9 +284,10 @@ class FakeHarnessAgent(SimpleResponsesAPIAgent):
     def _break_next_pause(self, session: SandboxSession[None]) -> None:
         async def unconfirmed(**kwargs: Any) -> HarnessPauseResult:
             del session.pause_harness
-            self._failed_pauses += 1
             return HarnessPauseResult(status="unconfirmed", error="injected: the pause was not confirmed")
 
+        # Counted when installed, so sessions that launch together do not all get one.
+        self._failed_pauses += 1
         session.pause_harness = unconfirmed
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:

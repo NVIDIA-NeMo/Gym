@@ -8,7 +8,8 @@ A partial-rollout checkpoint lets a training run stop and later continue its unf
 them over. Each server takes part for the state it owns. This page is for a resources server whose episode seed starts
 a **task sandbox** that the agent works in, as SWE-bench's does. A server whose session state is a small JSON object
 declares `checkpoint_mode = "exported"` and implements `export_session_states` and `restore_session_states` directly;
-see `resources_servers/example_session_state_mgmt`.
+see `resources_servers/example_session_state_mgmt`. For the agent side, see
+[Make a Harness Checkpointable](/main/agent-server/checkpointable-harness).
 
 ## Build on `CheckpointedSandboxSessionResourcesServer`
 
@@ -23,10 +24,23 @@ checkpoint half and leaves that flow as it is. A subclass:
 | `task_model` | The model of the episode seed's `task_data`. A restore rebuilds the session's task from it. |
 | `new_task_sandbox(session_id, spec)` | Call it from `_start_task_sandbox` to create the task sandbox: it puts the sandbox on the provider every session shares and registers it for the session and its checkpoints before it starts. |
 | `_export_task_sandbox_state` / `_restore_task_sandbox_state` | The JSON task state a restored session needs besides its sandbox, such as the commit the agent started from. |
+| `_forget_task_sandbox_state` | Drops that task state once the session's sandbox stopped. |
 | `checkpoint_mode` | `"restart_only"` for a grader that needs something a snapshot does not keep, such as processes the agent started (see below). |
 | Config | Mix `SandboxCheckpointFields` into the server's config for `sandbox_checkpoint` (snapshot parallelism and retries). |
 
 ```python
+from typing import Any
+
+from pydantic import JsonValue, PrivateAttr
+
+from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.server_runtime import BaseResourcesServerConfig
+from resources_servers.swebench.sandbox_session_checkpoints import (
+    CheckpointedSandboxSessionResourcesServer,
+    SandboxCheckpointFields,
+)
+
+
 class MyConfig(SandboxCheckpointFields, BaseResourcesServerConfig):
     sandbox_provider: str
     sandbox_config: dict[str, Any] = {}
@@ -36,12 +50,23 @@ class MyServer(CheckpointedSandboxSessionResourcesServer):
     config: MyConfig
     task_model = MyTask
     checkpoint_verify = "replay"  # verify grades the patch it captured once
+    _seed_heads: dict[str, str] = PrivateAttr(default_factory=dict)
 
     async def _start_task_sandbox(self, session_id: str, task: MyTask) -> str:
-        sandbox = self.new_task_sandbox(session_id, self._spec(task))
-        await sandbox.start_with_setup(self._spec(task), self._set_up(task))
-        self._seed_heads[session_id] = (await sandbox.exec("git rev-parse HEAD")).stdout.strip()
+        spec = self._spec(task)
+        sandbox = self.new_task_sandbox(session_id, spec)
+
+        async def set_up(sandbox: AsyncSandbox) -> None:
+            head = await sandbox.exec("git rev-parse HEAD", cwd="/testbed")
+            if head.error_type is not None or head.return_code != 0:
+                raise RuntimeError(f"Could not read the task's starting commit: {head.stderr or ''}")
+            self._seed_heads[session_id] = (head.stdout or "").strip()
+
+        await sandbox.start_with_setup(spec, set_up)
         return "/testbed"
+
+    def _forget_task_sandbox_state(self, session_id: str) -> None:
+        self._seed_heads.pop(session_id, None)
 
     def _export_task_sandbox_state(self, session_id: str) -> dict[str, JsonValue]:
         return {"seed_head": self._seed_heads[session_id]} if session_id in self._seed_heads else {}
@@ -51,8 +76,19 @@ class MyServer(CheckpointedSandboxSessionResourcesServer):
             self._seed_heads[session_id] = str(state["seed_head"])
 ```
 
-Seed, verify and close are the base's: `seed_task_sandbox_session`, `verify_task_sandbox_session` with
-`capture_task_sandbox_patch` and `stop_task_sandbox_after_capture`, and `close_resources_session`.
+Your `seed_session` and `verify` routes call the base's helpers: `seed_task_sandbox_session(request, body, MyTask)`
+for an episode seed, and `verify_task_sandbox_session(request, body, verify=..., lost_response=...)`, whose `verify`
+callback captures the patch inside `capture_task_sandbox_patch(session_id, capture)` and then calls
+`stop_task_sandbox_after_capture(session_id)`. Close is the base's `close_resources_session`.
+`resources_servers/swebench/app.py` shows all three.
+
+`sandbox_checkpoint` settings:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `parallelism` | `16` | Concurrent snapshot submits, creates, stops and deletes against the sandbox backend. Readiness waits are not counted. |
+| `snapshot_attempts` | `3` | Snapshots of one sandbox per commit before its export fails. The commit deadline must cover this many times the provider's snapshot timeout. |
+| `snapshot_retry_delay_s` | `5.0` | Pause between those attempts. |
 
 ## What a checkpoint holds
 
@@ -63,7 +99,9 @@ sandbox, whatever happened to the original since. The snapshot keeps **files, no
 
 - **Grade a captured patch, not a live sandbox.** Declare `checkpoint_verify = "replay"`: a checkpoint does not wait
   for grading, and a verify that runs again after a restore grades the saved patch instead of capturing it again. A
-  session past its capture exports no sandbox.
+  session past its capture exports no sandbox. Declare it only if `/verify` uses the task sandbox solely inside
+  `capture_task_sandbox_patch` and stops it solely with `stop_task_sandbox_after_capture`: both hold the lock a commit
+  holds while it snapshots. What the capture returns must be a JSON value, because the checkpoint stores it.
 - **In-place graders** that need processes the agent started declare `checkpoint_mode = "restart_only"`. The seed
   reply says so, and the episode starts over after a crash instead of continuing in a fork that has none of those
   processes.
@@ -73,14 +111,20 @@ sandbox, whatever happened to the original since. The snapshot keeps **files, no
 ## Requirements
 
 - A sandbox provider that can snapshot (`SupportsSandboxSnapshot`; OpenSandbox today). On any other provider
-  the server reports `restart_only`, says so on its seed reply, and its episodes start over after a crash.
+  the server reports `restart_only`, says so on its seed reply, and its episodes start over after a crash; commits
+  still succeed.
 - `checkpoint.state_dir`: an absolute path every restart of the run can read, outside anything the controller deletes.
   A server that exports its sessions refuses to start with checkpointing on and no `state_dir`, or a relative one.
+- One `state_dir` per job and its restarts: two jobs running at the same time that share one delete each other's
+  snapshots at their releases, so put the job's ID in the path. Its `flock` must hold across every node that runs the
+  server (on Lustre, mount with `-o flock`).
 - The controller calls `release(kept)` after each checkpoint it saves, and `release([])` at the end of a run that
   will not be resumed. A job that ended for good without that final release leaves its last snapshots. Their names
-  start with `ng-<state dir id>-`, where the id is the content of `<state_dir>/state_dir_id`; on OpenSandbox, delete them with
-  `python -m nemo_gym.sandbox.providers.opensandbox.snapshots --connection-config env.yaml --name-prefix "ng-$(cat <state_dir>/state_dir_id)-" --reap`
-  (without `--reap` it only lists them).
+  start with `ng-<state dir id>-`, where the id is the content of `<state_dir>/state_dir_id`; on OpenSandbox, delete
+  them as [OpenSandbox Provider](/main/infrastructure/sandbox/opensandbox) describes.
+
+Checkpoint timings and outcomes are reported as
+[Partial-Rollout Checkpoint Metrics](/main/observability/metrics#partial-rollout-checkpoint-metrics).
 
 ## Check it
 
@@ -90,8 +134,15 @@ replacement attempt's seed, the captured patch surviving a restore, release (inc
 left), close, shutdown, and `restart_only` on a provider that cannot snapshot.
 
 ```python
+from resources_servers.swebench.testing.checkpoint_conformance import check_sandbox_session_checkpoints
+
+
 async def test_my_server_conforms(tmp_path):
     await check_sandbox_session_checkpoints(make_server, episode_seed(), tmp_path / "state")
 ```
+
+`make_server(provider, global_config)` builds your server on the provider it is given (`shared_provider()` must return
+it) with `global_config` as its global configuration; `episode_seed()` is one `ResourcesSeedSessionRequest` your server
+accepts.
 
 `resources_servers/swebench/tests/test_checkpoint.py` is a complete example.
