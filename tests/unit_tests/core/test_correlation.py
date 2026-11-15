@@ -238,10 +238,12 @@ def test_resolve_leaves_the_state_of_an_unprefixed_request_untouched():
     assert "state" not in scope
 
 
-@pytest.mark.parametrize("key", [".hidden", "a b", "a:b", "ä"])
+@pytest.mark.parametrize("key", [".hidden", "a b", "a:b", "ä", "r-a1\n"])
 def test_a_capture_key_follows_the_rollout_id_rule(key):
     with pytest.raises(CorrelationPathError, match="invalid capture key"):
         parse_path(f"/ng-rollout/{key}/v1/responses")
+    with pytest.raises(ValueError, match="invalid capture key"):
+        CorrelationContext(capture_key=key)
 
 
 async def test_resources_servers_strip_a_whole_prefix_and_see_its_rollout():
@@ -310,6 +312,22 @@ def test_a_valid_bare_prefix_is_read_only_when_an_empty_rest_is_allowed(path, co
 def test_a_context_takes_keyword_arguments_only():
     with pytest.raises(TypeError):
         CorrelationContext("k", "judge")
+
+
+async def test_a_resources_server_leaves_a_path_whose_capture_key_ends_in_a_newline():
+    from nemo_gym.core.episode_context import current_rollout_id
+    from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
+
+    seen = {}
+
+    async def app(scope, receive, send):
+        seen["path"] = scope["path"]
+        seen["rollout_id"] = current_rollout_id()
+
+    path = "/ng-rollout/r-a1\n/verify"
+    await RolloutContextMiddleware(app)({"type": "http", "path": path, "raw_path": path.encode()}, None, None)
+
+    assert seen == {"path": path, "rollout_id": None}
 
 
 @pytest.mark.parametrize(

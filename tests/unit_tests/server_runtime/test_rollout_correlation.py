@@ -487,3 +487,32 @@ async def test_server_client_inserts_the_context_name_into_a_prefixed_path_and_n
         "http://resources.test:80/ng-rollout/4-2/verify",
         "http://judge.test:80/ng-rollout/4-2/v1/responses",
     ]
+
+
+@pytest.mark.asyncio
+async def test_server_client_keeps_the_query_and_the_trace_segment_of_a_path_it_names(monkeypatch) -> None:
+    from nemo_gym.core.episode_context import agent_instance_context
+
+    sent = []
+
+    async def transport(method: str, url: str, **kwargs):
+        sent.append(url)
+
+    monkeypatch.setattr("nemo_gym.client.server_client.request", transport)
+    client = _naming_client(observability=False)
+    trace = "ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+
+    with agent_instance_context("user"):
+        await client.post(server_name="judge", url_path="/ng-rollout/4-2/v1/responses?beta=true", json={})
+        await client.post(server_name="judge", url_path=f"/ng-rollout/4-2/{trace}/v1/chat/completions", json={})
+        await client.post(
+            server_name="judge",
+            url_path=f"/ng-rollout/4-2/training-token-capture/{trace}/v1/messages?beta=true",
+            json={},
+        )
+
+    assert sent == [
+        "http://judge.test:80/ng-rollout/4-2/ng-agent-instance/user/v1/responses?beta=true",
+        f"http://judge.test:80/ng-rollout/4-2/ng-agent-instance/user/{trace}/v1/chat/completions",
+        f"http://judge.test:80/ng-rollout/4-2/ng-agent-instance/user/training-token-capture/{trace}/v1/messages?beta=true",
+    ]

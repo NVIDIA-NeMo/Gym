@@ -130,7 +130,7 @@ class CorrelationContext:
     trace_parent: str | None = None
 
     def __post_init__(self) -> None:
-        if self.capture_key is not None and not ROLLOUT_ID_PATTERN.match(self.capture_key):
+        if self.capture_key is not None and not ROLLOUT_ID_PATTERN.fullmatch(self.capture_key):
             raise ValueError(f"invalid capture key {self.capture_key!r}")
         if self.capture_key is None and (self.agent_instance is not None or self.token_capture):
             raise ValueError("an agent instance or the training segment requires a capture key")

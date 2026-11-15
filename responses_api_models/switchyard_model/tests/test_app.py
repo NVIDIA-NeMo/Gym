@@ -255,6 +255,7 @@ class TestRolloutSessionMiddleware:
     async def test_rollout_id_outside_the_contract_charset_is_ignored(self) -> None:
         """The id becomes an upstream header value, so anything off-contract is dropped, not sent."""
         assert await self._rollout_id_for("/ng-rollout/bad\r\nx-injected: 1/v1/responses") is None
+        assert await self._rollout_id_for("/ng-rollout/task0-r1-a0\n/v1/responses") is None
 
     async def test_non_http_scope_is_forwarded_untouched(self) -> None:
         seen: dict = {}
