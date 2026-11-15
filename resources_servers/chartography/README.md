@@ -28,8 +28,8 @@ output. A row without a question or golden answer is masked (`mask_sample`,
 
 **Grading path A** (the resources server observes it): the judge call and its parse run inside
 `observe_llm_judge_grading`, and `record_parsed_judge_verdict()` marks the reply once it parses, so
-`gym eval submit` binds each grade to the judge reply. A row that needed a parse retry keeps an unknown grading
-outcome, since its first reply produced no verdict.
+`gym eval submit` binds each grade to the judge reply. A reply that does not parse and is asked again is marked
+with `record_rejected_judge_reply()`, so a row that needed a parse retry still completes its one grading.
 
 Two deliberate divergences from upstream, as in `gdp_pdf`:
 
