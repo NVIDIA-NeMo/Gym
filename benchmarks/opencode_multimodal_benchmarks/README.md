@@ -102,7 +102,7 @@ coverage and judge failures. Enable model-call capture when collecting evidence.
 A valid manifest and passing verifier fixtures do not establish score parity or
 harness conformance.
 
-The [2026-11-14 rollout evidence](evidence/visual-defaults-20261114.json) records
+The rollout evidence in [PR #6187](https://github.com/NVIDIA-NeMo/Gym/pull/6187) records
 representative real Qwen requests for all four catalogs, image delivery, the
 32768-token request limit, verifier outputs and a VTCBench judge call. It labels
 unfinished evaluations as partial and records the limits of cleanup telemetry.
