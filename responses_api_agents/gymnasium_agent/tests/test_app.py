@@ -900,6 +900,7 @@ class TestAgentObservation:
         (invocation,) = row["ng_agent_observations"]["records"]
         assert invocation["status"] == "completed"
         assert [call["response_id"] for call in invocation["model_calls"]] == ["r1", "r2"]
+        assert invocation["conversation"] == row["responses_create_params"]["input"] + row["response"]["output"]
 
     @pytest.mark.asyncio
     async def test_an_answer_the_model_cut_off_is_an_incomplete_invocation_not_a_missing_one(self):

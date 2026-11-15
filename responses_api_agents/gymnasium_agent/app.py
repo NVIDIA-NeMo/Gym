@@ -329,7 +329,9 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
                     AgentInvocation(
                         invocation_id=f"gymnasium_{uuid.uuid4().hex}",
                         in_session=False,
-                        # A cut-off last answer or an episode the step limit ended is incomplete, as other agents mark it.
+                        conversation=[*base_body.input, *last_model_response.output],
+                        # A cut-off last answer or an episode the step limit ended is incomplete, as other
+                        # agents mark it.
                         status="completed"
                         if finished
                         and getattr(last_model_response, "status", None) != "incomplete"

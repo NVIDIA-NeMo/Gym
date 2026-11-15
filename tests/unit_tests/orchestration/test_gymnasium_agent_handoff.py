@@ -100,7 +100,8 @@ async def test_a_finished_episode_of_a_real_run_is_observed_through_its_reward_r
     assert [call["response_metadata"]["response_id"] for call in row["ng_trial_observations"]["model_calls"]] == [
         "resp-1"
     ]
-    assert not [gap for gap in row["ng_trial_observations"]["gaps"] if gap["code"] == "model_call_reference_unmatched"]
+    gaps = {gap["code"] for gap in row["ng_trial_observations"]["gaps"]}
+    assert not gaps & {"model_call_reference_unmatched", "conversation_unavailable"}, gaps
     passed, reason, counts, covered = _gate(collected)
     assert covered is True and passed is True, reason
     assert counts["unobserved"] == 0
@@ -120,5 +121,4 @@ async def test_an_answer_cut_off_in_a_real_run_is_a_counted_model_failure(tmp_pa
     assert passed is True, reason
     assert evaluation["exact"] is True
     assert evaluation["evaluation"]["count"] == 0
-    assert evaluation["model"]["kinds"] == {"truncated_answer": 1}
     assert evaluation["model"]["kinds"] == {"truncated_answer": 1}
