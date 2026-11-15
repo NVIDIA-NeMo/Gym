@@ -207,6 +207,10 @@ class InheritPathNotFoundError(ConfigError, ValueError):
     """An `_inherit_from` / swap / copy directive references a config path that does not exist."""
 
 
+class InheritCycleError(ConfigError, ValueError):
+    """`_inherit_from` / copy directives form a cycle, so no config in it has a base to start from."""
+
+
 class AlmostServerError(ConfigError, ValueError):
     """One or more server blocks are almost-servers (right shape, failed validation) and
     `error_on_almost_servers` is set, so the run is aborted."""
