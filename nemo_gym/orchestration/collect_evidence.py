@@ -32,6 +32,7 @@ from nemo_gym.orchestration.executors.resume_script import (
     CANCELLED_FOLLOWUP_MARKER,
     FOLLOW_UP_SUBMISSION_REFUSED,
     GUARDED_DRIVER_FAILURE_KINDS,
+    NO_ELIGIBLE_RETRY_REASON,
     PROVISIONAL_MARKER_PREFIX,
 )
 
@@ -89,6 +90,9 @@ COLLECT_SCRIPT = (
     + "\n"
     + "FOLLOW_UP_SUBMISSION_REFUSED = "
     + repr(FOLLOW_UP_SUBMISSION_REFUSED)
+    + "\n"
+    + "NO_ELIGIBLE_RETRY_REASON = "
+    + repr(NO_ELIGIBLE_RETRY_REASON)
     + "\n"
     + "TASK_ID_FIELDS = "
     + repr(TASK_ID_FIELDS)
@@ -971,6 +975,16 @@ def chain_continuation_note():
         line = head + DRIVER_INSTALL_FAILED + ": (error text omitted)" + (sep + tail if sep else "")
     return line[:500] if named else None
 collected["chain_continuation_note"] = chain_continuation_note()
+def chain_ended_itself():
+    # True when the marker is the line a job writes when it ends its own chain with nothing eligible for another
+    # attempt (resume_script's NO_ELIGIBLE_RETRY_REASON): the chain stopped there with its accounting written, as a
+    # run whose only open rows are judge failures ends.
+    try:
+        text = open(os.path.join(d, ".gym_chain_incomplete")).read(2000)
+    except OSError:
+        return False
+    return text.strip().splitlines()[:1] == [NO_ELIGIBLE_RETRY_REASON]
+collected["chain_ended_itself"] = chain_ended_itself()
 collected["unreadable_files"] = sorted(unreadable)
 def judge_jobs():
     # The judge-only jobs queued for this run's saved answers (JUDGE_JOB_JOURNAL_NAME, oldest first), each with its

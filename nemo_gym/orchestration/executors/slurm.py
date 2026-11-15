@@ -1731,7 +1731,9 @@ class SlurmExecutor(BaseExecutor):
             if resume is None or resume.max_walltime is None or evidence.accounting_snapshot is None:
                 return stopped("saved rejudge walltime or accounting owner is unknown")
             used = evidence.accounted_walltime_s
-            retries = evidence.infra_retries_used
+            # As the recovery decision counts them: resume_script creates .gym_infra_retries on the first infra retry,
+            # so an absent file means none ran; a malformed or unknown one stays unknown.
+            retries = {"absent": 0.0, "ok": evidence.infra_retries_used}.get(evidence.infra_retries_state)
             if (
                 used is None
                 or not math.isfinite(used)
@@ -1741,7 +1743,10 @@ class SlurmExecutor(BaseExecutor):
                 or retries < 0
             ):
                 return stopped("actual chain walltime or retry accounting is unknown")
-            if retries > resume.max_retries or not evidence.job_chain or evidence.chain_incomplete:
+            # A chain whose last job ended it with nothing eligible for another attempt is complete: that is how a
+            # run whose only open rows are judge failures stops. Any other marker line leaves it incomplete.
+            incomplete = evidence.chain_incomplete and not evidence.chain_ended_itself
+            if retries > resume.max_retries or not evidence.job_chain or incomplete:
                 return stopped("recorded chain is incomplete or exceeds its original retry allowance")
             cap = _walltime_to_seconds(resume.max_walltime)
             remaining = math.floor(cap - used)
@@ -1767,6 +1772,9 @@ class SlurmExecutor(BaseExecutor):
             queued_snapshot = {k: v for k, v in evidence.source_digests.items() if Path(k).name == k}
             nonce = new_gym_job_id(utc_now())
             output = job_dir / "reverification" / nonce / "rollouts.jsonl"
+            # The receipt makes the job recompute the run's aggregate metrics and quality summary from the settled
+            # rows (``_reverify_with_receipt``), as the judge-only job of a GPU run does.
+            receipt = output.parent / "receipt.json"
             # Observability is on by default, and it needs a capture directory: the job's own folder, as a submitted
             # evaluation captures into its benchmark directory.
             run = _with_default_capture_dir(run, output.parent)
@@ -1785,6 +1793,8 @@ class SlurmExecutor(BaseExecutor):
                     shlex.quote(str(job_dir / "artifacts/rollouts_materialized_inputs.jsonl")),
                     "--output",
                     shlex.quote(str(output)),
+                    "--settle-receipt",
+                    shlex.quote(str(receipt)),
                     *flatten_run_args(run),
                 ]
             )
