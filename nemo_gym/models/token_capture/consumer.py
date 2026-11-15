@@ -335,7 +335,11 @@ def _build_snapshot(
     except LookupError:
         primary, has_primary = None, False
     terminals = dict(agent_instance_terminals or {})
-    owners = {entry.response_id: entry.agent_instance for entry in snapshot.entries if entry.response_id}
+    # A response id is unique on its model server only, so several agent instances may hold the same id.
+    owners: dict[str, set[str | None]] = {}
+    for entry in snapshot.entries:
+        if entry.response_id:
+            owners.setdefault(entry.response_id, set()).add(entry.agent_instance)
     builds: dict[str | None, dict] = {}
     for agent_instance, groups in agents.items():
         is_primary = has_primary and agent_instance == primary
@@ -356,9 +360,12 @@ def _build_snapshot(
             declared_response_id=declared,
             engine_refusals=snapshot.engine_refusals,
         )
-        if declared is not None and declared in owners and owners[declared] != agent_instance:
-            # The declared terminal is another agent instance's call: a conflict, not a match.
-            built.setdefault("metrics", {})["terminal_conflict"] = owners[declared]
+        if declared is not None and declared in owners and agent_instance not in owners[declared]:
+            # The declared terminal is only another agent instance's call: a conflict, not a match. When several
+            # hold the id, name the same one whatever the capture order, a named agent instance first.
+            built.setdefault("metrics", {})["terminal_conflict"] = min(
+                owners[declared], key=lambda name: (name is None, name or "")
+            )
             built["mask_sample"] = True
         _apply_snapshot_outcome(built, snapshot, agent_instance, always=mask_incomplete_when_attributed)
         builds[agent_instance] = built

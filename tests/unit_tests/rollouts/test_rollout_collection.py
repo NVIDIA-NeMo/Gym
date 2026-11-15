@@ -8009,6 +8009,66 @@ class TestRolloutCollection:
         written = json.loads(metrics_fpath.read_text())
         assert "perf_summary" not in written[0]
 
+    async def test_call_aggregate_metrics_strips_each_agent_instance_s_rebuilt_response(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A row's ``agent_instances`` entries reach /aggregate_metrics without their token-level ``response``."""
+        mock_response = AsyncMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.read = AsyncMock(return_value=orjson.dumps(AggregateMetrics().model_dump()))
+        mock_response.status = 200
+        mock_server_client = MagicMock()
+        mock_server_client.global_config_dict = OmegaConf.create(
+            {
+                "my_agent": {"responses_api_agents": {"impl": {}}},
+                "my_agent_environment_server": {
+                    "environment_servers": {"legacy_agent": {"agent_server": {"name": "my_agent"}}}
+                },
+            }
+        )
+        mock_server_client.post = AsyncMock(return_value=mock_response)
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection,
+            "setup_server_client_utils",
+            lambda *args, **kwargs: mock_server_client,
+        )
+        rebuilt = {"output": [{"prompt_token_ids": [1, 2], "generation_token_ids": [3]}], "usage": {"input_tokens": 2}}
+        rows = [{AGENT_REF_KEY_NAME: {"name": "my_agent"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}]
+        results = [
+            {
+                TASK_INDEX_KEY_NAME: 0,
+                ROLLOUT_INDEX_KEY_NAME: 0,
+                "reward": 1.0,
+                "response": dict(rebuilt),
+                "agent_instances": {
+                    "assistant": {
+                        "terminal_response_id": "resp_a1",
+                        "reward": 1.0,
+                        "response": dict(rebuilt),
+                        "mask_sample": False,
+                        "_ng_token_capture": {"n_calls": 1},
+                    },
+                    "user": {"terminal_response_id": "resp_u1"},
+                },
+            }
+        ]
+
+        await RolloutCollectionHelper()._call_aggregate_metrics(results, rows, tmp_path / "output.jsonl")
+
+        (sent,) = mock_server_client.post.call_args.kwargs["json"].verify_responses
+        assert sent["response"] == {"usage": {"input_tokens": 2}}
+        assert sent["agent_instances"] == {
+            "assistant": {
+                "terminal_response_id": "resp_a1",
+                "reward": 1.0,
+                "mask_sample": False,
+                "_ng_token_capture": {"n_calls": 1},
+            },
+            "user": {"terminal_response_id": "resp_u1"},
+        }
+        # The saved row keeps each agent instance's response.
+        assert results[0]["agent_instances"]["assistant"]["response"] == rebuilt
+
     async def test_call_aggregate_metrics_multiple_agents(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:

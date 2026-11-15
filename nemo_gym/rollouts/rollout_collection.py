@@ -737,6 +737,20 @@ def _reply_failure_report(response: Mapping[str, Any]) -> tuple[FailureReport, .
         return (FailureReport(omitted=True),)
 
 
+def _without_agent_instance_responses(agent_instances: object) -> object:
+    """Return a row's ``agent_instances`` map without each entry's rebuilt ``response``, for /aggregate_metrics.
+
+    Token capture delivery writes every agent instance's token-level response into its entry. Like the row's
+    top-level ``response``, it is generated content that aggregation does not read. The row's map is not modified.
+    """
+    if not isinstance(agent_instances, dict):
+        return agent_instances
+    return {
+        name: {key: value for key, value in entry.items() if key != "response"} if isinstance(entry, dict) else entry
+        for name, entry in agent_instances.items()
+    }
+
+
 def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
     """Turn a ``BaseEpisodeResponse`` into the rollout record the collector stores.
 
@@ -5134,6 +5148,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     response_metadata["metrics"] = metrics
                 if response_metadata:
                     entry["response"] = response_metadata
+                if AGENT_INSTANCES_KEY in entry:
+                    entry[AGENT_INSTANCES_KEY] = _without_agent_instance_responses(entry[AGENT_INSTANCES_KEY])
                 stripped.append(entry)
 
             agg_response = None
