@@ -619,12 +619,15 @@ def test_clients_hermes_builds_itself_use_the_model_server(restore_process_globa
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux supervisor contract")
 @pytest.mark.parametrize("cooperative", [True, False])
 @pytest.mark.parametrize("ending", ["deadline", "close"])
-def test_worker_stop_checkpoints_partial_work_before_hard_cleanup(tmp_path, cooperative, ending):
+def test_worker_stop_checkpoints_partial_work_before_hard_cleanup(
+    tmp_path: Path, cooperative: bool, ending: str
+) -> None:
     from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
     from responses_api_agents.hermes_agent import sandbox_runner
 
     input_path, output_path = tmp_path / "input.json", tmp_path / "output.json"
     stop_request_path = tmp_path / STOP_REQUEST_FILE
+    expire_path = tmp_path / "expire.request"
     input_path.write_text(json.dumps({**_payload("http://unused/v1"), "stop_request_path": str(stop_request_path)}))
     # Run the real worker/observer under the real supervisor, with a deterministic slow harness.
     driver = """
@@ -659,11 +662,13 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
             "bash",
             str(SUPERVISOR_SCRIPT),
             "--timeout",
-            "2" if ending == "deadline" else "10",
+            "60",
             "--cleanup-timeout",
-            "0.5",
+            "5",
             "--stop-file",
             str(stop_request_path),
+            "--expire-file",
+            str(expire_path),
             "--receipt",
             str(tmp_path / "cleanup.json"),
             "--",
@@ -683,19 +688,22 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
         errors="replace",
     )
     try:
-        if ending == "close":
-            deadline = time.monotonic() + 5
-            while not (tmp_path / "model.patch").exists() and process.poll() is None and time.monotonic() < deadline:
-                time.sleep(0.01)
-            assert (tmp_path / "model.patch").exists()
-            # Production sends no signal; the stop file alone must stop the supervisor.
-            stop_request_path.touch()
-        _, stderr = process.communicate(timeout=10)
+        # Imports and worker startup are not part of the stop/checkpoint contract. Trigger either
+        # stop only after the handler is installed and the harness has partial work to preserve.
+        deadline = time.monotonic() + 30
+        while not (tmp_path / "model.patch").exists() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert (tmp_path / "model.patch").exists(), "the worker never produced partial work"
+        assert not output_path.exists(), "the worker must still be running before the stop"
+        # Expiry takes the supervisor's deadline path without racing a loaded runner's startup.
+        # A close uses only the production stop file, not a signal from the test.
+        (expire_path if ending == "deadline" else stop_request_path).touch()
+        _, stderr = process.communicate(timeout=30)
         assert process.returncode == 0, stderr
     finally:
         if process.poll() is None:
             process.terminate()
-        process.wait(timeout=5)
+        process.wait(timeout=30)
     receipt = json.loads((tmp_path / "cleanup.json").read_text())
     assert receipt["timed_out"] is (ending == "deadline")
     assert receipt["cleanup_confirmed"] is True
