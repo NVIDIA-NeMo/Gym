@@ -160,6 +160,13 @@ def test_verifier_fixture() -> None:
         '<tracks coords="1:1 1 150 300 2 1 650 700;2:1 1 150 300;3:1 0 150 300">tracks</tracks>',
         '<tracks coords="1: [150,300] [650 700];2: [150, 300]">tracks</tracks>',
         '<points coords="1 1 150 300 2 650 700,2 1 150 300">points</points>',
+        # The frames of a <points> answer may be separated by ", " (or other whitespace after the delimiter).
+        '<points coords="1 1 150 300 2 650 700, 2 1 150 300">points</points>',
+        '<points coords="1 1 150 300 2 650 700;\n2 1 150 300">points</points>',
+        # An entry whose coordinate or frame number overflows a float is dropped; the rest still score.
+        '<answer>{"tracks":[{"frame":1,"xy":[' + "9" * 400 + ',300]},{"frame":1,"xy":[150,300]},'
+        '{"frame":1,"xy":[650,700]},{"frame":2,"xy":[150,300]}]}</answer>',
+        '<tracks coords="1e999: [150,300];1: [150,300] [650 700];2: [150, 300]">tracks</tracks>',
         '<tracks coords="1:1 150 300 2 650 700;2.0:1 150 300;x:1 150 300;nocolon">tracks</tracks>',
     ],
 )
@@ -185,6 +192,9 @@ def test_accepted_answer_shapes_recover_every_point(text: str) -> None:
         '<tracks coords="">tracks</tracks>',
         '<tracks coords="1:nothing here;2:">tracks</tracks>',
         '<points coords="x y z">points</points>',
+        # A frame number too large for a float is not a frame.
+        '<tracks coords="1e999: [150,300]">tracks</tracks>',
+        '<points coords="' + "9" * 400 + ' 1 150 300">points</points>',
     ],
 )
 def test_answers_without_any_point_are_parse_failures(text: str) -> None:
@@ -196,13 +206,31 @@ def test_answers_without_any_point_are_parse_failures(text: str) -> None:
     assert (result["reward"], result["num_scored_frames"]) == (0.0, 2)
 
 
-def test_an_entry_with_an_unusable_point_still_counts_as_a_parsed_answer() -> None:
-    text = '<answer>{"tracks":[{"frame":1,"xy":["a",2]},{"frame":2,"xy":[NaN,300]}]}</answer> <tracks coords="1: [150,300]">'
+@pytest.mark.parametrize(
+    "unusable",
+    ['"a",2', "NaN,300", "9" * 400 + ",300"],
+    ids=["not_a_number", "not_finite", "overflows_a_float"],
+)
+def test_an_answer_whose_points_are_all_unusable_is_a_parse_failure_that_ends_the_search(unusable: str) -> None:
+    text = (
+        f'<answer>{{"tracks":[{{"frame":1,"xy":[{unusable}]}},{{"frame":2,"xy":[NaN,300]}}]}}</answer>'
+        ' <tracks coords="1: [150,300]">'
+    )
     result = score_expression(text, _metadata())
 
     # The frames are recorded with no points, so neither the whole text nor the markup is consulted.
     assert parse_tracks(text) == {1: [], 2: []}
-    assert (result["parse_ok"], result["reward"]) == (True, 0.0)
+    assert (result["parse_ok"], result["reward"]) == (False, 0.0)
+    assert aggregate_metrics([result])["parse_fail_rate"] == 1.0
+
+
+def test_one_recovered_point_makes_the_answer_parsed() -> None:
+    result = score_expression(
+        '<answer>{"tracks":[{"frame":1,"xy":["a",2]},{"frame":2,"xy":[150,300]}]}</answer>', _metadata()
+    )
+
+    assert (result["parse_ok"], result["reward"]) == (True, 0.5)
+    assert aggregate_metrics([result])["parse_fail_rate"] == 0.0
 
 
 def test_native_markup_drops_points_flagged_invisible() -> None:
@@ -295,6 +323,8 @@ def test_an_expression_never_visible_scores_one_only_when_nothing_is_reported() 
 
     silent = score_expression('<answer>{"tracks":[]}</answer>', empty)
     assert (silent["reward"], silent["precision"], silent["recall"], silent["num_scored_frames"]) == (1.0, 1.0, 1.0, 0)
+    # No point was read from the answer, so it still counts towards parse_fail_rate.
+    assert silent["parse_ok"] is False
     assert score_expression(_answer((1, A_GRID)), empty)["reward"] == 0.0
 
 

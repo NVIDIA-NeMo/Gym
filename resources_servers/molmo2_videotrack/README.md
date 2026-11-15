@@ -55,14 +55,18 @@ was nothing to find and the model reported nothing. Ids are ignored, and predict
 shown are ignored.
 
 `compute_metrics` reports the mean `f1`, `precision` and `recall` over rows, the same per category as
-`<category>/f1` and so on with `<category>/samples`, and `parse_fail_rate`. The verify response also returns
-per-frame counts and scores.
+`<category>/f1` and so on with `<category>/samples`, and `parse_fail_rate`: the share of rows with `parse_ok` false,
+which is the case when no point with two finite coordinates could be read from the answer. The verify response also
+returns per-frame counts and scores.
 
 ## Data
 
 `data/example.jsonl` holds five synthetic clips (rectangles moving over a plain background) with embedded frames,
 generated with `python -m benchmarks.molmo2_videotrack.tests.synthetic`. It contains no imagery from the source
 video datasets.
+
+`task_data.py` declares the row fields. The verify request validates `verifier_metadata` with the model defined
+there, so `gym dataset collate` rejects a row the verifier would reject, before any inference.
 
 ## Tests
 

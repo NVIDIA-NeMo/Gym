@@ -13,7 +13,8 @@ Point MOLMO2_VIDEOTRACK_ROOT at <root>.
 
 Each annotation row (one referring expression over one clip) becomes one task
 whose prompt holds the clip's frames sampled 1 second apart. Ground-truth
-points and masks stay in `verifier_metadata` and never enter the prompt.
+points and masks stay in `verifier_metadata` and never enter the prompt. A task's
+ID is `<category>:<annotation id>`.
 
 By default frames are referenced as file:// URLs, which keeps the JSONL small
 (about 2.3 GB of frames are shared between expressions) but requires a model
@@ -28,6 +29,7 @@ import json
 import math
 import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, Iterator
 from urllib.parse import quote
 
@@ -123,6 +125,8 @@ def convert(row: dict[str, Any], category: str, videos_dir: Path) -> dict[str, A
     content.append({"type": "input_text", "text": INSTRUCTION_TEXT})
 
     return {
+        # Qualified by category, so equal annotation IDs in two categories stay distinct tasks.
+        "task_id": f"{category}:{row['id']}",
         "responses_create_params": {"input": [{"role": "user", "content": content}]},
         "verifier_metadata": {
             "id": row["id"],
@@ -158,12 +162,17 @@ def prepare() -> Path:
 
     OUTPUT_FPATH.parent.mkdir(parents=True, exist_ok=True)
     counts: dict[str, int] = {}
-    with open(OUTPUT_FPATH, "w", encoding="utf-8") as out:
-        for category, relative in CATEGORIES.items():
-            counts[category] = 0
-            for row in iter_annotation_rows(root / relative):
-                out.write(json.dumps(convert(row, category, videos_dir)) + "\n")
-                counts[category] += 1
+    # Written beside the final file and renamed over it only once every clip has converted, so a failed run
+    # leaves neither a partial benchmark nor a truncated earlier one for a later run to pick up.
+    with TemporaryDirectory(dir=OUTPUT_FPATH.parent) as temporary:
+        pending = Path(temporary) / OUTPUT_FPATH.name
+        with pending.open("w", encoding="utf-8") as out:
+            for category, relative in CATEGORIES.items():
+                counts[category] = 0
+                for row in iter_annotation_rows(root / relative):
+                    out.write(json.dumps(convert(row, category, videos_dir)) + "\n")
+                    counts[category] += 1
+        pending.replace(OUTPUT_FPATH)
     print(f"Wrote {sum(counts.values())} tasks to {OUTPUT_FPATH}: {counts}")
     return OUTPUT_FPATH
 

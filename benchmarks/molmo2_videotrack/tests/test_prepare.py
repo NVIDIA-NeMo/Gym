@@ -13,6 +13,7 @@ from benchmarks.molmo2_videotrack import prepare
 from benchmarks.molmo2_videotrack.tests import synthetic
 from nemo_gym.environment import load_manifest, resolve_manifest_config_path
 from nemo_gym.environment.validation import _mirror_differences, _resolve_manifest_composition
+from nemo_gym.eval.eval_plan import PlanBenchmark, PlanGym, build_eval_plan
 
 
 BENCHMARK_DIR = Path(prepare.__file__).parent
@@ -77,8 +78,49 @@ def test_prepare_writes_every_expression_in_category_order(dataset: Path) -> Non
     ]
 
 
+def _plan_tasks(rows: list[dict], **kwargs) -> dict[str, str]:
+    plan = build_eval_plan(
+        rows,
+        benchmark=PlanBenchmark(name="molmo2_videotrack", config_paths=[]),
+        taskset="molmo2_videotrack",
+        gym=PlanGym(version="0", commit=None),
+        **kwargs,
+    )
+    return {task.task_id.task_id: task.digest for task in plan.tasks}
+
+
+def test_every_row_has_a_task_id_that_does_not_depend_on_row_order(dataset: Path) -> None:
+    rows = [json.loads(line) for line in prepare.prepare().read_text().splitlines()]
+
+    assert [row["task_id"] for row in rows] == [
+        "misc:misc_clip_0",
+        "misc:two objects_0",
+        "animal:animal_clip_0",
+        "dance:dance_clip_0",
+        "person:person_clip_0",
+        "sports:sports_clip_0",
+    ]
+    assert all(row["task_id"].endswith(":" + row["verifier_metadata"]["id"]) for row in rows)
+    tasks = _plan_tasks(rows)
+    assert sorted(tasks) == sorted(row["task_id"] for row in rows)
+    assert _plan_tasks(rows[::-1]) == tasks
+    assert list(_plan_tasks(rows, selected_task_ids=["dance:dance_clip_0"])) == ["dance:dance_clip_0"]
+
+
+def test_equal_annotation_ids_in_two_categories_are_distinct_tasks(tmp_path: Path) -> None:
+    videos_dir = tmp_path / "videos"
+    rows = [
+        prepare.convert(synthetic.write_clip(videos_dir, category, "shared", "the box", [MOVER]), category, videos_dir)
+        for category in ("misc", "animal")
+    ]
+
+    assert [row["verifier_metadata"]["id"] for row in rows] == ["shared_0", "shared_0"]
+    assert sorted(_plan_tasks(rows)) == ["animal:shared_0", "misc:shared_0"]
+
+
 def test_prompt_shows_frames_by_file_url_and_keeps_ground_truth_out(dataset: Path) -> None:
     row = json.loads(prepare.prepare().read_text().splitlines()[1])
+    assert set(row) == {"task_id", "responses_create_params", "verifier_metadata"}
     content = row["responses_create_params"]["input"][0]["content"]
 
     # 14 frames at 6 fps: local frames 0, 6 and 12.
@@ -172,9 +214,25 @@ def test_a_missing_dataset_root_is_explained(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_incomplete_datasets_are_refused(dataset: Path) -> None:
-    (dataset / "videos" / "sports" / "sports_clip" / "00012.jpg").unlink()
+    frame = dataset / "videos" / "sports" / "sports_clip" / "00012.jpg"
+    image = frame.read_bytes()
+    frame.unlink()
+    # The last category fails after five rows were converted: none of them may reach the final path.
     with pytest.raises(FileNotFoundError, match="sports/sports_clip is missing 1 of 4 required 1 fps frames"):
         prepare.prepare()
+    assert not prepare.OUTPUT_FPATH.exists()
+    assert list(prepare.OUTPUT_FPATH.parent.iterdir()) == []
+
+    frame.write_bytes(image)
+    complete = prepare.prepare().read_bytes()
+    assert len(complete.splitlines()) == 6
+
+    # A failed run leaves an earlier complete benchmark file as it was.
+    frame.unlink()
+    with pytest.raises(FileNotFoundError, match="sports/sports_clip is missing 1 of 4"):
+        prepare.prepare()
+    assert prepare.OUTPUT_FPATH.read_bytes() == complete
+    assert list(prepare.OUTPUT_FPATH.parent.iterdir()) == [prepare.OUTPUT_FPATH]
 
     (dataset / prepare.CATEGORIES["dance"]).unlink()
     with pytest.raises(FileNotFoundError, match="annotations missing for dance"):
@@ -185,6 +243,7 @@ def test_committed_example_rows_are_the_synthetic_clips() -> None:
     rows = [json.loads(line) for line in synthetic.EXAMPLE_FPATH.read_text().splitlines()]
 
     assert [row["verifier_metadata"]["clip"] for row in rows] == [spec["clip"] for spec in synthetic.EXAMPLE_CLIPS]
+    assert [row["task_id"] for row in rows] == [f"misc:{spec['clip']}_0" for spec in synthetic.EXAMPLE_CLIPS]
     assert all(
         part["image_url"].startswith("data:image/png;base64,")
         for row in rows

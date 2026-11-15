@@ -17,7 +17,9 @@ on every object matching the description in every frame where it is visible.
 | Annotation license | ODC-BY-1.0; the benchmark code is Apache-2.0 |
 | Videos | Not shipped with the dataset. They come from APTv2, DanceTrack, SportsMOT, PersonPath22 and SA-V, each under its own terms, and are not redistributed here |
 
-No rows are filtered. `prepare.py` refuses to run if an annotation file or any required frame is missing.
+No rows are filtered. `prepare.py` refuses to run if an annotation file or any required frame is missing. It writes
+the benchmark file only once every row has converted, so a failed run leaves no partial file and does not touch one
+from an earlier complete run.
 
 Frames must be extracted once with the dataset's own `scripts/preprocess_videos.py`, which writes
 `videos/<category>/<clip>/<index>.jpg` with `index` aligned to the annotation arrays.
@@ -38,6 +40,9 @@ apart starting at the first frame, whether or not the object is visible in them.
 are sent unmodified at their original resolution. The 0-1000 grid is per axis and independent of pixel size.
 
 Ground-truth points and segmentation masks are in `verifier_metadata` only.
+
+Each row has a top-level `task_id`, `<category>:<annotation id>` (for example `misc:sav_022374_2`), which does not
+depend on row order. `gym eval plan` and task selection use it.
 
 ### How frames reach the model
 
@@ -62,7 +67,7 @@ over its frames. See the [scorer README](../../resources_servers/molmo2_videotra
 | `f1` | Mean task F1 over all expressions (headline; equals `mean/reward`) |
 | `<category>/f1` | Mean task F1 within `animal`, `dance`, `misc`, `person` or `sports` |
 | `precision`, `recall` | Mean task precision and recall |
-| `parse_fail_rate` | Share of tasks whose answer yielded no point at all |
+| `parse_fail_rate` | Share of tasks whose answer yielded no usable point at all, in any frame |
 
 All are in [0, 1], higher is better. `f1` weights every expression equally, so it is the average of the category
 scores weighted by their task counts, not their plain average.

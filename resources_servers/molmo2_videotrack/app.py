@@ -37,10 +37,10 @@ from pathlib import Path
 from typing import Any, ClassVar, Iterator, Optional
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 from scipy.optimize import linear_sum_assignment
 
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
@@ -49,6 +49,7 @@ from nemo_gym.server_runtime.base_resources_server import (
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import VerifierFixture
+from resources_servers.molmo2_videotrack.task_data import Molmo2Object, Molmo2VerifierMetadata
 
 
 GRID = 1000.0
@@ -64,7 +65,8 @@ NATIVE_COORDS_PATTERN = re.compile(r'<(?:points|tracks)[^>]*? coords="([^"]*)"')
 NATIVE_ID_VISIBLE_XY_PATTERN = re.compile(r"([0-9]+) ([01]) ([0-9]{3,4}) ([0-9]{3,4})")
 NATIVE_ID_XY_PATTERN = re.compile(r"([0-9]+) ([0-9]{3,4}) ([0-9]{3,4})")
 NATIVE_BRACKET_PATTERN = re.compile(r"\[\s*([0-9]{1,4})[\s,]+([0-9]{1,4})\s*\]")
-NATIVE_FRAME_GROUP_PATTERN = re.compile(r"(?:^|\t|:|,|;)([0-9\.]+) ([0-9\. ]+)")
+# Whitespace may follow the delimiter: the frames of a <points> answer are separated by ", ".
+NATIVE_FRAME_GROUP_PATTERN = re.compile(r"(?:^|\t|:|,|;)\s*([0-9\.]+) ([0-9\. ]+)")
 
 Point = tuple[float, float]
 
@@ -72,33 +74,6 @@ Point = tuple[float, float]
 # ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
-
-
-class Molmo2Object(BaseModel):
-    """One matching object that is visible in a frame."""
-
-    # Ground-truth point in pixels, used only to match predictions to objects.
-    xy: list[float] = Field(min_length=2, max_length=2)
-    # COCO RLE segmentation mask: {"size": [height, width], "counts": "..."}.
-    mask: dict[str, Any]
-
-
-class Molmo2Frame(BaseModel):
-    # Prompt-local frame number (1..N), the number the model is asked to answer with.
-    frame: int = Field(ge=1)
-    # 0-based frame index inside the source clip (bookkeeping only).
-    source_frame: Optional[int] = None
-    # Matching objects visible in this frame; empty when none is.
-    objects: list[Molmo2Object] = []
-
-
-class Molmo2VerifierMetadata(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    category: Optional[str] = None
-    image_width: float = Field(gt=0)
-    image_height: float = Field(gt=0)
-    frames: list[Molmo2Frame] = Field(min_length=1)
 
 
 class Molmo2FrameScore(BaseModel):
@@ -187,7 +162,7 @@ def _parse_native_markup(text: str) -> dict[int, list[Point]]:
     def frame_number(text: str) -> Optional[int]:
         try:
             return int(float(text.strip()))
-        except ValueError:
+        except (ValueError, OverflowError):
             return None
 
     for coords in NATIVE_COORDS_PATTERN.finditer(text):
@@ -239,11 +214,11 @@ def parse_tracks(text: str) -> dict[int, list[Point]]:
             except (TypeError, ValueError, OverflowError):
                 continue
             # The frame is recorded even if its point turns out to be unusable, so an answer in
-            # the right shape still counts as parsed and stops the search through later payloads.
+            # the right shape stops the search through later payloads.
             points = out.setdefault(frame, [])
             try:
                 point = (float(xy[0]), float(xy[1]))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 continue
             # A non-finite coordinate cannot be matched or looked up in a mask.
             if math.isfinite(point[0]) and math.isfinite(point[1]):
@@ -367,7 +342,7 @@ def score_expression(text: str, metadata: Molmo2VerifierMetadata) -> dict[str, A
         "precision": precision,
         "recall": recall,
         "f1": f1,
-        "parse_ok": bool(predictions),
+        "parse_ok": any(predictions.values()),
         "num_scored_frames": len(frame_scores),
         "frame_scores": frame_scores,
     }
