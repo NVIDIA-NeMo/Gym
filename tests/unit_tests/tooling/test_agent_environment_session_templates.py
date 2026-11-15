@@ -40,6 +40,7 @@ migration = load_migration()
         "simple_strands_agent",
         "goose_agent",
         "qwen_code_agent",
+        "prime_agent",
         "kimi_code_agent",
         "codex_agent",
         "openclaw_agent",
