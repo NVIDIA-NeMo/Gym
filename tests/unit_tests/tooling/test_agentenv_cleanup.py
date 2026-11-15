@@ -36,11 +36,14 @@ class _Paginator:
 @pytest.fixture
 def cleanup(monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
     module = _load()
-    state = types.SimpleNamespace(module=module, deleted=[], killed=[], queries=[])
+    state = types.SimpleNamespace(module=module, deleted=[], killed=[], queries=[], provider_config=None)
 
     class FakeProvider:
-        async def list_snapshots(self, prefix: str) -> list[dict]:
-            return [{"id": f"{prefix}snap:default", "name": f"{prefix}snap"}]
+        def __init__(self, **config: object) -> None:
+            state.provider_config = config
+
+        async def list_snapshots(self, prefix: str) -> list[types.SimpleNamespace]:
+            return [types.SimpleNamespace(snapshot_id=f"{prefix}snap:default", name=f"{prefix}snap")]
 
         async def delete_snapshot(self, snapshot_id: str) -> None:
             state.deleted.append(snapshot_id)
@@ -49,7 +52,14 @@ def cleanup(monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
         @staticmethod
         def list(query):
             state.queries.append(query.metadata)
-            return _Paginator([types.SimpleNamespace(sandbox_id="sbx-2"), types.SimpleNamespace(sandbox_id="sbx-1")])
+            # The last one is what a service that ignored the metadata filter would also hand over.
+            return _Paginator(
+                [
+                    types.SimpleNamespace(sandbox_id="sbx-2", metadata={"purpose": "r1"}),
+                    types.SimpleNamespace(sandbox_id="sbx-1", metadata={"purpose": "r1", "user": "me"}),
+                    types.SimpleNamespace(sandbox_id="sbx-other", metadata={}),
+                ]
+            )
 
         @staticmethod
         async def kill(sandbox_id: str) -> bool:
@@ -60,7 +70,7 @@ def cleanup(monkeypatch: pytest.MonkeyPatch) -> types.SimpleNamespace:
         AsyncSandbox=FakeAsyncSandbox, SandboxQuery=lambda metadata: types.SimpleNamespace(metadata=metadata)
     )
     monkeypatch.setattr(module, "E2BProvider", FakeProvider)
-    monkeypatch.setattr(module, "require_e2b_sdk", lambda feature: sdk)
+    monkeypatch.setattr(module, "_e2b_sdk", lambda: sdk)
     return state
 
 
@@ -85,7 +95,10 @@ async def test_apply_deletes_every_selected_snapshot_and_sandbox(cleanup: types.
 
     assert code == 0
     assert cleanup.deleted == ["ng-run-snap:default"]
+    # Only the sandboxes that carry the label, whatever the service listed.
     assert sorted(cleanup.killed) == ["sbx-1", "sbx-2"]
+    # Names on, or the provider would find no snapshot under a prefix.
+    assert cleanup.provider_config == {"snapshots": {"send_names": True}}
 
 
 def test_nothing_selected_is_an_error(cleanup: types.SimpleNamespace) -> None:
@@ -93,3 +106,11 @@ def test_nothing_selected_is_an_error(cleanup: types.SimpleNamespace) -> None:
         cleanup.module.parse_args([])
     with pytest.raises(SystemExit):
         cleanup.module.parse_args(["--metadata", "no-equals"])
+
+
+@pytest.mark.parametrize("arguments", [["--snapshot-prefix", ""], ["--metadata", "=x"], ["--metadata", "k="]])
+def test_a_selection_that_would_match_everything_is_an_error(
+    cleanup: types.SimpleNamespace, arguments: list[str]
+) -> None:
+    with pytest.raises(SystemExit):
+        cleanup.module.parse_args(arguments)

@@ -65,6 +65,8 @@ sandbox:
       template_map: {}
       timeout_s: 3600.0
       auto_resume: false
+      lease_s: null
+      reachable_timeout_s: null
       restore_login_env: true
       secure: true
       allow_internet_access: true
@@ -77,6 +79,9 @@ sandbox:
       request_timeout_s: null
       background: true
       reconnect_attempts: 2
+    snapshots:
+      send_names: false
+      keep_guest_clock: false
     operations:
       retries: 2
       retry_delay_s: 0.5
@@ -185,9 +190,9 @@ leaves it unset inherits `ready_timeout_s` for that sandbox object.
 With E2B 2.36+, the connection or exec `request_timeout_s` only bounds opening command and
 reconnect streams. Command `timeout_s` is NeMo Gym's total wait/stream budget across the initial
 connection and any reconnects. The public facades normally supply 180 seconds, so pass a larger
-value explicitly for long builds or test suites. With background execution, a timed-out stream
-does not guarantee that the remote process was killed; close the sandbox before reuse when a
-lingering process would be unsafe.
+value explicitly for long builds or test suites. A command that runs out its timeout returns exit
+code 124, and the processes it left running are killed by an environment marker, on a best-effort
+basis; close the sandbox before reuse when a lingering process would be unsafe.
 
 Background execution lets the provider reconnect to a running process by PID after an output
 stream interruption. Output emitted before reconnection is not replayed. If the process exits
@@ -379,10 +384,10 @@ it continues the processes it was running, so the provider reports `snapshot_kee
 
 | Setting | Effect |
 | --- | --- |
-| `snapshots.send_names: false` (default) | Snapshots are unnamed. E2B files a named snapshot as a team-wide template alias; the checkpointer releases snapshots by id. |
+| `snapshots.send_names: false` (default) | Snapshots are unnamed: E2B files a named snapshot as a team-wide template alias. This departs from the snapshot contract. The checkpointer deletes what it indexed by id; a snapshot that never reached its index is then not found by name, and stays until it is deleted by id. |
 | `snapshots.keep_guest_clock: true` | AgentENV only. A sandbox created from a snapshot keeps the wall clock the snapshot was taken at (`customExtensionParams: {keepGuestClock: true}`, sent with `create.custom_extension_params`), so a harness that continues in it sees no jump in time. The clock then lags real time by the time the snapshot sat unused: after a long gap, TLS checks and requests signed with the time (S3 allows 15 minutes) can fail in the sandbox. Creates from a template never send it. |
 | `create.lease_s` | Create with this timeout and renew it every third of a lease, so the sandboxes of a process that died end one lease later. |
-| `create.reachable_timeout_s` | After a create, run a no-op command until the gateway reaches the new sandbox (it can answer 502 "could not be reached" at first), for up to this many seconds; a sandbox still unreachable is killed and the create fails. Unset hands the sandbox over at once. |
+| `create.reachable_timeout_s` | After a create, run a no-op command until the gateway reaches the new sandbox (it can answer 502 "could not be reached" or 404 at first), for up to this many seconds; a sandbox still unreachable is killed and the create fails. Unset hands the sandbox over at once. |
 | `create.auto_resume: false` | Kill at timeout. Required on AgentENV, which otherwise keeps timed-out sandboxes paused. |
 
 `nemo_gym/sandbox/providers/e2b/configs/agentenv.yaml` is a ready config for an AgentENV cell:

@@ -4,7 +4,8 @@
 
 AgentENV is shared: snapshots and sandboxes a crashed or finished run did not release stay visible to every team on
 the cell until deleted. Select them by snapshot name prefix (named snapshots only), by a file of snapshot ids (for
-example the ids a checkpointer indexed), or by sandbox metadata (the run's labels). Without ``--apply`` nothing is
+example the ids a checkpointer indexed), or by sandbox metadata (the run's labels). Select by a label only your run
+carries: a label every sandbox has, such as a provider default, selects everyone's. Without ``--apply`` nothing is
 deleted.
 
 Connection settings come from the SDK's environment: E2B_API_KEY, E2B_API_URL, E2B_SANDBOX_URL, SSL_CERT_FILE.
@@ -16,14 +17,23 @@ Connection settings come from the SDK's environment: E2B_API_KEY, E2B_API_URL, E
 import argparse
 import asyncio
 import sys
-from collections.abc import Sequence
+from collections.abc import Awaitable, Sequence
 from pathlib import Path
+from typing import Any
 
-from nemo_gym.sandbox import E2BProvider, require_e2b_sdk
+from nemo_gym.sandbox import E2BProvider
 
 
 # Deletions in flight at once.
 PARALLELISM = 16
+
+
+def _e2b_sdk() -> Any:
+    try:
+        import e2b
+    except ModuleNotFoundError as error:
+        raise SystemExit("agentenv_cleanup needs the e2b SDK, the E2B provider's optional dependency") from error
+    return e2b
 
 
 def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -37,34 +47,43 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if not (args.snapshot_prefix or args.snapshot_ids or args.metadata):
         parser.error("select something: --snapshot-prefix, --snapshot-ids or --metadata")
+    for prefix in args.snapshot_prefix:
+        if not prefix.strip():
+            parser.error("--snapshot-prefix must not be empty: it would select every snapshot the key can see")
     for item in args.metadata:
-        if "=" not in item:
-            parser.error(f"--metadata takes KEY=VALUE, got {item!r}")
+        key, separator, value = item.partition("=")
+        if not separator or not key.strip() or not value.strip():
+            parser.error(f"--metadata takes KEY=VALUE with both parts non-empty, got {item!r}")
     return args
 
 
 async def selected_snapshots(provider: E2BProvider, prefixes: Sequence[str], ids_file: Path | None) -> list[str]:
     ids: set[str] = set()
     for prefix in prefixes:
-        ids.update(entry["id"] for entry in await provider.list_snapshots(prefix))
+        ids.update(info.snapshot_id for info in await provider.list_snapshots(prefix))
     if ids_file is not None:
         ids.update(line.strip() for line in ids_file.read_text().splitlines() if line.strip())
     return sorted(ids)
 
 
-async def selected_sandboxes(e2b: object, metadata: dict[str, str]) -> list[str]:
+async def selected_sandboxes(e2b: Any, metadata: dict[str, str]) -> list[str]:
     """Running and paused sandboxes whose metadata includes every pair in ``metadata``."""
     paginator = e2b.AsyncSandbox.list(query=e2b.SandboxQuery(metadata=metadata))
     found: list[str] = []
     while paginator.has_next:
-        found.extend(info.sandbox_id for info in await paginator.next_items())
+        for info in await paginator.next_items():
+            # Checked here too: a service that ignored the filter would otherwise hand over every sandbox.
+            labels = getattr(info, "metadata", None) or {}
+            if all(labels.get(key) == value for key, value in metadata.items()):
+                found.append(info.sandbox_id)
     return sorted(found)
 
 
 async def run(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    provider = E2BProvider()
-    e2b = require_e2b_sdk("agentenv_cleanup")
+    # Names on: this provider takes no snapshot, and with names off list_snapshots finds none under a prefix.
+    provider = E2BProvider(snapshots={"send_names": True})
+    e2b = _e2b_sdk()
     snapshots = await selected_snapshots(provider, args.snapshot_prefix, args.snapshot_ids)
     metadata = dict(item.split("=", 1) for item in args.metadata)
     sandboxes = await selected_sandboxes(e2b, metadata) if metadata else []
@@ -80,7 +99,7 @@ async def run(argv: Sequence[str] | None = None) -> int:
     limit = asyncio.Semaphore(PARALLELISM)
     failures: list[str] = []
 
-    async def delete(kind: str, target: str, operation: object) -> None:
+    async def delete(kind: str, target: str, operation: Awaitable[object]) -> None:
         async with limit:
             try:
                 await operation
