@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+gdpval_train_resources:
+  resources_servers:
+    gdpval_disaggregated:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      num_workers: 1
+      description: GDPVal artifact collection and structured rubric judging for OpenHands training
+      dataset_path: ${oc.env:GDPVAL_TRAIN_DATASET_PATH,resources_servers/gdpval_disaggregated/data/tasks.jsonl}
+      data_root: ${oc.env:GDPVAL_DATA_ROOT,resources_servers/gdpval_disaggregated/data}
+      artifact_root: ${oc.env:GDPVAL_ARTIFACT_ROOT}
+      sandbox_provider: sandbox
+      sandbox_image: ${oc.env:GDPVAL_SANDBOX_IMAGE}
+      judge_model_server:
+        type: responses_api_models
+        name: gdpval_judge_model
+gdpval_val_resources:
+  resources_servers:
+    gdpval_disaggregated:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      num_workers: 1
+      description: GDPVal artifact collection and structured rubric judging for OpenHands validation
+      dataset_path: ${oc.env:GDPVAL_VAL_DATASET_PATH,resources_servers/gdpval_disaggregated/data/tasks.jsonl}
+      data_root: ${oc.env:GDPVAL_DATA_ROOT,resources_servers/gdpval_disaggregated/data}
+      artifact_root: ${oc.env:GDPVAL_ARTIFACT_ROOT}
+      sandbox_provider: sandbox
+      sandbox_image: ${oc.env:GDPVAL_SANDBOX_IMAGE}
+      judge_model_server:
+        type: responses_api_models
+        name: gdpval_judge_model
