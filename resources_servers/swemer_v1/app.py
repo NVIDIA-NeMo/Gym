@@ -34,12 +34,12 @@ import sys
 from pathlib import Path
 from time import time
 from traceback import format_exc
-from typing import Any
+from typing import Any, ClassVar
 from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, JsonValue
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
@@ -73,7 +73,12 @@ from resources_servers.swebench.patch_capture import (
     capture_model_patch,
     prepare_git_for_commits,
 )
-from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
+from resources_servers.swebench.repo_task_sessions import (
+    RepoTaskSessionFields,
+    RepoTaskSessionResourcesServer,
+    loaded_capture,
+    saved_capture,
+)
 from resources_servers.swemer_v1.verification import (
     VerificationInputs,
     VerificationResult,
@@ -89,7 +94,7 @@ JVM_MIRROR_ENV = {
 }
 
 
-class SwemerV1ResourcesServerConfig(BaseResourcesServerConfig, AgentNetworkConfig):
+class SwemerV1ResourcesServerConfig(RepoTaskSessionFields, BaseResourcesServerConfig, AgentNetworkConfig):
     is_verifying_golden_patch: bool = False
     # "worktree" (diff of the working tree) or "committed" (committed work only); see swebench/patch_capture.py.
     patch_capture_mode: PatchCaptureMode = "worktree"
@@ -165,8 +170,9 @@ class SwemerV1VerifyResponse(BaseVerifyResponse):
     model_patch: str | None = None
 
 
-class SwemerV1ResourcesServer(SandboxSessionResourcesServer):
+class SwemerV1ResourcesServer(RepoTaskSessionResourcesServer):
     config: SwemerV1ResourcesServerConfig
+    task_model: ClassVar[type[BaseModel]] = SwemerV1InstanceRequest
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -227,9 +233,11 @@ class SwemerV1ResourcesServer(SandboxSessionResourcesServer):
             resources=sandbox_resources,
             provider_options=self.config.sandbox_provider_options(provider_config, for_agent=session_id is not None),
         )
-        sandbox = AsyncSandbox(provider_config)
         if session_id is not None:
-            self._session_id_to_sandbox[session_id] = sandbox
+            # On the provider every task sandbox shares, and registered for the session and its checkpoints.
+            sandbox = self.new_task_sandbox(session_id, spec)
+        else:
+            sandbox = AsyncSandbox(provider_config)
         if verifier_session_id is not None:
             self._verifier_sandboxes[verifier_session_id] = sandbox
         await sandbox.start(spec)
@@ -366,22 +374,25 @@ class SwemerV1ResourcesServer(SandboxSessionResourcesServer):
             capture = PatchCapture.static(body.patch, mode, "golden")
         else:
 
-            async def capture_or_fallback() -> tuple[PatchCapture, str | None, bool]:
+            async def capture_or_fallback() -> dict[str, JsonValue]:
                 try:
                     capture = await self._extract_model_patch(
                         session_id, body.workdir, self._session_id_to_base_commit[session_id]
                     )
-                    return capture, None, False
+                    return saved_capture(capture, None, False)
                 except CaptureCommandError as exc:
                     # A real git failure can reflect a repository damaged by the agent. Keep its empty-patch
                     # grading behavior; unavailable execution belongs to the infrastructure denominator.
                     incomplete = exc.error_type is not None or not isinstance(exc.return_code, int)
-                    return PatchCapture.static("", mode, "none"), f"Failed to extract model patch: {exc}", incomplete
+                    error = f"Failed to extract model patch: {exc}"
+                    return saved_capture(PatchCapture.static("", mode, "none"), error, incomplete)
                 except Exception as exc:
-                    return PatchCapture.static("", mode, "none"), f"Failed to extract model patch: {exc}", True
+                    error = f"Failed to extract model patch: {exc}"
+                    return saved_capture(PatchCapture.static("", mode, "none"), error, True)
 
-            capture, extraction_error, capture_incomplete = await self.capture_task_sandbox_patch(
-                session_id, capture_or_fallback
+            # Saved as a JSON value, so a checkpoint can export it.
+            capture, extraction_error, capture_incomplete = loaded_capture(
+                await self.capture_task_sandbox_patch(session_id, capture_or_fallback)
             )
             await self.stop_task_sandbox_after_capture(session_id)
             if capture_incomplete:
