@@ -241,14 +241,18 @@ settings through the YAML profile. Only inherited native network access is suppo
 does not implement Gym sandbox-provider isolation. Optional unused tool grants are skipped. There
 is no token-ID capture or multi-activation continuation support in this native bridge.
 
-Identical activation retries share one shielded task. Only session close cancels it. Completed
-episode retries return the saved reply; changed requests and interrupted attempts require inspection
-and a new attempt ID. Output identity includes the output root, collector run and capture key.
+Identical activation retries within one typed session share one shielded task. Only session close
+cancels it. Resources chooses a fresh private folder from its session ID and publishes it under
+the attempt-qualified capture key for agent seed. A later run replaces that pointer. The shipped
+Environment Server starts a fresh episode on HTTP resend; it owns cancellation and shielded cleanup.
 `evaluation_protocol.gym_protocol=agent_sessions_v1` prevents merging these results with the older
 combined execution/grading protocol. A process crash still requires operator inspection and cleanup
 of any native container that the owning allocation did not reclaim.
 
 ## Session validation
+
+The following historical session runs preceded the switch to the shipped
+`single_agent_turn_legacy` Environment Server.
 
 Five real Kimi K3 API tasks used the new Environment → Resources → Agent session
 lifecycle, with unchanged native execution and graders. All five were unmasked,
