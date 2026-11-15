@@ -18,12 +18,20 @@ over the executor's connection (or locally), that reads the job directory and pr
 Decisions live in ``nemo_gym.orchestration.recovery``; this module holds the script and the constants it embeds.
 """
 
-from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED
+from nemo_gym.core.failure_kinds import (
+    DRIVER_INSTALL_FAILED,
+    ENVIRONMENT_PROTOCOL_VIOLATION,
+    JUDGE_SKIPPED,
+    PROVIDER_CREDENTIALS_REJECTED,
+    PROVIDER_QUOTA_EXHAUSTED,
+    QUOTA_RESET_REGEX,
+)
 from nemo_gym.data.task_materialization import TASK_ID_FIELDS
 from nemo_gym.orchestration.executors.resume_script import (
     ACCOUNTING_UNKNOWN_PREFIX,
     CANCELLED_FOLLOWUP_MARKER,
     FOLLOW_UP_SUBMISSION_REFUSED,
+    GUARDED_DRIVER_FAILURE_KINDS,
     PROVISIONAL_MARKER_PREFIX,
 )
 
@@ -61,6 +69,24 @@ COLLECT_SCRIPT = (
     + "PROVIDER_CREDENTIALS_REJECTED = "
     + repr(PROVIDER_CREDENTIALS_REJECTED)
     + "\n"
+    + "GUARDED_DRIVER_FAILURE_KINDS = "
+    + repr(GUARDED_DRIVER_FAILURE_KINDS)
+    + "\n"
+    + "DRIVER_INSTALL_FAILED = "
+    + repr(DRIVER_INSTALL_FAILED)
+    + "\n"
+    + "ENVIRONMENT_PROTOCOL_VIOLATION = "
+    + repr(ENVIRONMENT_PROTOCOL_VIOLATION)
+    + "\n"
+    + "JUDGE_SKIPPED = "
+    + repr(JUDGE_SKIPPED)
+    + "\n"
+    + "PROVIDER_QUOTA_EXHAUSTED = "
+    + repr(PROVIDER_QUOTA_EXHAUSTED)
+    + "\n"
+    + "QUOTA_RESET_REGEX = "
+    + repr(QUOTA_RESET_REGEX)
+    + "\n"
     + "FOLLOW_UP_SUBMISSION_REFUSED = "
     + repr(FOLLOW_UP_SUBMISSION_REFUSED)
     + "\n"
@@ -74,7 +100,7 @@ COLLECT_SCRIPT = (
     + f"JUDGE_JOB_JOURNAL_NAME = {JUDGE_JOB_JOURNAL_NAME!r}\n"
     + f"JUDGE_JOB_ACK_JOURNAL_NAME = {JUDGE_JOB_ACK_JOURNAL_NAME!r}\n"
     + r"""
-import hashlib, json, math, os, sys
+import hashlib, json, math, os, re, sys
 d = sys.argv[1]
 def job_identity():
     try:
@@ -123,6 +149,17 @@ def model_call_facts(r):
                                        for event in (events.values() if isinstance(events, dict) else ()) if isinstance(event, dict)],
                     "started_at": finite(item.get("started_at")), "duration_ms": finite(item.get("latency_total_ms", item.get("duration_ms")))})
     return out
+def repetition_stop(call):
+    # Whether the provider stopped the call's generation for repetition (vLLM's repetition detection): a `repetition`
+    # finish reason or a `repetition_detected` stop reason, recorded on the call or kept on its saved response.
+    response = call.get("response") if isinstance(call.get("response"), dict) else {}
+    meta = call.get("response_metadata") if isinstance(call.get("response_metadata"), dict) else {}
+    choices = response.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    finish = (meta.get("finish_reason"), response.get("native_finish_reason"), response.get("finish_reason"),
+              choice.get("native_finish_reason"), choice.get("finish_reason"))
+    stop = (response.get("native_stop_reason"), response.get("stop_reason"), choice.get("stop_reason"))
+    return "repetition" in finish or "repetition_detected" in stop
 def trial_metadata(value):
     if not isinstance(value, dict):
         return None
@@ -309,6 +346,8 @@ def grading_facts(r):
         "judge_error": isinstance(r.get("judge_evaluations"), list) and any(
             isinstance(item, dict) and item.get("verdict_label") == "JUDGE_ERROR" for item in r["judge_evaluations"]),
         "judge_unparsed": isinstance(r.get("judge_evaluations"), list) and judge_unparsed(r["judge_evaluations"]),
+        "judge_error_message": isinstance(r.get("judge_error"), str) and bool(r["judge_error"].strip()),
+        "invalid_judge_response": r.get("invalid_judge_response") is True,
         "games_unjudged": games_unjudged(r.get("games")),
         "rubric": rubric(r),
         "library_reward": finite(r.get("library_reward")),
@@ -438,6 +477,14 @@ def rows(name, skip=0):
             if name == "rollouts.jsonl" and any(managed_store):
                 r["_line"] = i
             selected = {k: r[k] for k in KEEP if k in r}
+            if isinstance(r, dict) and r.get("failure_kind") == JUDGE_SKIPPED and isinstance(r.get("failure_reason"), str):
+                # The skip's own reason (a bounded configuration note), never an answer.
+                selected["_ng_skipped_reason"] = r["failure_reason"][:200]
+            if isinstance(r, dict) and r.get("failure_kind") == PROVIDER_QUOTA_EXHAUSTED:
+                # Only the reset time of a quota stop leaves the run host, never its message.
+                reset = re.search(QUOTA_RESET_REGEX, str(r.get("_ng_failure_message") or r.get("failure_reason") or ""))
+                if reset:
+                    selected["_ng_quota_resets_at"] = reset.group(1)
             if name in ("rollouts.jsonl", "rollouts_failures.jsonl"):
                 calls = model_call_facts(r)
                 if calls is not None:
@@ -542,7 +589,7 @@ def rows(name, skip=0):
                                     if isinstance(item, dict) else None for item in trajectory.get("invocations")] if isinstance(trajectory.get("invocations"), list) else None,
                     "verifier_invocations": [({k: item.get(k) for k in ("invocation_id", "status", "failure_kind")} | {"model_calls": trial_refs(item.get("model_calls")), "grading_operations": trial_grading(item.get("grading_operations")), "grading_record": {k: item["grading_record"].get(k) for k in ("verifier", "score", "verdict", "result_binding_sha256")} if isinstance(item.get("grading_record"), dict) else None, "sandbox_observations": [{k: fact.get(k) for k in ("role", "provider", "sandbox_id", "outcome", "exit_code", "teardown_confirmed", "error_type")} if isinstance(fact, dict) else None for fact in item["sandbox_observations"]] if isinstance(item.get("sandbox_observations"), list) else item.get("sandbox_observations")})
                                             if isinstance(item, dict) else None for item in trajectory.get("verifier_invocations")] if isinstance(trajectory.get("verifier_invocations"), list) else None,
-                    "model_calls": [{"model_call_id": item.get("model_call_id"), "started_at": finite(item.get("started_at")), "response_metadata": trial_metadata(item.get("response_metadata")),
+                    "model_calls": [{"model_call_id": item.get("model_call_id"), "started_at": finite(item.get("started_at")), "response_metadata": trial_metadata(item.get("response_metadata")), "repetition_stop": repetition_stop(item),
                                      "output_items": trial_items(item.get("response"), "output", ("type", "role", "status", "call_id", "name")),
                                      "input_items": trial_items(item.get("request"), "input", ("type", "call_id"))}
                                     if isinstance(item, dict) else None for item in trajectory.get("model_calls")] if isinstance(trajectory.get("model_calls"), list) else None,
@@ -813,6 +860,21 @@ try:
         coverage_scored = [report["scored"], report["expected"]]
 except (OSError, ValueError, AttributeError):
     pass
+task_selection = None
+try:
+    # The subset a run selected by task id (task_ids or task_ids_fpath): its source, counts and digest, not the ids.
+    selection = json.load(open(os.path.join(a, "rollouts_task_selection.json")))
+    if (isinstance(selection.get("source"), str) and isinstance(selection.get("task_ids_sha256"), str)
+            and all(type(selection.get(k)) is int and selection[k] >= 0 for k in ("tasks", "rows"))):
+        task_selection = {"source": selection["source"][:512], "tasks": selection["tasks"], "rows": selection["rows"],
+                          "task_ids_sha256": selection["task_ids_sha256"][:64]}
+    else:
+        task_selection = {"source": None, "tasks": None, "rows": None, "task_ids_sha256": None}
+except FileNotFoundError:
+    pass
+except (OSError, ValueError, AttributeError):
+    # A selection record that cannot be read still says the run was a subset.
+    task_selection = {"source": None, "tasks": None, "rows": None, "task_ids_sha256": None}
 collected = {"materialized": rows("rollouts_materialized_inputs.jsonl"), "results": rows("rollouts.jsonl"),
                   "failures": rows("rollouts_failures.jsonl") or [], "resubmit_offset": offset, "infra_retries_used": num(".gym_infra_retries")[0],
                   "infra_retries_state": "unknown" if unknown_accounting else num(".gym_infra_retries")[1],
@@ -821,7 +883,7 @@ collected = {"materialized": rows("rollouts_materialized_inputs.jsonl"), "result
                   "chain_incomplete": os.path.exists(os.path.join(d, ".gym_chain_incomplete")),
                   "quality": quality, "score": score, "mlflow": mlflow, "managed_store": any(managed_store),
                   "coverage_allocation_id": coverage_allocation_id, "coverage_scored": coverage_scored,
-                  "benchmark_metric_coverage": benchmark_metric_coverage}
+                  "benchmark_metric_coverage": benchmark_metric_coverage, "task_selection": task_selection}
 # One closing snapshot: every source hash above is the opening one, so a change during collection shows up here.
 closing_snapshot = {name: sha256(os.path.join(a, name)) for name in source_files}
 if quality is not None and (source_snapshot != closing_snapshot or changed_while_reading):
@@ -886,8 +948,9 @@ def resume_drift_keys():
 collected["resume_drift_keys"] = resume_drift_keys()
 def chain_continuation_note():
     # A continuation's provisional line, left when it ended before queuing its follow-up, or a sentinel's line for a
-    # follow-up cancelled before it started, or the guard's stop on rejected sandbox credentials or on a follow-up
-    # submission the scheduler refused (see resume_script).
+    # follow-up cancelled before it started, or the guard's stop on a typed driver failure (rejected credentials, a
+    # server start-up timeout, a failed install or preparation, a refused resume, ...) or on a follow-up submission the
+    # scheduler refused (see resume_script): the typed stop carries the remedy the next recovery needs first.
     try:
         text = open(os.path.join(d, ".gym_chain_incomplete")).read(2000)
     except OSError:
@@ -896,9 +959,16 @@ def chain_continuation_note():
     named = (
         line.startswith(PROVISIONAL_MARKER_PREFIX)
         or CANCELLED_FOLLOWUP_MARKER in line
-        or PROVIDER_CREDENTIALS_REJECTED in line
+        or any(kind in line for kind in GUARDED_DRIVER_FAILURE_KINDS)
         or line.startswith(FOLLOW_UP_SUBMISSION_REFUSED)
     )
+    if named and DRIVER_INSTALL_FAILED + ": " in line:
+        # The install's own error text is the one free-form excerpt the guard copies from the driver log, and an installer
+        # can print a credentialed URL: keep the typed failure and the log reference, and leave the excerpt in the
+        # private driver log on the run host.
+        head, _, rest = line.partition(DRIVER_INSTALL_FAILED + ": ")
+        _, sep, tail = rest.rpartition("; the chain does not retry it")
+        line = head + DRIVER_INSTALL_FAILED + ": (error text omitted)" + (sep + tail if sep else "")
     return line[:500] if named else None
 collected["chain_continuation_note"] = chain_continuation_note()
 collected["unreadable_files"] = sorted(unreadable)

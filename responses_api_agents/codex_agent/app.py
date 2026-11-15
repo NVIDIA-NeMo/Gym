@@ -36,7 +36,8 @@ from pydantic import ConfigDict, Field, PrivateAttr, field_validator, model_vali
 
 from nemo_gym.agents import (
     AGENT_TIMEOUT_METADATA_KEY,
-    RUNNER_FILE,
+    HARNESS_RUNNER_FILE,
+    HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionResponse,
     AgentOutcome,
     AgentSeedRejectedError,
@@ -86,6 +87,7 @@ from nemo_gym.sandbox import (
 )
 from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse, MCPToolAccess
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, ToolCallObservation
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.codex_agent.observability import (
     TESTED_CODEX_VERSION,
     associate_codex_compaction_calls,
@@ -93,7 +95,7 @@ from responses_api_agents.codex_agent.observability import (
     parse_codex_usage,
     read_codex_observations,
 )
-from responses_api_agents.codex_agent.sandbox import CodexSandboxSession
+from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE, CodexSandboxSession
 from responses_api_agents.codex_agent.setup_codex import ensure_codex
 from responses_api_agents.codex_agent.transport import rate_limit_proxy
 
@@ -188,24 +190,9 @@ def _terminal_model_error(
 
 
 def _sandbox_prepare_command(workdir: str, directory: str, runtime: str) -> str:
-    validate = """
-from pathlib import Path
-import sys
-workdir = Path(sys.argv[1]).resolve(strict=True)
-if not workdir.is_dir():
-    raise ValueError("Codex workdir must be an existing directory")
-# The root holds every path: a task image without WORKDIR runs there, as Harbor starts it.
-contains = workdir != Path("/")
-for value in sys.argv[2:]:
-    owned = Path(value).resolve()
-    if workdir == owned or (contains and workdir in owned.parents) or owned in workdir.parents:
-        raise ValueError("Codex task workdir and adapter paths must be disjoint after resolving symlinks")
-"""
-    # The task may provide neither the Python worker runtime nor the Bash installer runtime.
-    # This bootstrap must remain POSIX sh so Alpine can install Bash before using it.
+    # Keep the bootstrap POSIX sh: Bash must exist before its installer can run.
     bootstrap = """set -eu
 set --
-command -v python3 >/dev/null 2>&1 || set -- "$@" python3
 command -v bash >/dev/null 2>&1 || set -- "$@" bash
 if [ "$#" -gt 0 ]; then
     [ "$(id -u)" = 0 ] || { echo "Codex in the task sandbox requires $*: preinstall these tools or use a root image." >&2; exit 1; }
@@ -220,10 +207,28 @@ if [ "$#" -gt 0 ]; then
     fi
 fi
 """
-    return (
-        bootstrap + f"python3 -I -c {shlex.quote(validate)} {shlex.quote(workdir)} "
-        f"{shlex.quote(directory)} {shlex.quote(runtime)} && mkdir -p {shlex.quote(directory + '/home/.codex')}"
-    )
+    # Positional parameters WORKDIR SESSION_DIR RUNTIME. Resolve symlinks on the sandbox filesystem, not the
+    # agent server's; an adapter path that does not exist yet resolves through its nearest existing ancestor.
+    validate = """
+[ -d "$1" ] || { echo "Codex workdir must be an existing directory: $1" >&2; exit 1; }
+workdir=$(cd "$1" && pwd -P) || exit 1
+# Both paths drop a trailing slash, so the root is empty.
+workdir=${workdir%/}
+shift
+for owned in "$@"; do
+    path=$owned rest=
+    until [ -d "${path:-/}" ]; do rest=/${path##*/}$rest path=${path%/*}; done
+    owned=$(cd "${path:-/}" && pwd -P) || exit 1
+    owned=${owned%/}$rest
+    overlap=
+    # The root holds every path: a task image without WORKDIR runs there, as Harbor starts it.
+    if [ -n "$workdir" ]; then case "$owned/" in "$workdir/"*) overlap=1 ;; esac; fi
+    case "$workdir/" in "$owned/"*) overlap=1 ;; esac
+    [ -z "$overlap" ] || { echo "Codex task workdir and adapter paths must be disjoint after resolving symlinks" >&2; exit 1; }
+done
+"""
+    check_paths = f"(set -- {shlex.join([workdir, directory, runtime])}{validate})"
+    return bootstrap + f"{check_paths} && mkdir -p {shlex.quote(directory + '/home/.codex')}"
 
 
 def _redact(text: str, values: list[str]) -> str:
@@ -915,11 +920,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     f"error_type={prepared.error_type}; {prepared.stderr or prepared.stdout}"
                 )
             if self.config.sandbox_runtime_dir:
-                # The installer checks Python and isolates Codex's own check; a preinstalled runtime gets the same.
+                # Check the preinstalled runtime with its private Node, without requiring task-image Python.
                 # CODEX_HOME keeps the check out of the task's HOME, where Codex would otherwise create ~/.codex.
                 version_home = f"{directory}/codex-version-home"
                 checked = await sandbox.exec(
-                    "python3 -c 'import sys; assert sys.version_info >= (3, 8), \"Codex needs Python 3.8 or newer\"' && "
                     f"mkdir -p {shlex.quote(version_home)} && CODEX_HOME={shlex.quote(version_home)} "
                     f"{shlex.quote(runtime + '/node/bin/node')} "
                     f"{shlex.quote(runtime + '/codex/node_modules/@openai/codex/bin/codex.js')} --version",
@@ -934,7 +938,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
                         f"stdout={checked.stdout}; stderr={checked.stderr}"
                     )
                 if checked.return_code != 0 or reported != f"codex-cli {self.config.codex_version}":
-                    # A missing runtime, another version or no usable Python fails the same way every time.
+                    # A missing runtime or another version fails the same way every time.
                     raise AgentSeedRejectedError(
                         f"Codex runtime in {runtime} does not run codex_version {self.config.codex_version} "
                         f"(exit {checked.return_code}); stdout={checked.stdout}; stderr={checked.stderr}"
@@ -958,9 +962,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
                         f"Codex installer exited {installed.return_code}, command={install_command}, "
                         f"error_type={installed.error_type}; stdout={installed.stdout}; stderr={installed.stderr}"
                     )
-            await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/{RUNNER_FILE}")
-            # The runner loads the transport from beside itself under this name.
-            await sandbox.upload(Path(__file__).with_name("sandbox_transport.py"), f"{directory}/sandbox_transport.py")
+            await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
+            await sandbox.upload(Path(__file__).with_name(LAUNCHER_FILE), f"{directory}/{LAUNCHER_FILE}")
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
@@ -1068,7 +1071,6 @@ class CodexAgent(SimpleResponsesAPIAgent):
         base_url = self._resolve_call_base_url(invocation_id)
         config = self._build_config(base_url, developer_instructions=system, mcp_servers=mcp_servers or None)
         config["model_providers"]["gym"]["http_headers"] = {"x-session-id": invocation_id}
-        await state.upload_text("home/.codex/config.toml", toml_dumps(config))
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         command = self._build_command("-", state.session.workdir)
         command.remove("--ephemeral")
@@ -1096,8 +1098,13 @@ class CodexAgent(SimpleResponsesAPIAgent):
         failure = None
         try:
             async with self.sem:
+                # The configuration can carry the MCP grant headers. Staging it inside the session's execute lets
+                # close cancel the upload before it releases the sandbox.
                 raw = await state.execute(
-                    payload, timeout=timeout, close_timeout=self.config.session_close_timeout_seconds
+                    payload,
+                    timeout=timeout,
+                    close_timeout=self.config.session_close_timeout_seconds,
+                    files={"home/.codex/config.toml": toml_dumps(config)},
                 )
         except BaseException as exc:
             failure = exc
@@ -1106,12 +1113,15 @@ class CodexAgent(SimpleResponsesAPIAgent):
             else:
                 LOG.warning("Codex event transcript unavailable after interrupted activation")
         events = []
-        for line in raw.splitlines():
+        # The runner copies event lines verbatim; JSON may hold U+2028 and similar inside a string.
+        for line in raw.split("\n"):
+            if not line.strip():
+                continue
             try:
                 observed_at, event = json.loads(line)
                 if isinstance(event, dict):
                     events.append((float(observed_at), event))
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, RecursionError):
                 LOG.warning("Skipping malformed Codex event record")
         cleanup = state.session.cleanup
         runtime = state.runtime_info
@@ -1908,3 +1918,6 @@ class CodexAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     CodexAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = CodexAgent.run_webserver()  # noqa: F401

@@ -1,0 +1,11 @@
+tesseract-ocr
+tesseract-ocr-eng
+poppler-utils
+ghostscript
+libglib2.0-0t64
+ripgrep
+imagemagick
+qpdf
+pdfgrep
+curl
+gawk

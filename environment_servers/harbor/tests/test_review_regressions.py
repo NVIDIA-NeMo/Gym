@@ -605,12 +605,12 @@ async def test_repeat_attempt_retries_the_previous_verifier_stop(tmp_path, monke
 
 async def test_interrupted_verifier_start_is_stopped_by_the_episode(tmp_path, monkeypatch):
     agent = AgentSandbox()
-    server, task, _, _ = make_server(
-        tmp_path, monkeypatch, agent, toml=SEPARATE_TOML, default_episode_timeout_seconds=0.5
-    )
+    server, task, _, _ = make_server(tmp_path, monkeypatch, agent, toml=SEPARATE_TOML)
     verifier = FakeSandbox()
+    starting = asyncio.Event()
 
     async def hang(spec):
+        starting.set()
         await asyncio.Future()
 
     monkeypatch.setattr(verifier, "start", hang, raising=False)
@@ -619,8 +619,13 @@ async def test_interrupted_verifier_start_is_stopped_by_the_episode(tmp_path, mo
         "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
     )
     monkeypatch.setattr("environment_servers.harbor.sandboxes.AsyncSandbox", lambda config: verifier)
-    response = await asyncio.wait_for(run_episode(server, task), 10)
-    assert response.failure is not None
+    # Interrupt the episode only once the verifier is starting: a short episode deadline raced the setup before it
+    # on a slow runner, and then no verifier was ever provisioned.
+    episode = asyncio.create_task(run_episode(server, task))
+    await asyncio.wait_for(starting.wait(), 10)
+    episode.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(episode, 10)
     # The episode's own cleanup stops the half-started verifier; it does not wait for shutdown.
     assert verifier.stopped and agent.stopped and not server._sandboxes
 

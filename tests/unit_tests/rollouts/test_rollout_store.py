@@ -1047,6 +1047,8 @@ def test_saved_retry_cap_drives_resume_exporters_and_health(prepared_run, monkey
     coverage = reader.coverage()
     assert (coverage["failed_final"], coverage["failed_not_final"], coverage["failure_budget_exhausted"]) == (1, 0, 1)
     assert (coverage["missing"], coverage["not_started"], coverage["intentionally_omitted"]) == (1, 1, 1)
+    # The missing and the not-started rollout have no final result; the final failure is not open.
+    assert (coverage["open"], coverage["failed_masked"]) == (2, 0)
     metrics = _failure_export_metrics([], lambda row: None, set(), histories=[reader])
     assert metrics["retries/max_attempts"] == metrics["retries/at_cap"] == 1
     assert metrics["coverage/failed/agent_run_error"] == 1
@@ -1617,3 +1619,21 @@ def test_canonical_rejudge_links_new_verifier_and_preserves_history(prepared_run
     assert selected["_ng_rejudge_verifier_invocation_ids"] == ["new-verifier"]
     assert [v["invocation_id"] for v in selected["ng_trajectory"]["verifier_invocations"]] == ["new-verifier"]
     assert selected["response"] == failure["response"] and selected["reward"] == 0.0
+
+
+def test_coverage_reports_masked_failure_records_apart_from_masked_results(prepared_run):
+    """A judge outage leaves a failure record with ``mask_sample``: excluded from the score, not a zero. It is a
+    failure, so it never counts under ``masked`` (completed results); ``failed_masked`` says how many failures are
+    masked, and a final failure is not an open rollout."""
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        scored, judged = store.pending()
+        store.record_dispatches([scored, judged])
+        store.record_outcome(scored | {"reward": 1.0})
+        store.record_outcome(judged | {"_ng_failure_class": "judge_failed", "mask_sample": True})
+        live = store.coverage()
+    for coverage in (live, RolloutStore.read(output).coverage()):
+        assert (coverage["expected"], coverage["successful"], coverage["measured"]) == (2, 1, 1)
+        assert (coverage["failed"], coverage["failed_final"], coverage["failed_masked"]) == (1, 1, 1)
+        assert (coverage["masked"], coverage["final_zeros"], coverage["open"]) == (0, 0, 0)
+        assert coverage["complete"] is False

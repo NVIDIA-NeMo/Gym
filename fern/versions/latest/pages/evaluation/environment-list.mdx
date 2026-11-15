@@ -80,21 +80,25 @@ gym list benchmarks --json   # machine-readable output for scripting or CI
 | Environment | Description | Verification | Benchmark |
 |---|---|---|---|
 | [workplace_assistant](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/workplace_assistant) | Workplace tasks: 27 tools, 5 databases, 690 tasks | Rule-based (task completion) | ✓ |
+| [WebArena](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/webarena/README.md) | 812 browser tasks on self-hosted sites; deployment, reset, judge, and single-display requirements in the benchmark README | WebArena reference evaluator: rules and LLM judge | ✓ |
 | [aviary](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/aviary) | Multi-hop QA with Wikipedia search + GSM8k with calculator | LLM judge + execution | ✓ |
 | [tavily_search](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/tavily_search) | Web search tool use (Tavily API) | Execution + optional LLM judge | ✓ |
 | [calendar](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/calendar) | Multi-turn calendar scheduling with constraint satisfaction | Rule-based (constraints) | ✓ |
+| [OfficeQA Pro](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/officeqa_pro/README.md) | Experimental document retrieval and numerical reasoning: 133 questions over 697 Treasury Bulletin PDFs | OfficeQA reference scorer | ✓ |
 | [finance_sec_search](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/finance_sec_search) | SEC EDGAR filing search for financial analysis | LLM judge + execution | ✓ |
 | [xlam_fc](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/xlam_fc) | Function calling from Salesforce xlam-60k | Exact match | ✓ |
 | [single_step_tool_use_with_argument_comparison](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/single_step_tool_use_with_argument_comparison) | Pivot RL for tool use across conversational, SWE, and search domains | Argument comparison | ✓ |
 | [agentic_turn_simulation](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/agentic_turn_simulation) | Whole agent turns in your own agent-harness conversations (Claude Code, Hermes, Cline, ...) against simulated tools | LLM judge + code gates | ✓ ([AgentArena](/evaluation/benchmarks#benchmarks-whose-data-you-stage), data staged by you) |
 | [tales](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/tales) | Text-adventure games (AlfWorld, ScienceWorld, Jericho, TextWorld) in Gymnasium API style | Rule-based (task completion) | |
 | [google_search](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/google_search) | MCQA with integrated Google search tool | Exact match | |
+| [collab_intel](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/collab_intel) | [Collaborative Intelligence](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/collab_intel): the model as a teammate in a team chat with a scripted teammate who creates a problem, 8 dimensions (evaluation only; partners and judges are a configured endpoint) | Upstream harness checkers, test pass on scenarios passed alone | ✓ |
 
 ## Instruction Following & Safety
 
 | Environment | Description | Verification | Benchmark |
 |---|---|---|---|
 | [ifbench](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/ifbench) | IFBench with 57 instruction types (AllenAI library) | LLM judge | ✓ |
+| [agentic_if_realworld](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/agentic_if_realworld) | Private, development-exposed, evaluation-only single-turn instruction following (969 tasks) | Strict-v2.2 LLM judge; technical failures masked | ✓ |
 | [inverse_if](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/inverse_if) | Inverse instruction-following benchmark — instructions that counter conventional expectations | LLM judge (per-task) | ✓ |
 | [structured_outputs](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/structured_outputs) | Schema adherence across structured output formats | Rule-based (schema validation) | ✓ |
 | [indirect_prompt_injection](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/indirect_prompt_injection) | Resistance to injected instructions in tool-use trajectories | Rule-based (attack detection) | ✓ |

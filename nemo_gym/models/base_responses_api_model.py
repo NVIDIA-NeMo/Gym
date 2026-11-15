@@ -32,12 +32,14 @@ from uuid import uuid4
 
 import orjson
 from aiohttp import ClientResponseError
+from anyio import CancelScope
 from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
 
 from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
+from nemo_gym.core.model_call_sampling import model_call_sampling_config
 from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -81,6 +83,7 @@ from nemo_gym.models.responses_streaming import (
     validate_streaming_responses_params,
 )
 from nemo_gym.models.token_capture.config import NonGeneratingRequest, token_capture_config
+from nemo_gym.models.token_capture.harness_notes import trailing_harness_note
 from nemo_gym.models.token_capture.protocols import (
     CaptureAdmissionError,
     CaptureInputError,
@@ -97,6 +100,7 @@ from nemo_gym.models.token_capture.sink import (
 from nemo_gym.server_runtime._checkpoint.control import install_control_routes, install_participant
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
+from nemo_gym.server_runtime.request_handling.model_sampling import ModelSamplingMiddleware
 from nemo_gym.telemetry.endpoints import traced_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_worker
@@ -213,6 +217,35 @@ def _plain(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: _plain(item) for key, item in value.items()}
     return value
+
+
+async def _cancel_and_wait_for_backend(backend: asyncio.Task[Any]) -> None:
+    # Disconnects cancel the enclosing AnyIO scope at every checkpoint. Protect the backend's own
+    # asynchronous teardown from that cancellation and from another cleanup owner cancelling it twice.
+    with CancelScope(shield=True):
+        if not backend.done() and not backend.cancelling():
+            backend.cancel()
+        await asyncio.gather(backend, return_exceptions=True)
+
+
+class _BackendStreamingResponse(StreamingResponse):
+    """A keepalive stream that owns the backend call its body waits for.
+
+    The body's own cleanup runs only once iteration starts. A client that disconnects after the
+    handler returns but before the first chunk would otherwise leave the call generating.
+    """
+
+    def __init__(self, content: AsyncIterator[str | bytes], *, backend: "asyncio.Task[Any]") -> None:
+        super().__init__(
+            content, media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+        )
+        self.backend = backend
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await _cancel_and_wait_for_backend(self.backend)
 
 
 def _orjson_dispatch_response(content: Any) -> Any:
@@ -421,6 +454,12 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         app.post("/v1/embeddings")(self.embeddings)
 
         self.setup_policy_checkpoint(app, capture_ledger)
+        # Added after policy admission and capture, so it runs before them and they see the values the provider receives.
+        sampling_config = model_call_sampling_config(self.server_client.global_config_dict)
+        app.add_middleware(
+            ModelSamplingMiddleware,
+            required=sampling_config is not None and self.config.name in sampling_config.required_model_servers,
+        )
         return app
 
     def setup_policy_checkpoint(self, app: FastAPI, capture_ledger: CaptureLedger | None) -> None:
@@ -496,7 +535,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
             app.router.lifespan_context = lifespan_with_coordinator
             gate = link.gate
-        # Outermost of this app's middleware: a refused call must not register capture intent.
+        # Outside capture: a refused call must not register capture intent.
         app.add_middleware(PolicyAdmissionMiddleware, gate=gate)
         app.state.nemo_gym_policy_gate = gate
 
@@ -590,17 +629,15 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             # first, so a call that finishes sooner keeps the buffered events and HTTP error statuses.
             done, _ = await asyncio.wait({pending}, timeout=keepalive_s)
         except BaseException:
-            pending.cancel()
-            await asyncio.gather(pending, return_exceptions=True)
+            await _cancel_and_wait_for_backend(pending)
             raise
         if done:
             return await self._stream_buffered_responses(request, pending, ns_map)
-        return StreamingResponse(
+        return _BackendStreamingResponse(
             self._responses_keepalive_events(
                 request, pending, ns_map, keepalive_s, response_id, failure_log=failure_log
             ),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            backend=pending,
         )
 
     async def _stream_buffered_responses(
@@ -662,9 +699,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             async for event in served.body_iterator:
                 yield _with_stream_report(event, report)
         finally:
-            if not pending.done():
-                pending.cancel()
-            await asyncio.gather(pending, return_exceptions=True)
+            await _cancel_and_wait_for_backend(pending)
 
     def _streamed_responses_failure(self, exc: Exception) -> tuple[Optional[str], str]:
         """The ``(code, message)`` of the ``response.failed`` event that reports a failure after keepalives.
@@ -744,10 +779,14 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             completion_json = (
                 completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
             )
-            return await self._stream_served_response(
+            streamed = await self._stream_served_response(
                 completion_json,
                 synthesize_chat_completion_sse(completion_json, include_usage=include_usage),
             )
+            if "usage" in completion_json:
+                # A client without stream_options.include_usage gets no usage chunk; capture records Gym's own usage.
+                request.state.nemo_gym_internal_usage = completion_json["usage"]
+            return streamed
 
         # The middleware resets the request's log before the body streams; keep this request's log object.
         failure_log = RequestFailureLog.current()
@@ -759,9 +798,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             if done:
                 return await completed_stream(await pending)
         except BaseException:
-            if not pending.done():
-                pending.cancel()
-            await asyncio.gather(pending, return_exceptions=True)
+            await _cancel_and_wait_for_backend(pending)
             raise
 
         async def events() -> AsyncIterator[str | bytes]:
@@ -823,15 +860,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 if last is not None:
                     yield last
             finally:
-                if not pending.done():
-                    pending.cancel()
-                await asyncio.gather(pending, return_exceptions=True)
+                await _cancel_and_wait_for_backend(pending)
 
-        return StreamingResponse(
-            events(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
+        return _BackendStreamingResponse(events(), backend=pending)
 
     async def _invoke_chat_completions(
         self, request: Request, params: NeMoGymChatCompletionCreateParamsNonStreaming
@@ -843,7 +874,16 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # Exact prefix supply and capture share this decision.
         if current_capture_context() is not None:
             self._validate_capture_request(params)
-            request_messages = _request_messages(params)
+            note = trailing_harness_note(list(params.messages))
+            if note is not None:
+                # The harness, not the model, wrote this assistant message, and its next request drops it. The
+                # model reads it as a user message, and lineage leaves it out (see harness_notes).
+                params = params.model_copy(
+                    update={"messages": [*params.messages[:-1], {"role": "user", "content": note}]}
+                )
+                request_messages = _request_messages(params)[:-1]
+            else:
+                request_messages = _request_messages(params)
             try:
                 await resolve_parent(request_messages)
                 await register_call_intent()

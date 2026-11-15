@@ -83,17 +83,9 @@ It sets `network_access: model_only`, so the sandbox reaches only the model serv
 overrides it with `model_and_tools`. A restricted sandbox cannot download Codex, so supply
 `sandbox_runtime_dir`.
 
-The pairing also needs one Environment Server setting. HLE's Environment Server, like those of HLE Diamond, GPQA and
-APEX Shortlist, grants the agent its Resources server over `direct_http`, which this agent cannot use, so every seed
-fails with a 422. The judge offers the agent no tools, so load this alongside the benchmark, the profile and the
-model config, under the benchmark's own Environment Server name (`gym env resolve` shows it):
-
-```yaml
-hle_equivalence_llm_judge_environment_server:
-  environment_servers:
-    single_agent_turn_legacy:
-      resources_tool_transports: []
-```
+HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: their judges serve no tools, so their
+Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
+benchmark whose Resources server serves its tools over direct HTTP does not pair with it.
 
 ## Runtime and model requirements
 
@@ -105,9 +97,9 @@ direct HTTP grants are rejected. The task sandbox supplies isolation, so `sandbo
 `danger-full-access`. No Codex CLI is required on the agent-server host.
 With several agent workers, session routing sends each session's requests to the worker that seeded it.
 
-The installer accepts Linux x86_64/aarch64 glibc and x86_64 musl/Alpine with Python 3.8+.
-POSIX sh installs missing Python and Bash using apt-get or apk when running as root,
-before invoking the Bash runtime installer; otherwise the image must provide them.
+The installer accepts Linux x86_64/aarch64 glibc and x86_64 musl/Alpine images; the task image needs bash
+but no Python. POSIX sh installs a missing bash using apt-get or apk when running as root,
+before invoking the Bash runtime installer; otherwise the image must provide it.
 The pinned Node 22.19.0 build has no arm64 musl binary.
 Older Alpine images use a checksum-verified private C++ library for Node. Runtime files live
 under `/tmp/nemo-gym-codex-node-*`, and private `CODEX_HOME` configuration lives under
@@ -193,9 +185,9 @@ blocks verification. Missing evidence stays retryable; a final negative receipt 
 the borrowed connection without making the failed activation gradable. The borrowing
 agent never destroys the sandbox.
 Cleanup coordinates lifecycle; it is not a security boundary against hostile task code.
-The supervisor is a bash script, and the runner above Codex runs as `gym-runner` (a link to the
-sandbox's `python3`) from a file without a `.py` suffix, so a task agent's `pkill -f python3`,
-`pkill python3` or `killall python3` does not end Codex, as it would not under Harbor.
+The supervisor and the shared `harness_runner.sh` are bash scripts, and `sandbox_launcher.mjs` runs on
+the runtime's private Node, so a task agent's `pkill -f python3`, `pkill python3` or `killall python3`
+does not end Codex, as it would not under Harbor.
 
 Responses and close observations preserve text, reasoning, tool events, partial output,
 CLI aggregate usage, and sandbox hostname/PID/version. Wall-time and the pinned CLI's explicit
@@ -229,7 +221,7 @@ when the sandbox starts it below zero), so a memory-cgroup OOM kill picks agent 
 than the sandbox's exec daemon or the supervisor. Docker's equivalent daemon runs outside the
 container's memory cgroup. The runner records the change in the supervisor's `output.log`.
 
-Native session transcripts supply tool-call IDs and outcomes. The sandbox forwarder retains request statuses and invocation correlation across retries; native cumulative usage supplements CLI totals when a failed turn omits them. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
+Native session transcripts supply tool-call IDs and outcomes. Codex disables its native HTTP 429 retries, so `sandbox_launcher.mjs` runs it behind a loopback forwarder on the runtime's Node that retries a 429 twice, honoring `Retry-After` up to 30 seconds. The forwarder retains request statuses and invocation correlation across retries; native cumulative usage supplements CLI totals when a failed turn omits them. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
 Compare CLI totals with captured model calls; do not interpret unavailable usage as zero.
 Known model-metadata/compaction warnings remain visible as gaps after clean completion or a gradable model/wall-time limit.
 
@@ -398,7 +390,8 @@ Each rollout result is stamped with a `skills_ref` for provenance and grouping d
 
 ## Legacy direct-agent limitations
 
-- Eval only for now. Token IDs and logprobs are not wired up yet.
+- Training token-ID capture works as in agent sessions when `model_server` is set. A direct
+  `openai_base_url` endpoint bypasses Gym capture.
 - Token counts come from Codex's own usage reporting (`turn.completed`).
 - `turns_used` counts assistant messages right now, not tool calls.
 - Codex has no `--max-turns` equivalent; runaway rollouts are bounded by `timeout`.
@@ -418,9 +411,9 @@ OpenSandbox policy is set when the sandbox is created, so a session that borrows
 other than `inherit` (the default, the provider's network), and it cannot be combined with
 `sandbox_config.provider_options.network_policy`. Such a sandbox cannot download the runtime: set
 `sandbox_runtime_dir` to an absolute sandbox path that holds `node/` and `codex/` as the installer lays them out.
-Build it into the image with `bash install_codex_runtime.sh <dir> <codex_version>`. The image also needs `bash` and
-Python 3.8 or newer as `python3`, since the session prepare step would otherwise run `apt-get` or `apk`, which a
-restricted sandbox cannot reach. Setup checks that the directory reports `codex-cli <codex_version>` (an exact match)
+Build it into the image with `bash install_codex_runtime.sh <dir> <codex_version>`. The image also needs `bash`,
+since the session prepare step would otherwise run `apt-get` or `apk`, which a restricted sandbox cannot reach.
+Task-image Python is not required. Setup checks that the directory reports `codex-cli <codex_version>` (an exact match)
 instead of installing, and refuses the seed with a 422 when it does not. `sandbox_runtime_dir` applies to a borrowed
 sandbox too: it is checked there in the same way, and a borrowed sandbox is never stopped.
 

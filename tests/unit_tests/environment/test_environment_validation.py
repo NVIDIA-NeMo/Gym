@@ -3,12 +3,15 @@
 
 import ast
 import json
+import logging
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
-from nemo_gym.config.config_types import ConfigInterpolationError
+from nemo_gym.config.config_types import AlmostServerError, ConfigInterpolationError
 from nemo_gym.environment.manifest import EnvironmentManifest, dump_manifest, load_manifest
 from nemo_gym.environment.validation import (
     EnvironmentValidationError,
@@ -20,6 +23,7 @@ from nemo_gym.environment.validation import (
     _only_raises_not_implemented,
     _resolve_manifest_composition,
     _with_component_root,
+    resolve_config_servers,
     validate_environment,
 )
 
@@ -28,6 +32,7 @@ from nemo_gym.environment.validation import (
     "name",
     [
         "terminal_bench_4/miniswe",
+        "terminal_bench_4/miniswe_legacy_agent",
         "terminal_bench_science/miniswe",
         "terminal_bench_science/codex",
         "deepsearchqa",
@@ -122,6 +127,284 @@ def test_manifest_selects_named_config_and_dataset_owner(tmp_path: Path) -> None
         _resolve_manifest_composition(selected_config, dataset_owner="missing")
 
 
+def test_resolve_config_servers_reads_the_wiring_of_a_config(tmp_path: Path) -> None:
+    config_path = _asset(tmp_path).with_name("config.yaml")
+
+    assert resolve_config_servers(config_path) == ("demo", "simple_agent")
+
+
+@pytest.mark.parametrize("route", ["agent", "taskset", "legacy"])
+@pytest.mark.parametrize("agent_resources", [None, "other_resources"])
+def test_resolve_config_servers_uses_selected_environment_resources(
+    tmp_path: Path, route: str, agent_resources: str | None
+) -> None:
+    config_path = _asset(tmp_path).with_name("config.yaml")
+    config = yaml.safe_load(config_path.read_text())
+    agent = config["demo_agent"]["responses_api_agents"]["simple_agent"]
+    agent.pop("resources_server")
+    if agent_resources:
+        agent["resources_server"] = {"type": "resources_servers", "name": agent_resources}
+    config["other_resources"] = {"resources_servers": {"other": {"entrypoint": "app.py", "domain": "math"}}}
+    environment = {
+        "entrypoint": "app.py",
+        "agent_server": {"type": "responses_api_agents", "name": "demo_agent"},
+        "resources_server": {"type": "resources_servers", "name": "demo_resources"},
+    }
+    implementation = "single_agent_turn" if route == "taskset" else "single_agent_turn_legacy"
+    config["demo_environment_server"] = {"environment_servers": {implementation: environment}}
+    if route != "agent":
+        # A second environment fronts the same agent, so only the explicit route identifies the binding.
+        config["a_decoy_environment_server"] = {
+            "environment_servers": {
+                implementation: environment
+                | {"resources_server": {"type": "resources_servers", "name": "other_resources"}}
+            }
+        }
+    if route == "taskset":
+        agent["datasets"][0]["taskset"] = "demo:test"
+        config["environment_server_routes"] = {"demo:test": "demo_environment_server"}
+        # A materialized taskset takes precedence even over the flat-row route.
+        config.update(environment_routing_mode="legacy", environment_server_name="a_decoy_environment_server")
+    elif route == "legacy":
+        config.update(environment_routing_mode="legacy", environment_server_name="demo_environment_server")
+    config_path.write_text(yaml.safe_dump(config))
+
+    assert resolve_config_servers(config_path) == ("demo", "simple_agent")
+    # Catalog correction must not silently change the manifest's existing composition contract.
+    assert _resolve_manifest_composition(config_path).resources_server == ("other" if agent_resources else None)
+
+
+@pytest.mark.parametrize("second_resources", ["demo_resources", "other_resources"])
+def test_resolve_config_servers_checks_every_taskset_binding(tmp_path: Path, second_resources: str) -> None:
+    config_path = _asset(tmp_path).with_name("config.yaml")
+    config = yaml.safe_load(config_path.read_text())
+    agent = config["demo_agent"]["responses_api_agents"]["simple_agent"]
+    dataset = agent["datasets"][0]
+    agent["datasets"] = [dict(dataset, name=taskset, taskset=taskset) for taskset in ("demo:first", "demo:second")]
+    config["other_resources"] = {"resources_servers": {"other": {"entrypoint": "app.py", "domain": "math"}}}
+    for name, resources in (("demo_environment_server", "demo_resources"), ("second_environment", second_resources)):
+        config[name] = {
+            "environment_servers": {
+                "single_agent_turn": {
+                    "entrypoint": "app.py",
+                    "agent_server": {"type": "responses_api_agents", "name": "demo_agent"},
+                    "resources_server": {"type": "resources_servers", "name": resources},
+                }
+            }
+        }
+    config["environment_server_routes"] = {
+        "demo:first": "demo_environment_server",
+        "demo:second": "second_environment",
+    }
+    config_path.write_text(yaml.safe_dump(config))
+
+    expected = "demo" if second_resources == "demo_resources" else None
+    assert resolve_config_servers(config_path) == (expected, "simple_agent")
+
+
+@pytest.mark.parametrize("route", [None, "other_environment", "missing", "demo_resources"])
+def test_resolve_config_servers_rejects_routes_that_do_not_front_the_selected_agent(
+    tmp_path: Path, route: str | None
+) -> None:
+    config_path = _asset(tmp_path).with_name("config.yaml")
+    config = yaml.safe_load(config_path.read_text())
+    other_agent = deepcopy(config["demo_agent"])
+    other_agent["responses_api_agents"]["simple_agent"].pop("datasets")
+    config["other_agent"] = other_agent
+    config["other_resources"] = {"resources_servers": {"other": {"entrypoint": "app.py", "domain": "math"}}}
+    config["other_environment"] = {
+        "environment_servers": {
+            "single_agent_turn_legacy": {
+                "entrypoint": "app.py",
+                "agent_server": {"type": "responses_api_agents", "name": "other_agent"},
+                "resources_server": {"type": "resources_servers", "name": "other_resources"},
+            }
+        }
+    }
+    if route is not None:
+        config.update(environment_routing_mode="legacy", environment_server_name=route)
+    config_path.write_text(yaml.safe_dump(config))
+
+    # An unrelated environment does not make the agent's implicit route ambiguous, but cannot be its explicit route.
+    expected = "demo" if route is None else None
+    assert resolve_config_servers(config_path) == (expected, "simple_agent")
+
+
+@pytest.mark.parametrize("include_taskset", [False, True])
+def test_resolve_config_servers_keeps_resources_unknown_for_unroutable_flat_datasets(
+    tmp_path: Path, include_taskset: bool
+) -> None:
+    config_path = _asset(tmp_path).with_name("config.yaml")
+    config = yaml.safe_load(config_path.read_text())
+    config["environment_routing_mode"] = "taskset"
+    if include_taskset:
+        datasets = config["demo_agent"]["responses_api_agents"]["simple_agent"]["datasets"]
+        datasets.insert(0, dict(datasets[0], name="routed", taskset="demo:test"))
+        config["environment_server_routes"] = {"demo:test": "demo_environment_server"}
+    config_path.write_text(yaml.safe_dump(config))
+
+    # A successful first route must not hide the next dataset's missing route or permit the raw-name fallback.
+    assert resolve_config_servers(config_path) == (None, "simple_agent")
+
+
+def test_resolve_config_servers_does_not_guess_between_environment_routes(tmp_path: Path) -> None:
+    config_path = _asset(tmp_path).with_name("config.yaml")
+    config = yaml.safe_load(config_path.read_text())
+    config["second_environment"] = config["demo_environment_server"]
+    config_path.write_text(yaml.safe_dump(config))
+
+    # Both relays front the same agent and even share its resource binding, but flat-row routing is ambiguous.
+    assert resolve_config_servers(config_path) == (None, "simple_agent")
+
+
+def test_resolve_config_servers_keeps_self_contained_agent_without_resources(tmp_path: Path) -> None:
+    config_path = _asset(tmp_path).with_name("config.yaml")
+    config = yaml.safe_load(config_path.read_text())
+    del config["demo_agent"]["responses_api_agents"]["simple_agent"]["resources_server"]
+    config_path.write_text(yaml.safe_dump(config))
+
+    # The unrelated resources block in the file must not become the self-contained agent's binding.
+    assert resolve_config_servers(config_path) == (None, "simple_agent")
+
+
+def test_resolve_config_servers_is_unknown_when_the_config_needs_run_time_servers(tmp_path: Path) -> None:
+    config_path = _asset(tmp_path).with_name("config.yaml")
+    # A judge model server that only a run defines, as in environments/abstention.
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "      grading_mode: exact\n",
+            "      grading_mode: exact\n"
+            "      judge_model_server:\n"
+            "        type: responses_api_models\n"
+            "        name: judge_model\n",
+        ),
+        encoding="utf-8",
+    )
+
+    assert resolve_config_servers(config_path) is None
+
+
+def test_resolve_config_servers_does_not_apply_manifest_dataset_rules(tmp_path: Path) -> None:
+    config_path = _asset(tmp_path, kind="benchmark").with_name("config.yaml")
+    # A benchmark whose data already exists may omit prepare_script; only a manifest requires it.
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace("        prepare_script: benchmarks/demo/prepare.py\n", ""),
+        encoding="utf-8",
+    )
+
+    assert resolve_config_servers(config_path) == ("demo", "simple_agent")
+    with pytest.raises(ValidationError):
+        _resolve_manifest_composition(config_path)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [b"demo: ${unclosed\n", b"- a list\n- not a mapping\n", b"\xff\xfe not utf-8\n"],
+    ids=["interpolation-syntax", "top-level-list", "not-utf-8"],
+)
+def test_resolve_config_servers_is_unknown_for_a_malformed_config(tmp_path: Path, text: bytes) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_bytes(text)
+
+    assert resolve_config_servers(config_path) is None
+
+
+@pytest.mark.parametrize(
+    ("field_path", "value"),
+    [
+        (("config_paths",), 1),
+        (("demo_agent", "responses_api_agents", "simple_agent", "_inherit_from"), 1),
+        (("demo_resources", "resources_servers", "demo"), "not a mapping"),
+    ],
+    ids=["config-paths-not-a-list", "inherit-from-not-a-path", "server-block-not-a-mapping"],
+)
+def test_resolve_config_servers_is_unknown_for_a_field_of_the_wrong_type(
+    tmp_path: Path, field_path: tuple[str, ...], value: object
+) -> None:
+    config_path = _asset(tmp_path).with_name("config.yaml")
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    parent = config
+    for key in field_path[:-1]:
+        parent = parent[key]
+    parent[field_path[-1]] = value
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    assert resolve_config_servers(config_path) is None
+
+
+@pytest.mark.parametrize(
+    ("case", "error_type"),
+    [("policy_model_port", StopIteration), ("unknown_home", RuntimeError), ("recursive_alias", RecursionError)],
+)
+def test_resolve_config_servers_logs_unresolvable_configs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    case: str,
+    error_type: type[Exception],
+) -> None:
+    config_path = _asset(tmp_path).with_name("config.yaml")
+    config = yaml.safe_load(config_path.read_text())
+    if case == "policy_model_port":
+        config["policy_model"] = {"port": 12345}
+    elif case == "unknown_home":
+        config["results_dir"] = "~nemo_gym_missing_user/out"
+        original_expanduser = Path.expanduser
+
+        def expanduser(path: Path) -> Path:
+            # Exercise the parser's home expansion without depending on the machine's user directory service.
+            if str(path) == config["results_dir"]:
+                raise RuntimeError("Could not determine home directory.")
+            return original_expanduser(path)
+
+        monkeypatch.setattr(Path, "expanduser", expanduser)
+    else:
+        config["recursive"] = config
+    config_path.write_text(yaml.safe_dump(config))
+
+    with caplog.at_level(logging.DEBUG, logger="nemo_gym.environment.validation"):
+        assert resolve_config_servers(config_path) is None
+    [record] = [record for record in caplog.records if record.name == "nemo_gym.environment.validation"]
+    assert record.levelno == logging.DEBUG
+    assert str(config_path) in record.getMessage()
+    assert record.exc_info is not None and record.exc_info[0] is error_type
+    # Only best-effort catalog lookup catches these failures; manifest composition stays strict.
+    with pytest.raises(error_type):
+        _resolve_manifest_composition(config_path)
+
+
+@pytest.mark.parametrize("error_on_almost_servers", [True, False])
+def test_resolve_config_servers_rejects_unreferenced_almost_servers(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], error_on_almost_servers: bool
+) -> None:
+    config_path = _asset(tmp_path).with_name("config.yaml")
+    config = yaml.safe_load(config_path.read_text())
+    config["unreferenced_resources"] = {
+        "resources_servers": {"other": {"entrypoint": "app.py", "domain": "not_a_domain"}}
+    }
+    config["error_on_almost_servers"] = error_on_almost_servers
+    config_path.write_text(yaml.safe_dump(config))
+
+    assert resolve_config_servers(config_path) is None
+    assert capsys.readouterr() == ("", "")
+
+
+def test_resolve_config_servers_prints_nothing_for_a_server_block_that_fails_validation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config_path = _asset(tmp_path).with_name("config.yaml")
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace("domain: math", "domain: not_a_domain"), encoding="utf-8"
+    )
+
+    assert resolve_config_servers(config_path) is None
+    assert capsys.readouterr() == ("", "")
+    # Validating the config still reports the block.
+    with pytest.raises(AlmostServerError):
+        _resolve_manifest_composition(config_path)
+    assert "Almost-Server Detected: 'demo_resources'" in capsys.readouterr().err
+
+
 def test_manifest_accepts_external_agent_without_resources(tmp_path: Path) -> None:
     path = _asset(tmp_path, kind="benchmark", profile="external-agent-loop")
     raw = yaml.safe_load(path.read_text())
@@ -162,6 +445,7 @@ def test_manifest_resolves_taskset_datasets_through_environment(tmp_path: Path, 
     report = validate_environment(path, sync=True)
     assert next(c.name for c in report.components if c.role == "agent_server") == "demo_agent"
     assert len(report.datasets) == len(tasksets)
+    assert resolve_config_servers(config_path) == ("demo", "simple_agent")
 
     # Every declared taskset must be checked, even if another route already resolved.
     del config["environment_server_routes"]["demo:test"]
@@ -671,3 +955,122 @@ def test_custom_driver_is_checked_without_scaffolding(tmp_path: Path) -> None:
     driver_path.unlink()
     with pytest.raises(EnvironmentValidationError, match="Rollout driver module was not found"):
         validate_environment(manifest_path)
+
+
+HARBOR_HARNESSES = {
+    "mini_swe_agent": (
+        "responses_api_agents/mini_swe_agent/configs/mini_swe_agent_sandboxed.yaml",
+        {"step_limit": 500},
+    ),
+    # Its shipped template leaves `resources_server.name` for benchmark composition; the Harbor run clears it.
+    "terminus_2_sandboxed_agent": (
+        "responses_api_agents/terminus_2_sandboxed_agent/configs/terminus_2_sandboxed_agent.yaml",
+        {},
+    ),
+}
+
+
+def _harbor_asset(
+    tmp_path: Path, *, config_target: str, manifest_target: str | None = None, harness: str = "mini_swe_agent"
+) -> Path:
+    directory = tmp_path / "benchmarks" / "harbor_demo"
+    directory.mkdir(parents=True)
+    shipped, settings = HARBOR_HARNESSES[harness]
+    config = {
+        "harbor_target": config_target,
+        "config_paths": [shipped],
+        harness: {"responses_api_agents": {harness: settings}},
+    }
+    (directory / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    manifest = _manifest(kind="benchmark", profile="custom-gym-agent-loop")
+    manifest.update(
+        name="harbor_demo",
+        harbor_target=manifest_target or config_target,
+        resources_server=None,
+        agent_server=harness,
+        datasets=[],
+        prompt_source="agent",
+        grading_mode=None,
+    )
+    manifest.pop("standard_prompt_config")
+    path = directory / "manifest.yaml"
+    path.write_text(dump_manifest(manifest), encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize("harness", sorted(HARBOR_HARNESSES))
+def test_harbor_backed_manifest_validates_its_harness_and_target(tmp_path: Path, harness: str) -> None:
+    path = _harbor_asset(tmp_path, config_target="terminal_bench_4", harness=harness)
+    report = validate_environment(path)
+    assert report.datasets == ()
+    assert [(c.role, c.name) for c in report.components] == [
+        ("agent_server", harness),
+        ("model_server", "policy_model"),
+    ]
+    assert report.components[0].implementation == harness
+    assert resolve_config_servers(path.parent / "config.yaml") == (None, harness)
+
+
+def test_dataset_owner_does_not_apply_to_a_harbor_target(tmp_path: Path) -> None:
+    path = _harbor_asset(tmp_path, config_target="terminal_bench_4")
+    manifest = yaml.safe_load(path.read_text())
+    manifest["dataset_owner"] = "mini_swe_agent"
+    path.write_text(yaml.safe_dump(manifest), encoding="utf-8")
+    with pytest.raises(EnvironmentValidationError, match="dataset_owner does not apply to harbor_target"):
+        validate_environment(path)
+
+
+def test_a_harbor_target_only_an_include_sets_is_refused(tmp_path: Path) -> None:
+    path = _harbor_asset(tmp_path, config_target="terminal_bench_4")
+    config = path.parent / "config.yaml"
+    base = path.parent / "base.yaml"
+    base.write_text(config.read_text(), encoding="utf-8")
+    config.write_text(yaml.safe_dump({"config_paths": [str(base)]}), encoding="utf-8")
+    with pytest.raises(EnvironmentValidationError, match="set `harbor_target` in the benchmark file itself"):
+        validate_environment(path)
+
+
+def test_harbor_target_is_mirrored_from_the_config(tmp_path: Path) -> None:
+    path = _harbor_asset(tmp_path, config_target="terminal_bench_4", manifest_target="terminal_bench_2_1")
+    with pytest.raises(EnvironmentValidationError, match="harbor_target"):
+        validate_environment(path)
+
+
+def test_harbor_target_must_resolve_without_a_fetch(tmp_path: Path) -> None:
+    with pytest.raises(EnvironmentValidationError, match="not an entry under environments/harbor/"):
+        validate_environment(_harbor_asset(tmp_path, config_target="no_such_harbor_entry"))
+    folder = tmp_path / "tasks"
+    folder.mkdir()
+    assert validate_environment(_harbor_asset(tmp_path / "local", config_target=str(folder))).datasets == ()
+
+
+@pytest.mark.parametrize("target", ["harbor:", "harbor:org/name/extra"])
+def test_a_malformed_harbor_reference_is_refused(tmp_path: Path, target: str) -> None:
+    with pytest.raises(EnvironmentValidationError):
+        validate_environment(_harbor_asset(tmp_path, config_target=target))
+
+
+def test_a_well_formed_harbor_reference_is_accepted_without_a_fetch(tmp_path: Path) -> None:
+    path = _harbor_asset(tmp_path, config_target="harbor:terminal-bench/terminal-bench@4.0.0")
+    assert validate_environment(path).datasets == ()
+
+
+def test_a_file_is_not_a_task_folder_target(tmp_path: Path) -> None:
+    task_file = tmp_path / "task.toml"
+    task_file.write_text("")
+    with pytest.raises(EnvironmentValidationError, match="not an entry under environments/harbor/"):
+        validate_environment(_harbor_asset(tmp_path / "file", config_target=str(task_file)))
+
+
+def test_component_verifier_validation_does_not_require_full_dataset(tmp_path: Path) -> None:
+    manifest_path = _asset(tmp_path, kind="benchmark")
+    (manifest_path.parent / "data/example.jsonl").unlink()
+    with pytest.raises(EnvironmentValidationError, match="Dataset file was not found"):
+        validate_environment(manifest_path)
+    report = validate_environment(manifest_path, validate_datasets=False)
+    assert report.datasets == ()
+    assert report.components
+    # Dataset-free validation must still catch a stale manifest composition.
+    _replace_manifest(manifest_path, resources_server="wrong_server")
+    with pytest.raises(EnvironmentValidationError, match="composition is stale"):
+        validate_environment(manifest_path, validate_datasets=False)
