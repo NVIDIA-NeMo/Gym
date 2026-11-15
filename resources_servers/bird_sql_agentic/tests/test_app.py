@@ -18,6 +18,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.server_runtime import BaseVerifyRequest
 from nemo_gym.server_utils import ServerClient
 from resources_servers.bird_sql.app import BirdSqlVerifyRequest, FailureCode
 from resources_servers.bird_sql_agentic.app import (
@@ -29,6 +30,7 @@ from resources_servers.bird_sql_agentic.sql_tool import (
     format_rows,
     run_readonly_query,
 )
+from resources_servers.bird_sql_agentic.task_data import TaskData
 
 
 # ---------------------------------------------------------------------------
@@ -323,3 +325,23 @@ class TestVerify:
         metrics = server.compute_metrics(tasks)
         assert metrics["mean/num_tool_calls"] == 3
         assert metrics["mean/num_sql_errors"] == 0.5
+
+
+class TestTaskDataParity:
+    def test_task_data_matches_bird_sql_verify_request(self):
+        # Field names (sql_context is an extra prompt field; the rest come from BaseVerifyRequest)
+        task_fields = set(TaskData.model_fields) - {"sql_context"}
+        bird_fields = set(BirdSqlVerifyRequest.model_fields) - set(BaseVerifyRequest.model_fields)
+        assert task_fields == bird_fields
+
+        # Type, required, and default for each shared field
+        for name in task_fields:
+            task_field = TaskData.model_fields[name]
+            bird_field = BirdSqlVerifyRequest.model_fields[name]
+            assert task_field.annotation == bird_field.annotation, name
+            assert task_field.is_required() == bird_field.is_required(), name
+            assert task_field.default == bird_field.default, name
+
+        # Both allow extra fields
+        assert TaskData.model_config.get("extra") == "allow"
+        assert BirdSqlVerifyRequest.model_config.get("extra") == "allow"
