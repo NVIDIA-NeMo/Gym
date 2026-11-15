@@ -38,6 +38,7 @@ PRIME_AGENT_PACKAGE_SHA256 = (
 )
 # Release dependencies use an R2 host in their manifests. Fetch the identical, pinned GitHub release assets and
 # rewrite only those URLs to uploaded local archives, including the core package's transitive AI dependency.
+# The sha256 values match the GitHub release asset digests and the release's SHA256SUMS.
 PRIME_RELEASE_PACKAGES = {
     "prime-agent": PRIME_AGENT_PACKAGE_SHA256,
     "prime-agent-ai": "7cdbb3e835f48dd103325f7a351ce540b27af4d161aeb9c7b9bdcc12fe7909af",  # pragma: allowlist secret
@@ -45,7 +46,9 @@ PRIME_RELEASE_PACKAGES = {
     "prime-agent-tui": "3225f7f92e87db80fe2c9005d1f7770735ae625c32935ef2283688fc9bd33951",  # pragma: allowlist secret
 }
 PRIME_RELEASE_URL = PRIME_AGENT_PACKAGE_URL.rsplit("/", 1)[0]
-PRIME_DEPENDENCY_URL = "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.7.0"
+PRIME_DEPENDENCY_URL = f"https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v{PRIME_AGENT_VERSION}"
+# The manifest fields npm installs from.
+DEPENDENCY_FIELDS = ("dependencies", "optionalDependencies", "peerDependencies")
 
 
 NODE_VERSION = "22.23.2"
@@ -64,25 +67,34 @@ STDERR_TAIL_BYTES = 1024 * 1024
 
 
 def _localize_release_package(source: Path, target: Path, replacements: dict[str, str]) -> str:
-    # Stream archive members without extracting paths or modifying the verified download cache.
+    """Copy a verified release archive to `target` with `replacements` applied to its manifest's dependency URLs.
+
+    Members are streamed, never extracted, and the download cache is left unchanged. An archive whose manifest still
+    names a remote dependency is refused, so npm in the sandbox never fetches an unverified tarball. Returns the
+    sha256 of `target`, which the sandbox checks before npm reads it.
+    """
     found_manifest = False
-    with tarfile.open(source, "r:gz") as original, tarfile.open(target, "w:gz") as localized:
+    # Every seed repacks the archives: level 6 keeps level 9's size at under half its CPU time.
+    with tarfile.open(source, "r:gz") as original, tarfile.open(target, "w:gz", compresslevel=6) as localized:
         for member in original:
             data = original.extractfile(member) if member.isfile() else None
             if member.name == "package/package.json":
                 if data is None:
-                    raise ValueError("Prime release package.json must be a regular file")
+                    raise ValueError(f"{source.name}: package/package.json must be a regular file")
                 manifest = json.load(data)
-                for name, value in manifest.get("dependencies", {}).items():
-                    if value in replacements:
-                        manifest["dependencies"][name] = replacements[value]
+                for field in DEPENDENCY_FIELDS:
+                    dependencies = manifest.get(field) or {}
+                    for name, value in dependencies.items():
+                        dependencies[name] = replacements.get(value, value)
+                        if "://" in dependencies[name]:
+                            raise ValueError(f"{source.name}: {field} {name} still points at {value}")
                 content = json.dumps(manifest).encode()
                 member.size = len(content)
                 data = io.BytesIO(content)
                 found_manifest = True
             localized.addfile(member, data)
     if not found_manifest:
-        raise ValueError("Prime release archive has no package/package.json")
+        raise ValueError(f"{source.name}: no package/package.json")
     return hashlib.sha256(target.read_bytes()).hexdigest()
 
 
@@ -114,9 +126,10 @@ class PrimeSession(AgentSessionState):
     async def install(self, *, timeout: float) -> None:
         """Create the session directory and install (or reuse) Node.js and the pinned Prime Agent package.
 
-        The agent server downloads and checks the Node.js build, the release package and the kernel's Python and uv
-        once, then uploads them, so the sandbox needs no download tools. Prime release dependencies are also uploaded;
-        npm and uv install remaining dependencies from their package indexes.
+        The agent server downloads the Node.js build, the four Prime release archives and the kernel's Python and uv
+        once, checks every pinned SHA-256 (uv has none), points the Prime manifests' release-host dependencies at the
+        uploaded archives and uploads everything, so the sandbox needs no download tools; npm and uv install the
+        remaining dependencies from their package indexes.
         """
         # Shared host-side download cache for pinned sandbox assets.
         from responses_api_agents.miniswe_sandboxed_agent.bootstrap import (
@@ -150,32 +163,34 @@ class PrimeSession(AgentSessionState):
         # The installer requires glibc, so the kernel uses the glibc Python build.
         uv, python = await bootstrap_assets(arch_name, "gnu")
         await sandbox.upload(node, f"{directory}/{name}")
+        # Each release archive's sandbox path, which the rewritten manifests name as a `file:` dependency.
+        uploads = {release: f"{directory}/{release}.tgz" for release in PRIME_RELEASE_PACKAGES}
         replacements = {
-            f"{PRIME_DEPENDENCY_URL}/{name}-{PRIME_AGENT_VERSION}.tgz": f"file:{directory}/{name}.tgz"
-            for name in PRIME_RELEASE_PACKAGES
+            f"{PRIME_DEPENDENCY_URL}/{release}-{PRIME_AGENT_VERSION}.tgz": f"file:{path}"
+            for release, path in uploads.items()
         }
-        package_checksums = {}
+        checksums = {}
         with tempfile.TemporaryDirectory(prefix="gym-prime-release-") as temporary:
-            for package_name, checksum in PRIME_RELEASE_PACKAGES.items():
-                package = await cached_download(
-                    f"{PRIME_RELEASE_URL}/{package_name}-{PRIME_AGENT_VERSION}.tgz", sha256=checksum, timeout=timeout
+            for release, pinned in PRIME_RELEASE_PACKAGES.items():
+                source = await cached_download(
+                    f"{PRIME_RELEASE_URL}/{release}-{PRIME_AGENT_VERSION}.tgz", sha256=pinned, timeout=timeout
                 )
-                localized = Path(temporary) / f"{package_name}.tgz"
-                package_checksums[package_name] = await asyncio.to_thread(
-                    _localize_release_package, package, localized, replacements
+                localized = Path(temporary) / f"{release}.tgz"
+                checksums[release] = await asyncio.to_thread(
+                    _localize_release_package, source, localized, replacements
                 )
-                await sandbox.upload(localized, f"{directory}/{package_name}.tgz")
+                await sandbox.upload(localized, uploads[release])
         dependency_checks = " ".join(
-            f"{quote(f'{directory}/{name}.tgz')} {quote(checksum)}"
-            for name, checksum in package_checksums.items()
-            if name != "prime-agent"
+            f"{quote(uploads[release])} {quote(checksum)}"
+            for release, checksum in checksums.items()
+            if release != "prime-agent"
         )
         await sandbox.upload(python, f"{directory}/python.tar.gz")
         await sandbox.upload(uv, f"{directory}/uv.tar.gz")
         result = await sandbox.exec(
             f"bash {quote(f'{directory}/{INSTALLER}')} {quote(self.runtime)} {quote(PRIME_AGENT_VERSION)} "
             f"{quote(f'{directory}/{name}')} {quote(NODE_SHA256[arch_name])} "
-            f"{quote(f'{directory}/prime-agent.tgz')} {quote(package_checksums['prime-agent'])} "
+            f"{quote(uploads['prime-agent'])} {quote(checksums['prime-agent'])} "
             f"{quote(f'{directory}/python.tar.gz')} {quote(PYTHON_SHA256[arch_name, 'gnu'])} "
             f"{quote(f'{directory}/uv.tar.gz')} {dependency_checks}",
             cwd="/",

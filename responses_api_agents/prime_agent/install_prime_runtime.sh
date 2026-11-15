@@ -62,6 +62,8 @@ trap 'rm -rf "$staging"' EXIT
 echo "$node_sha256  $node_archive" | sha256sum -c -
 echo "$package_sha256  $package" | sha256sum -c -
 echo "$python_sha256  $python_archive" | sha256sum -c -
+# PACKAGE_SHA256 and each DEPENDENCY_SHA256 are checksums of the copies the agent server rewrote after checking the
+# release's pinned values.
 while [ "$#" -gt 0 ]; do
     echo "$2  $1" | sha256sum -c -
     shift 2
