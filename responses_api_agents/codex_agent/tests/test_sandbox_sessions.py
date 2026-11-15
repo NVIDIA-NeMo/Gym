@@ -3627,10 +3627,11 @@ def test_later_rejection_preserves_real_tool_output_and_available_usage(setup, u
 
 
 @pytest.mark.parametrize("usage_source", ["native", "missing"])
-def test_graded_failure_reports_native_usage_or_none(setup, usage_source):
-    """A killed run that is graded reports the native cumulative usage, or none, never the CLI's zero."""
+@pytest.mark.parametrize("outcome", ["graded-error", "output-limit", "wall-time"])
+def test_unfinished_turn_reports_native_usage_or_none(setup, usage_source, outcome):
+    """Failures and limits without turn.completed use native totals or unknown, never a fabricated zero."""
     agent, sandbox = setup
-    agent.config.verify_after_agent_error = True
+    agent.config.verify_after_agent_error = outcome == "graded-error"
     sandbox.status = AsyncMock(return_value=SandboxStatus.RUNNING)
     sandbox.result["return_code"] = 128 + signal.SIGKILL  # killed after a completed tool call, before turn.completed
     tool = {"id": "item_1", "type": "command_execution", "command": "printf retained", "status": "in_progress"}
@@ -3639,6 +3640,11 @@ def test_graded_failure_reports_native_usage_or_none(setup, usage_source):
         {"type": "item.started", "item": tool},
         {"type": "item.completed", "item": tool | {"status": "completed", "exit_code": 0, "aggregated_output": "ok"}},
     ]
+    if outcome == "output-limit":
+        sandbox.result["return_code"] = 1
+        records.append({"type": "turn.failed", "error": {"message": CODEX_OUTPUT_CAP}})
+    elif outcome == "wall-time":
+        sandbox.result["timed_out"] = True
     sandbox.events = "\n".join(json.dumps([float(i), event]) for i, event in enumerate(records))
     transcript = native_transcript(
         [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "task"}]}]
@@ -3675,8 +3681,11 @@ def test_graded_failure_reports_native_usage_or_none(setup, usage_source):
         client.post("/v1/agent_sessions/close", json=close_body(session_id))
     assert response.status_code == 200, response.text
     body = response.json()
-    assert (body["status"], body["error"]) == ("failed", None)
-    assert body["metadata"]["graded_agent_error"].startswith("exit 137: ")
+    assert (body["status"], body["error"]) == ("failed" if outcome == "graded-error" else "incomplete", None)
+    if outcome == "graded-error":
+        assert body["metadata"]["graded_agent_error"].startswith("exit 137: ")
+    else:
+        assert "graded_agent_error" not in body["metadata"]
     assert "ng_agent_outcome" not in body["metadata"]
     if usage_source == "native":
         assert body["usage"] == {

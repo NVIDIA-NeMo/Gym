@@ -1210,8 +1210,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
             input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=usage["cached_input_tokens"]),
             output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=usage["reasoning_tokens"]),
         )
-        # A failed run that may be scored can have done model work after the CLI's last usage total.
-        if (reported_model_error or gradable) and not completed:
+        # Failures and budget stops can do model work without a CLI turn.completed usage total.
+        if (reported_model_error or gradable or gradable_limit) and not completed:
             native_usage = parse_codex_usage(state.native_transcript)
             if native_usage is not None:
                 response_usage = native_usage
