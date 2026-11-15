@@ -13,7 +13,8 @@ from pathlib import Path
 from nemo_gym.core import MODEL_CONTEXT_LIMIT, MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
 from nemo_gym.trajectory import ContextCompactionObservation, ToolCallObservation, TrajectoryRecord
 from responses_api_agents.opencode_agent.app import OpenCodeAgent
-from responses_api_agents.opencode_agent.artifacts import _parse_opencode_session
+from responses_api_agents.opencode_agent.artifacts import _parse_opencode_session, parse_opencode_session
+from responses_api_agents.opencode_agent.continuation import classify_opencode_run
 from responses_api_agents.opencode_agent.opencode2.store import (
     message_labels,
     reached_step_limit,
@@ -164,7 +165,9 @@ def test_labeled_replies_take_the_label_the_model_call_carried(tmp_path):
         (ROOT, "msg_user", *user("go", 1)),
         (ROOT, "msg_a1", *assistant(2, [{"type": "text", "text": "done"}])),
     ]
-    labels = message_labels(json.dumps({"label": "msg_gym_1", "session": ROOT, "message": "msg_a1"}) + "\nnot json\n")
+    recorded = [{"label": label, "session": ROOT, "message": "msg_a1"} for label in ("msg_gym_0", "msg_gym_1")]
+    labels = message_labels("\n".join(map(json.dumps, recorded)) + "\nnot json\n")
+    # A call retried before any output records the same reply under a new label; the last call holds its response.
     assert labels == {(ROOT, "msg_a1"): "msg_gym_1"}
     translate_store(store(tmp_path / "opencode.db", messages), tmp_path / "sessions.db", labels=labels)
     with sqlite3.connect(tmp_path / "sessions.db") as con:
@@ -189,10 +192,13 @@ def test_provider_errors_keep_their_status_and_classification(tmp_path):
         ),
         "msg_400": failed({"type": "provider.invalid-request", "message": "bad tool schema", "status": 400}),
     }
-    messages = [(ROOT, "msg_user", *user("go", 1))] + [(ROOT, key, *value) for key, value in cases.items()]
-    translate_store(store(tmp_path / "opencode.db", messages), tmp_path / "sessions.db")
-    with sqlite3.connect(tmp_path / "sessions.db") as con:
-        infos = {row[0]: json.loads(row[1]) for row in con.execute("select id, data from message")}
+    infos = {}
+    for key, value in cases.items():
+        # Each failure ends its run: it is the last reply of its session.
+        messages = [(ROOT, "msg_user", *user("go", 1)), (ROOT, key, *value)]
+        translate_store(store(tmp_path / f"{key}.db", messages), tmp_path / f"{key}-sessions.db")
+        with sqlite3.connect(tmp_path / f"{key}-sessions.db") as con:
+            infos |= {row[0]: json.loads(row[1]) for row in con.execute("select id, data from message")}
     assert infos["msg_429"]["error"] == {
         "name": "APIError",
         "data": {"message": "slow down", "type": "provider.rate-limit", "statusCode": 429, "isRetryable": True},
@@ -289,8 +295,10 @@ def test_a_compaction_is_a_summary_reply_to_a_compaction_request(tmp_path):
     )
     # The summary call is not a turn of the conversation.
     assert [turn.source_message_id for turn in trajectory.turns] == ["msg_a1", "msg_a2"]
-    # Its tokens count toward usage, as OpenCode 1's summary message did.
+    # Its tokens count toward usage, as OpenCode 1's summary message did, in both ways the readers sum usage.
     assert len([info for info in export["usage_messages"] if info["role"] == "assistant"]) == 3
+    _, usage = parse_opencode_session(tmp_path / "sessions.db")
+    assert usage["output_tokens"] == 3 * (TOKENS["output"] + TOKENS["reasoning"])
 
 
 def test_content_kept_in_part_rows_is_read_too(tmp_path):
@@ -368,3 +376,82 @@ def test_an_empty_store_translates_to_empty_tables(tmp_path: Path):
     with sqlite3.connect(tmp_path / "sessions.db") as con:
         assert con.execute("select count(*) from message").fetchone() == (0,)
         assert con.execute("select id, parent_id from session").fetchall() == [(ROOT, None)]
+
+
+def test_records_it_cannot_translate_are_reported_not_dropped_silently(tmp_path: Path):
+    reply = assistant(
+        3,
+        [
+            {"type": "text", "text": "kept"},
+            {"type": "hologram", "text": "a content type 2.2.7 does not have"},
+            {**shell("call_1", "ok"), "state": {"status": "suspended", "input": {}}},
+        ],
+    )
+    messages = [
+        (ROOT, "msg_user", "user", {**user("go", 1)[1], "skills": [{"text": "skill text"}]}),
+        (ROOT, "msg_system", "system", {"time": {"created": 2}, "text": "instructions"}),
+        (ROOT, "msg_idle", "idle", {"time": {"created": 2}, "outcome": "succeeded"}),
+        (ROOT, "msg_switch", "agent-switched", {"time": {"created": 2}}),
+        (ROOT, "msg_shell", "shell", {"time": {"created": 2}, "command": "ls"}),
+        (ROOT, "msg_shell_2", "shell", {"time": {"created": 2}, "command": "pwd"}),
+        (ROOT, "msg_a1", *reply),
+        (ROOT, "msg_compaction", "compaction", {"time": {"created": 4}, "status": "pending"}),
+    ]
+    untranslated = translate_store(store(tmp_path / "opencode.db", messages), tmp_path / "sessions.db")
+    # System instructions, idle and agent switches hold nothing OpenCode 1 stored; everything else is named.
+    assert untranslated == [
+        "assistant content type 'hologram' x1",
+        "compaction status 'pending' x1",
+        "message type 'shell' x2",
+        "tool status 'suspended' x1",
+        "user message skills x1",
+    ]
+    with sqlite3.connect(tmp_path / "sessions.db") as con:
+        (parts,) = con.execute("select group_concat(data, '|') from part where message_id = 'msg_a1'").fetchone()
+    assert "kept" in parts and "hologram" not in parts
+
+
+def test_a_run_of_the_known_shapes_translates_completely(tmp_path: Path):
+    messages = [(ROOT, "msg_user", *user("go", 1)), (ROOT, "msg_a1", *assistant(2, [shell("call_1", "ok")]))]
+    assert translate_store(store(tmp_path / "opencode.db", messages), tmp_path / "sessions.db") == []
+
+
+def test_a_step_opencode_continued_after_does_not_fail_the_run(tmp_path: Path):
+    """A stream that breaks after output started: OpenCode 2 saves the error on that step and continues."""
+    broken = assistant(2, [{"type": "text", "text": "partial"}], finish="error")
+    broken[1]["error"] = {"type": "provider.transport", "message": "socket hang up"}
+    messages = [
+        (ROOT, "msg_user", *user("go", 1)),
+        (ROOT, "msg_a1", *broken),
+        (ROOT, "msg_continue", "synthetic", {"time": {"created": 3}, "text": "Continue."}),
+        (ROOT, "msg_a2", *assistant(4, [{"type": "text", "text": "done"}])),
+    ]
+    export, _, trajectory = conversation(tmp_path, messages)
+    first = export["messages"][1]["info"]
+    assert "error" not in first and "finish" not in first
+    assert first["recoveredError"]["data"]["type"] == "provider.transport"
+    outcome = classify_opencode_run(
+        export,
+        cleanup={"return_code": 0, "timed_out": False, "cleanup_confirmed": True, "error": None},
+        previous_session_id=None,
+        session_id=ROOT,
+        stdout="",
+        continuation=False,
+    )
+    assert outcome.status == "completed"
+    assert [turn.source_message_id for turn in trajectory.turns] == ["msg_a1", "msg_a2"]
+
+
+def test_an_error_on_the_last_reply_still_ends_the_run(tmp_path: Path):
+    failed = assistant(2, [], finish="error", error={"type": "provider.transport", "message": "socket hang up"})
+    export, _, _ = conversation(tmp_path, [(ROOT, "msg_user", *user("go", 1)), (ROOT, "msg_a1", *failed)])
+    # The saved error alone fails the run, whatever the exit code says.
+    outcome = classify_opencode_run(
+        export,
+        cleanup={"return_code": 0, "timed_out": False, "cleanup_confirmed": True, "error": None},
+        previous_session_id=None,
+        session_id=ROOT,
+        stdout="",
+        continuation=False,
+    )
+    assert outcome.status == "failed" and "socket hang up" in outcome.error

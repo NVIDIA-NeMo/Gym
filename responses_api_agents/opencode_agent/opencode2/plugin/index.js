@@ -6,6 +6,9 @@
 // The adapter passes every setting as plugin options; file paths are absolute sandbox paths.
 //
 // - Tool shells get the task's HOME and XDG directories (shell `create.before`).
+// - Code Mode is off: the adapter denies its `execute` tool, and the plugin removes the tools that OpenCode offers
+//   only through Code Mode (`opencode_*`: sessions, worktrees, models, schedules, artifacts, MCP resources), which
+//   OpenCode would otherwise offer directly. The model gets OpenCode's own tools and the MCP grants, as in OpenCode 1.
 // - Request temperature and top_p reach every model call (session `context` and `compaction`); OpenCode 2
 //   accepts per-agent sampling in its config but does not apply it.
 // - Required MCP grants are checked when the prompt arrives, before the first model call; the statuses go to a
@@ -14,7 +17,8 @@
 //   sessions) and, with model-call capture on, `X-OpenCode-Assistant-Message-Id`. OpenCode 2 names a reply only
 //   once its stream starts, after the request is sent, so the header carries a label of the plugin's own; when
 //   the step starts (or fails before streaming), the plugin records which message the label became, and the
-//   adapter uses the label as that message's ID. Retries before any output reuse the message, and the label.
+//   adapter uses the label as that message's ID. A call retried before any output reuses the message under a new
+//   label, and the last label recorded for a message wins.
 //
 // Once the hooks are registered, the plugin writes its ready receipt; the adapter accepts a run only with it.
 
@@ -53,6 +57,12 @@ export default {
         Object.assign(event.env, env)
       })
     }
+
+    await ctx.tool.transform((tools) => {
+      for (const tool of tools.list()) {
+        if (tool.options?.codemode !== false) tools.remove(tool.id)
+      }
+    })
 
     const sampling = options.sampling ?? {}
     if (Object.keys(sampling).length) {

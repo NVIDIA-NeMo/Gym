@@ -206,7 +206,13 @@ class OpenCodeSandboxSession(AgentSessionState):
     opencode_environment: str = ""
     # Whether the session runs OpenCode 2: its store is translated (``opencode2.store``) before it is read.
     opencode2: bool = False
+    # Whether the OpenCode 2 plugin records model-call labels, which it does with model-call capture on.
+    model_call_labels: bool = False
     _export_gaps: list[ObservationGap] = field(default_factory=list, init=False, repr=False)
+    # Gaps of the latest capture's store translation, added to that capture's observations.
+    _capture_gaps: list[ObservationGap] = field(default_factory=list, init=False, repr=False)
+    # Every model-call label read so far; the label file only grows, so an earlier read stays valid.
+    _labels: dict[tuple[str, str], str] = field(default_factory=dict, init=False, repr=False)
     _retained_activations: dict[int, tuple[AgentObservationBundle, TrajectoryRecord | None]] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -619,6 +625,7 @@ class OpenCodeSandboxSession(AgentSessionState):
             for gap in trajectory.gaps:
                 if gap.code == "turns_unavailable":
                     gap.detail = (gap.detail or "") + "; capture_lifecycle=" + lifecycle
+            observations.gaps.extend(self._capture_gaps)
             if self.is_continuation:
                 assert self.activation_id is not None
                 scope_opencode_activation(
@@ -640,6 +647,7 @@ class OpenCodeSandboxSession(AgentSessionState):
                 gaps=[
                     ObservationGap(code="agent_artifact_unavailable"),
                     ObservationGap(code="observation_capture_failed"),
+                    *self._capture_gaps,
                 ],
             )
             if self.is_continuation:
@@ -723,30 +731,50 @@ class OpenCodeSandboxSession(AgentSessionState):
         for name in names:
             await self.session.sandbox.download(f"{self.store_directory}/{name}", directory / name)
 
-    async def readable_store(self, directory: Path) -> Path:
+    async def readable_store(self, directory: Path, *, capture: bool = False) -> Path:
         """The downloaded store in ``directory`` with OpenCode 1 tables, which every reader of the store parses.
 
-        An OpenCode 2 store is translated into ``sessions.db`` beside it, with the assistant messages that the Gym
-        plugin labeled named by their labels, so captured model calls join to them.
+        An OpenCode 2 store is translated into ``sessions.db`` beside it. For a ``capture``, the assistant messages
+        that the Gym plugin labeled are named by their labels, so captured model calls join to them, and what the
+        translation could not carry becomes gaps of the capture's observations.
+
+        A reply keeps the ID an earlier capture gave it, whatever the label file says now: the snapshot tells earlier
+        replies from new output by ID, so a renamed reply would count twice. When the label file cannot be read,
+        the labels read before still apply, and the gap ``model_call_labels_unavailable`` says this capture's calls
+        may not join.
         """
         database = directory / "opencode.db"
         if not self.opencode2:
             return database
-        try:
-            async with asyncio.timeout(30):
-                text = await read_text(
-                    self.session.sandbox, path=f"{self.persistent_directory}/{OPENCODE2_LABEL_FILE}"
+        gaps: list[ObservationGap] = []
+        if capture and self.model_call_labels:
+            try:
+                async with asyncio.timeout(30):
+                    text = await read_text(
+                        self.session.sandbox, path=f"{self.persistent_directory}/{OPENCODE2_LABEL_FILE}"
+                    )
+                self._labels.update(message_labels(text))
+            except Exception as error:
+                LOG.warning("OpenCode 2 model-call labels unavailable", exc_info=True)
+                gaps.append(
+                    ObservationGap(
+                        code="model_call_labels_unavailable", detail=f"{type(error).__name__}: {error}"[:2000]
+                    )
                 )
-            labels = message_labels(text)
-        except Exception:
-            # Without capture there is no label file; unlabeled messages keep their OpenCode IDs.
-            labels = {}
+        earlier = set(self.message_ids)
+        labels = {key: label for key, label in self._labels.items() if key[1] not in earlier} if capture else {}
         translated = directory / "sessions.db"
-        await asyncio.to_thread(translate_store, database, translated, labels=labels)
+        untranslated = await asyncio.to_thread(translate_store, database, translated, labels=labels)
+        if untranslated:
+            LOG.warning("OpenCode 2 store records were not translated: %s", untranslated)
+            gaps.append(ObservationGap(code="harness_records_untranslated", detail="; ".join(untranslated)[:2500]))
+        if capture:
+            self._capture_gaps = gaps
         return translated
 
     async def snapshot(self, directory: Path, timeout: float) -> None:
         """Copy SQLite out after CLI completion and export it here; borrowed task services may remain alive."""
+        self._capture_gaps = []
         if self.session.cleanup is None or not self.session.cleanup["cleanup_confirmed"]:
             raise RuntimeError("OpenCode transcript capture requires confirmed cleanup")
         deadline = asyncio.get_running_loop().time() + timeout
@@ -766,7 +794,7 @@ class OpenCodeSandboxSession(AgentSessionState):
         try:
             await asyncio.to_thread(
                 snapshot,
-                await self.readable_store(directory),
+                await self.readable_store(directory, capture=True),
                 directory,
                 harness_session_id=self.harness_session_id,
                 previous_message_ids=self.message_ids,

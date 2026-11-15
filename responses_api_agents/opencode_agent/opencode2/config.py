@@ -6,7 +6,9 @@ The adapter writes OpenCode 2's own schema for what it owns (provider, model, pl
 and passes the session's ``opencode_config`` keys (``permission``, ``tools``, ``compaction``, ``agent``) in the
 OpenCode 1 form the agent configuration and ``configs/permissions/default.yaml`` use. OpenCode 2 reads that form
 and migrates it: ``bash`` rules apply to ``shell``, ``task`` rules to ``subagent``, ``agent.build.steps`` stays the
-build agent's step limit and ``agent.build.prompt`` its system prompt. ``attachment`` is renamed to ``media``.
+build agent's step limit and ``agent.build.prompt`` its system prompt. ``attachment`` is renamed to ``media``. The
+seed refuses any other ``opencode_config`` key, for both versions (``app._session_opencode_config_error``). Code Mode
+is off (``code_mode_off``).
 """
 
 import copy
@@ -29,6 +31,21 @@ ISOLATION = {
 UNRESTRICTED_MEDIA = {
     "image": {"auto_resize": False, "max_width": 2**31 - 1, "max_height": 2**31 - 1, "max_base64_bytes": 2**31 - 1}
 }
+
+
+def code_mode_off(permission: Mapping[str, Any] | str | None) -> dict[str, Any]:
+    """``permission`` with Code Mode's ``execute`` tool denied, after every other rule so that none re-allows it.
+
+    OpenCode 2's Code Mode offers one ``execute`` tool that runs code against the tools registered for Code Mode:
+    OpenCode's own sessions, worktrees, models, schedules and artifacts, which OpenCode 1 did not offer. With
+    ``execute`` denied OpenCode would offer those tools directly, so the Gym plugin removes them
+    (``packages/core/src/tool.ts``, ``Tool.snapshot``).
+    """
+    if isinstance(permission, str):
+        # OpenCode reads a bare action as the rule for every tool.
+        permission = {"*": permission}
+    rules = {key: copy.deepcopy(value) for key, value in (permission or {}).items() if key != "execute"}
+    return {**rules, "execute": "deny"}
 
 
 def mcp_server(url: str, headers: Mapping[str, str] | None, timeout_ms: int | None) -> dict[str, Any]:
@@ -94,10 +111,7 @@ def session_config(
                 "models": {model_id: model},
             }
         },
-        # OpenCode 2 also offers its Code Mode tool `execute`, through which the model reaches OpenCode's own tools
-        # (sessions, worktrees, models). Denying `execute` would offer those tools directly instead, so the session
-        # keeps OpenCode's default; a `permission` rule can deny it.
-        "permission": copy.deepcopy(dict(opencode_config.get("permission") or {})),
+        "permission": code_mode_off(opencode_config.get("permission")),
         "plugins": [
             {"package": PurePosixPath(plugin_directory).as_uri(), "options": dict(plugin_options)},
             *(PurePosixPath(path).as_uri() for path in owner_plugins),

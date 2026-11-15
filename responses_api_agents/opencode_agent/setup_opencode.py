@@ -46,6 +46,10 @@ _OPENCODE2_PREFIX = Path(__file__).parent / ".opencode_runtime"
 _OPENCODE2_RELEASE_URL = (
     "https://github.com/anomalyco/opencode/releases/download/v{version}/opencode-linux-{arch}.tar.gz"
 )
+# Bounds on a release download, which runs under the install lock: a read that waits longer than the first fails, and
+# so does a download that takes longer than the second, so a stalled download cannot hold every local call.
+_DOWNLOAD_READ_TIMEOUT_S = 60
+_DOWNLOAD_TIMEOUT_S = 600
 
 
 def _reports_version(binary: Path, version: str) -> bool:
@@ -67,6 +71,16 @@ def _linux_release_arch() -> str:
     else:
         raise RuntimeError(f"OpenCode releases cover Linux x86_64 and aarch64, not {machine}")
     return arch if platform.libc_ver()[0] == "glibc" else f"{arch}-musl"
+
+
+def _download(url: str, target: Path) -> None:
+    """Write ``url`` to ``target`` within the download bounds, raising ``TimeoutError`` past either."""
+    deadline = time.monotonic() + _DOWNLOAD_TIMEOUT_S
+    with urllib.request.urlopen(url, timeout=_DOWNLOAD_READ_TIMEOUT_S) as response, target.open("wb") as file:  # noqa: S310
+        while chunk := response.read(1 << 20):
+            file.write(chunk)
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"Downloading {url} took longer than {_DOWNLOAD_TIMEOUT_S} s")
 
 
 def ensure_opencode2(version: str) -> str:
@@ -91,7 +105,7 @@ def ensure_opencode2(version: str) -> str:
         with tempfile.TemporaryDirectory(dir=binary.parent) as staging:
             archive = Path(staging) / "opencode.tar.gz"
             LOG.info("downloading OpenCode %s (%s)", version, arch)
-            urllib.request.urlretrieve(_OPENCODE2_RELEASE_URL.format(version=version, arch=arch), archive)  # noqa: S310
+            _download(_OPENCODE2_RELEASE_URL.format(version=version, arch=arch), archive)
             with archive.open("rb") as file:
                 digest = hashlib.file_digest(file, "sha256").hexdigest()
             if digest != digests[arch]:

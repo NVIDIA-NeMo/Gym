@@ -691,9 +691,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         return config
 
     def _build_opencode2_local_config(self, rollout_id: Optional[str], label_file: Path) -> dict[str, Any]:
-        """A local OpenCode 2 call's configuration: the OpenCode 1 form above, which OpenCode 2 migrates, and the Gym
-        plugin, which loads from a directory and labels model calls when capture is on."""
+        """A local OpenCode 2 call's configuration: the OpenCode 1 form above, which OpenCode 2 migrates, without Code
+        Mode (``opencode2.config.code_mode_off``), and the Gym plugin, which loads from a directory and labels model
+        calls when capture is on."""
         config = self._build_opencode_config(rollout_id)
+        config["permission"] = opencode2_config.code_mode_off(config.get("permission"))
         for model in ((config.get("provider") or {}).get("nemo") or {}).get("models", {}).values():
             # OpenCode 2 assumes image input for a model it does not know; OpenCode 1 assumed text only.
             model.setdefault("modalities", {"input": ["text"], "output": ["text"]})
@@ -753,9 +755,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         env = self._env(str(data_home), rollout_id)
         if self._opencode2:
             # OpenCode 2 takes its configuration from the environment, which keeps it out of a persistent repo, and
-            # its directory from PWD.
+            # its directory from PWD. The sandbox sessions' isolation keeps its hosted free models out of the run.
             env["OPENCODE_CONFIG_CONTENT"] = json.dumps(self._build_opencode2_local_config(rollout_id, label_file))
             env["PWD"] = str(project_dir)
+            env.update(opencode2_config.ISOLATION)
         if system_prompt and self.config.system_prompt_mode == "replace":
             # Keep request-specific instructions out of a persistent repo's config file.
             overrides = json.loads(env.get("OPENCODE_CONFIG_CONTENT", "{}"))
@@ -766,7 +769,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if self._opencode2:
             # `--standalone`: never run inside a background OpenCode service started with another configuration.
             command = [binary] if binary is not None else self.config.command_parts
-            cmd = [*command, "run", "--standalone", "-m", self._effective_model()]
+            # A fixed title: OpenCode 2 would otherwise generate one with a model call outside the rollout.
+            cmd = [*command, "run", "--standalone", "--title", "NeMo Gym", "-m", self._effective_model()]
         else:
             cmd = [*self.config.command_parts, "run", "-m", self._effective_model(), "--dir", str(project_dir)]
         if self.config.system_prompt_mode == "replace":
@@ -797,10 +801,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 LOG.warning("opencode exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
 
             db_path = data_home / "opencode" / "opencode.db"
+            untranslated: list[str] = []
             if self._opencode2 and db_path.is_file():
                 translated = data_home / "opencode" / "sessions.db"
                 labels = message_labels(label_file.read_text()) if label_file.is_file() else {}
-                await asyncio.to_thread(translate_store, db_path, translated, labels=labels)
+                untranslated = await asyncio.to_thread(translate_store, db_path, translated, labels=labels)
                 db_path = translated
             invocation_id = rollout_id or f"opencode-{uuid4().hex}"
             output_items, usage = (
@@ -843,6 +848,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     invocation.status = run_status
             if timed_out:
                 observations.gaps.append(ObservationGap(code="agent_run_timeout"))
+            if untranslated:
+                LOG.warning("OpenCode 2 store records were not translated: %s", untranslated)
+                observations.gaps.append(
+                    ObservationGap(code="harness_records_untranslated", detail="; ".join(untranslated)[:2500])
+                )
             return output_items, usage, self.config.model, observations
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
@@ -1143,6 +1153,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 path_prefix=self.config.sandbox_path_prefix,
             ),
             opencode2=self._opencode2,
+            model_call_labels=self._opencode2 and self._model_call_capture_enabled(),
         )
         prepared_directory = False
         try:

@@ -19,13 +19,22 @@ conversion read, so every reader is shared between the two versions:
 - Tool parts keep OpenCode 2's tool names (``shell``, ``subagent``, ...) and record the text the model read as
   ``output`` (or ``error``); images a tool returned reach the model in a separate message and are not recorded.
 - Errors take OpenCode 1's names: a provider failure is an ``APIError`` with its HTTP status, a provider rejection
-  of an over-long prompt a ``ContextOverflowError``.
-- ``system``, ``idle`` and the ``*-switched`` messages are left out.
+  of an over-long prompt a ``ContextOverflowError``. An error OpenCode recovered from is kept as ``recoveredError``,
+  not ``error``: when a stream breaks after output started, OpenCode 2 saves the error on that step and continues
+  with a new one (``packages/core/src/session/runner/step.ts``), so only an error on a session's last reply ends the
+  run, as every error OpenCode 1 saved did.
+- ``system`` messages (instruction updates, which OpenCode 1 did not store either), ``idle`` and ``agent-switched``
+  messages are left out.
+
+Anything else (another message type, content item type, tool or compaction status, or a user message's skill text)
+is not translated, and ``translate_store`` returns a description of it so the adapter can report an observation gap
+instead of losing a turn without a trace. The list matches the 2.2.7 schema (``packages/schema/src/session-message.ts``).
 """
 
 import json
 import re
 import sqlite3
+from collections import Counter
 from collections.abc import Mapping
 from contextlib import closing
 from pathlib import Path
@@ -43,6 +52,9 @@ _CONTEXT_OVERFLOW = re.compile(
     re.IGNORECASE,
 )
 _TOOL_STATUS = {"streaming": "pending", "running": "running", "completed": "completed", "error": "error"}
+# Message types that hold nothing the OpenCode 1 tables recorded.
+_SKIPPED_MESSAGES = frozenset({"system", "idle", "agent-switched"})
+_COMPACTION_STATUS = frozenset({"running", "completed", "failed"})
 
 
 def _json(value: Any) -> dict[str, Any]:
@@ -99,8 +111,10 @@ def tool_output_text(content: Any) -> str:
     return "\n".join(texts)
 
 
-def _tool_part(item: Mapping[str, Any]) -> dict[str, Any]:
+def _tool_part(item: Mapping[str, Any], untranslated: Counter[str]) -> dict[str, Any]:
     state = item.get("state") if isinstance(item.get("state"), Mapping) else {}
+    if state.get("status") not in _TOOL_STATUS:
+        untranslated[f"tool status {state.get('status')!r}"] += 1
     status = _TOOL_STATUS.get(state.get("status"), state.get("status"))
     tool_input = state.get("input")
     if isinstance(tool_input, str):
@@ -133,12 +147,13 @@ def _tool_part(item: Mapping[str, Any]) -> dict[str, Any]:
     return {"type": "tool", "callID": item.get("id"), "tool": item.get("name"), "state": translated}
 
 
-def _content_part(item: Mapping[str, Any]) -> dict[str, Any] | None:
+def _content_part(item: Mapping[str, Any], untranslated: Counter[str]) -> dict[str, Any] | None:
     kind = item.get("type")
     if kind in ("text", "reasoning"):
         return {"type": kind, "text": item.get("text") if isinstance(item.get("text"), str) else ""}
     if kind == "tool":
-        return _tool_part(item)
+        return _tool_part(item, untranslated)
+    untranslated[f"assistant content type {kind!r}"] += 1
     return None
 
 
@@ -178,18 +193,26 @@ class _Writer:
 
 
 def message_labels(text: str) -> dict[tuple[str, str], str]:
-    """The Gym plugin's label file as ``{(session ID, message ID): label}``; unreadable lines are skipped."""
+    """The Gym plugin's label file as ``{(session ID, message ID): label}``; unreadable lines are skipped.
+
+    A call retried before any output reuses its reply, under a new label; the last label is the call whose response
+    the reply holds.
+    """
     labels: dict[tuple[str, str], str] = {}
     for line in text.splitlines():
         entry = _json(line)
         if all(isinstance(entry.get(key), str) for key in ("label", "session", "message")):
-            labels.setdefault((entry["session"], entry["message"]), entry["label"])
+            labels[(entry["session"], entry["message"])] = entry["label"]
     return labels
 
 
-def translate_store(source: Path, target: Path, *, labels: Mapping[tuple[str, str], str] | None = None) -> None:
-    """Write ``target``, a new SQLite file with OpenCode 1 tables, from the OpenCode 2 store ``source``."""
+def translate_store(source: Path, target: Path, *, labels: Mapping[tuple[str, str], str] | None = None) -> list[str]:
+    """Write ``target``, a new SQLite file with OpenCode 1 tables, from the OpenCode 2 store ``source``.
+
+    Returns what was not translated, one ``"<what> xN"`` entry per kind, or an empty list.
+    """
     labels = labels or {}
+    untranslated: Counter[str] = Counter()
     with closing(sqlite3.connect(f"file:{source}?mode=ro", uri=True)) as con:
         con.row_factory = sqlite3.Row
         sessions = con.execute(
@@ -214,6 +237,7 @@ def translate_store(source: Path, target: Path, *, labels: Mapping[tuple[str, st
         )
         writer = _Writer(out)
         parent: dict[str, str] = {}
+        last_reply = {row["session_id"]: row["id"] for row in messages if row["type"] == "assistant"}
         for row in messages:
             session_id, message_id, kind = row["session_id"], row["id"], row["type"]
             data = _json(row["data"])
@@ -222,6 +246,9 @@ def translate_store(source: Path, target: Path, *, labels: Mapping[tuple[str, st
                 parts = [{"type": "text", "text": data.get("text") if isinstance(data.get("text"), str) else ""}]
                 if kind == "synthetic":
                     parts[0]["synthetic"] = True
+                if data.get("skills"):
+                    # OpenCode 2 sends a prompt's skills as text before the prompt; a headless run attaches none.
+                    untranslated["user message skills"] += 1
                 for file in data.get("files") or []:
                     if isinstance(file, Mapping):
                         parts.append({"type": "file", "mime": file.get("mime"), "filename": file.get("name")})
@@ -232,6 +259,10 @@ def translate_store(source: Path, target: Path, *, labels: Mapping[tuple[str, st
                 model = data.get("model") if isinstance(data.get("model"), Mapping) else {}
                 error = translate_error(data.get("error"))
                 finish = data.get("finish")
+                recovered = None
+                if error is not None and last_reply.get(session_id) != message_id:
+                    # OpenCode continued after this step; it ended unfinished, as OpenCode 1 left a retried one.
+                    recovered, error, finish = error, None, None
                 if error is not None and error["name"] == "APIError":
                     # OpenCode 1 saved a provider failure without a finish reason.
                     finish = None
@@ -247,11 +278,14 @@ def translate_store(source: Path, target: Path, *, labels: Mapping[tuple[str, st
                     **_usage(data),
                     **({"finish": finish} if finish is not None else {}),
                     **({"error": error} if error is not None else {}),
+                    **({"recoveredError": recovered} if recovered is not None else {}),
                 }
                 content = data.get("content") or part_rows.get(message_id) or []
                 parts = [{"type": "step-start"}]
                 parts.extend(
-                    part for item in content if isinstance(item, Mapping) and (part := _content_part(item)) is not None
+                    part
+                    for item in content
+                    if isinstance(item, Mapping) and (part := _content_part(item, untranslated)) is not None
                 )
                 if finish is not None and finish != "error":
                     parts.append({"type": "step-finish", "reason": finish, **_usage(data)})
@@ -259,6 +293,8 @@ def translate_store(source: Path, target: Path, *, labels: Mapping[tuple[str, st
                     session_id, labels.get((session_id, message_id), message_id), row["time_created"], info, parts
                 )
             elif kind == "compaction":
+                if data.get("status") not in _COMPACTION_STATUS:
+                    untranslated[f"compaction status {data.get('status')!r}"] += 1
                 request = f"{message_id}-request"
                 info = {"role": "user", "time": {"created": created}}
                 part = {"type": "compaction", "auto": data.get("reason") == "auto"}
@@ -286,8 +322,15 @@ def translate_store(source: Path, target: Path, *, labels: Mapping[tuple[str, st
                     **({"error": error} if error is not None else {}),
                 }
                 text = data.get("summary") if isinstance(data.get("summary"), str) else ""
-                writer.message(session_id, message_id, row["time_created"], summary, [{"type": "text", "text": text}])
+                parts = [{"type": "text", "text": text}]
+                if completed:
+                    # As OpenCode 1's summary reply did, so readers that sum step usage count the compaction call.
+                    parts.append({"type": "step-finish", "reason": "stop", **_usage(data)})
+                writer.message(session_id, message_id, row["time_created"], summary, parts)
+            elif kind not in _SKIPPED_MESSAGES:
+                untranslated[f"message type {kind!r}"] += 1
         out.commit()
+    return [f"{what} x{count}" for what, count in sorted(untranslated.items())]
 
 
 def reached_step_limit(export: Mapping[str, Any], steps: int | None) -> bool:
