@@ -23,11 +23,8 @@ That is the dataset-health check: a row whose golden patch does not resolve is a
 scoring an agent against it is measuring noise.
 """
 
-import sys
 from pathlib import Path
-from shlex import quote
 from time import time
-from traceback import format_exc
 from typing import Any, ClassVar
 from urllib.parse import quote as url_quote
 from uuid import uuid4
@@ -272,18 +269,6 @@ class SWERebenchResourcesServer(RepoTaskSessionResourcesServer):
         else:
             await sandbox.start(spec)
         return sandbox
-
-    async def _pristine_untracked_files(self, sandbox: AsyncSandbox, workdir: str) -> frozenset[str]:
-        """List of files ``workdir`` holds untracked before the agent touches it."""
-        try:
-            result = await sandbox.exec(f"git -C {quote(workdir)} ls-files --others --exclude-standard")
-            if result.return_code != 0:
-                print(f"Failed to list pristine untracked files: {result.stderr}", file=sys.stderr)
-                return frozenset()
-            return frozenset(line.strip() for line in (result.stdout or "").splitlines() if line.strip())
-        except Exception:
-            print("Failed to list pristine untracked files", format_exc(), file=sys.stderr)
-            return frozenset()
 
     async def _extract_model_patch(self, session_id: str, workdir: str, base_commit: str) -> PatchCapture:
         """Capture the agent's patch per ``config.patch_capture_mode``, leaving cleanup to the session lifecycle."""

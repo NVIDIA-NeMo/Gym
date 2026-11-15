@@ -33,7 +33,6 @@ import shlex
 import sys
 from pathlib import Path
 from time import time
-from traceback import format_exc
 from typing import Any, ClassVar
 from urllib.parse import quote
 from uuid import uuid4
@@ -41,6 +40,7 @@ from uuid import uuid4
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, JsonValue
 
+from nemo_gym.agents import exec_idempotent
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import VERIFIER_ERROR
@@ -248,18 +248,6 @@ class SwemerV2ResourcesServer(RepoTaskSessionResourcesServer):
         if result.return_code != 0:
             print(f"Failed to init git repo at {workdir}: {result.stdout}\n{result.stderr}", file=sys.stderr)
 
-    async def _pristine_untracked_files(self, sandbox: AsyncSandbox, workdir: str) -> frozenset[str]:
-        """List of files ``workdir`` holds untracked before the agent touches it."""
-        try:
-            result = await sandbox.exec(f"git -C {shlex.quote(workdir)} ls-files --others --exclude-standard")
-            if result.return_code != 0:
-                print(f"Failed to list pristine untracked files: {result.stderr}", file=sys.stderr)
-                return frozenset()
-            return frozenset(line.strip() for line in (result.stdout or "").splitlines() if line.strip())
-        except Exception:
-            print("Failed to list pristine untracked files", format_exc(), file=sys.stderr)
-            return frozenset()
-
     async def _extract_model_patch(self, session_id: str, workdir: str, base_commit: str) -> PatchCapture:
         """Capture the agent's patch per ``config.patch_capture_mode``, leaving cleanup to the session lifecycle."""
         original_sandbox = self._session_id_to_sandbox[session_id]
@@ -303,7 +291,10 @@ class SwemerV2ResourcesServer(RepoTaskSessionResourcesServer):
         # The anti-cheat scrub leaves no committer identity, so the agent's `git commit` would fail.
         await prepare_git_for_commits(sandbox, body.workdir, "swemer_v2")
 
-        head_result = await sandbox.exec(f"git -C {shlex.quote(body.workdir)} rev-parse HEAD")
+        # A new sandbox can refuse its first commands for a few seconds; this read is safe to repeat.
+        head_result = await exec_idempotent(
+            sandbox, f"git -C {shlex.quote(body.workdir)} rev-parse HEAD", what="swemer_v2: reading HEAD"
+        )
         if (
             head_result.error_type is not None
             or head_result.return_code != 0

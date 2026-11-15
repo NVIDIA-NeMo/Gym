@@ -30,16 +30,15 @@ the dataset-health check: a row whose golden patch does not resolve is a broken 
 """
 
 import shlex
-import sys
 from pathlib import Path
 from time import time
-from traceback import format_exc
 from typing import Annotated, Any, ClassVar
 from uuid import uuid4
 
 from fastapi import Request
 from pydantic import BaseModel, BeforeValidator, ConfigDict, JsonValue
 
+from nemo_gym.agents import exec_idempotent
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import VERIFIER_ERROR
@@ -267,18 +266,6 @@ class SWENextResourcesServer(RepoTaskSessionResourcesServer):
         if result.error_type is not None or result.return_code != 0:
             raise RuntimeError(f"Failed to initialize SWE-Next git repository at {workdir}")
 
-    async def _pristine_untracked_files(self, sandbox: AsyncSandbox, workdir: str) -> frozenset[str]:
-        """List of files ``workdir`` holds untracked before the agent touches it."""
-        try:
-            result = await sandbox.exec(f"git -C {shlex.quote(workdir)} ls-files --others --exclude-standard")
-            if result.return_code != 0:
-                print(f"Failed to list pristine untracked files: {result.stderr}", file=sys.stderr)
-                return frozenset()
-            return frozenset(line.strip() for line in (result.stdout or "").splitlines() if line.strip())
-        except Exception:
-            print("Failed to list pristine untracked files", format_exc(), file=sys.stderr)
-            return frozenset()
-
     async def _extract_model_patch(self, session_id: str, workdir: str, base_commit: str) -> PatchCapture:
         """Capture the patch before the shared lifecycle stops the task sandbox."""
         return await capture_model_patch(
@@ -330,7 +317,10 @@ class SWENextResourcesServer(RepoTaskSessionResourcesServer):
         self._session_id_to_pristine_untracked[session_id] = await self._pristine_untracked_files(
             sandbox, body.workdir
         )
-        head = await sandbox.exec(f"git -C {shlex.quote(body.workdir)} rev-parse HEAD")
+        # A new sandbox can refuse its first commands for a few seconds; this read is safe to repeat.
+        head = await exec_idempotent(
+            sandbox, f"git -C {shlex.quote(body.workdir)} rev-parse HEAD", what="swe_next: reading HEAD"
+        )
         if head.error_type is not None or head.return_code != 0 or not (head.stdout or "").strip():
             raise RuntimeError("SWE-Next seed did not produce a base commit")
         self._session_id_to_base_commit[session_id] = head.stdout.strip()
