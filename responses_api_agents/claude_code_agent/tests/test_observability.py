@@ -508,7 +508,7 @@ async def test_adapter_associates_compaction_before_collection(tmp_path: Path, m
             session=SimpleNamespace(session_dir="/tmp/session", workdir="/app", cleanup=None),
         )
         monkeypatch.setattr(ClaudeCodeSandboxSession, "execute", AsyncMock(return_value=artifacts))
-        monkeypatch.setattr(ClaudeCodeAgent, "_resolve_call_base_url", lambda *args: None)
+        monkeypatch.setattr(ClaudeCodeAgent, "_resolve_call_base_url", lambda *args, **kwargs: None)
         await instance._sandbox_response(state, body, prompt="Continue", system=None)
         observations = state.observations
 

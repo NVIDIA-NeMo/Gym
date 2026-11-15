@@ -598,7 +598,7 @@ async def test_sandbox_only_receives_direct_credentials_without_gym_model_server
     )
     execute = AsyncMock(return_value=adapter.ClaudeCodeArtifacts(""))
     monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", execute)
-    monkeypatch.setattr(app.ClaudeCodeAgent, "_resolve_call_base_url", lambda *_: "http://model-server")
+    monkeypatch.setattr(app.ClaudeCodeAgent, "_resolve_call_base_url", lambda *_, **__: "http://model-server")
     await instance._sandbox_response(
         state, NeMoGymResponseCreateParamsNonStreaming(input="Question"), prompt="Question", system=None
     )
@@ -608,6 +608,33 @@ async def test_sandbox_only_receives_direct_credentials_without_gym_model_server
     assert payload["env"]["ANTHROPIC_AUTH_TOKEN"] == expected
     if model_server:
         assert credential not in json.dumps(payload)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "agent_instance, expected",
+    [
+        # SWE-Together seeds this agent as the episode's ``judge``: its calls must carry that name.
+        ("judge", "http://model-server/ng-rollout/rollout/ng-agent-instance/judge"),
+        # An unnamed session is unchanged.
+        (None, "http://model-server/ng-rollout/rollout"),
+    ],
+)
+async def test_a_session_s_model_url_names_the_agent_instance_it_was_seeded_as(monkeypatch, agent_instance, expected):
+    instance = agent(model_server={"type": "responses_api_models", "name": "policy"})
+    state = adapter.ClaudeCodeSandboxSession(
+        request=seed().model_copy(update={"agent_instance": agent_instance}),
+        runtime="/runtime",
+        session=SimpleNamespace(session_dir="/tmp/session", workdir="/app", cleanup=None),
+    )
+    execute = AsyncMock(return_value=adapter.ClaudeCodeArtifacts(""))
+    monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", execute)
+    monkeypatch.setattr(app.ClaudeCodeAgent, "_resolve_base_url", lambda self: "http://model-server")
+    # No agent instance is set in this task's context: the name comes from the session's own seed.
+    await instance._sandbox_response(
+        state, NeMoGymResponseCreateParamsNonStreaming(input="Question"), prompt="Question", system=None
+    )
+    assert execute.await_args.args[0]["env"]["ANTHROPIC_BASE_URL"] == expected
 
 
 @pytest.mark.asyncio

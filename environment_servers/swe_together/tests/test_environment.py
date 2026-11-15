@@ -720,6 +720,7 @@ async def test_local_lifecycle_closes_candidate_before_verification(
     async def post(name, path, *, json, cookies, headers=None, _control=False):
         if path == "/v1/agent_sessions":
             order.append("seed")
+            seeded.append((json.episode_id, json.agent_instance))
             data = {
                 "agent_session_id": json.agent_session_id,
                 "capabilities": {"mode": "resume_harness_session", "observations": ["trajectory", "timing"]},
@@ -745,9 +746,13 @@ async def test_local_lifecycle_closes_candidate_before_verification(
     monkeypatch.setattr(SWETEnvironmentServer, "_prepare", prepare)
     monkeypatch.setattr(SWETEnvironmentServer, "_stop_owned_sandbox", stop)
     monkeypatch.setattr(SWETEnvironmentServer, "_verify", verify)
-    monkeypatch.setattr(
-        SWETEnvironmentServer, "_activation_path", lambda self, req, agent_name, agent_instance: "/v1/responses"
-    )
+    seeded, activated = [], []
+
+    def activation_path(self, req, agent_name, agent_instance):
+        activated.append((agent_name, agent_instance))
+        return "/v1/responses"
+
+    monkeypatch.setattr(SWETEnvironmentServer, "_activation_path", activation_path)
     monkeypatch.setattr(
         SWETEnvironmentServer, "_next_user_turn", AsyncMock(return_value=UserTurn(activation_id=0, kind="stop"))
     )
@@ -766,6 +771,9 @@ async def test_local_lifecycle_closes_candidate_before_verification(
     )
     req = request()
     result = await environment.run_request(req)
+    # The candidate is seeded as the episode's agent instance ``assistant`` and activated on the path that names it.
+    assert seeded == [(req.episode_id, "assistant")]
+    assert activated == [("policy", "assistant")]
     collected = _episode_record(result.model_dump(mode="json"))
     collector_task_id = trajectory_task_id
     assert collected["ng_trajectory"]["task_id"] == collector_task_id
