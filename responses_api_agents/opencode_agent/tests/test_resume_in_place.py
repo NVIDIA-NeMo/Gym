@@ -3,7 +3,7 @@
 """OpenCode on a sandbox whose snapshots keep processes: hold at checkpoints, resume in place after a crash.
 
 The sandbox is this machine, as in ``test_checkpoint``, with the real process supervisor and the real model relay. The
-fake ``opencode`` makes one model call through the URL its config names before it answers. A crash is the agent
+fake ``opencode`` makes one model call through the URL its config names after its first answer. A crash is the agent
 server's death alone: its harness, supervisor and relay keep running, as a restore of a memory snapshot brings them
 back. The model servers are local HTTP servers: the crashed attempt's holds the call, the replacement's answers it.
 """
@@ -26,13 +26,21 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nemo_gym.agents import AgentSeedSessionRequest, NotResumable, RestoredLaunch, SandboxSession
+from nemo_gym.agents import AgentSeedSessionRequest, LaunchFinished, NotResumable, RestoredLaunch, SandboxSession
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.sandbox import AsyncSandbox
-from nemo_gym.server_runtime import LocalExecProvider
 from responses_api_agents.opencode_agent import app as opencode_app
+from responses_api_agents.opencode_agent import runtime as opencode_runtime
 from responses_api_agents.opencode_agent.sandbox import RELAY_ENDPOINT_FILE, OpenCodeSandboxSession
-from responses_api_agents.opencode_agent.tests.test_checkpoint import FAKE_OPENCODE, OpenCodeFixture
+from responses_api_agents.opencode_agent.tests.test_checkpoint import (
+    ANSWER,
+    FAKE_OPENCODE,
+    PERMISSION,
+    REFUSED_PROMPT,
+    USER,
+    OpenCodeFixture,
+    _export,
+)
 
 
 TOKEN = "resume-in-place-token"
@@ -40,7 +48,7 @@ _AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 
 def _control(checkpoint_id: str, **extra: Any) -> dict[str, Any]:
-    return {"checkpoint_id": checkpoint_id, "deadline_ts": time.time() + 30, **extra}
+    return {"checkpoint_id": checkpoint_id, "deadline_ts": time.time() + 120, **extra}
 
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux process supervision required")
@@ -50,28 +58,17 @@ needs_relay_runtime = pytest.mark.skipif(
     JS_RUNTIME is None, reason="no JavaScript runtime (node or bun) for the relay"
 )
 
-# ``run`` first asks the model through the URL in its config, and keeps the reply. Like OpenCode's binary with
-# ``BUN_BE_BUN=1``, it runs a script instead (the model relay), here on this machine's JavaScript runtime.
-MODEL_CALLING_OPENCODE = (
-    FAKE_OPENCODE.replace(
-        "import base64, http.server, json, os, pathlib, signal, sqlite3, sys, threading, time, urllib.parse",
-        "import base64, http.server, json, os, pathlib, signal, sqlite3, sys, threading, time, urllib.parse, "
-        "urllib.request",
-    )
-    .replace(
-        "CONTROL = pathlib.Path({control!r})",
-        """if os.environ.get("BUN_BE_BUN") == "1":
+# What the model-calling fake adds to test_checkpoint's, inserted before the fake dispatches on its arguments, so no
+# line of the fake's own functions is patched. ``run`` counts itself as started once it has saved its first answer:
+# the model call follows that, through the URL in its config, and its reply is kept. Like OpenCode's binary with
+# ``BUN_BE_BUN=1``, the fake runs a script instead (the model relay), here on this machine's JavaScript runtime.
+_MODEL_CALL = """if os.environ.get("BUN_BE_BUN") == "1":
     os.execv({js_runtime!r}, [{js_runtime!r}, *sys.argv[1:]])
 
-CONTROL = pathlib.Path({control!r})""",
-    )
-    .replace(
-        """def run():
-    prompt = sys.stdin.read()
-    started("run")
-    plugin_ready()
-""",
-        """def call_model():
+
+def call_model():
+    import urllib.request
+
     config = json.loads(os.environ["OPENCODE_CONFIG_CONTENT"])
     base = config["provider"]["nemo_gym"]["options"]["baseURL"]
     body = json.dumps({{"model": "m", "messages": [{{"role": "user", "content": "one step"}}]}}).encode()
@@ -80,15 +77,19 @@ CONTROL = pathlib.Path({control!r})""",
         (CONTROL / "model_reply").write_bytes(response.read())
 
 
-def run():
-    prompt = sys.stdin.read()
-    started("run")
-    plugin_ready()
-    call_model()
-""",
-    )
-)
-assert "call_model()" in MODEL_CALLING_OPENCODE
+_count_started = started
+
+
+def started(kind):
+    _count_started(kind)
+    if kind == "run":
+        call_model()
+
+
+"""
+_DISPATCH = "signal.signal(signal.SIGTERM, lambda *_: os._exit(143))\n"
+assert FAKE_OPENCODE.count(_DISPATCH) == 1, "test_checkpoint's fake OpenCode lacks the line the model call goes before"
+MODEL_CALLING_OPENCODE = FAKE_OPENCODE.replace(_DISPATCH, _MODEL_CALL + _DISPATCH)
 
 
 class ModelServer:
@@ -104,7 +105,8 @@ class ModelServer:
                 body = self.rfile.read(int(self.headers["Content-Length"]))
                 server.calls.append({"path": self.path, "sha256": hashlib.sha256(body).hexdigest()})
                 if not answer:
-                    server.release.wait(120)
+                    # Held until the test stops this server: a call dropped earlier is one the relay sends again.
+                    server.release.wait()
                     return
                 reply = json.dumps({"choices": [{"message": {"role": "assistant", "content": "ok"}}]}).encode()
                 self.send_response(200)
@@ -127,12 +129,6 @@ class ModelServer:
         self.httpd.server_close()
 
 
-class KeepingProvider(LocalExecProvider):
-    """This machine as a sandbox whose snapshots keep processes."""
-
-    snapshot_keeps_processes = True
-
-
 class InPlaceFixture(OpenCodeFixture):
     def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         super().__init__(tmp_path, monkeypatch)
@@ -140,11 +136,14 @@ class InPlaceFixture(OpenCodeFixture):
             MODEL_CALLING_OPENCODE.format(
                 python=sys.executable,
                 control=str(self.control),
-                version="1.17.11",
+                version=opencode_runtime.OPENCODE_VERSION,
+                permission=PERMISSION,
+                refused=REFUSED_PROMPT,
                 js_runtime=JS_RUNTIME or "",
             )
         )
-        self.provider = KeepingProvider()
+        # This machine as a sandbox whose snapshots keep processes.
+        self.provider.snapshot_keeps_processes = True
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             self.relay_port = probe.getsockname()[1]
@@ -166,7 +165,7 @@ def _state(pid: int) -> str | None:
         return None
 
 
-async def _until(condition: Any, timeout: float = 60) -> None:
+async def _until(condition: Any, timeout: float = 120) -> None:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while not condition():
@@ -189,6 +188,15 @@ async def _crash_after_a_checkpoint(fixture: InPlaceFixture, state_dir: Path, he
         http.post("/ng-rollout/r/v1/responses", json=fixture.activation(), headers={"x-ng-agent-activation": "1"})
     )
     await _until(lambda: held.calls)
+    # The launch must be calling through its relay: a relay that did not come up falls back to a direct call, and
+    # the restore would then relaunch.
+    [launch_dir] = fixture.session_dirs()
+    relay_log = launch_dir / "relay.log"
+    assert not (launch_dir / "unavailable").exists(), (
+        f"the model relay did not start on port {fixture.relay_port}: "
+        f"{relay_log.read_text() if relay_log.exists() else 'no relay.log'}"
+    )
+    await _until(lambda: (launch_dir / "relay-status.json").exists(), 10)
     for operation, extra in (("prepare", {}), ("commit", {"checkpoint_dir": str(state_dir / "ckpt")})):
         reply = await http.post(f"/ng-control/v1/checkpoint/{operation}", json=_control("c1", **extra), headers=_AUTH)
         assert reply.status_code == 200, f"{operation}: {reply.text}"
@@ -198,21 +206,55 @@ async def _crash_after_a_checkpoint(fixture: InPlaceFixture, state_dir: Path, he
     return config, (agent, http, activation)
 
 
-async def _replacement(fixture: InPlaceFixture, config: dict[str, Any], state_dir: Path, model_url: str) -> Any:
+async def _replacement(
+    fixture: InPlaceFixture,
+    config: dict[str, Any],
+    state_dir: Path,
+    model_url: str,
+    *,
+    checkpoint: str = "ckpt",
+    restore_id: str = "r1",
+    attempt: int = 1,
+) -> Any:
+    """A new agent server that restores ``checkpoint`` and is seeded for ``attempt``, which continues the one before."""
     import httpx
 
     agent = fixture.make_agent(config, model_url=model_url)
     app = agent.setup_webserver()
     http = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://agent", timeout=120)
+    # A restore names the attempts it continues: the checkpoint's record is the replaced attempt's.
+    replaced = {"rollout_id": "r", "attempt": attempt - 1}
     for operation, extra in (
-        ("restore", {"checkpoint_dir": str(state_dir / "ckpt"), "episode_ids": [{"rollout_id": "r"}]}),
+        ("restore", {"checkpoint_dir": str(state_dir / checkpoint), "episode_ids": [replaced]}),
         ("resume", {}),
     ):
-        reply = await http.post(f"/ng-control/v1/checkpoint/{operation}", json=_control("r1", **extra), headers=_AUTH)
+        reply = await http.post(
+            f"/ng-control/v1/checkpoint/{operation}", json=_control(restore_id, **extra), headers=_AUTH
+        )
         assert reply.status_code == 200, f"{operation}: {reply.text}"
-    seeded = await http.post("/v1/agent_sessions", json=fixture.seed("kept", 1))
+    seeded = await http.post("/v1/agent_sessions", json=fixture.seed("kept", attempt))
     assert seeded.status_code == 200, seeded.text
     return agent, http
+
+
+async def _clean_up(fixture: InPlaceFixture, *servers: ModelServer, crashed: Any = None) -> None:
+    """Leave nothing of a test behind, whether or not it passed."""
+    fixture.finish()
+    for server in servers:
+        server.stop()
+    # A supervisor still holding a pause ends on its stop file; a harness in hold mode is never stopped for it.
+    for launch_dir in fixture.session_dirs():
+        (launch_dir / "stop.request").touch()
+    for pid in fixture.harness_pids():
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    if crashed is not None:
+        _, http, activation = crashed
+        activation.cancel()
+        await asyncio.gather(activation, return_exceptions=True)
+        await http.aclose()
 
 
 @needs_relay_runtime
@@ -222,17 +264,19 @@ async def test_a_restore_that_kept_the_processes_continues_the_same_launch_again
     fixture = InPlaceFixture(tmp_path, monkeypatch)
     crashed_server, new_server = ModelServer(answer=False), ModelServer(answer=True)
     endpoints_at_continue: list[dict[str, Any]] = []
-    original_continue = SandboxSession.continue_harness
+    original_adopt = OpenCodeSandboxSession.adopt
+    crashed = None
 
-    async def recording_continue(session: SandboxSession, **kwargs: Any) -> Any:
-        endpoint = Path(session.session_dir) / RELAY_ENDPOINT_FILE
+    async def recording_adopt(state: OpenCodeSandboxSession, **kwargs: Any) -> Any:
+        # The take-over is what continues the launch: this is the endpoint its relay reads when it does.
+        endpoint = Path(state.require_session().session_dir) / RELAY_ENDPOINT_FILE
         endpoints_at_continue.append(json.loads(endpoint.read_text()))
-        return await original_continue(session, **kwargs)
+        return await original_adopt(state, **kwargs)
 
     try:
-        config, _crashed = await _crash_after_a_checkpoint(fixture, tmp_path / "state", crashed_server)
+        config, crashed = await _crash_after_a_checkpoint(fixture, tmp_path / "state", crashed_server)
         harness = fixture.harness_pids()
-        monkeypatch.setattr(SandboxSession, "continue_harness", recording_continue)
+        monkeypatch.setattr(OpenCodeSandboxSession, "adopt", recording_adopt)
         caplog.set_level(logging.WARNING)
         _, http = await _replacement(fixture, config, tmp_path / "state", new_server.url)
         fixture.finish()
@@ -242,6 +286,7 @@ async def test_a_restore_that_kept_the_processes_continues_the_same_launch_again
 
         assert reply.status_code == 200, reply.text
         assert fixture.started() == 1, "the launch that ran through the restore finished; nothing was relaunched"
+        assert reply.json()["metadata"]["harness_launches"] == "1"
         assert harness and not fixture.harness_pids(), "the same harness processes ran on to the end"
         # The relay re-sent the call the checkpoint held, byte for byte, to the replacement attempt's model URL.
         [held], [resent] = crashed_server.calls, new_server.calls
@@ -252,11 +297,51 @@ async def test_a_restore_that_kept_the_processes_continues_the_same_launch_again
         assert endpoints_at_continue[0]["gen"] == 2 and "/r-a1" in endpoints_at_continue[0]["upstream"]
         assert "OpenCode resumed in place: session kept, launch 1, pause 1, relay generation 2" in caplog.text
     finally:
+        await _clean_up(fixture, crashed_server, new_server, crashed=crashed)
+
+
+@needs_relay_runtime
+async def test_a_launch_taken_over_once_is_checkpointed_and_taken_over_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    fixture = InPlaceFixture(tmp_path, monkeypatch)
+    first, second, third = ModelServer(answer=False), ModelServer(answer=False), ModelServer(answer=True)
+    state_dir = tmp_path / "state"
+    activation = {"x-ng-agent-activation": "1"}
+    crashed = taken_over = None
+    try:
+        config, crashed = await _crash_after_a_checkpoint(fixture, state_dir, first)
+        agent, http = await _replacement(fixture, config, state_dir, second.url)
+        # The first replacement takes the launch over; its model server holds the re-sent call too.
+        running = asyncio.create_task(
+            http.post("/ng-rollout/r-a1/v1/responses", json=fixture.activation(), headers=activation)
+        )
+        taken_over = (agent, http, running)
+        await _until(lambda: second.calls)
+        for operation, extra in (("prepare", {}), ("commit", {"checkpoint_dir": str(state_dir / "ckpt2")})):
+            reply = await http.post(
+                f"/ng-control/v1/checkpoint/{operation}", json=_control("c2", **extra), headers=_AUTH
+            )
+            assert reply.status_code == 200, f"{operation}: {reply.text}"
+        # The second crash: again the agent server alone.
+        caplog.set_level(logging.WARNING)
+        _, http = await _replacement(
+            fixture, config, state_dir, third.url, checkpoint="ckpt2", restore_id="r2", attempt=2
+        )
         fixture.finish()
-        crashed_server.stop()
-        new_server.stop()
-        for pid in fixture.harness_pids():
-            os.kill(pid, signal.SIGKILL)
+        reply = await http.post("/ng-rollout/r-a2/v1/responses", json=fixture.activation(), headers=activation)
+
+        assert reply.status_code == 200, reply.text
+        assert fixture.started() == 1, "the same launch ran through both restores"
+        assert reply.json()["metadata"]["harness_launches"] == "1"
+        [held], [again], [resent] = first.calls, second.calls, third.calls
+        assert resent["sha256"] == again["sha256"] == held["sha256"]
+        assert "/r-a1" in again["path"] and "/r-a2" in resent["path"]
+        assert "OpenCode resumed in place: session kept, launch 1, pause 2, relay generation 3" in caplog.text
+        assert "cannot resume in place" not in caplog.text
+    finally:
+        await _clean_up(fixture, first, second, third, crashed=crashed)
+        await _clean_up(fixture, crashed=taken_over)
 
 
 @needs_relay_runtime
@@ -265,8 +350,9 @@ async def test_a_restored_launch_whose_supervisor_died_is_abandoned_and_relaunch
 ) -> None:
     fixture = InPlaceFixture(tmp_path, monkeypatch)
     crashed_server, new_server = ModelServer(answer=False), ModelServer(answer=True)
+    crashed = None
     try:
-        config, _crashed = await _crash_after_a_checkpoint(fixture, tmp_path / "state", crashed_server)
+        config, crashed = await _crash_after_a_checkpoint(fixture, tmp_path / "state", crashed_server)
         [launch_dir] = fixture.session_dirs()
         identity = json.loads((launch_dir / "paused.json").read_text())["identity"]
         os.kill(int(identity.split(".")[0]), signal.SIGKILL)
@@ -285,12 +371,9 @@ async def test_a_restored_launch_whose_supervisor_died_is_abandoned_and_relaunch
         )
         assert reply.status_code == 200, reply.text
         assert fixture.started() == 2, "the abandoned launch is relaunched once, resuming the saved conversation"
+        assert reply.json()["metadata"]["harness_launches"] == "2"
     finally:
-        fixture.finish()
-        crashed_server.stop()
-        new_server.stop()
-        for pid in fixture.harness_pids():
-            os.kill(pid, signal.SIGKILL)
+        await _clean_up(fixture, crashed_server, new_server, crashed=crashed)
 
 
 # -- the decision after a restore -----------------------------------------------------------------------------------
@@ -355,6 +438,274 @@ async def test_a_restored_session_without_a_held_pause_has_nothing_to_take_over(
     assert state.adoption is None
 
 
+async def test_a_restored_launch_without_a_held_pause_is_stopped_before_its_relaunch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    agent = OpenCodeFixture(tmp_path, monkeypatch).make_agent({})
+    state = _restored_state(agent)
+    state.launch_count = 1
+    stops: list[dict[str, Any]] = []
+
+    async def stop(sandbox: Any, **kwargs: Any) -> dict:
+        stops.append(kwargs)
+        if len(stops) == 2:
+            raise RuntimeError("OpenCode cleanup receipt missing")
+        return {"stopped": True, "cleanup_confirmed": True, "return_code": None}
+
+    monkeypatch.setattr(opencode_app, "stop_and_confirm_cleanup", stop)
+    monkeypatch.setattr(opencode_app, "check_restored", MagicMock(side_effect=AssertionError("not checked")))
+    saved = {"session_root": "/s", "session_dir": "/s", "launch_started": True}
+
+    await agent._check_restored_launch(state, saved)
+
+    assert [call["session_dir"] for call in stops] == ["/sessions/s/launch-1"] and stops[0]["harness"] == "OpenCode"
+    assert state.adoption is None
+    # A stop that fails is reported and the session relaunches all the same.
+    await agent._check_restored_launch(state, saved)
+    assert len(stops) == 2 and "could not stop the restored launch of session s" in caplog.text
+
+
+async def test_a_restored_launch_check_that_could_not_run_is_made_once_more(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    agent = OpenCodeFixture(tmp_path, monkeypatch).make_agent({})
+    state = _restored_state(agent)
+    verdicts = [NotResumable("check_failed", "exit 255"), RestoredLaunch(pause_seq=3, identity="10.20")]
+
+    async def check(sandbox: Any, session_dir: str, **kwargs: Any) -> Any:
+        return verdicts.pop(0)
+
+    monkeypatch.setattr(opencode_app, "check_restored", check)
+    monkeypatch.setattr(opencode_app, "abandon_launch", MagicMock(side_effect=AssertionError("not abandoned")))
+    caplog.set_level(logging.WARNING)
+
+    await agent._check_restored_launch(state, {"pause_seq": 3, "supervisor_identity": "10.20"})
+
+    assert verdicts == [] and state.adoption == RestoredLaunch(pause_seq=3, identity="10.20")
+    assert "restored-launch check failed for session s (exit 255); checking once more" in caplog.text
+
+
+async def test_a_restored_launch_that_cannot_be_ended_is_reported_and_not_taken_over(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    agent = OpenCodeFixture(tmp_path, monkeypatch).make_agent({})
+    state = _restored_state(agent)
+    attempts: list[str] = []
+
+    async def check(sandbox: Any, session_dir: str, **kwargs: Any) -> Any:
+        return NotResumable("supervisor_gone")
+
+    async def abandon(sandbox: Any, session_dir: str, *, identity: str, **kwargs: Any) -> dict:
+        attempts.append(identity)
+        raise RuntimeError("OpenCode abandoned launch left no receipt")
+
+    monkeypatch.setattr(opencode_app, "check_restored", check)
+    monkeypatch.setattr(opencode_app, "abandon_launch", abandon)
+    caplog.set_level(logging.WARNING)
+
+    await agent._check_restored_launch(state, {"pause_seq": 3, "supervisor_identity": "10.20"})
+
+    # The abandon kills and is safe to repeat: it is tried twice, then reported, and the seed goes on.
+    assert attempts == ["10.20", "10.20"] and state.adoption is None
+    assert "abandon of the restored launch of session s failed" in caplog.text
+    assert "could not abandon the restored launch of session s (reason supervisor_gone)" in caplog.text
+
+
+async def test_a_rebound_session_not_yet_taken_over_exports_the_pause_it_still_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = OpenCodeFixture(tmp_path, monkeypatch).make_agent({})
+    state = _session_state(agent, tmp_path, keeps_processes=True)
+    state.launch_count = 1
+    state.reprompted_conversation = True
+    state.adoption = RestoredLaunch(pause_seq=3, identity="10.20")
+    monkeypatch.setattr(type(agent), "_session_state", lambda self, key: state)
+
+    exported = (await agent.export_agent_sessions(["s"], checkpoint_id="c"))["s"]
+
+    # The session itself launched nothing, yet the launch the restore brought back still holds this pause.
+    assert exported["session"] == {
+        "session_root": str(tmp_path / "s"),
+        "session_dir": str(tmp_path / "s"),
+        "launch_started": True,
+        "pause_seq": 3,
+        "supervisor_identity": "10.20",
+    }
+    assert exported["reprompted_conversation"] is True and exported["relay_gen"] == 1
+    # Taken over or ended, the session exports what it holds itself.
+    state.adoption = None
+    exported = (await agent.export_agent_sessions(["s"], checkpoint_id="c"))["s"]
+    assert exported["session"]["launch_started"] is False and "pause_seq" not in exported["session"]
+
+
+def _relaunching(monkeypatch: pytest.MonkeyPatch, events: list[str]) -> None:
+    """Stand in for the sandbox side of a relaunch and of an abandon, recording each in ``events``."""
+
+    async def abandon(sandbox: Any, session_dir: str, *, identity: str, **kwargs: Any) -> dict:
+        events.append(f"abandon {identity}")
+        return {"stopped": True, "abandoned": True, "cleanup_confirmed": True, "return_code": None}
+
+    async def prepare_launch(self: OpenCodeSandboxSession, launch: int, *, timeout: float) -> None:
+        events.append(f"prepare {launch}")
+
+    async def inspect_conversation(self: OpenCodeSandboxSession, *, timeout: float) -> dict:
+        return _export(USER, ANSWER)
+
+    async def execute(self: OpenCodeSandboxSession, payload: dict, **kwargs: Any) -> str:
+        events.append("reprompt" if payload.get("reprompt") is not None else "fresh")
+        return ""
+
+    async def run(
+        session: Any, activation: Any, *, launch: Any, on_parked: Any, stop_timeout: float
+    ) -> LaunchFinished:
+        return LaunchFinished(await launch())
+
+    for name, value in (
+        ("prepare_launch", prepare_launch),
+        ("inspect_conversation", inspect_conversation),
+        ("execute", execute),
+    ):
+        monkeypatch.setattr(OpenCodeSandboxSession, name, value)
+    monkeypatch.setattr(opencode_app, "abandon_launch", abandon)
+    monkeypatch.setattr(opencode_app, "run_with_checkpoint_pauses", run)
+
+
+@pytest.mark.parametrize("failing", ["point_relay", "adopt"])
+async def test_a_take_over_that_fails_ends_the_restored_launch_before_its_relaunch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, failing: str
+) -> None:
+    agent = OpenCodeFixture(tmp_path, monkeypatch).make_agent({})
+    state = _session_state(agent, tmp_path, keeps_processes=True)
+    state.launch_count = 1
+    state.adoption = RestoredLaunch(pause_seq=1, identity="10.20")
+    events: list[str] = []
+    _relaunching(monkeypatch, events)
+
+    async def point_relay(self: OpenCodeSandboxSession, upstream: str) -> None:
+        if failing == "point_relay":
+            raise ConnectionError("502 Bad Gateway")
+
+    async def adopt(self: OpenCodeSandboxSession, **kwargs: Any) -> str:
+        # As SandboxSession.adopt leaves a launch whose continue was not confirmed and whose stop then failed.
+        self.session.launch_started = True
+        raise RuntimeError("OpenCode restored launch did not continue")
+
+    monkeypatch.setattr(OpenCodeSandboxSession, "point_relay", point_relay)
+    monkeypatch.setattr(OpenCodeSandboxSession, "adopt", adopt)
+    caplog.set_level(logging.WARNING)
+
+    await agent._run_launches(
+        state, MagicMock(), lambda: {"command": ["opencode", "run"]}, prompt="fix the bug", timeout=10, deadline=None
+    )
+
+    # Nothing of the restored launch may run beside its relaunch, whichever step of the take-over failed.
+    assert events == ["abandon 10.20", "prepare 2", "reprompt"]
+    assert state.adoption is None and state.launch_count == 2
+    [record] = state.launch_records
+    assert record["launch"] == 2 and record["reprompted"] is True and "resumed_in_place" not in record
+    assert "reason adopt_failed" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "receipt, relaunched",
+    [
+        ({"stopped": True, "abandoned": True, "cleanup_confirmed": True, "return_code": None}, True),
+        ({"stopped": False, "cleanup_confirmed": True, "return_code": 0}, False),
+    ],
+    ids=["stopped", "ended_by_itself"],
+)
+async def test_a_launch_taken_over_after_it_was_stopped_is_relaunched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, receipt: dict, relaunched: bool
+) -> None:
+    agent = OpenCodeFixture(tmp_path, monkeypatch).make_agent({})
+    state = _session_state(agent, tmp_path, keeps_processes=True)
+    state.launch_count = 1
+    state.adoption = RestoredLaunch(pause_seq=1, identity="10.20")
+    events: list[str] = []
+    _relaunching(monkeypatch, events)
+
+    async def point_relay(self: OpenCodeSandboxSession, upstream: str) -> None:
+        pass
+
+    async def adopt(self: OpenCodeSandboxSession, **kwargs: Any) -> str:
+        # The restored launch had ended before the take-over: only its receipt is left to read.
+        self.session.launch_started = True
+        self.session.cleanup = receipt
+        return ""
+
+    monkeypatch.setattr(OpenCodeSandboxSession, "point_relay", point_relay)
+    monkeypatch.setattr(OpenCodeSandboxSession, "adopt", adopt)
+
+    await agent._run_launches(
+        state, MagicMock(), lambda: {"command": ["opencode", "run"]}, prompt="fix the bug", timeout=10, deadline=None
+    )
+
+    # A stop or an abandon ended it, not OpenCode: its conversation is not finished, and a relaunch resumes it.
+    assert events == (["prepare 2", "reprompt"] if relaunched else [])
+    outcomes = [
+        (record["launch"], record.get("resumed_in_place", False), record["reprompted"], record["outcome"])
+        for record in state.launch_records
+    ]
+    assert outcomes == (
+        [(1, True, False, "stopped"), (2, False, True, "finished")] if relaunched else [(1, True, False, "finished")]
+    )
+
+
+async def test_a_take_over_of_a_launch_that_ended_by_itself_fails_the_activation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = OpenCodeFixture(tmp_path, monkeypatch).make_agent({})
+    state = _session_state(agent, tmp_path, keeps_processes=True)
+    state.launch_count = 1
+    state.adoption = RestoredLaunch(pause_seq=1, identity="10.20")
+    events: list[str] = []
+    _relaunching(monkeypatch, events)
+
+    async def point_relay(self: OpenCodeSandboxSession, upstream: str) -> None:
+        pass
+
+    async def adopt(self: OpenCodeSandboxSession, **kwargs: Any) -> str:
+        self.session.launch_started = True
+        self.session.cleanup = {"stopped": False, "cleanup_confirmed": True, "return_code": 1}
+        raise RuntimeError("OpenCode exited with code 1")
+
+    monkeypatch.setattr(OpenCodeSandboxSession, "point_relay", point_relay)
+    monkeypatch.setattr(OpenCodeSandboxSession, "adopt", adopt)
+
+    # As after `execute`: the launch ran to its own end, so its failure is not a reason to run it again.
+    with pytest.raises(RuntimeError, match="exited with code 1"):
+        await agent._run_launches(
+            state,
+            MagicMock(),
+            lambda: {"command": ["opencode", "run"]},
+            prompt="fix the bug",
+            timeout=10,
+            deadline=None,
+        )
+
+    assert events == []
+
+
+async def test_closing_a_session_whose_restored_launch_was_not_taken_over_ends_that_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = OpenCodeFixture(tmp_path, monkeypatch).make_agent({})
+    state = _session_state(agent, tmp_path, keeps_processes=True)
+    state.launch_count = 1
+    state.adoption = RestoredLaunch(pause_seq=1, identity="10.20")
+    events: list[str] = []
+    _relaunching(monkeypatch, events)
+
+    async def close(self: OpenCodeSandboxSession, timeout: float) -> None:
+        events.append("close")
+
+    monkeypatch.setattr(OpenCodeSandboxSession, "close", close)
+
+    await agent._close_agent_session_state(state)
+
+    assert events == ["abandon 10.20", "close"] and state.adoption is None
+
+
 # -- the launch's model URL and relay -------------------------------------------------------------------------------
 
 
@@ -416,8 +767,9 @@ def test_a_launch_elsewhere_calls_the_model_server_directly(tmp_path: Path, monk
 async def test_staging_a_relayed_launch_writes_the_relay_endpoint_and_its_runner_parameters(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    agent = OpenCodeFixture(tmp_path, monkeypatch).make_agent({})
-    sandbox = await AsyncSandbox.connect({"sandbox_id": "local"}, provider=LocalExecProvider())
+    fixture = OpenCodeFixture(tmp_path, monkeypatch)
+    agent = fixture.make_agent({})
+    sandbox = await AsyncSandbox.connect({"sandbox_id": "local"}, provider=fixture.provider)
     state = _session_state(agent, tmp_path, keeps_processes=True)
     state.session = SandboxSession(
         sandbox=sandbox, session_dir=str(tmp_path / "s"), workdir=str(tmp_path), harness="OpenCode"
@@ -436,14 +788,15 @@ async def test_staging_a_relayed_launch_writes_the_relay_endpoint_and_its_runner
     relay_command = f"MODEL_RELAY_COMMAND=({state.runtime}/opencode {state.persistent_directory}/model_relay.mjs)"
     assert relay_command in params
     assert "MODEL_RELAY_COMMAND_ENV=(BUN_BE_BUN=1)" in params
-    assert "BUN_BE_BUN" not in payload["env"] and "MODEL_RELAY_SCRIPT" not in params
+    assert "BUN_BE_BUN" not in payload["env"]
 
 
 async def test_pointing_the_relay_raises_its_endpoint_generation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    agent = OpenCodeFixture(tmp_path, monkeypatch).make_agent({})
-    sandbox = await AsyncSandbox.connect({"sandbox_id": "local"}, provider=LocalExecProvider())
+    fixture = OpenCodeFixture(tmp_path, monkeypatch)
+    agent = fixture.make_agent({})
+    sandbox = await AsyncSandbox.connect({"sandbox_id": "local"}, provider=fixture.provider)
     state = _session_state(agent, tmp_path, keeps_processes=True)
     state.session = SandboxSession(
         sandbox=sandbox, session_dir=str(tmp_path / "s"), workdir=str(tmp_path), harness="OpenCode"
@@ -468,7 +821,7 @@ async def test_pointing_the_relay_raises_its_endpoint_generation(
     ],
     ids=["relay_unavailable", "relay_gone", "pause_mismatch"],
 )
-async def test_expected_restore_fallbacks_are_logged_at_info(
+async def test_only_expected_restore_fallbacks_are_logged_at_info(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
