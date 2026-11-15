@@ -5,11 +5,15 @@ requested image from the model's answer and scores each by IoU against the groun
 
 ## Request
 
-Each row carries its ground truth in `verifier_metadata`:
+Each row carries its ground truth in `verifier_metadata`. The schema is `Got10kVerifierMetadata` in
+[`task_data.py`](task_data.py), which is both the verify request model and the `TaskData` that dataset tooling
+validates rows against:
 
 ```json
 {
   "sequence": "GOT-10k_Val_000001",
+  "split": "val",
+  "anno_fps": 10.0,
   "image_width": 1280,
   "image_height": 720,
   "targets": [
@@ -19,7 +23,8 @@ Each row carries its ground truth in `verifier_metadata`:
 ```
 
 `frame` is the image number used in the prompt (1..N). `bbox` is in pixels as `[x, y, width, height]`. `visible` is
-the GOT-10k `cover.label` value; a frame is scored only when it is above 0.
+the GOT-10k `cover.label` value; a frame is scored only when it is above 0. `sequence`, `split`, `anno_fps` and
+`source_frame` are bookkeeping and optional.
 
 ## Answer format
 
@@ -33,7 +38,8 @@ with `xyxy` coordinates on a 0-1000 grid. Only the assistant message is read, no
 lenient so that a slightly malformed answer still gets credit for the frames it localized. In order, stopping at the
 first step that yields a box:
 
-1. Each `<answer>` block, then the full text, as JSON or a Python literal. Accepted shapes include a list under
+1. Each `<answer>` block, the last one first so that a corrected answer wins over an earlier draft, then the full
+   text, as JSON or a Python literal. Accepted shapes include a list under
    `boxes`, `bboxes`, `predictions` or `answers`; a bare list of entries or of boxes in frame order; an object keyed
    by frame number; entries using `box`, `bbox_2d` or `x1,y1,x2,y2` keys; and one object that repeats the `frame`
    and `bbox` keys for every frame.
@@ -41,13 +47,16 @@ first step that yields a box:
 3. `frame N` or `image N` followed by a bracketed list.
 4. A bare run of numbers: exactly four per frame, or five per frame when each group starts with its frame number.
 
-Entries for frames that were not requested are ignored.
+Entries for frames that were not requested are ignored. A number is never read out of a word, so the `x1` of an
+echoed format line is not a coordinate, and the box key `bbox_2d` is not frame 2.
 
 ## Scoring
 
 A recovered box is divided by 1000, clamped to [0, 1], converted to pixels, rounded to 3 decimals and clipped to the
-image. A box with no positive area (for example swapped corners) is discarded. Each frame's score is the IoU with the
-ground-truth box, or 0 when there is no usable box. Out-of-range coordinates are clamped, not rejected.
+image. A box with no positive area (for example swapped corners) or with a non-finite coordinate (NaN, infinity) is
+discarded. The ground-truth box is clipped to the image in the same way, as the GOT-10k toolkit's `rect_iou` does.
+Each frame's score is the IoU of the two boxes, or 0 when there is no usable box. Finite out-of-range coordinates
+are clamped, not rejected.
 
 The reward is the mean IoU over the row's visible frames, in [0, 1]. A row with no visible frame gets reward 0 and
 contributes nothing to the aggregate metrics.

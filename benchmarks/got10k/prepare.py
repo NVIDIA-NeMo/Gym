@@ -19,6 +19,7 @@ import os
 import re
 import struct
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 
@@ -204,14 +205,19 @@ def prepare() -> Path:
     names = sequence_names(root)
     OUTPUT_FPATH.parent.mkdir(parents=True, exist_ok=True)
     written = 0
-    with open(OUTPUT_FPATH, "w", encoding="utf-8") as out:
-        for name in names:
-            row = convert(load_sequence(root / name))
-            if row is None:
-                print(f"Skipping {name}: too short to yield a target frame at {SAMPLE_FPS} fps")
-                continue
-            out.write(json.dumps(row) + "\n")
-            written += 1
+    # Staged beside the output and renamed into place only after every sequence converted, so a failed run
+    # neither publishes a partial file nor damages the output of an earlier complete run.
+    with TemporaryDirectory(dir=OUTPUT_FPATH.parent) as staging_dir:
+        staged = Path(staging_dir) / OUTPUT_FPATH.name
+        with staged.open("w", encoding="utf-8") as out:
+            for name in names:
+                row = convert(load_sequence(root / name))
+                if row is None:
+                    print(f"Skipping {name}: too short to yield a target frame at {SAMPLE_FPS} fps")
+                    continue
+                out.write(json.dumps(row) + "\n")
+                written += 1
+        staged.replace(OUTPUT_FPATH)
     print(f"Wrote {written} of {len(names)} sequences to {OUTPUT_FPATH}")
     return OUTPUT_FPATH
 

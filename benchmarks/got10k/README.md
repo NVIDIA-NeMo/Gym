@@ -41,8 +41,8 @@ the model sees.
 
 ## Scoring
 
-Each predicted box is clamped to the grid, mapped to pixels and scored by IoU against the ground-truth box. A frame
-with no usable prediction scores 0. Frames where GOT-10k marks the target as fully occluded (`cover.label` of 0) are
+Each predicted box is clamped to the grid, mapped to pixels and scored by IoU against the ground-truth box. Both
+boxes are clipped to the image, as in the GOT-10k toolkit. A frame with no usable prediction scores 0. Frames where GOT-10k marks the target as fully occluded (`cover.label` of 0) are
 excluded. See the [scorer README](../../resources_servers/got10k/README.md) for the answer formats accepted.
 
 | Metric | Meaning |
@@ -64,6 +64,11 @@ Scoring is deterministic and uses no judge. The numbers this benchmark was set u
 temperature 0.6, top-p 0.95, a 16,384-token output budget, one repeat, and reasoning enabled; pass these through
 `responses_create_params` when comparing against them. Sampling is stochastic, so expect run-to-run variation.
 
+The Gym run that reproduced them (`visible_gt_AO` 0.686) served the model with vLLM using
+`--limit-mm-per-prompt '{"image":128,"video":1}'` and `--max-model-len 262144`. The longest prompt was 99,533 input
+tokens for that model, and no request was rejected for length. Token counts per image depend on the model, so check
+them for yours: a prompt that does not fit scores 0 without an error (see [Limitations](#limitations)).
+
 ## Prepare and run
 
 ```bash
@@ -78,5 +83,8 @@ The prepared JSONL is about 170 MB because it embeds 2,182 frames.
 
 ## Limitations
 
-- Prompts carry up to 48 images; the model server must accept that many images per request and enough context.
+- Prompts carry up to 48 images at their original resolution. With vLLM, allow them with
+  `--limit-mm-per-prompt '{"image": 48}'` or higher, and set `--max-model-len` to fit the longest prompt plus the
+  16,384-token output budget. Gym's `vllm_model` turns a request that does not fit into an empty answer, which
+  scores 0 on every frame of that sequence with no error. Such rows have `parse_status: empty` in the rollouts.
 - Rollout files repeat the embedded frames, so each repeat adds roughly the size of the prepared JSONL.

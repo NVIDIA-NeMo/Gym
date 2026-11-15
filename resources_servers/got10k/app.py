@@ -19,7 +19,8 @@ Scoring is deterministic and needs no judge:
      xywh box using the sequence's image size, and clipped to the image. A box
      with no positive area after clipping is discarded.
   3. Each requested frame scores the IoU between the predicted and ground-truth
-     pixel boxes; a missing or discarded prediction scores 0.
+     pixel boxes; a missing or discarded prediction scores 0. The ground-truth
+     box is clipped to the image too, as in the GOT-10k toolkit.
 
 Only frames whose GOT-10k `cover.label` is above 0 (target at least partly
 visible) count. The per-task reward is the mean IoU over those frames. The
@@ -38,9 +39,9 @@ import re
 from pathlib import Path
 from typing import Any, ClassVar, Iterator, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
@@ -49,13 +50,16 @@ from nemo_gym.server_runtime.base_resources_server import (
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import VerifierFixture
+from resources_servers.got10k.task_data import Got10kVerifierMetadata
 
 
 GRID = 1000.0
 ANSWER_PATTERN = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.IGNORECASE | re.DOTALL)
-NUMBER_PATTERN = re.compile(r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
+# A number must not continue a word or another number, so the "1" of "x1" or the "5" of "x1.5" is not one.
+NUMBER_PATTERN = re.compile(r"(?<![\w.])[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
 FRAME_BBOX_PAIR_PATTERN = re.compile(
-    r"[\"']?frame[\"']?\s*[:=]?\s*(-?\d+)\s*,?\s*[\"']?bbox[\"']?\s*[:=]?\s*\[([^\]]+)\]", re.IGNORECASE
+    r"[\"']?frame[\"']?\s*[:=]?\s*(-?\d+)\s*,?\s*[\"']?bbox(?:_2d)?[\"']?\s*[:=]?\s*\[([^\]]+)\]",
+    re.IGNORECASE,
 )
 BOX_LIST_KEYS = ("boxes", "bboxes", "predictions", "answers")
 BOX_VALUE_KEYS = ("bbox", "box", "bbox_2d", "bounding_box", "pred_bbox", "prediction", "answer")
@@ -67,28 +71,6 @@ RawBox = list[float]
 # ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
-
-
-class Got10kTarget(BaseModel):
-    """Ground truth for one requested image."""
-
-    # Prompt-local image id (1..N), the id the model is asked to answer with.
-    frame: int = Field(ge=1)
-    # 1-based frame number inside the source sequence (bookkeeping only).
-    source_frame: Optional[int] = None
-    # Ground-truth box in pixels, [x, y, width, height].
-    bbox: list[float] = Field(min_length=4, max_length=4)
-    # GOT-10k cover.label value; the frame is scored only when this is above 0.
-    visible: float = 1.0
-
-
-class Got10kVerifierMetadata(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    sequence: Optional[str] = None
-    image_width: float = Field(gt=0)
-    image_height: float = Field(gt=0)
-    targets: list[Got10kTarget] = Field(min_length=1)
 
 
 class Got10kFrameScore(BaseModel):
@@ -219,7 +201,7 @@ def _coerce_box(value: Any) -> Optional[RawBox]:
             return None
         try:
             return [float(x) for x in value[:4]]
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return None
     if isinstance(value, dict):
         for key in BOX_VALUE_KEYS:
@@ -230,7 +212,7 @@ def _coerce_box(value: Any) -> Optional[RawBox]:
         if all(key in value for key in XYXY_KEYS):
             try:
                 return [float(value[key]) for key in XYXY_KEYS]
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 return None
         return None
     if isinstance(value, str):
@@ -260,14 +242,17 @@ def _structured_boxes(value: Any, frame_ids: list[int]) -> dict[int, RawBox]:
         for key in BOX_LIST_KEYS:
             if key in value:
                 return _structured_boxes(value[key], frame_ids)
-        # {"1": [...], "frame 2": [...]} — the frame id is the first number in the key.
+        # {"1": [...], "frame 2": [...]} — the frame id is the first number in the key. A box field name such as
+        # "bbox_2d" is not a frame id.
         for key, item in value.items():
-            match = re.search(r"\d+", str(key))
-            if match and int(match.group(0)) in frame_ids:
+            match = None if key in BOX_VALUE_KEYS else re.search(r"\d+", str(key))
+            frame_id = _as_frame_id(match.group(0)) if match else -1
+            if frame_id in frame_ids:
                 box = _coerce_box(item)
                 if box is not None:
-                    parsed[int(match.group(0))] = box
-        if len(frame_ids) == 1:
+                    parsed[frame_id] = box
+        # With one requested frame an object holding a box needs no frame id, but an id it does give must match.
+        if len(frame_ids) == 1 and ("frame" not in value or _as_frame_id(value["frame"]) == frame_ids[0]):
             box = _coerce_box(value)
             if box is not None:
                 parsed[frame_ids[0]] = box
@@ -292,6 +277,11 @@ def _structured_boxes(value: Any, frame_ids: list[int]) -> dict[int, RawBox]:
         boxes = [_coerce_box(item) for item in value]
         if all(box is not None for box in boxes):
             return {frame_id: box for frame_id, box in zip(frame_ids, boxes) if box is not None}
+        # _load_json_duplicate_aware flattens nested lists, so a list of boxes arrives as one run of scalars:
+        # exactly four per frame are split back into boxes, in frame order.
+        if len(value) == 4 * len(frame_ids) and not any(isinstance(item, (list, tuple, dict)) for item in value):
+            chunks = [_coerce_box(value[i * 4 : i * 4 + 4]) for i in range(len(frame_ids))]
+            return {frame_id: box for frame_id, box in zip(frame_ids, chunks) if box is not None}
     return parsed
 
 
@@ -299,8 +289,9 @@ def parse_boxes(text: str, frame_ids: list[int]) -> tuple[dict[int, RawBox], str
     """Recover {frame id: raw box} from the model's answer, plus a parse status.
 
     Tried in order, stopping at the first that yields any box:
-      1. Each <answer>...</answer> payload, then the whole text, read as JSON
-         (whole payload first, then every JSON object embedded in it).
+      1. Each <answer>...</answer> payload, last one first (a later block
+         corrects an earlier draft), then the whole text, read as JSON (whole
+         payload first, then every JSON object embedded in it).
       2. "frame": N ... "bbox": [...] pairs found by pattern, for JSON that was
          truncated or never closed. The first occurrence of a frame wins.
       3. "frame N" / "image N" followed by a bracketed list.
@@ -310,7 +301,7 @@ def parse_boxes(text: str, frame_ids: list[int]) -> tuple[dict[int, RawBox], str
     text = text.strip()
     boxes: dict[int, RawBox] = {}
 
-    for payload in [*ANSWER_PATTERN.findall(text), text]:
+    for payload in [*reversed(ANSWER_PATTERN.findall(text)), text]:
         loaded = _load_json_duplicate_aware(payload)
         if loaded is None:
             loaded = _load_json_or_literal(payload)
@@ -324,7 +315,7 @@ def parse_boxes(text: str, frame_ids: list[int]) -> tuple[dict[int, RawBox], str
 
     if not boxes:
         for match in FRAME_BBOX_PAIR_PATTERN.finditer(text):
-            frame_id = int(match.group(1))
+            frame_id = _as_frame_id(match.group(1))
             numbers = _extract_numbers(match.group(2))
             if frame_id in frame_ids and frame_id not in boxes and len(numbers) >= 4:
                 boxes[frame_id] = numbers[:4]
@@ -404,12 +395,17 @@ def score_sequence(text: str, metadata: Got10kVerifierMetadata) -> dict[str, Any
         raw_box = boxes.get(target.frame)
         predicted: Optional[list[float]] = None
         status = "missing"
-        if raw_box is not None:
+        if raw_box is not None and not all(math.isfinite(value) for value in raw_box):
+            # Rejected here, before the grid clamp would turn an infinite coordinate into a valid edge.
+            status = "non_finite"
+        elif raw_box is not None:
             # Boxes are compared at 3-decimal pixel precision on both sides.
             predicted, status = clip_box_to_image(
                 _round_box(grid_box_to_pixel_xywh(raw_box, width, height)), width, height
             )
-        iou = iou_xywh(predicted, _round_box(target.bbox)) if predicted is not None else 0.0
+        # The ground truth is clipped to the image as well, as the GOT-10k toolkit's rect_iou does with its bound.
+        truth, _ = clip_box_to_image(_round_box(target.bbox), width, height)
+        iou = iou_xywh(predicted, truth) if predicted is not None and truth is not None else 0.0
         frame_scores.append(
             Got10kFrameScore(
                 frame=target.frame,

@@ -3,12 +3,16 @@
 
 import asyncio
 import json
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from nemo_gym.client import ServerClient
+from nemo_gym.data import load_task_data_schema, validate_jsonl_rows
 from nemo_gym.verification import exercise_verifier_fixture
+from resources_servers.got10k.task_data import TaskData
 
 from ..app import (
     VERIFIER_FIXTURE,
@@ -208,6 +212,98 @@ def test_a_frame_missing_from_the_answer_scores_zero_for_that_frame_only() -> No
     assert result["parsed_frames"] == 1
 
 
+def test_the_last_answer_block_with_boxes_wins_over_an_earlier_draft() -> None:
+    text = f'<answer>{{"boxes":[{{"frame":1,"bbox":[0,0,10,10]}}]}}</answer> Wait, redo. {EXACT}'
+
+    assert parse_boxes(text, [1, 2]) == ({1: BOX_1, 2: BOX_2}, "structured")
+    assert score_sequence(text, _metadata())["reward"] == 1.0
+
+
+def test_a_box_field_name_is_not_a_frame_id() -> None:
+    text = f'<answer>\n{{"frame": 1, "bbox_2d": {BOX_1}}}\n{{"frame": 2, "bbox_2d": {BOX_2}}}\n</answer>'
+    assert parse_boxes(text, [1, 2]) == ({1: BOX_1, 2: BOX_2}, "structured")
+
+
+def test_a_requested_shape_answer_cut_off_before_its_last_brace_keeps_every_box() -> None:
+    # Guards the fix above: the complete first entry must not stop the pair-by-pair recovery of the second.
+    text = f'<answer>{{"boxes":[{{"frame":1,"bbox":{BOX_1}}},{{"frame":2,"bbox":{BOX_2}'
+    assert parse_boxes(text, [1, 2]) == ({1: BOX_1, 2: BOX_2}, "structured")
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        f"[{BOX_1},{BOX_2}]",
+        # Point-pair boxes: nested lists are still flattened into one box.
+        '{"boxes":[{"frame":1,"bbox":[[100,100],[300,300]]},{"frame":2,"bbox":[[400,500],[700,900]]}]}',
+    ],
+)
+def test_nested_box_lists_survive_other_numbers_in_the_message(answer: str) -> None:
+    text = f"Boxes for the 2 frames:\n<answer>{answer}</answer>"
+
+    assert parse_boxes(text, [1, 2]) == ({1: BOX_1, 2: BOX_2}, "structured")
+    assert score_sequence(text, _metadata())["reward"] == 1.0
+
+
+def test_a_bare_box_list_keeps_its_box_boundaries_when_one_box_is_unusable() -> None:
+    result = score_sequence('<answer>[[100,100,300,300],[400,500,700,"NaN"]]</answer>', _metadata())
+
+    assert [(score.status, score.iou) for score in result["frame_scores"]] == [("ok", 1.0), ("non_finite", 0.0)]
+    assert (result["reward"], result["parsed_frames"]) == (0.5, 1)
+
+
+def test_digits_inside_words_are_not_coordinates() -> None:
+    # The prompt's format line echoed back, then the real answer cut off inside the third box.
+    template = ",".join(f'{{"frame":{frame},"bbox":[x1,y1,x2,y2]}}' for frame in (1, 2, 3))
+    text = (
+        f'The required format is <answer>{{"boxes":[{template}]}}</answer>.\n'
+        f'<answer>{{"boxes":[{{"frame":1,"bbox":{BOX_1}}},{{"frame":2,"bbox":{BOX_2}}},{{"frame":3,"bbox":[50'
+    )
+    targets = [*METADATA["targets"], {"frame": 3, "bbox": [10.0, 10.0, 50.0, 50.0], "visible": 8.0}]
+
+    assert parse_boxes(text, [1, 2, 3]) == ({1: BOX_1, 2: BOX_2}, "structured")
+    result = score_sequence(text, _metadata(targets=targets))
+    assert result["reward"] == pytest.approx(2 / 3)
+    assert [score.status for score in result["frame_scores"]] == ["ok", "ok", "missing"]
+    # "x1.5" holds no number either, so this is not four per frame.
+    assert parse_boxes("x1.5 y1.5 x2.5 y2.5", [1]) == ({}, "parse_failed")
+
+
+def test_an_explicit_frame_id_is_kept_when_one_frame_is_requested() -> None:
+    metadata = _metadata(targets=METADATA["targets"][:1])
+    other_frame = f'{{"frame":9,"bbox":{BOX_1}}}'
+    same_frame = f'{{"frame":1,"bbox":{BOX_1}}}'
+
+    assert parse_boxes(other_frame, [1])[0] == {}
+    assert score_sequence(other_frame, metadata)["reward"] == 0.0
+    assert parse_boxes(same_frame, [1]) == ({1: BOX_1}, "structured")
+    assert score_sequence(same_frame, metadata)["reward"] == 1.0
+
+
+@pytest.mark.parametrize(
+    "first_entry",
+    [
+        {"frame": 1, "bbox": [10**400, 100, 300, 300]},
+        {"frame": 1, "x1": 10**400, "y1": 100, "x2": 300, "y2": 300},
+    ],
+)
+def test_an_integer_too_large_for_a_float_drops_that_box_only(first_entry: dict) -> None:
+    text = json.dumps({"boxes": [first_entry, {"frame": 2, "bbox": BOX_2}]})
+    result = score_sequence(text, _metadata())
+
+    assert [(score.status, score.iou) for score in result["frame_scores"]] == [("missing", 0.0), ("ok", 1.0)]
+    assert (result["reward"], result["parsed_frames"]) == (0.5, 1)
+
+
+def test_a_frame_id_too_long_to_convert_is_not_a_requested_frame() -> None:
+    # A runaway digit string: int() refuses more than 4300 digits with a ValueError.
+    digits = "1" * 5000
+    truncated = f'{{"boxes":[{{"frame":{digits},"bbox":[0,0,5,5]}},{{"frame":2,"bbox":{BOX_2}}},{{'
+
+    assert parse_boxes(truncated, [1, 2]) == ({2: BOX_2}, "structured")
+    assert parse_boxes(f'{{"{digits}":[0,0,5,5]}}', [1, 2])[0] == {}
+
+
 # ---------------------------------------------------------------------------
 # Geometry
 # ---------------------------------------------------------------------------
@@ -221,6 +317,8 @@ def test_boxes_are_clipped_to_the_image_and_degenerate_ones_dropped() -> None:
     assert clip_box_to_image([900.0, 400.0, 300.0, 300.0], 1000, 500) == ([900.0, 400.0, 100.0, 100.0], "ok")
     assert clip_box_to_image([10.0, 10.0, -5.0, 20.0], 1000, 500) == (None, "non_positive")
     assert clip_box_to_image([float("nan"), 0.0, 5.0, 5.0], 1000, 500) == (None, "non_finite")
+    # As in the GOT-10k toolkit's rect_iou, a negative origin moves to the edge and the size is kept.
+    assert clip_box_to_image([-50.0, 10.0, 100.0, 20.0], 1000, 500) == ([0.0, 10.0, 100.0, 20.0], "ok")
 
 
 def test_iou() -> None:
@@ -254,6 +352,28 @@ def test_out_of_range_predictions_are_clamped_rather_than_rejected() -> None:
 
     assert result["frame_scores"][0].iou == pytest.approx(20000 / 45000)
     assert result["frame_scores"][0].predicted_bbox == [0.0, 0.0, 300.0, 150.0]
+
+
+def test_non_finite_coordinates_are_rejected_before_the_grid_clamp() -> None:
+    # Clamped first, [-inf,-inf,inf,inf] would become the whole image and match this ground truth exactly.
+    metadata = _metadata(targets=[{"frame": 1, "bbox": [0.0, 0.0, 1000.0, 500.0], "visible": 8.0}])
+    result = score_sequence('<answer>{"boxes":[{"frame":1,"bbox":[-1e999,-1e999,1e999,1e999]}]}</answer>', metadata)
+
+    assert (result["reward"], result["parsed_frames"]) == (0.0, 0)
+    assert result["frame_scores"][0].status == "non_finite"
+    assert result["frame_scores"][0].predicted_bbox is None
+
+
+def test_the_ground_truth_box_is_clipped_to_the_image() -> None:
+    # The ground truth runs 100 px past the right edge; the answer covers exactly its visible part.
+    answer = '<answer>{"boxes":[{"frame":1,"bbox":[900,100,1000,300]}]}</answer>'
+    past_the_edge = _metadata(targets=[{"frame": 1, "bbox": [900.0, 50.0, 200.0, 100.0], "visible": 8.0}])
+    outside = _metadata(targets=[{"frame": 1, "bbox": [1200.0, 50.0, 200.0, 100.0], "visible": 8.0}])
+
+    assert score_sequence(answer, past_the_edge)["frame_scores"][0].iou == 1.0
+    # A ground truth with nothing inside the image cannot be matched; the frame still counts as visible.
+    result = score_sequence(answer, outside)
+    assert (result["reward"], result["visible_frames"], result["frame_scores"][0].status) == (0.0, 1, "ok")
 
 
 # ---------------------------------------------------------------------------
@@ -346,3 +466,41 @@ def test_verify_handles_a_response_with_no_message(server: Got10kResourcesServer
 
     assert result.reward == 0.0
     assert result.parse_status == "empty"
+
+
+# ---------------------------------------------------------------------------
+# Task data schema
+# ---------------------------------------------------------------------------
+
+
+def test_committed_example_rows_validate_against_the_task_data_schema() -> None:
+    server_dir = Path(__file__).parents[1]
+    path = server_dir / "data" / "example.jsonl"
+    lines = path.read_text().splitlines()
+
+    report = validate_jsonl_rows("got10k", load_task_data_schema(server_dir), str(path), lines)
+
+    assert len(lines) == 5
+    assert report.clean, report.summary()
+
+
+def test_the_request_model_and_the_task_data_schema_are_one_class() -> None:
+    assert TaskData is Got10kVerifierMetadata
+    assert Got10kVerifyRequest.model_fields["verifier_metadata"].annotation is TaskData
+
+
+def test_task_data_defaults_and_required_fields() -> None:
+    minimal = TaskData.model_validate(
+        {"image_width": 10, "image_height": 10, "targets": [{"frame": 1, "bbox": [1, 2, 3, 4]}]}
+    )
+    assert (minimal.sequence, minimal.split, minimal.anno_fps) == (None, None, None)
+    assert (minimal.targets[0].source_frame, minimal.targets[0].visible) == (None, 1.0)
+
+    for broken in (
+        {key: value for key, value in METADATA.items() if key != "image_width"},
+        {**METADATA, "targets": [{"frame": 1, "bbox": [1.0, 2.0, 3.0]}]},
+        {**METADATA, "targets": [{"frame": 1, "bbox": [1.0, 2.0, 3.0, 4.0, 5.0]}]},
+        {**METADATA, "targets": []},
+    ):
+        with pytest.raises(ValidationError):
+            TaskData.model_validate(broken)

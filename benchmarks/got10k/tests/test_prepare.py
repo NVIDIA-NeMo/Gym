@@ -12,6 +12,7 @@ from benchmarks.got10k import prepare
 from benchmarks.got10k.tests.synthetic import HEIGHT, WIDTH, png_bytes, write_sequence, write_split
 from nemo_gym.environment import load_manifest, resolve_manifest_config_path
 from nemo_gym.environment.validation import _mirror_differences, _resolve_manifest_composition
+from resources_servers.got10k.task_data import TaskData
 
 
 BENCHMARK_DIR = Path(prepare.__file__).parent
@@ -126,6 +127,45 @@ def test_prepare_writes_one_row_per_sequence_with_ground_truth_out_of_the_prompt
     # Only the reference box is model-visible; no target box leaks into the prompt text.
     prompt_text = " ".join(part["text"] for part in content if part["type"] == "input_text")
     assert "[240,234,448,453]" not in prompt_text
+
+
+def test_prepared_rows_match_the_task_data_schema(dataset: Path) -> None:
+    write_split(dataset, ["seq_a", "seq_b"], num_frames=31, hidden_frames=(20,))
+
+    rows = [json.loads(line) for line in prepare.prepare().read_text().splitlines()]
+
+    assert len(rows) == 2
+    for row in rows:
+        metadata = TaskData.model_validate(row["verifier_metadata"])
+        # Every field prepare.py writes is declared, at both levels: nothing lands in the models' extras.
+        assert metadata.model_extra == {}
+        assert all(target.model_extra == {} for target in metadata.targets)
+        assert metadata.model_dump() == row["verifier_metadata"]
+
+
+def test_a_failed_preparation_publishes_nothing_and_keeps_the_previous_output(dataset: Path) -> None:
+    split = write_split(dataset, ["seq_a"])
+    (split / "list.txt").write_text("seq_a\nseq_b\n")
+    output = prepare.OUTPUT_FPATH
+
+    # The second listed sequence is missing: no final file, and no staging leftovers.
+    with pytest.raises(FileNotFoundError, match="sequence directory not found"):
+        prepare.prepare()
+    assert not output.exists()
+    assert list(output.parent.iterdir()) == []
+
+    # An earlier complete output is left byte-for-byte unchanged by a failed run.
+    output.write_text("previous complete output\n")
+    with pytest.raises(FileNotFoundError, match="sequence directory not found"):
+        prepare.prepare()
+    assert output.read_text() == "previous complete output\n"
+    assert list(output.parent.iterdir()) == [output]
+
+    # Once the sequence is repaired, both rows are published in list order.
+    write_sequence(split, "seq_b")
+    rows = [json.loads(line) for line in prepare.prepare().read_text().splitlines()]
+    assert [row["verifier_metadata"]["sequence"] for row in rows] == ["seq_a", "seq_b"]
+    assert list(output.parent.iterdir()) == [output]
 
 
 def test_dataset_root_may_be_the_split_directory_itself(dataset: Path, monkeypatch: pytest.MonkeyPatch) -> None:
