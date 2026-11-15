@@ -70,6 +70,7 @@ def request(caption="A person walks.", *, reference_caption=None):
 
 
 def server(**overrides):
+    overrides.setdefault("judge_retry_base_delay_seconds", 0)
     config = VideoCaptionResourcesServerConfig(
         name="video_caption",
         host="127.0.0.1",
@@ -78,7 +79,6 @@ def server(**overrides):
         judge_model_server={"type": "responses_api_models", "name": "video_caption_judge"},
         judge_chat_completion_create_params={"messages": [], "max_tokens": 20480, "reasoning_effort": "low"},
         caption_tokenizer_path="unused",
-        judge_retry_base_delay_seconds=0,
         **overrides,
     )
     tokenizer = Tokenizer(WordLevel({"[UNK]": 0}, unk_token="[UNK]"))
