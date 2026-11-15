@@ -859,6 +859,10 @@ def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
             f"Harbor environment server, or as `gym eval run {harbor_target} --agent <harness>`"
         )
     target = "nemo_gym.cli.eval:collect_rollouts" if args.no_serve else "nemo_gym.cli.eval:e2e_rollout_collection"
+    if agent_type := getattr(args, "agent_type", None):
+        # Loading a null-bound session-agent config does not rewire a native taskset's Environment Server.
+        # Retain the explicit choice so collection can reject an unchanged route before preparing its data.
+        overrides = [*overrides, f"+_requested_agent_type={_hydra_quote(agent_type.split('/', 1)[0])}"]
     dispatch(target, overrides)
 
 

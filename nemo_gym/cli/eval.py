@@ -360,6 +360,32 @@ def _validate_prepared_split_file_exists(input_jsonl_fpath: Path, split: str, ou
     )
 
 
+def _validate_requested_native_agent(global_config_dict: DictConfig) -> None:
+    """Refuse a taskset that still routes to another harness after an explicit CLI selection."""
+    requested = global_config_dict.get("_requested_agent_type")
+    if not requested:
+        return
+    mismatches = []
+    for taskset, environment_name in global_config_dict.get("environment_server_routes", {}).items():
+        instance = global_config_dict.get(environment_name, {})
+        environment = instance.get("environment_servers", {}).get("single_agent_turn")
+        if environment is None:
+            continue
+        agent_name = environment.get("agent_server", {}).get("name")
+        agent = global_config_dict.get(agent_name, {}).get("responses_api_agents", {})
+        if requested not in agent:
+            mismatches.append(f"  - {taskset}: {environment_name} uses {agent_name} ({', '.join(agent) or 'unknown'})")
+    if mismatches:
+        raise ConfigError(
+            f"--agent-type {requested} did not select the harness used by the native taskset route(s):\n"
+            + "\n".join(mismatches)
+            + "\nLoading a standalone agent config does not rebind a native Environment Server. "
+            "Use --config to bind its agent_server to the selected agent, or omit --agent-type to run "
+            "the recipe's existing harness. --allow-unsupported-pairing only bypasses compatibility checks; "
+            "it does not change this binding."
+        )
+
+
 @exit_cleanly_on_config_error
 def e2e_rollout_collection():  # pragma: no cover
     from nemo_gym.artifacts.resolved_config import write_resolved_config
@@ -371,6 +397,7 @@ def e2e_rollout_collection():  # pragma: no cover
     )
 
     global_config_dict = get_global_config_dict()
+    _validate_requested_native_agent(global_config_dict)
 
     # Ensure we have the right config first thing
     e2e_rollout_collection_config = E2ERolloutCollectionConfig.model_validate(global_config_dict)

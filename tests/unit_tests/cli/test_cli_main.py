@@ -1747,7 +1747,10 @@ class TestAgentSelector:
     )
     def test_name_resolves_to_config_path(self, monkeypatch: MonkeyPatch, command) -> None:
         _, overrides = _dispatch_for(monkeypatch, [*command, "--agent-type", "hermes_agent"])
-        assert overrides == [f"+config_paths=[{WORKING_DIR / self.HERMES}]"]
+        expected = [f"+config_paths=[{WORKING_DIR / self.HERMES}]"]
+        if command == ["eval", "run"]:
+            expected.append("+_requested_agent_type='hermes_agent'")
+        assert overrides == expected
 
     def test_agent_is_interchangeable_with_config(self, monkeypatch: MonkeyPatch) -> None:
         COMMAND = ["env", "start"]
@@ -1773,7 +1776,7 @@ class TestAgentSelector:
             str(WORKING_DIR / "benchmarks/gpqa/config.yaml"),
             str(WORKING_DIR / "responses_api_models/vllm_model/configs/vllm_model.yaml"),
         }
-        assert others == set()
+        assert others == {"+_requested_agent_type='hermes_agent'"}
 
     def test_composes_with_explicit_config(self, monkeypatch: MonkeyPatch) -> None:
         _, overrides = _dispatch_for(
@@ -1802,7 +1805,71 @@ class TestAgentSelector:
         )
         paths, others = _split_overrides(overrides)
         assert paths == {str(WORKING_DIR / self.HERMES)}
-        assert others == {"+agent_name=gpqa_mcqa_simple_agent"}
+        assert others == {"+agent_name=gpqa_mcqa_simple_agent", "+_requested_agent_type='hermes_agent'"}
+
+    @pytest.mark.parametrize("selector", ["codex_agent", "hermes_agent", "claude_code_agent"])
+    def test_native_swe_selector_cannot_run_the_unchanged_harness(
+        self, monkeypatch: MonkeyPatch, selector: str, capsys, tmp_path: Path
+    ) -> None:
+        _, overrides = _dispatch_for(
+            monkeypatch,
+            [
+                "eval",
+                "run",
+                "--benchmark",
+                "swebench/pro/opencode",
+                "--agent-type",
+                selector,
+                "--model-type",
+                "vllm_model",
+                "--allow-unsupported-pairing",
+                "--output",
+                str(tmp_path / "rollouts.jsonl"),
+                "--split",
+                "benchmark",
+            ],
+        )
+        monkeypatch.setattr(sys, "argv", ["gym", *overrides])
+        resolved = gc.GlobalConfigDictParser().parse(
+            gc.GlobalConfigDictParserConfig(
+                initial_global_config_dict=DictConfig(
+                    {
+                        "policy_base_url": "http://example.invalid/v1",
+                        "policy_api_key": "test-placeholder",
+                        "policy_model_name": "test-model",
+                        "anthropic_api_key": "test-placeholder",
+                    }
+                ),
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+        monkeypatch.setattr(cli_eval, "get_global_config_dict", lambda: resolved)
+
+        def unexpected_preparation(*args, **kwargs):
+            pytest.fail("An ignored native harness selection must fail before preparing benchmark data")
+
+        monkeypatch.setattr("nemo_gym.data.dataset_preparation.TrainDataProcessor", unexpected_preparation)
+        with pytest.raises(SystemExit) as error:
+            cli_eval.e2e_rollout_collection()
+        assert error.value.code == 1
+        output = capsys.readouterr().out
+        assert f"--agent-type {selector}" in output
+        assert "swebench_pro_opencode_agent" in output
+        assert "--allow-unsupported-pairing" in output
+
+    @pytest.mark.parametrize("requested", [None, "opencode_agent", "codex_agent"])
+    def test_native_selector_accepts_an_explicit_matching_binding(self, requested: str | None) -> None:
+        implementation = requested or "opencode_agent"
+        config = DictConfig(
+            {
+                "_requested_agent_type": requested,
+                "environment_server_routes": {"swebench:pro": "episode"},
+                "episode": {"environment_servers": {"single_agent_turn": {"agent_server": {"name": "agent"}}}},
+                "agent": {"responses_api_agents": {implementation: {"resources_server": None}}},
+            }
+        )
+        cli_eval._validate_requested_native_agent(config)
 
     def test_agent_type_is_rejected_with_no_serve(self, monkeypatch: MonkeyPatch, capsys) -> None:
         monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: None)
