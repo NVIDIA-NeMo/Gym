@@ -28,6 +28,7 @@ Originally inline in resources_servers/swebench_pro/app.py; factored out here on
 servers needed the identical upload+exec+cleanup sequence rather than each carrying its own copy.
 """
 
+import asyncio
 import sys
 from pathlib import Path
 from traceback import format_exc
@@ -35,25 +36,56 @@ from typing import Any
 
 
 ANTI_CHEAT_SCRIPT_FPATH = Path(__file__).parent / "anti_cheat_setup.sh"
+# The scrub is idempotent, so a provider error (a sandbox the gateway briefly could not reach) is retried: this many
+# attempts in all, waiting ANTI_CHEAT_RETRY_DELAY_S, then twice that, between them.
+ANTI_CHEAT_ATTEMPTS = 3
+ANTI_CHEAT_RETRY_DELAY_S = 2.0
 
 
-async def apply_anti_cheat_setup(sandbox: Any, workdir: str, instance_id: str, log_prefix: str) -> None:
-    """Best-effort: a failure here is logged, not raised -- the caller still hands the
-    (unscrubbed) sandbox to the agent rather than failing the whole rollout over a cleanup step.
+class AntiCheatSetupError(RuntimeError):
+    """The scrub did not complete, so the sandbox's git history may still hold the task's solution."""
+
+
+async def apply_anti_cheat_setup(
+    sandbox: Any, workdir: str, instance_id: str, log_prefix: str, *, required: bool = False
+) -> None:
+    """Scrub the repository's git history before the agent gets the sandbox.
+
+    A provider error is retried. By default a scrub that still fails is logged and the caller hands the (unscrubbed)
+    sandbox to the agent; with ``required`` it raises :class:`AntiCheatSetupError` instead, so the seed fails and the
+    rollout is retried rather than run against a history that holds the answer.
     """
-    try:
-        remote_fpath = f"{workdir.rstrip('/')}/anti_cheat_setup.sh"
-        await sandbox.upload(ANTI_CHEAT_SCRIPT_FPATH, remote_fpath)
-        result = await sandbox.exec(
-            f"git reset --hard && WORKING_DIRECTORY={workdir} bash anti_cheat_setup.sh && rm -f anti_cheat_setup.sh",
-            cwd=workdir,
-            timeout_s=600,
-        )
-        if result.return_code != 0:
-            print(
-                f"[{log_prefix}] {instance_id}: anti-cheat setup failed (non-fatal). "
-                f"Return code: {result.return_code}\nStdout:\n{result.stdout}\nStderr:\n{result.stderr}",
-                file=sys.stderr,
+    remote_fpath = f"{workdir.rstrip('/')}/anti_cheat_setup.sh"
+    delay = ANTI_CHEAT_RETRY_DELAY_S
+    for attempt in range(1, ANTI_CHEAT_ATTEMPTS + 1):
+        try:
+            await sandbox.upload(ANTI_CHEAT_SCRIPT_FPATH, remote_fpath)
+            result = await sandbox.exec(
+                f"git reset --hard && WORKING_DIRECTORY={workdir} bash anti_cheat_setup.sh && rm -f anti_cheat_setup.sh",
+                cwd=workdir,
+                timeout_s=600,
             )
-    except Exception:
-        print(f"[{log_prefix}] {instance_id}: anti-cheat setup raised (non-fatal)", format_exc(), file=sys.stderr)
+        except Exception as error:
+            if attempt < ANTI_CHEAT_ATTEMPTS:
+                print(
+                    f"[{log_prefix}] {instance_id}: anti-cheat setup raised (attempt {attempt}/{ANTI_CHEAT_ATTEMPTS}),"
+                    f" retrying in {delay:g}s: {error!r}",
+                    file=sys.stderr,
+                )
+                await asyncio.sleep(delay)
+                delay *= 2
+                continue
+            if required:
+                raise AntiCheatSetupError(f"{instance_id}: anti-cheat setup raised: {error!r}") from error
+            print(f"[{log_prefix}] {instance_id}: anti-cheat setup raised (non-fatal)", format_exc(), file=sys.stderr)
+            return
+        if result.return_code == 0:
+            return
+        message = (
+            f"{instance_id}: anti-cheat setup failed. Return code: {result.return_code}\n"
+            f"Stdout:\n{result.stdout}\nStderr:\n{result.stderr}"
+        )
+        if required:
+            raise AntiCheatSetupError(message)
+        print(f"[{log_prefix}] {message} (non-fatal)", file=sys.stderr)
+        return
