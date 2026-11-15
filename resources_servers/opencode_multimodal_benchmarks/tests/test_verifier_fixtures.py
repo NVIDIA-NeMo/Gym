@@ -21,7 +21,7 @@ async def test_catalog_verifier_contract(fixture):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("benchmark", ["vstar", "hrbench8k", "vtcbench", "zerobench"])
-async def test_prepared_catalog_validation_and_verifier_need_no_services(benchmark, tmp_path, monkeypatch):
+async def test_prepared_catalog_validation_and_verifier_with_configured_deployment(benchmark, tmp_path, monkeypatch):
     root = Path(__file__).resolve().parents[3]
     catalog = root / "benchmarks/opencode_multimodal_benchmarks" / benchmark
     directory = tmp_path / "benchmarks/opencode_multimodal_benchmarks" / benchmark
@@ -56,6 +56,9 @@ async def test_prepared_catalog_validation_and_verifier_need_no_services(benchma
         yaml.safe_dump(
             {
                 "config_paths": [str(catalog / "config.yaml")],
+                "visual_agent": {
+                    "responses_api_agents": {"opencode_agent": {"sandbox_config": {"image": "test-image"}}}
+                },
                 "opencode_multimodal_benchmarks": {
                     "resources_servers": {
                         "opencode_multimodal_benchmarks": {
@@ -66,8 +69,10 @@ async def test_prepared_catalog_validation_and_verifier_need_no_services(benchma
             }
         )
     )
-    for key in ("OPENSANDBOX_API_KEY", "OPENSANDBOX_DOMAIN", "GYM_JUDGE_API_KEY", "GYM_JUDGE_BASE_URL"):
-        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("OPENSANDBOX_API_KEY", "test-only")
+    monkeypatch.setenv("OPENSANDBOX_DOMAIN", "https://sandbox.invalid")
+    monkeypatch.setenv("GYM_JUDGE_API_KEY", "test-only")
+    monkeypatch.setenv("GYM_JUDGE_BASE_URL", "https://judge.invalid/v1")
     validation = validate_environment(manifest_path)
     assert validation.datasets[0].rows == 1
     report = await verify_environment(

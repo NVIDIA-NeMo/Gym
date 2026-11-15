@@ -1,7 +1,7 @@
 {
   "captured_at": "2026-11-14T15:07:55.365474+00:00",
   "evaluated_commit": "7b6feb78820d5813bd683b65ee9d7ad3f6da89b3",
-  "scope": "Existing real-model runs with the final execution defaults; predates the static-validation and agent-replacement binding fixes.",
+  "scope": "Existing real-model runs with the final execution defaults; predates the agent-replacement binding fix.",
   "policy": "nvidia/qwen/qwen3.8-flash-next",
   "harness": "OpenCode 1.17.11",
   "defaults": {

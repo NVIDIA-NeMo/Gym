@@ -106,8 +106,8 @@ The [2026-11-14 rollout evidence](evidence/visual-defaults-20261114.json) record
 representative real Qwen requests for all four catalogs, image delivery, the
 32768-token request limit, verifier outputs and a VTCBench judge call. It labels
 unfinished evaluations as partial and records the limits of cleanup telemetry.
-These runs use the execution settings above; they predate the static-validation
-and agent-replacement binding fixes.
+These runs use the execution settings above; they predate the
+agent-replacement binding fix.
 
 For vLLM-compatible model endpoints, add
 `--config benchmarks/opencode_multimodal_benchmarks/default_eval.yaml` to preparation
