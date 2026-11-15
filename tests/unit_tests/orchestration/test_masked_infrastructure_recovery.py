@@ -528,25 +528,6 @@ def test_store_refuses_malformed_saved_policy_sections(tmp_path, section):
         RolloutStore.read(output)
 
 
-def test_a_masked_result_its_producer_failed_is_final_and_leaves_the_run_incomplete(tmp_path):
-    # A task-data defect the Environment Server reports with action fail: never measured and never run again.
-    output, _ = _run(tmp_path, [[_masked("demo_env:invalid_reference") | {"failure_outcome_action": "fail"}]])
-    store = RolloutStore.read(output, import_legacy=False)
-    assert store.pending() == []
-    coverage = store.coverage()
-    assert (coverage["complete"], coverage["masked"], coverage["masked_failed"], coverage["open"]) == (False, 1, 1, 0)
-    assert coverage["masked_failed_kinds"] == {"demo_env:invalid_reference": 1}
-    _, decision = _decide(tmp_path, allocation_cut=False)
-    assert (decision.action.value, decision.counts) == ("stop", {"scored": 1, "terminal": 1})
-
-
-def test_a_masked_result_without_an_action_keeps_its_coverage(tmp_path):
-    output, _ = _run(tmp_path, [[_masked("demo_env:invalid_reference")]])
-    coverage = RolloutStore.read(output, import_legacy=False).coverage()
-    assert (coverage["complete"], coverage["masked"], coverage["masked_failed"]) == (True, 1, 0)
-    assert coverage["masked_failed_kinds"] == {}
-
-
 def test_a_masked_agent_stage_retry_with_a_recorded_grade_keeps_its_graded_answer(tmp_path):
     # A graded result is never overwritten by a new sample, with or without the collector's saved-answer flag.
     for flag in ({}, {"_ng_collected_saved_answer": False}):
@@ -559,49 +540,15 @@ def test_a_masked_agent_stage_retry_with_a_recorded_grade_keeps_its_graded_answe
         assert store.attempt_count({"_ng_task_index": 1, "_ng_rollout_index": 0}) == 0
 
 
-def test_a_row_both_infrastructure_masked_and_failed_by_its_producer_is_unsettled_once(tmp_path, monkeypatch):
-    # The two buckets are exclusive: a row that qualified for both would otherwise be subtracted twice.
-    import nemo_gym.rollouts.rollout_records as records
-
-    row = _masked("session_lost") | {"failure_outcome_action": "fail"}
-    monkeypatch.setattr(
-        records,
-        "masked_infrastructure_kind",
-        lambda row, classification=None: "session_lost" if row.get("mask_sample") else None,
-    )
-    output, _ = _run(tmp_path, [[row] * 3])
-    coverage = RolloutStore.read(output, import_legacy=False).coverage()
-    assert (coverage["masked_exhausted"], coverage["masked_failed"]) == (1, 0)
-    assert (coverage["settled"], coverage["completion_fraction"]) == (1, 0.5)
-    assert coverage["settled"] == coverage["successful"] - coverage["masked_exhausted"] - coverage["masked_failed"]
-
-
-def test_the_incomplete_run_message_names_the_masked_failed_kinds_and_the_retryable_exhausted_ones():
+def test_the_incomplete_run_message_names_the_exhausted_masked_results():
     from nemo_gym.rollouts.rollout_recovery import unsettled_masked_note
 
-    note = unsettled_masked_note(
-        {
-            "masked_failed": 2,
-            "masked_failed_kinds": {"demo_env:invalid_reference": 2},
-            "masked_exhausted": 1,
-        }
-    )
-    assert "masked_failed_kinds: demo_env:invalid_reference (2)" in note and "fix or drop" in note
-    assert "--extend-attempts" in note
-    assert unsettled_masked_note({"masked_failed": 0, "masked_exhausted": 0}) == ""
+    assert "masked_exhausted" in unsettled_masked_note({"masked_exhausted": 1})
+    assert "--extend-attempts" in unsettled_masked_note({"masked_exhausted": 1})
+    assert unsettled_masked_note({"masked_exhausted": 0}) == ""
 
 
-@pytest.mark.parametrize(
-    "masked, note",
-    [
-        ([_masked("session_lost")] * 3, "masked_exhausted"),
-        ([_masked("demo_env:invalid_reference") | {"failure_outcome_action": "fail"}], "masked_failed_kinds"),
-    ],
-    ids=["exhausted", "producer-failed"],
-)
-def test_the_strict_saved_completion_gate_never_covers_an_unsettled_masked_result_with_an_omission(
-    tmp_path, masked, note
-):
+def test_the_strict_saved_completion_gate_never_covers_an_unsettled_masked_result_with_an_omission(tmp_path):
     import orjson
 
     from nemo_gym.cli.eval import _check_saved_completion
@@ -609,11 +556,11 @@ def test_the_strict_saved_completion_gate_never_covers_an_unsettled_masked_resul
     from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
 
     omitted = [{"_ng_failure_class": "skipped", "_ng_failure_terminal": True}]
-    output, _ = _run(tmp_path, [omitted, masked])
+    output, _ = _run(tmp_path, [omitted, [_masked("session_lost")] * 3])
     coverage = RolloutStore.read(output, import_legacy=False).coverage()
     assert (coverage["intentionally_omitted"], coverage["successful"], coverage["complete"]) == (1, 2, False)
     coverage_path_for(output).write_bytes(orjson.dumps(coverage))
-    with pytest.raises(IncompleteEvaluationError, match=note):
+    with pytest.raises(IncompleteEvaluationError, match="masked_exhausted"):
         _check_saved_completion(output)
 
 

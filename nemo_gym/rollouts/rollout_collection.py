@@ -6573,12 +6573,6 @@ class RolloutAggregationHelper(BaseModel):
             if inventory_known
             else None,
             "masked_exhausted": sum(c.get("masked_exhausted", 0) for c in components) if inventory_known else None,
-            "masked_failed": sum(c.get("masked_failed", 0) for c in components) if inventory_known else None,
-            "masked_failed_kinds": dict(
-                sum((Counter(c.get("masked_failed_kinds", {})) for c in components), Counter())
-            )
-            if inventory_known
-            else None,
             "max_rollout_attempts": components[0]["max_rollout_attempts"]
             if components and len({c["max_rollout_attempts"] for c in components}) == 1
             else None,

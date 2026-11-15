@@ -138,26 +138,13 @@ def has_recorded_grade(row: Mapping[str, Any]) -> bool:
 
 
 def unsettled_masked_note(coverage: Mapping[str, Any]) -> str:
-    """What keeps masked results from counting as settled, for an incomplete-run message; empty when none does.
-
-    Names the kinds a producer masked with ``fail`` (final: fix or drop those rows, a larger attempt cap does not
-    reopen them) and the infrastructure-masked results that spent their attempt budget (reopened by
-    ``--extend-attempts``).
-    """
-    notes = []
-    if coverage.get("masked_failed"):
-        by_kind = sorted(coverage.get("masked_failed_kinds", {}).items())
-        kinds = ", ".join(f"{kind} ({count})" for kind, count in by_kind)
-        notes.append(
-            f"{coverage['masked_failed']} masked result(s) were failed by their producer and are not retried "
-            f"(masked_failed_kinds: {kinds}): fix or drop those rows."
-        )
-    if coverage.get("masked_exhausted"):
-        notes.append(
-            f"{coverage['masked_exhausted']} infrastructure-masked result(s) spent their attempt budget "
-            "(masked_exhausted): continue with gym eval resubmit --recover --extend-attempts N."
-        )
-    return " ".join(notes)
+    """Why infrastructure-masked results are not settled, for an incomplete-run message; empty when none is."""
+    if not coverage.get("masked_exhausted"):
+        return ""
+    return (
+        f"{coverage['masked_exhausted']} infrastructure-masked result(s) spent their attempt budget "
+        "(masked_exhausted): continue with gym eval resubmit --recover --extend-attempts N."
+    )
 
 
 def _row_failure_kind(row: Mapping[str, Any]) -> Any:
@@ -503,9 +490,9 @@ def masked_infrastructure_kind(
     attempt and a later attempt supersedes it. A recorded ``retry`` is honored for a registered kind whatever its
     attribution, but for a namespaced kind only when it is not attributed to the model. A model-class kind, no kind,
     an unregistered kind, a namespaced kind without a recorded ``retry`` or attributed to the model, and the kinds
-    whose saved answer is graded again (``_MASKED_REGRADE_KINDS``, including a built-in ``transport_*`` verify call) keep the
-    masked row as the result. So does a saved answer (``_keeps_saved_answer``): it is never sampled again, whatever its
-    verifier could grade of it.
+    whose saved answer is graded again (``_MASKED_REGRADE_KINDS``, including a built-in ``transport_*`` verify call)
+    keep the masked row as the result. So does a saved answer (``_keeps_saved_answer``): it is never sampled again,
+    whatever its verifier could grade of it.
     """
     kind = _masked_evaluation_side_kind(row, classification=classification)
     return None if kind is None or _keeps_saved_answer(row) else kind
