@@ -35,6 +35,7 @@ import time
 from enum import Enum
 from typing import Any, List, Literal, Optional, Tuple
 
+from aiohttp import ClientError
 from fastapi import Request, Response
 from pydantic import ConfigDict, Field
 
@@ -53,9 +54,9 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
+    NgFailureEvent,
     accumulate_response_usage,
 )
-from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
@@ -669,7 +670,10 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             if response.ok or response.status not in _RETRYABLE_RESOURCES_STATUSES or attempt == attempts:
                 await raise_for_status(response)
                 return response
-            content = await response.content.read()
+            try:
+                content = await response.content.read()
+            except (ClientError, TimeoutError) as error:
+                content = f"<error body unavailable: {type(error).__name__}: {error}>".encode()
             delay = min(2.0 ** (attempt - 1), 10.0)
             logger.warning(
                 "%s returned %s (attempt %d/%d), retrying in %.0fs: %s",

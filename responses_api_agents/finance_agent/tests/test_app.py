@@ -42,7 +42,7 @@ from nemo_gym.config import (
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
 )
-from nemo_gym.metrics.reward_profile import compute_aggregate_metrics
+from nemo_gym.metrics import compute_aggregate_metrics
 from responses_api_agents.finance_agent import app as finance_agent_app
 from responses_api_agents.finance_agent.app import (
     FinanceAgent,
@@ -1616,12 +1616,26 @@ class TestResourcesServerRetries:
         assert agent.server_client.post.await_count == 1
         assert self.sleeps == []
 
-    _GENERATED = _text_response("Revenue was $5B.")
+    @pytest.mark.asyncio
+    async def test_a_gateway_status_whose_body_cannot_be_read_is_still_retried(self) -> None:
+        agent, _ = _make_agent_and_client(_make_config(resources_server_retries=1))
+        cut = _status_mock(502)
+        cut.content.read = AsyncMock(side_effect=ClientPayloadError("cut"))
+        ok = _status_mock(200)
+        agent.server_client.post = AsyncMock(side_effect=[cut, ok])
 
-    async def _run(self, *verify_replies, **overrides):
+        assert await agent._post_resources_server("/seed_session", {"a": 1}, {"c": "1"}) is ok
+        first, second = agent.server_client.post.await_args_list
+        assert first.kwargs == second.kwargs
+        assert self.sleeps == [1.0]
+
+    _GENERATED = _text_response("Revenue was $5B.")
+    _GRADED = {"responses_create_params": _INPUT, "response": _GENERATED, "reward": 1.0, "final_answer": "$5B"}
+
+    async def _run(self, *verify_replies, seed_replies=(), **overrides):
         agent, _ = _make_agent_and_client(_make_config(resources_server_retries=1, **overrides))
         agent.server_client.post = AsyncMock(
-            side_effect=[_status_mock(200), _dotjson_mock(self._GENERATED), *verify_replies]
+            side_effect=[*seed_replies, _status_mock(200), _dotjson_mock(self._GENERATED), *verify_replies]
         )
         body = FinanceAgentRunRequest.model_validate(
             {"responses_create_params": _INPUT, "instance_config": {"task": "t1"}}
@@ -1654,12 +1668,19 @@ class TestResourcesServerRetries:
         self._assert_masked_rollout(result, "agent_route_failed")
 
     @pytest.mark.asyncio
-    async def test_a_successful_verify_passes_through_unchanged_when_enabled(self) -> None:
-        graded = _dotjson_mock(
-            {"responses_create_params": _INPUT, "response": self._GENERATED, "reward": 1.0, "final_answer": "$5B"}
-        )
+    async def test_a_seed_gateway_status_with_an_unreadable_body_is_retried_through_run(self) -> None:
+        cut = _status_mock(502)
+        cut.content.read = AsyncMock(side_effect=ClientPayloadError("cut"))
 
-        result = await self._run(graded, keep_response_on_verify_failure=True)
+        result = await self._run(_dotjson_mock(self._GRADED), seed_replies=[cut])
+
+        assert result.reward == 1.0
+        assert result.response.id == self._GENERATED["id"]
+        assert self.sleeps == [1.0]
+
+    @pytest.mark.asyncio
+    async def test_a_successful_verify_passes_through_unchanged_when_enabled(self) -> None:
+        result = await self._run(_dotjson_mock(self._GRADED), keep_response_on_verify_failure=True)
 
         assert result.reward == 1.0
         assert result.mask_sample is False
