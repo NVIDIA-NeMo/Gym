@@ -433,12 +433,10 @@ def _translate_agent_type(args: argparse.Namespace) -> list[str]:
             "running, so it cannot be combined with `--no-serve`. Use `--agent` to name one of them."
         )
     config_path = asset_config_path("agent-type", name)
-    overrides = [f"+config_paths=[{config_path}]"]
-    if name.split("/", 1)[0] == "langgraph_agent":
-        # Null-bound LangGraph configs also serve independently wired session agents. Only an explicit
-        # --agent-type selection asks the composer to replace the workload's existing agent.
-        overrides.append(f"+_selected_langgraph_config={_hydra_quote(config_path)}")
-    return overrides
+    # The parser reads the selected config to compose its LangGraph agent (null-bound LangGraph configs also serve
+    # independently wired session agents, so only an explicit selection replaces the workload's agent), and to refuse
+    # a selection the composed config would not run, such as a session agent the workload's routes never bind.
+    return [f"+config_paths=[{config_path}]", f"+_selected_agent_config={_hydra_quote(config_path)}"]
 
 
 # `--search-dir`: extra component-search roots. `main()` folds these into the `NEMO_GYM_EXTRA_ROOTS` env
@@ -859,10 +857,6 @@ def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
             f"Harbor environment server, or as `gym eval run {harbor_target} --agent <harness>`"
         )
     target = "nemo_gym.cli.eval:collect_rollouts" if args.no_serve else "nemo_gym.cli.eval:e2e_rollout_collection"
-    if agent_type := getattr(args, "agent_type", None):
-        # Loading a null-bound session-agent config does not rewire a native taskset's Environment Server.
-        # Retain the explicit choice so collection can reject an unchanged route before preparing its data.
-        overrides = [*overrides, f"+_requested_agent_type={_hydra_quote(agent_type.split('/', 1)[0])}"]
     dispatch(target, overrides)
 
 
