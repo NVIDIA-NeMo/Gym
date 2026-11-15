@@ -127,6 +127,22 @@ def uploaded_file(sandbox, name: str) -> list[bytes]:
 
 
 class TestRewardFile:
+    def test_non_numeric_keys_beside_a_numeric_reward_are_metrics_not_errors(self, tmp_path):
+        # Harbor keeps reward.json as written and the benchmark reads `reward`; a judge that writes a nested
+        # `details` block or a `reason` string beside the score keeps its score here too.
+        (tmp_path / "reward.json").write_text(
+            json.dumps({"reward": 1.0, "details": {"match": True, "samples": [1, 2]}, "reason": "ok", "ssim": 0.5})
+        )
+        rewards, problem = parse_reward_file(tmp_path)
+        assert problem is None and rewards == {"reward": 1.0, "ssim": 0.5}
+        assert select_reward(rewards) == 1.0
+        # Without a numeric `reward` every key is a component, so a non-numeric key is still a malformed file.
+        (tmp_path / "reward.json").write_text(json.dumps({"accuracy": 1.0, "details": {"a": 1}}))
+        rewards, problem = parse_reward_file(tmp_path)
+        assert rewards is None and "'details' is not a finite number" in problem
+        (tmp_path / "reward.json").write_text(json.dumps({"reward": True, "details": {"a": 1}}))
+        assert parse_reward_file(tmp_path)[0] is None
+
     def test_text_and_json(self, tmp_path):
         (tmp_path / "reward.txt").write_text("0.5\n")
         assert parse_reward_file(tmp_path) == ({"reward": 0.5}, None)

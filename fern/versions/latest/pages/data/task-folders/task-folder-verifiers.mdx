@@ -35,9 +35,11 @@ is masked, as `verifier_error` when `bash` or `timeout` is missing and as `provi
 `test.sh` does not affect the score.
 
 - `reward.txt` holds one number, which is the reward.
-- `reward.json` holds a non-empty JSON object of numbers; booleans count as numbers. A `reward` key is the score,
-  and the other keys are metrics, kept per row in `verifier_rewards` but not in aggregate metrics. Without a
-  `reward` key, every key is a component: the score is their sum, and the result names them in `reward_components`.
+- `reward.json` holds a non-empty JSON object. A numeric `reward` key is the score, and the other keys are metrics:
+  the numeric ones are kept per row in `verifier_rewards` (not in aggregate metrics), and a nested object or a
+  string beside the score, such as a `details` block, is left out rather than failing the file. Without a `reward`
+  key, every key is a component and must be a number (booleans count): the score is their sum, and the result names
+  them in `reward_components`.
 - `reward.json` wins whenever it exists, even when it is malformed.
 
 Two tasks of one dataset may write different keys. Gym pads no missing key and renames none.

@@ -120,8 +120,14 @@ def _parse_one_reward_file(path: Path) -> tuple[dict[str, float] | None, str | N
     if not isinstance(raw, dict) or not raw:
         return None, f"{path.name} must hold a non-empty JSON object"
     rewards: dict[str, float] = {}
+    # With a numeric `reward`, the other keys are metrics: a verifier that writes a nested object or a string beside
+    # it (a `details` block, a `reason`) keeps its score, as Harbor keeps the file as written and reads `reward`.
+    # Without one, every key is a component of the score, so every key has to be a number.
+    scored = isinstance(raw.get("reward"), (int, float)) and not isinstance(raw.get("reward"), bool)
     for key, value in raw.items():
         if not isinstance(value, (int, float)):
+            if scored:
+                continue
             return None, f"{path.name}: {key!r} is not a finite number"
         try:
             value = float(value)
