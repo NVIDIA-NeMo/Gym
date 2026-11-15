@@ -16,6 +16,7 @@ import asyncio
 import json
 import socket
 from contextlib import nullcontext
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -376,10 +377,12 @@ class TestApp:
                     "id": "rs_1",
                     "type": "reasoning",
                     "encrypted_content": "opaque",
+                    "content": [{"type": "output_text", "text": "Reasoning"}],
                     **({} if summary == "missing" else {"summary": summary}),
                 }
             ],
         }
+        original = deepcopy(response_data)
         server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
         server._client.create_response = AsyncMock(return_value=response_data)
 
@@ -387,6 +390,8 @@ class TestApp:
 
         assert response.status_code == 200
         assert response.json()["output"][0]["summary"] == []
+        assert response.json()["output"][0]["content"][0]["type"] == "reasoning_text"
+        assert response_data == original
 
     def test_streaming_messages_capture(self, tmp_path) -> None:
         server = self._setup_server()
