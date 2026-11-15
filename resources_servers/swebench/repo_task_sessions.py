@@ -13,23 +13,31 @@ would otherwise repeat to take part in partial-rollout checkpoints, on ``Checkpo
   ``/verify`` that runs again after a restore grades the patch the checkpoint saved (``checkpoint_verify`` ``replay``);
 - golden-patch grading seeds no episode sessions and runs ``restart_only``.
 
+The seed's reads of a new sandbox are retried: ``_pristine_untracked_files`` here, and each server's own read of HEAD.
+
 A server starts its agent's sandbox with ``new_task_sandbox``, from the spec ``agent_sandbox_spec`` returns, and sets
 ``task_model``; its config adds ``RepoTaskSessionFields``. Grading sandboxes are not session state: each grading run
 starts its own, from the spec as the server built it.
 """
 
 import dataclasses
+import logging
+import shlex
 from typing import Any, ClassVar
 
 from pydantic import JsonValue
 
-from nemo_gym.sandbox import SandboxSpec
+from nemo_gym.agents import exec_idempotent
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.server_runtime import CheckpointMode, StepType
 from resources_servers.swebench.patch_capture import PatchCapture
 from resources_servers.swebench.sandbox_session_checkpoints import (
     CheckpointedSandboxSessionResourcesServer,
     SandboxCheckpointFields,
 )
+
+
+LOG = logging.getLogger(__name__)
 
 
 class RepoTaskSessionFields(SandboxCheckpointFields):
@@ -83,6 +91,26 @@ class RepoTaskSessionResourcesServer(CheckpointedSandboxSessionResourcesServer):
             return spec
         options = {**(spec.provider_options or {}), "network_policy": dict(self.config.agent_network_policy)}
         return dataclasses.replace(spec, provider_options=options)
+
+    async def _pristine_untracked_files(self, sandbox: AsyncSandbox, workdir: str) -> frozenset[str]:
+        """The files ``workdir`` holds untracked before the agent touches it, which its patch leaves out.
+
+        A new sandbox can refuse its first commands for a few seconds, so the listing is retried. A sandbox that still
+        cannot run it fails the seed: an empty set would make the patch capture count the image's own untracked files
+        as the agent's. A listing that runs and fails (``workdir`` is not a git repository) gives the empty set, with
+        a warning.
+        """
+        result = await exec_idempotent(
+            sandbox,
+            f"git -C {shlex.quote(workdir)} ls-files --others --exclude-standard",
+            what=f"{self.config.name}: listing pristine untracked files",
+        )
+        if result.error_type is not None:
+            raise RuntimeError(f"Task sandbox could not list its pristine untracked files: {result.error_type}")
+        if result.return_code != 0:
+            LOG.warning("%s: failed to list pristine untracked files: %s", self.config.name, result.stderr)
+            return frozenset()
+        return frozenset(line.strip() for line in (result.stdout or "").splitlines() if line.strip())
 
     def _export_task_sandbox_state(self, session_id: str) -> dict[str, JsonValue]:
         # What a restored session's patch capture needs; nothing once verify captured the patch and stopped the sandbox.
