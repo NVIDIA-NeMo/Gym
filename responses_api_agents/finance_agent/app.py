@@ -179,6 +179,12 @@ class FinanceAgentConfig(BaseResponsesAPIAgentConfig):
         "worker holding the session. Both calls must be safe to repeat on that server. "
         "0 fails the rollout on the first such answer.",
     )
+    keep_response_on_verify_failure: bool = Field(
+        default=False,
+        description="When verify still fails after its retries, return the generated rollout with reward 0 "
+        "and the error in verify_error instead of failing the run, whose reward-0 result has an empty "
+        "response that a trainer cannot use. The 0 is not a grade: a correct answer also gets it.",
+    )
     done_tools: List[str] = Field(
         default_factory=lambda: ["submit_final_result"],
         description="Tool names that signal the agent loop should terminate. "
@@ -692,7 +698,17 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             body.model_dump() | {"response": await get_response_json(response)}
         )
 
-        verify_response = await self._post_resources_server("/verify", verify_request.model_dump(), cookies)
+        try:
+            verify_response = await self._post_resources_server("/verify", verify_request.model_dump(), cookies)
+        except Exception as e:
+            if not self.config.keep_response_on_verify_failure:
+                raise
+            logger.error("verify failed — keeping the rollout with reward=0: %s: %s", type(e).__name__, e)
+            return FinanceAgentVerifyResponse(
+                **verify_request.model_dump(),
+                reward=0.0,
+                verify_error=f"{type(e).__name__}: {e}",
+            )
         return FinanceAgentVerifyResponse.model_validate(await get_response_json(verify_response))
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:

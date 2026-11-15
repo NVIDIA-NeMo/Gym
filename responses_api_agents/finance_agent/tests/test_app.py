@@ -1594,6 +1594,34 @@ class TestResourcesServerRetries:
         assert agent.server_client.post.await_count == 1
         assert self.sleeps == []
 
+    async def _run_with_failing_verify(self, **overrides) -> tuple:
+        agent, _ = _make_agent_and_client(_make_config(resources_server_retries=1, **overrides))
+        generated = _text_response("Revenue was $5B.")
+        agent.server_client.post = AsyncMock(
+            side_effect=[_status_mock(200), _dotjson_mock(generated), _status_mock(502), _status_mock(502)]
+        )
+        body = FinanceAgentRunRequest.model_validate({"responses_create_params": _INPUT})
+        request = MagicMock()
+        request.cookies = {}
+        return await agent.run(request, body), generated
+
+    @pytest.mark.asyncio
+    async def test_a_failed_verify_keeps_the_generated_rollout_when_enabled(self) -> None:
+        result, generated = await self._run_with_failing_verify(keep_response_on_verify_failure=True)
+
+        assert result.reward == 0.0
+        assert result.response.id == generated["id"]
+        assert result.response.output[0].content[0].text == "Revenue was $5B."
+        assert "status 502" in result.verify_error
+
+    @pytest.mark.asyncio
+    async def test_a_failed_verify_returns_the_empty_error_response_by_default(self) -> None:
+        result, _ = await self._run_with_failing_verify()
+
+        assert result.reward == 0.0
+        assert result.response.id == "error"
+        assert result.response.output == []
+
     @pytest.mark.asyncio
     async def test_no_retries_by_default(self) -> None:
         agent, _ = _make_agent_and_client()
