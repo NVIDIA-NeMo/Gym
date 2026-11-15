@@ -291,6 +291,25 @@ class TestEpisode:
         assert "sb-1" not in response.text and "sandbox" not in payload["result"]
         assert sandbox.stopped
 
+    @pytest.mark.parametrize("context", [None, {}, {"agent": {"values": {"tag": "figure"}}}])
+    @pytest.mark.parametrize("nested", [False, True], ids=["flat", "task_data"])
+    def test_run_rejects_unsupported_agent_context_before_setup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, context: object, nested: bool
+    ) -> None:
+        server, task, sandbox, created = make_server(tmp_path, monkeypatch)
+        body = episode(task).model_dump(mode="json")
+        task_input = body["task"]["task_input"]
+        target = task_input["task_data"] if nested else task_input
+        target["agent_context"] = context
+
+        with TestClient(server.setup_webserver()) as client:
+            response = client.post("/run", json=body)
+
+        assert response.status_code == 422, response.text
+        assert "agent_context" in response.text
+        assert created == [] and sandbox.execs == []
+        assert server.server_client.calls == []
+
     async def test_a_flat_single_turn_row_runs_as_the_canonical_one(self, tmp_path, monkeypatch):
         """Review (CI bot, round 34): a single-turn `/run` request with the task fields beside
         `responses_create_params` (the flat shape `SingleAgentTurnTaskInput` accepted before `HarborTaskInput`
@@ -5522,3 +5541,21 @@ class TestVerifierNetwork:
         assert server._verifier_network_policy(task) is None
         spec = server._sandbox_spec(task, None, image="org/verifier:1", role="verifier", network_policy=None)
         assert "network_policy" not in spec.provider_options
+
+
+@pytest.mark.parametrize(
+    ("skip_token_capture", "agent_path"),
+    [
+        (False, "/ng-rollout/r1/training-token-capture/v1/responses"),
+        (True, "/ng-rollout/r1/v1/responses"),
+    ],
+)
+def test_an_episode_that_skips_token_capture_activates_the_agent_without_the_training_tag(
+    tmp_path, monkeypatch, skip_token_capture, agent_path
+):
+    server, task, _, _ = make_server(tmp_path, monkeypatch)
+    server.server_client.global_config_dict["token_id_capture"] = {"enabled": True, "all_agents": True}
+
+    request = episode(task).model_copy(update={"skip_token_capture": skip_token_capture})
+
+    assert server._agent_responses_path(request) == agent_path

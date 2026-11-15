@@ -39,6 +39,7 @@ Either way the walltime is the run's segment walltime bounded by the partition's
 known.
 """
 
+import re
 import shlex
 from dataclasses import dataclass
 from typing import Any
@@ -75,6 +76,8 @@ _ALLOCATION_SHAPE_DIRECTIVES = frozenset(
 # Job-level directives of the original allocation's size, which the kept node pools state for themselves; its QOS and
 # per-node GRES stay with the served-judge job, a GPU job on nodes of the same allocation's shape.
 _SERVED_SHAPE_DIRECTIVES = _ALLOCATION_SHAPE_DIRECTIVES - {"gres", "qos"}
+# What choose_judge_partition's refusal says when no CPU partition is named anywhere; the dispatch classifies on it.
+NO_CPU_PARTITION = "no CPU partition is known"
 _NO_PROFILE = "this submission has no existing CPU-only judge execution profile and none can be derived"
 _NO_SERVED_PROFILE = "this submission has no served-judge execution profile"
 
@@ -188,10 +191,52 @@ def choose_judge_partition(
     if reader:
         return reader, "the launcher's reader placement (NEMO_GYM_REMOTE_READER_SRUN)"
     raise JudgeProfileUnsupported(
-        f"{_NO_PROFILE}: no CPU partition is known (the saved compute declares no node pool with gpus_per_node 0, "
+        f"{_NO_PROFILE}: {NO_CPU_PARTITION} (the saved compute declares no node pool with gpus_per_node 0, "
         "the launcher's NEMO_GYM_REMOTE_READER_SRUN names no partition, and no --judge-partition was given); policy "
         "services are not restarted"
     )
+
+
+# The scheduler's refusals of a job's placement: its partition, QOS, account or GPU request. Anything else the
+# scheduler answers (a controller it cannot reach, a timeout) is not a placement problem.
+_PLACEMENT_REFUSAL = re.compile(r"partition|\bqos|gres|account|node configuration", re.IGNORECASE)
+
+
+# What a scheduler that did not answer says (an unreachable controller, a timeout, a failed query); waiting helps.
+_SCHEDULER_UNAVAILABLE = re.compile(
+    r"unable to contact|connection (?:refused|reset|timed out)|timed out|socket|slurm_load|"
+    r"temporarily unavailable|scheduler unknown|unable to send|network is unreachable|no route to host",
+    re.IGNORECASE,
+)
+
+
+# The dispatch script's own words when the scheduler refused the judge-only job's allocation (an sbatch that exited
+# nonzero); the text after it is the scheduler's.
+JUDGE_ALLOCATION_REFUSED = "judge allocation not admitted"
+# The dispatch script's own guards: a concurrent recovery holds the run's lock, or a job of the run (or a live
+# allocation of its chain) is still on the scheduler. Neither is a refusal of the judge-only job; waiting is the answer.
+_DISPATCH_CONCURRENCY = re.compile(
+    r"another recovery holds the lock|a job of this run is still pending or running|"
+    r"an original allocation is still live",
+    re.IGNORECASE,
+)
+
+
+def placement_refusal(diagnostic: str, served: bool) -> str:
+    """The ``RecoveryDecision.judge_refusal`` of a judge-only job the dispatch did not queue.
+
+    Only the scheduler's own refusal of the allocation (``JUDGE_ALLOCATION_REFUSED``) is a placement problem
+    (``cpu_placement``, or ``served_placement`` for a run that serves its judge on its own saved node pool) or a
+    definite refusal of another kind (``refused``); a scheduler that did not answer is ``other``. A dispatch guard that
+    found a concurrent recovery or job of the run is ``concurrent``, and anything else (an acknowledgement that is
+    missing or unknown, a failed staging or journaling step) stays ``other``: whether the job was queued is not known.
+    """
+    _, found, refusal = diagnostic.partition(JUDGE_ALLOCATION_REFUSED)
+    if not found:
+        return "concurrent" if _DISPATCH_CONCURRENCY.search(diagnostic) else "other"
+    if not _PLACEMENT_REFUSAL.search(refusal):
+        return "other" if _SCHEDULER_UNAVAILABLE.search(refusal) else "refused"
+    return "served_placement" if served else "cpu_placement"
 
 
 def _slurm_duration(seconds: int) -> str:
