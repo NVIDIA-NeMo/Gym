@@ -3,7 +3,12 @@
 """Prime Agent runtime, input staging and artifact capture over Gym's shared sandbox lifecycle."""
 
 import asyncio
+import hashlib
+import io
+import json
 import logging
+import tarfile
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from shlex import quote
@@ -31,6 +36,18 @@ PRIME_AGENT_PACKAGE_URL = (
 PRIME_AGENT_PACKAGE_SHA256 = (
     "88b6578518c72cd51a825bc80f28e0fef9a64c67de4a7d6fd7afd7ca1b34da0b"  # pragma: allowlist secret
 )
+# Release dependencies use an R2 host in their manifests. Fetch the identical, pinned GitHub release assets and
+# rewrite only those URLs to uploaded local archives, including the core package's transitive AI dependency.
+PRIME_RELEASE_PACKAGES = {
+    "prime-agent": PRIME_AGENT_PACKAGE_SHA256,
+    "prime-agent-ai": "7cdbb3e835f48dd103325f7a351ce540b27af4d161aeb9c7b9bdcc12fe7909af",  # pragma: allowlist secret
+    "prime-agent-core": "0313373089831d9a2ce06e874fab8b9c05762c0094ff9fc202908cf7db7f99cd",  # pragma: allowlist secret
+    "prime-agent-tui": "3225f7f92e87db80fe2c9005d1f7770735ae625c32935ef2283688fc9bd33951",  # pragma: allowlist secret
+}
+PRIME_RELEASE_URL = PRIME_AGENT_PACKAGE_URL.rsplit("/", 1)[0]
+PRIME_DEPENDENCY_URL = "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev/releases/v0.7.0"
+
+
 NODE_VERSION = "22.23.2"
 # sha256 of the official Node.js builds, from https://nodejs.org/dist/v22.23.2/SHASUMS256.txt, keyed by `uname -m`.
 NODE_SHA256 = {
@@ -44,6 +61,29 @@ RUNTIME_ROOT = "/tmp/nemo-gym-prime-runtime"
 INSTALLER = "install_prime_runtime.sh"
 # Bounds the stderr tail copied back to the agent server.
 STDERR_TAIL_BYTES = 1024 * 1024
+
+
+def _localize_release_package(source: Path, target: Path, replacements: dict[str, str]) -> str:
+    # Stream archive members without extracting paths or modifying the verified download cache.
+    found_manifest = False
+    with tarfile.open(source, "r:gz") as original, tarfile.open(target, "w:gz") as localized:
+        for member in original:
+            data = original.extractfile(member) if member.isfile() else None
+            if member.name == "package/package.json":
+                if data is None:
+                    raise ValueError("Prime release package.json must be a regular file")
+                manifest = json.load(data)
+                for name, value in manifest.get("dependencies", {}).items():
+                    if value in replacements:
+                        manifest["dependencies"][name] = replacements[value]
+                content = json.dumps(manifest).encode()
+                member.size = len(content)
+                data = io.BytesIO(content)
+                found_manifest = True
+            localized.addfile(member, data)
+    if not found_manifest:
+        raise ValueError("Prime release archive has no package/package.json")
+    return hashlib.sha256(target.read_bytes()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -75,8 +115,8 @@ class PrimeSession(AgentSessionState):
         """Create the session directory and install (or reuse) Node.js and the pinned Prime Agent package.
 
         The agent server downloads and checks the Node.js build, the release package and the kernel's Python and uv
-        once, then uploads them, so the sandbox needs no download tools; npm and uv install dependencies from their
-        package indexes.
+        once, then uploads them, so the sandbox needs no download tools. Prime release dependencies are also uploaded;
+        npm and uv install remaining dependencies from their package indexes.
         """
         # Shared host-side download cache for pinned sandbox assets.
         from responses_api_agents.miniswe_sandboxed_agent.bootstrap import (
@@ -107,19 +147,37 @@ class PrimeSession(AgentSessionState):
         node = await cached_download(
             f"https://nodejs.org/dist/v{NODE_VERSION}/{name}", sha256=NODE_SHA256[arch_name], timeout=timeout
         )
-        package = await cached_download(PRIME_AGENT_PACKAGE_URL, sha256=PRIME_AGENT_PACKAGE_SHA256, timeout=timeout)
         # The installer requires glibc, so the kernel uses the glibc Python build.
         uv, python = await bootstrap_assets(arch_name, "gnu")
         await sandbox.upload(node, f"{directory}/{name}")
-        await sandbox.upload(package, f"{directory}/prime-agent.tgz")
+        replacements = {
+            f"{PRIME_DEPENDENCY_URL}/{name}-{PRIME_AGENT_VERSION}.tgz": f"file:{directory}/{name}.tgz"
+            for name in PRIME_RELEASE_PACKAGES
+        }
+        package_checksums = {}
+        with tempfile.TemporaryDirectory(prefix="gym-prime-release-") as temporary:
+            for package_name, checksum in PRIME_RELEASE_PACKAGES.items():
+                package = await cached_download(
+                    f"{PRIME_RELEASE_URL}/{package_name}-{PRIME_AGENT_VERSION}.tgz", sha256=checksum, timeout=timeout
+                )
+                localized = Path(temporary) / f"{package_name}.tgz"
+                package_checksums[package_name] = await asyncio.to_thread(
+                    _localize_release_package, package, localized, replacements
+                )
+                await sandbox.upload(localized, f"{directory}/{package_name}.tgz")
+        dependency_checks = " ".join(
+            f"{quote(f'{directory}/{name}.tgz')} {quote(checksum)}"
+            for name, checksum in package_checksums.items()
+            if name != "prime-agent"
+        )
         await sandbox.upload(python, f"{directory}/python.tar.gz")
         await sandbox.upload(uv, f"{directory}/uv.tar.gz")
         result = await sandbox.exec(
             f"bash {quote(f'{directory}/{INSTALLER}')} {quote(self.runtime)} {quote(PRIME_AGENT_VERSION)} "
             f"{quote(f'{directory}/{name}')} {quote(NODE_SHA256[arch_name])} "
-            f"{quote(f'{directory}/prime-agent.tgz')} {quote(PRIME_AGENT_PACKAGE_SHA256)} "
+            f"{quote(f'{directory}/prime-agent.tgz')} {quote(package_checksums['prime-agent'])} "
             f"{quote(f'{directory}/python.tar.gz')} {quote(PYTHON_SHA256[arch_name, 'gnu'])} "
-            f"{quote(f'{directory}/uv.tar.gz')}",
+            f"{quote(f'{directory}/uv.tar.gz')} {dependency_checks}",
             cwd="/",
             timeout_s=timeout,
         )

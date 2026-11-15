@@ -3,11 +3,14 @@
 """Prime Agent sessions: seed refusals, request mapping, and real supervised runs of a fake Prime Agent CLI."""
 
 import asyncio
+import hashlib
+import io
 import json
 import os
 import shlex
 import shutil
 import sys
+import tarfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -81,7 +84,9 @@ class LocalSandbox:
     async def exec(self, command, *, cwd=None, timeout_s=30, env=None):
         argv = shlex.split(command)
         if len(argv) > 1 and argv[1].endswith("/install_prime_runtime.sh"):
-            assert argv[3] == PRIME_AGENT_VERSION and argv[8].endswith("/python.tar.gz") and len(argv) == 11
+            assert argv[3] == PRIME_AGENT_VERSION and argv[8].endswith("/python.tar.gz") and len(argv) == 17
+            for path, checksum in [(argv[6], argv[7]), *zip(argv[11::2], argv[12::2])]:
+                assert hashlib.sha256(Path(path).read_bytes()).hexdigest() == checksum
             node = Path(argv[2]) / "bin" / "node"
             node.parent.mkdir(parents=True, exist_ok=True)
             node.write_text(f"#!{sys.executable}\n" + FAKE_PRIME)
@@ -218,7 +223,11 @@ async def activate(tmp_path: Path, mode: str, *, timeout: float = 20, expire: bo
     host_provider = {"apiKey": "host-only"}  # pragma: allowlist secret
     prime = agent(timeout=timeout, thinking="high", models_config={"providers": {"private": host_provider}})
     asset = tmp_path / "asset.tgz"
-    asset.write_bytes(b"asset")
+    with tarfile.open(asset, "w:gz") as archive:
+        content = b'{"name": "prime-agent", "dependencies": {}}'
+        manifest = tarfile.TarInfo("package/package.json")
+        manifest.size = len(content)
+        archive.addfile(manifest, io.BytesIO(content))
     # The agent server downloads Node.js, the release package and the kernel's Python and uv; the fake installer
     # stands in for all of them.
     with patch(
@@ -228,9 +237,12 @@ async def activate(tmp_path: Path, mode: str, *, timeout: float = 20, expire: bo
     arch = os.uname().machine
     assert [call.args[0].rsplit("/", 1)[1] for call in download.await_args_list] == [
         f"node-v22.23.2-linux-{'arm64' if arch == 'aarch64' else 'x64'}.tar.gz",
-        "prime-agent-0.7.0.tgz",
         f"uv-{arch}-unknown-linux-musl.tar.gz",
         f"cpython-3.13.12%2B20260310-{arch}-unknown-linux-gnu-install_only_stripped.tar.gz",
+        "prime-agent-0.7.0.tgz",
+        "prime-agent-ai-0.7.0.tgz",
+        "prime-agent-core-0.7.0.tgz",
+        "prime-agent-tui-0.7.0.tgz",
     ]
     if expire:
         assert await state.session.expire(timeout=10, reason="stopped")
