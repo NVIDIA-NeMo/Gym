@@ -16,7 +16,7 @@ from nemo_gym.agents import AGENT_SESSION_COOKIE_KEY, AgentCloseSessionRequest, 
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
 from responses_api_agents.wildclawbench_agent.app import WildClawAgent
-from responses_api_agents.wildclawbench_agent.execution import ExecutionConfig, NativeProcess
+from responses_api_agents.wildclawbench_agent.execution import ExecutionConfig, NativeProcess, publish_episode
 from responses_api_agents.wildclawbench_agent.tests.helpers import make_agent
 
 
@@ -41,7 +41,6 @@ async def seeded(tmp_path):
         agent_session_id="agent-1",
         episode_id=EpisodeId(rollout_id="3-2"),
         task_id=TaskId(taskset="wildclaw_agent", task_id="task"),
-        agent_context={"values": {"execution_key": output.name, "owner_host": socket.gethostname()}},
     )
     lease = dict(
         execution=execution.model_dump(mode="json"),
@@ -52,6 +51,7 @@ async def seeded(tmp_path):
         task_id=seed.task_id.model_dump(mode="json"),
     )
     (output / "lease.json").write_text(json.dumps(lease))
+    publish_episode(execution, seed.episode_id.capture_key, output.name)
     req = request()
     with patch.object(WildClawAgent, "resolve_model_base_url", return_value="http://policy/rollouts/3-2/v1"):
         await agent.seed_agent_session(req, seed)
@@ -237,3 +237,37 @@ async def test_cancel_during_spawn_acquires_and_reaps_the_real_child(tmp_path, m
             task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await task
+
+
+@pytest.mark.parametrize("segment", ["null", "eyJ0ZW1wZXJhdHVyZSI6MC43fQ"])
+async def test_sampling_context_refused_before_native_activation(seeded, segment):
+    from nemo_gym.core import model_sampling_context
+
+    agent, seed, req, _ = seeded
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[dict(role="user", content="original prompt")])
+    with model_sampling_context(segment), pytest.raises(HTTPException) as rejected:
+        await agent.responses(req, body)
+    assert rejected.value.status_code == 422
+    assert agent._require_agent_session(seed.agent_session_id).task is None
+
+
+def test_agent_context_is_refused_through_real_route_without_native_assets(tmp_path):
+    from nemo_gym.agents import check_agent_seed_rejected
+
+    agent = make_agent(tmp_path, sys.executable)
+    seed = AgentSeedSessionRequest(
+        agent_session_id="context",
+        episode_id=EpisodeId(rollout_id="probe"),
+        task_id=TaskId(taskset="probe", task_id="probe"),
+        agent_context={"values": {"execution_key": "a" * 64}},
+    )
+    assert check_agent_seed_rejected(agent.setup_webserver(), seed)
+
+
+async def test_closed_resources_pointer_cannot_seed_another_agent(seeded):
+    from nemo_gym.agents import AgentSeedRejectedError
+
+    agent, seed, _, output = seeded
+    (output / "resources_closed.json").write_text('{"cleanup_confirmed":true}')
+    with pytest.raises(AgentSeedRejectedError, match="missing or incompatible"):
+        await agent.seed_agent_session(request(), seed.model_copy(update={"agent_session_id": "new-agent"}))

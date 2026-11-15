@@ -11,7 +11,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from fastapi import HTTPException
 
 from benchmarks.wildclawbench.merge import merge
 from responses_api_agents.wildclawbench_agent import data
@@ -238,7 +237,7 @@ def test_real_cleanup_accepts_already_removed_container_but_not_daemon_failure(t
 
 
 @pytest.mark.asyncio
-async def test_real_subprocess_retains_artifacts_and_retry_does_not_repeat_execution(tmp_path, monkeypatch):
+async def test_shipped_environment_uses_fresh_sessions_and_preserves_native_artifacts(tmp_path, monkeypatch):
     script = tmp_path / "worker-python"
     script.write_text(
         f"#!{sys.executable}\n"
@@ -277,6 +276,7 @@ else:
     )
     first, duplicate = await asyncio.gather(environment.run_legacy(request), environment.run_legacy(request))
     assert first["reward"] == duplicate["reward"] == 0
+    assert first["artifact_dir"] != duplicate["artifact_dir"]
     assert not first["mask_sample"]
     output = Path(first["artifact_dir"])
     assert (output / "cleaned").read_text() == "yes"
@@ -291,20 +291,16 @@ else:
         result = await environment.run_legacy(retried)
         assert result["artifact_dir"] != first["artifact_dir"]
         assert Path(result["artifact_dir"], "executed").exists()
-    changed = json.loads(json.dumps(request))
-    changed["verifier_metadata"]["task_id"] = "other-task"
-    with pytest.raises(HTTPException) as exc:
-        await environment.run_legacy(changed)
-    assert exc.value.status_code == 409
-
-
-@pytest.mark.asyncio
-async def test_missing_rollout_id_is_rejected_before_execution(tmp_path, monkeypatch):
-    environment, _, _, _ = make_pipeline(tmp_path, sys.executable, monkeypatch)
-    body = dict(responses_create_params=dict(input="test"), verifier_metadata={})
-    with pytest.raises(HTTPException) as exc:
-        await environment.run_legacy(body)
-    assert exc.value.status_code == 400
+    assert not agent._session_records or all(record.state is None for record in agent._session_records.values())
+    assert not resources._owned
+    assert calls[:6] == [
+        "/seed_session",
+        "/v1/agent_sessions",
+        "/ng-rollout/3-2/v1/responses",
+        "/v1/agent_sessions/close",
+        "/verify",
+        "/close_session",
+    ]
 
 
 def test_enroot_detached_warmups_are_owned_and_cleanup_is_idempotent(tmp_path, monkeypatch):

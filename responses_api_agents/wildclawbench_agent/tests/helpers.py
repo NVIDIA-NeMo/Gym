@@ -66,9 +66,13 @@ def make_pipeline(tmp_path, worker_python, monkeypatch):
 
     from starlette.requests import Request
 
-    from environment_servers.wildclawbench_environment.app import WildClawEnvironment, WildClawEnvironmentConfig
+    from environment_servers.single_agent_turn_legacy.app import (
+        SingleAgentTurnLegacyEnvironmentServer,
+        SingleAgentTurnLegacyEnvironmentServerConfig,
+    )
     from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedSessionRequest
     from nemo_gym.client import SESSION_ID_KEY
+    from nemo_gym.config import AggregateMetricsRequest
     from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
     from nemo_gym.server_runtime import BaseVerifyRequest, ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
     from resources_servers.wildclawbench.app import WildClawResources, WildClawResourcesConfig
@@ -130,6 +134,8 @@ def make_pipeline(tmp_path, worker_python, monkeypatch):
             result = await agent.seed_agent_session(request, AgentSeedSessionRequest.model_validate(body))
         elif url_path == "/v1/agent_sessions/close":
             result = await agent.close_agent_session(request, AgentCloseSessionRequest.model_validate(body))
+        elif url_path == "/aggregate_metrics":
+            result = await resources.aggregate_metrics(AggregateMetricsRequest.model_validate(body))
         elif url_path == "/verify":
             result = await resources.verify(request, BaseVerifyRequest.model_validate(body))
         elif url_path == "/close_session":
@@ -162,8 +168,8 @@ def make_pipeline(tmp_path, worker_python, monkeypatch):
             },
         }
     )
-    environment = WildClawEnvironment(
-        config=WildClawEnvironmentConfig(
+    environment = SingleAgentTurnLegacyEnvironmentServer(
+        config=SingleAgentTurnLegacyEnvironmentServerConfig(
             name="wildclaw_environment_server",
             host="127.0.0.1",
             port=2,
@@ -171,7 +177,6 @@ def make_pipeline(tmp_path, worker_python, monkeypatch):
             agent_server={"type": "responses_api_agents", "name": "wildclaw_agent"},
             resources_server={"type": "resources_servers", "name": "wildclaw_resources"},
             tool_servers=[],
-            output_root=execution.output_root,
             max_concurrent_episodes=1,
             queue_timeout_seconds=10,
             default_episode_timeout_seconds=10,

@@ -291,4 +291,4 @@ def test_wildclaw_sessions_do_not_gain_a_legacy_relay() -> None:
     pairing = yaml.safe_load((root / "benchmarks/wildclawbench/config.yaml").read_text())
     assert not migration.needs_environment_server(default["wildclaw_agent"])
     assert not migration.needs_environment_server(pairing["wildclaw_agent"])
-    assert list(pairing["wildclaw_environment_server"]["environment_servers"]) == ["wildclawbench_environment"]
+    assert list(pairing["wildclaw_environment_server"]["environment_servers"]) == ["single_agent_turn_legacy"]

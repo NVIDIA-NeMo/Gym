@@ -3,8 +3,8 @@
 """Prepared native task metadata, read from verifier_metadata when the Resources session is seeded.
 
 Keep this module dependency-light so collation can validate source-bound rows without native assets,
-Docker/Enroot, or importing either server. Execution keys are injected by the Environment Server,
-not supplied in the dataset.
+Docker/Enroot, or importing either server. Private episode folders are chosen by the Resources
+Server from its session identity, not supplied in the dataset.
 """
 
 from pydantic import BaseModel, ConfigDict, Field

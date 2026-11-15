@@ -87,7 +87,7 @@ else:
     assert (started[0].parent / "cleaned").exists()
     assert Path(result["artifact_dir"], "previous-cleaned").read_text() == "True"
     assert middleware.num_cancelled == 1
-    assert not environment._inflight
+    assert not resources._owned
     with pytest.raises(ProcessLookupError):
         os.kill(int(started[0].read_text()), 0)
 
@@ -194,17 +194,7 @@ def test_model_profile_validation(tmp_path, monkeypatch, profile, valid):
 
 @pytest.mark.asyncio
 async def test_environment_preserves_collector_indices_and_retry_attempt(tmp_path, monkeypatch):
-    from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
-
     environment, _, _, _ = make_pipeline(tmp_path, sys.executable, monkeypatch)
-    seen = []
-
-    async def episode(self, row):
-        request = self._episode_request_from_row(row)
-        seen.append((request.episode_id.capture_key, row["wildclaw_execution_key"], row["_ng_run_id"]))
-        return {"rollout_id": request.episode_id.capture_key}
-
-    monkeypatch.setattr(SingleAgentTurnLegacyEnvironmentServer, "run_legacy", episode)
     for attempt in (0, 1):
         payload = dict(
             _ng_task_index=7,
@@ -214,7 +204,6 @@ async def test_environment_preserves_collector_indices_and_retry_attempt(tmp_pat
             responses_create_params={"input": [{"role": "user", "content": "task"}]},
             verifier_metadata={},
         )
-        response = await environment.run_legacy(payload)
-        assert response["rollout_id"] == ("7-2" if not attempt else "7-2-a1")
-    assert [item[2] for item in seen] == ["collector-run", "collector-run"]
-    assert seen[0][1] != seen[1][1]
+        request = environment._episode_request_from_row(payload)
+        assert request.episode_id.capture_key == ("7-2" if not attempt else "7-2-a1")
+        assert request.episode_id.attempt == attempt

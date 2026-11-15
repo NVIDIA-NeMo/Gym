@@ -78,3 +78,41 @@ def test_literal_benchmark_paths_keep_path_api():
     instance, error = maybe_get_server_instance_config("agent", config.agent)
     assert error is None
     assert instance.datasets[0].jsonl_fpath == Path("data/input.jsonl")
+
+
+@pytest.mark.parametrize("field", ["jsonl_fpath", "prepare_script", "prompt_config", "prepare_project"])
+def test_unused_benchmark_paths_may_keep_an_unset_environment_variable(monkeypatch, tmp_path, field):
+    monkeypatch.delenv("UNSET_BENCHMARK_PATH", raising=False)
+    reference = "${oc.env:UNSET_BENCHMARK_PATH}"
+    dataset = dict(name="benchmark", type="benchmark", jsonl_fpath="data/input.jsonl")
+    dataset[field] = reference
+    config = OmegaConf.create(
+        dict(agent=dict(responses_api_agents=dict(example=dict(entrypoint="app.py", datasets=[dataset]))))
+    )
+    instance, error = maybe_get_server_instance_config("agent", config.agent)
+    assert error is None
+    assert str(getattr(instance.datasets[0], field)) == reference
+    path = tmp_path / "provided-later"
+    monkeypatch.setenv("UNSET_BENCHMARK_PATH", str(path))
+    instance, error = maybe_get_server_instance_config("agent", config.agent)
+    assert error is None
+    assert getattr(instance.datasets[0], field) == path
+
+
+def test_vision2code_eval_config_loads_without_unused_task_dataset(monkeypatch):
+    monkeypatch.delenv("VISION2CODE_EVAL_TASKS", raising=False)
+    for name in ("SQSH", "POLICY_URL", "POLICY_MODEL", "JUDGE_URL", "JUDGE_MODEL"):
+        monkeypatch.setenv("VISION2CODE_" + name, "/unused")
+    config = OmegaConf.merge(
+        OmegaConf.load("resources_servers/vision2code/configs/vision2code.yaml"),
+        OmegaConf.load("resources_servers/vision2code/configs/vision2code_evals.yaml"),
+    )
+    instance, error = maybe_get_server_instance_config("vision2code", config.vision2code)
+    assert error is None
+    assert str(instance.datasets[0].jsonl_fpath) == "${oc.env:VISION2CODE_EVAL_TASKS}"
+    assert (
+        OmegaConf.to_container(config, resolve=False)["vision2code"]["resources_servers"]["vision2code"]["datasets"][
+            0
+        ]["jsonl_fpath"]
+        == "${oc.env:VISION2CODE_EVAL_TASKS}"
+    )

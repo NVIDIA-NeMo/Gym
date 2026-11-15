@@ -3,8 +3,8 @@
 Evaluation adapter for original OpenClaw at the source revision in
 [`source-pin.json`](../../benchmarks/wildclawbench/source-pin.json), using the provisioned
 `wildclawbench-ubuntu:v1.3` image. Supports Gym agent-session seed, one activation and close.
-The paired `wildclawbench` Resources Server owns the native container and grading; the paired
-Environment Server orders the episode and aggregates scores.
+The paired `wildclawbench` Resources Server owns the native container, grading and suite aggregation.
+The shipped `single_agent_turn_legacy` Environment Server orders the episode and adds performance metrics.
 
 Identical seed/activation retries reuse their state; changed bindings conflict. Close cancels
 active work and returns captured observations or an explicit observation gap. Borrowed sandbox

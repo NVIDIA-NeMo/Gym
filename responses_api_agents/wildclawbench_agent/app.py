@@ -6,16 +6,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-import socket
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar
 from uuid import uuid4
 
 import anyio
 from fastapi import Body, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import PrivateAttr
 
 from nemo_gym.agents import (
     AgentCloseSessionResponse,
@@ -27,7 +25,7 @@ from nemo_gym.agents import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config import get_first_server_config_dict, get_global_config_dict
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, current_model_sampling_segment
 from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.openclaw_agent.app import openclaw_session_conversation
@@ -36,6 +34,7 @@ from responses_api_agents.wildclawbench_agent.execution import (
     ExecutionConfig,
     NativeProcess,
     episode_output,
+    execution_key_for_episode,
     image_identity,
     read_lease,
 )
@@ -43,12 +42,6 @@ from responses_api_agents.wildclawbench_agent.execution import (
 
 class WildClawConfig(BaseResponsesAPIAgentConfig, ExecutionConfig):
     """The native harness has one trusted-host execution mode."""
-
-
-class WildClawContext(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    execution_key: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
-    owner_host: str | None = None
 
 
 @dataclass
@@ -63,7 +56,6 @@ class WildClawSession(AgentSessionState):
 
 class WildClawAgent(SimpleResponsesAPIAgent):
     config: WildClawConfig
-    agent_context_model: ClassVar[type[BaseModel]] = WildClawContext
     _semaphore: asyncio.Semaphore = PrivateAttr()
     _image_identity: str | None = PrivateAttr(default=None)
 
@@ -87,13 +79,11 @@ class WildClawAgent(SimpleResponsesAPIAgent):
             )
         if any(access.required for access in self.effective_tool_accesses(body)):
             raise AgentSeedRejectedError("WildClawBench does not support required external tool grants")
-        context = self.parse_agent_context(body)
-        assert isinstance(context, WildClawContext)
-        if not context.execution_key or context.owner_host != socket.gethostname():
-            raise AgentSeedRejectedError("Native resources and agent must share one host and workspace")
+        self.parse_agent_context(body)
         execution = ExecutionConfig.model_validate(self.config.model_dump())
         try:
-            lease = read_lease(execution, context.execution_key)
+            key = execution_key_for_episode(execution, body.episode_id.capture_key)
+            lease = read_lease(execution, key)
         except (OSError, ValueError, KeyError):
             raise AgentSeedRejectedError("Native resources lease is missing or incompatible") from None
         if lease["episode_id"] != body.episode_id.model_dump(mode="json") or lease[
@@ -102,7 +92,7 @@ class WildClawAgent(SimpleResponsesAPIAgent):
             raise AgentSessionConflictError("Native lease belongs to another episode or task")
         if self._image_identity is None:
             self._image_identity = image_identity(execution)
-        output = episode_output(execution, context.execution_key)
+        output = episode_output(execution, key)
         binding = dict(agent_session_id=body.agent_session_id, episode_id=lease["episode_id"])
         try:
             with (output / "agent_binding.json").open("x") as stream:
@@ -150,6 +140,8 @@ class WildClawAgent(SimpleResponsesAPIAgent):
         assert isinstance(state, WildClawSession)
         if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
             raise AgentSessionConflictError("Activation route differs from the seeded episode")
+        if current_model_sampling_segment() is not None:
+            raise HTTPException(422, "Native sampling is config-owned; per-row sampling overrides are unsupported")
         if state.task is None:
             dumped = body.model_dump(exclude_none=True, exclude_defaults=True)
             inputs = dumped.pop("input", None)

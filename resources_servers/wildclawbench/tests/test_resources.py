@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Resource cleanup retains ownership until the native container is removed."""
 
+import hashlib
 import sys
 
 import pytest
@@ -54,7 +55,7 @@ def test_typed_session_ownership_fences_and_lost_seed_reply(tmp_path, monkeypatc
         resources_session_id="one",
         episode_id=EpisodeId(rollout_id="3-2"),
         task_id=TaskId(taskset="wildclaw", task_id="task"),
-        task_data={"wildclaw_execution_key": "a" * 64, "verifier_metadata": {"task_id": "task"}},
+        task_data={"verifier_metadata": {"task_id": "task"}},
         responses_create_params={"input": [{"role": "user", "content": "task"}]},
     )
     client = TestClient(resources.setup_webserver(), raise_server_exceptions=False)
@@ -63,44 +64,67 @@ def test_typed_session_ownership_fences_and_lost_seed_reply(tmp_path, monkeypatc
     assert resources.has_session_state("one")
     client.cookies.clear()
     foreign = seed.model_copy(update={"resources_session_id": "foreign"})
-    assert client.post("/seed_session", json=foreign.model_dump(mode="json")).status_code == 409
+    assert client.post("/seed_session", json=foreign.model_dump(mode="json")).status_code == 200
+    assert resources._owned["foreign"].output != resources._owned["one"].output
     assert not cleanup and resources.has_session_state("one")
+    assert (
+        client.post(
+            "/close_session",
+            json={"resources_session_id": "foreign", "episode_id": seed.episode_id.model_dump(mode="json")},
+        ).status_code
+        == 200
+    )
+    cleanup.clear()
     close = {"resources_session_id": "one", "episode_id": seed.episode_id.model_dump(mode="json")}
     wrong = dict(close, episode_id={"rollout_id": "other"})
     assert client.post("/close_session", json=wrong).status_code == 409
     assert resources.has_session_state("one")
     for _ in range(2):
         assert client.post("/close_session", json=close).status_code == 200
-    assert cleanup == ["a" * 64] and not resources.has_session_state("one")
+    assert cleanup == [hashlib.sha256(b"one").hexdigest()] and not resources.has_session_state("one")
     client.cookies.clear()
     assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 409
     # An unrelated new execution can be closed without the cookie from its lost seed reply.
-    fresh = seed.model_copy(
-        update={"resources_session_id": "new", "task_data": dict(seed.task_data, wildclaw_execution_key="b" * 64)}
-    )
+    fresh = seed.model_copy(update={"resources_session_id": "new"})
     assert client.post("/seed_session", json=fresh.model_dump(mode="json")).status_code == 200
     client.cookies.clear()
     assert client.post("/close_session", json=dict(close, resources_session_id="new")).status_code == 200
-    assert cleanup == ["a" * 64, "b" * 64]
+    assert cleanup == [hashlib.sha256(b"one").hexdigest(), hashlib.sha256(b"new").hexdigest()]
     assert not resources._owned
 
 
-@pytest.mark.parametrize("key", ["invalid", "../escape", "a" * 63])
-def test_invalid_execution_key_is_terminal_before_allocation(tmp_path, monkeypatch, key):
+@pytest.mark.parametrize("session_id", ["invalid", "../escape", "a" * 63])
+def test_resources_owns_output_path_and_replaces_capture_pointer(tmp_path, monkeypatch, session_id):
     from fastapi.testclient import TestClient
+
+    from responses_api_agents.wildclawbench_agent.execution import execution_key_for_episode
 
     _, _, resources, _ = make_pipeline(tmp_path, sys.executable, monkeypatch)
     body = dict(
-        resources_session_id="bad",
-        episode_id={"rollout_id": "3-2"},
+        resources_session_id=session_id,
+        episode_id={"rollout_id": "3-2", "attempt": 1},
         task_id={"taskset": "wildclaw", "task_id": "task"},
-        task_data={"verifier_metadata": {}, "wildclaw_execution_key": key},
+        task_data={"verifier_metadata": {}},
         responses_create_params={"input": [{"role": "user", "content": "task"}]},
     )
-    response = TestClient(resources.setup_webserver(), raise_server_exceptions=False).post("/seed_session", json=body)
-    assert response.status_code == 422
-    assert not resources._owned
-    assert not (tmp_path / "episodes").exists()
+    client = TestClient(resources.setup_webserver(), raise_server_exceptions=False)
+    assert client.post("/seed_session", json=body).status_code == 200
+    key = execution_key_for_episode(resources.config.execution, "3-2-a1")
+    assert key == hashlib.sha256(session_id.encode()).hexdigest()
+    output = resources._owned[session_id].output
+    assert output.name == key and output.parent == tmp_path / "episodes"
+    # A later run can reuse the capture route, with a fresh private folder.
+    client.cookies.clear()
+    body["resources_session_id"] = session_id + "-new-run"
+    assert client.post("/seed_session", json=body).status_code == 200
+    current = execution_key_for_episode(resources.config.execution, "3-2-a1")
+    assert current != key
+    assert (output / "lease.json").is_file()
+    close = dict(resources_session_id=body["resources_session_id"], episode_id=body["episode_id"])
+    assert client.post("/close_session", json=close).status_code == 200
+    assert (resources._owned[session_id].output / "lease.json").is_file()
+    with pytest.raises(ValueError, match="closed"):
+        execution_key_for_episode(resources.config.execution, "3-2-a1")
 
 
 def test_grading_rejects_a_changed_answer_or_model():
@@ -147,11 +171,11 @@ def test_verification_retry_keeps_original_grade_and_rejects_changed_response(tm
         resources_session_id="scored",
         episode_id={"rollout_id": "3-2"},
         task_id={"taskset": "wildclaw", "task_id": "task"},
-        task_data={"verifier_metadata": {"task_id": "task"}, "wildclaw_execution_key": "c" * 64},
+        task_data={"verifier_metadata": {"task_id": "task"}},
         responses_create_params={"input": [{"role": "user", "content": "task"}]},
     )
     assert client.post("/seed_session", json=seed).status_code == 200
-    output = tmp_path / "episodes" / ("c" * 64)
+    output = resources._owned["scored"].output
     events = [
         {
             "type": "message",
@@ -213,3 +237,49 @@ def test_prepared_rows_have_source_bound_metadata_and_reject_missing_digests():
         del incomplete["workspace_sha256"]
         with pytest.raises(ValidationError):
             TaskData.model_validate(incomplete)
+
+
+async def test_aggregation_retains_valid_zero_and_blocks_incomplete_or_failed_headline(tmp_path, monkeypatch):
+    from nemo_gym.config import AggregateMetricsRequest
+    from responses_api_agents.wildclawbench_agent import metrics
+
+    environment, _, resources, calls = make_pipeline(tmp_path, sys.executable, monkeypatch)
+    pin = dict(revision="r", tasks={"a": "a.md", "b": "b.md"}, files={"a.md": "a" * 64, "b.md": "b" * 64})
+    monkeypatch.setattr(metrics, "source_pin", lambda: pin)
+    rows = [
+        dict(
+            task_id=k,
+            task_sha256=k * 64,
+            source_revision="r",
+            evaluation_protocol={"gym_protocol": "agent_sessions_v1"},
+            reward=float(i),
+            native_reward=float(i),
+            mask_sample=False,
+            ng_perf={"completion_tokens": 10 * (i + 1), "num_turns": 2},
+            _ng_task_index=i,
+            _ng_rollout_index=0,
+        )
+        for i, k in enumerate(["a", "b"])
+    ]
+
+    async def aggregate(values):
+        request = AggregateMetricsRequest(verify_responses=values)
+        direct = await resources.aggregate_metrics(request)
+        forwarded = await environment.aggregate_metrics(request)
+        assert forwarded.key_metrics == direct.key_metrics
+        assert all(forwarded.agent_metrics[key] == value for key, value in direct.agent_metrics.items())
+        assert calls[-1] == "/aggregate_metrics"
+        assert forwarded.perf_summary["total_completion_tokens"] == sum(
+            row.get("ng_perf", {}).get("completion_tokens", 0) for row in values
+        )
+        return forwarded
+
+    complete = await aggregate(rows)
+    assert complete.key_metrics == {"wildclawbench/overall_score": 0.5}
+    masked = await aggregate([rows[0], dict(rows[1], reward=0.0, native_reward=None, mask_sample=True)])
+    assert masked.agent_metrics["wildclawbench/num_scored"] == 1
+    assert masked.agent_metrics["wildclawbench/partial_mean_score"] == 0
+    assert not masked.key_metrics
+    failed = await aggregate(rows + [{"_ng_failure_class": "environment_server_failed"}])
+    assert failed.agent_metrics["wildclawbench/num_failed"] == 1
+    assert not failed.key_metrics

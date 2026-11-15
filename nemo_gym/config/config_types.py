@@ -23,6 +23,7 @@ from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Set,
 
 import rich
 from omegaconf import DictConfig, OmegaConf
+from omegaconf.errors import InterpolationResolutionError
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -865,8 +866,14 @@ def maybe_get_server_instance_config(
             for index, dataset in enumerate(instance.get("datasets") or []):
                 if isinstance(dataset, DictConfig) and dataset.get("type") == "benchmark":
                     for field in ("jsonl_fpath", "prepare_script", "prompt_config", "prepare_project"):
-                        if field in dataset:
-                            server_values[server_kind][instance_name]["datasets"][index][field] = dataset[field]
+                        if field not in dataset:
+                            continue
+                        try:
+                            resolved = dataset[field]
+                        except InterpolationResolutionError:
+                            # Unused datasets may depend on variables supplied only at evaluation time.
+                            continue
+                        server_values[server_kind][instance_name]["datasets"][index][field] = resolved
     maybe_server_instance_config_dict = {
         "name": name,
         "server_type_config_dict": server_type_config_dict,

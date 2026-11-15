@@ -11,9 +11,10 @@ from contextlib import asynccontextmanager
 from typing import ClassVar
 
 from fastapi import FastAPI, Request
-from pydantic import ConfigDict, Field, PrivateAttr
+from pydantic import ConfigDict, PrivateAttr
 
 from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -33,7 +34,9 @@ from responses_api_agents.wildclawbench_agent.execution import (
     create_lease,
     episode_output,
     image_identity,
+    publish_episode,
 )
+from responses_api_agents.wildclawbench_agent.metrics import benchmark_metrics
 from responses_api_agents.wildclawbench_agent.worker import failure_fields
 
 
@@ -45,7 +48,6 @@ class WildClawSeedRequest(BaseSeedSessionRequest):
     model_config = ConfigDict(extra="allow")
     verifier_metadata: dict
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
-    wildclaw_execution_key: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
 class WildClawVerifyResponse(BaseVerifyResponse):
@@ -109,19 +111,21 @@ class WildClawResources(SimpleResourcesServer):
         if item.get("role") != "user" or not isinstance(item.get("content"), str):
             raise ResourcesSeedRejectedError("Use the prepared single user prompt")
         episode, task = self.session_identity(session_id)
-        output = episode_output(self.config.execution, body.wildclaw_execution_key)
+        key = hashlib.sha256(session_id.encode()).hexdigest()
+        output = episode_output(self.config.execution, key)
         if (output / "lease.json").exists():
             raise ResourcesSessionConflictError("Native execution key already belongs to another resources session")
         self._owned[session_id] = NativeProcess(self.config.execution, output, self._image_identity)
         try:
             create_lease(
                 self.config.execution,
-                body.wildclaw_execution_key,
+                key,
                 body.verifier_metadata,
                 item["content"],
                 episode.model_dump(mode="json"),
                 task.model_dump(mode="json"),
             )
+            publish_episode(self.config.execution, episode.capture_key, key)
         except (ValueError, OSError, KeyError):
             raise ResourcesSeedRejectedError(
                 "Native lease validation failed; inspect the prepared source and task assets"
@@ -131,6 +135,9 @@ class WildClawResources(SimpleResourcesServer):
         process = self._owned.get(session_id)
         if process is not None:
             await process.invoke("cleanup", 60)
+            if (process.output / "lease.json").is_file():
+                # A rejected agent seed may never write worker.json or allocate a native container.
+                (process.output / "resources_closed.json").write_text('{"cleanup_confirmed":true}\n')
             del self._owned[session_id]
 
     async def verify(self, request: Request, body: BaseVerifyRequest) -> WildClawVerifyResponse:
@@ -176,6 +183,18 @@ class WildClawResources(SimpleResourcesServer):
                 result["errors"] = ["native_verification_failed"]
                 result.update(failure_fields(result["errors"]))
             return WildClawVerifyResponse.model_validate(dict(**body.model_dump(), **result))
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
+        completed = [row for row in body.verify_responses if not row.get("_ng_failure_class")]
+        failed = len(body.verify_responses) - len(completed)
+        metrics = benchmark_metrics(completed)
+        metrics["wildclawbench/num_failed"] = failed
+        if failed:
+            metrics.pop("wildclawbench/overall_score", None)
+        return AggregateMetrics(
+            agent_metrics=metrics,
+            key_metrics={key: value for key, value in metrics.items() if key == "wildclawbench/overall_score"},
+        )
 
 
 if __name__ == "__main__":

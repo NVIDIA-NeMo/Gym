@@ -5,10 +5,11 @@ OpenClaw → the original task grader**. Gym owns preparation, episode dispatch,
 policy-call correlation, trace conversion and aggregation. Factory supplies
 launch composition. No OpenCode adapter or training changes are included.
 
-The `wildclawbench_environment` Environment Server drives Gym's single-agent session protocol:
+The `single_agent_turn_legacy` Environment Server drives Gym's single-agent session protocol:
 Resources seed → agent seed → OpenClaw activation → agent close → native verification → Resources close.
 The agent has no benchmark `/run` or aggregation override. The Resources Server owns the
-native container and original graders; the Environment Server owns aggregation and retry identity.
+native container, original graders and suite aggregation. Each Resources session gets a fresh
+private episode folder; capture routes retain the collector’s rollout and attempt identity.
 Native source, prompts, skills, OpenClaw version, compaction and grader code remain pinned unchanged.
 
 This is an evaluation-only integration. Live session validation and historical
@@ -181,8 +182,9 @@ python -m benchmarks.wildclawbench.merge \
 Supply all shards. Duplicate task attempts, source drift, reward mismatches or
 incomplete coverage fail the merge. Never average shard means. Infrastructure
 retries are an explicit operator decision in a new run; choose one valid
-attempt per task before merging. HTTP retries of a completed rollout reuse its
-saved result. An interrupted rollout ID is refused rather than reexecuted.
+attempt per task before merging. Typed session seed and activation retries retain their
+existing session bindings. A new HTTP request to the shipped Environment Server starts
+a fresh Resources session and private folder, including when the capture route is reused.
 
 Factory's binding uses standard Gym prepare/run and pins this adapter. Slurm
 `driver.container: null` selects only the trusted host controller; a non-null

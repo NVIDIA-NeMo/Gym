@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -12,6 +13,7 @@ import shlex
 import signal
 import socket
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Literal
 
@@ -67,6 +69,32 @@ def episode_output(config: ExecutionConfig, key: str) -> Path:
     if output.resolve().parent != root.resolve():
         raise ValueError("Native execution path escapes output root")
     return output
+
+
+def episode_index(config: ExecutionConfig, capture_key: str) -> Path:
+    """The latest Resources session for a capture route, including its attempt suffix."""
+    return Path(config.output_root) / ".episodes" / (hashlib.sha256(capture_key.encode()).hexdigest() + ".json")
+
+
+def publish_episode(config: ExecutionConfig, capture_key: str, key: str) -> None:
+    """Publish only a fully initialized lease; a later run replaces the old route pointer."""
+    episode_output(config, key)
+    index = episode_index(config, capture_key)
+    index.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.NamedTemporaryFile(mode="w", dir=index.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+        json.dump({"execution_key": key}, stream)
+    try:
+        temporary.replace(index)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def execution_key_for_episode(config: ExecutionConfig, capture_key: str) -> str:
+    key = json.loads(episode_index(config, capture_key).read_text())["execution_key"]
+    if (episode_output(config, key) / "resources_closed.json").exists():
+        raise ValueError("Native resources session is closed")
+    return key
 
 
 def read_lease(config: ExecutionConfig, key: str) -> dict:
