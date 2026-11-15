@@ -90,19 +90,6 @@ are grouped into three optional sections, each of which accepts a plain mapping
 (e.g. from Hydra YAML) or the corresponding dataclass. A ready-to-use config is
 shipped at [`configs/enroot.yaml`](./configs/enroot.yaml).
 
-The provider accepts Docker image references pinned by digest, including
-`repository:tag@sha256:<digest>`. The digest selects the image; the tag does not
-override it. These references are translated to Enroot's `repository:sha256:<digest>`
-URI spelling, and the original reference remains the squashfs cache key.
-
-`AsyncSandbox.serialize()` and `AsyncSandbox.connect()` let an environment server
-lend a running sandbox to an agent server. Both processes must run on the same
-host as the same OS user, with identical Enroot data and runtime paths and access
-to the same staging directory. The descriptor is trusted control-plane state,
-not a portable lease; `scope` does not create a separate lease. A stopped sandbox
-or reused init PID is refused. The borrower calls `disconnect()` when finished,
-and the creator remains responsible for `stop()`.
-
 ```yaml
 enroot:
   create:
@@ -122,4 +109,24 @@ enroot:
     stable_count: 2
 ```
 
+## Image digests
 
+The provider accepts Docker image references pinned by digest, including
+`repository:tag@sha256:<digest>`. The digest selects the image; the tag does not
+override it. Enroot before 4.0 cannot parse the `@` spelling, so these references
+are translated to `repository:sha256:<digest>`, which Enroot 3.1 and later accept.
+The original reference remains the squashfs cache key.
+
+## Lending a sandbox to another process
+
+`AsyncSandbox.serialize()` and `AsyncSandbox.connect()` let an environment server
+lend a running sandbox to an agent server. Both processes must run on the same
+host and in the same PID namespace as the same OS user, with identical Enroot data
+and runtime paths and access to the same staging directory. The descriptor is
+trusted control-plane state, not a portable lease; `scope` does not create a
+separate lease. It leaves out the sandbox environment, which may hold task secrets;
+`enroot exec` reads that environment from the running container, so the borrower's
+commands still see it.
+A stopped sandbox or reused init PID is refused. The borrower calls `disconnect()`
+when finished, and the creator remains responsible for `stop()`; a borrower's
+`stop()` would tear the sandbox down.
