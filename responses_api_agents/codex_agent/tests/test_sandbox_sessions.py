@@ -3627,7 +3627,7 @@ def test_later_rejection_preserves_real_tool_output_and_available_usage(setup, u
 
 
 @pytest.mark.parametrize("usage_source", ["native", "missing"])
-@pytest.mark.parametrize("outcome", ["graded-error", "output-limit", "wall-time"])
+@pytest.mark.parametrize("outcome", ["graded-error", "output-limit", "wall-time", "wall-time-retry"])
 def test_unfinished_turn_reports_native_usage_or_none(setup, usage_source, outcome):
     """Failures and limits without turn.completed use native totals or unknown, never a fabricated zero."""
     agent, sandbox = setup
@@ -3643,8 +3643,10 @@ def test_unfinished_turn_reports_native_usage_or_none(setup, usage_source, outco
     if outcome == "output-limit":
         sandbox.result["return_code"] = 1
         records.append({"type": "turn.failed", "error": {"message": CODEX_OUTPUT_CAP}})
-    elif outcome == "wall-time":
+    elif outcome in ("wall-time", "wall-time-retry"):
         sandbox.result["timed_out"] = True
+        if outcome == "wall-time-retry":
+            records = [{"type": "turn.started"}]
     sandbox.events = "\n".join(json.dumps([float(i), event]) for i, event in enumerate(records))
     transcript = native_transcript(
         [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "task"}]}]
@@ -3672,7 +3674,8 @@ def test_unfinished_turn_reports_native_usage_or_none(setup, usage_source, outco
     def publish():
         original_publish()
         sandbox.files[f"{sandbox.directory}/native_session.jsonl"] = transcript
-        sandbox.files[f"{sandbox.directory}/model_attempts.jsonl"] = '{"status":200}\n'
+        attempt_status = 429 if outcome == "wall-time-retry" else 200
+        sandbox.files[f"{sandbox.directory}/model_attempts.jsonl"] = json.dumps({"status": attempt_status}) + "\n"
 
     sandbox.publish = publish
     with TestClient(agent.setup_webserver()) as client:

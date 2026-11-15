@@ -1215,7 +1215,12 @@ class CodexAgent(SimpleResponsesAPIAgent):
             native_usage = parse_codex_usage(state.native_transcript)
             if native_usage is not None:
                 response_usage = native_usage
-            elif output or not state.model_attempts or any(a["status"] == 200 for a in state.model_attempts):
+            elif (
+                gradable_limit
+                or output
+                or not state.model_attempts
+                or any(a["status"] == 200 for a in state.model_attempts)
+            ):
                 # Prior work without a usage artifact is unknown, not a zero-token run.
                 response_usage = None
         conversation = [NeMoGymEasyInputMessage(role="user", content=prompt)]
