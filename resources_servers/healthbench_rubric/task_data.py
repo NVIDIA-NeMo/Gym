@@ -15,6 +15,7 @@ class TaskData(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     uuid: str | None = Field(default=None, json_schema_extra={"consumed_by": ["provenance"]})
+    task_id: str | None = Field(default=None, json_schema_extra={"consumed_by": ["provenance"]})
     source_id: str = Field(json_schema_extra={"consumed_by": ["verify", "provenance"]})
     conversation: list[dict[str, str]] = Field(json_schema_extra={"consumed_by": ["verify", "prompt"]})
     rubrics: list[dict[str, Any]] = Field(min_length=1, json_schema_extra={"consumed_by": ["verify"]})
