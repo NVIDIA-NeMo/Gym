@@ -5,9 +5,9 @@
 import hashlib
 import io
 import json
-import tarfile
-import subprocess
 import shutil
+import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -23,7 +23,10 @@ def test_local_release_dependencies_preserve_package_contents(tmp_path: Path, pa
     manifest = {"name": package, "dependencies": {"@earendil-works/pi-ai": remote, "chalk": "^5.5.0"}}
     code = b"export const value = 42;\n"
     with tarfile.open(source, "w:gz") as archive:
-        for name, content in {"package/package.json": json.dumps(manifest).encode(), "package/dist/index.js": code}.items():
+        for name, content in {
+            "package/package.json": json.dumps(manifest).encode(),
+            "package/dist/index.js": code,
+        }.items():
             member = tarfile.TarInfo(name)
             member.size, member.mode = len(content), 0o755
             archive.addfile(member, io.BytesIO(content))
@@ -46,8 +49,10 @@ def test_missing_release_manifest_is_rejected(tmp_path: Path):
         _localize_release_package(source, tmp_path / "target.tgz", {})
 
 
-@pytest.mark.skipif(any(shutil.which(tool) is None for tool in ["bash", "flock", "sha256sum", "getconf"]),
-                    reason="Linux installer tools are required")
+@pytest.mark.skipif(
+    any(shutil.which(tool) is None for tool in ["bash", "flock", "sha256sum", "getconf"]),
+    reason="Linux installer tools are required",
+)
 def test_installer_rejects_corrupt_release_dependency_before_install(tmp_path: Path):
     from responses_api_agents.prime_agent import sandbox
 
@@ -55,8 +60,21 @@ def test_installer_rejects_corrupt_release_dependency_before_install(tmp_path: P
     asset.write_bytes(b"uploaded asset")
     checksum = hashlib.sha256(asset.read_bytes()).hexdigest()
     runtime = tmp_path / "runtime"
-    command = ["bash", str(Path(sandbox.__file__).with_name("install_prime_runtime.sh")), str(runtime), "0.7.0",
-               str(asset), checksum, str(asset), checksum, str(asset), checksum, str(asset), str(asset), "0" * 64]
+    command = [
+        "bash",
+        str(Path(sandbox.__file__).with_name("install_prime_runtime.sh")),
+        str(runtime),
+        "0.7.0",
+        str(asset),
+        checksum,
+        str(asset),
+        checksum,
+        str(asset),
+        checksum,
+        str(asset),
+        str(asset),
+        "0" * 64,
+    ]
     result = subprocess.run(command, capture_output=True, text=True, timeout=30)
     assert result.returncode != 0
     assert f"{asset}: FAILED" in result.stdout
