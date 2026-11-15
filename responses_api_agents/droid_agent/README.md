@@ -162,6 +162,7 @@ assistant text and stderr are not model-failure evidence, even when their text m
 | the HTTP status, a space, then the error body's message (`429 rate limited`) | `model_request_error` with that status |
 | exactly `Connection error.` (a refused or reset connection) | `model_transport_error` |
 | exactly Droid's compaction-does-not-fit message (after a `context_length_exceeded` rejection) | `model_context_limit` |
+| exactly `LLM output entered an exact repetition cycle` | `agent_invalid_output` |
 | anything else | `unknown` |
 
 Another `droid_version` may word these differently, so its failures are reported as `unknown`. The
