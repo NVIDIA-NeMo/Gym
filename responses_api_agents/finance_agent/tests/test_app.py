@@ -1675,6 +1675,18 @@ class TestResourcesServerRetries:
         assert result.response.output == []
 
     @pytest.mark.asyncio
+    async def test_a_verify_reply_cut_off_mid_read_returns_the_empty_error_response_by_default(self) -> None:
+        cut = _status_mock(200)
+        cut.read = AsyncMock(side_effect=ClientPayloadError("cut"))
+
+        result = await self._run(cut)
+
+        assert result.reward == 0.0
+        assert result.mask_sample is False
+        assert result.response.id == "error"
+        assert result.response.output == []
+
+    @pytest.mark.asyncio
     async def test_a_masked_rollout_is_left_out_of_the_mean_reward(self) -> None:
         masked = await self._run(_status_mock(502), _status_mock(502), keep_response_on_verify_failure=True)
         rows = [
