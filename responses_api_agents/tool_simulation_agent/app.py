@@ -38,6 +38,7 @@ from nemo_gym.server_runtime import (
     StepType,
     require_rollout,
     seed_restarts,
+    seed_restores_before_agent_close,
     seed_verify_step_type,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -226,7 +227,9 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
                 await raise_for_status(seed)
             cookies = _cookies(seed.cookies)
             resources_verify_step_type = seed_verify_step_type(seed.headers)
-            if seed_restarts(seed.headers):
+            if seed_restarts(seed.headers) or seed_restores_before_agent_close(seed.headers):
+                # A session a restore can continue only until the agent's turn ends starts over too: this run
+                # cannot tell the resources server when that is.
                 await legacy_run.mark_restart()
             stage = "model"
 

@@ -717,23 +717,6 @@ def test_a_record_with_nothing_spent_is_written_without_the_field_so_an_earlier_
     assert spent["elapsed_s"] == 1.5 and EpisodeRecord.model_validate(spent).elapsed_s == 1.5
 
 
-async def test_a_blocking_episode_becomes_a_restart_at_once_while_a_checkpoint_is_open() -> None:
-    notified: list[bool] = []
-
-    async def notify() -> None:
-        notified.append(True)
-
-    steps = EpisodeSteps(notify)
-    steps.begin("r")
-    steps.close()
-    # The episode is between boundaries, so the open checkpoint waits for it: marking it cannot wait for resume.
-    await asyncio.wait_for(steps.mark_restart("r"), 1)
-
-    assert steps.restarts() == ["r"] and steps.blocker_count() == 0
-    # The open checkpoint was waiting for this episode, so it must hear that it no longer has to.
-    assert notified == [True]
-
-
 @pytest.mark.parametrize("known", [True, False])
 async def test_marking_an_episode_that_is_already_a_restart_or_unknown_does_not_wait_for_resume(known: bool) -> None:
     notified: list[bool] = []

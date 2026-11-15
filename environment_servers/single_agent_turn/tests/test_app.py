@@ -2369,6 +2369,28 @@ async def test_a_restore_without_a_borrowed_sandbox_seeds_nothing_again(handles:
     ]
 
 
+async def test_a_replacement_restored_before_its_agent_s_turn_keeps_the_restore_policy_its_seed_reported() -> None:
+    environment, client = _environment_server()
+    # No borrowed sandbox, so nothing is seeded again: the policy comes from the checkpointed handles.
+    request = _restore_into(
+        environment,
+        {"next": "invoke_agent", "handles": _restored_handles(resources_restores_before_agent_close=True)},
+    )
+    del client.responses[:2]
+    restarts: list[list[str]] = []
+    mark_restart = environment._checkpoint.mark_restart
+
+    async def recording(episode_id: EpisodeId) -> None:
+        restarts.append([path for _, path, _ in client.calls])
+        await mark_restart(episode_id)
+
+    environment._checkpoint.mark_restart = recording
+    episode = await environment.run_request(request)
+
+    assert episode.result is not None
+    assert restarts == [["/ng-rollout/rollout-a2/v1/responses"]]
+
+
 async def test_a_restored_episode_that_skips_verification_still_re_seeds_and_closes_both_sessions() -> None:
     environment, client = _environment_server()
     environment = SingleAgentTurnEnvironmentServer(

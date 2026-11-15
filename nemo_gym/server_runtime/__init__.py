@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from nemo_gym.server_runtime._checkpoint.resources import ResourcesParticipant
     from nemo_gym.server_runtime._checkpoint.sandbox import (
         SandboxCheckpointConfig,
+        SandboxCheckpointError,
         SandboxSessionCheckpointer,
         checkpoint_state_dir,
     )
@@ -223,6 +224,7 @@ _PUBLIC_API = {
     "RolloutIdRequiredError": "_checkpoint.errors",
     "SESSION_OWNER_HEADER": "request_handling.session_routing",
     "SandboxCheckpointConfig": "_checkpoint.sandbox",
+    "SandboxCheckpointError": "_checkpoint.sandbox",
     "SandboxSessionCheckpointer": "_checkpoint.sandbox",
     "ServedTools": "base_environment_server",
     "SimpleResourcesServer": "base_resources_server",

@@ -2003,7 +2003,14 @@ class TestCheckpointContinuation:
 
         assert blocked_during_verify == [blocks_while_verifying]
 
-    async def test_a_legacy_run_on_a_resources_server_that_cannot_capture_it_is_a_restart(self) -> None:
+    @pytest.mark.parametrize(
+        "seed_headers",
+        [{"x-ng-checkpoint-restart": "1"}, {"x-ng-checkpoint-restore-policy": "before_agent_close"}],
+        ids=["cannot_capture", "restores_before_agent_close"],
+    )
+    async def test_a_legacy_run_on_a_resources_server_that_cannot_continue_it_is_a_restart(
+        self, seed_headers: dict[str, str]
+    ) -> None:
         server, server_client = _make_agent(False)
         participant = AgentSessionParticipant(server)
         server._checkpoint_participant = participant
@@ -2012,7 +2019,7 @@ class TestCheckpointContinuation:
         async def post(*, url_path, **kwargs):
             if url_path == "/seed_session":
                 response = _mock_response({})
-                response.headers = {"x-ng-checkpoint-restart": "1"}
+                response.headers = seed_headers
                 return response
             if url_path.endswith("/v1/responses"):
                 return _mock_response(_FINAL_RESPONSE)

@@ -25,10 +25,16 @@ registers it for the session and its checkpoints, sets ``task_model`` to the mod
 ``task_data``, and keeps the task state a restore needs through ``_export_task_sandbox_state`` and
 ``_restore_task_sandbox_state``. A commit fails for a session whose sandbox was registered any other way. What the
 server passes to ``capture_task_sandbox_patch`` must be a JSON value: a checkpoint stores it.
+
+A subclass may declare ``checkpoint_verify = "replay"`` when its ``/verify`` uses the task sandbox only inside
+``capture_task_sandbox_patch`` and stops it only with ``stop_task_sandbox_after_capture``: both hold the lock a
+commit holds while it snapshots the sandbox, so a verify admitted during a commit neither runs commands in a sandbox
+being snapshotted nor changes what the commit exports.
 """
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from pathlib import Path
 from time import monotonic
@@ -180,14 +186,8 @@ class CheckpointedSandboxSessionResourcesServer(SandboxSessionResourcesServer):
         await super().shutdown()
         if self._sandbox_checkpointer is not None:
             # What only the checkpointer still tracks, such as the fork of a restore whose rollback could not stop it.
-            leftover = self._sandbox_checkpointer.keys
-            outcomes = await asyncio.gather(
-                *(self._sandbox_checkpointer.stop(key) for key in leftover), return_exceptions=True
-            )
-            for key, outcome in zip(leftover, outcomes):
-                if isinstance(outcome, Exception):
-                    LOG.error("Failed to stop the task sandbox of session %s at shutdown", key, exc_info=outcome)
-            await self._sandbox_checkpointer.settle()
+            # It closes first, so a restore that installs its forks during the shutdown has them stopped here.
+            await self._sandbox_checkpointer.aclose()
         if self._provider is not None:
             await self._provider.aclose()
 
@@ -227,6 +227,14 @@ class CheckpointedSandboxSessionResourcesServer(SandboxSessionResourcesServer):
             if session_id not in self._session_id_to_sandbox:
                 await self._untrack(session_id)
 
+    async def capture_task_sandbox_patch[CaptureT](
+        self, session_id: str, capture: Callable[[], Awaitable[CaptureT]]
+    ) -> CaptureT:
+        # A replayable verify is admitted while a commit runs: under the export lock its capture neither runs
+        # commands in a sandbox being snapshotted nor changes what the commit exports for the session.
+        async with self._export_locks.locked(session_id):
+            return await super().capture_task_sandbox_patch(session_id, capture)
+
     async def _untrack(self, session_id: str) -> None:
         """Drop the session's sandbox from the checkpointer once the server no longer registers it.
 
@@ -240,11 +248,11 @@ class CheckpointedSandboxSessionResourcesServer(SandboxSessionResourcesServer):
     async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
         """Snapshot each seeded session's task sandbox and export the session; one past capture exports no sandbox."""
         async with AsyncExitStack() as held:
-            for session_id in sorted(set(session_ids)):
-                if self._exportable(session_id):
-                    await held.enter_async_context(self._export_locks.locked(session_id))
+            locked = [session_id for session_id in sorted(set(session_ids)) if self._exportable(session_id)]
+            for session_id in locked:
+                await held.enter_async_context(self._export_locks.locked(session_id))
             # A stop that held the lock first may have released a sandbox meanwhile.
-            exported = [session_id for session_id in sorted(set(session_ids)) if self._exportable(session_id)]
+            exported = [session_id for session_id in locked if self._exportable(session_id)]
             checkpointer = self._checkpointer()
             for session_id in exported:
                 if session_id in self._session_id_to_sandbox and session_id not in checkpointer:
@@ -252,14 +260,15 @@ class CheckpointedSandboxSessionResourcesServer(SandboxSessionResourcesServer):
                         f"{type(self).__name__} started the task sandbox of session {session_id!r} without "
                         "new_task_sandbox, so a checkpoint cannot snapshot it"
                     )
-            # Before any snapshot is taken: a capture a checkpoint cannot store fails every commit.
+            # Before any snapshot is taken: a capture a checkpoint cannot store fails every commit, and whether the
+            # session has one is read together with it.
             captures = {session_id: self._exported_capture(session_id) for session_id in exported}
             snapshots = await checkpointer.export(
                 [session_id for session_id in exported if session_id in checkpointer], checkpoint_id=checkpoint_id
             )
             return {
                 session_id: self._session_state(
-                    session_id, snapshots.get(session_id), captures[session_id]
+                    session_id, snapshots.get(session_id), *captures[session_id]
                 ).model_dump(mode="json")
                 for session_id in exported
             }
@@ -268,24 +277,25 @@ class CheckpointedSandboxSessionResourcesServer(SandboxSessionResourcesServer):
         record = self._task_sessions.get(session_id)
         return record is not None and record.seed is not None and record.response is not None and not record.expired
 
-    def _exported_capture(self, session_id: str) -> JsonValue:
+    def _exported_capture(self, session_id: str) -> tuple[bool, JsonValue]:
+        """Whether the session captured its patch, and the capture."""
         record = self._task_sessions[session_id]
         if not record.capture_ready:
-            return None
+            return False, None
         try:
-            return _JSON.validate_python(record.capture)
+            return True, _JSON.validate_python(record.capture)
         except ValidationError as error:
             raise TypeError(f"{type(self).__name__} captured a patch a checkpoint cannot store: {error}") from error
 
     def _session_state(
-        self, session_id: str, sandbox: Optional[dict[str, JsonValue]], capture: JsonValue
+        self, session_id: str, sandbox: Optional[dict[str, JsonValue]], capture_ready: bool, capture: JsonValue
     ) -> _CheckpointedSession:
         record = self._task_sessions[session_id]
         return _CheckpointedSession(
             seed=record.seed,
             workdir=record.workdir,
             sandbox=sandbox,
-            capture_ready=record.capture_ready,
+            capture_ready=capture_ready,
             capture=capture,
             task_state=self._export_task_sandbox_state(session_id),
         )
@@ -338,13 +348,21 @@ class CheckpointedSandboxSessionResourcesServer(SandboxSessionResourcesServer):
         self._restore_task_sandbox_state(session_id, session.task_state)
 
     async def _discard_restored_sessions(self, session_ids: list[str]) -> None:
-        """Stop the forks of a restore that failed after forking and drop what it installed, so a retry can run."""
+        """Stop the forks of a restore that failed after forking and drop what it installed.
+
+        A retry can run once every fork stopped; one whose stop failed stays registered until shutdown, or a seed of
+        its session, stops it.
+        """
         checkpointer = self._checkpointer()
-        for session_id in session_ids:
+
+        async def stop(session_id: str) -> None:
             try:
                 await checkpointer.stop(session_id)
             except Exception:
                 LOG.exception("Failed to stop the fork of session %s after a failed restore", session_id)
+
+        await asyncio.gather(*(stop(session_id) for session_id in session_ids))
+        for session_id in session_ids:
             if session_id not in checkpointer:
                 self._session_id_to_sandbox.pop(session_id, None)
             # A fork that did not stop stays registered, so shutdown stops it.

@@ -186,7 +186,7 @@ async def test_the_notes_server_conforms(tmp_path: Path, attempt: int) -> None:
     await check_sandbox_session_checkpoints(make_server, _seed(attempt=attempt), tmp_path / "state")
 
 
-async def test_a_server_that_restores_only_before_its_agent_closed_conforms(tmp_path: Path) -> None:
+async def test_a_server_that_restores_only_until_its_agent_s_turn_ended_conforms(tmp_path: Path) -> None:
     def make(provider: Any, global_config: dict) -> NotesServer:
         return make_server(provider, global_config, server_type=InPlaceGrader)
 
@@ -251,7 +251,8 @@ async def test_a_commit_waits_for_a_task_sandbox_being_stopped_and_then_exports_
         assert (await _post_seed(http, _seed())).status_code == 200
         provider.close = slow_close
         stop = asyncio.create_task(server.stop_task_sandbox_after_capture("rs-1"))
-        await stopping.wait()
+        async with asyncio.timeout(10):
+            await stopping.wait()
         export = asyncio.create_task(server.export_session_states(["rs-1"], checkpoint_id="c1"))
         await asyncio.sleep(0.05)
         waited = not export.done()
@@ -282,7 +283,7 @@ async def test_a_capture_a_checkpoint_cannot_store_fails_the_export_loudly(tmp_p
     assert not [call for call in provider.calls if call[0] == "snapshot"]
 
 
-async def test_a_server_whose_fork_cannot_continue_after_the_agent_closed_says_so_on_its_seed(tmp_path: Path) -> None:
+async def test_a_server_whose_fork_cannot_outlive_its_agent_s_turn_says_so_on_its_seed(tmp_path: Path) -> None:
     server = make_server(FakeSnapshotProvider(), checkpointing_config(tmp_path), server_type=InPlaceGrader)
     async with _http(server) as http:
         seeded = await _post_seed(http, _seed())
@@ -397,7 +398,8 @@ async def test_a_close_waits_for_a_commit_snapshotting_its_task_sandbox(tmp_path
         assert (await _post_seed(http, _seed())).status_code == 200
         provider.snapshot = slow_snapshot
         export = asyncio.create_task(server.export_session_states(["rs-1"], checkpoint_id="c1"))
-        await snapshotting.wait()
+        async with asyncio.timeout(10):
+            await snapshotting.wait()
         path, body = _close_path(_seed())
         close = asyncio.create_task(http.post(path, json=body))
         await asyncio.sleep(0.05)
@@ -410,6 +412,37 @@ async def test_a_close_waits_for_a_commit_snapshotting_its_task_sandbox(tmp_path
     assert states["rs-1"]["sandbox"] is not None, "the commit exported the session with its snapshot"
     assert closed.status_code == 200, closed.text
     assert provider.live() == [] and server._checkpointer().keys == []
+
+
+async def test_a_capture_waits_for_a_commit_snapshotting_its_task_sandbox(tmp_path: Path) -> None:
+    provider = FakeSnapshotProvider()
+    server = make_server(provider, checkpointing_config(tmp_path / "state"))
+    snapshotting, finish = asyncio.Event(), asyncio.Event()
+    snapshot = provider.snapshot
+
+    async def slow_snapshot(handle: Any, **kwargs: Any) -> str:
+        snapshotting.set()
+        await finish.wait()
+        return await snapshot(handle, **kwargs)
+
+    await server.seed_task_sandbox_session(_request("rs-1"), _seed(), _Task)
+    provider.snapshot = slow_snapshot
+    export = asyncio.create_task(server.export_session_states(["rs-1"], checkpoint_id="c1"))
+    async with asyncio.timeout(10):
+        await snapshotting.wait()
+    # A replayable verify is admitted during a commit; its capture must not run in the sandbox being snapshotted,
+    # nor leave the commit with a capture it read before and a "captured" flag it read after.
+    capture = asyncio.create_task(server.capture_task_sandbox_patch("rs-1", lambda: server._read_note("rs-1")))
+    await asyncio.sleep(0.05)
+    waited = not capture.done()
+    finish.set()
+    states = await export
+
+    assert waited, "the capture waits for the commit holding the session's export lock"
+    assert states["rs-1"]["sandbox"] is not None
+    assert (states["rs-1"]["capture_ready"], states["rs-1"]["capture"]) == (False, None)
+    assert await capture == "hello"
+    await server.shutdown()
 
 
 async def test_an_expired_session_stops_its_task_sandbox_and_is_no_longer_exported(tmp_path: Path) -> None:
@@ -544,6 +577,64 @@ async def test_a_restore_that_fails_after_forking_stops_the_forks_and_can_be_ret
     await restored.restore_session_states(states)
     assert len(_running_forks(provider)) == 2 and sorted(restored._task_sessions) == ["a", "b"]
     await restored.shutdown()
+
+
+async def test_a_restore_cancelled_while_installing_stops_the_forks_and_installs_nothing(tmp_path: Path) -> None:
+    provider = FakeSnapshotProvider()
+    config = checkpointing_config(tmp_path / "state")
+    states = await _exported(make_server(provider, config), ["a", "b"])
+    restored = make_server(provider, config)
+    response = restored._task_sandbox_response
+    installing = asyncio.Event()
+
+    async def hanging(session_id: str, record: Any) -> ResourcesSeedSessionResponse:
+        if session_id == "b":
+            installing.set()
+            await asyncio.Event().wait()
+        return await response(session_id, record)
+
+    object.__setattr__(restored, "_task_sandbox_response", hanging)
+    restoring = asyncio.create_task(restored.restore_session_states(states))
+    async with asyncio.timeout(10):
+        await installing.wait()
+    # A restore past its deadline is cancelled: "a" is installed and both forks are running.
+    restoring.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await restoring
+
+    assert _running_forks(provider) == []
+    assert restored._task_sessions == {} and restored._session_id_to_sandbox == {} and restored._notes == {}
+    assert restored._open_task_sessions == {} and restored._checkpointer().keys == []
+
+
+async def test_a_failed_restore_does_not_wait_for_a_fork_whose_stop_hangs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = FakeSnapshotProvider()
+    config = checkpointing_config(tmp_path / "state")
+    states = await _exported(make_server(provider, config), ["a", "b"])
+    restored = make_server(provider, config)
+    object.__setattr__(restored, "_task_sandbox_response", AsyncMock(side_effect=RuntimeError("install failed")))
+    monkeypatch.setattr("nemo_gym.server_runtime._checkpoint.sandbox.STOP_TIMEOUT_S", 0.05)
+    close = provider.close
+
+    async def hung(handle: Any) -> None:
+        # Only the forks: the restore also stops the sandboxes it replaced, in the background.
+        if provider.boxes[handle.sandbox_id]["from_snapshot"] is None:
+            return await close(handle)
+        await asyncio.Event().wait()
+
+    provider.close = hung
+    # The rollback is shielded from cancellation, so a stop without a ceiling would hold the restore forever.
+    async with asyncio.timeout(10):
+        with pytest.raises(RuntimeError, match="install failed"):
+            await restored.restore_session_states(states)
+
+    # The forks that did not stop stay tracked, so shutdown stops them.
+    assert restored._task_sessions == {} and restored._checkpointer().keys == ["a", "b"]
+    provider.close = close
+    await restored.shutdown()
+    assert _running_forks(provider) == []
 
 
 async def test_shutdown_stops_the_forks_a_failed_restore_could_not_stop(tmp_path: Path) -> None:

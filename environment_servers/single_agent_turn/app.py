@@ -113,7 +113,8 @@ class SessionHandles(BaseModel):
     observation: str | None = None
     # Keyed by tool server name.
     tool_sessions: dict[str, ToolSession] = Field(default_factory=dict)
-    # Whether a restore can continue the resources session only until the agent closed, as its seed reply reported.
+    # Whether a restore can continue the resources session only until the agent's turn ended, as its seed reply
+    # reported.
     resources_restores_before_agent_close: bool = False
     # Whether the agent borrows a sandbox the resources server lent in its seed reply.
     # A restore rebuilds that sandbox under a new id, so the replacement attempt seeds both sessions again.
@@ -316,7 +317,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             if handles.resources_restores_before_agent_close:
                 # A fork of the resources session cannot continue once the agent's turn ended: it lacks the
                 # processes the agent left for the grader, and nothing starts them again. Marked before the
-                # close boundary, so no checkpoint exports the episode between the turn's end and the close.
+                # close boundary, so no checkpoint that opens after the turn ended exports the episode. One
+                # already open when the turn ended keeps it at the invoke_agent boundary, as one taken during
+                # the turn's last model call does.
                 await self.checkpoint_restart(request)
             stage = "close_agent"
 

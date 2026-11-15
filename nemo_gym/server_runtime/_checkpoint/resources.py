@@ -763,7 +763,8 @@ class ResourcesCheckpointMiddleware:
                 started = True
                 if seed is not None:
                     # Tell the caller, before it ever verifies, whether this server's /verify may be replayed,
-                    # and whether its episode must start over after a crash because this server cannot capture it.
+                    # and whether its episode must start over after a crash because this server cannot capture it,
+                    # or can continue it only until its agent's turn ends.
                     headers = [(CHECKPOINT_VERIFY_HEADER.encode(), self.participant.verify_step_type.encode())]
                     if self.participant.mode == "restart_only":
                         headers.append((CHECKPOINT_RESTART_HEADER.encode(), b"1"))

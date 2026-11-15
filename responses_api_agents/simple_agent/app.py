@@ -110,6 +110,7 @@ from nemo_gym.server_runtime import (
     is_retryable_dependency_status,
     require_rollout,
     seed_restarts,
+    seed_restores_before_agent_close,
     seed_verify_step_type,
 )
 from nemo_gym.trajectory import (
@@ -1122,8 +1123,12 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 await raise_for_status(seed_session_response)
             cookies = _cookie_values(seed_session_response.cookies)
             resources_verify_step_type = seed_verify_step_type(seed_session_response.headers)
-            if legacy_run is not None and seed_restarts(seed_session_response.headers):
-                # The resources server cannot capture its session, so this episode starts over after a crash.
+            if legacy_run is not None and (
+                seed_restarts(seed_session_response.headers)
+                or seed_restores_before_agent_close(seed_session_response.headers)
+            ):
+                # The resources server cannot capture its session, or can continue it only until the agent's turn
+                # ends, which this run cannot tell it: the episode starts over after a crash.
                 await legacy_run.mark_restart()
             stage = "loop"
 

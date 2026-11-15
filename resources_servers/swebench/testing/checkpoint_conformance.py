@@ -14,7 +14,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Optional
 
-from nemo_gym.sandbox.providers.base import (
+from nemo_gym.sandbox import (
     SandboxExecResult,
     SandboxHandle,
     SandboxSnapshotInfo,
@@ -22,9 +22,8 @@ from nemo_gym.sandbox.providers.base import (
     SandboxSpec,
     SandboxStatus,
 )
-from nemo_gym.server_runtime import ResourcesSeedSessionRequest
+from nemo_gym.server_runtime import ResourcesSeedSessionRequest, SandboxCheckpointError
 from nemo_gym.server_runtime._checkpoint import sandbox as sandbox_checkpoints
-from nemo_gym.server_runtime._checkpoint.sandbox import SandboxCheckpointError
 
 
 TOKEN = "conformance-token"
@@ -290,7 +289,7 @@ async def check_sandbox_session_checkpoints(
         assert "c2" not in restored._checkpointer().indexed_snapshots, "nothing is snapshotted after the stop"
 
         # Release: a crashed process's indexed snapshot and an unindexed one with this server's prefix go too.
-        stray = await provider.snapshot(
+        await provider.snapshot(
             await provider.create(SandboxSpec(image="stray")),
             # Named as this server names a snapshot of a checkpoint it never indexed, which a crash in a commit leaves.
             name=restored._checkpointer().snapshot_name("dropped", "stray", 1),
@@ -298,7 +297,6 @@ async def check_sandbox_session_checkpoints(
         await control(http, "release", "c2", kept=[])
         await restored._checkpointer().settle()
         assert provider.snapshots == {}, f"release deletes every snapshot of dropped checkpoints: {provider.snapshots}"
-        assert stray not in provider.snapshots
         assert restored._checkpointer().indexed_snapshots == {}, "release empties the index"
 
         closed = await http.post(

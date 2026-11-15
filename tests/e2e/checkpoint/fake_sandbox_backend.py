@@ -54,6 +54,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     sweeper = asyncio.create_task(_sweep_expired())
     yield
     sweeper.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await sweeper
 
 
 app = FastAPI(lifespan=lifespan)
