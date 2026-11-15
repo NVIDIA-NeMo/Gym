@@ -105,6 +105,7 @@ if TYPE_CHECKING:
         harness_termination_failure,
         is_harness_termination_failure,
         parse_cleanup_receipt,
+        stop_and_confirm_cleanup,
     )
     from nemo_gym.agents.utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 
@@ -169,10 +170,10 @@ _PUBLIC_API = {
     "assert_model_url_reachable_from_sandbox": "base_responses_api_agent",
     "check_agent_seed_rejected": "testing.agent_session_conformance",
     "check_harness_checkpointing": "testing.checkpoint_conformance",
+    "check_restored": "utils.supervisor_client",
     "confirmed_policy_response_timeout": "agent_outcome",
     "queued_policy_response_timeout": "agent_outcome",
     "exec_idempotent": "utils.setup_retry",
-    "check_restored": "utils.supervisor_client",
     "exec_timeout": "utils.supervisor_client",
     "failure_outcome_policy": "agent_outcome",
     "harness_termination_failure": "utils.supervisor_client",
@@ -191,6 +192,7 @@ _PUBLIC_API = {
     "seed_mcp_servers": "agent_tools",
     "shell_assignments": "utils.sandbox_session",
     "stage_skills": "skills",
+    "stop_and_confirm_cleanup": "utils.supervisor_client",
     "verification_failure_fields": "agent_tools",
     "verify_agent_response": "agent_tools",
 }
