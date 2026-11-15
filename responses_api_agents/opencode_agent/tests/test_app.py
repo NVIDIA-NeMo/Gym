@@ -14,12 +14,14 @@
 # limitations under the License.
 
 import asyncio
+import importlib
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 
 from nemo_gym.client import ServerClient
@@ -46,11 +48,13 @@ from responses_api_agents.opencode_agent.app import (
     OpenCodeAgent,
     OpenCodeAgentConfig,
     OpenCodeAgentRunRequest,
+    OpenCodeAgentVerifyResponse,
     _extract_instruction,
     _parse_opencode_session,
     parse_opencode_session,
 )
 from responses_api_agents.opencode_agent.artifacts import parse_opencode_export
+from responses_api_agents.opencode_agent.legacy_app import OpenCodeLegacyAgent
 from responses_api_agents.opencode_agent.observability import split_gym_reasoning
 from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
 
@@ -851,13 +855,40 @@ class TestRolloutObservability:
         assert "agent_transcript_unavailable" in {gap.code for gap in episode.observations.gaps}
         assert "model_call_ownership_unavailable" in {gap.code for gap in episode.observations.gaps}
 
-    def test_run_attaches_artifact_observations_when_enabled(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("recipe", [None, "opencode_math", "opencode_reasoning_gym"])
+    def test_legacy_run_attaches_artifact_observations_when_enabled(
+        self, tmp_path: Path, recipe: str | None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         db = _session_db(
             tmp_path,
             [("assistant", [{"type": "step-start"}, {"type": "text", "text": "done"}, {"type": "step-finish"}])],
         )
         items, usage = parse_opencode_session(db)
-        agent = _make_agent()
+        agent = OpenCodeLegacyAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        if recipe is not None:
+            # Exercise the entry point selected by each shipped local recipe, not just the compatibility class.
+            monkeypatch.chdir(Path(__file__).resolve().parents[3])
+            _, configs = GlobalConfigDictParser().load_extra_config_paths([f"environments/{recipe}/config.yaml"])
+            config = OmegaConf.merge(
+                *configs,
+                {
+                    "policy_base_url": "http://unused.invalid/v1",
+                    "policy_api_key": "unused",
+                    "policy_model_name": "test",
+                },
+            )
+            relay = config[f"{recipe}_environment_server"].environment_servers.legacy_agent
+            name = relay.agent_server.name
+            settings = config[name].responses_api_agents.opencode_agent
+            agent_config = OpenCodeAgentConfig.model_validate(
+                OmegaConf.to_container(settings, resolve=True) | {"host": "localhost", "port": 8001, "name": name}
+            )
+            module = importlib.import_module(
+                f"responses_api_agents.opencode_agent.{Path(agent_config.entrypoint).stem}"
+            )
+            agent_class = getattr(module, "OpenCodeLegacyAgent", module.OpenCodeAgent)
+            agent = agent_class(config=agent_config, server_client=agent.server_client)
+        agent._ensure_local_runtime = AsyncMock()
         agent.server_client.global_config_dict = {"observability_enabled": True}
 
         async def run_opencode(*args, trajectory, **kwargs):
@@ -883,7 +914,6 @@ class TestRolloutObservability:
             return Response(json | {"reward": 1.0}) if url_path == "/verify" else Response({})
 
         agent.server_client.post = AsyncMock(side_effect=post)
-        request = MagicMock(cookies={})
         body = OpenCodeAgentRunRequest.model_validate(
             {
                 "responses_create_params": {"input": "solve"},
@@ -892,8 +922,17 @@ class TestRolloutObservability:
             }
         )
 
-        result = asyncio.run(agent.run(request, body))
+        with TestClient(agent.setup_webserver()) as client:
+            response = client.post("/run", json=body.model_dump(mode="json"))
+        assert response.status_code == 200, response.text
+        result = OpenCodeAgentVerifyResponse.model_validate(response.json())
 
+        assert result.reward == 1.0
+        assert [call.kwargs["server_name"] for call in agent.server_client.post.await_args_list] == [
+            agent.config.resources_server.name,
+            agent.config.name,
+            agent.config.resources_server.name,
+        ]
         assert result.ng_agent_observations is not None
         assert _invocations(result.ng_agent_observations)[0].conversation
         assert agent._run_opencode.await_args.kwargs["rollout_id"] == "1-2"
