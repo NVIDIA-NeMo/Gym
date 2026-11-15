@@ -5,6 +5,7 @@
 import asyncio
 import json
 import logging
+import random
 from collections.abc import Callable
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -14,15 +15,15 @@ from pydantic import BaseModel, Field, NonNegativeFloat, NonNegativeInt, Positiv
 from tokenizers import Tokenizer
 
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import NeMoGymChatCompletion, NeMoGymChatCompletionCreateParamsNonStreaming
-from nemo_gym.models.chat_completions_converter import ChatCompletionsConverter
+from nemo_gym.core import NeMoGymChatCompletion, NeMoGymChatCompletionCreateParamsNonStreaming, NgFailureEvent
+from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.verification import JUDGE_FAILURES, JudgeError, call_judge
+from nemo_gym.verification import JUDGE_FAILURES, JudgeError, call_judge, is_judge_failure
 from resources_servers.video_caption.reward import (
     VideoCaptionRewardResult,
     VisualRewardType,
@@ -46,7 +47,13 @@ logger = logging.getLogger(__name__)
 # whole episode, which costs a new policy rollout for a row that can never be scored.
 UNSCORABLE_ROW = "video_caption:unscorable_row"
 
+# Judge replies that fail the same way again: every 4xx except a timeout (408) or rate limit (429).
+RETRYABLE_JUDGE_STATUSES = frozenset({408, 429})
 
+
+# The wire form of the row's task fields. task_data.py declares the same fields for data validation with a
+# stricter blank check; here a blank entry still reaches verify(), which masks the row instead of answering 422.
+# tests/test_task_data.py pins the two declarations to the same fields and required set.
 class VisualAtomicEvents(BaseModel):
     visual_events: list[str] = Field(min_length=1)
 
@@ -62,7 +69,7 @@ class VideoCaptionResourcesServerConfig(BaseResourcesServerConfig):
     judge_prompt_fpath: str = "prompt_templates/visual_event_judge.txt"
     visual_reward_type: VisualRewardType = "recall"
     event_extraction_prompt_fpath: str = "prompt_templates/visual_event_extraction.txt"
-    # Opt-in zero-total-reward gate; the legacy prompt/schema remain the default.
+    # Opt-in zero-total-reward gate; the recall prompt and schema stay the default.
     penalize_degeneration: bool = False
     degeneration_judge_prompt_fpath: str = "prompt_templates/degeneration_judge.txt"
     caption_tokenizer_path: str
@@ -70,8 +77,13 @@ class VideoCaptionResourcesServerConfig(BaseResourcesServerConfig):
     judge_max_retries: NonNegativeInt = 2
     judge_attempt_timeout_seconds: PositiveFloat = 1200.0
     judge_retry_base_delay_seconds: NonNegativeFloat = 1.0
+    judge_retry_max_delay_seconds: NonNegativeFloat = 30.0
     min_caption_tokens: NonNegativeInt = 100
     max_caption_tokens: PositiveInt = 4000
+    # A caption longer than this skips every judge and scores its visual half 0: scored, not masked. The judge's
+    # context is finite, and a runaway caption is the policy's failure, not a judge outage. At least
+    # max_caption_tokens, so no caption the length reward accepts goes unjudged.
+    max_judged_caption_tokens: PositiveInt = 16000
 
 
 class VideoCaptionVerifyRequest(BaseVerifyRequest):
@@ -97,6 +109,8 @@ class VideoCaptionVerifyResponse(VideoCaptionVerifyRequest, BaseVerifyResponse):
     degeneration_reward: float
     judge_attempts: int
     judge_response_text: str | None = None
+    # True when the caption exceeded max_judged_caption_tokens: no judge ran and the visual half is 0.
+    caption_over_judge_cap: bool
     event_extraction_attempts: int
     event_extraction_response_text: str | None = None
     precision_judge_attempts: int
@@ -120,6 +134,8 @@ class VideoCaptionResourcesServer(SimpleResourcesServer):
         super().model_post_init(context)
         if self.config.max_caption_tokens < self.config.min_caption_tokens:
             raise ValueError("max_caption_tokens must be at least min_caption_tokens")
+        if self.config.max_judged_caption_tokens < self.config.max_caption_tokens:
+            raise ValueError("max_judged_caption_tokens must be at least max_caption_tokens")
         self._tokenizer = Tokenizer.from_file(self.config.caption_tokenizer_path)
         self._judge_prompt = self._read_prompt(self.config.judge_prompt_fpath)
         if self.config.visual_reward_type in ("precision", "f1"):
@@ -206,14 +222,25 @@ class VideoCaptionResourcesServer(SimpleResourcesServer):
                 return text, attempt + 1
             # JUDGE_FAILURES covers the transport failure call_judge raises as a judge_failed event.
             except (*JUDGE_FAILURES, TimeoutError, ValueError) as error:
+                if isinstance(error, NgFailureEvent) and not is_judge_failure(error):
+                    raise  # another Gym failure, such as a judge provider stop: not this loop's to retry
+                if isinstance(error, NgFailureEvent) and not _is_retryable(error):
+                    raise  # an auth or bad-request reply fails the same way again
                 if attempt + 1 == total_attempts:
-                    # The standard Gym verify wrapper tags this and returns total
-                    # reward zero. No caption length bonus or RL mask is applied.
+                    # judge_failsafe turns this into a masked zero: reward 0, mask_sample true,
+                    # failure_kind judge_failed, and no caption length bonus.
                     raise JudgeError(
                         f"Caption {name} judge exhausted {total_attempts} attempts: {type(error).__name__}: {error}"
                     ) from error
-                await asyncio.sleep(self.config.judge_retry_base_delay_seconds * 2**attempt)
+                await asyncio.sleep(self._retry_delay(attempt))
         raise AssertionError("At least one judge attempt is required")
+
+    def _retry_delay(self, attempt: int) -> float:
+        """Full-jitter exponential backoff, so concurrent verifies do not retry a rate-limited judge in lockstep."""
+        config = self.config
+        return random.uniform(
+            0, min(config.judge_retry_max_delay_seconds, config.judge_retry_base_delay_seconds * 2**attempt)
+        )
 
     async def verify(self, body: VideoCaptionVerifyRequest) -> VideoCaptionVerifyResponse:
         # Gym's parsed output_text contains assistant message text, not reasoning items.
@@ -247,7 +274,15 @@ class VideoCaptionResourcesServer(SimpleResourcesServer):
                 reward_kwargs,
                 reason="Precision/F1 requires a nonempty verifier_metadata.reference_caption",
             )
-        if caption:
+        over_cap = caption_length > self.config.max_judged_caption_tokens
+        if caption and over_cap:
+            logger.info(
+                "Caption of %d tokens exceeds max_judged_caption_tokens=%d (source_index=%s): scored 0 without a judge",
+                caption_length,
+                self.config.max_judged_caption_tokens,
+                body.source_index,
+            )
+        if caption and not over_cap:
             if self.config.visual_reward_type in ("recall", "f1"):
                 judge_text, judge_attempts = await self._judge(caption, atomic_events)
             if needs_precision:
@@ -272,12 +307,14 @@ class VideoCaptionResourcesServer(SimpleResourcesServer):
                 **reward_kwargs,
             )
         else:
+            # Nothing to judge: an empty caption, or one over the judge cap (which the length window also rejects).
             result = empty_video_caption_reward(caption, caption_length, **reward_kwargs)
         return VideoCaptionVerifyResponse(
             **body.model_dump(),
             **asdict(result),
             judge_attempts=judge_attempts,
             judge_response_text=judge_text,
+            caption_over_judge_cap=bool(caption) and over_cap,
             predicted_visual_events=predicted_events,
             event_extraction_attempts=extraction_attempts,
             event_extraction_response_text=extraction_text,
@@ -299,8 +336,17 @@ class VideoCaptionResourcesServer(SimpleResourcesServer):
         """A masked zero for a row the verifier cannot score; no judge is called and no length bonus is paid."""
         logger.warning("Masking an unscorable video_caption row (source_index=%s): %s", body.source_index, reason)
         zero: VideoCaptionRewardResult = empty_video_caption_reward(caption, caption_length, **reward_kwargs)
-        # Keep the caption's length for diagnostics, but pay nothing for it: the sample is masked.
-        result = replace(zero, reward=0.0, length_reward=0.0, reward_before_degeneration=0.0)
+        # Keep the caption's length for diagnostics, but pay nothing for it: the sample is masked. The per-metric
+        # scores stay null (uncomputed), so aggregates that ignore the mask do not count them as measured zeros.
+        result = replace(
+            zero,
+            reward=0.0,
+            length_reward=0.0,
+            reward_before_degeneration=0.0,
+            visual_recall_reward=None,
+            visual_precision_reward=None,
+            visual_f1_reward=None,
+        )
         return VideoCaptionVerifyResponse(
             **body.model_dump(),
             **asdict(result),
@@ -308,11 +354,18 @@ class VideoCaptionResourcesServer(SimpleResourcesServer):
             failure_kind=UNSCORABLE_ROW,
             failure_reason=reason,
             judge_attempts=0,
+            caption_over_judge_cap=False,
             predicted_visual_events=None,
             event_extraction_attempts=0,
             precision_judge_attempts=0,
             degeneration_judge_attempts=0,
         )
+
+
+def _is_retryable(failure: NgFailureEvent) -> bool:
+    """Whether another attempt can succeed: no reply (a timeout or lost connection), a 408/429, or a 5xx."""
+    status = failure.http_status
+    return status is None or status in RETRYABLE_JUDGE_STATUSES or status >= 500
 
 
 if __name__ == "__main__":

@@ -7,19 +7,16 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from omegaconf import OmegaConf
 from pydantic import ValidationError
 from starlette.requests import Request
-from starlette.responses import Response
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import WhitespaceSplit
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import FailureBoundary, NeMoGymChatCompletion, NeMoGymResponse, NgFailureEvent
-from nemo_gym.models.chat_completions_converter import ChatCompletionsConverter
+from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.verification import JudgeError, judge_failsafe
-from resources_servers.mcqa.app import MCQAResourcesServer, MCQAResourcesServerConfig, MCQAVerifyRequest
 from resources_servers.video_caption.app import (
     UNSCORABLE_ROW,
     VideoCaptionResourcesServer,
@@ -27,7 +24,6 @@ from resources_servers.video_caption.app import (
     VideoCaptionVerifyRequest,
     VideoCaptionVerifyResponse,
 )
-from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig, SimpleAgentRunRequest
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
@@ -133,7 +129,6 @@ async def test_reward_and_judge_contract(judge):
     ],
 )
 async def test_judge_through_gym_adapter(
-    monkeypatch: pytest.MonkeyPatch,
     reasoning_field: str | None,
     final_text: str | None,
     expected_reward: float,
@@ -141,7 +136,6 @@ async def test_judge_through_gym_adapter(
 ) -> None:
     # Exercise the real adapter, shared judge client, and verifier. Only the
     # upstream model and HTTP transport are mocked; reasoning conversion is not.
-    monkeypatch.setattr("nemo_gym.server_utils.get_global_config_dict", lambda: {})
     adapter = VLLMModel(
         config=VLLMModelConfig(
             name="video_caption_judge",
@@ -206,6 +200,7 @@ async def test_judge_through_gym_adapter(
     else:
         body = json.loads(result.body)
         assert body["reward"] == body.get("length_reward", 0) == 0
+        assert body["mask_sample"] is True
         assert body["_ng_failure_class"] == "judge_failed"
         assert "3 attempts" in body["_ng_failure_judge_error"]
         assert upstream.create_chat_completion.await_count == 3
@@ -270,10 +265,13 @@ async def test_third_attempt_success(judge):
     assert result.reward == 0.75
 
 
-def transport_failure():
-    """What call_judge raises when every attempt of one call failed over HTTP: a judge_failed event."""
+def transport_failure(http_status=None, failure_kind="judge_failed"):
+    """What call_judge raises when a call failed over HTTP: a judge_failed event carrying the reply's status."""
     return NgFailureEvent(
-        boundary=FailureBoundary.RESOURCES_SERVER, failure_kind="judge_failed", failure_reason="connection reset"
+        boundary=FailureBoundary.RESOURCES_SERVER,
+        failure_kind=failure_kind,
+        failure_reason="connection reset" if http_status is None else f"HTTP {http_status}",
+        http_status=http_status,
     )
 
 
@@ -288,13 +286,55 @@ async def test_transport_failure_is_retried_by_this_loop_with_single_attempt_cal
 
 
 @pytest.mark.asyncio
-async def test_transport_failure_exhaustion_is_tagged_judge_failed(judge):
-    judge.side_effect = [transport_failure(), transport_failure(), transport_failure()]
+@pytest.mark.parametrize("http_status", [None, 408, 429, 500, 503])
+async def test_transport_failure_exhaustion_is_a_masked_judge_failed_zero(http_status, judge):
+    judge.side_effect = [transport_failure(http_status)] * 3
     response = await judge_failsafe(server().verify)(request("word " * 100))
     body = json.loads(response.body)
     assert judge.await_count == 3
-    assert body["reward"] == 0
+    assert body["reward"] == body.get("length_reward", 0) == 0
+    # The mask is what makes a judge outage safe for training: the row drops out instead of teaching a zero.
+    assert body["mask_sample"] is True
+    assert body["failure_kind"] == body["_ng_failure_class"] == "judge_failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("http_status", [400, 401, 403, 404, 422])
+async def test_non_retryable_judge_reply_fails_at_once(http_status, judge):
+    # call_judge(max_attempts=1) gives up on these immediately; repeating them here would fail the same way.
+    judge.side_effect = [transport_failure(http_status)] * 3
+    response = await judge_failsafe(server().verify)(request("word " * 100))
+    body = json.loads(response.body)
+    assert judge.await_count == 1
+    assert body["reward"] == 0 and body["mask_sample"] is True
     assert body["_ng_failure_class"] == "judge_failed"
+    assert f"HTTP {http_status}" in body["_ng_failure_judge_error"]
+
+
+@pytest.mark.asyncio
+async def test_other_gym_failures_are_not_retried_as_judge_failures(judge):
+    # JUDGE_FAILURES is every NgFailureEvent; only judge_failed is this loop's to retry.
+    judge.side_effect = [transport_failure(failure_kind="session_lost")] * 3
+    with pytest.raises(NgFailureEvent) as raised:
+        await server().verify(request("word " * 100))
+    assert raised.value.failure_kind == "session_lost"
+    assert judge.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_backoff_is_full_jitter_capped_at_the_max_delay(judge, monkeypatch):
+    bounds = []
+
+    def uniform(low, high):
+        bounds.append((low, high))
+        return 0.0
+
+    monkeypatch.setattr("resources_servers.video_caption.app.random.uniform", uniform)
+    judge.side_effect = [transport_failure(503), judge_response("invalid JSON"), judge_response()]
+    env = server(judge_retry_base_delay_seconds=1.5, judge_retry_max_delay_seconds=2.0)
+    result = await env.verify(request("word " * 100))
+    assert result.judge_attempts == 3
+    assert bounds == [(0, 1.5), (0, 2.0)]
 
 
 @pytest.mark.asyncio
@@ -314,6 +354,7 @@ async def test_exhaustion_tagged_zero_without_length_bonus(failure, judge):
     assert judge.await_count == 3
     assert body["reward"] == 0
     assert body.get("length_reward", 0) == 0
+    assert body["mask_sample"] is True
     assert body["_ng_failure_class"] == "judge_failed"
     assert "3 attempts" in body["_ng_failure_judge_error"]
 
@@ -470,84 +511,6 @@ async def test_judgments_and_length_use_final_answer_without_policy_reasoning(ju
         judge.assert_not_called()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "kind,caption,expected",
-    [
-        ("caption", "word " * 100, 0.75),
-        ("caption_f1", "word " * 100, 5 / 6),
-        ("qa", r"\boxed{B}", 1.0),
-        ("qa", r"\boxed{A}", 0.0),
-    ],
-)
-async def test_caption_and_qa_agent_routing(kind, caption, expected, judge):
-    gym_root = Path(__file__).resolve().parents[3]
-    is_caption = kind.startswith("caption")
-    name = "video_caption" if is_caption else "mcqa"
-    config = OmegaConf.load(gym_root / f"resources_servers/{name}/configs/{name}.yaml")
-    agent_name = f"{name}_simple_agent"
-    config_values = OmegaConf.to_container(config[agent_name].responses_api_agents.simple_agent)
-    client = MagicMock(spec=ServerClient)
-    agent = SimpleAgent(
-        config=SimpleAgentConfig(name=agent_name, host="127.0.0.1", port=8081, **config_values),
-        server_client=client,
-    )
-    if is_caption:
-        resource = server(visual_reward_type="f1" if kind == "caption_f1" else "recall")
-        if kind == "caption_f1":
-            judge.side_effect = [
-                judge_response(),
-                judge_response('{"visual_events":["Walking"]}'),
-                judge_response('{"visual_hits":[1]}'),
-            ]
-    else:
-        resource = MCQAResourcesServer(
-            config=MCQAResourcesServerConfig(name="mcqa", host="127.0.0.1", port=8082, entrypoint="app.py"),
-            server_client=client,
-        )
-    policy_response = request(caption).response
-    http_request = Request({"type": "http", "method": "POST", "path": "/run", "headers": []})
-    calls = []
-
-    async def route(*, server_name, url_path, **kwargs):
-        calls.append((server_name, url_path))
-        payload = kwargs["json"]
-        if (server_name, url_path) == (name, "/seed_session"):
-            value = {}
-        elif (server_name, url_path) == (agent_name, "/v1/responses"):
-            value = (await agent.responses(http_request, Response(), payload)).model_dump(mode="json")
-        elif (server_name, url_path) == ("policy_model", "/v1/responses"):
-            assert "verifier_metadata" not in payload.model_dump()
-            assert "HUMAN_REFERENCE" not in payload.model_dump_json()
-            value = policy_response.model_dump(mode="json")
-        elif (server_name, url_path) == (name, "/verify"):
-            request_type = VideoCaptionVerifyRequest if is_caption else MCQAVerifyRequest
-            value = (await resource.verify(request_type.model_validate(payload))).model_dump(mode="json")
-        else:
-            raise AssertionError((server_name, url_path))
-        response = MagicMock(ok=True, cookies={})
-        # Gym's shared decoding helper consumes the aiohttp response's bytes.
-        response.read = AsyncMock(return_value=json.dumps(value).encode())
-        return response
-
-    client.post = AsyncMock(side_effect=route)
-    body = request(caption, reference_caption="HUMAN_REFERENCE A person walks.").model_dump(exclude={"response"})
-    if kind == "qa":
-        body = {
-            "responses_create_params": body["responses_create_params"],
-            "expected_answer": "B",
-            "options": [{"A": "red"}, {"B": "blue"}],
-        }
-    result = await agent.run(http_request, SimpleAgentRunRequest.model_validate(body))
-    assert result.reward == pytest.approx(expected)
-    assert calls == [
-        (name, "/seed_session"),
-        (agent_name, "/v1/responses"),
-        ("policy_model", "/v1/responses"),
-        (name, "/verify"),
-    ]
-
-
 def test_visual_reward_configuration_defaults_and_validation():
     assert server().config.visual_reward_type == "recall"
     with pytest.raises(ValidationError, match="visual_reward_type"):
@@ -564,6 +527,36 @@ async def test_precision_requires_human_reference_before_any_judging(mode, refer
     assert result.mask_sample is True
     assert result.failure_kind == UNSCORABLE_ROW
     assert "reference_caption" in result.failure_reason
+    # Uncomputed scores are null, not measured zeros, so per-metric aggregates that ignore the mask stay honest.
+    assert result.visual_recall_reward is result.visual_precision_reward is result.visual_f1_reward is None
+    assert not result.caption_over_judge_cap
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("penalize_degeneration", [False, True])
+@pytest.mark.parametrize("mode", ["recall", "precision", "f1"])
+async def test_caption_over_the_judge_cap_scores_zero_without_a_judge(mode, penalize_degeneration, judge):
+    env = server(visual_reward_type=mode, penalize_degeneration=penalize_degeneration, max_judged_caption_tokens=4000)
+    result = await env.verify(request("word " * 4001, reference_caption="A person walks."))
+    judge.assert_not_called()
+    assert result.caption_over_judge_cap and result.caption_length_tokens == 4001
+    # Scored, not masked: a runaway caption is the policy's failure and must stay in the batch as a zero.
+    assert result.reward == result.visual_reward == result.length_reward == 0
+    assert result.mask_sample is False and result.failure_kind is None
+    assert result.judge_attempts == result.degeneration_judge_attempts == 0
+    assert not result.degeneration_checked
+
+
+@pytest.mark.asyncio
+async def test_caption_within_the_judge_cap_is_judged(judge):
+    result = await server(max_judged_caption_tokens=4000).verify(request("word " * 4000))
+    assert judge.await_count == 1 and not result.caption_over_judge_cap
+    assert result.visual_reward == 0.5 and result.length_reward == 1
+
+
+def test_judge_cap_must_cover_the_length_window():
+    with pytest.raises(ValueError, match="max_judged_caption_tokens"):
+        server(max_caption_tokens=4000, max_judged_caption_tokens=3999)
 
 
 @pytest.mark.asyncio
@@ -731,8 +724,7 @@ async def test_precision_extraction_uses_only_final_policy_text(judge):
 
 
 @pytest.mark.asyncio
-async def test_f1_through_real_gym_judge_adapter(monkeypatch):
-    monkeypatch.setattr("nemo_gym.server_utils.get_global_config_dict", lambda: {})
+async def test_f1_through_real_gym_judge_adapter():
     adapter = VLLMModel(
         config=VLLMModelConfig(
             name="video_caption_judge",

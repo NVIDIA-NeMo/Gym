@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Task-data schema for the video_caption server.
 
-Both task fields ride inside ``verifier_metadata`` (``VideoCaptionVerifyRequest`` in app.py).
+Both task fields ride inside ``verifier_metadata`` (``VideoCaptionVerifyRequest`` in app.py); ``source_index``
+is an optional top-level provenance field.
 ``atomic_events.visual_events`` is the reference event list every reward type judges against;
 ``reference_caption`` is only needed when ``visual_reward_type`` is ``precision`` or ``f1``, so it is
 optional here, but a row that carries it must carry text. The verifier masks a row that violates
@@ -52,6 +53,12 @@ class TaskData(BaseModel):
             "unused by recall. Required by precision/F1 rows."
         ),
         json_schema_extra=VERIFIER_METADATA | {"consumed_by": ["verify"]},
+    )
+
+    source_index: int | None = Field(
+        default=None,
+        description="Position of the row in the manifest it came from; only logged, never graded on.",
+        json_schema_extra={"consumed_by": ["provenance"]},
     )
 
     @field_validator("reference_caption")

@@ -55,3 +55,23 @@ def test_rows_the_verifier_would_mask_fail_validation(bad):
 def test_missing_events_fail_validation():
     with pytest.raises(ValidationError):
         TaskData.model_validate({"reference_caption": "text"})
+
+
+def test_request_model_and_task_data_declare_the_same_row() -> None:
+    # The wire model (app.py) and the data schema (task_data.py) are declared twice on purpose: the schema rejects
+    # blank text at validation time, the wire model lets it through so verify() can mask the row. Same fields though.
+    from resources_servers.video_caption import app, task_data
+
+    def shape(model):
+        return {name: field.is_required() for name, field in model.model_fields.items()}
+
+    in_metadata = {
+        name: field.is_required()
+        for name, field in task_data.TaskData.model_fields.items()
+        if (field.json_schema_extra or {}).get("legacy_location") == "verifier_metadata"
+    }
+    assert shape(app.CaptionVerifierMetadata) == in_metadata
+    assert shape(app.VisualAtomicEvents) == shape(task_data.VisualAtomicEvents)
+    top_level = set(task_data.TaskData.model_fields) - set(in_metadata)
+    assert top_level == {"source_index"}
+    assert "source_index" in app.VideoCaptionVerifyRequest.model_fields
