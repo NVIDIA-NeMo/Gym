@@ -24,6 +24,7 @@ from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.server_runtime import ResourcesSeedSessionRequest
+from resources_servers.swebench.anti_cheat import AntiCheatSetupError
 from resources_servers.swebench.testing.checkpoint_conformance import (
     FakeSandboxProvider,
     FakeSnapshotProvider,
@@ -314,9 +315,7 @@ async def test_a_capture_git_refuses_grades_an_empty_patch_and_stops_the_agent_s
     assert provider.live() == []
 
 
-async def test_a_capture_the_sandbox_cannot_run_is_masked_and_a_commit_stores_it(
-    case: Case, tmp_path: Path
-) -> None:
+async def test_a_capture_the_sandbox_cannot_run_is_masked_and_a_commit_stores_it(case: Case, tmp_path: Path) -> None:
     def unreachable(command: str) -> Optional[SandboxExecResult]:
         if "status --porcelain" in command:
             return SandboxExecResult(stdout="", stderr="gateway timeout", return_code=125, error_type="sandbox")
@@ -490,3 +489,104 @@ async def test_swe_next_links_testbed_in_the_agent_and_grading_sandboxes(
     # The link comes before the repository is prepared in the agent's sandbox, and before grading in the other.
     assert agent_box["commands"][0] == "ln -sfn /workspace /testbed", agent_box["commands"][:3]
     assert "ln -sfn /workspace /testbed" in grading_box["commands"]
+
+
+class SpecRecording:
+    """Records the spec of every sandbox created from an image, and of every fork."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.specs: list[Any] = []
+        self.fork_specs: list[Any] = []
+
+    async def create(self, spec: Any) -> Any:
+        self.specs.append(spec)
+        return await super().create(spec)
+
+    async def create_from_snapshot(self, snapshot_id: str, spec: Any) -> Any:
+        self.fork_specs.append(spec)
+        return await super().create_from_snapshot(snapshot_id, spec)
+
+
+class SpecRecordingSnapshotProvider(SpecRecording, FakeSnapshotProvider):
+    pass
+
+
+AGENT_NETWORK = {"defaultAction": "deny", "egress": [{"action": "allow", "target": "10.0.0.0/8"}]}
+
+
+async def test_the_agent_network_policy_limits_the_agent_sandbox_and_its_fork_but_not_grading(
+    case: Case, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    provider = SpecRecordingSnapshotProvider(git_results)
+    grading_specs: list[Any] = []
+
+    class Graders(FakeSandboxProvider):
+        async def create(self, spec: Any) -> Any:
+            grading_specs.append(spec)
+            return await super().create(spec)
+
+    monkeypatch.setattr(f"resources_servers.{case.name}.app.resolve_provider_config", lambda *_: Graders())
+    config = checkpointing_config(tmp_path / "state")
+    server = make_server(case, provider, config, agent_network_policy=AGENT_NETWORK)
+    async with http(server) as client:
+        await seed(client, episode_seed(case))
+        for operation, body in (
+            ("prepare", control("c1")),
+            ("commit", control("c1", checkpoint_dir=str(tmp_path / "ckpt"))),
+            ("resume", control("c1")),
+        ):
+            reply = await client.post(f"/ng-control/v1/checkpoint/{operation}", json=body, headers=AUTH)
+            assert reply.status_code == 200, reply.text
+        await client.post("/ng-rollout/r/verify", json=verify_body(case))
+
+    [agent_spec] = provider.specs
+    [grading_spec] = grading_specs
+    assert agent_spec.provider_options["network_policy"] == AGENT_NETWORK
+    assert "network_policy" not in (grading_spec.provider_options or {})
+
+    # The rule is recorded with the sandbox, so the fork a restore makes gets it too.
+    restored = make_server(case, provider, config, agent_network_policy=None)
+    async with http(restored) as client:
+        for operation, body in (
+            ("restore", control("r1", checkpoint_dir=str(tmp_path / "ckpt"), episode_ids=[{"rollout_id": "r"}])),
+            ("resume", control("r1")),
+        ):
+            reply = await client.post(f"/ng-control/v1/checkpoint/{operation}", json=body, headers=AUTH)
+            assert reply.status_code == 200, reply.text
+    [fork_spec] = provider.fork_specs
+    assert fork_spec.provider_options["network_policy"] == AGENT_NETWORK
+
+
+async def test_a_required_scrub_that_fails_fails_the_seed_and_stops_the_sandbox(case: Case, tmp_path: Path) -> None:
+    def failing(command: str) -> Optional[SandboxExecResult]:
+        if "anti_cheat_setup.sh" in command:
+            return SandboxExecResult(stdout="", stderr="cannot rewrite refs", return_code=1)
+        return git_results(command)
+
+    provider = FakeSnapshotProvider(failing)
+    server = make_server(case, provider, checkpointing_config(tmp_path), anti_cheat_required=True)
+    body = episode_seed(case)
+    async with http(server) as client:
+        # The test transport re-raises the server's error instead of answering 500 as the server would.
+        with pytest.raises(AntiCheatSetupError):
+            await client.post(
+                f"/ng-rollout/{body.episode_id.capture_key}/seed_session", json=body.model_dump(mode="json")
+            )
+
+    assert provider.live() == []
+    assert "rs-1" not in server._session_id_to_sandbox
+
+
+async def test_a_scrub_that_fails_is_best_effort_unless_required(case: Case, tmp_path: Path) -> None:
+    def failing(command: str) -> Optional[SandboxExecResult]:
+        if "anti_cheat_setup.sh" in command:
+            return SandboxExecResult(stdout="", stderr="cannot rewrite refs", return_code=1)
+        return git_results(command)
+
+    provider = FakeSnapshotProvider(failing)
+    server = make_server(case, provider, checkpointing_config(tmp_path))
+    async with http(server) as client:
+        reply = await seed(client, episode_seed(case))
+
+    assert reply.status_code == 200 and len(provider.live()) == 1

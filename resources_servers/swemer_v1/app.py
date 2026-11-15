@@ -235,6 +235,7 @@ class SwemerV1ResourcesServer(RepoTaskSessionResourcesServer):
         )
         if session_id is not None:
             # On the provider every task sandbox shares, and registered for the session and its checkpoints.
+            spec = self.agent_sandbox_spec(spec)
             sandbox = self.new_task_sandbox(session_id, spec)
         else:
             sandbox = AsyncSandbox(provider_config)
@@ -313,7 +314,8 @@ class SwemerV1ResourcesServer(RepoTaskSessionResourcesServer):
         )
         await self._ensure_git_repo(sandbox, body.workdir)
         if self.config.apply_anti_cheating:
-            await apply_anti_cheat_setup(sandbox, body.workdir, body.instance_id, "swemer_v1")
+            required = self.config.anti_cheat_required
+            await apply_anti_cheat_setup(sandbox, body.workdir, body.instance_id, "swemer_v1", required=required)
         # The anti-cheat scrub leaves no committer identity, so the agent's `git commit` would fail.
         await prepare_git_for_commits(sandbox, body.workdir, "swemer_v1")
 

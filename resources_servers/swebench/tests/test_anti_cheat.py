@@ -19,7 +19,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from resources_servers.swebench.anti_cheat import ANTI_CHEAT_SCRIPT_FPATH, apply_anti_cheat_setup
+from resources_servers.swebench import anti_cheat
+from resources_servers.swebench.anti_cheat import ANTI_CHEAT_SCRIPT_FPATH, AntiCheatSetupError, apply_anti_cheat_setup
 
 
 class _FakeSandbox:
@@ -67,3 +68,50 @@ class TestApplyAntiCheatSetup:
                 raise RuntimeError("boom")
 
         await apply_anti_cheat_setup(_BrokenSandbox(), "/testbed", "inst-1", "some_server")  # must not raise
+
+
+class _FlakySandbox(_FakeSandbox):
+    """Raises on the first ``failures`` execs, as a sandbox the gateway briefly could not reach does."""
+
+    def __init__(self, failures: int, return_code: int = 0) -> None:
+        super().__init__(return_code)
+        self.failures = failures
+
+    async def exec(self, command: str, **kwargs):
+        if self.failures:
+            self.failures -= 1
+            self.exec_calls.append({"command": command} | kwargs)
+            raise TimeoutError("502: The sandbox could not be reached")
+        return await super().exec(command, **kwargs)
+
+
+class TestAntiCheatRetryAndRequired:
+    @pytest.fixture(autouse=True)
+    def _no_delay(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(anti_cheat, "ANTI_CHEAT_RETRY_DELAY_S", 0.0)
+
+    @pytest.mark.asyncio
+    async def test_a_provider_error_is_retried_until_the_scrub_runs(self) -> None:
+        sandbox = _FlakySandbox(failures=2)
+        await apply_anti_cheat_setup(sandbox, "/testbed", "inst-1", "some_server", required=True)
+        assert len(sandbox.exec_calls) == 3
+
+    @pytest.mark.asyncio
+    async def test_a_required_scrub_that_keeps_raising_fails(self) -> None:
+        sandbox = _FlakySandbox(failures=10)
+        with pytest.raises(AntiCheatSetupError, match="inst-1"):
+            await apply_anti_cheat_setup(sandbox, "/testbed", "inst-1", "some_server", required=True)
+        assert len(sandbox.exec_calls) == anti_cheat.ANTI_CHEAT_ATTEMPTS
+
+    @pytest.mark.asyncio
+    async def test_a_required_scrub_that_fails_raises_without_a_retry(self) -> None:
+        sandbox = _FakeSandbox(return_code=1)
+        with pytest.raises(AntiCheatSetupError, match="Return code: 1"):
+            await apply_anti_cheat_setup(sandbox, "/testbed", "inst-1", "some_server", required=True)
+        assert len(sandbox.exec_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_best_effort_scrub_that_keeps_raising_is_logged_not_raised(self) -> None:
+        sandbox = _FlakySandbox(failures=10)
+        await apply_anti_cheat_setup(sandbox, "/testbed", "inst-1", "some_server")
+        assert len(sandbox.exec_calls) == anti_cheat.ANTI_CHEAT_ATTEMPTS

@@ -261,6 +261,7 @@ class SWERebenchResourcesServer(RepoTaskSessionResourcesServer):
         )
         if session_id is not None:
             # On the provider every task sandbox shares, and registered for the session and its checkpoints.
+            spec = self.agent_sandbox_spec(spec)
             sandbox = self.new_task_sandbox(session_id, spec)
         else:
             sandbox = AsyncSandbox(provider_config)
@@ -321,7 +322,10 @@ class SWERebenchResourcesServer(RepoTaskSessionResourcesServer):
         self._forget_task_sandbox_state(session_id)
         sandbox = await self._create_sandbox(body, session_id=session_id)
         if self.config.apply_anti_cheating:
-            await apply_anti_cheat_setup(sandbox, repo_directory(body.repo), body.instance_id, "swe_rebench")
+            required = self.config.anti_cheat_required
+            await apply_anti_cheat_setup(
+                sandbox, repo_directory(body.repo), body.instance_id, "swe_rebench", required=required
+            )
         # The anti-cheat scrub leaves no committer identity, so the agent's `git commit` would fail.
         await prepare_git_for_commits(sandbox, repo_directory(body.repo), "swe_rebench")
         self._session_id_to_pristine_untracked[session_id] = await self._pristine_untracked_files(

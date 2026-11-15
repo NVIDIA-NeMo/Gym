@@ -13,8 +13,9 @@ would otherwise repeat to take part in partial-rollout checkpoints, on ``Checkpo
   ``/verify`` that runs again after a restore grades the patch the checkpoint saved (``checkpoint_verify`` ``replay``);
 - golden-patch grading seeds no episode sessions and runs ``restart_only``.
 
-A server starts its agent's sandbox with ``new_task_sandbox`` and sets ``task_model``; its config adds
-``RepoTaskSessionFields``. Grading sandboxes are not session state: each grading run starts its own.
+A server starts its agent's sandbox with ``new_task_sandbox``, from the spec ``agent_sandbox_spec`` returns, and sets
+``task_model``; its config adds ``RepoTaskSessionFields``. Grading sandboxes are not session state: each grading run
+starts its own, from the spec as the server built it.
 """
 
 import dataclasses
@@ -22,6 +23,7 @@ from typing import Any, ClassVar
 
 from pydantic import JsonValue
 
+from nemo_gym.sandbox import SandboxSpec
 from nemo_gym.server_runtime import CheckpointMode, StepType
 from resources_servers.swebench.patch_capture import PatchCapture
 from resources_servers.swebench.sandbox_session_checkpoints import (
@@ -32,6 +34,15 @@ from resources_servers.swebench.sandbox_session_checkpoints import (
 
 class RepoTaskSessionFields(SandboxCheckpointFields):
     """The config fields of a repository-task server, besides its own."""
+
+    # Fail a seed whose anti-cheat scrub did not complete instead of handing the agent a history that may hold the
+    # task's solution; the rollout is then retried. Off keeps the scrub best effort.
+    anti_cheat_required: bool = False
+    # A provider-neutral egress rule for the agent's sandbox only, e.g. {"defaultAction": "deny", "egress":
+    # [{"action": "allow", "target": "10.0.0.0/8"}]} to reach the model servers and nothing else. Grading sandboxes keep
+    # the spec's network. The rule is recorded with the sandbox, so a restore's fork gets it too: name targets that stay
+    # valid across jobs (an address range, not one job's model server).
+    agent_network_policy: dict[str, Any] | None = None
 
 
 def saved_capture(capture: PatchCapture, error: str | None, incomplete: bool) -> dict[str, JsonValue]:
@@ -65,6 +76,13 @@ class RepoTaskSessionResourcesServer(CheckpointedSandboxSessionResourcesServer):
         if self.config.is_verifying_golden_patch:
             return "restart_only"
         return super().checkpoint_mode_in_effect()
+
+    def agent_sandbox_spec(self, spec: SandboxSpec) -> SandboxSpec:
+        """``spec`` for the agent's sandbox: with ``agent_network_policy``, which a grading sandbox does not get."""
+        if self.config.agent_network_policy is None:
+            return spec
+        options = {**(spec.provider_options or {}), "network_policy": dict(self.config.agent_network_policy)}
+        return dataclasses.replace(spec, provider_options=options)
 
     def _export_task_sandbox_state(self, session_id: str) -> dict[str, JsonValue]:
         # What a restored session's patch capture needs; nothing once verify captured the patch and stopped the sandbox.
