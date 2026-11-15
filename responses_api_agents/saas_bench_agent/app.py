@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Session adapter for the native SaaS external-harness worker."""
+"""SaaS evaluation through the legacy_agent relay and native harness workers."""
 
 from __future__ import annotations
 
@@ -10,26 +10,31 @@ import json
 import os
 import signal
 import sys
-from dataclasses import dataclass
 from pathlib import Path
-from typing import ClassVar, Literal
+from typing import Literal
 
-from fastapi import HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from fastapi import HTTPException
+from pydantic import Field, PrivateAttr
 
-from nemo_gym.agents import (
-    AgentCloseSessionResponse,
-    AgentSeedRejectedError,
-    AgentSeedSessionRequest,
-    AgentSessionState,
-    BaseResponsesAPIAgentConfig,
-    Body,
-    SimpleResponsesAPIAgent,
-)
-from nemo_gym.config import ModelServerRef
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
 from nemo_gym.core import (
+    AGENT_COMMAND_NOT_ALLOWED,
+    AGENT_INVALID_OUTPUT,
+    AGENT_LIMIT,
+    AGENT_RUN_ERROR,
+    AGENT_TIMEOUT,
+    JUDGE_FAILED,
+    JUDGE_UNPARSEABLE,
+    MODEL_CONTEXT_LIMIT,
+    VERIFIER_ERROR,
+    FailureClass,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    OutcomeAction,
+    StageOutcomePolicyConfig,
+    StagePolicyConfig,
+    choose_stage_outcome,
     maybe_rollout_id_from_run_body,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -40,12 +45,39 @@ from responses_api_agents.saas_bench_agent.runtime import (
     check_bundle_code,
     configure_cache,
 )
-from responses_api_agents.saas_bench_agent.schemas import SaasBenchRunRequest
+from responses_api_agents.saas_bench_agent.schemas import SaasBenchRunRequest, SaasBenchVerifyResponse
+
+
+_MODEL_ENDINGS = {
+    "malformed_tool_call": AGENT_INVALID_OUTPUT,
+    "model_protocol_error": AGENT_INVALID_OUTPUT,
+    "output_token_limit": AGENT_LIMIT,
+    "context_limit": MODEL_CONTEXT_LIMIT,
+    "timeout": AGENT_TIMEOUT,
+    "agent_error": AGENT_INVALID_OUTPUT,
+    "permission_abort": AGENT_COMMAND_NOT_ALLOWED,
+}
+
+
+def default_outcome_policy() -> StageOutcomePolicyConfig:
+    """Grade model endings from app state; retry evaluation failures."""
+    return StageOutcomePolicyConfig(
+        by_stage={
+            "verification": StagePolicyConfig(default_action=OutcomeAction.FAIL),
+            "agent": StagePolicyConfig(
+                by_failure_class={
+                    FailureClass.MODEL: OutcomeAction.VERIFY,
+                    FailureClass.EVALUATION: OutcomeAction.RETRY,
+                },
+                default_action=OutcomeAction.RETRY,
+            ),
+        }
+    )
 
 
 class SaasBenchConfig(BaseResponsesAPIAgentConfig):
     num_workers: int = 1
-    session_close_timeout_seconds: float = 180
+    outcome_policy: StageOutcomePolicyConfig = Field(default_factory=default_outcome_policy)
     source_root: str = str(DEFAULT_BUNDLE_ROOT)
     harness: Literal["opencode", "browser_use"] = "opencode"
     cache_root: str
@@ -72,22 +104,9 @@ class SaasBenchConfig(BaseResponsesAPIAgentConfig):
     inconclusive_verification_retries: int = Field(default=1, ge=0, le=3)
 
 
-class SaasBenchSessionContext(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    episode: dict | None = None
-
-
-@dataclass
-class SaasBenchSession(AgentSessionState):
-    body: SaasBenchRunRequest
-    task: asyncio.Task | None = None
-    activation: dict | None = None
-
-
 class SaasBenchAgent(SimpleResponsesAPIAgent):
     """Execute episodes in separate processes so runtime globals cannot cross slots."""
 
-    agent_context_model: ClassVar[type[BaseModel]] = SaasBenchSessionContext
     ray_enabled = False
     config: SaasBenchConfig
     _prepared: bool = PrivateAttr(default=False)
@@ -123,67 +142,12 @@ class SaasBenchAgent(SimpleResponsesAPIAgent):
         sys.path.insert(0, str(source))
         self._prepared = True
 
-    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> SaasBenchSession:
-        if body.sandbox_access is not None:
-            raise AgentSeedRejectedError("SaaS native app adapter does not support sandbox access")
-        if body.tool_accesses or body.continuation is not None:
-            raise AgentSeedRejectedError("SaaS sessions accept neither external tool grants nor continuation")
-        context = self.parse_agent_context(body)
-        if not isinstance(context, SaasBenchSessionContext) or context.episode is None:
-            raise AgentSeedRejectedError("SaaS requires its environment's episode context")
-        episode = SaasBenchRunRequest.model_validate(context.episode)
-        if maybe_rollout_id_from_run_body(episode) != body.episode_id.capture_key:
-            raise AgentSeedRejectedError("SaaS session episode identity does not match its context")
-        if episode.verifier_metadata["task_id"] != body.task_id.task_id:
-            raise AgentSeedRejectedError("SaaS session task identity does not match its context")
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+        raise HTTPException(400, "Use /run with prepared SaaS verifier_metadata")
+
+    async def run(self, body: SaasBenchRunRequest) -> SaasBenchVerifyResponse:
         self._prepare_runtime()
-        return SaasBenchSession(body, episode)
-
-    async def responses(
-        self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
-    ) -> NeMoGymResponse:
-        session_id = self._agent_session_id_from_request(request)
-        if session_id is None:
-            raise HTTPException(422, "SaaS activation requires an environment-seeded agent session")
-        state = self._require_agent_session(session_id)
-        if not isinstance(state, SaasBenchSession):
-            raise HTTPException(409, "Unexpected SaaS session state")
-        if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
-            raise HTTPException(409, "SaaS activation does not match the session rollout")
-        activation = body.model_dump(mode="json")
-        if activation != state.body.responses_create_params.model_dump(mode="json"):
-            raise HTTPException(409, "SaaS activation differs from its prepared episode input")
-        if state.task is None:
-            state.activation = activation
-            state.task = asyncio.create_task(self._execute(state.body))
-        elif state.activation != activation:
-            raise HTTPException(409, "SaaS session already has a different activation")
-        native = await asyncio.shield(state.task)
-        response = actor_response(state.body, native, harness=self.config.harness, model_name=self.config.model_name)
-        return response.model_copy(update={"saas_bench_native_result": native})
-
-    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
-        if not isinstance(state, SaasBenchSession):
-            raise RuntimeError("Unexpected SaaS session state")
-        if state.task is not None and not state.task.done():
-            state.task.cancel()
-            try:
-                await state.task
-            except asyncio.CancelledError:
-                pass
-        if state.task is not None:
-            output = (
-                Path(self.config.output_root).resolve()
-                / hashlib.sha256(state.request.episode_id.capture_key.encode()).hexdigest()
-            )
-            env = {
-                **os.environ,
-                "PYTHONPATH": str(Path(self.config.source_root).resolve())
-                + os.pathsep
-                + str(Path(__file__).resolve().parents[2]),
-            }
-            await self._stop_recorded_apps(output, env)
-        return AgentCloseSessionResponse(agent_session_id=state.request.agent_session_id, cleanup_confirmed=True)
+        return self._response(body, await self._execute(body))
 
     async def _execute(self, body: SaasBenchRunRequest) -> dict:
         # Capture IDs distinguish repeats and make HTTP retries idempotent.
@@ -323,6 +287,136 @@ class SaasBenchAgent(SimpleResponsesAPIAgent):
                     os.killpg(cleanup.pid, signal.SIGKILL)
                     await cleanup.wait()
                 raise
+
+    def _response(
+        self, body: SaasBenchRunRequest, result: dict, response: NeMoGymResponse | None = None
+    ) -> SaasBenchVerifyResponse:
+        from saas_bench.opencode.core import measured_score
+        from saas_bench.opencode.observability import native_trajectory
+        from saas_bench.opencode.protocol import has_model_turn
+
+        native = result.get("native_trajectory", result.get("trajectory", []))
+        model_turn = result.get("model_turn_observed") is True or has_model_turn(native)
+        masked = result.get("mask_sample", True)
+        kind = None
+        decision = None
+        # Judge/readback faults take precedence over the actor's ending: there
+        # is no usable evaluation verdict, even when the actor also failed.
+        diagnostics = result.get("verifier_diagnostics") or {}
+        judge_faults = (result.get("verify") or {}).get("judge_failures") or diagnostics.get("judge_failures") or []
+        if judge_faults:
+            kind = (
+                JUDGE_UNPARSEABLE
+                if all(f["failure_kind"] == JUDGE_UNPARSEABLE for f in judge_faults)
+                else JUDGE_FAILED
+            )
+        elif result.get("failure_kind") == "saas_bench:verifier" or diagnostics.get("unavailable"):
+            kind = VERIFIER_ERROR
+        elif (
+            result.get("failure_kind") == "saas_bench:infrastructure"
+            or result.get("failure_origin") == "evaluation"
+            or self.config.harness == "browser_use"
+            and result.get("failure_kind") == "saas_bench:model_ending"
+            and result.get("failure_origin") != "model"
+        ):
+            kind = AGENT_RUN_ERROR
+        else:
+            termination = (result.get("execution_health") or {}).get("termination")
+            kind = (
+                (AGENT_TIMEOUT if model_turn else AGENT_RUN_ERROR)
+                if result.get("timed_out") or termination == "timeout"
+                else _MODEL_ENDINGS.get(termination)
+            )
+            if kind is None and result.get("failure_kind"):
+                kind = AGENT_RUN_ERROR
+        if kind is not None:
+            stage = "verification" if kind in {VERIFIER_ERROR, JUDGE_FAILED, JUDGE_UNPARSEABLE} else "agent"
+            decision = choose_stage_outcome(
+                failure_kind=kind, http_status=None, stage=stage, config=self.config.outcome_policy
+            )
+            masked = decision.action not in {OutcomeAction.COUNT_AS_ZERO, OutcomeAction.VERIFY}
+        reward = (
+            0.0
+            if masked or decision and decision.action == OutcomeAction.COUNT_AS_ZERO
+            else measured_score(result["verify"])
+        )
+        response = response or actor_response(
+            body, result, harness=self.config.harness, model_name=self.config.model_name
+        )
+        return SaasBenchVerifyResponse.model_validate(
+            {
+                **body.model_dump(by_alias=True),
+                "response": response,
+                "reward": reward,
+                "mask_sample": masked,
+                "failure_kind": kind,
+                "failure_outcome_action": decision.action if decision else None,
+                "failure_outcome_attribution": decision.attribution if decision else None,
+                "native_failure_kind": result.get("failure_kind"),
+                "native_metrics": {} if masked else {"weighted_score": reward, "execution": 1.0},
+                "native_diagnostics": {}
+                if masked
+                else {
+                    "task_id": body.verifier_metadata["task_id"],
+                    "source_sha256": body.verifier_metadata["source_sha256"],
+                    "rollout_id": maybe_rollout_id_from_run_body(body),
+                    "verifier": result["verify"],
+                    "graded_response_id": response.id,
+                    "graded_response_sha256": hashlib.sha256(response.model_dump_json().encode()).hexdigest(),
+                },
+                "failure_reason": result.get("error") or result.get("execution_error"),
+                "execution_error": result.get("execution_error"),
+                "task_id": body.verifier_metadata["task_id"],
+                "category_id": body.verifier_metadata["category_id"],
+                "artifacts": result["artifacts"],
+                "verify_status": result.get("verify", {}).get("status", "ERROR"),
+                "trajectory": native,
+                "native_trajectory": native,
+                "harness": self.config.harness,
+                "execution_health": result.get("execution_health", {}),
+                "harness_version": result.get("harness_version"),
+                "verifier_diagnostics": result.get("verifier_diagnostics", {}),
+                "ng_trajectory": native_trajectory(
+                    native,
+                    body.verifier_metadata["task_id"],
+                    maybe_rollout_id_from_run_body(body) or "unknown",
+                    result.get("execution_health", {}),
+                )
+                if self.config.harness == "opencode"
+                else None,
+            }
+        )
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
+        rows = body.verify_responses
+        valid = [r for r in rows if not r.get("mask_sample", False)]
+        metrics = {
+            "saas_bench/num_scored": len(valid),
+            "saas_bench/num_masked": len(rows) - len(valid),
+            "saas_bench/num_verifier_errors": sum(
+                r.get("failure_kind") in {"saas_bench:verifier", VERIFIER_ERROR} for r in rows
+            ),
+        }
+        health = [r["execution_health"] for r in rows if r.get("execution_health")]
+        metrics["saas_bench/num_execution_health_unobserved"] = len(rows) - len(health)
+        if health:
+            metrics["saas_bench/tool_calls"] = sum(h["tool_calls"] for h in health)
+            metrics["saas_bench/tool_errors"] = sum(h["tool_errors"] for h in health)
+            metrics["saas_bench/execution_healthy_rate"] = sum(h["execution_healthy"] for h in health) / len(health)
+            metrics["saas_bench/malformed_terminations"] = sum(
+                h["termination"] in {"malformed_tool_call", "model_protocol_error"} for h in health
+            )
+            metrics["saas_bench/incomplete_tasks"] = sum(h.get("task_success") is False for h in health)
+        if valid:
+            metrics["saas_bench/mean_score"] = sum(r["reward"] for r in valid) / len(valid)
+            metrics["saas_bench/pass_rate"] = sum(r["verify_status"] == "PASS" for r in valid) / len(valid)
+            for domain in sorted({r["category_id"] for r in valid}):
+                subset = [r for r in valid if r["category_id"] == domain]
+                metrics[f"saas_bench/{domain}/mean_score"] = sum(r["reward"] for r in subset) / len(subset)
+        return AggregateMetrics(
+            agent_metrics=metrics,
+            key_metrics={k: v for k, v in metrics.items() if k in {"saas_bench/mean_score", "saas_bench/pass_rate"}},
+        )
 
 
 if __name__ == "__main__":

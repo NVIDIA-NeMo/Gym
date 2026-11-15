@@ -13,10 +13,10 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
-from environment_servers.saas_bench_environment.app import SaasBenchEnvironmentConfig, SaasBenchEnvironmentServer
 from nemo_gym.client import ServerClient
-from nemo_gym.config import AgentServerRef, AggregateMetricsRequest, ModelServerRef
+from nemo_gym.config import AggregateMetricsRequest, ModelServerRef
 from responses_api_agents.saas_bench_agent.app import SaasBenchAgent, SaasBenchConfig
 from responses_api_agents.saas_bench_agent.schemas import SaasBenchRunRequest
 
@@ -67,18 +67,7 @@ def agent(tmp_path, monkeypatch):
 
 @pytest.fixture
 def grader(agent):
-    return SaasBenchEnvironmentServer(
-        config=SaasBenchEnvironmentConfig(
-            name="saas_environment",
-            host="127.0.0.1",
-            port=1235,
-            entrypoint="app.py",
-            agent_server=AgentServerRef(type="responses_api_agents", name=agent.config.name),
-            harness=agent.config.harness,
-            model_name=agent.config.model_name,
-        ),
-        server_client=MagicMock(spec=ServerClient),
-    )
+    return agent
 
 
 def request(identity="repeat-0"):
@@ -368,3 +357,51 @@ async def test_cancellation_stops_detached_apps(agent, monkeypatch, tmp_path):
             os.killpg(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+
+
+@pytest.mark.parametrize("harness", ["opencode", "browser_use"])
+@pytest.mark.parametrize("score,masked", [(0.0, False), (0.25, False), (0.0, True)])
+def test_run_http_reuses_persisted_grade_and_aggregates_without_agent_session(agent, harness, score, masked):
+    from responses_api_agents.saas_bench_agent.runtime import HARNESS_VERSIONS
+
+    agent.config.harness = harness
+    body = request()
+    body.verifier_metadata["harness"] = harness
+    body.verifier_metadata["harness_version"] = HARNESS_VERSIONS[harness]
+    output = Path(agent.config.output_root) / hashlib.sha256(b"repeat-0").hexdigest()
+    output.mkdir(parents=True)
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            {
+                "request": body.model_dump(),
+                "config": agent.config.model_dump(),
+                "harness_version": HARNESS_VERSIONS[harness],
+            },
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    (output / "binding.json").write_text(json.dumps({"fingerprint": fingerprint}))
+    native = result(score=score, masked=masked)
+    if masked:
+        native["failure_kind"] = "saas_bench:verifier"
+    (output / "result.json").write_text(json.dumps(native))
+    client = TestClient(agent.setup_webserver())
+    first = client.post("/run", json={**body.model_dump(mode="json", by_alias=True), "_ng_rollout_id": "repeat-0"})
+    assert first.status_code == 200, first.text
+    row = first.json()
+    assert row["reward"] == score and row["mask_sample"] is masked
+    assert row["native_diagnostics"].get("graded_response_id") == (None if masked else row["response"]["id"])
+    second = client.post("/run", json={**body.model_dump(mode="json", by_alias=True), "_ng_rollout_id": "repeat-0"})
+    assert second.status_code == 200 and second.json()["reward"] == score
+    metrics = client.post("/aggregate_metrics", json={"verify_responses": [row]})
+    assert metrics.status_code == 200, metrics.text
+    assert metrics.json()["agent_metrics"]["saas_bench/num_scored"] == int(not masked)
+    assert metrics.json()["agent_metrics"]["saas_bench/num_masked"] == int(masked)
+    changed = body.model_copy(deep=True)
+    changed.verifier_metadata["task_id"] = "other"
+    assert (
+        client.post(
+            "/run", json={**changed.model_dump(mode="json", by_alias=True), "_ng_rollout_id": "repeat-0"}
+        ).status_code
+        == 409
+    )

@@ -233,6 +233,18 @@ def test_gym_preparation_and_collection_use_same_dataset(tmp_path, monkeypatch, 
     config = OmegaConf.load(gym / f"benchmarks/saas_bench_{harness}/config.yaml")
     config.saas_bench_run_root = str(tmp_path / "run")
     config.saas_bench_tasks = "fixture"
+    from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServerConfig
+
+    relay = config.saas_bench_environment_server.environment_servers
+    assert list(relay) == ["legacy_agent"]
+    LegacyAgentEnvironmentServerConfig.model_validate(
+        {
+            "name": "saas_bench_environment_server",
+            "host": "127.0.0.1",
+            "port": 1235,
+            **OmegaConf.to_container(relay.legacy_agent, resolve=True),
+        }
+    )
     selected = datasets_to_prepare(config)
     assert len(selected) == 1
     args = OmegaConf.to_container(config.prepare_script_args, resolve=True)
