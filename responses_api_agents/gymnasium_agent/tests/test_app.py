@@ -14,6 +14,8 @@
 # limitations under the License.
 import asyncio
 import json
+import re
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import anyio
@@ -947,3 +949,39 @@ class TestAgentObservation:
         row = (await TestEnvironmentRewardRecord()._run(steps, model_responses=responses)).model_dump(mode="json")
         (invocation,) = row["ng_agent_observations"]["records"]
         assert [call["response_id"] for call in invocation["model_calls"]] == ["r2"]
+
+
+# The rows the core hand-off test (tests/unit_tests/orchestration/test_gymnasium_agent_handoff.py) feeds to the
+# collector and the trial gate. Each is what ``GymnasiumAgent.run`` returns for the case's step and model response
+# with fake model and environment servers; only the random invocation id is fixed.
+FAKE_SERVER_ROWS = (
+    Path(__file__).resolve().parents[3]
+    / "tests/unit_tests/orchestration/fixtures/gymnasium-agent-rows-fake-servers.json"
+)
+FIXED_INVOCATION_ID = "gymnasium_" + "0" * 32
+
+
+async def _fake_servers_row(step: dict, response: dict) -> dict:
+    agent = _make_agent()
+    payloads = {"/reset": [{"observation": "go", "info": {}}], "/step": [step]}
+
+    async def _post(server_name, url_path, json=None, cookies=None, headers=None, **kw):
+        return _FakeHttpResp(response if url_path.endswith("/v1/responses") else payloads[url_path].pop(0))
+
+    agent.server_client.post = AsyncMock(side_effect=_post)
+    body = GymnasiumAgentRunRequest(
+        responses_create_params={"input": [{"role": "user", "content": "play"}]},
+        **{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "_ng_rollout_id": "handoff_0"},
+    )
+    row = (await agent.run(MagicMock(cookies={}), body)).model_dump(mode="json")
+    (invocation,) = row["ng_agent_observations"]["records"]
+    assert re.fullmatch(r"gymnasium_[0-9a-f]{32}", invocation["invocation_id"])
+    invocation["invocation_id"] = FIXED_INVOCATION_ID
+    return row
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["finished", "cut_off"])
+async def test_the_agent_still_returns_the_rows_the_core_hand_off_test_reads(case):
+    fixture = json.loads(FAKE_SERVER_ROWS.read_text())[case]
+    assert await _fake_servers_row(fixture["step"], fixture["response"]) == fixture["row"]
