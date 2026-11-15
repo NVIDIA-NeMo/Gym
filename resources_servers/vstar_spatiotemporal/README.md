@@ -26,7 +26,9 @@ Each row carries its ground truth in `verifier_metadata`:
 
 `sub_task` is one of `vqa`, `temporal`, `spatial`, `spatial_2`, `temporal_2`. `item_index` is shared by the five
 tasks of one item. `timestamps` is the annotated time span in seconds and `bboxes` the annotated box, in video
-pixels, at each whole second inside it.
+pixels, at each whole second inside it. Prepared rows also carry `vid` and `frame_times` there, and a top-level
+`task_id`; the verifier reads none of the three. `task_data.py` declares the schema: `app.py` validates
+`verifier_metadata` with its `VerifierMetadata`, and `TaskData` adds the row's `task_id`.
 
 ## Answer formats
 
@@ -36,7 +38,7 @@ without one, the whole message.
 | Sub-task | Reading |
 | --- | --- |
 | `vqa` | The answer text, sent to the judge as is. An empty `<answer></answer>` leaves the item unanswered |
-| `temporal`, `temporal_2` | `m:ss` times become seconds; the answer must then hold exactly two numbers, taken as start and end. A number directly followed by a letter (`2s`) is not read, so `From <t>2</t>s to <t>6</t>s` parses and `From 2s to 6s` does not |
+| `temporal`, `temporal_2` | `m:ss` times become seconds, each where it stands; the answer must then hold exactly two numbers, taken as start and end. A number directly followed by a letter (`2s`) is not read, so `From <t>2</t>s to <t>6</t>s` parses and `From 2s to 6s` does not |
 | `spatial`, `spatial_2` | JSON with a `tracks` list, or a bare list, of `{"t": T, "box": [x1,y1,x2,y2]}` entries or `{"boxes": {T: [x1,y1,x2,y2]}}` entries |
 
 For box answers, coordinates are on a 0-1000 grid and are scaled to video pixels; a box whose coordinates are all at
@@ -54,8 +56,9 @@ answer cut off by the output limit keeps the entries it completed.
 
 The judge receives the V-STaR rating instructions as a system message and
 `Question: ... Groundtruth answer: ... Candidate answer: ... Your response: ` as the user message. Its reply must be
-a single integer; any other reply is recorded as rating -1, which counts as 0. A model reply with no text is rated 0
-without calling the judge.
+a single integer from 0 to 3; any other reply, such as `4` or `Rating: 3`, is recorded as rating -1, which counts as
+0. A model reply with no text is rated 0 without calling the judge. A judge call that fails raises `JudgeError`, and
+Gym masks the rollout.
 
 ### Aggregation
 
@@ -63,6 +66,7 @@ without calling the judge.
 
 - An item whose VQA answer is empty contributes nothing to the temporal and spatial means or to the per-group
   metrics. It still counts in the denominator of the overall `VQA_acc` and of the combined-success rates.
+- An item whose VQA task has no scored rollout (masked after a judge failure) is left out of every metric.
 - `AM_k = (VQA_acc + temporal mIoU_k + spatial mIoU_k) / 3` and
   `LGM_k = -(log(1 - VQA_acc) + log(1 - temporal mIoU_k) + log(1 - spatial mIoU_k)) / 3` for chain `k`; `mAM` and
   `mLGM` average the two chains. An infinite LGM (a component equal to 1) is left out of the reported metrics.
@@ -70,7 +74,9 @@ without calling the judge.
   parts together: rating of at least 2, temporal IoU of at least 0.3, mean box IoU of at least 0.1.
 - `length/...` and `domain/...` repeat the main metrics for each video-length group and domain, over the answered
   items of the group.
-- With several repeats, each repeat is aggregated on its own and the metrics are averaged.
+- With several repeats, each repeat is aggregated on its own and the metrics are averaged. A repeat is the rollouts
+  that share a `_ng_rollout_index`, so a missing or masked rollout does not move a later one into its place.
+  Rollouts without that key are matched by their position in the task's list.
 
 `get_key_metrics` returns `mAM`, `mLGM`, `VQA_acc`, the four mIoU values and `parsed_rate_mean`.
 
@@ -86,6 +92,11 @@ without calling the judge.
 `data/example.jsonl` holds the five tasks of one synthetic item (a rectangle moving over a dark background, embedded
 as PNG images). Regenerate it with `python -m benchmarks.vstar_spatiotemporal.tests.synthetic`.
 
+## Sources
+
+The judge prompts are V-STaR's, word for word, and several scoring and parsing helpers adapt its evaluation code;
+the header of `app.py` lists them with the source commit. The V-STaR repository declares no license.
+
 ## Tests
 
 ```bash
@@ -93,4 +104,5 @@ gym env test --resources-server vstar_spatiotemporal
 ```
 
 `tests/verifier_cases.jsonl` holds full-reward, zero-reward and malformed cases; its VQA cases are rated by exact
-match with the reference answer instead of a model.
+match with the reference answer instead of a model. The tests of the benchmark's `prepare.py` are in the core suite,
+`tests/unit_tests/benchmarks/test_vstar_spatiotemporal_prepare.py`.

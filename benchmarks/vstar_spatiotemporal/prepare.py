@@ -1,5 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# resized_size adapts smart_resize from qwen-vl-utils (Apache-2.0):
+# https://github.com/QwenLM/Qwen2.5-VL/blob/a30e36facd0a5131d9ed59e93210c7ac5de75adb/qwen-vl-utils/src/qwen_vl_utils/vision_process.py
+# The question wording adapts V-STaR's inference_demo.py, from a repository that declares no license:
+# https://github.com/V-STaR-Bench/V-STaR/blob/1894682b15be0a0c0c5ab24be6e8252743cd6c2f/inference_demo.py
 """Convert V-STaR (video spatio-temporal reasoning) into Gym benchmark JSONL.
 
 V-STaR (V-STaR-Bench/V-STaR on Hugging Face) is not downloaded automatically.
@@ -22,7 +26,9 @@ seconds), resized onto a 28-pixel grid, and sent as images, each preceded by
 the caption `Frame i at <t>s: `. Boxes are requested as integers on a 0-1000
 grid. Ground truth stays in `verifier_metadata` and never enters the prompt,
 except where the sub-task itself hands part of it to the model (the span for
-`spatial`, the boxes for `temporal_2`).
+`spatial`, the boxes for `temporal_2`). Each row carries a top-level `task_id`,
+`<vid>/<item index>/<sub-task>`, where the item index is the item's position in
+the annotation file (V-STaR items have no ID of their own).
 
 Frames are written once as JPEG files to VSTAR_FRAME_DIR (default
 `benchmarks/vstar_spatiotemporal/data/frames`) and referenced as file:// URLs,
@@ -38,6 +44,7 @@ import json
 import math
 import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 from urllib.parse import quote
 
@@ -48,6 +55,9 @@ ANNOTATION_FILE = "V_STaR_test.json"
 SUB_TASKS = ("vqa", "temporal", "spatial", "spatial_2", "temporal_2")
 SAMPLE_FPS = 1.0
 MAX_FRAMES = 16
+# Recorded with each video's extracted frames. Frames extracted under another value (or none) are extracted again.
+# 2: a video between 16 and 17 seconds long gets MAX_FRAMES frames spread over its whole length, as longer ones do.
+SAMPLING_VERSION = 2
 # Frames are resized so both sides are multiples of this many pixels.
 RESIZE_FACTOR = 28
 RESIZE_MIN_PIXELS = 4 * RESIZE_FACTOR * RESIZE_FACTOR
@@ -108,7 +118,7 @@ def sampled_frame_indices(total_frames: int, video_fps: float) -> list[int]:
     """Indices of the frames shown to the model: one per second, or MAX_FRAMES evenly spaced for a longer video."""
     import numpy as np
 
-    if int(total_frames / video_fps * SAMPLE_FPS) > MAX_FRAMES:
+    if total_frames / video_fps * SAMPLE_FPS > MAX_FRAMES:
         return [int(index) for index in np.linspace(0, total_frames - 1, MAX_FRAMES, dtype=int)]
     return list(range(0, total_frames, int(video_fps / SAMPLE_FPS)))[:MAX_FRAMES]
 
@@ -134,11 +144,12 @@ def extract_frames(video: Path) -> tuple[list[bytes], list[float]]:
     try:
         import cv2
     except ImportError as error:
-        # Gym's dependency overrides exclude OpenCV, so `prepare_dependencies` cannot install it.
+        # `gym eval prepare` runs this module in the benchmark's locked environment, which has OpenCV. Gym's own
+        # environment has none, so this is reached only when the module is run outside `gym eval prepare`.
         raise RuntimeError(
-            "V-STaR preparation decodes the videos with OpenCV, which Gym does not install. Install "
-            "opencv-python-headless into this environment yourself (from outside the Gym checkout, whose uv "
-            "overrides drop it), then run the preparation again."
+            "V-STaR preparation decodes the videos with OpenCV, which this environment does not have. Run "
+            "`gym eval prepare --benchmark vstar_spatiotemporal`, which uses the benchmark's locked environment, or "
+            "install opencv-python-headless at the version in benchmarks/vstar_spatiotemporal/uv.lock."
         ) from error
     from PIL import Image
 
@@ -167,21 +178,25 @@ def extract_frames(video: Path) -> tuple[list[bytes], list[float]]:
 
 
 def video_frames(vid: str, video: Path, frames_root: Path) -> tuple[list[Path], list[float]]:
-    """Paths and times of one video's frames, extracting them on first use."""
+    """Paths and times of one video's frames, extracting them on first use or when the sampling has changed."""
     directory = frames_root / vid
     meta_file = directory / "frames.json"
     if meta_file.is_file():
         meta = json.loads(meta_file.read_text(encoding="utf-8"))
         paths = [directory / name for name in meta["files"]]
-        if all(path.is_file() for path in paths):
+        if meta.get("sampling_version") == SAMPLING_VERSION and all(path.is_file() for path in paths):
             return paths, meta["times"]
+        # The new extraction may have fewer frames; a leftover file must not look like one of them.
+        meta_file.unlink()
     frames, times = extract_frames(video)
     directory.mkdir(parents=True, exist_ok=True)
     names = [f"{number:02d}.jpg" for number in range(1, len(frames) + 1)]
     for name, data in zip(names, frames):
         (directory / name).write_bytes(data)
     # Written last, so an interrupted extraction is redone.
-    meta_file.write_text(json.dumps({"files": names, "times": times}), encoding="utf-8")
+    meta_file.write_text(
+        json.dumps({"files": names, "times": times, "sampling_version": SAMPLING_VERSION}), encoding="utf-8"
+    )
     return [directory / name for name in names], times
 
 
@@ -292,6 +307,8 @@ def convert(
     prompt = prompt.replace(VIDEO_PAD, captions) if VIDEO_PAD in prompt else captions + prompt
     urls = [frame_url(frame, frames_root) for frame in frames]
     return {
+        # Stable while the annotation file is unchanged, and unique: two items on one video differ in their index.
+        "task_id": f"{item['vid']}/{index}/{sub_task}",
         "responses_create_params": {
             "input": [
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -347,15 +364,20 @@ def prepare() -> Path:
     OUTPUT_FPATH.parent.mkdir(parents=True, exist_ok=True)
     cache: dict[str, tuple[list[Path], list[float]]] = {}
     written = 0
-    with open(OUTPUT_FPATH, "w", encoding="utf-8") as out:
-        for index, item in enumerate(items):
-            vid = str(item["vid"])
-            if vid not in cache:
-                cache[vid] = video_frames(vid, videos[vid], frames_root)
-            frames, times = cache[vid]
-            for sub_task in SUB_TASKS:
-                out.write(json.dumps(convert(item, index, sub_task, frames, times, frames_root)) + "\n")
-                written += 1
+    # The rows are staged beside the destination and moved into place only when every video has succeeded, so the
+    # dataset path never holds a partial preparation and a failed run leaves an earlier complete file untouched.
+    with TemporaryDirectory(dir=OUTPUT_FPATH.parent) as staging:
+        staged = Path(staging) / OUTPUT_FPATH.name
+        with staged.open("w", encoding="utf-8") as out:
+            for index, item in enumerate(items):
+                vid = str(item["vid"])
+                if vid not in cache:
+                    cache[vid] = video_frames(vid, videos[vid], frames_root)
+                frames, times = cache[vid]
+                for sub_task in SUB_TASKS:
+                    out.write(json.dumps(convert(item, index, sub_task, frames, times, frames_root)) + "\n")
+                    written += 1
+        staged.replace(OUTPUT_FPATH)
     print(
         f"Wrote {written} tasks ({len(items)} items x {len(SUB_TASKS)} sub-tasks, {len(cache)} videos) to {OUTPUT_FPATH}"
     )

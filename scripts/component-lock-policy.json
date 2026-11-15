@@ -1,4 +1,9 @@
 {
+  "benchmarks/vstar_spatiotemporal": {
+    "override-dependencies": [
+      "opencv-python-headless==5.0.0.93"
+    ]
+  },
   "environment_servers/nemo_user_sim": {
     "override-dependencies": [
       "pyarrow>=25.0.1,<26"

@@ -1,5 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# The judge prompts, temporal_iou, box_iou, spatial_scores, parse_judge_score, the span regex in parse_span and
+# balance_brackets adapt V-STaR's evaluation code, from a repository that declares no license:
+# https://github.com/V-STaR-Bench/V-STaR/blob/1894682b15be0a0c0c5ab24be6e8252743cd6c2f/eval.py
+# https://github.com/V-STaR-Bench/V-STaR/blob/1894682b15be0a0c0c5ab24be6e8252743cd6c2f/inference_demo.py
 """V-STaR (video spatio-temporal reasoning) verifier, frames-as-images protocol with 0-1000 grid boxes.
 
 Every V-STaR item is asked as five independent tasks (`sub_task` in the verifier metadata):
@@ -16,7 +20,8 @@ reward is 1.0 for a VQA rating of 2 or 3 (else 0.0), the temporal IoU, or the me
 
 The benchmark metrics are defined per item, not per task, so `compute_metrics` folds the five tasks of an item back
 together. As in the V-STaR evaluation, an item whose VQA answer is empty contributes nothing to the temporal and
-spatial means, and still counts in the denominator of the overall VQA accuracy. For each chain k:
+spatial means, and still counts in the denominator of the overall VQA accuracy. An item whose VQA task has no scored
+rollout (Gym masks it when the judge call fails) was not measured and is left out of every metric. For each chain k:
 
     AM_k  = mean(VQA accuracy, temporal mIoU_k, spatial mIoU_k)
     LGM_k = -mean(log(1 - VQA accuracy), log(1 - temporal mIoU_k), log(1 - spatial mIoU_k))
@@ -34,9 +39,9 @@ import re
 from pathlib import Path
 from typing import Any, ClassVar, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ConfigDict, Field
 
-from nemo_gym.config import ModelServerRef
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, ModelServerRef
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -47,9 +52,10 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JudgeError, VerifierFixture, call_judge
+from resources_servers.vstar_spatiotemporal.task_data import SUB_TASKS, VstarBox
+from resources_servers.vstar_spatiotemporal.task_data import VerifierMetadata as VstarVerifierMetadata
 
 
-SUB_TASKS = ("vqa", "temporal", "spatial", "spatial_2", "temporal_2")
 IOU_THRESHOLDS = (0.1, 0.3, 0.5, 0.7, 0.9)
 ANSWER_PATTERN = re.compile(r"<answer>(.*?)</answer>", re.DOTALL)
 
@@ -95,35 +101,6 @@ KEY_METRICS = (
 # ---------------------------------------------------------------------------
 
 
-class VstarBox(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    # The whole second this box is annotated at.
-    timestamp: int
-    xmin: float
-    ymin: float
-    xmax: float
-    ymax: float
-
-
-class VstarVerifierMetadata(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
-    # Position of the item in the annotation file; the five tasks of one item share it.
-    item_index: int
-    sub_task: str = Field(pattern="^(vqa|temporal|spatial|spatial_2|temporal_2)$")
-    domain: Optional[str] = None
-    fps: float = Field(gt=0)
-    frame_count: int = Field(ge=0)
-    width: float = Field(gt=0)
-    height: float = Field(gt=0)
-    question: str
-    answer: str
-    # Annotated [start, end] of the event, in seconds.
-    timestamps: list[float] = Field(min_length=2, max_length=2)
-    bboxes: list[VstarBox]
-
-
 class VstarResourcesServerConfig(BaseResourcesServerConfig):
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
@@ -150,7 +127,7 @@ class VstarVerifyResponse(BaseVerifyResponse):
     # Whether the reply held something to score: a non-empty answer, a time span, or at least one box.
     parsed: bool
     # vqa: the answer text sent to the judge, whether it was non-empty, the judge's reply and its rating (-1 when the
-    # reply was not a single integer). An empty model reply is rated 0 without calling the judge.
+    # reply was not a single integer from 0 to 3). An empty model reply is rated 0 without calling the judge.
     answer_vqa: Optional[str] = None
     answered: Optional[bool] = None
     answer_tag_found: Optional[bool] = None
@@ -180,9 +157,8 @@ def answer_text(text: str) -> str:
 def parse_span(text: str) -> list[float]:
     """[start, end] in seconds, or [] unless the answer holds exactly two numbers. `m:ss` times count as seconds."""
     text = answer_text(text)
-    for stamp in re.findall(r"(\d+:\d+)", text):
-        minutes, seconds = map(int, stamp.split(":"))
-        text = text.replace(stamp, f"<t>{minutes * 60 + seconds}</t>s")
+    # Each match is converted where it stands: replacing by value would also rewrite the tail of `11:05` for `1:05`.
+    text = re.sub(r"(\d+):(\d+)", lambda match: f"<t>{int(match.group(1)) * 60 + int(match.group(2))}</t>s", text)
     numbers = re.findall(r"\b\d+(?:\.\d+)?\b", text)
     return [float(numbers[0]), float(numbers[1])] if len(numbers) == 2 else []
 
@@ -329,11 +305,12 @@ def spatial_scores(boxes: list[VstarBox], predicted: Optional[dict[str, list[flo
 
 
 def parse_judge_score(text: str) -> int:
-    """The judge's rating, or -1 when its reply is not a single integer."""
+    """The judge's rating, or -1 when its reply is not a single integer from 0 to 3."""
     try:
-        return int(str(text).strip())
+        score = int(str(text).strip())
     except (ValueError, TypeError):
         return -1
+    return score if 0 <= score <= 3 else -1
 
 
 def score_reply(text: str, metadata: VstarVerifierMetadata) -> dict[str, Any]:
@@ -454,6 +431,9 @@ def aggregate_metrics(rollouts: list[dict[str, Any]]) -> dict[str, Any]:
     for rollout in rollouts:
         if rollout.get("sub_task") in SUB_TASKS and rollout.get("item_index") is not None:
             items.setdefault(rollout["item_index"], {})[rollout["sub_task"]] = rollout
+    # A VQA task with no scored rollout (Gym masks it when the judge call fails) leaves its item unmeasured: drop
+    # the item instead of scoring it as a wrong answer and dropping its temporal and spatial scores.
+    items = {index: tasks for index, tasks in items.items() if "vqa" in tasks}
     if not items:
         return {}
 
@@ -522,11 +502,13 @@ def aggregate_metrics(rollouts: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def aggregate_repeats(tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
-    """Metrics of each repeat (the i-th rollout of every task), averaged over the repeats that report them."""
-    repeats = max((len(rollouts) for rollouts in tasks), default=0)
-    per_repeat = [
-        aggregate_metrics([rollouts[index] for rollouts in tasks if index < len(rollouts)]) for index in range(repeats)
-    ]
+    """Metrics of each repeat (the rollouts that share a rollout index), averaged over the repeats that report them."""
+    repeats: dict[int, list[dict[str, Any]]] = {}
+    for rollouts in tasks:
+        for position, rollout in enumerate(rollouts):
+            # A failed or masked rollout leaves a gap in its task's list, so match repeats by index, not position.
+            repeats.setdefault(rollout.get(ROLLOUT_INDEX_KEY_NAME, position), []).append(rollout)
+    per_repeat = [aggregate_metrics(repeats[index]) for index in sorted(repeats)]
     keys = list(dict.fromkeys(key for metrics in per_repeat for key in metrics))
     return {key: _mean([metrics[key] for metrics in per_repeat if key in metrics]) for key in keys}
 

@@ -2,8 +2,9 @@
 config_paths:
 - resources_servers/vstar_spatiotemporal/configs/vstar_spatiotemporal.yaml
 
-# Rates the "what" answers. V-STaR uses Qwen2.5-72B-Instruct; set JUDGE_BASE_URL (and JUDGE_API_KEY, JUDGE_MODEL)
-# to an OpenAI-compatible endpoint serving it. Scores are comparable only between runs with the same judge.
+# Rates the "what" answers. V-STaR samples Qwen2.5-72B-Instruct; this benchmark runs it at temperature 0. Set
+# JUDGE_BASE_URL (and JUDGE_API_KEY, JUDGE_MODEL) to an OpenAI-compatible endpoint serving it. Scores are comparable
+# only between runs with the same judge.
 judge_model:
   responses_api_models:
     vllm_model:
@@ -35,9 +36,9 @@ vstar_spatiotemporal_resources_server:
         type: benchmark
         jsonl_fpath: benchmarks/vstar_spatiotemporal/data/vstar_spatiotemporal_benchmark.jsonl
         prepare_script: benchmarks/vstar_spatiotemporal/prepare.py
-        # prepare.py resizes the frames with Pillow. It also needs OpenCV to decode the videos, which Gym's
-        # dependency overrides exclude, so it has to be installed by hand (see the README).
-        prepare_dependencies: [pillow, numpy]
+        # Locked preparation environment: Pillow, NumPy and OpenCV, which scripts/component-lock-policy.json
+        # re-enables for this project only.
+        prepare_project: benchmarks/vstar_spatiotemporal
         num_repeats: 1
 vstar_spatiotemporal_environment_server:
   environment_servers:

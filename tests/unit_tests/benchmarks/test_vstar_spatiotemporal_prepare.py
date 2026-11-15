@@ -9,8 +9,10 @@ import pytest
 
 from benchmarks.vstar_spatiotemporal import prepare
 from benchmarks.vstar_spatiotemporal.tests import synthetic
-from nemo_gym.environment import load_manifest, resolve_manifest_config_path
+from nemo_gym.data.task_data import TaskDataValidator, find_server_dir, load_task_data_schema
+from nemo_gym.environment.manifest import load_manifest, resolve_manifest_config_path
 from nemo_gym.environment.validation import _mirror_differences, _resolve_manifest_composition
+from nemo_gym.eval.eval_plan import PlanBenchmark, PlanGym, build_eval_plan
 
 
 BENCHMARK_DIR = Path(prepare.__file__).parent
@@ -70,6 +72,8 @@ def test_manifest_mirrors_the_resolved_config() -> None:
         (150, 30.0, [0, 30, 60, 90, 120]),  # 5 seconds: one frame per second
         (91, 29.97, [0, 29, 58, 87]),  # the step is the frame rate rounded down
         (480, 30.0, list(range(0, 480, 30))),  # exactly 16 seconds
+        # 16.5 s: longer than 16 seconds, so already spread out, up to the last frame.
+        (495, 30.0, [0, 32, 65, 98, 131, 164, 197, 230, 263, 296, 329, 362, 395, 428, 461, 494]),
         (510, 30.0, [0, 33, 67, 101, 135, 169, 203, 237, 271, 305, 339, 373, 407, 441, 475, 509]),  # 17 s: spread out
         (20, 30.0, [0]),
     ],
@@ -106,6 +110,9 @@ def test_every_item_becomes_five_tasks_in_annotation_order(dataset: Path, decode
 
 def test_frames_are_interleaved_with_their_captions_and_ground_truth_stays_out(dataset: Path) -> None:
     row = _rows()[0]
+    # The task ID is a row field of its own: nothing but `responses_create_params` is sent to the model.
+    assert list(row) == ["task_id", "responses_create_params", "verifier_metadata"]
+    assert list(row["responses_create_params"]) == ["input"]
     system, user = row["responses_create_params"]["input"]
 
     assert system == {"role": "system", "content": prepare.SYSTEM_PROMPT}
@@ -209,6 +216,95 @@ def test_extracted_frames_are_reused(dataset: Path, decoded: list[str]) -> None:
     assert decoded == ["clip one.mp4", "clip&two.mp4", "clip&two.mp4"]
 
 
+def test_frames_extracted_under_an_earlier_sampling_are_extracted_again(dataset: Path, decoded: list[str]) -> None:
+    prepare.prepare()
+    meta_file = dataset / "out" / "frames" / "clip one" / "frames.json"
+    meta = json.loads(meta_file.read_text())
+    assert meta["sampling_version"] == prepare.SAMPLING_VERSION
+
+    # Frames written before the sampling was recorded carry no version.
+    del meta["sampling_version"]
+    meta_file.write_text(json.dumps(meta))
+    prepare.prepare()
+    assert decoded == ["clip one.mp4", "clip&two.mp4", "clip one.mp4"]
+    assert json.loads(meta_file.read_text())["sampling_version"] == prepare.SAMPLING_VERSION
+
+    # The frames are current again, so nothing more is decoded.
+    prepare.prepare()
+    assert decoded == ["clip one.mp4", "clip&two.mp4", "clip one.mp4"]
+
+
+def test_the_jsonl_is_published_only_after_every_video_succeeded(
+    dataset: Path, decoded: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    extract_frames = prepare.extract_frames
+
+    def fail_on_the_second_video(video: Path) -> tuple[list[bytes], list[float]]:
+        if video.name == "clip&two.mp4":
+            raise ValueError("Could not open video")
+        return extract_frames(video)
+
+    # With no earlier output, a failed preparation leaves the dataset path absent.
+    monkeypatch.setattr(prepare, "extract_frames", fail_on_the_second_video)
+    with pytest.raises(ValueError, match="Could not open video"):
+        prepare.prepare()
+    assert not prepare.OUTPUT_FPATH.exists()
+    assert [path.name for path in prepare.OUTPUT_FPATH.parent.iterdir()] == ["frames"]
+
+    # Without the failure every item gets its five rows, and the first video's frames are not decoded again.
+    monkeypatch.setattr(prepare, "extract_frames", extract_frames)
+    assert len(_rows()) == 15
+    assert decoded == ["clip one.mp4", "clip&two.mp4"]
+
+    # With an earlier complete output, a failed preparation leaves its bytes unchanged.
+    complete = prepare.OUTPUT_FPATH.read_bytes()
+    (dataset / "out" / "frames" / "clip&two" / "frames.json").unlink()
+    monkeypatch.setattr(prepare, "extract_frames", fail_on_the_second_video)
+    with pytest.raises(ValueError, match="Could not open video"):
+        prepare.prepare()
+    assert prepare.OUTPUT_FPATH.read_bytes() == complete
+    assert sorted(path.name for path in prepare.OUTPUT_FPATH.parent.iterdir()) == [
+        "frames",
+        prepare.OUTPUT_FPATH.name,
+    ]
+
+
+def test_every_task_has_its_own_id_that_does_not_depend_on_row_order(dataset: Path) -> None:
+    rows = _rows()
+
+    def plan(plan_rows: list[dict]) -> dict[str, str]:
+        built = build_eval_plan(
+            plan_rows,
+            benchmark=PlanBenchmark(name="vstar_spatiotemporal", config_paths=[]),
+            taskset="vstar_spatiotemporal",
+            gym=PlanGym(version="0", commit=None),
+        )
+        return {task.task_id.task_id: task.digest for task in built.tasks}
+
+    digests = plan(rows)
+
+    # The two items on `clip one` and their five sub-tasks stay apart.
+    assert [row["task_id"] for row in rows] == [
+        f"{vid}/{index}/{sub_task}"
+        for index, vid in enumerate(["clip one", "clip one", "clip&two"])
+        for sub_task in prepare.SUB_TASKS
+    ]
+    assert len(digests) == 15
+    assert plan(rows[::-1]) == digests
+
+
+def test_prepared_rows_match_the_resources_server_schema(dataset: Path) -> None:
+    server_dir = find_server_dir("vstar_spatiotemporal")
+    validator = TaskDataValidator(
+        server_name="vstar_spatiotemporal", adapter=load_task_data_schema(server_dir), dataset_fpath="prepared"
+    )
+
+    for index, row in enumerate(_rows()):
+        validator.validate_row(index, row)
+
+    assert validator.report.clean, validator.report.summary()
+
+
 def test_frame_urls_can_point_at_the_path_the_model_server_sees(
     dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -278,7 +374,7 @@ def test_a_missing_opencv_is_explained(tmp_path: Path, monkeypatch: pytest.Monke
     # A None entry makes `import cv2` raise ImportError whether or not OpenCV is installed.
     monkeypatch.setitem(sys.modules, "cv2", None)
 
-    with pytest.raises(RuntimeError, match="Install opencv-python-headless"):
+    with pytest.raises(RuntimeError, match="gym eval prepare --benchmark vstar_spatiotemporal"):
         prepare.extract_frames(tmp_path / "clip.mp4")
 
 
@@ -287,6 +383,7 @@ def test_committed_example_rows_are_the_synthetic_item() -> None:
 
     assert [row["verifier_metadata"]["sub_task"] for row in rows] == list(prepare.SUB_TASKS)
     assert {row["verifier_metadata"]["vid"] for row in rows} == {synthetic.EXAMPLE_ITEM["vid"]}
+    assert [row["task_id"] for row in rows] == [f"synthetic_0001/0/{sub_task}" for sub_task in prepare.SUB_TASKS]
     assert all(
         part["image_url"].startswith("data:image/png;base64,")
         for row in rows

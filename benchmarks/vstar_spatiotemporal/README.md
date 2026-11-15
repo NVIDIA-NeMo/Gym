@@ -7,7 +7,7 @@ visual-search benchmark V\*.
 
 - Integration profile: `custom-gym-verifier`
 - Scorer: [`resources_servers/vstar_spatiotemporal`](../../resources_servers/vstar_spatiotemporal/README.md)
-- Harness: `simple_agent`, single turn, no tools
+- Harness: `simple_agent`, single turn, no tools, through the `legacy_agent` relay (see [Limitations](#limitations))
 - Judge: an LLM rates the "what" answers (see [Run conditions](#run-conditions))
 
 ## Provenance
@@ -21,6 +21,14 @@ visual-search benchmark V\*.
 
 No items are filtered. `prepare.py` refuses to run if the annotation file or any annotated video is missing. The
 dataset is not downloaded automatically.
+
+Code and prompts adapted from other projects (the same record is in the header of each file):
+
+| Here | Source | License |
+| --- | --- | --- |
+| `resources_servers/vstar_spatiotemporal/app.py`: the judge prompts (verbatim), `temporal_iou`, `box_iou`, `spatial_scores`, `parse_judge_score` | [`eval.py`](https://github.com/V-STaR-Bench/V-STaR/blob/1894682b15be0a0c0c5ab24be6e8252743cd6c2f/eval.py) of V-STaR at commit `1894682b` | the repository declares none |
+| `app.py`: the number pattern in `parse_span`, `balance_brackets`; `prepare.py`: the question wording | [`inference_demo.py`](https://github.com/V-STaR-Bench/V-STaR/blob/1894682b15be0a0c0c5ab24be6e8252743cd6c2f/inference_demo.py) of V-STaR at commit `1894682b` | the repository declares none |
+| `prepare.py`: `resized_size` and its constants | `smart_resize` in [`vision_process.py`](https://github.com/QwenLM/Qwen2.5-VL/blob/a30e36facd0a5131d9ed59e93210c7ac5de75adb/qwen-vl-utils/src/qwen_vl_utils/vision_process.py) of qwen-vl-utils at commit `a30e36fa` | Apache-2.0 |
 
 ## Task contract
 
@@ -50,11 +58,18 @@ multiples of 28 pixels (close to the original size) and stored as JPEG at qualit
 Ground truth is in `verifier_metadata` only, apart from what a sub-task hands to the model by design (the table's
 "Given" column).
 
+Each row has a top-level `task_id`, `<vid>/<item index>/<sub-task>` (for example `abc123/12/spatial`). V-STaR items
+have no ID of their own, so the item index is the item's position in `V_STaR_test.json`, the same number as
+`verifier_metadata.item_index`. The ID is stable for as long as that file is unchanged, and it is not part of the
+prompt.
+
 ### How frames reach the model
 
 The five tasks of an item, and all items of a video, share the same frames. Each frame is referenced by a `file://`
-URL (73 MB of JSONL; the frames take 1.1 GB). This needs a model server that reads local files, for example vLLM started with
-`--allowed-local-media-path <frames dir>`.
+URL (73 MB of JSONL; the frames take 1.1 GB). This needs a model server that reads local files, for example vLLM
+started with `--allowed-local-media-path <frames dir>`. The `opencode_agent` and `pi_agent` harnesses take prompt
+images only as data URLs, so they refuse these rows with a 422. With `VSTAR_EMBED_FRAMES=1` they accept the rows but
+send the frames apart from their `Frame i at <t>s:` captions.
 
 | Variable | Effect |
 | --- | --- |
@@ -63,7 +78,11 @@ URL (73 MB of JSONL; the frames take 1.1 GB). This needs a model server that rea
 | `VSTAR_FRAME_URL_ROOT` | Path at which the model server sees the frame directory, when it differs |
 | `VSTAR_EMBED_FRAMES=1` | Embed frames as data URLs, for endpoints that cannot read local files |
 
-Frames already extracted are reused, so `prepare.py` can be re-run to change only the URLs.
+Frames already extracted are reused, so `prepare.py` can be re-run to change only the URLs. Each video's frames
+record the sampling rule they were extracted under (`sampling_version` in `frames.json`); frames from another rule,
+or from before the rule was recorded, are extracted again. The JSONL is written to a temporary file and moved into
+place only after every video has succeeded, so a failed preparation leaves no partial file and does not touch an
+earlier complete one.
 
 ## Scoring
 
@@ -92,8 +111,12 @@ The frames-as-images protocol this benchmark reproduces was run with temperature
 reasoning enabled and a 32,768-token output budget; pass these through `responses_create_params` when comparing
 against such results.
 
-The V-STaR evaluation rates the "what" answers with Qwen2.5-72B-Instruct at temperature 0. The benchmark config
-declares a `judge_model` server for this; point it at an OpenAI-compatible endpoint serving that model:
+The V-STaR evaluation rates the "what" answers with Qwen2.5-72B-Instruct, sampling with the model's default settings
+(temperature 0.7, top-p 0.8, top-k 20, repetition penalty 1.05): its `eval.py` calls `generate` with no sampling
+arguments. This benchmark judges at temperature 0 instead, with the same prompts and a 512-token limit, so that a
+rating does not change from one run to the next. The judge receives the text inside the reply's `<answer>` tags, or
+the whole reply when it has none. The benchmark config declares a `judge_model` server for this; point it at an
+OpenAI-compatible endpoint serving that model:
 
 | Variable | Effect |
 | --- | --- |
@@ -102,6 +125,10 @@ declares a `judge_model` server for this; point it at an OpenAI-compatible endpo
 | `JUDGE_API_KEY` | API key, if the endpoint needs one |
 
 A different judge gives scores that are not comparable; record the judge with any reported score.
+
+When a judge call fails (after Gym's retries), Gym masks that VQA rollout. Its item is then left out of every
+V-STaR metric instead of counting as a wrong answer, and Gym reports the number of masked rollouts beside the
+scores. A judge reply that is not a single integer from 0 to 3 is a completed call: it rates the answer as wrong.
 
 ## Prepare and run
 
@@ -113,13 +140,9 @@ gym eval run --benchmark vstar_spatiotemporal --model-type vllm_model --split be
     --output results/vstar_spatiotemporal_smoke.jsonl
 ```
 
-`prepare.py` decodes the videos with OpenCV (a build that reads H.264). Gym's dependency overrides exclude
-OpenCV, so `gym eval prepare` cannot install it and stops with an explanation if it is missing. Install it into the
-environment first, from a directory outside the Gym checkout so that the overrides do not apply:
-
-```bash
-(cd /tmp && uv pip install --python /path/to/gym/.venv/bin/python opencv-python-headless)
-```
+`prepare.py` decodes the videos with OpenCV. `gym eval prepare` installs OpenCV into its own locked environment
+(`pyproject.toml` and `uv.lock` in this directory pin `opencv-python-headless` 5.0.0.93); Gym's own environment
+stays without it.
 
 Decoding the 732 videos takes about 20 minutes.
 
@@ -127,6 +150,18 @@ Decoding the 732 videos takes about 20 minutes.
 
 - An LLM judge decides one third of the headline metric, so scores are comparable only between runs that use the
   same judge.
-- A limited run (`--limit`) that does not cover all five tasks of an item scores the missing ones as 0.
-- Decoded pixels can differ slightly between OpenCV builds.
+- A limited run (`--limit`) that does not cover all five tasks of an item scores the missing ones as 0. The same
+  holds for a "when" or "where" rollout that failed. An item with no scored VQA rollout is left out instead.
+- Decoded pixels can differ slightly between OpenCV builds, so the preparation environment pins one. Frames
+  extracted with another build (for example one installed by hand) are not replaced until they are extracted again.
 - The example rows of the resources server are synthetic (a moving rectangle) and contain no V-STaR footage.
+- Scores are not comparable with published V-STaR results. V-STaR's reference inference (`inference_demo.py`)
+  samples one frame per second. Here a video longer than 16 seconds gets 16 frames. From 60 seconds of video on,
+  at most about one in four whole seconds of the video has a frame within half a second. The judge also runs at
+  temperature 0 here and is sampled there (see [Run conditions](#run-conditions)).
+- The benchmark runs `simple_agent` through the `legacy_agent` relay, which Gym keeps for Agent Servers that have
+  not moved to the Environment Server protocols. On it, a session harness such as `opencode_agent` cannot run the
+  benchmark. Moving to `single_agent_turn_legacy` is a configuration-only change (no tool grant, because the
+  verifier has no tools), but the reported scores were measured on the relay, so the switch waits for a run that
+  shows the rewards match. Those harnesses also need the frames embedded (see
+  [How frames reach the model](#how-frames-reach-the-model)).

@@ -6,7 +6,7 @@ vstar_spatiotemporal_resources_server:
       verified: false
       description: V-STaR video spatio-temporal reasoning verifier for frames-as-images prompts with 0-1000 grid boxes
       value: Rate the "what" answer with an LLM judge, score the "when" span by temporal IoU and the "where" boxes by per-second IoU, and fold each item's five tasks into the V-STaR mAM and mLGM
-      # Rates the VQA answers; the V-STaR evaluation uses Qwen2.5-72B-Instruct at temperature 0.
+      # Rates the VQA answers. V-STaR's evaluation samples Qwen2.5-72B-Instruct; this config runs it at temperature 0.
       judge_model_server:
         type: responses_api_models
         name: policy_model

@@ -7,9 +7,11 @@ import math
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from nemo_gym.client import ServerClient
 from nemo_gym.verification import JudgeError, exercise_verifier_fixture
+from resources_servers.vstar_spatiotemporal.task_data import TaskData
 
 from .. import app as app_module
 from ..app import (
@@ -153,6 +155,9 @@ def test_answer_text_is_the_first_answer_tag_or_the_whole_reply() -> None:
         ("<answer>From <t>2</t>s to <t>6.5</t>s</answer>", [2.0, 6.5]),
         ("From <t>2</t>s to <t>6</t>s", [2.0, 6.0]),
         ("<answer>From 1:05 to 2:10</answer>", [65.0, 130.0]),  # m:ss is read as seconds
+        # Each time is converted where it stands: `1:05` is also the tail of `11:05`.
+        ("<answer>From 1:05 to 11:05</answer>", [65.0, 665.0]),
+        ("<answer>From 11:05 to 1:05</answer>", [665.0, 65.0]),
         ("<answer>[3, 4]</answer>", [3.0, 4.0]),
         ("<answer>6 then 2</answer>", [6.0, 2.0]),  # kept in the order given
         ("<think>frames 1 2 3</think><answer>From <t>2</t>s to <t>6</t>s</answer>", [2.0, 6.0]),
@@ -297,11 +302,27 @@ def test_each_sub_task_has_its_own_reward() -> None:
     unreadable = score_reply("<answer>later</answer>", _metadata("temporal"))
     assert (unreadable["reward"], unreadable["parsed"], unreadable["predicted_span"]) == (0.0, False, [])
 
+    minutes = score_reply("<answer>From 1:05 to 11:05</answer>", _metadata("temporal", timestamps=[65.0, 665.0]))
+    assert (minutes["reward"], minutes["predicted_span"]) == (1.0, [65.0, 665.0])
+
 
 @pytest.mark.parametrize(
-    ("reply", "score"), [("3", 3), (" 2\n", 2), ("0", 0), ("2.0", -1), ("Rating: 3", -1), ("", -1)]
+    ("reply", "score"),
+    [
+        ("3", 3),
+        (" 2\n", 2),
+        ("1", 1),
+        ("0", 0),
+        ("2.0", -1),
+        ("Rating: 3", -1),
+        ("", -1),
+        # An integer off the 0-3 scale is not a rating.
+        ("4", -1),
+        ("100", -1),
+        ("-2", -1),
+    ],
 )
-def test_a_judge_reply_must_be_a_single_integer(reply: str, score: int) -> None:
+def test_a_judge_reply_must_be_a_single_integer_from_0_to_3(reply: str, score: int) -> None:
     assert parse_judge_score(reply) == score
 
 
@@ -326,8 +347,10 @@ def test_vqa_answers_are_rated_by_the_judge(server: VstarResourcesServer) -> Non
     ]
 
 
-@pytest.mark.parametrize(("judge_reply", "score"), [("1", 1), ("0", 0), ("I think 3", -1)])
-def test_low_or_unreadable_ratings_earn_nothing(server: VstarResourcesServer, judge_reply: str, score: int) -> None:
+@pytest.mark.parametrize(("judge_reply", "score"), [("1", 1), ("0", 0), ("I think 3", -1), ("4", -1), ("100", -1)])
+def test_low_unreadable_or_out_of_range_ratings_earn_nothing(
+    server: VstarResourcesServer, judge_reply: str, score: int
+) -> None:
     result, _ = _judged(server, _request("vqa", "a stick"), judge_reply)
 
     assert (result.reward, result.vqa_score, result.answered) == (0.0, score, True)
@@ -452,6 +475,54 @@ def test_items_with_missing_tasks_are_still_aggregated() -> None:
     assert aggregate_metrics([{"reward": 1.0}]) == {}
 
 
+def test_an_item_whose_vqa_task_was_masked_is_left_out() -> None:
+    # Item 1's VQA task failed at the judge, so Gym masked it and only its other four tasks reach compute_metrics.
+    metrics = aggregate_metrics(_item(0, 3, 0.8, 0.6, 0.4, 0.2) + _item(1, 3, 0.2, 0.0, 0.0, 0.0)[1:])
+
+    assert (metrics["items"], metrics["VQA_acc"]) == (1, 1.0)
+    assert metrics["temporal_mIoU"] == pytest.approx(0.8)
+    # The same metrics as a run without that item, and none at all when no item has a scored VQA task.
+    assert metrics == aggregate_metrics(_item(0, 3, 0.8, 0.6, 0.4, 0.2))
+    assert aggregate_metrics(_item(1, 3, 0.2, 0.0, 0.0, 0.0)[1:]) == {}
+
+
+def test_repeats_are_matched_by_rollout_index(server: VstarResourcesServer) -> None:
+    first = [{**rollout, "_ng_rollout_index": 0} for rollout in _item(0, None, 0.8, 0.8, 0.8, 0.8)]
+    second = [{**rollout, "_ng_rollout_index": 1} for rollout in _item(0, 3, 0.2, 0.2, 0.2, 0.2)]
+    # The first repeat's VQA rollout was masked, so the VQA task holds only the second repeat's rollout.
+    tasks = [[second[0]]] + [[a, b] for a, b in zip(first[1:], second[1:])]
+
+    metrics = server.compute_metrics(tasks)
+
+    # The second repeat's right answer is never joined with the first repeat's temporal answer.
+    assert metrics["VQA&Temp_1"] == 0.0
+
+
+def test_a_missing_rollout_does_not_shift_later_repeats(server: VstarResourcesServer) -> None:
+    def repeat(index: int, vqa: int, score: float) -> list[dict]:
+        return [
+            {**rollout, "_ng_task_index": task, "_ng_rollout_index": index}
+            for task, rollout in enumerate(_item(0, vqa, score, score, score, score))
+        ]
+
+    first, second = repeat(0, 3, 0.0), repeat(1, 0, 1.0)
+    # The first repeat's VQA rollout is missing, so it was not measured; the metrics are the second repeat's own.
+    tasks = [[second[0]]] + [[a, b] for a, b in zip(first[1:], second[1:])]
+
+    metrics = server.compute_metrics(tasks)
+
+    # Joined by position, the second repeat's wrong answer would sit beside the first repeat's scores of 0: mAM 0.
+    assert metrics["mAM"] == pytest.approx(2 / 3)
+    assert (metrics["VQA_acc"], metrics["temporal_mIoU"], metrics["spatial_2_mIoU"]) == (0.0, 1.0, 1.0)
+    assert metrics == aggregate_metrics(second)
+    # The order of the rollouts inside a task does not matter when they carry their repeat index.
+    assert server.compute_metrics([rollouts[::-1] for rollouts in tasks]) == metrics
+    # With both repeats complete, each is aggregated on its own whatever the order.
+    complete = [[a, b] for a, b in zip(first, second)]
+    assert server.compute_metrics(complete)["VQA_acc"] == 0.5
+    assert server.compute_metrics([rollouts[::-1] for rollouts in complete]) == server.compute_metrics(complete)
+
+
 def test_repeats_are_aggregated_separately_and_averaged(server: VstarResourcesServer) -> None:
     first = _item(0, 3, 1.0, 0.5, 0.5, 0.5)
     second = _item(0, 0, 0.0, 0.5, 0.5, 0.5)
@@ -477,3 +548,38 @@ def test_repeats_are_aggregated_separately_and_averaged(server: VstarResourcesSe
             "parsed_rate_mean",
         )
     }
+
+
+# ---------------------------------------------------------------------------
+# Task-data schema
+# ---------------------------------------------------------------------------
+
+
+def test_the_row_schema_and_the_verifier_share_one_declaration() -> None:
+    assert issubclass(TaskData, VstarVerifierMetadata)
+    assert set(TaskData.model_fields) - set(VstarVerifierMetadata.model_fields) == {"task_id"}
+    # `vid`, `frame_times` and the row's `task_id` are optional; everything else in METADATA is required.
+    for model in (TaskData, VstarVerifierMetadata):
+        assert model.model_validate(METADATA).vid is None
+    row = TaskData.model_validate({**METADATA, "vid": "clip", "frame_times": [0.0, 1.0], "task_id": "clip/7/spatial"})
+    assert (row.vid, row.frame_times, row.task_id) == ("clip", [0.0, 1.0], "clip/7/spatial")
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {key: value for key, value in METADATA.items() if key != "fps"},
+        {**METADATA, "sub_task": "counting"},
+        {**METADATA, "bboxes": [{"timestamp": 2, "xmin": 100, "ymin": 50, "xmax": 300}]},
+        {**METADATA, "bboxes": [{"timestamp": "soon", "xmin": 100, "ymin": 50, "xmax": 300, "ymax": 150}]},
+        {**METADATA, "timestamps": [2.0]},
+    ],
+)
+def test_malformed_metadata_fails_the_schema_and_the_verifier_alike(metadata: dict) -> None:
+    for model in (TaskData, VstarVerifierMetadata):
+        with pytest.raises(ValidationError):
+            model.model_validate(metadata)
+    with pytest.raises(ValidationError):
+        VstarVerifyRequest.model_validate(
+            {"responses_create_params": {"input": "watch"}, "response": _response("x"), "verifier_metadata": metadata}
+        )
