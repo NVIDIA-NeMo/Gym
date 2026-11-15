@@ -154,6 +154,7 @@ LIMIT_SCENARIOS = [
     ("output_tool", NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED),
     ("output_partial_tool", NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED),
 ]
+PARTIAL_SCENARIOS = [*LIMIT_SCENARIOS, ("text_only", NOOATerminationReason.INVALID_POLICY_OUTPUT)]
 
 
 def assert_partial_evidence(response: NeMoGymResponse, *, scenario: str) -> None:
@@ -162,7 +163,7 @@ def assert_partial_evidence(response: NeMoGymResponse, *, scenario: str) -> None
     assert any(item.type == "reasoning" for item in response.output)
     assert any(item.type == "message" and item.content[0].text == "working on the task" for item in response.output)
     calls = [item for item in response.output if item.type == "function_call" and item.call_id == "call-1"]
-    if scenario == "output_text":
+    if scenario in {"output_text", "text_only"}:
         assert not calls
     else:
         assert len(calls) == 1
@@ -172,14 +173,14 @@ def assert_partial_evidence(response: NeMoGymResponse, *, scenario: str) -> None
     if scenario.startswith("output_"):
         assert response.incomplete_details.reason == "max_output_tokens"
         assert not any(item.type == "function_call_output" and item.call_id == "call-1" for item in response.output)
-    else:
+    elif scenario != "text_only":
         assert any(
             item.type == "function_call_output" and item.call_id == "call-1" and "partial progress" in item.output
             for item in response.output
         )
 
 
-@pytest.mark.parametrize(("scenario", "reason"), LIMIT_SCENARIOS)
+@pytest.mark.parametrize(("scenario", "reason"), PARTIAL_SCENARIOS)
 async def test_real_codeact_response_retains_partial_evidence_without_verification(
     scenario: str, reason: NOOATerminationReason, tmp_path: Path
 ) -> None:
@@ -200,7 +201,7 @@ async def test_real_codeact_response_retains_partial_evidence_without_verificati
 
 @pytest.mark.parametrize(
     ("scenario", "reason"),
-    [*LIMIT_SCENARIOS, ("output_then_success", None), ("output_then_outage", None), ("model_outage", None)],
+    [*PARTIAL_SCENARIOS, ("output_then_success", None), ("output_then_outage", None), ("model_outage", None)],
 )
 async def test_real_codeact_environment_verifies_partial_response_once(
     scenario: str, reason: NOOATerminationReason | None, tmp_path: Path
@@ -254,7 +255,7 @@ async def test_real_codeact_environment_verifies_partial_response_once(
     assert _paths(client)[-3:] == ["/v1/agent_sessions/close", "/verify", "/close_session"]
 
 
-@pytest.mark.parametrize("scenario", ["retries", "text_only", "model_outage"])
+@pytest.mark.parametrize("scenario", ["retries", "model_outage"])
 async def test_other_codeact_limits_and_unrecovered_outage_fail_agent_activation(scenario: str) -> None:
     instance, model_calls = iteration_agent(scenario=scenario)
     req = await open_session(instance)
@@ -271,11 +272,19 @@ async def test_other_codeact_limits_and_unrecovered_outage_fail_agent_activation
     assert NOOATerminationReason.MAX_ITERATIONS_EXCEEDED not in gaps
 
 
-async def test_matching_generation_error_message_is_not_a_gradable_execution_limit() -> None:
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Generation failed after 1 iterations (max_iterations=1). Unable to complete `analyze`.",
+        "CodeAct aborted: LLM returned plain text without a tool call 1 times in a row "
+        "(max_consecutive_text_only=1) for `analyze`.",
+    ],
+)
+async def test_matching_generation_error_message_is_not_a_gradable_execution_limit(message: str) -> None:
     instance, model_calls = iteration_agent()
 
     async def invoke_error(agent: object, request: object) -> object:
-        raise GenerationError("Generation failed after 1 iterations (max_iterations=1). Unable to complete `analyze`.")
+        raise GenerationError(message)
 
     req = await open_session(instance)
     instance._require_agent_session("session").runner._invocation_adapter = invoke_error
@@ -316,10 +325,12 @@ async def test_cancellation_after_limit_stays_cancelled_in_agent_session(scenari
     assert not sentinel.exists()
 
 
-async def test_codeact_cleanup_failure_after_iteration_exhaustion_skips_verification(
+@pytest.mark.parametrize("scenario", ["iterations", "text_only"])
+async def test_codeact_cleanup_failure_after_policy_stop_skips_verification(
     monkeypatch: pytest.MonkeyPatch,
+    scenario: str,
 ) -> None:
-    instance, model_calls = iteration_agent()
+    instance, model_calls = iteration_agent(scenario=scenario)
     environment, client = _environment(instance)
     cleanup_failure = ConnectionError("sandbox cleanup connection lost")
     cleanup = AsyncMock(side_effect=cleanup_failure)
