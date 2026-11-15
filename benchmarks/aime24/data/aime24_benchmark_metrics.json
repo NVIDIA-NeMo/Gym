@@ -1,0 +1,37 @@
+{
+    "name": "aime24",
+    "type": "benchmark",
+    "jsonl_fpath": "benchmarks/aime24/data/aime24_benchmark.jsonl",
+    "prepare_script": "benchmarks/aime24/prepare.py",
+    "prompt_config": "benchmarks/aime24/prompts/default.yaml",
+    "num_repeats": 32,
+    "Number of examples": 0,
+    "Number of tools": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Number of turns": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 0,
+        "Average": 0.0,
+        "Min": 0.0,
+        "Max": 0.0,
+        "Standard deviation": 0.0
+    }
+}
