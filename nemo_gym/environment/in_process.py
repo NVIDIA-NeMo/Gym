@@ -63,7 +63,7 @@ from nemo_gym.core.failure_kinds import (
 )
 from nemo_gym.data.task_selection import row_task_id, select_tasks
 from nemo_gym.environment.assets import asset_config_path
-from nemo_gym.environment.benchmark_preparation import PrepareBenchmarkConfig, plan_for_config
+from nemo_gym.environment.benchmark_preparation import PrepareBenchmarkConfig, plan_for_config, read_jsonl_rows
 from nemo_gym.eval.eval_plan import EvalPlan
 from nemo_gym.rollouts.rollout_collection import (
     NG_ENVIRONMENT_SERVER_KEY,
@@ -308,7 +308,7 @@ def _collated_rows(global_config_dict: DictConfig, output_dir: Path) -> list[dic
     collated = output_dir / "benchmark.jsonl"
     if not collated.exists():
         raise ConfigError(f"Collation did not produce {collated}")
-    return [json.loads(line) for line in collated.read_text().splitlines() if line.strip()]
+    return read_jsonl_rows(collated)
 
 
 class TaskRunner:

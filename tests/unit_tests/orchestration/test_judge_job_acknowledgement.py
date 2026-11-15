@@ -264,3 +264,75 @@ def test_a_blocking_job_without_an_id_cannot_be_acknowledged_and_the_stop_says_s
     stop = failed_judge_jobs_stop(blocked, "reverification")
     assert "(id unknown), 12" in stop and "cannot be acknowledged" in stop
     assert ACKNOWLEDGE_JUDGE_JOBS_FLAGS not in stop
+
+
+def test_the_verdict_names_the_block_and_the_acknowledgement_before_and_after_a_refused_recovery(
+    tmp_path, judge_slurm_bin
+):
+    job_dir = _blocked_run(tmp_path, judge_slurm_bin)
+    reason = (
+        "the last 2 judge-only jobs (4242, 4243) ended without settling a saved answer, so recovery queues no "
+        "other until they are read and acknowledged"
+    )
+
+    inspected = inspect_recovery(*_handle(job_dir))
+    refused = recover(*_handle(job_dir), judge_partition="cpu")
+
+    assert inspected.decision.action == RecoveryAction.REVERIFY and refused.decision.action == RecoveryAction.STOP
+    # The acknowledgement command repeats the options of the call it answers (the refused one named a partition).
+    for out, where, asked in (
+        (inspected, "the run's reverification directory", ""),
+        (refused, str(job_dir / "reverification"), " --judge-partition cpu"),
+    ):
+        assert out.operator_verdict == {
+            "state": "needs_action",
+            "reason": reason,
+            "action": f"read their receipts and logs under {where}, then "
+            f"`gym eval resubmit gym-job-x bench --recover{asked} {FLAGS} TEXT` allows one more judge-only job",
+        }
+    assert _sbatch_count(judge_slurm_bin) == 2 and _acknowledgements(job_dir) == []
+
+
+def test_the_verdict_of_a_block_without_a_job_id_offers_no_acknowledgement():
+    from nemo_gym.orchestration.recovery import IdentityState, RecoveryDecision, operator_verdict
+
+    stop = failed_judge_jobs_stop([None, "12"], "reverification")
+    decision = RecoveryDecision(
+        action=RecoveryAction.REVERIFY,
+        reason=f"1 saved answer(s) can be re-judged; {stop}",
+        expected=2,
+        counts={IdentityState.SCORED: 1, IdentityState.JUDGE_RECOVERABLE: 1},
+        identities={},
+        evidence=[],
+    )
+    verdict = operator_verdict({"status": "PLANNED", "expected_samples": 2, "errors": []}, decision)
+    assert verdict["state"] == "needs_action" and "(id unknown), 12" in verdict["reason"]
+    assert ACKNOWLEDGE_JUDGE_JOBS_FLAGS not in verdict["action"] and "recover` now" not in verdict["action"]
+    assert verdict["action"] == (
+        "read their receipts and logs under reverification; a job without an id cannot be acknowledged, so no "
+        "further judge-only job is allowed and no recovery command is known"
+    )
+
+
+@pytest.mark.parametrize("inspect_only", [True, False])
+def test_the_command_prints_one_verdict_in_the_json_the_gate_and_stderr(
+    tmp_path, judge_slurm_bin, capsys, inspect_only
+):
+    from nemo_gym.cli.main import _eval_resubmit, build_parser
+    from nemo_gym.orchestration.recovery import operator_verdict_line
+
+    job_dir = _blocked_run(tmp_path, judge_slurm_bin)
+    argv = ["eval", "resubmit", *_handle(job_dir), "--recover"]
+    argv += ["--inspect"] if inspect_only else ["--judge-partition", "cpu"]
+    capsys.readouterr()
+    with pytest.raises(SystemExit) as error:
+        _eval_resubmit(build_parser().parse_args(argv), [])
+    assert error.value.code == 1
+
+    out, err = capsys.readouterr()
+    payload = json.loads(out)
+    verdict = payload["operator_verdict"]
+    assert verdict is not None and verdict["state"] == "needs_action" and "4242, 4243" in verdict["reason"]
+    assert payload["gate_task"]["operator_verdict"] == verdict
+    assert operator_verdict_line(verdict) in err.splitlines()
+    assert _sbatch_count(judge_slurm_bin) == 2
