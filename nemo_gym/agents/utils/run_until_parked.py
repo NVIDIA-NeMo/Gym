@@ -136,13 +136,26 @@ async def _continue(session: SandboxSession[Any]) -> bool:
 async def _stop[T](
     session: SandboxSession[Any], launched: asyncio.Future[T], *, stop_timeout: float
 ) -> Finished[T] | Stopped:
-    """Stop the harness and wait for the launch to collect; a harness that ended on its own first is ``Finished``."""
+    """Stop the harness and wait for the launch to collect; a harness that ended on its own first is ``Finished``.
+
+    A launch that had not started its harness is cancelled, and an error of a launch no stop ended propagates.
+    """
     await session.stop_harness(timeout=stop_timeout)
+    if not session.launch_started and not launched.done():
+        # The launch is still staging, so the stop had no harness to end. Left alone it would run the harness
+        # unpaused, or wait for the continue of a pause request that did reach the sandbox. Cancelling ends it
+        # before it launches (SandboxSession.execute).
+        launched.cancel()
+        await asyncio.wait({launched}, timeout=stop_timeout)
+        if not launched.done() or launched.cancelled():
+            return Stopped(receipt=None)
     try:
         result = await launched
     except Exception as error:
         receipt = session.cleanup
-        if receipt is not None and not receipt.get("stopped", False):
+        # Only a receipt that records the stop makes this the stopped launch's error. Without one, for example
+        # when the sandbox died, it is the launch's own failure.
+        if receipt is None or not receipt.get("stopped", False):
             raise
         return Stopped(receipt=receipt, error=error)
     receipt = session.cleanup

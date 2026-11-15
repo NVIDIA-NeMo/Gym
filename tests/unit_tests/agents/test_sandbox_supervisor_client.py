@@ -285,7 +285,14 @@ async def test_stop_claiming_after_the_guard_still_fences_the_launch(session, tm
         release.touch()
         launched = await asyncio.wait_for(launch, 60)
     assert launched.return_code == 0, launched.stderr
-    assert receipt == {"cleanup_confirmed": True, "error": None, "return_code": None, "timed_out": False}
+    # The stop file ended the launch before it ran.
+    assert receipt == {
+        "cleanup_confirmed": True,
+        "error": None,
+        "return_code": None,
+        "timed_out": False,
+        "stopped": True,
+    }
     assert (session_dir / LAUNCH_CLAIM_FILE).readlink() == Path("stop")
     assert not (session_dir / SUPERVISOR_PID_FILE).exists()
     assert not (session_dir / OUTPUT_LOG_FILE).exists()

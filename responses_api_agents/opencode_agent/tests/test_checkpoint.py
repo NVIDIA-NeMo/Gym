@@ -15,20 +15,24 @@ import shutil
 import subprocess
 import sys
 import textwrap
+import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.agents import AgentSeedSessionRequest, HarnessPauseResult, SandboxSession
+from nemo_gym.agents import AgentSeedSessionRequest, Finished, HarnessPauseResult, SandboxSession
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.server_runtime import HarnessFixture, LocalExecProvider, check_harness_adapter
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig
 from responses_api_agents.opencode_agent.resume import resume_decision, resume_payload
 from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION
+from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
 
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux process supervision required")
@@ -85,11 +89,14 @@ def plugin_ready():
             path.with_name("task-environment.ready").write_text("ready\n")
 
 
+def register():
+    (CONTROL / "pids").mkdir(exist_ok=True)
+    (CONTROL / "pids" / str(os.getpid())).touch()
+
+
 def started(kind):
     with (CONTROL / "launches").open("a") as launches:
         launches.write(kind + "\n")
-    (CONTROL / "pids").mkdir(exist_ok=True)
-    (CONTROL / "pids" / str(os.getpid())).touch()
 
 
 def wait_for_finish():
@@ -99,7 +106,7 @@ def wait_for_finish():
 
 def run():
     prompt = sys.stdin.read()
-    started("run")
+    register()
     plugin_ready()
     connection = database()
     if not connection.execute("select id from session").fetchall():
@@ -108,11 +115,14 @@ def run():
         [{{"type": "text", "text": prompt}}])
     answer(connection, "msg_002", "working", "tool-calls")
     print(json.dumps({{"type": "step_finish"}}), flush=True)
+    # Counted as started only now: a checkpoint then finds a conversation the model has answered.
+    started("run")
     wait_for_finish()
     answer(connection, "msg_003", "done", "stop")
 
 
 def serve():
+    register()
     started("serve")
     plugin_ready()
     password = os.environ["OPENCODE_SERVER_PASSWORD"]
@@ -136,7 +146,6 @@ def serve():
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     print(f"opencode server listening on http://127.0.0.1:{{server.server_address[1]}}", flush=True)
-    signal.signal(signal.SIGINT, lambda *_: os._exit(0))
     server.serve_forever()
 
 
@@ -172,6 +181,10 @@ class OpenCodeFixture(HarnessFixture):
         (self.bin / "rg").write_text("#!/bin/sh\nexit 0\n")
         (self.bin / "rg").chmod(0o755)
         self.provider = LocalExecProvider()
+        # The sandbox is this machine: without this every run on the node would install its fake at one /tmp path.
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_agent.app.SANDBOX_RUNTIME_PREFIX", str(tmp_path / "runtime-")
+        )
         for name, value in (
             ("create_provider", lambda *_: self.provider),
             ("resolve_provider_config", lambda *_: {}),
@@ -197,7 +210,7 @@ class OpenCodeFixture(HarnessFixture):
                 sandbox_executable_sha256=hashlib.sha256(self.binary.read_bytes()).hexdigest(),
                 sandbox_path_prefix=[str(self.bin)],
                 sandbox_session_root=str(self.tmp_path / "sessions"),
-                session_close_timeout_seconds=15,
+                session_close_timeout_seconds=60,
                 timeout=300,
             ),
             server_client=client,
@@ -259,6 +272,9 @@ async def test_opencode_conforms_to_the_harness_checkpoint_contract(
         await check_harness_adapter(fixture, tmp_path / "state")
     finally:
         fixture.finish()
+        # A supervisor still waiting for a continue ends on its stop file.
+        for supervisor in (tmp_path / "sessions").rglob("process_supervisor.sh"):
+            (supervisor.parent / "stop.request").touch()
         for pid in fixture.harness_pids():
             try:
                 os.kill(pid, 9)
@@ -351,7 +367,13 @@ def test_a_conversation_exported_from_opencode_s_database_is_resumed() -> None:
 # -- resume_opencode.sh --------------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("transport", ["curl", "dev_tcp"])
+@pytest.mark.parametrize(
+    "transport",
+    [
+        pytest.param("curl", marks=pytest.mark.skipif(shutil.which("curl") is None, reason="curl is required")),
+        "dev_tcp",
+    ],
+)
 def test_the_resume_helper_re_posts_the_saved_user_turn_through_the_opencode_server(
     tmp_path: Path, transport: str
 ) -> None:
@@ -376,6 +398,7 @@ def test_the_resume_helper_re_posts_the_saved_user_turn_through_the_opencode_ser
             found = shutil.which(tool)
             if found:
                 (tools / tool).symlink_to(found)
+        assert all((tools / tool).exists() for tool in ("bash", "mktemp", "sleep", "base64", "wc", "cat", "rm"))
         (tools / "python3").symlink_to(sys.executable)
         env["PATH"] = str(tools)
 
@@ -410,6 +433,218 @@ def test_the_resume_helper_reports_a_server_that_never_starts(tmp_path: Path) ->
     assert completed.returncode == 3
 
 
+def test_a_stop_ends_the_resume_helper_and_its_server_while_the_turn_runs(tmp_path: Path) -> None:
+    control = tmp_path / "control"
+    control.mkdir()
+    (control / "launches").write_text("")
+    binary = tmp_path / "opencode"
+    binary.write_text(FAKE_OPENCODE.format(python=sys.executable, control=str(control), version=OPENCODE_VERSION))
+    binary.chmod(0o755)
+    payload = tmp_path / "resume.json"
+    payload.write_text(json.dumps({"messageID": "msg_001", "parts": []}))
+    env = {**os.environ, "XDG_DATA_HOME": str(tmp_path / "data"), "OPENCODE_CONFIG_CONTENT": "{}"}
+    # No finish file: the server holds the request, as it does for the whole of a resumed turn.
+    process = subprocess.Popen(
+        ["bash", str(RESUME_SCRIPT), str(binary), "ses_root", str(payload)],
+        cwd=tmp_path,
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    def running(pid: str) -> bool:
+        try:
+            return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] not in ("Z", "X")
+        except OSError:
+            return False
+
+    def wait_for(condition: Any) -> None:
+        deadline = time.monotonic() + 30
+        while not condition():
+            assert time.monotonic() < deadline, "timed out waiting"
+            time.sleep(0.05)
+
+    try:
+        wait_for(lambda: (control / "resume_requests").exists())
+        servers = [path.name for path in (control / "pids").iterdir()]
+        process.terminate()
+        # The supervisor's TERM is acted on at once, not when the turn ends.
+        assert process.wait(timeout=10) == 143
+        wait_for(lambda: not any(running(pid) for pid in servers))
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=10)
+        for path in (control / "pids").iterdir() if (control / "pids").exists() else ():
+            try:
+                os.kill(int(path.name), 9)
+            except ProcessLookupError:
+                pass
+
+
+def test_the_resume_payload_keeps_the_user_turn_s_settings_and_nothing_else() -> None:
+    user = {
+        "id": "msg_5",
+        "info": {
+            "role": "user",
+            "agent": "plan",
+            "system": "be brief",
+            "format": {"type": "text"},
+            "tools": {"bash": False},
+            "model": {"providerID": "p", "modelID": "m"},
+            "time": {"created": 1},
+        },
+        "parts": [
+            {"type": "text", "text": "fix "},
+            {"type": "file", "url": "x"},
+            {"type": "text", "text": "the bug\n"},
+        ],
+    }
+    expected = {
+        "messageID": "msg_5",
+        "parts": [],
+        "agent": "plan",
+        "system": "be brief",
+        "format": {"type": "text"},
+        "tools": {"bash": False},
+        "model": {"providerID": "p", "modelID": "m"},
+    }
+    assert resume_payload([user]) == expected
+    # The prompt is the user turn's text parts joined; a file part between them is not text.
+    decision = resume_decision(_export(user, ANSWER), "fix the bug")
+    assert decision.resume and decision.payload == expected
+
+
+def test_text_that_opencode_added_to_the_user_turn_is_not_part_of_the_prompt() -> None:
+    attached = {"type": "text", "text": "Called the Read tool with the following input: ...", "synthetic": True}
+    user = {"info": USER["info"], "parts": [*USER["parts"], attached]}
+
+    assert resume_decision(_export(user, ANSWER), "fix the bug").resume
+
+
+# -- relaunch and re-bind ----------------------------------------------------------------------------------------
+
+
+async def test_a_relaunch_that_starts_afresh_does_not_name_the_conversation_it_set_aside(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = OpenCodeAgent.model_construct(
+        config=OpenCodeAgentConfig.model_construct(
+            session_close_timeout_seconds=1, checkpoint_pause_allowance_seconds=0
+        )
+    )
+    launched: list[dict] = []
+
+    async def execute(payload: dict, **_: Any) -> None:
+        launched.append(payload)
+
+    session = SimpleNamespace(cleanup=None, session_dir="/s/launch-2")
+    state = SimpleNamespace(
+        launch_count=1,
+        harness_session_id="ses_old",
+        message_ids=["m"],
+        observations=object(),
+        trajectory=object(),
+        launch_records=[],
+        session=session,
+        persistent_directory="/s",
+        runtime="/rt",
+        request=SimpleNamespace(agent_session_id="a"),
+        require_session=lambda: session,
+        prepare_launch=AsyncMock(),
+        discard_conversation=AsyncMock(),
+        execute=execute,
+        # The model had not answered when the first launch was stopped.
+        inspect_conversation=AsyncMock(return_value=_export(USER, PENDING)),
+    )
+
+    async def run(session: Any, activation: Any, *, launch: Any, on_parked: Any, stop_timeout: float) -> Finished:
+        await launch()
+        return Finished(None)
+
+    monkeypatch.setattr("responses_api_agents.opencode_agent.app.run_until_parked", run)
+
+    def payload() -> dict:
+        session_arguments = ["--session", state.harness_session_id] if state.harness_session_id else []
+        return {"command": ["opencode", "run", *session_arguments]}
+
+    await agent._run_launches(state, MagicMock(), payload, prompt="fix the bug", timeout=10, deadline=None)
+
+    state.discard_conversation.assert_awaited_once()
+    assert launched == [{"command": ["opencode", "run"]}]
+    assert state.harness_session_id is None and state.resumed_conversation is False
+    # Evidence of the conversation that was set aside is not this launch's.
+    assert state.observations is None and state.trajectory is None
+
+
+def _restored(monkeypatch: pytest.MonkeyPatch, sandbox: Any) -> tuple[OpenCodeAgent, OpenCodeSandboxSession, Any]:
+    agent = OpenCodeAgent.model_construct(
+        config=OpenCodeAgentConfig.model_construct(
+            session_close_timeout_seconds=1,
+            sandbox_install_timeout_seconds=1,
+            export_dir="/exports",
+            sandbox_path_prefix=[],
+        )
+    )
+    body = AgentSeedSessionRequest(
+        agent_session_id="s",
+        episode_id=EpisodeId(rollout_id="r", attempt=1),
+        task_id=TaskId(taskset="t", task_id="0"),
+        sandbox_access={
+            "connection": {"kind": "direct", "provider_config_ref": "sandbox", "descriptor": {"sandbox_id": "fork"}},
+            "workdir": "/app",
+        },
+    )
+    state = OpenCodeSandboxSession(request=body, session=None, runtime="/rt", checkpointed=True)
+    state.restored = {"session": {}}
+    provider = SimpleNamespace(aclose=AsyncMock())
+    for name, value in (
+        ("create_provider", lambda *_: provider),
+        ("resolve_provider_config", lambda *_: {}),
+        ("get_global_config_dict", lambda: {}),
+        ("AsyncSandbox", SimpleNamespace(connect=AsyncMock(return_value=sandbox))),
+    ):
+        monkeypatch.setattr(f"responses_api_agents.opencode_agent.app.{name}", value)
+    return agent, state, body
+
+
+async def test_a_re_bind_retries_the_first_command_a_forked_sandbox_refused_and_restores_what_the_seed_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sandbox = MagicMock(sandbox_id="fork")
+    present = SandboxExecResult(stdout="", stderr="", return_code=0)
+    sandbox.exec = AsyncMock(side_effect=[ConnectionError("502 Bad Gateway"), present])
+    sandbox.disconnect = AsyncMock()
+    agent, state, body = _restored(monkeypatch, sandbox)
+    session = SimpleNamespace(root_dir="/sessions/s")
+    monkeypatch.setattr(SandboxSession, "reattach", staticmethod(lambda *_, **__: session))
+
+    assert await agent._rebind_restored_agent_session_state(state, body) is state
+
+    assert sandbox.exec.await_count == 2 and state.session is session and state.restored is None
+    # A checkpoint does not carry these; without them a restored episode writes no exports.
+    assert state.export_dir == "/exports" and "/sessions/s" in state.opencode_environment
+    sandbox.disconnect.assert_not_awaited()
+
+
+async def test_a_re_bind_that_fails_releases_its_sandbox_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    sandbox = MagicMock(sandbox_id="fork")
+    sandbox.disconnect = AsyncMock()
+    agent, state, body = _restored(monkeypatch, sandbox)
+
+    def broken(*_: Any, **__: Any) -> None:
+        raise RuntimeError("the fork holds no session")
+
+    monkeypatch.setattr(SandboxSession, "reattach", staticmethod(broken))
+
+    with pytest.raises(RuntimeError, match="holds no session"):
+        await agent._rebind_restored_agent_session_state(state, body)
+
+    # The seed that re-binds is retried: each attempt must not leave a connection behind.
+    sandbox.disconnect.assert_awaited_once()
+    assert state.session is None and state.restored == {"session": {}}
+
+
 # -- checkpoint declarations -------------------------------------------------------------------------------------
 
 
@@ -426,10 +661,17 @@ def test_sessions_the_agent_cannot_capture_restart() -> None:
     owned = borrowed.model_copy(update={"sandbox_access": None})
     continued = AgentSeedSessionRequest.model_validate(borrowed.model_dump() | {"continuation": {}})
     restarts = OpenCodeAgent._seed_restarts
+    agent = SimpleNamespace(config=SimpleNamespace(session_import_path=None), _opencode2=False)
+    importing = SimpleNamespace(config=SimpleNamespace(session_import_path="/imports/session.json"), _opencode2=False)
+    opencode2 = SimpleNamespace(config=SimpleNamespace(session_import_path=None), _opencode2=True)
 
     assert OpenCodeAgent.checkpoint_mode == "exported" and OpenCodeAgent.rebinds_tool_accesses
-    assert not restarts(None, borrowed)
-    assert restarts(None, owned) and restarts(None, continued)
+    assert not restarts(agent, borrowed)
+    assert restarts(agent, owned) and restarts(agent, continued)
+    # An imported conversation is not this task's own: a relaunch could not tell it from a foreign one.
+    assert restarts(importing, borrowed)
+    # The relaunch that resumes a saved conversation speaks OpenCode 1's server API and reads its store.
+    assert restarts(opencode2, borrowed)
 
 
 def test_the_resume_helper_is_plain_bash() -> None:

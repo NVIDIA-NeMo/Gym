@@ -496,6 +496,14 @@ class SandboxSession[Artifacts]:
             raise RuntimeError(f"{self.harness} sandbox session was not launched pausable")
         if self.cleanup is not None or self.sandbox_stopped or self.closing:
             return HarnessPauseResult(status="finished")
+        stage = self._stage_task
+        if stage is not None and not stage.done():
+            # Staging writes into the sandbox and ends in the launch command. Let it finish, so a snapshot does not
+            # run beside it and the launch's polls are held like a running launch's. A stage that takes longer
+            # than the bound is paused as before, by the request the launch reads when it starts.
+            await asyncio.wait({stage}, timeout=timeout)
+            if self.cleanup is not None or self.sandbox_stopped or self.closing:
+                return HarnessPauseResult(status="finished")
         if self._pause_seq <= self._continued_seq:
             self._pause_seq = self._continued_seq + 1
         outcome, acknowledgement = await request_pause(

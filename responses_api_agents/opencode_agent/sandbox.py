@@ -47,6 +47,10 @@ from responses_api_agents.opencode_agent.snapshot import NoRootSessionError, sna
 
 LOG = logging.getLogger(__name__)
 
+# Reads of the conversation a relaunch may resume: how many, and the wait before the second (doubled for the third).
+_CONVERSATION_READ_ATTEMPTS = 3
+_CONVERSATION_READ_RETRY_DELAY_S = 2.0
+
 
 def format_error_message(message: str, *, output: str = "", stderr: str = "") -> str:
     """Bound the combined error to 16k characters, preserving context and log tails."""
@@ -222,6 +226,8 @@ class OpenCodeSandboxSession(AgentSessionState):
     # Every model-call label read so far; the label file only grows, so an earlier read stays valid.
     _labels: dict[tuple[str, str], str] = field(default_factory=dict, init=False, repr=False)
     checkpointed: bool = False
+    # Whether the last launch resumed the saved conversation with ``resume_opencode.sh`` instead of ``opencode run``.
+    resumed_conversation: bool = False
     # Launches of the harness so far, and what each ended with, for the checkpoint and the reply's evidence.
     launch_count: int = 0
     launch_records: list[dict[str, JsonValue]] = field(default_factory=list)
@@ -271,8 +277,26 @@ class OpenCodeSandboxSession(AgentSessionState):
     async def inspect_conversation(self, *, timeout: float) -> dict[str, JsonValue] | None:
         """Export the conversation OpenCode saved in this session's root, or ``None`` when there is none."""
         with tempfile.TemporaryDirectory(prefix="opencode-resume-") as directory:
-            if not await self._download_database(Path(directory), timeout):
-                return None
+            for attempt in range(1, _CONVERSATION_READ_ATTEMPTS + 1):
+                try:
+                    async with asyncio.timeout(timeout):
+                        names = await self.list_store(timeout=timeout)
+                        if "opencode.db" not in names:
+                            return None
+                        await self.download_store(names, Path(directory))
+                    break
+                except Exception as error:
+                    # Reading is safe to repeat, and a sandbox a restore just forked can refuse its first commands.
+                    # A conversation that cannot be read is not a missing one: the caller would set it aside.
+                    if attempt == _CONVERSATION_READ_ATTEMPTS:
+                        raise RuntimeError(f"Cannot read the saved OpenCode conversation: {error}") from error
+                    LOG.warning(
+                        "Reading the saved OpenCode conversation failed (attempt %d/%d): %r",
+                        attempt,
+                        _CONVERSATION_READ_ATTEMPTS,
+                        error,
+                    )
+                    await asyncio.sleep(_CONVERSATION_READ_RETRY_DELAY_S * attempt)
             try:
                 await asyncio.to_thread(
                     snapshot,

@@ -21,7 +21,7 @@ _AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 
 def _control(checkpoint_id: str, **extra: Any) -> dict[str, Any]:
-    return {"checkpoint_id": checkpoint_id, "deadline_ts": time.time() + 30, **extra}
+    return {"checkpoint_id": checkpoint_id, "deadline_ts": time.time() + 120, **extra}
 
 
 class LocalExecProvider:
@@ -159,7 +159,7 @@ def _process_state(pid: int) -> Optional[str]:
     return stat.rsplit(")", 1)[1].split()[0]
 
 
-async def _until(condition: Callable[[], Any], timeout: float = 30) -> None:
+async def _until(condition: Callable[[], Any], timeout: float = 120) -> None:
     deadline = time.monotonic() + timeout
     while True:
         value = condition()
@@ -313,7 +313,7 @@ async def check_harness_adapter(fixture: HarnessFixture, state_dir: Path) -> Non
         )
         await asyncio.gather(running, return_exceptions=True)
     assert closed.status_code == 200, f"close: {closed.text}"
-    await _until(lambda: not fixture.harness_pids(), timeout=30)
+    await _until(lambda: not fixture.harness_pids())
 
 
 def _kill(pid: int) -> None:

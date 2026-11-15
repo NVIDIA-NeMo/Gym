@@ -281,15 +281,20 @@ paused_settled() {
 # Pause request $1: stop every reached process and acknowledge. A harness not launched yet has
 # nothing to stop; the launch waits instead.
 pause() {
-    local limit error=null pid list=
+    local limit error=null pid list= known round
     paused=()
     if [[ -n ${harness-} ]]; then
         pause_scan
         [[ -n ${groups[harness]} ]] && owned_group "$harness" "${groups[harness]}" && kill -STOP -- "-$harness" 2>/dev/null
         signal_paused STOP
-        # A process forked between the scan and its group's stop is found again.
-        pause_scan
-        signal_paused STOP
+        # A process forked between a scan and its parent's stop is found by the next scan: scan until one finds
+        # nothing new.
+        for round in 1 2 3 4 5 6 7 8 9 10; do
+            known=${#paused[@]}
+            pause_scan
+            signal_paused STOP
+            ((${#paused[@]} == known)) && break
+        done
     fi
     now
     limit=$((NOW + pause_wait))
@@ -426,9 +431,16 @@ identity=$$.$started
 marker=NEMO_GYM_SUPERVISOR=$identity
 # A pause requested before the launch holds it until continued.
 while ! stopped && serve_pause; do :; done
+# The hold ended before the deadline starts, so its time is not added to the deadline again.
+paused_total=0
 if stopped; then
     [[ -e $stop_file ]] && requested_stop=true
     write_receipt true null # Nothing was launched.
+    exit 0
+fi
+if expired; then
+    timed_out=true
+    write_receipt true null # The deadline arrived during the hold, so nothing was launched.
     exit 0
 fi
 
