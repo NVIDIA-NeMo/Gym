@@ -98,12 +98,22 @@ from responses_api_agents.hermes_agent.sandbox import HarnessProcessInfo, Hermes
 MODEL_REJECTION_STATUSES = frozenset({400, 413, 422})
 _HTTP_STATUS = re.compile(r"\b(?:HTTP |Error code: )([45]\d{2})\b")
 _TRUNCATION_ERROR = "First response truncated due to output length limit"
+# Every error Hermes 26bb847a returns when a run ends because the model's output reached max_tokens (run_agent.py).
+_OUTPUT_LIMIT_ERRORS = frozenset(
+    {
+        _TRUNCATION_ERROR,
+        "Response truncated due to output length limit",
+        "Response remained truncated after 3 continuation attempts",
+        "Model used all output tokens on reasoning with none left for the response. "
+        "Try lowering reasoning effort or increasing max_tokens.",
+    }
+)
 
 
 def _is_limit_result(result: Mapping[str, Any]) -> bool:
     """Recognize explicit Hermes limit results; tested on Hermes 26bb847a.
 
-    `partial` alone also covers invalid model output, so require a native limit reason.
+    `partial` alone also covers invalid model output, so require a Hermes limit reason.
     """
     error = str(result.get("error") or "")
     return (
@@ -111,14 +121,7 @@ def _is_limit_result(result: Mapping[str, Any]) -> bool:
         or error == _TRUNCATION_ERROR
         or (
             bool(result.get("partial"))
-            and (
-                error
-                in {
-                    "Response truncated due to output length limit",
-                    "Response remained truncated after 3 continuation attempts",
-                }
-                or error.startswith("Request payload too large")
-            )
+            and (error in _OUTPUT_LIMIT_ERRORS or error.startswith("Request payload too large"))
         )
     )
 
