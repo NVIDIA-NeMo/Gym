@@ -91,17 +91,16 @@ def by_agent_instance(items: Iterable[_T], key: Callable[[_T], LineageScopeKey])
 def primary_agent_instance(agent_instances: Iterable[str | None]) -> str | None:
     """The agent instance whose result is the episode's top-level result.
 
-    ``assistant`` when the episode has one; otherwise the unnamed agent; otherwise the only agent instance.
-    ``assistant`` comes first, so an unnamed caller beside it, such as a helper or a judge that does not
-    name itself, never takes the scored response. Raise ``LookupError`` when none of these exists.
+    ``assistant`` when the episode has one; otherwise the unnamed agent. ``assistant`` comes first, so an
+    unnamed caller beside it, such as a helper or a judge that does not name itself, never takes the scored
+    response. Raise ``LookupError`` when neither exists: another agent instance is never the primary, even
+    when it is the only one captured, because the scored response is not its own.
     """
     names = list(dict.fromkeys(agent_instances))
     if PRIMARY_AGENT_INSTANCE in names:
         return PRIMARY_AGENT_INSTANCE
     if UNNAMED_AGENT_INSTANCE in names:
         return UNNAMED_AGENT_INSTANCE
-    if len(names) == 1:
-        return names[0]
     raise LookupError(f"no primary agent instance among {names}")
 
 

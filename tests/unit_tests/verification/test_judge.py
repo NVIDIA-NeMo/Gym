@@ -288,6 +288,15 @@ async def test_an_explicit_judge_name_wins_over_the_context():
     assert names == ["judge.2"]
 
 
+@pytest.mark.parametrize("name", ["VERIFIER_INVOCATION_HEADER", "current_verifier_invocation_id"])
+def test_names_the_judge_module_no_longer_uses_stay_importable_from_it(name):
+    import nemo_gym.core.episode_context as episode_context
+    import nemo_gym.verification.judge as judge
+
+    with pytest.warns(DeprecationWarning, match=name):
+        assert getattr(judge, name) is getattr(episode_context, name)
+
+
 async def test_a_judge_failure_a_caller_retries_past_stays_an_observation():
     """A consumer that retries after a judge failure and then succeeds still reports that failure, once."""
     from nemo_gym.core.failure_transport import RequestFailureLog

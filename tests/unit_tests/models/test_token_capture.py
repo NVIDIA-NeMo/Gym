@@ -55,7 +55,11 @@ from nemo_gym.models.base_responses_api_model import (
     _request_messages,
 )
 from nemo_gym.models.model_call_capture import CaptureStore, _reconstruct_streamed_response
-from nemo_gym.models.token_capture.config import TokenCaptureConfig, token_capture_enabled_for_agent
+from nemo_gym.models.token_capture.config import (
+    TokenCaptureConfig,
+    agent_instance_carries_training_tag,
+    token_capture_enabled_for_agent,
+)
 from nemo_gym.models.token_capture.external_capture import TOKEN_FIELDS
 from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint, conversation_digest
 from nemo_gym.models.token_capture.lineage import (
@@ -1152,6 +1156,28 @@ def test_agent_capture_selection_uses_static_agent_config_or_all_agents():
         {**config, "token_id_capture": {**config["token_id_capture"], "enabled": False, "all_agents": True}},
         "captured",
     )
+
+
+def test_training_agent_instances_select_by_agent_instance_name_or_agent_kind():
+    default = {"token_id_capture": {"enabled": True, "dir": "/capture"}}
+    assert agent_instance_carries_training_tag(default, "assistant")
+    assert agent_instance_carries_training_tag(default, "assistant.2")
+    assert not agent_instance_carries_training_tag(default, "judge")
+    # The unnamed agent of a single-agent episode is never held back by the selection.
+    assert agent_instance_carries_training_tag(default, None)
+
+    selected = {
+        "token_id_capture": {"enabled": True, "dir": "/capture", "training_agent_instances": ["debater.1", "user"]}
+    }
+    # A full name selects that agent instance only, not its kind or the other agent instances of the kind.
+    assert agent_instance_carries_training_tag(selected, "debater.1")
+    assert not agent_instance_carries_training_tag(selected, "debater.2")
+    assert not agent_instance_carries_training_tag(selected, "debater")
+    # A kind selects every agent instance of the kind.
+    assert agent_instance_carries_training_tag(selected, "user")
+    assert agent_instance_carries_training_tag(selected, "user.3")
+    assert not agent_instance_carries_training_tag(selected, "assistant")
+    assert agent_instance_carries_training_tag(selected, None)
 
 
 def test_config_warns_rather_than_fails_on_a_sink_beside_a_directory(caplog):
