@@ -57,6 +57,7 @@ from uuid import uuid4
 
 from pydantic import TypeAdapter, ValidationError
 
+from nemo_gym.agents.utils.setup_retry import exec_idempotent
 from nemo_gym.core.failure_kinds import HARNESS_TERMINATION_UNCONFIRMED
 from nemo_gym.core.failure_records import FailureBoundary
 from nemo_gym.core.typed_exceptions import NgFailureEvent
@@ -613,15 +614,21 @@ async def check_restored(
 
     The launch qualifies when its supervisor still runs as ``identity`` (``PID.START``), holds pause ``pause_seq`` in
     hold mode with no continue for it yet, and has written no cleanup receipt; and, with ``relay_status_path``, when
-    the model relay whose status file that is still runs (its ``pid`` and ``start``). One command in the sandbox.
+    the model relay whose status file that is still runs (its ``pid`` and ``start``). One command in the sandbox,
+    repeated when the sandbox refuses it; a check that still cannot run is ``check_failed``, which says nothing
+    about the launch.
     """
     if not _IDENTITY.fullmatch(identity):
         return NotResumable("identity_mismatch", f"malformed supervisor identity {identity!r}")
-    result = await sandbox.exec(
+    command = (
         f"bash -c {quote(_CHECK_RESTORED)} check {quote(session_dir)} {quote(identity)} {int(pause_seq)} "
-        f"{quote(relay_status_path or '')}",
-        timeout_s=timeout,
+        f"{quote(relay_status_path or '')}"
     )
+    try:
+        # The check only reads, so it is safe to repeat: a sandbox a restore just forked can refuse a command.
+        result = await exec_idempotent(sandbox, command, what="restored launch check", timeout_s=timeout)
+    except Exception as error:
+        return NotResumable("check_failed", repr(error)[:500])
     verdict = (result.stdout or "").strip()
     if result.return_code != 0 or result.error_type or (verdict != "ok" and verdict not in _NOT_RESUMABLE_REASONS):
         detail = result.error_type or (result.stderr or verdict or f"exit {result.return_code}").strip()

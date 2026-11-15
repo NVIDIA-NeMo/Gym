@@ -15,11 +15,12 @@ import subprocess
 import sys
 from pathlib import Path
 from time import monotonic
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.agents.utils.run_until_parked import Finished, run_until_parked
+from nemo_gym.agents.utils.run_with_checkpoint_pauses import LaunchFinished, run_with_checkpoint_pauses
 from nemo_gym.agents.utils.sandbox_session import SandboxCommand, SandboxSession
 from nemo_gym.agents.utils.supervisor_client import (
     CLEANUP_RECEIPT_FILE,
@@ -33,6 +34,7 @@ from nemo_gym.agents.utils.supervisor_client import (
     abandon_launch,
     check_restored,
     is_harness_termination_failure,
+    request_continue,
     request_pause,
     supervised_launch_command,
 )
@@ -63,7 +65,7 @@ def _dead_pid() -> int:
     return process.pid
 
 
-# A worker that ticks for about 3 seconds, starts a ticking child, and a service that leaves the harness (only the
+# A worker that ticks until a file named finish exists, starts a ticking child, and a service that leaves the harness (only the
 # supervisor's marker reaches it); it records the pids, and that it was continued if a CONT ever reaches it.
 _SERVICE = (
     "import os, time\nos.setsid()\nwhile True:\n    open('service.ticks', 'a').write('.')\n    time.sleep(0.02)\n"
@@ -74,7 +76,7 @@ trap 'touch continued' CONT
 ( "{sys.executable}" service.py & echo $! > service.pid )
 echo $$ > worker.pid
 touch ready
-for _ in $(seq 1 150); do printf . >> worker.ticks; sleep 0.02; done
+until [ -e finish ]; do printf . >> worker.ticks; sleep 0.02; done
 touch finished
 """
 
@@ -98,7 +100,16 @@ class Launch:
         self.process = subprocess.Popen(
             ["sh", "-c", command], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True
         )
-        _wait_for(lambda: (session_dir / "ready").exists() and (session_dir / "service.pid").exists())
+        try:
+            _wait_for(lambda: (session_dir / "ready").exists() and (session_dir / "service.pid").exists())
+        except BaseException:
+            # The caller never got the launch, so its fixture cannot clean it up.
+            self.cleanup()
+            raise
+
+    def finish(self) -> None:
+        """Let the worker end by itself."""
+        (self.session_dir / "finish").touch()
 
     def pids(self) -> dict[str, int]:
         return {name: int((self.session_dir / f"{name}.pid").read_text()) for name in ("worker", "child", "service")}
@@ -137,6 +148,21 @@ def launches():
         launch.cleanup()
 
 
+async def _end(task: asyncio.Task) -> None:
+    """Cancel what a failed test left waiting; a cancelled adopt stops its harness."""
+    if not task.done():
+        task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+async def _continued(launch: Launch, seq: int) -> None:
+    """Wait until the launch's supervisor acknowledged continue ``seq``."""
+    path = launch.session_dir / CONTINUED_FILE
+    async with asyncio.timeout(15):
+        while not path.exists() or json.loads(path.read_text())["seq"] != seq:
+            await asyncio.sleep(0.02)
+
+
 def _abandon(identity: str, receipt: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["bash", str(SUPERVISOR_SCRIPT), "--abandon", identity, "--receipt", str(receipt), "--cleanup-timeout", "5"],
@@ -171,7 +197,6 @@ async def test_abandon_kills_a_held_launch_and_the_service_it_marked(tmp_path: P
     assert not any(_alive(pid) for pid in [*pids.values(), int(identity.split(".")[0])])
     launch.process.wait(timeout=10)
     assert json.loads((tmp_path / "launch-1" / CLEANUP_RECEIPT_FILE).read_text()) == ABANDONED
-    assert not (tmp_path / "launch-1" / "finished").exists()
 
 
 async def test_abandon_kills_stopped_processes_without_continuing_them(tmp_path: Path, launches: list[Launch]) -> None:
@@ -349,10 +374,33 @@ async def test_a_check_that_cannot_run_fails_as_such() -> None:
     ).reason == ("identity_mismatch")
 
 
+async def test_a_check_the_sandbox_keeps_refusing_fails_as_such_and_one_it_refuses_once_is_repeated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "nemo_gym.agents.utils.setup_retry.asyncio", SimpleNamespace(sleep=AsyncMock(), timeout=asyncio.timeout)
+    )
+    # The timeout is the budget of every attempt and the waits between them: it must cover the retries' waits.
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = ConnectionError("502: the sandbox could not be reached")
+    verdict = await check_restored(sandbox, "/s", pause_seq=1, identity="1.2", relay_status_path=None, timeout=30)
+    # Not a verdict on the launch: the check never ran.
+    assert isinstance(verdict, NotResumable) and verdict.reason == "check_failed" and "502" in (verdict.detail or "")
+    assert sandbox.exec.await_count == 3
+
+    sandbox.exec.reset_mock()
+    sandbox.exec.side_effect = [
+        ConnectionError("502: the sandbox could not be reached"),
+        SandboxExecResult(stdout="ok\n", stderr="", return_code=0),
+    ]
+    verdict = await check_restored(sandbox, "/s", pause_seq=1, identity="1.2", relay_status_path=None, timeout=30)
+    assert verdict == RestoredLaunch(pause_seq=1, identity="1.2") and sandbox.exec.await_count == 2
+
+
 # -- adopt -----------------------------------------------------------------------------------------------------------
 
 
-def _reattached(tmp_path: Path, acknowledgement: dict) -> tuple[SandboxSession, dict]:
+def _rebound(tmp_path: Path, acknowledgement: dict) -> tuple[SandboxSession, dict]:
     """The session a restored agent server rebinds to the launch's files, from the bookmark its checkpoint saved."""
     state = {
         "session_root": str(tmp_path / "launch-1"),
@@ -361,7 +409,7 @@ def _reattached(tmp_path: Path, acknowledgement: dict) -> tuple[SandboxSession, 
         "pause_seq": acknowledgement["seq"],
         "supervisor_identity": acknowledgement["identity"],
     }
-    session = SandboxSession.reattach(
+    session = SandboxSession.rebind(
         LocalSandbox(),  # type: ignore[arg-type]
         state,  # type: ignore[arg-type]
         workdir=str(tmp_path),
@@ -377,19 +425,24 @@ async def test_adopt_continues_the_held_launch_and_finishes_it_as_execute_would(
 ) -> None:
     launch = Launch(tmp_path / "launch-1")
     launches.append(launch)
-    session, state = _reattached(tmp_path, await launch.pause())
+    session, state = _rebound(tmp_path, await launch.pause())
     assert await _check(tmp_path / "launch-1", state["supervisor_identity"]) == RestoredLaunch(
         pause_seq=1, identity=state["supervisor_identity"]
     )
     collect = AsyncMock(return_value="artifacts")
-
-    result = await asyncio.wait_for(
-        session.adopt(pause_seq=1, collect=collect, timeout=60, close_timeout=3, poll_window_s=1), 30
+    adopting = asyncio.create_task(
+        session.adopt(pause_seq=1, collect=collect, timeout=60, close_timeout=3, poll_window_s=1)
     )
+    try:
+        await _continued(launch, 1)
+        assert not adopting.done(), "the adopted launch runs until its harness ends"
+        launch.finish()
+        result = await asyncio.wait_for(adopting, 30)
+    finally:
+        await _end(adopting)
 
     assert result == "artifacts" and collect.await_count == 1
     assert (tmp_path / "launch-1" / "finished").exists()
-    assert json.loads((tmp_path / "launch-1" / CONTINUED_FILE).read_text())["seq"] == 1
     assert session.cleanup is not None and session.cleanup["return_code"] == 0 and session.cleanup_confirmed
 
 
@@ -397,10 +450,10 @@ async def test_an_adopted_launch_pauses_again_at_the_next_checkpoint(tmp_path: P
     launch = Launch(tmp_path / "launch-1")
     launches.append(launch)
     held = await launch.pause()
-    session, _ = _reattached(tmp_path, held)
+    session, _ = _rebound(tmp_path, held)
     activation = FakeActivation()
     running = asyncio.create_task(
-        run_until_parked(
+        run_with_checkpoint_pauses(
             session,
             activation,
             launch=lambda: session.adopt(
@@ -410,18 +463,155 @@ async def test_an_adopted_launch_pauses_again_at_the_next_checkpoint(tmp_path: P
             stop_timeout=10,
         )
     )
-    async with asyncio.timeout(15):
-        while not (tmp_path / "launch-1" / CONTINUED_FILE).exists():
-            await asyncio.sleep(0.02)
-    activation.park.set()
-    await asyncio.wait_for(activation.parked.wait(), 15)
-    assert activation.boundaries[0]["pause_seq"] == 2
-    assert activation.boundaries[0]["supervisor_identity"] == held["identity"]
-    ticking = launch.ticks("worker")
-    await asyncio.sleep(0.2)
-    assert launch.ticks("worker") > ticking, "a hold pause leaves the harness running"
-    activation.resume.set()
-    assert await asyncio.wait_for(running, 30) == Finished("artifacts")
+    try:
+        await _continued(launch, 1)
+        activation.park.set()
+        await asyncio.wait_for(activation.parked.wait(), 15)
+        assert activation.boundaries[0]["pause_seq"] == 2
+        assert activation.boundaries[0]["supervisor_identity"] == held["identity"]
+        ticking = launch.ticks("worker")
+        async with asyncio.timeout(15):  # A hold pause leaves the harness running.
+            while launch.ticks("worker") == ticking:
+                await asyncio.sleep(0.02)
+        activation.resume.set()
+        await _continued(launch, 2)
+        launch.finish()
+        assert await asyncio.wait_for(running, 30) == LaunchFinished("artifacts")
+    finally:
+        launch.finish()
+        await _end(running)
+
+
+async def test_a_launch_restored_a_second_time_is_taken_over_at_its_later_pause(
+    tmp_path: Path, launches: list[Launch]
+) -> None:
+    launch = Launch(tmp_path / "launch-1")
+    launches.append(launch)
+    first = await launch.pause(1)
+    # What the first restoring job did: continued pause 1, then held pause 2 at its own checkpoint, then crashed.
+    outcome, _ = await request_continue(
+        LocalSandbox(), session_dir=str(launch.session_dir), workdir=None, seq=1, timeout=15
+    )
+    assert outcome == "acknowledged"
+    second = await launch.pause(2)
+    assert second["identity"] == first["identity"]
+    session, state = _rebound(tmp_path, second)
+    identity = state["supervisor_identity"]
+
+    assert await _check(launch.session_dir, identity, seq=1) == NotResumable("pause_mismatch")
+    assert await _check(launch.session_dir, identity, seq=2) == RestoredLaunch(pause_seq=2, identity=identity)
+    adopting = asyncio.create_task(
+        session.adopt(
+            pause_seq=2, collect=AsyncMock(return_value="artifacts"), timeout=60, close_timeout=3, poll_window_s=1
+        )
+    )
+    try:
+        await _continued(launch, 2)
+        launch.finish()
+        assert await asyncio.wait_for(adopting, 30) == "artifacts"
+    finally:
+        await _end(adopting)
+    assert session.cleanup is not None and session.cleanup["return_code"] == 0
+
+
+async def test_cancelling_an_adopted_launch_stops_the_restored_harness(tmp_path: Path, launches: list[Launch]) -> None:
+    launch = Launch(tmp_path / "launch-1")
+    launches.append(launch)
+    session, _ = _rebound(tmp_path, await launch.pause())
+    pids = launch.pids()
+    adopting = asyncio.create_task(
+        session.adopt(
+            pause_seq=1, collect=AsyncMock(return_value="artifacts"), timeout=60, close_timeout=10, poll_window_s=1
+        )
+    )
+    try:
+        await _continued(launch, 1)
+        adopting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(adopting, 30)
+    finally:
+        await _end(adopting)
+    assert session.cleanup is not None and session.cleanup["stopped"] is True and session.cleanup_confirmed
+    _wait_for(lambda: not _alive(pids["worker"]) and not _alive(pids["child"]))
+    assert not (tmp_path / "launch-1" / "finished").exists()
+    launch.process.wait(timeout=10)
+
+
+async def test_adopt_repeats_a_continue_the_sandbox_did_not_confirm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answers = [ConnectionError("502"), ("timeout", None), ("finished", None)]
+
+    async def request(sandbox, *, session_dir, workdir, seq, timeout):
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session.request_continue", request)
+    session, _ = _rebound(tmp_path, {"seq": 1, "identity": "1.2"})
+    reached: list[str] = []
+
+    async def receipt(*, deadline: float, window_s: float) -> SandboxExecResult:
+        reached.append("receipt wait")
+        return SandboxExecResult(stdout="", stderr=None, return_code=0)
+
+    monkeypatch.setattr(session, "_wait_for_receipt", receipt)
+    monkeypatch.setattr(session, "_finish", AsyncMock())
+    await asyncio.wait_for(
+        session.adopt(pause_seq=1, collect=AsyncMock(return_value=None), timeout=5, close_timeout=3), 30
+    )
+    # The continue is the same request each time, so repeating it is safe; the third answer ended the retries.
+    assert answers == [] and reached == ["receipt wait"]
+
+
+async def test_adopt_fails_when_the_restored_pause_never_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[int] = []
+
+    async def request(sandbox, *, session_dir, workdir, seq, timeout):
+        calls.append(seq)
+        return ("timeout", None)
+
+    monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session.request_continue", request)
+    session, _ = _rebound(tmp_path, {"seq": 1, "identity": "1.2"})
+    monkeypatch.setattr(session, "_finish", AsyncMock())
+    with pytest.raises(RuntimeError, match="restored launch did not continue"):
+        await asyncio.wait_for(
+            session.adopt(pause_seq=1, collect=AsyncMock(return_value=None), timeout=5, close_timeout=3), 30
+        )
+    assert calls == [1, 1, 1]
+
+
+async def test_adopt_writes_an_expiry_that_was_requested_before_the_take_over(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session, _ = _rebound(tmp_path, {"seq": 1, "identity": "1.2"})
+    events: list[str] = []
+
+    async def expiry(*, timeout: float) -> None:
+        events.append("expiry")
+
+    async def request(sandbox, *, session_dir, workdir, seq, timeout):
+        events.append("continue")
+        return ("finished", None)
+
+    async def receipt(*, deadline: float, window_s: float) -> SandboxExecResult:
+        return SandboxExecResult(stdout="", stderr=None, return_code=0)
+
+    monkeypatch.setattr(session, "_request_expiry", expiry)
+    monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session.request_continue", request)
+    monkeypatch.setattr(session, "_wait_for_receipt", receipt)
+    monkeypatch.setattr(session, "_finish", AsyncMock())
+    # The session has no launch of its own yet, so the request is only recorded.
+    assert await session.expire(timeout=1) is True and events == []
+
+    await asyncio.wait_for(
+        session.adopt(pause_seq=1, collect=AsyncMock(return_value=None), timeout=5, close_timeout=3), 30
+    )
+    # The supervisor honours the marker once the pause is continued, so it is written first.
+    assert events == ["expiry", "continue"]
 
 
 # -- a launch whose connection is lost ---------------------------------------------------------------------------------
@@ -530,14 +720,57 @@ async def test_a_raised_receipt_poll_is_one_failed_poll() -> None:
     sandbox = AsyncMock()
     sandbox.exec.side_effect = [
         ConnectionError("stream lost"),
-        SandboxExecResult(stdout=json.dumps({"return_code": 3}), stderr=None, return_code=0),
+        SandboxExecResult(
+            stdout=json.dumps({"cleanup_confirmed": True, "return_code": 3}), stderr=None, return_code=0
+        ),
     ]
     session = SandboxSession(sandbox=sandbox, session_dir="/s", workdir="/w", harness="test", pausable=True)
     result = await session._wait_for_receipt(deadline=monotonic() + 600, window_s=1)
-    assert result.return_code == 3 and sandbox.exec.await_count == 2
+    # As the launch command ends: 0 once the supervisor confirmed the cleanup, whatever the harness returned.
+    assert result.return_code == 0 and sandbox.exec.await_count == 2
 
 
-async def test_five_raised_receipt_polls_give_up() -> None:
+async def test_a_receipt_that_does_not_confirm_the_cleanup_ends_the_wait_as_a_failed_launch_command() -> None:
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = SandboxExecResult(
+        stdout=json.dumps({"cleanup_confirmed": False, "return_code": None}), stderr=None, return_code=0
+    )
+    session = SandboxSession(sandbox=sandbox, session_dir="/s", workdir="/w", harness="test", pausable=True)
+    result = await session._wait_for_receipt(deadline=monotonic() + 600, window_s=1)
+    assert (result.return_code, result.error_type) == (1, None)
+
+
+async def test_failed_receipt_polls_do_not_end_the_wait_before_they_span_the_failure_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session.asyncio.sleep", AsyncMock())
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = [ConnectionError("gateway restart")] * 8 + [
+        SandboxExecResult(stdout=json.dumps({"cleanup_confirmed": True}), stderr=None, return_code=0)
+    ]
+    session = SandboxSession(sandbox=sandbox, session_dir="/s", workdir="/w", harness="test", pausable=True)
+    result = await session._wait_for_receipt(deadline=monotonic() + 600, window_s=1)
+    # Eight failures in well under a minute: a sandbox that refuses commands for a while is waited out.
+    assert result.return_code == 0 and sandbox.exec.await_count == 9
+
+
+async def test_failed_receipt_polls_are_not_counted_while_a_checkpoint_holds_the_harness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session._RECEIPT_POLL_FAILURE_S", 0.0)
+    monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session.asyncio.sleep", AsyncMock())
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = [ConnectionError("mid-snapshot")] * 8 + [
+        SandboxExecResult(stdout=json.dumps({"cleanup_confirmed": True}), stderr=None, return_code=0)
+    ]
+    session = SandboxSession(sandbox=sandbox, session_dir="/s", workdir="/w", harness="test", pausable=True)
+    session._pause_seq, session._continued_seq = 2, 1  # A pause is held: the sandbox may be mid-snapshot.
+    result = await session._wait_for_receipt(deadline=monotonic() + 600, window_s=1)
+    assert result.return_code == 0 and sandbox.exec.await_count == 9
+
+
+async def test_five_raised_receipt_polls_give_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session._RECEIPT_POLL_FAILURE_S", 0.0)
     sandbox = AsyncMock()
     sandbox.exec.side_effect = ConnectionError("sandbox gone")
     session = SandboxSession(sandbox=sandbox, session_dir="/s", workdir="/w", harness="test", pausable=True)

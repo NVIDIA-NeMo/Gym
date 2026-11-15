@@ -58,8 +58,12 @@ HARNESS_RUNNER_SCRIPT = Path(__file__).with_name(HARNESS_RUNNER_FILE)
 # could not be started. Any other status is the CLI's own.
 HARNESS_RUNNER_FAILED = 125
 HARNESS_COMMAND_NOT_STARTED = (126, 127)
-# Consecutive failed polls for an adopted launch's receipt before the wait gives up.
+# A receipt wait gives up after this many consecutive failed polls that also span this many seconds: a sandbox being
+# snapshotted, or a gateway restart, refuses commands for a while.
 _RECEIPT_POLL_FAILURES = 5
+_RECEIPT_POLL_FAILURE_S = 60.0
+# Continue requests ``adopt`` sends for the pause a restored launch holds; the request is safe to repeat.
+_ADOPT_CONTINUE_ATTEMPTS = 3
 # Each receipt poll is one command of at most this many seconds; a longer one could outlive a provider's stream limit.
 _RECEIPT_POLL_WINDOW_S = 50.0
 _SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -524,9 +528,30 @@ class SandboxSession[Artifacts]:
 
         async def launch() -> asyncio.Task[SandboxExecResult]:
             self.launch_started = True
+            if self._expire_requested:
+                # Requested before the take-over: the supervisor honours the marker once the pause is continued.
+                await self._request_expiry(timeout=close_timeout)
             self._pause_seq = pause_seq
             self._continue_seq = self._continued_seq = pause_seq - 1
-            continued = await self.continue_harness()
+            continued = HarnessPauseResult(status="unconfirmed")
+            # One hold of the lock for every attempt, so no pause is requested between two of them.
+            async with self._control:
+                for attempt in range(1, _ADOPT_CONTINUE_ATTEMPTS + 1):
+                    try:
+                        continued = await self._continue(timeout=DEFAULT_PAUSE_TIMEOUT)
+                    except Exception as error:
+                        continued = HarnessPauseResult(
+                            status="unconfirmed", error=f"continue request failed: {error!r}"
+                        )
+                    if continued.status != "unconfirmed":
+                        break
+                    LOG.warning(
+                        "%s restored launch continue attempt %d/%d failed: %s",
+                        self.harness,
+                        attempt,
+                        _ADOPT_CONTINUE_ATTEMPTS,
+                        continued.error,
+                    )
             if continued.status == "unconfirmed":
                 raise RuntimeError(f"{self.harness} restored launch did not continue: {continued.error}")
             _, provider_timeout = supervision_timeouts(
@@ -539,10 +564,16 @@ class SandboxSession[Artifacts]:
         return await self._run_launch(launch, close_timeout=close_timeout)
 
     async def _wait_for_receipt(self, *, deadline: float, window_s: float) -> SandboxExecResult:
-        """Poll for the launch's cleanup receipt until ``deadline``; its harness status is the result's code."""
+        """Poll for the launch's cleanup receipt until ``deadline``.
+
+        The result's code is the launch command's: 0 when the receipt confirms the cleanup, whatever the harness
+        returned, and 1 otherwise.
+        """
         receipt = quote(f"{self.session_dir}/{CLEANUP_RECEIPT_FILE}")
         failures = 0
+        failing_since = 0.0
         while (window := min(window_s, deadline - monotonic())) > 0:
+            asked = monotonic()
             try:
                 result = await self.sandbox.exec(
                     f"for _ in $(seq 1 {max(1, int(window))}); do "
@@ -555,20 +586,34 @@ class SandboxSession[Artifacts]:
                 result = SandboxExecResult(stdout=None, stderr=repr(error), return_code=-1, error_type="poll_failed")
             if result.return_code == 0 and not result.error_type:
                 try:
-                    code = json.loads(result.stdout or "{}").get("return_code")
+                    confirmed = json.loads(result.stdout or "{}").get("cleanup_confirmed") is True
                 except (ValueError, AttributeError):
-                    code = None
-                return SandboxExecResult(stdout="", stderr=None, return_code=code if type(code) is int else 0)
+                    confirmed = False
+                # As the launch command ends: 0 once the supervisor confirmed the cleanup.
+                return SandboxExecResult(stdout="", stderr=None, return_code=0 if confirmed else 1)
             if result.return_code != 3 or result.error_type:
-                failures += 1
-                if failures >= _RECEIPT_POLL_FAILURES:
-                    return SandboxExecResult(
-                        stdout=None, stderr=result.stderr, return_code=-1, error_type=result.error_type or "failed"
+                if self._pause_seq > self._continued_seq:
+                    failures = 0  # A checkpoint holds the harness: the sandbox may be in the middle of a snapshot.
+                else:
+                    failures += 1
+                    if failures == 1:
+                        failing_since = asked
+                    if failures >= _RECEIPT_POLL_FAILURES and monotonic() - failing_since >= _RECEIPT_POLL_FAILURE_S:
+                        return SandboxExecResult(
+                            stdout=None,
+                            stderr=result.stderr,
+                            return_code=-1,
+                            error_type=result.error_type or "failed",
+                        )
+                if failures <= 1:
+                    LOG.warning(
+                        "%s receipt poll failed (%s); retrying", self.harness, result.error_type or result.stderr
                     )
-                LOG.warning("%s receipt poll failed (%s); retrying", self.harness, result.error_type or result.stderr)
                 await asyncio.sleep(1)
             else:
                 failures = 0
+                if monotonic() - asked < 1:
+                    await asyncio.sleep(1)  # A poll that could not wait (no seq in the image) must not spin.
         return SandboxExecResult(stdout=None, stderr=None, return_code=-1, error_type="timeout")
 
     async def _run_launch(

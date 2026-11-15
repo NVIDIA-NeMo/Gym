@@ -3,7 +3,7 @@
 """The model relay as a sandbox runs it: a separate process between a client and real local upstream servers.
 
 model_relay.mjs runs on a JavaScript runtime: ``NEMO_GYM_TEST_JS_RUNTIME``, else ``node`` or ``bun`` on PATH. Without
-one, these tests are skipped.
+one, these tests are skipped; a ``NEMO_GYM_TEST_JS_RUNTIME`` that names no executable is an error.
 """
 
 import asyncio
@@ -18,10 +18,22 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.agents.utils.sandbox_session import HARNESS_RUNNER_SCRIPT
+from nemo_gym.agents.utils.supervisor_client import PAUSED_FILE, NotResumable, RestoredLaunch, check_restored
+from tests.unit_tests.agents.test_harness_pause import LocalSandbox, _start_time
 
 
 RELAY = HARNESS_RUNNER_SCRIPT.with_name("model_relay.mjs")
-JS_RUNTIME = os.environ.get("NEMO_GYM_TEST_JS_RUNTIME") or shutil.which("node") or shutil.which("bun")
+
+
+def _js_runtime() -> str | None:
+    named = os.environ.get("NEMO_GYM_TEST_JS_RUNTIME")
+    if named:
+        assert os.access(named, os.X_OK), f"NEMO_GYM_TEST_JS_RUNTIME={named!r} is not an executable"
+        return named
+    return shutil.which("node") or shutil.which("bun")
+
+
+JS_RUNTIME = _js_runtime()
 
 pytestmark = pytest.mark.skipif(JS_RUNTIME is None, reason="no JavaScript runtime (node or bun) on this machine")
 
@@ -65,6 +77,19 @@ class Upstream:
             method, path, _ = lines[0].split(" ")
             self.requests.append({"method": method, "path": path, "headers": headers, "body": body})
             digest = hashlib.sha256(body).hexdigest()
+            if self.mode == "reset_once" and len(self.requests) == 1:
+                writer.transport.abort()
+                return
+            if self.mode == "drop_mid_stream":
+                data = b"data: 0\n\n"
+                writer.write(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n"
+                    + b"%x\r\n%s\r\n" % (len(data), data)
+                )
+                await writer.drain()
+                await asyncio.sleep(0.2)
+                writer.transport.abort()
+                return
             if self.mode == "hold":
                 await asyncio.Event().wait()
             if self.mode == "hold_after_headers":
@@ -124,13 +149,20 @@ class RelayProcess:
         argv += ["--session-dir", str(self.session), "--status", str(self.status_path)]
         argv += ["--hold-timeout-s", str(self.hold_timeout_s)]
         self.process = subprocess.Popen(argv)
-        await wait_until(lambda: self.status_path.exists() and self.status()["port"] > 0)
+        # The runtime may start cold from a network file system while other test workers do the same.
+        await wait_until(lambda: self.status_path.exists() and self.status()["port"] > 0, timeout=30)
         self.port = self.status()["port"]
         return self
 
     def stop(self) -> None:
+        if self.process is None or self.process.poll() is not None:
+            return
         self.process.send_signal(signal.SIGTERM)
-        self.process.wait(timeout=10)
+        try:
+            self.process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait(timeout=10)
 
 
 async def wait_until(condition, timeout: float = 10.0) -> None:
@@ -166,22 +198,24 @@ def encode_request(path: str, body: bytes, headers: dict | None = None, close: b
     return ("\r\n".join(lines) + "\r\n\r\n").encode() + body
 
 
-async def call(port: int, path: str, body: bytes, headers: dict | None = None) -> tuple[int, dict, bytes]:
-    reader, writer = await asyncio.open_connection("127.0.0.1", port)
-    try:
-        writer.write(encode_request(path, body, headers))
-        await writer.drain()
-        return await read_response(reader)
-    finally:
-        writer.close()
+async def call(
+    port: int, path: str, body: bytes, headers: dict | None = None, timeout: float = 30.0
+) -> tuple[int, dict, bytes]:
+    async with asyncio.timeout(timeout):
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        try:
+            writer.write(encode_request(path, body, headers))
+            await writer.drain()
+            return await read_response(reader)
+        finally:
+            writer.close()
 
 
 @pytest.fixture
 async def relay(tmp_path: Path):
     process = RelayProcess(tmp_path)
     yield process
-    if process.process is not None and process.process.poll() is None:
-        process.stop()
+    process.stop()
 
 
 async def test_a_v1_call_goes_to_the_upstream_base_with_its_headers_and_body(relay: RelayProcess) -> None:
@@ -250,6 +284,7 @@ async def test_response_headers_wait_for_the_first_body_byte(relay: RelayProcess
     reader, writer = await asyncio.open_connection("127.0.0.1", relay.port)
     writer.write(encode_request("/v1/responses", b"{}"))
     await writer.drain()
+    await wait_until(lambda: len(stalled.requests) == 1)
 
     # The upstream sent its headers; the client must not see them, or the call could not be sent again.
     with pytest.raises(asyncio.TimeoutError):
@@ -276,6 +311,8 @@ async def test_a_response_already_started_is_cut_by_an_endpoint_change(relay: Re
     relay.point(2, streaming.url())
     with pytest.raises((ConnectionError, asyncio.IncompleteReadError)):
         await asyncio.wait_for(reader.readuntil(b"0\r\n\r\n"), 10)
+    await asyncio.sleep(0.5)
+    assert len(streaming.requests) == 1, "a response that started is never sent again"
     writer.close()
     await streaming.stop()
 
@@ -315,8 +352,8 @@ async def test_an_upstream_unreachable_past_the_hold_timeout_gets_a_502(tmp_path
     await probe.stop()
     relay = RelayProcess(tmp_path, hold_timeout_s=1.5)
     relay.point(1, f"http://127.0.0.1:{port}/v1")
-    await relay.start()
     try:
+        await relay.start()
         status, _, body = await asyncio.wait_for(call(relay.port, "/v1/responses", b"{}"), 15)
         assert status == 502 and "unreachable" in json.loads(body)["error"]["message"]
     finally:
@@ -354,7 +391,7 @@ async def test_one_connection_serves_several_calls(relay: RelayProcess) -> None:
     for index in range(3):
         writer.write(encode_request("/v1/responses", b'{"n": %d}' % index, close=False))
         await writer.drain()
-        status, _, reply = await read_response(reader)
+        status, _, reply = await asyncio.wait_for(read_response(reader), 15)
         assert status == 200 and json.loads(reply)["body"] == '{"n": %d}' % index
     writer.close()
     await upstream.stop()
@@ -369,3 +406,100 @@ async def test_the_status_file_names_the_process_and_its_counters(relay: RelayPr
     assert status["held"] == status["inflight"] == status["resent"] == 0
     stat = Path(f"/proc/{relay.process.pid}/stat").read_text()
     assert status["start"] == int(stat[stat.rindex(")") + 2 :].split()[19])
+
+
+async def test_a_restore_sends_cut_and_held_calls_to_the_new_endpoint_only_after_the_continue(
+    relay: RelayProcess,
+) -> None:
+    dead, fresh = await Upstream("hold").start(), await Upstream().start()
+    try:
+        relay.point(1, dead.url())
+        await relay.start()
+        cut_body, held_body = b'{"call": "in flight at the snapshot"}', b'{"call": "made while held"}'
+        cut = asyncio.ensure_future(call(relay.port, "/v1/responses", cut_body))
+        await wait_until(lambda: len(dead.requests) == 1)
+        # The checkpoint: a hold pause, and a call the harness makes while it is open.
+        relay.request_file("pause.request", 1)
+        held = asyncio.ensure_future(call(relay.port, "/v1/responses", held_body))
+        await wait_until(lambda: relay.status()["held"] == 1)
+        # The restore: the new job's model server first, the continue second.
+        relay.point(2, fresh.url("/rollout/key-b/v1"))
+        await wait_until(lambda: relay.status()["gen"] == 2 and relay.status()["held"] == 2)
+        assert fresh.requests == [] and len(dead.requests) == 1 and not cut.done() and not held.done()
+
+        relay.request_file("continue.request", 1)
+        replies = await asyncio.wait_for(asyncio.gather(cut, held), 15)
+
+        assert [status for status, _, _ in replies] == [200, 200]
+        assert sorted(request["body"] for request in fresh.requests) == sorted([cut_body, held_body])
+        assert all(request["path"] == "/rollout/key-b/v1/responses" for request in fresh.requests)
+        assert len(dead.requests) == 1
+    finally:
+        await dead.stop()
+        await fresh.stop()
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="check_restored reads /proc")
+async def test_check_restored_reads_the_status_file_the_relay_writes(relay: RelayProcess) -> None:
+    relay.point(1, "http://127.0.0.1:9/v1")
+    await relay.start()
+    me = f"{os.getpid()}.{_start_time(os.getpid())}"
+    (relay.session / PAUSED_FILE).write_text(
+        json.dumps({"seq": 1, "confirmed": True, "pids": [], "error": None, "mode": "hold", "identity": me})
+    )
+
+    async def check():
+        return await check_restored(
+            LocalSandbox(),  # type: ignore[arg-type]
+            str(relay.session),
+            pause_seq=1,
+            identity=me,
+            relay_status_path=str(relay.status_path),
+            timeout=15,
+        )
+
+    assert await check() == RestoredLaunch(pause_seq=1, identity=me)
+    relay.process.kill()
+    relay.process.wait(timeout=10)
+    assert await check() == NotResumable("relay_gone")
+
+
+async def test_an_upstream_that_closes_before_its_response_gets_the_same_call_again(relay: RelayProcess) -> None:
+    upstream = await Upstream("reset_once").start()
+    try:
+        relay.point(1, upstream.url())
+        await relay.start()
+        body = json.dumps({"input": "x" * 3000}).encode()
+
+        status, _, reply = await call(relay.port, "/v1/responses", body, {"X-Session-Id": "s"})
+
+        assert status == 200 and json.loads(reply)["sha256"] == hashlib.sha256(body).hexdigest()
+        first, again = upstream.requests
+        assert first["body"] == again["body"] == body
+        assert first["headers"] == again["headers"] and first["path"] == again["path"]
+    finally:
+        await upstream.stop()
+
+
+async def test_an_upstream_that_drops_a_started_response_ends_the_call_and_is_not_asked_again(
+    relay: RelayProcess,
+) -> None:
+    upstream = await Upstream("drop_mid_stream").start()
+    try:
+        relay.point(1, upstream.url())
+        await relay.start()
+        async with asyncio.timeout(15):
+            reader, writer = await asyncio.open_connection("127.0.0.1", relay.port)
+            writer.write(encode_request("/v1/responses", b"{}"))
+            await writer.drain()
+            try:
+                received = await reader.read()
+            except ConnectionError:
+                received = b""
+            writer.close()
+
+        assert not received.endswith(b"0\r\n\r\n"), "a dropped stream must not look complete to the harness"
+        await asyncio.sleep(1.0)  # longer than the first retry delays
+        assert len(upstream.requests) == 1
+    finally:
+        await upstream.stop()
