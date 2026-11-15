@@ -33,6 +33,7 @@ from nemo_gym.server_runtime import DirectHTTPToolAccess
 from nemo_gym.trajectory import AgentInvocation, SandboxObservation, ToolCallObservation
 from responses_api_agents.terminus_2_agent import sandbox as terminus_sandbox
 from responses_api_agents.terminus_2_agent.app import Terminus2Agent, Terminus2AgentConfig, Terminus2AgentRunRequest
+from responses_api_agents.terminus_2_agent.legacy_app import Terminus2LegacyAgent
 from responses_api_agents.terminus_2_agent.sandbox import Terminus2SandboxSession, terminus_runtime
 
 
@@ -1172,12 +1173,18 @@ class TestSandboxLifecycle:
         wired.sandbox.disconnect.assert_awaited_once()
 
 
+def test_session_entrypoint_uses_the_environment_server_run() -> None:
+    from nemo_gym.agents import SimpleResponsesAPIAgent
+
+    assert Terminus2Agent.run is SimpleResponsesAPIAgent.run
+
+
 class TestRun:
     """``/run`` is the host path's compatibility endpoint; it needs a Resources server and no agent session."""
 
     @staticmethod
-    def _agent(**kwargs) -> Terminus2Agent:
-        agent = _agent(**kwargs)
+    def _agent(**kwargs) -> Terminus2LegacyAgent:
+        agent = Terminus2LegacyAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
         agent.server_client.post = AsyncMock(side_effect=AssertionError("a refused /run must not call any server"))
         return agent
 
@@ -1201,7 +1208,7 @@ class TestRun:
         assert "resources_server" in refused.value.detail
 
     async def test_run_forwards_max_output_tokens_to_the_host_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        agent = _agent(resources_server=ResourcesServerRef(type="resources_servers", name="resources"))
+        agent = self._agent(resources_server=ResourcesServerRef(type="resources_servers", name="resources"))
         calls: list[tuple[str, object]] = []
 
         class Stop(Exception):
@@ -1214,7 +1221,7 @@ class TestRun:
             return MagicMock(cookies={})
 
         agent.server_client.post = post
-        monkeypatch.setattr("responses_api_agents.terminus_2_agent.app.raise_for_status", AsyncMock())
+        monkeypatch.setattr("responses_api_agents.terminus_2_agent.legacy_app.raise_for_status", AsyncMock())
         request = Request({"type": "http", "headers": [], "session": {}})
         body = Terminus2AgentRunRequest(responses_create_params={"input": "task", "max_output_tokens": 32})
 

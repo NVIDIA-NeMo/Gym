@@ -2,7 +2,7 @@ terminus_2_agent:
   responses_api_agents:
     terminus_2_agent:
       entrypoint: app.py
-      # Agent sessions get their task from the environment server. Set a resources server only for /run.
+      # Agent sessions get their task from the environment server. For host /run, set entrypoint: legacy_app.py and resources_server.
       resources_server: null
       model_server:
         type: responses_api_models

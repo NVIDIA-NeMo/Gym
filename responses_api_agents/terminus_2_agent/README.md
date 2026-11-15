@@ -81,7 +81,7 @@ unknown. Reasoning-token counts are always unknown, because Harbor keeps none.
 
 `configs/terminus_2_agent.yaml` is the agent-session configuration (`resources_server: null`). Composing it onto a
 benchmark does not replace the benchmark's own agent. For a benchmark whose Resources server lends no sandbox, use
-`configs/profiles/benchmark.yaml` (below); for the host-path `/run`, set `resources_server` and front the agent with
+`configs/profiles/benchmark.yaml` (below); for the host-path `/run`, set `entrypoint: legacy_app.py` and `resources_server`, and front the agent with
 the [`legacy_agent`](../../environment_servers/legacy_agent/README.md) Environment Server. Besides the Terminus
 settings (`max_turns`, `parser_name`, `temperature`, `enable_summarize`, `model_info`, tmux pane size and others),
 it sets:
@@ -158,7 +158,7 @@ interchangeable.
 ## Host path and AnyTerminal
 
 Without an agent session, Terminus-2 runs on this host in a fresh temporary workspace, or in `workspace_root`.
-The host must provide `bash`, `tmux`, and `script`. `/run` uses this path; it requires `resources_server`.
+The host must provide `bash`, `tmux`, and `script`. `/run` uses this path through `entrypoint: legacy_app.py`; it requires `resources_server`.
 
 Prepare the Terminal Bench dataset first:
 
