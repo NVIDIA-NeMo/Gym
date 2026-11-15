@@ -2014,6 +2014,12 @@ async def test_an_export_records_whether_the_providers_snapshots_keep_processes(
     exported = await (await seeded(keeping, state_dir / "vm", "s1")).export(["s1"], checkpoint_id="c1")
     assert state_of(exported, "s1").keeps_processes is True
 
+    # Only the provider's own True counts: anything else is read as files only.
+    truthy = FakeSnapshotProvider()
+    truthy.snapshot_keeps_processes = "yes"  # type: ignore[attr-defined]
+    exported = await (await seeded(truthy, state_dir / "truthy", "s1")).export(["s1"], checkpoint_id="c1")
+    assert state_of(exported, "s1").keeps_processes is False
+
 
 def test_a_state_written_before_keeps_processes_existed_reads_as_files_only() -> None:
     state = SandboxCheckpointState.model_validate(

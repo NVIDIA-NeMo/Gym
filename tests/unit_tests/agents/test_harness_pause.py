@@ -238,7 +238,15 @@ def test_a_continued_pause_written_before_the_launch_is_acknowledged_and_not_ser
         process.wait(timeout=15)
         assert (tmp_path / "started").exists()
         assert not (tmp_path / PAUSED_FILE).exists()
-        assert json.loads((tmp_path / CONTINUED_FILE).read_text())["seq"] == 3
+        # Written before the supervisor has an identity to name.
+        assert json.loads((tmp_path / CONTINUED_FILE).read_text()) == {
+            "seq": 3,
+            "confirmed": True,
+            "pids": [],
+            "error": None,
+            "mode": "stop",
+            "identity": None,
+        }
     finally:
         _finish(process)
 
@@ -380,28 +388,132 @@ def test_a_stop_while_paused_continues_the_harness_so_it_can_save_on_term(tmp_pa
         _finish(process)
 
 
+# Like _WORKER, but the harness and its child end once the test lets them.
+_HOLD_WORKER = f"""
+(until [ -e finish ]; do printf . >> child.ticks; sleep 0.02; done) &
+( "{sys.executable}" service.py & echo $! > service.pid )
+while [ ! -s service.pid ]; do sleep 0.01; done
+touch ready
+until [ -e finish ]; do printf . >> worker.ticks; sleep 0.02; done
+"""
+
+
 @linux_only
 def test_a_hold_pause_signals_nothing_names_the_supervisor_and_credits_the_deadline(tmp_path: Path) -> None:
-    # The worker needs 2.5 seconds of a 1.5 second budget; the pause holds the budget for about 2 of them.
-    worker = "touch ready; for _ in $(seq 1 125); do printf . >> worker.ticks; sleep 0.02; done; touch finished"
-    process = _start(tmp_path, "bash", "-c", worker, timeout="1.5", pause_mode="hold")
+    (tmp_path / "service.py").write_text(_SERVICE)
+    process = _start(tmp_path, "bash", "-c", _HOLD_WORKER, timeout="3", pause_mode="hold")
+    service = None
+    try:
+        _wait_for(lambda: (tmp_path / "ready").exists())
+        service = int((tmp_path / "service.pid").read_text())
+        _wait_for(lambda: all(_ticks(tmp_path).values()))
+        _request(tmp_path / PAUSE_REQUEST_FILE, 1)
+        paused = _acknowledgement(tmp_path / PAUSED_FILE, 1)
+        assert paused == {
+            "seq": 1,
+            "confirmed": True,
+            "pids": [],
+            "error": None,
+            "mode": "hold",
+            "identity": paused["identity"],
+        }
+        assert _is_identity_of_a_live_process(paused["identity"])
+        # Nothing is stopped: the harness, its child and a service that left it keep running through a hold
+        # longer than the whole budget.
+        before = _ticks(tmp_path)
+        time.sleep(3.5)
+        assert _state(service) not in ("T", "t", "gone")
+        after = _ticks(tmp_path)
+        assert all(after[name] > before[name] for name in before), (before, after)
+        assert process.poll() is None and not (tmp_path / CLEANUP_RECEIPT_FILE).exists()
+        _request(tmp_path / CONTINUE_REQUEST_FILE, 1)
+        continued = _acknowledgement(tmp_path / CONTINUED_FILE, 1)
+        assert continued["confirmed"] is True and continued["mode"] == "hold", continued
+        assert continued["identity"] == paused["identity"]
+        # The held time was credited: several supervisor rounds later the deadline has still not ended the harness.
+        time.sleep(0.3)
+        assert process.poll() is None
+        (tmp_path / "finish").touch()
+        process.wait(timeout=15)
+        receipt = json.loads((tmp_path / CLEANUP_RECEIPT_FILE).read_text())
+        assert receipt["timed_out"] is False and receipt["stopped"] is False and receipt["return_code"] == 0, receipt
+    finally:
+        _finish(process)
+        if service is not None:
+            try:
+                os.kill(service, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@linux_only
+def test_a_harness_that_ends_during_a_hold_pause_is_reported_once_the_pause_is_continued(tmp_path: Path) -> None:
+    worker = "touch ready; until [ -e finish ]; do sleep 0.02; done; touch ended; exit 7"
+    process = _start(tmp_path, "bash", "-c", worker, pause_mode="hold")
     try:
         _wait_for(lambda: (tmp_path / "ready").exists())
         _request(tmp_path / PAUSE_REQUEST_FILE, 1)
+        assert _acknowledgement(tmp_path / PAUSED_FILE, 1)["confirmed"] is True
+        (tmp_path / "finish").touch()
+        _wait_for(lambda: (tmp_path / "ended").exists())
+        time.sleep(0.3)
+        # The supervisor serves the hold until its continue: no receipt yet.
+        assert process.poll() is None and not (tmp_path / CLEANUP_RECEIPT_FILE).exists()
+        _request(tmp_path / CONTINUE_REQUEST_FILE, 1)
+        assert _acknowledgement(tmp_path / CONTINUED_FILE, 1)["confirmed"] is True
+        process.wait(timeout=15)
+        receipt = json.loads((tmp_path / CLEANUP_RECEIPT_FILE).read_text())
+        assert receipt == {
+            "cleanup_confirmed": True,
+            "return_code": 7,
+            "error": None,
+            "timed_out": False,
+            "stopped": False,
+        }
+    finally:
+        _finish(process)
+
+
+@linux_only
+def test_a_stop_during_a_hold_pause_ends_the_harness_with_term(tmp_path: Path) -> None:
+    worker = "trap 'echo saved > checkpoint; exit 0' TERM; touch ready; while :; do sleep 0.05; done"
+    process = _start(tmp_path, "bash", "-c", worker, pause_mode="hold")
+    try:
+        _wait_for(lambda: (tmp_path / "ready").exists())
+        _request(tmp_path / PAUSE_REQUEST_FILE, 1)
+        assert _acknowledgement(tmp_path / PAUSED_FILE, 1)["mode"] == "hold"
+        (tmp_path / "stop.request").touch()
+        process.wait(timeout=15)
+        receipt = json.loads((tmp_path / CLEANUP_RECEIPT_FILE).read_text())
+        assert receipt == {
+            "cleanup_confirmed": True,
+            "return_code": 0,
+            "error": None,
+            "timed_out": False,
+            "stopped": True,
+        }
+        assert (tmp_path / "checkpoint").read_text() == "saved\n"
+    finally:
+        _finish(process)
+
+
+@linux_only
+def test_a_hold_pause_before_the_launch_holds_the_launch_until_continued(tmp_path: Path) -> None:
+    _request(tmp_path / PAUSE_REQUEST_FILE, 1)
+    process = _start(tmp_path, "touch", "started", pause_mode="hold")
+    try:
         paused = _acknowledgement(tmp_path / PAUSED_FILE, 1)
         assert paused["confirmed"] is True and paused["pids"] == [] and paused["mode"] == "hold", paused
         assert _is_identity_of_a_live_process(paused["identity"])
-        # Nothing is stopped: the harness keeps running while the pause holds.
-        before = _ticks(tmp_path)["worker"]
-        time.sleep(2)
-        assert _ticks(tmp_path)["worker"] > before
+        time.sleep(0.3)
+        assert not (tmp_path / "started").exists()
         _request(tmp_path / CONTINUE_REQUEST_FILE, 1)
-        continued = _acknowledgement(tmp_path / CONTINUED_FILE, 1)
-        assert continued["confirmed"] is True and continued["identity"] == paused["identity"], continued
         process.wait(timeout=15)
+        assert (tmp_path / "started").exists()
+        continued = json.loads((tmp_path / CONTINUED_FILE).read_text())
+        assert continued["seq"] == 1 and continued["mode"] == "hold" and continued["identity"] == paused["identity"]
         receipt = json.loads((tmp_path / CLEANUP_RECEIPT_FILE).read_text())
-        assert receipt["timed_out"] is False and receipt["return_code"] == 0, receipt
-        assert (tmp_path / "finished").exists()
+        assert receipt["return_code"] == 0 and receipt["timed_out"] is False and receipt["stopped"] is False, receipt
     finally:
         _finish(process)
 
@@ -730,6 +842,9 @@ async def test_a_session_pauses_and_continues_its_running_harness(tmp_path: Path
                 await asyncio.sleep(0.02)
         paused = await session.pause_harness(timeout=10)
         assert paused.confirmed and paused.pids, paused
+        assert (
+            paused.mode == "stop" and paused.identity is not None and _is_identity_of_a_live_process(paused.identity)
+        )
         frozen = (launch_dir / "ticks").read_text()
         await asyncio.sleep(0.3)
         assert (launch_dir / "ticks").read_text() == frozen
@@ -759,20 +874,64 @@ async def test_a_hold_session_keeps_its_harness_running_and_records_the_pause_it
             close_timeout=3,
         )
     )
-    async with asyncio.timeout(15):
-        while not (launch_dir / "ticks").exists():
-            await asyncio.sleep(0.02)
-    paused = await session.pause_harness(timeout=10)
-    assert paused.confirmed and paused.pids == () and paused.mode == "hold", paused
-    assert paused.identity is not None and _is_identity_of_a_live_process(paused.identity)
-    before = len((launch_dir / "ticks").read_text())
-    await asyncio.sleep(0.3)
-    assert len((launch_dir / "ticks").read_text()) > before
-    state = session.checkpoint_state()
-    assert state["pause_seq"] == 1 and state["supervisor_identity"] == paused.identity
-    assert (await session.continue_harness(timeout=10)).confirmed
-    assert "pause_seq" not in session.checkpoint_state()
-    assert await asyncio.wait_for(running, 30) == "artifacts"
+    try:
+        async with asyncio.timeout(15):
+            while not (launch_dir / "ticks").exists():
+                await asyncio.sleep(0.02)
+        paused = await session.pause_harness(timeout=10)
+        assert paused.confirmed and paused.pids == () and paused.mode == "hold", paused
+        assert paused.identity is not None and _is_identity_of_a_live_process(paused.identity)
+        # Nothing is stopped: the harness keeps ticking while the pause holds.
+        await _ticks_grow(launch_dir, (launch_dir / "ticks").read_text())
+        state = json.loads(json.dumps(session.checkpoint_state()))
+        assert state["launch_started"] is True
+        assert state["pause_seq"] == 1 and state["supervisor_identity"] == paused.identity
+        # Pausing again before the continue asks for the same pause; the same supervisor answers.
+        again = await session.pause_harness(timeout=10)
+        assert again.confirmed and again.mode == "hold" and again.identity == paused.identity, again
+        assert session.checkpoint_state()["pause_seq"] == 1
+        continued = await session.continue_harness(timeout=10)
+        assert continued.confirmed and continued.mode == "hold" and continued.identity == paused.identity, continued
+        released = session.checkpoint_state()
+        assert "pause_seq" not in released and "supervisor_identity" not in released
+        # The next checkpoint holds a later pause under the same supervisor.
+        assert (await session.pause_harness(timeout=10)).confirmed
+        assert session.checkpoint_state()["pause_seq"] == 2
+        assert session.checkpoint_state()["supervisor_identity"] == paused.identity
+        assert (await session.continue_harness(timeout=10)).confirmed
+        await _ticks_grow(launch_dir, (launch_dir / "ticks").read_text())
+        (launch_dir / "finish").touch()
+        assert await asyncio.wait_for(running, 30) == "artifacts"
+        assert session.cleanup is not None
+        assert session.cleanup["stopped"] is False and session.cleanup["timed_out"] is False
+    finally:
+        await _end_launch(running, launch_dir)
+
+
+@linux_only
+async def test_a_stopped_launch_no_longer_records_the_pause_it_held(tmp_path: Path) -> None:
+    session = _session(tmp_path, pause_mode="hold")
+    launch_dir = tmp_path / "launch-1"
+    running = asyncio.create_task(
+        session.execute(
+            stage_activation=_ticking_stage(launch_dir),
+            collect=AsyncMock(return_value="artifacts"),
+            timeout=30,
+            close_timeout=3,
+        )
+    )
+    try:
+        async with asyncio.timeout(15):
+            while not (launch_dir / "ticks").exists():
+                await asyncio.sleep(0.02)
+        assert (await session.pause_harness(timeout=10)).confirmed
+        assert "pause_seq" in session.checkpoint_state()
+        await session.stop_harness(timeout=10)
+        # Its supervisor is gone: a restore must not look for one holding this pause.
+        assert session.cleanup is not None and "pause_seq" not in session.checkpoint_state()
+        await asyncio.wait_for(asyncio.gather(running, return_exceptions=True), 30)
+    finally:
+        await _end_launch(running, launch_dir)
 
 
 @linux_only
@@ -936,6 +1095,64 @@ async def test_rebind_binds_a_session_to_a_restored_sandbox_without_the_dead_lau
     (tmp_path / "launch-1").mkdir()
     await rebound.close(timeout=5)
     assert rebound.closed and not (tmp_path / "launch-1").exists()
+
+
+def test_rebind_accepts_a_held_pause_and_keeps_the_pause_mode(tmp_path: Path) -> None:
+    state = {
+        "session_root": str(tmp_path / "launch-1"),
+        "session_dir": str(tmp_path / "launch-2"),
+        "launch_started": True,
+        "pause_seq": 3,
+        "supervisor_identity": "41.9000",
+    }
+    rebound = SandboxSession.rebind(
+        LocalSandbox(),  # type: ignore[arg-type]
+        json.loads(json.dumps(state)),
+        workdir=str(tmp_path),
+        harness="test",
+        pausable=True,
+        pause_mode="hold",
+    )
+    assert rebound.pause_mode == "hold" and rebound.pausable
+    # The re-bound session has no launch of its own, so it holds no pause either.
+    assert rebound.checkpoint_state() == {
+        "session_root": state["session_root"],
+        "session_dir": state["session_dir"],
+        "launch_started": False,
+    }
+    default = SandboxSession.rebind(LocalSandbox(), state, workdir=None, harness="test")  # type: ignore[arg-type]
+    assert default.pause_mode == "stop"
+    with pytest.raises(ValueError):
+        SandboxSession.rebind(LocalSandbox(), state | {"pause_seq": "3"}, workdir=None, harness="test")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("pausable", "pause_mode", "option"), [(True, "hold", True), (True, "stop", False), (False, "hold", False)]
+)
+async def test_execute_launches_the_supervisor_in_the_session_s_pause_mode(
+    pausable: bool, pause_mode: str, option: bool
+) -> None:
+    sandbox = AsyncMock(spec=AsyncSandbox)
+    sandbox.exec.return_value = SandboxExecResult(stdout="", stderr="", return_code=0)
+    session = SandboxSession(
+        sandbox=sandbox,
+        session_dir="/s",
+        workdir="/w",
+        harness="test",
+        pausable=pausable,
+        pause_mode=pause_mode,  # type: ignore[arg-type]
+    )
+    session.stop_harness = AsyncMock()  # type: ignore[method-assign]
+    await session.execute(
+        stage_activation=AsyncMock(return_value=SandboxCommand(argv=["worker"])),
+        collect=AsyncMock(return_value=None),
+        timeout=10,
+        close_timeout=3,
+    )
+    [launch] = [call for call in sandbox.exec.await_args_list if "process_supervisor.sh" in call.args[0]]
+    # stop is the supervisor's default and is not passed; a session that cannot pause passes no pause option.
+    assert ("--pause-mode hold" in launch.args[0]) is option
+    assert ("--pause-mode" in launch.args[0]) is option
 
 
 # -- run_with_checkpoint_pauses -------------------------------------------------------------------------------------
@@ -1604,6 +1821,108 @@ async def test_a_pause_keeps_its_number_until_a_continue_is_confirmed(
     assert (await session.continue_harness()).confirmed
     assert (await session.pause_harness()).confirmed
     assert requests == [("pause", 1)] * 3 + [("continue", 1)] * 2 + [("pause", 2)]
+
+
+def _scripted_requests(monkeypatch: pytest.MonkeyPatch, answers: dict[str, list]) -> list[tuple[str, int]]:
+    """Answer the session's pause and continue requests from ``answers``; returns the requests made."""
+    requests: list[tuple[str, int]] = []
+
+    def answering(kind: str):
+        async def request(sandbox, *, session_dir, workdir, seq, timeout):
+            requests.append((kind, seq))
+            return answers[kind].pop(0)
+
+        return request
+
+    monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session.request_pause", answering("pause"))
+    monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session.request_continue", answering("continue"))
+    return requests
+
+
+def _ack(seq: int, confirmed: bool = True, **fields) -> tuple:
+    return ("acknowledged", {"seq": seq, "confirmed": confirmed, "pids": [], "error": None, **fields})
+
+
+async def test_a_pause_that_found_no_supervisor_yet_is_asked_again_once_the_launch_command_was_sent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    named = {"mode": "hold", "identity": "7.100"}
+    answers = {
+        "pause": [("not_launched", None), _ack(1, **named), ("not_launched", None), ("not_launched", None)],
+        "continue": [_ack(1, **named)],
+    }
+    requests = _scripted_requests(monkeypatch, answers)
+    session = _session(tmp_path, pause_mode="hold")
+    session.launch_started = True
+
+    # The launch command is on its way: its supervisor reads the request as it starts, and the second answer names it.
+    paused = await session.pause_harness()
+    assert paused.confirmed and paused.identity == "7.100"
+    state = session.checkpoint_state()
+    assert state["pause_seq"] == 1 and state["supervisor_identity"] == "7.100"
+    assert requests == [("pause", 1), ("pause", 1)]
+
+    assert (await session.continue_harness()).confirmed
+    # A supervisor that still has not started: confirmed, as before, with nothing to find again after a restore.
+    unnamed = await session.pause_harness()
+    assert unnamed.confirmed and unnamed.identity is None
+    assert "pause_seq" not in session.checkpoint_state()
+    assert requests[3:] == [("pause", 2), ("pause", 2)]
+
+
+async def test_a_pause_before_the_launch_command_is_not_asked_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requests = _scripted_requests(monkeypatch, {"pause": [("not_launched", None)], "continue": []})
+    session = _session(tmp_path, pause_mode="hold")
+
+    assert (await session.pause_harness()).confirmed
+    assert requests == [("pause", 1)]
+
+
+async def test_checkpoint_state_records_a_pause_only_while_a_named_supervisor_holds_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    named = {"mode": "hold", "identity": "7.100"}
+    answers = {
+        "pause": [
+            _ack(1, confirmed=False, **named),
+            _ack(1),  # A supervisor from before acknowledgements named it.
+            _ack(1, **named),
+            _ack(2, **named),
+        ],
+        "continue": [("timeout", None), _ack(1, **named)],
+    }
+    _scripted_requests(monkeypatch, answers)
+    session = _session(tmp_path, pause_mode="hold")
+    session.launch_started = True
+
+    def held() -> tuple:
+        state = session.checkpoint_state()
+        return state.get("pause_seq"), state.get("supervisor_identity")
+
+    # An unconfirmed pause, and a supervisor that does not name itself: nothing to find again.
+    for _ in range(2):
+        await session.pause_harness()
+        assert held() == (None, None)
+    paused = await session.pause_harness()
+    assert paused.confirmed and paused.identity == "7.100" and paused.mode == "hold"
+    assert held() == (1, "7.100")
+    session.launch_started = False
+    assert held() == (None, None)
+    session.launch_started = True
+    # A continue that was not confirmed leaves the pause held.
+    assert (await session.continue_harness()).status == "unconfirmed"
+    assert held() == (1, "7.100")
+    assert (await session.continue_harness()).confirmed
+    assert held() == (None, None)
+    assert (await session.pause_harness()).confirmed
+    assert held() == (2, "7.100")
+    # The next activation has a fresh supervisor: nothing held carries over.
+    session.launch_started = False
+    await session.begin_activation(session_dir=str(tmp_path / "launch-2"), timeout=1)
+    session.launch_started = True
+    assert held() == (None, None)
 
 
 @pytest.mark.parametrize(

@@ -139,8 +139,9 @@ class ExpiryUnsupportedError(Exception):
 class HarnessPauseResult:
     """The outcome of ``SandboxSession.pause_harness`` or ``continue_harness``.
 
-    ``confirmed``: every process the supervisor reached is paused (or running again), or no launch had started,
-    and the launch will honour the request when it starts. ``finished``: the harness had already ended; its cleanup
+    ``confirmed``: the supervisor holds the pause (in ``stop`` mode every process it reached is stopped, or running
+    again after a continue; in ``hold`` mode nothing was signalled), or no launch had started, and the launch will
+    honour the request when it starts. ``finished``: the harness had already ended; its cleanup
     receipt answers instead. ``unconfirmed``: the supervisor did not confirm in time or reported ``error``.
     ``pids`` are the processes a pause stopped. ``acknowledged`` says the supervisor answered this request: its
     answer stays in the acknowledgement file, so sending the same request again reads the same answer.
@@ -256,7 +257,7 @@ class SandboxSession[Artifacts]:
     # The supervisor that confirmed pause ``_held_seq``, as ``PID.START``.
     _held_identity: str | None = field(default=None, init=False)
     _held_seq: int = field(default=0, init=False)
-    # Holds the provider's polls of the launch's command while the harness is paused, so a sandbox being snapshotted
+    # Holds the provider's polls of the launch's command while a pause is held, so a sandbox being snapshotted
     # is not asked about it; released before anything else runs a command in the sandbox.
     _parked_polls: ExitStack | None = field(default=None, init=False, repr=False)
 
@@ -267,7 +268,13 @@ class SandboxSession[Artifacts]:
             "session_dir": self.session_dir,
             "launch_started": self.launch_started,
         }
-        if self.launch_started and self._held_identity is not None and self._continued_seq < self._held_seq:
+        # A launch that ended holds no pause: its supervisor is gone, whatever it acknowledged before.
+        if (
+            self.launch_started
+            and self.cleanup is None
+            and self._held_identity is not None
+            and self._continued_seq < self._held_seq
+        ):
             state["pause_seq"] = self._held_seq
             state["supervisor_identity"] = self._held_identity
         return state
@@ -541,6 +548,13 @@ class SandboxSession[Artifacts]:
         outcome, acknowledgement = await request_pause(
             self.sandbox, session_dir=self.session_dir, workdir=self.workdir, seq=self._pause_seq, timeout=timeout
         )
+        if outcome == "not_launched" and self.launch_started:
+            # The launch command was already sent: its supervisor reads this request as it starts and holds the
+            # launch. Ask once more for its acknowledgement, which names it, so the pause is recorded with the
+            # supervisor that holds it. The request is the same one, so repeating it changes nothing.
+            outcome, acknowledgement = await request_pause(
+                self.sandbox, session_dir=self.session_dir, workdir=self.workdir, seq=self._pause_seq, timeout=timeout
+            )
         result = _pause_result(outcome, acknowledgement)
         if result.confirmed and result.identity is not None:
             self._held_seq, self._held_identity = self._pause_seq, result.identity
