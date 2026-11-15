@@ -14,6 +14,7 @@ from benchmarks.agentic_vbench.prepare_harbor_env import RECORDS_DIR, adapt_task
 from benchmarks.agentic_vbench.staging import (
     HUB_JUDGE,
     JUDGE_PROTOCOLS,
+    MATERIALS_ARTIFACT,
     MATERIALS_FETCH_GUARD,
     MATERIALS_RETRY_PATCHED,
     OUTPUT_ARTIFACT,
@@ -104,7 +105,7 @@ def test_adapt_task_stretches_the_golden_asset_retries(tmp_path: Path) -> None:
     # A download that still fails exits 75 (verifier unavailable), not without a reward.
     assert verifier.count(MATERIALS_FETCH_GUARD) == 1
     config = tomllib.loads((destination / "task.toml").read_text())
-    assert config["steps"][0]["artifacts"] == [OUTPUT_ARTIFACT]
+    assert config["steps"][0]["artifacts"] == [OUTPUT_ARTIFACT, MATERIALS_ARTIFACT]
     HarborTaskConfig.model_validate(config)
     record = json.loads((tmp_path / "records" / "materials.json").read_text())
     assert record["retry"]["staged"] == MATERIALS_RETRY_PATCHED

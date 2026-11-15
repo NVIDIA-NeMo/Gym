@@ -21,6 +21,7 @@ from benchmarks.agentic_vbench import staging
 from benchmarks.agentic_vbench.staging import (
     HUB_JUDGE,
     JUDGE_PROTOCOLS,
+    MATERIALS_ARTIFACT,
     MATERIALS_FETCH_GUARD,
     MATERIALS_RETRY,
     MATERIALS_RETRY_PATCHED,
@@ -265,9 +266,10 @@ def test_materials_download_retries_longer_and_a_failed_fetch_exits_75(tmp_path:
     assert patched.count(MATERIALS_FETCH_GUARD) == 1
     assert '"$MATERIALS_URL" -o /tmp/g.zip' + MATERIALS_FETCH_GUARD in patched
     assert patched.endswith("unzip -qo /tmp/g.zip 'golden/*' -d /tmp/g\n")
-    # The verifier reads only the agent's output: declared as the step's artifact for separate verification.
+    # The verifier reads the agent's output and the materials the setup step copied: both declared as the step's
+    # artifacts for separate verification.
     config = tomllib.loads((staged / "task.toml").read_text())
-    assert config["steps"][0]["artifacts"] == [OUTPUT_ARTIFACT]
+    assert config["steps"][0]["artifacts"] == [OUTPUT_ARTIFACT, MATERIALS_ARTIFACT]
     assert config["steps"][0]["verifier"]["env"]["MATERIALS_URL"].endswith("exp-demo.zip")
     # Source task and non-verifier files are untouched.
     assert verifier.read_text() == MATERIALS_VERIFIER

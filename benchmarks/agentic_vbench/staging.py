@@ -48,8 +48,11 @@ DEFAULT_JUDGE_PROTOCOL = "nvinference-upstream"
 # The upstream tasks' own judge credentials: the templates stage_judge removes from the agent's environment.
 UPSTREAM_JUDGE_ENV = {"ANTHROPIC_API_KEY", "GEMINI_API_KEY"}
 # What the judged and repair verifiers read of the agent's work; declared as the step's artifact so the server can
-# verify them in a fresh sandbox (`separate_verifier_for_artifacts`).
+# verify them in a fresh sandbox (`separate_verifier_for_artifacts`). The repair verifiers also read the task's
+# materials, which the setup step copies from the image's /baked into the agent's sandbox, so a fresh verifier
+# sandbox needs them copied too; the judged verifiers read their source clip from /baked directly.
 OUTPUT_ARTIFACT = "/workspace/output"
+MATERIALS_ARTIFACT = "/workspace/materials"
 # Informational scan in the repurpose verifier; inaccessible /proc entries in rootless containers must not
 # abort the verifier under pipefail.
 TYPING_DIAGNOSTIC = "find / -name 'typing_extensions*' 2>/dev/null | head -20"
@@ -284,7 +287,8 @@ MATERIALS_FETCH_GUARD = (
 
 def stage_materials(task_path: Path, *, staging: Path, output: Path) -> Path:
     """Copy a task whose verifier downloads MATERIALS_URL: longer, bounded curl retries, a failed download exits 75,
-    and ``/workspace/output`` becomes the step's artifact. Tasks without such a download are returned unchanged."""
+    and ``/workspace/output`` and ``/workspace/materials`` become the step's artifacts. Tasks without such a download
+    are returned unchanged."""
     text = (task_path / "task.toml").read_text()
     if "MATERIALS_URL" not in text:
         return task_path
@@ -303,14 +307,14 @@ def stage_materials(task_path: Path, *, staging: Path, output: Path) -> Path:
             "original_sha256": _file_digest(verifier),
             "staged_sha256": _file_digest(target),
         }
-    (staged / "task.toml").write_text(_declare_output_artifact(text))
+    (staged / "task.toml").write_text(_declare_output_artifact(text, MATERIALS_ARTIFACT))
     _write_record(
         output / "materials.json",
         {
             "source_task": str(task_path),
             "reason": "bounded longer golden-asset retries; a failed download exits 75 (verifier unavailable)",
             "retry": {"original": MATERIALS_RETRY, "staged": MATERIALS_RETRY_PATCHED},
-            "artifacts": [OUTPUT_ARTIFACT],
+            "artifacts": [OUTPUT_ARTIFACT, MATERIALS_ARTIFACT],
             "verifiers": digests,
             "task_toml_sha256": {
                 "original": _file_digest(task_path / "task.toml"),
@@ -321,8 +325,8 @@ def stage_materials(task_path: Path, *, staging: Path, output: Path) -> Path:
     return staged
 
 
-def _declare_output_artifact(text: str) -> str:
-    """Add ``artifacts = ["/workspace/output"]`` to the task's single ``[[steps]]`` table, after its ``name``."""
+def _declare_output_artifact(text: str, *extra: str) -> str:
+    """Add ``artifacts = ["/workspace/output", ...]`` to the task's single ``[[steps]]`` table, after its ``name``."""
     if "artifacts" in text:
         raise ValueError("Pinned task already declares artifacts")
     marker = "[[steps]]\n"
@@ -330,7 +334,8 @@ def _declare_output_artifact(text: str) -> str:
         raise ValueError("Expected exactly one [[steps]] table")
     lines = text.split("\n")
     name = next(i for i, line in enumerate(lines) if line.startswith("name = ") and i > lines.index("[[steps]]"))
-    lines.insert(name + 1, f'artifacts = ["{OUTPUT_ARTIFACT}"]')
+    paths = ", ".join(f'"{path}"' for path in (OUTPUT_ARTIFACT, *extra))
+    lines.insert(name + 1, f"artifacts = [{paths}]")
     return "\n".join(lines)
 
 
