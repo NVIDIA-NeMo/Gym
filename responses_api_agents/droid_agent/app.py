@@ -102,7 +102,8 @@ _CLASSIFIED_DROID_VERSION = "1.1.0"
 _MODEL_REQUEST_STATUS = re.compile(r"^([45]\d{2}) ")
 # A refused or reset connection to the model server.
 _TRANSPORT_ERROR = "Connection error."
-# Droid's native loop detector stopped generated output, not the model transport.
+# Droid's repetition stop: a model response's streamed text or thinking ended in an exact repeated cycle, and Droid's
+# resample of it repeated too (or the run had already used its three resamples). The model's output caused it.
 _REPETITION_CYCLE = "LLM output entered an exact repetition cycle"
 # Droid compacts the conversation when the model rejects its context, and stops with this when the compaction
 # request does not fit either.

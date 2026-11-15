@@ -354,7 +354,7 @@ async def test_model_request_error_is_classified_for_the_environment(monkeypatch
 
 
 # Droid 1.1.0's error events for a refused or reset connection, a context overflow, and rejected model requests,
-# captured from runs against a scripted model server.
+# captured from runs against a scripted model server, and for its repetition stop, seen in real model runs.
 CONTEXT_LIMIT_ERROR = (
     "The existing summary and compaction instructions do not fit the selected model input window. "
     "Choose a compaction model with a larger context window."
