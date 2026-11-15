@@ -4,8 +4,6 @@ description: "Capture exact token ids and log probabilities when an external age
 position: 6
 ---
 
-# Training on External Agent Harnesses
-
 An external agent harness runs its own model-calling loop and returns a finished transcript to Gym. Claude Code is one example. The transcript contains the conversation text, but it does not contain the exact token ids and log probabilities produced by each model call.
 
 Training needs those original token ids. Re-tokenizing the final text can produce a different sequence from the one sampled by the policy. Gym's training-token capture records the ids while they are still available in the model server, associates the calls with their rollout, and rebuilds them into the token-bearing response expected by the trainer.

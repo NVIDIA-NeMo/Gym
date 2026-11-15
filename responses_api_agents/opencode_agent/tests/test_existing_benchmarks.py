@@ -66,16 +66,16 @@ def test_permission_profile_loads_with_cli_override(override: bool, monkeypatch:
 
 def test_permission_profile_is_not_a_standalone_agent_variant(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(Path(__file__).resolve().parents[3])
-    assert list(discover_agents()["opencode_agent"].variants) == ["opencode_agent"]
+    assert list(discover_agents()["opencode_agent"].variants) == ["opencode_agent", "opencode_legacy_agent"]
 
 
 @pytest.mark.parametrize(
     ("recipe", "prefix"),
     [
-        ("swebench/verified/opencode", "swebench_verified"),
-        ("swebench/multilingual/opencode", "swebench_multilingual"),
+        ("swebench/verified/opencode_legacy_agent", "swebench_verified"),
+        ("swebench/multilingual/opencode_legacy_agent", "swebench_multilingual"),
         ("swebench/multimodal/opencode", "swebench_multimodal"),
-        ("swebench/pro/opencode", "swebench_pro"),
+        ("swebench/pro/opencode_legacy_agent", "swebench_pro"),
         # terminal_bench_2_1/opencode runs on the Harbor environment server; its relay recipe keeps the bindings.
         ("terminal_bench_2_1/opencode_legacy_agent", "terminal_bench_2_1"),
     ],
