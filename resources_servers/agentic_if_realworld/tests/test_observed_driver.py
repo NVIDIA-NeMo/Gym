@@ -95,8 +95,11 @@ def test_http_resume_and_connection_recovery(
             return_token_id_information=True,
             uses_reasoning_parser=True,
             chat_template_kwargs={"reasoning_effort": "max"},
+            max_num_tries=1,
+            refit_output_budget_to_window=False,
         )
         settings["policy_model"]["responses_api_models"] = {"vllm_model": model}
+        settings["agentic_if_realworld_agent"] = {"responses_api_agents": {"simple_agent": {"max_model_retries": 0}}}
     server_client = MagicMock(spec=ServerClient)
     server_client.global_config_dict = settings
     server_client.assistant_message_header.return_value = None

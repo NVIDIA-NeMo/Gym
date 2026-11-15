@@ -66,6 +66,18 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
         raise ValueError("The seeded adaptive profile requires vllm_model; use native.yaml for other clients")
     if not raw_receipt and resource.get("response_source") != "gym_response":
         raise ValueError("Standard model clients require response_source=gym_response")
+    if not raw_receipt:
+        agent = global_config_dict["agentic_if_realworld_agent"]["responses_api_agents"]["simple_agent"]
+        if (
+            model.get("max_num_tries") != 1
+            or model.get("refit_output_budget_to_window", True)
+            or model.get("refit_output_budget_to_prompt", False)
+            or model.get("sampling_overrides")
+            or agent.get("max_model_retries", 2) != 0
+        ):
+            raise ValueError(
+                "Adaptive delivery requires single-attempt policy calls without budget refitting or sampling overrides"
+            )
     reasoning_effort = (
         model.get("reasoning_effort")
         if raw_receipt
@@ -205,7 +217,7 @@ async def run_rollout_collection(rollout_collection_config, global_config_dict) 
                         "raw_attempts": [],
                     }
                     write(path, receipt)
-                completions = helper.run_examples([attempt], route_failures_to_sidecar=True)
+                completions = helper.run_examples([attempt], route_failures_to_sidecar=True, retry_requests=False)
                 try:
                     request_row, agent_result = await next(iter(completions))
                     rollout = {**request_row, **agent_result}

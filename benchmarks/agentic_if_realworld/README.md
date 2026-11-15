@@ -167,6 +167,18 @@ The driver supplies each seed through the client's existing `metadata.extra_body
 interface. Configure maximum reasoning through `chat_template_kwargs`; reasoning
 stays in Responses reasoning items, separate from the final answer.
 
+The `single_agent_turn_legacy` Environment Server accepts the existing flat rows
+and runs the typed Resources and agent-session lifecycle. It grants no tools,
+keeps `execute_tools: false`, skips inline verification, and closes both sessions
+after each attempt. The adaptive driver selects the first complete answer and
+judges it separately.
+
+This profile pins the policy client to one upstream attempt, disables the agent's
+model retries and both output-budget refitting options, and rejects sampling
+overrides. The collector does not replay a disconnected `/run`. A policy dispatch
+with no observed response requires reconciliation before resume; it cannot advance
+the schedule or generate another answer automatically.
+
 The full Responses output, including token IDs and log probabilities when enabled
 by the model server, passes unchanged through verification and saved rollouts.
 Only a separate copy is projected for judging. These are explicitly marked Gym
