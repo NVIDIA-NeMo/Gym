@@ -25,16 +25,24 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from aiohttp import ClientResponseError
+from aiohttp import ClientPayloadError, ClientResponseError
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
 from nemo_gym.client import ServerClient
-from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig, ModelServerRef, ResourcesServerRef
+from nemo_gym.config import (
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+    GlobalConfigDictParser,
+    GlobalConfigDictParserConfig,
+    ModelServerRef,
+    ResourcesServerRef,
+)
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
 )
+from nemo_gym.metrics.reward_profile import compute_aggregate_metrics
 from responses_api_agents.finance_agent import app as finance_agent_app
 from responses_api_agents.finance_agent.app import (
     FinanceAgent,
@@ -252,12 +260,26 @@ class TestFinanceAgentConfig:
     def test_shared_config_accepts_training_overlay_in_struct_mode(self) -> None:
         config = OmegaConf.load(_REPO_ROOT / "responses_api_agents/finance_agent/configs/finance_agent.yaml")
         OmegaConf.set_struct(config, True)
+        assert config.finance_agent.responses_api_agents.finance_agent.resources_server_retries == 0
+        assert config.finance_agent.responses_api_agents.finance_agent.keep_response_on_verify_failure is False
         merged = OmegaConf.merge(
             config,
-            {"finance_agent": {"responses_api_agents": {"finance_agent": {"continue_if_not_tool_call": False}}}},
+            {
+                "finance_agent": {
+                    "responses_api_agents": {
+                        "finance_agent": {
+                            "continue_if_not_tool_call": False,
+                            "resources_server_retries": 2,
+                            "keep_response_on_verify_failure": True,
+                        }
+                    }
+                }
+            },
         )
         agent_config = merged.finance_agent.responses_api_agents.finance_agent
         assert agent_config.continue_if_not_tool_call is False
+        assert agent_config.resources_server_retries == 2
+        assert agent_config.keep_response_on_verify_failure is True
         assert agent_config.prose_only_behavior == "nudge"
         assert agent_config.tool_call_execution == "sequential"
 
@@ -1553,7 +1575,7 @@ class TestResourcesServerRetries:
         async def fake_raise_for_status(response) -> None:
             if not response.ok:
                 self.raised.append(response.status)
-                raise RuntimeError(f"status {response.status}")
+                raise ClientResponseError(request_info=MagicMock(), history=(), status=response.status)
 
         self.sleeps = []
 
@@ -1580,7 +1602,7 @@ class TestResourcesServerRetries:
         agent, _ = _make_agent_and_client(_make_config(resources_server_retries=1))
         agent.server_client.post = AsyncMock(side_effect=[_status_mock(502), _status_mock(502)])
 
-        with pytest.raises(RuntimeError, match="status 502"):
+        with pytest.raises(ClientResponseError, match="^502"):
             await agent._post_resources_server("/verify", {}, {})
         assert agent.server_client.post.await_count == 2
 
@@ -1589,44 +1611,87 @@ class TestResourcesServerRetries:
         agent, _ = _make_agent_and_client(_make_config(resources_server_retries=3))
         agent.server_client.post = AsyncMock(side_effect=[_status_mock(500)])
 
-        with pytest.raises(RuntimeError, match="status 500"):
+        with pytest.raises(ClientResponseError, match="^500"):
             await agent._post_resources_server("/seed_session", {}, {})
         assert agent.server_client.post.await_count == 1
         assert self.sleeps == []
 
-    async def _run_with_failing_verify(self, **overrides) -> tuple:
+    _GENERATED = _text_response("Revenue was $5B.")
+
+    async def _run(self, *verify_replies, **overrides):
         agent, _ = _make_agent_and_client(_make_config(resources_server_retries=1, **overrides))
-        generated = _text_response("Revenue was $5B.")
         agent.server_client.post = AsyncMock(
-            side_effect=[_status_mock(200), _dotjson_mock(generated), _status_mock(502), _status_mock(502)]
+            side_effect=[_status_mock(200), _dotjson_mock(self._GENERATED), *verify_replies]
         )
-        body = FinanceAgentRunRequest.model_validate({"responses_create_params": _INPUT})
+        body = FinanceAgentRunRequest.model_validate(
+            {"responses_create_params": _INPUT, "instance_config": {"task": "t1"}}
+        )
         request = MagicMock()
         request.cookies = {}
-        return await agent.run(request, body), generated
+        return await agent.run(request, body)
+
+    def _assert_masked_rollout(self, result, failure_kind: str) -> None:
+        assert result.reward == 0.0
+        assert result.mask_sample is True
+        assert result.failure_kind == failure_kind
+        assert result.instance_config == {"task": "t1", "mask_sample": True}
+        assert result.response.id == self._GENERATED["id"]
+        assert result.response.output[0].content[0].text == "Revenue was $5B."
 
     @pytest.mark.asyncio
-    async def test_a_failed_verify_keeps_the_generated_rollout_when_enabled(self) -> None:
-        result, generated = await self._run_with_failing_verify(keep_response_on_verify_failure=True)
+    async def test_exhausted_gateway_retries_keep_the_rollout_masked_when_enabled(self) -> None:
+        result = await self._run(_status_mock(502), _status_mock(502), keep_response_on_verify_failure=True)
 
-        assert result.reward == 0.0
-        assert result.response.id == generated["id"]
-        assert result.response.output[0].content[0].text == "Revenue was $5B."
-        assert "status 502" in result.verify_error
+        self._assert_masked_rollout(result, "judge_failed")
+
+    @pytest.mark.asyncio
+    async def test_a_verify_reply_cut_off_mid_read_keeps_the_rollout_masked_when_enabled(self) -> None:
+        cut = _status_mock(200)
+        cut.read = AsyncMock(side_effect=ClientPayloadError("cut"))
+
+        result = await self._run(cut, keep_response_on_verify_failure=True)
+
+        self._assert_masked_rollout(result, "agent_route_failed")
+
+    @pytest.mark.asyncio
+    async def test_a_successful_verify_passes_through_unchanged_when_enabled(self) -> None:
+        graded = _dotjson_mock(
+            {"responses_create_params": _INPUT, "response": self._GENERATED, "reward": 1.0, "final_answer": "$5B"}
+        )
+
+        result = await self._run(graded, keep_response_on_verify_failure=True)
+
+        assert result.reward == 1.0
+        assert result.mask_sample is False
+        assert result.failure_kind is None
+        assert result.final_answer == "$5B"
 
     @pytest.mark.asyncio
     async def test_a_failed_verify_returns_the_empty_error_response_by_default(self) -> None:
-        result, _ = await self._run_with_failing_verify()
+        result = await self._run(_status_mock(502), _status_mock(502))
 
         assert result.reward == 0.0
         assert result.response.id == "error"
         assert result.response.output == []
 
     @pytest.mark.asyncio
+    async def test_a_masked_rollout_is_left_out_of_the_mean_reward(self) -> None:
+        masked = await self._run(_status_mock(502), _status_mock(502), keep_response_on_verify_failure=True)
+        rows = [
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0},
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, **masked.model_dump()},
+        ]
+
+        metrics = compute_aggregate_metrics(rows).agent_metrics
+
+        assert metrics["mean/reward"] == 1.0
+        assert metrics["coverage/masked_rollouts"] == 1
+
+    @pytest.mark.asyncio
     async def test_no_retries_by_default(self) -> None:
         agent, _ = _make_agent_and_client()
         agent.server_client.post = AsyncMock(side_effect=[_status_mock(502)])
 
-        with pytest.raises(RuntimeError, match="status 502"):
+        with pytest.raises(ClientResponseError, match="^502"):
             await agent._post_resources_server("/verify", {}, {})
         assert agent.server_client.post.await_count == 1

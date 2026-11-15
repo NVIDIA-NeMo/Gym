@@ -43,6 +43,7 @@ from nemo_gym.agents import (
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.agents.utils.verify_call import masked_verify_failure, verify_with_transport_retry
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
@@ -54,6 +55,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     accumulate_response_usage,
 )
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
@@ -181,9 +183,10 @@ class FinanceAgentConfig(BaseResponsesAPIAgentConfig):
     )
     keep_response_on_verify_failure: bool = Field(
         default=False,
-        description="When verify still fails after its retries, return the generated rollout with reward 0 "
-        "and the error in verify_error instead of failing the run, whose reward-0 result has an empty "
-        "response that a trainer cannot use. The 0 is not a grade: a correct answer also gets it.",
+        description="When verify fails after its retries, or its reply cannot be read or parsed, return "
+        "the generated rollout as a masked zero (masked_verify_failure), instead of failing the run, "
+        "whose empty error response a trainer cannot use. Also retries a reply lost in transport "
+        "against a STATELESS verifier (verify_with_transport_retry).",
     )
     done_tools: List[str] = Field(
         default_factory=lambda: ["submit_final_result"],
@@ -698,18 +701,25 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             body.model_dump() | {"response": await get_response_json(response)}
         )
 
+        verify_request_data = verify_request.model_dump()
+
+        async def verify() -> FinanceAgentVerifyResponse:
+            verify_response = await self._post_resources_server("/verify", verify_request_data, cookies)
+            return FinanceAgentVerifyResponse.model_validate(await get_response_json(verify_response))
+
+        if not self.config.keep_response_on_verify_failure:
+            return await verify()
         try:
-            verify_response = await self._post_resources_server("/verify", verify_request.model_dump(), cookies)
-        except Exception as e:
-            if not self.config.keep_response_on_verify_failure:
-                raise
-            logger.error("verify failed — keeping the rollout with reward=0: %s: %s", type(e).__name__, e)
-            return FinanceAgentVerifyResponse(
-                **verify_request.model_dump(),
-                reward=0.0,
-                verify_error=f"{type(e).__name__}: {e}",
+            return await verify_with_transport_retry(
+                verify, server_client=self.server_client, server_name=self.config.resources_server.name
             )
-        return FinanceAgentVerifyResponse.model_validate(await get_response_json(verify_response))
+        except NgFailureEvent as failure:
+            cause = failure.__cause__
+            logger.error("verify failed — keeping the rollout masked: %s: %s", type(cause).__name__, cause)
+            result = masked_verify_failure(verify_request_data, failure)
+            # NeMo RL versions that predate the top-level field read instance_config.
+            result["instance_config"] = {**(result.get("instance_config") or {}), "mask_sample": True}
+            return FinanceAgentVerifyResponse.model_validate(result)
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Proxy aggregate_metrics to the resources server."""
