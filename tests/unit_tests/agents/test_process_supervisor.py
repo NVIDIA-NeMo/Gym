@@ -22,7 +22,12 @@ linux_only = pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc is 
 
 
 def _supervise(
-    tmp_path: Path, *command: str, timeout: str = "10", cleanup_timeout: str = "0.5", **kwargs
+    tmp_path: Path,
+    *command: str,
+    timeout: str = "10",
+    cleanup_timeout: str = "0.5",
+    run_timeout: float = 20,
+    **kwargs,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
@@ -39,7 +44,7 @@ def _supervise(
         capture_output=True,
         text=True,
         errors="replace",
-        timeout=20,
+        timeout=run_timeout,
         **kwargs,
     )
 
@@ -178,8 +183,11 @@ def test_forced_stop_reaches_processes_that_leave_the_harness_during_the_stop(tm
     (tmp_path / "worker.sh").write_text(worker)
     try:
         # The worker must install its trap before the stop, then get time to record its spawned child.
+        # The cleanup scans every process on the machine; on a busy one a few seconds can be less than one scan.
         for timeout in ("1", "4", "10"):
-            result = _supervise(tmp_path, "bash", "worker.sh", timeout=timeout, cleanup_timeout="5", cwd=tmp_path)
+            result = _supervise(
+                tmp_path, "bash", "worker.sh", timeout=timeout, cleanup_timeout="15", run_timeout=60, cwd=tmp_path
+            )
             if (tmp_path / "ready").exists():
                 break
         assert (tmp_path / "ready").exists(), "the worker never set its trap before the stop"

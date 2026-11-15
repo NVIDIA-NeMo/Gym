@@ -26,12 +26,15 @@ log=$(mktemp "${TMPDIR:-/tmp}/opencode-resume.XXXXXX") || exit 3
 
 "$opencode" serve --hostname 127.0.0.1 --port 0 >"$log" 2>&1 &
 server=$!
+request= response=
 stop_server() {
-    kill -INT "$server" 2>/dev/null
+    [[ -n $request ]] && kill "$request" 2>/dev/null
+    # TERM, not INT: bash starts a background command with INT ignored.
+    kill -TERM "$server" 2>/dev/null
     for _ in $(seq 1 150); do kill -0 "$server" 2>/dev/null || break; sleep 0.1; done
     kill -KILL "$server" 2>/dev/null
     wait "$server" 2>/dev/null
-    rm -f "$log"
+    rm -f "$log" ${response:+"$response"}
 }
 trap 'stop_server; exit 143' TERM
 trap 'stop_server; exit 130' INT
@@ -55,6 +58,8 @@ fi
 # OpenCode's CLI scopes sessions by the working directory, as PWD names it.
 directory=$PWD
 encode() {
+    # Bytes, not characters: a character outside ASCII is encoded as its UTF-8 bytes.
+    local LC_ALL=C
     local value=$1 encoded= character index
     for ((index = 0; index < ${#value}; index++)); do
         character=${value:index:1}
@@ -67,22 +72,30 @@ encode() {
 }
 path="/session/$(encode "$session")/message?directory=$(encode "$directory")"
 authorization="Basic $(printf '%s' "opencode:$password" | base64 | tr -d '\n')"
-status=
+response=$(mktemp "${TMPDIR:-/tmp}/opencode-resume.XXXXXX") || { stop_server; exit 4; }
+# The request runs in the background and is waited for: bash runs a trap only between foreground commands, and
+# this request lasts the whole turn, so in the foreground it would hold the supervisor's TERM until the turn ended.
 if command -v curl >/dev/null 2>&1; then
-    status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-time 0 \
+    # No proxy: the task image may export one, and the server listens on loopback.
+    curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-time 0 --noproxy '*' \
         -H "Authorization: $authorization" -H 'Content-Type: application/json' \
-        --data-binary "@$payload" "http://127.0.0.1:$port$path")
+        --data-binary "@$payload" "http://127.0.0.1:$port$path" >"$response" &
 else
     # No curl in the image: one HTTP/1.0 request over bash's /dev/tcp, which closes when the turn is done.
-    exec 5<>"/dev/tcp/127.0.0.1/$port" || { stop_server; exit 4; }
-    body=$(<"$payload")
-    printf 'POST %s HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s' \
-        "$path" "$authorization" "$(printf '%s' "$body" | wc -c)" "$body" >&5
-    IFS= read -r line <&5
-    [[ $line =~ ^HTTP/[0-9.]+\ ([0-9]+) ]] && status=${BASH_REMATCH[1]}
-    cat <&5 >/dev/null
-    exec 5<&-
+    (
+        exec 5<>"/dev/tcp/127.0.0.1/$port" || exit 1
+        body=$(<"$payload")
+        printf 'POST %s HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s' \
+            "$path" "$authorization" "$(printf '%s' "$body" | wc -c)" "$body" >&5
+        IFS= read -r line <&5
+        [[ $line =~ ^HTTP/[0-9.]+\ ([0-9]+) ]] && printf '%s' "${BASH_REMATCH[1]}"
+        cat <&5 >/dev/null
+    ) >"$response" &
 fi
+request=$!
+wait "$request"
+request=
+status=$(<"$response")
 stop_server
 if [[ $status != 200 ]]; then
     echo "OpenCode resume request failed with HTTP status ${status:-none}" >&2

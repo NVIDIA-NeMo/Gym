@@ -5,6 +5,7 @@
 import asyncio
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -21,8 +22,10 @@ from nemo_gym.agents.utils.supervisor_client import (
     CLEANUP_RECEIPT_FILE,
     CONTINUE_REQUEST_FILE,
     CONTINUED_FILE,
+    EXPIRE_REQUEST_FILE,
     PAUSE_REQUEST_FILE,
     PAUSED_FILE,
+    STOP_REQUEST_FILE,
     SUPERVISOR_SCRIPT,
     exec_timeout,
     parse_cleanup_receipt,
@@ -42,8 +45,10 @@ linux_only = pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc is 
 
 def _start(tmp_path: Path, *command: str, timeout: str = "30") -> subprocess.Popen:
     return subprocess.Popen(
-        ["bash", str(SUPERVISOR_SCRIPT), "--timeout", timeout, "--cleanup-timeout", "1"]
+        # Cleanup phases end early when the harness does; the limit only matters on a busy node.
+        ["bash", str(SUPERVISOR_SCRIPT), "--timeout", timeout, "--cleanup-timeout", "5"]
         + ["--receipt", str(tmp_path / CLEANUP_RECEIPT_FILE), "--stop-file", str(tmp_path / "stop.request")]
+        + ["--expire-file", str(tmp_path / EXPIRE_REQUEST_FILE)]
         + ["--pause-file", str(tmp_path / PAUSE_REQUEST_FILE), "--paused", str(tmp_path / PAUSED_FILE)]
         + ["--continue-file", str(tmp_path / CONTINUE_REQUEST_FILE), "--continued", str(tmp_path / CONTINUED_FILE)]
         + ["--", *command],
@@ -192,18 +197,112 @@ def test_a_continued_pause_written_before_the_launch_is_acknowledged_and_not_ser
 
 @linux_only
 def test_time_spent_paused_does_not_count_against_the_deadline(tmp_path: Path) -> None:
-    # The harness needs one second of a 1.5 second budget; it spends two more seconds paused.
-    process = _start(tmp_path, "bash", "-c", "touch ready; sleep 1; touch finished", timeout="1.5")
+    # The harness needs a fraction of its two second budget; it spends more than the whole budget paused.
+    process = _start(tmp_path, "bash", "-c", "touch ready; sleep 0.2; touch finished", timeout="2")
     try:
         _wait_for(lambda: (tmp_path / "ready").exists())
         _request(tmp_path / PAUSE_REQUEST_FILE, 1)
         assert _acknowledgement(tmp_path / PAUSED_FILE, 1)["confirmed"] is True
-        time.sleep(2)
+        time.sleep(2.5)
         _request(tmp_path / CONTINUE_REQUEST_FILE, 1)
         process.wait(timeout=15)
         receipt = json.loads((tmp_path / CLEANUP_RECEIPT_FILE).read_text())
         assert receipt["timed_out"] is False and receipt["return_code"] == 0, receipt
         assert (tmp_path / "finished").exists()
+    finally:
+        _finish(process)
+
+
+@linux_only
+def test_a_hold_before_the_launch_is_not_added_to_the_deadline_again_by_a_later_pause(tmp_path: Path) -> None:
+    _request(tmp_path / PAUSE_REQUEST_FILE, 1)
+    process = _start(tmp_path, "bash", "-c", "touch ready; sleep 60", timeout="2")
+    try:
+        assert _acknowledgement(tmp_path / PAUSED_FILE, 1)["confirmed"] is True
+        # Held for longer than the whole budget, which starts at the launch.
+        time.sleep(3)
+        _request(tmp_path / CONTINUE_REQUEST_FILE, 1)
+        _wait_for(lambda: (tmp_path / "ready").exists())
+        launched = time.monotonic()
+        _request(tmp_path / PAUSE_REQUEST_FILE, 2)
+        assert _acknowledgement(tmp_path / PAUSED_FILE, 2)["confirmed"] is True
+        _request(tmp_path / CONTINUE_REQUEST_FILE, 2)
+        process.wait(timeout=30)
+        elapsed = time.monotonic() - launched
+        receipt = json.loads((tmp_path / CLEANUP_RECEIPT_FILE).read_text())
+        assert receipt["timed_out"] is True and receipt["stopped"] is False, receipt
+        # Two seconds of budget plus the short pause; the three seconds of hold would make it five.
+        assert elapsed < 4.5, elapsed
+    finally:
+        _finish(process)
+
+
+@linux_only
+def test_an_expire_during_a_hold_before_the_launch_launches_nothing(tmp_path: Path) -> None:
+    _request(tmp_path / PAUSE_REQUEST_FILE, 1)
+    process = _start(tmp_path, "touch", "started")
+    try:
+        assert _acknowledgement(tmp_path / PAUSED_FILE, 1)["confirmed"] is True
+        (tmp_path / EXPIRE_REQUEST_FILE).touch()
+        _request(tmp_path / CONTINUE_REQUEST_FILE, 1)
+        process.wait(timeout=15)
+        receipt = json.loads((tmp_path / CLEANUP_RECEIPT_FILE).read_text())
+        assert receipt == {
+            "cleanup_confirmed": True,
+            "return_code": None,
+            "error": None,
+            "timed_out": True,
+            "stopped": False,
+        }
+        assert not (tmp_path / "started").exists()
+    finally:
+        _finish(process)
+
+
+_TICKER = "touch ready; while :; do printf . >> ticks; sleep 0.02; done"
+
+
+def _grown(tmp_path: Path, by: int = 5) -> None:
+    before = len((tmp_path / "ticks").read_text())
+    _wait_for(lambda: len((tmp_path / "ticks").read_text()) >= before + by)
+
+
+@linux_only
+def test_a_malformed_or_earlier_pause_number_is_not_served(tmp_path: Path) -> None:
+    process = _start(tmp_path, "bash", "-c", _TICKER)
+    try:
+        _wait_for(lambda: (tmp_path / "ticks").exists())
+        (tmp_path / PAUSE_REQUEST_FILE).write_text("not-a-number")
+        _grown(tmp_path)
+        assert not (tmp_path / PAUSED_FILE).exists()
+        _request(tmp_path / PAUSE_REQUEST_FILE, 2)
+        assert _acknowledgement(tmp_path / PAUSED_FILE, 2)["confirmed"] is True
+        _request(tmp_path / CONTINUE_REQUEST_FILE, 2)
+        assert _acknowledgement(tmp_path / CONTINUED_FILE, 2)["confirmed"] is True
+        # An earlier number, for example a request delivered late, pauses nothing.
+        _request(tmp_path / PAUSE_REQUEST_FILE, 1)
+        _grown(tmp_path)
+        assert json.loads((tmp_path / PAUSED_FILE).read_text())["seq"] == 2
+    finally:
+        _finish(process)
+
+
+@linux_only
+def test_an_expire_while_paused_takes_effect_once_the_pause_is_continued(tmp_path: Path) -> None:
+    worker = "trap 'echo saved > checkpoint; exit 0' TERM; touch ready; while :; do sleep 0.05; done"
+    process = _start(tmp_path, "bash", "-c", worker)
+    try:
+        _wait_for(lambda: (tmp_path / "ready").exists())
+        _request(tmp_path / PAUSE_REQUEST_FILE, 1)
+        assert _acknowledgement(tmp_path / PAUSED_FILE, 1)["confirmed"] is True
+        (tmp_path / EXPIRE_REQUEST_FILE).touch()
+        time.sleep(0.3)
+        assert process.poll() is None and not (tmp_path / CLEANUP_RECEIPT_FILE).exists()
+        _request(tmp_path / CONTINUE_REQUEST_FILE, 1)
+        process.wait(timeout=15)
+        receipt = json.loads((tmp_path / CLEANUP_RECEIPT_FILE).read_text())
+        assert receipt["timed_out"] is True and receipt["stopped"] is False and receipt["return_code"] == 0, receipt
+        assert (tmp_path / "checkpoint").read_text() == "saved\n"
     finally:
         _finish(process)
 
@@ -291,6 +390,19 @@ def test_receipts_without_stopped_still_parse_and_stopped_is_kept() -> None:
     assert parse_cleanup_receipt(old | {"stopped": True}) == old | {"stopped": True}
 
 
+def test_a_receipt_with_malformed_diagnostics_keeps_only_a_boolean_stopped() -> None:
+    malformed = {"cleanup_confirmed": True, "return_code": "0", "error": None, "timed_out": False}
+    assert parse_cleanup_receipt(malformed | {"stopped": True}) == {
+        "cleanup_confirmed": True,
+        "return_code": None,
+        "error": None,
+        "timed_out": False,
+        "stopped": True,
+    }
+    assert "stopped" not in parse_cleanup_receipt(malformed | {"stopped": "yes"})
+    assert "stopped" not in parse_cleanup_receipt(malformed)
+
+
 def test_the_provider_deadline_covers_the_pause_allowance() -> None:
     assert (
         exec_timeout(timeout=10, cleanup_timeout=1, pause_allowance=600)
@@ -338,10 +450,28 @@ async def test_a_request_the_supervisor_never_answers_times_out(tmp_path: Path) 
 def _ticking_stage(session_dir: Path):
     async def stage() -> SandboxCommand:
         session_dir.mkdir(parents=True, exist_ok=True)
-        worker = "touch ready; for _ in $(seq 1 60); do printf . >> ticks; sleep 0.02; done"
+        # Ticks until the test lets it end, so a pause that is slow on a busy node never races the harness's exit.
+        worker = "touch ready; until [ -e finish ]; do printf . >> ticks; sleep 0.02; done"
         return SandboxCommand(argv=["bash", "-c", f"cd {session_dir} && {worker}"])
 
     return stage
+
+
+async def _ticks_grow(launch_dir: Path, since: str) -> None:
+    async with asyncio.timeout(15):
+        while (launch_dir / "ticks").read_text() == since:
+            await asyncio.sleep(0.02)
+
+
+async def _end_launch(running: asyncio.Task, launch_dir: Path) -> None:
+    """End the launch of a test that failed half way; a stop while paused continues the processes first."""
+    if not running.done():
+        launch_dir.mkdir(parents=True, exist_ok=True)
+        (launch_dir / STOP_REQUEST_FILE).touch()
+        (launch_dir / "finish").touch()
+        await asyncio.wait({running}, timeout=20)
+        running.cancel()
+    await asyncio.gather(running, return_exceptions=True)
 
 
 def _session(tmp_path: Path, **kwargs) -> SandboxSession:
@@ -367,22 +497,27 @@ async def test_a_session_pauses_and_continues_its_running_harness(tmp_path: Path
             close_timeout=3,
         )
     )
-    async with asyncio.timeout(15):
-        while not (launch_dir / "ticks").exists():
-            await asyncio.sleep(0.02)
-    paused = await session.pause_harness(timeout=10)
-    assert paused.confirmed and paused.pids, paused
-    frozen = (launch_dir / "ticks").read_text()
-    await asyncio.sleep(0.3)
-    assert (launch_dir / "ticks").read_text() == frozen
-    assert (await session.continue_harness(timeout=10)).confirmed
-    # Continuing twice is answered at once.
-    assert (await session.continue_harness(timeout=10)) == HarnessPauseResult(status="confirmed")
-    assert await asyncio.wait_for(running, 30) == "artifacts"
-    assert len((launch_dir / "ticks").read_text()) == 60
-    assert session.cleanup is not None and session.cleanup["stopped"] is False
-    # The receipt answers a pause of a harness that has ended.
-    assert (await session.pause_harness(timeout=1)).status == "finished"
+    try:
+        async with asyncio.timeout(15):
+            while not (launch_dir / "ticks").exists():
+                await asyncio.sleep(0.02)
+        paused = await session.pause_harness(timeout=10)
+        assert paused.confirmed and paused.pids, paused
+        frozen = (launch_dir / "ticks").read_text()
+        await asyncio.sleep(0.3)
+        assert (launch_dir / "ticks").read_text() == frozen
+        assert (await session.continue_harness(timeout=10)).confirmed
+        # Continuing twice is answered at once.
+        assert (await session.continue_harness(timeout=10)) == HarnessPauseResult(status="confirmed")
+        await _ticks_grow(launch_dir, frozen)
+        (launch_dir / "finish").touch()
+        assert await asyncio.wait_for(running, 30) == "artifacts"
+        assert session.cleanup is not None and session.cleanup["stopped"] is False
+        # The receipt answers a pause, and a continue, of a harness that has ended.
+        assert (await session.pause_harness(timeout=1)).status == "finished"
+        assert (await session.continue_harness(timeout=1)).status == "finished"
+    finally:
+        await _end_launch(running, launch_dir)
 
 
 @linux_only
@@ -398,14 +533,18 @@ async def test_a_session_paused_before_its_launch_holds_the_launch_until_continu
             close_timeout=3,
         )
     )
-    async with asyncio.timeout(15):
-        while not (launch_dir / PAUSED_FILE).exists():
-            await asyncio.sleep(0.02)
-    await asyncio.sleep(0.3)
-    assert not (launch_dir / "ready").exists()
-    assert (await session.continue_harness(timeout=10)).confirmed
-    assert await asyncio.wait_for(running, 30) == "artifacts"
-    assert (launch_dir / "ready").exists()
+    try:
+        async with asyncio.timeout(15):
+            while not (launch_dir / PAUSED_FILE).exists():
+                await asyncio.sleep(0.02)
+        await asyncio.sleep(0.3)
+        assert not (launch_dir / "ready").exists()
+        assert (await session.continue_harness(timeout=10)).confirmed
+        (launch_dir / "finish").touch()
+        assert await asyncio.wait_for(running, 30) == "artifacts"
+        assert (launch_dir / "ready").exists()
+    finally:
+        await _end_launch(running, launch_dir)
 
 
 async def test_a_session_that_was_not_launched_pausable_refuses_to_pause(tmp_path: Path) -> None:
@@ -491,6 +630,8 @@ class FakeActivation:
 
 class FakeSession:
     harness = "fake"
+    # Its harness is running: a stop ends it.
+    launch_started = True
 
     def __init__(self, *, pauses=(), continues=(), stopped_receipt: bool = True) -> None:
         self.events: list[str] = []
@@ -517,7 +658,10 @@ class FakeSession:
 
     async def continue_harness(self) -> HarnessPauseResult:
         self.events.append("continue")
-        return self._continues.pop(0) if self._continues else HarnessPauseResult(status="confirmed")
+        result = self._continues.pop(0) if self._continues else HarnessPauseResult(status="confirmed")
+        if isinstance(result, Exception):
+            raise result
+        return result
 
     async def stop_harness(self, *, timeout: float) -> None:
         self.events.append("stop")
@@ -546,8 +690,9 @@ async def test_parks_in_place_at_each_checkpoint_and_finishes_the_same_launch() 
         await asyncio.wait_for(activation.parked.wait(), 5)
         assert session.events[-1] == "pause"
         activation.resume.set()
-        while session.events[-1] != "continue":
-            await asyncio.sleep(0)
+        async with asyncio.timeout(5):
+            while session.events[-1] != "continue":
+                await asyncio.sleep(0)
     session.done.set()
     assert await asyncio.wait_for(running, 5) == Finished("result")
     assert session.events == ["pause", "continue", "pause", "continue"]
@@ -606,10 +751,12 @@ async def test_a_harness_that_finished_as_the_park_arrived_keeps_its_result() ->
     activation = FakeActivation()
     running = _run(session, activation)
     activation.park.set()
-    await asyncio.sleep(0.05)
+    async with asyncio.timeout(5):
+        while session.events != ["pause"]:
+            await asyncio.sleep(0)
     session.done.set()
     assert await asyncio.wait_for(running, 5) == Finished("result")
-    assert activation.boundaries == []
+    assert session.events == ["pause"] and activation.boundaries == []
 
 
 async def test_a_launch_that_ends_first_never_pauses() -> None:
@@ -626,7 +773,7 @@ async def test_cancelling_a_parked_activation_stops_its_launch() -> None:
     await asyncio.wait_for(activation.parked.wait(), 5)
     running.cancel()
     with pytest.raises(asyncio.CancelledError):
-        await running
+        await asyncio.wait_for(running, 10)
     assert session.events == ["pause", "launch_cancelled"]
 
 
@@ -638,6 +785,163 @@ async def test_a_retired_session_stops_its_launch_and_raises() -> None:
     with pytest.raises(StaleAttemptError):
         await asyncio.wait_for(running, 5)
     assert session.events == ["launch_cancelled"]
+
+
+class StagingSession(FakeSession):
+    """Its launch has not started the harness yet: a stop has nothing to end."""
+
+    launch_started = False
+
+    async def stop_harness(self, *, timeout: float) -> None:
+        self.events.append("stop")
+
+
+async def test_a_failed_pause_of_a_launch_still_staging_cancels_it_and_asks_for_a_relaunch() -> None:
+    session, activation = StagingSession(pauses=[RuntimeError("sandbox exec failed")]), FakeActivation()
+    running = _run(session, activation)
+    activation.park.set()
+    await asyncio.wait_for(activation.parked.wait(), 5)
+    activation.resume.set()
+    # Left alone, the launch would run its harness through the checkpoint, or wait for a continue nobody sends.
+    assert await asyncio.wait_for(running, 5) == Stopped(receipt=None)
+    assert session.events == ["pause", "stop", "launch_cancelled"]
+
+
+class DeadSandboxSession(FakeSession):
+    """Its sandbox died: the stop finds nothing to ask and leaves no receipt, and the launch fails."""
+
+    async def launch(self) -> str:
+        await self.done.wait()
+        raise RuntimeError("sandbox OOM-killed")
+
+    async def stop_harness(self, *, timeout: float) -> None:
+        self.events.append("stop")
+        self.done.set()
+
+
+async def test_a_launch_whose_sandbox_died_raises_its_own_error_and_does_not_park() -> None:
+    session, activation = DeadSandboxSession(pauses=[RuntimeError("exec failed")]), FakeActivation()
+    running = _run(session, activation)
+    activation.park.set()
+    with pytest.raises(RuntimeError, match="OOM-killed"):
+        await asyncio.wait_for(running, 5)
+    assert activation.boundaries == []
+
+
+async def test_a_continue_request_that_fails_in_transport_is_tried_again() -> None:
+    session = FakeSession(continues=[RuntimeError("sandbox exec failed"), HarnessPauseResult(status="finished")])
+    activation = FakeActivation()
+    running = _run(session, activation)
+    activation.park.set()
+    await asyncio.wait_for(activation.parked.wait(), 5)
+    activation.resume.set()
+    async with asyncio.timeout(5):
+        while session.events != ["pause", "continue", "continue"]:
+            await asyncio.sleep(0)
+    session.done.set()
+    assert await asyncio.wait_for(running, 5) == Finished("result")
+    assert "stop" not in session.events
+
+
+class FailingLaunchSession(FakeSession):
+    """Its launch raises once it ends, as an execute whose capture failed does."""
+
+    async def launch(self) -> str:
+        await self.done.wait()
+        raise RuntimeError("capture failed")
+
+
+async def test_a_stopped_launch_that_raised_parks_and_reports_its_error() -> None:
+    session = FailingLaunchSession(pauses=[HarnessPauseResult(status="unconfirmed", error="D state")])
+    activation = FakeActivation()
+    running = _run(session, activation)
+    activation.park.set()
+    await asyncio.wait_for(activation.parked.wait(), 5)
+    activation.resume.set()
+    result = await asyncio.wait_for(running, 5)
+    assert isinstance(result, Stopped) and result.receipt["stopped"] is True
+    assert isinstance(result.error, RuntimeError) and str(result.error) == "capture failed"
+
+
+async def test_an_error_of_a_launch_that_ended_on_its_own_as_the_stop_arrived_propagates() -> None:
+    session = FailingLaunchSession(pauses=[HarnessPauseResult(status="unconfirmed")], stopped_receipt=False)
+    activation = FakeActivation()
+    running = _run(session, activation)
+    activation.park.set()
+    with pytest.raises(RuntimeError, match="capture failed"):
+        await asyncio.wait_for(running, 5)
+    assert activation.boundaries == [] and session.events == ["pause", "stop"]
+
+
+async def test_a_park_that_ends_in_a_retired_session_stops_the_paused_launch() -> None:
+    class Retiring(FakeActivation):
+        async def boundary(self, snapshot) -> None:
+            raise StaleAttemptError("retired while parked")
+
+    session, activation = FakeSession(), Retiring()
+    running = _run(session, activation)
+    activation.park.set()
+    with pytest.raises(StaleAttemptError):
+        await asyncio.wait_for(running, 5)
+    assert session.events == ["pause", "launch_cancelled"]
+
+
+async def test_a_pause_keeps_its_number_until_a_continue_is_confirmed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    refusal = "A process the pause reached did not stop"
+    answers = {
+        "pause": [
+            ("timeout", None),
+            ("acknowledged", {"seq": 1, "confirmed": False, "pids": [7], "error": refusal}),
+            ("acknowledged", {"seq": 1, "confirmed": True, "pids": [7], "error": None}),
+            ("acknowledged", {"seq": 2, "confirmed": True, "pids": [7], "error": None}),
+        ],
+        "continue": [("timeout", None), ("acknowledged", {"seq": 1, "confirmed": True, "pids": [], "error": None})],
+    }
+    requests: list[tuple[str, int]] = []
+
+    def answering(kind: str):
+        async def request(sandbox, *, session_dir, workdir, seq, timeout):
+            requests.append((kind, seq))
+            return answers[kind].pop(0)
+
+        return request
+
+    # sandbox_session imports both by name and calls them.
+    monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session.request_pause", answering("pause"))
+    monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session.request_continue", answering("continue"))
+    session = _session(tmp_path)
+
+    assert (await session.pause_harness()).status == "unconfirmed"
+    refused = await session.pause_harness()
+    assert refused.status == "unconfirmed" and refused.error == refusal
+    assert (await session.pause_harness()).confirmed
+    assert (await session.continue_harness()).status == "unconfirmed"
+    assert (await session.continue_harness()).confirmed
+    assert (await session.pause_harness()).confirmed
+    assert requests == [("pause", 1)] * 3 + [("continue", 1)] * 2 + [("pause", 2)]
+
+
+@pytest.mark.parametrize(
+    ("result", "message"),
+    [
+        (SandboxExecResult(stdout="", stderr="disk full", return_code=1), "disk full"),
+        (SandboxExecResult(stdout=None, stderr=None, return_code=-1, error_type="timeout"), "timeout"),
+        (SandboxExecResult(stdout="acknowledged\n", stderr="", return_code=0), "malformed supervisor acknowledgement"),
+        (
+            SandboxExecResult(stdout='acknowledged\n{"seq": "1", "confirmed": true}\n', stderr="", return_code=0),
+            "malformed supervisor acknowledgement",
+        ),
+        (SandboxExecResult(stdout="paused\n", stderr="", return_code=0), "unexpected supervisor request outcome"),
+    ],
+    ids=["exit", "provider_error", "no_acknowledgement", "wrong_types", "unknown"],
+)
+async def test_a_request_the_sandbox_answered_wrongly_is_an_error(result: SandboxExecResult, message: str) -> None:
+    sandbox = AsyncMock(spec=AsyncSandbox)
+    sandbox.exec.return_value = result
+    with pytest.raises(RuntimeError, match=re.escape(message)):
+        await request_pause(sandbox, session_dir="/s", workdir=None, seq=1, timeout=1)
 
 
 @linux_only
@@ -665,16 +969,20 @@ async def test_run_until_parked_pauses_a_real_supervised_harness(tmp_path: Path)
             stop_timeout=10,
         )
     )
-    async with asyncio.timeout(15):
-        while not (launch_dir / "ticks").exists():
-            await asyncio.sleep(0.02)
-    activation.park.set()
-    await asyncio.wait_for(activation.parked.wait(), 15)
-    await asyncio.sleep(0.3)
-    assert (launch_dir / "ticks").read_text() == frozen[0]
-    activation.resume.set()
-    assert await asyncio.wait_for(running, 30) == Finished("artifacts")
-    assert len((launch_dir / "ticks").read_text()) == 60
+    try:
+        async with asyncio.timeout(15):
+            while not (launch_dir / "ticks").exists():
+                await asyncio.sleep(0.02)
+        activation.park.set()
+        await asyncio.wait_for(activation.parked.wait(), 15)
+        await asyncio.sleep(0.3)
+        assert (launch_dir / "ticks").read_text() == frozen[0]
+        activation.resume.set()
+        await _ticks_grow(launch_dir, frozen[0])
+        (launch_dir / "finish").touch()
+        assert await asyncio.wait_for(running, 30) == Finished("artifacts")
+    finally:
+        await _end_launch(running, launch_dir)
 
 
 class ScopedLocalSandbox(LocalSandbox):
@@ -726,18 +1034,21 @@ async def test_a_paused_harness_s_command_polls_are_held_until_continue_and_a_st
             close_timeout=3,
         )
     )
-    async with asyncio.timeout(15):
-        while not (launch_dir / "ticks").exists():
-            await asyncio.sleep(0.02)
-    assert (await session.pause_harness(timeout=10)).confirmed
-    held = list(sandbox.events)
-    assert (await session.continue_harness(timeout=10)).confirmed
-    continued = list(sandbox.events)
-    assert (await session.pause_harness(timeout=10)).confirmed
-    before_stop = len(sandbox.events)
-    await session.stop_harness(timeout=10)
-    stopping = sandbox.events[before_stop:]
-    await asyncio.wait_for(asyncio.gather(running, return_exceptions=True), 30)
+    try:
+        async with asyncio.timeout(15):
+            while not (launch_dir / "ticks").exists():
+                await asyncio.sleep(0.02)
+        assert (await session.pause_harness(timeout=10)).confirmed
+        held = list(sandbox.events)
+        assert (await session.continue_harness(timeout=10)).confirmed
+        continued = list(sandbox.events)
+        assert (await session.pause_harness(timeout=10)).confirmed
+        before_stop = len(sandbox.events)
+        await session.stop_harness(timeout=10)
+        stopping = sandbox.events[before_stop:]
+        await asyncio.wait_for(asyncio.gather(running, return_exceptions=True), 30)
+    finally:
+        await _end_launch(running, launch_dir)
 
     # The polls are held from the confirmed pause, and asked again before the continue request runs in the sandbox.
     assert held == ["enter parked"]

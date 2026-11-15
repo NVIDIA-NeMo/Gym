@@ -733,7 +733,8 @@ def discard_abandoned_calls(ledger: CheckpointableLedger, abandoned: Mapping[str
         except Exception:
             LOGGER.warning("could not discard abandoned calls %s of %s", model_call_ids, capture_key, exc_info=True)
             continue
-        LOGGER.info("discarded %d abandoned call row(s) of %s after the checkpoint", dropped, capture_key)
+        if dropped:
+            LOGGER.info("discarded %d abandoned call row(s) of %s after the checkpoint", dropped, capture_key)
 
 
 async def retire_ledgers(ledger: Optional[CheckpointableLedger], episode_ids: Iterable[EpisodeId]) -> None:

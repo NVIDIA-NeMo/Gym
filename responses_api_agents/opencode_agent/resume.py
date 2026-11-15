@@ -49,7 +49,12 @@ def resume_payload(messages: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _text(message: dict[str, Any]) -> str:
-    return "".join(part.get("text", "") for part in message.get("parts", []) if part.get("type") == "text")
+    # Text OpenCode added itself, for example for an attached file, is not part of the prompt.
+    return "".join(
+        part.get("text", "")
+        for part in message.get("parts", [])
+        if part.get("type") == "text" and not part.get("synthetic")
+    )
 
 
 def resume_decision(export: Optional[dict[str, Any]], prompt: str) -> ResumeDecision:

@@ -660,18 +660,19 @@ async def test_a_call_abandoned_while_held_is_left_out_of_the_commit_and_dropped
     app = _captured_app(participant, ledger, release)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://m") as client:
         call = asyncio.create_task(client.post("/ng-rollout/r/v1/chat/completions"))
-        await asyncio.sleep(0.05)
+        # The call has recorded its row and is held before the checkpoint opens.
+        await wait_until(lambda: [row["model_call_id"] for row in ledger.export_rows("r")] == ["c1", "c2"])
         await controller.prepare(CheckpointRequest(**control()))
         # The client (the interrupted harness) goes away while the response is held.
         call.cancel()
         with pytest.raises(asyncio.CancelledError):
             await call
-        await asyncio.sleep(0.05)
+        await wait_until(lambda: participant.gate.abandoned == {"c2": "r"})
         live_rows = [row["model_call_id"] for row in ledger.export_rows("r")]
         snapshot = participant.gate.snapshot()
         commit = await controller.commit(_commit_request("c1", tmp_path / "ckpt", [{"rollout_id": "r"}]))
         await controller.resume(CheckpointRequest(**control()))
-        await asyncio.sleep(0.05)
+        await wait_until(lambda: [row["model_call_id"] for row in ledger.export_rows("r")] == ["c1"])
         after_resume = [row["model_call_id"] for row in ledger.export_rows("r")]
 
     rows = (tmp_path / "ckpt" / "gym" / "model" / "policy" / commit["manifest"]["records_file"]).read_text()
@@ -680,6 +681,41 @@ async def test_a_call_abandoned_while_held_is_left_out_of_the_commit_and_dropped
     assert '"c1"' in rows and '"c2"' not in rows, "the commit left the abandoned call out"
     assert after_resume == ["c1"], "the resume dropped it from the live ledger"
     assert participant.gate.abandoned == {}, "cleared for the next checkpoint"
+
+
+async def test_only_a_held_call_that_ends_while_the_checkpoint_is_open_is_abandoned() -> None:
+    gate = PolicyModelParticipant().gate
+
+    def entered(model_call_id: str | None):
+        ticket = gate.enter("r")
+        if model_call_id is not None:
+            ticket.capture = CaptureContext(
+                capture_key="r", model_call_id=model_call_id, token_sink=None, request_items=[]
+            )
+        return ticket
+
+    await gate.exit(entered("ended-before"))
+    streaming, uncaptured, held = entered("streaming"), entered(None), entered("held")
+    streaming.response_started = True
+    await gate.close(CheckpointRequest(**control()))
+    for ticket in (streaming, uncaptured, held):
+        await gate.exit(ticket)
+
+    # Not a call that ended before the checkpoint, one whose response had started, or one without a capture.
+    assert gate.snapshot().abandoned == {"held": "r"}
+    assert gate.take_abandoned() == {"held": "r"} and gate.abandoned == {}
+    gate.open()
+
+
+async def test_discarding_calls_the_ledger_does_not_hold_leaves_it_untouched(tmp_path: Path) -> None:
+    ledger = FileLineageStore(tmp_path / "store")
+    await ledger.record(_commit(_call_record("c1"), [USER_1], [ASSISTANT_1], rollout_id="r", staging_chain=("r/c1",)))
+    before = ledger.export_rows("r")
+
+    assert ledger.discard_calls("r", ["c9"]) == 0
+    assert ledger.export_rows("r") == before
+    assert ledger.discard_calls("r", ["c1", "c9"]) == 1
+    assert ledger.export_rows("r") == []
 
 
 async def test_each_model_server_continues_only_its_own_restored_cut() -> None:
