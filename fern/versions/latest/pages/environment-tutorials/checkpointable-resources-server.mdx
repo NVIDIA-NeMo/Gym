@@ -75,7 +75,7 @@ sandbox, whatever happened to the original since. The snapshot keeps **files, no
 - A sandbox provider that can snapshot (`SupportsSandboxSnapshot`; OpenSandbox today). On any other provider
   the server reports `restart_only`, says so on its seed reply, and its episodes start over after a crash.
 - `checkpoint.state_dir`: an absolute path every restart of the run can read, outside anything the controller deletes.
-  The server refuses to start with checkpointing on and no `state_dir`, or a relative one.
+  A server that exports its sessions refuses to start with checkpointing on and no `state_dir`, or a relative one.
 - The controller calls `release(kept)` after each checkpoint it saves, and `release([])` at the end of a run that
   will not be resumed. A job that ended for good without that final release leaves its last snapshots. Their names
   start with `ng-<state dir id>-`, where the id is the content of `<state_dir>/state_dir_id`; on OpenSandbox, delete them with
