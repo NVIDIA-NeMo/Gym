@@ -4,9 +4,12 @@
 import hashlib
 import io
 import json
+import shutil
 import tarfile
 from functools import partial
 from pathlib import Path
+from unittest.mock import Mock
+from urllib.error import URLError
 
 import pytest
 from pytest import MonkeyPatch
@@ -14,7 +17,7 @@ from pytest import MonkeyPatch
 from benchmarks.deepswe.prepare import is_prepared_data_current
 from resources_servers.deepswe import prepare as prepare_module
 from resources_servers.deepswe.prepare import _write_jsonl, ensure_ripgrep
-from resources_servers.deepswe.task_store import DeepSWETaskStore
+from resources_servers.deepswe.task_store import EXPECTED_TASK_COUNT, DeepSWETaskStore
 
 
 def test_write_jsonl_uses_pinned_task_image(task_assets: Path, tmp_path: Path) -> None:
@@ -27,6 +30,57 @@ def test_write_jsonl_uses_pinned_task_image(task_assets: Path, tmp_path: Path) -
     assert row["task_id"] == "example-task"
     assert row["verifier_metadata"] == {"task_id": "example-task"}
     assert row["image"] == "public.example/project/example-task:v1.1"
+
+
+@pytest.mark.parametrize("allow_download", [False, True], ids=["no-download", "download-failure"])
+def test_ripgrep_preparation_failure_preserves_prepared_outputs(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch, allow_download: bool
+) -> None:
+    source = tmp_path / "source"
+    (source / ".git").mkdir(parents=True)
+    for index in range(EXPECTED_TASK_COUNT):
+        task_dir = source / "tasks" / f"example-task-{index}"
+        shutil.copytree(task_assets / "example-task", task_dir)
+        config = task_dir / "task.toml"
+        config.write_text(config.read_text(encoding="utf-8").replace("example-task", task_dir.name), encoding="utf-8")
+    monkeypatch.setattr(prepare_module, "_git_output", Mock(return_value=prepare_module.DEEPSWE_SOURCE_REVISION))
+    monkeypatch.setattr(prepare_module, "ensure_ripgrep", partial(ensure_ripgrep, tmp_path / "runtime" / "rg"))
+    monkeypatch.setattr(prepare_module.urllib.request, "urlopen", Mock(side_effect=URLError("ripgrep unavailable")))
+
+    tasks = tmp_path / "prepared-tasks"
+    shutil.copytree(source / "tasks", tasks)
+    (tasks / "example-task-0" / "instruction.md").write_text("Previously prepared instructions.\n", encoding="utf-8")
+    marker = {
+        "source_repository": prepare_module.DEEPSWE_REPOSITORY,
+        "source_revision": prepare_module.DEEPSWE_SOURCE_REVISION,
+        "image_source": "task.toml",
+    }
+    (tasks / prepare_module.CACHE_MARKER).write_text(json.dumps(marker) + "\n", encoding="utf-8")
+    jsonl = tmp_path / "benchmark.jsonl"
+    example = tmp_path / "example.jsonl"
+    store = DeepSWETaskStore(tasks)
+    _write_jsonl(store, jsonl)
+    _write_jsonl(store, example, limit=5)
+
+    def prepared_outputs() -> dict[str, bytes]:
+        return {
+            str(path.relative_to(tmp_path)): path.read_bytes()
+            for path in [*tasks.rglob("*"), jsonl, example]
+            if path.is_file()
+        }
+
+    before = prepared_outputs()
+    error = URLError if allow_download else FileNotFoundError
+    with pytest.raises(error, match="ripgrep"):
+        prepare_module.prepare(
+            source_dir=source,
+            tasks_dir=tasks,
+            jsonl_path=jsonl,
+            example_jsonl_path=example,
+            allow_download=allow_download,
+        )
+
+    assert prepared_outputs() == before
 
 
 def _ripgrep_archive(executable: bytes) -> bytes:

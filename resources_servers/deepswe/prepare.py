@@ -160,6 +160,7 @@ def prepare(
     source = ensure_source(source_dir, allow_download=allow_download)
     source_tasks_dir = source / "tasks"
     DeepSWETaskStore(source_tasks_dir)
+    ensure_ripgrep(allow_download=allow_download)
 
     prepared_tasks_dir = Path(tasks_dir).expanduser().resolve()
     _copy_task_assets(source_tasks_dir, prepared_tasks_dir)
@@ -177,7 +178,6 @@ def prepare(
     example_output_path = Path(example_jsonl_path).expanduser().resolve()
     _write_jsonl(store, output_path)
     _write_jsonl(store, example_output_path, limit=5)
-    ensure_ripgrep(allow_download=allow_download)
     return prepared_tasks_dir, output_path
 
 
