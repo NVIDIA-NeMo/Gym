@@ -9,11 +9,13 @@ import os
 import signal
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 from pydantic import Field, PrivateAttr
 
 from nemo_gym.server_runtime import BaseResourcesServerConfig, SimpleResourcesServer
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import JudgeError
 from resources_servers.agentvista.verifier_fixture import VERIFIER_FIXTURE as VERIFIER_FIXTURE
 from responses_api_agents.agentvista_agent.runtime.paths import output_path
 from responses_api_agents.agentvista_agent.runtime.results import (
@@ -21,6 +23,21 @@ from responses_api_agents.agentvista_agent.runtime.results import (
     AgentVistaVerifyRequest,
     AgentVistaVerifyResponse,
 )
+
+
+def _has_verdict(result: object) -> bool:
+    if not isinstance(result, dict) or result.get("mask_sample") is not False:
+        return False
+    verdict = result.get("verify")
+    return (
+        isinstance(verdict, dict)
+        and type(verdict.get("reward")) in (int, float)
+        and (verdict.get("status"), verdict["reward"]) in (("PASS", 1.0), ("FAIL", 0.0))
+    )
+
+
+def _archive_attempt(output: Path) -> Path:
+    return output.rename(output.with_name(f"{output.name}.failed-{uuid4().hex}"))
 
 
 class AgentVistaResourcesConfig(BaseResourcesServerConfig):
@@ -82,15 +99,17 @@ class AgentVistaResources(AgentVistaResults, SimpleResourcesServer):
             with config_path.open("x") as stream:
                 json.dump(config, stream)
         except FileExistsError:
-            if result_path.exists():
-                return json.loads(result_path.read_text())
-            result.update(
-                mask_sample=True,
-                failure_kind="agentvista:verifier",
-                error="Incomplete verification requires inspection; use a new rollout ID to retry",
-            )
-            result.pop("verification_pending", None)
-            return result
+            try:
+                saved = json.loads(result_path.read_text())
+            except (OSError, ValueError):
+                saved = None
+            if _has_verdict(saved):
+                return saved
+            # Old failed/incomplete attempts must not permanently poison this answer's receipt.
+            _archive_attempt(output)
+            output.mkdir()
+            with config_path.open("x") as stream:
+                json.dump(config, stream)
         env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
         # The judge runs in the separately pinned native runtime, with workspace-only library caches.
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
@@ -99,6 +118,8 @@ class AgentVistaResources(AgentVistaResults, SimpleResourcesServer):
             path.mkdir()
             env[key] = str(path)
         process = None
+        completed = False
+        failure = None
         try:
             with (output / "verifier.log").open("w") as log:
                 process = await asyncio.create_subprocess_exec(
@@ -113,17 +134,24 @@ class AgentVistaResources(AgentVistaResults, SimpleResourcesServer):
                 )
                 await asyncio.wait_for(process.wait(), timeout=self.config.verifier_timeout)
             if process.returncode != 0:
-                raise RuntimeError(f"Verifier worker exited {process.returncode}; inspect {output}")
+                raise RuntimeError(f"Verifier worker exited {process.returncode}")
             result = json.loads((output / "result.json").read_text())
+            if not _has_verdict(result):
+                raise JudgeError(result.get("error", "Verifier worker returned no valid verdict"))
+            completed = True
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            result.update(mask_sample=True, failure_kind="agentvista:verifier", error=str(error))
-            result.pop("verification_pending", None)
+            failure = error
         finally:
             if process is not None and process.returncode is None:
                 os.killpg(process.pid, signal.SIGKILL)
                 await process.wait()
+            if not completed:
+                # Preserve diagnostics, but free the canonical receipt for judge-only recovery.
+                failed = _archive_attempt(output)
+        if failure is not None:
+            raise JudgeError(f"{type(failure).__name__}: {failure}; inspect {failed}") from failure
         return result
 
 

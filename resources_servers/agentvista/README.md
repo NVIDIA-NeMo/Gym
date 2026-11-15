@@ -14,6 +14,16 @@ and worker failures stay masked; measured wrong answers count as zero. Verificat
 has a bounded subprocess deadline and kills its worker on cancellation. Artifacts
 and library caches remain under `output_root`.
 
+Only completed binary verdicts are reused. Failed, timed-out, cancelled or
+incomplete judge attempts are preserved in `verification/<identity>.failed-*`
+directories, freeing the canonical receipt for another verification of the same
+saved answer. Judge failures raise Gym's `JudgeError` and become `judge_failed`
+rows through the standard `/verify` failsafe. A later verification retries the
+judge without regenerating the agent answer; successful verdicts, including
+measured zeros, remain reusable after a server restart. Existing masked or
+incomplete receipts are archived and retried as well. This does not add automatic
+retries inside the Resources Server or lift Gym's manifest-reverification limits.
+
 Run focused tests with `pytest resources_servers/agentvista/tests`. This server
 uses the same separately pinned AgentVista source and native runtime as the agent;
 see its README for provisioning and source/license provenance.

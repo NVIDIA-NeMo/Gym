@@ -135,26 +135,26 @@ async def test_resource_contract_preserves_zero_reuses_receipts_and_rejects_acto
 
 
 @pytest.mark.asyncio
-async def test_resource_contract_masks_incomplete_receipts_and_worker_failures(resource_server, monkeypatch):
+async def test_resource_contract_retries_incomplete_receipts_and_reports_worker_failures(resource_server, monkeypatch):
     import asyncio
     import sys
+
+    from nemo_gym.verification.judge import JudgeError
 
     config = {"result": {"verification_pending": True, "mask_sample": True}}
     output = Path(resource_server.config.output_root) / "verification" / "incomplete"
     output.mkdir(parents=True)
     (output / "input.json").write_text("{}")
-    result = await resource_server._judge(config, "incomplete")
-    assert result["mask_sample"] and result["failure_kind"] == "agentvista:verifier"
-    assert "Incomplete verification" in result["error"]
-    assert "verification_pending" not in result
-
     spawn = asyncio.create_subprocess_exec
 
     async def failed_worker(*args, **kwargs):
         return await spawn(sys.executable, "-c", "raise SystemExit(7)", **kwargs)
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", failed_worker)
-    result = await resource_server._judge(config, "worker-failed")
-    assert result["mask_sample"] and result["failure_kind"] == "agentvista:verifier"
-    assert "exited 7" in result["error"]
-    assert "verification_pending" not in result
+    for identity in ("incomplete", "worker-failed"):
+        with pytest.raises(JudgeError, match="exited 7") as failure:
+            await resource_server._judge(config, identity)
+        assert not (output.parent / identity).exists()
+        archived = list(output.parent.glob(f"{identity}.failed-*"))
+        assert archived and all((attempt / "input.json").exists() for attempt in archived)
+        assert any(str(attempt) in str(failure.value) for attempt in archived)

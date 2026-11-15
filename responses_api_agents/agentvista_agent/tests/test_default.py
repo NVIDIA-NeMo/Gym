@@ -14,6 +14,25 @@ from responses_api_agents.agentvista_agent.runtime.data import inventory
 from responses_api_agents.agentvista_agent.runtime.default_worker import run
 
 
+@pytest.mark.parametrize("output_tokens", [-1, 0, 65536, 70000])
+def test_invalid_generation_limits_are_setup_failures_before_any_model_or_judge_call(
+    tmp_path, monkeypatch, output_tokens
+):
+    from responses_api_agents.agentvista_agent.runtime import default_worker
+
+    def unexpected(*args):
+        pytest.fail("Invalid limits must be rejected before source loading or inference")
+
+    monkeypatch.setattr(default_worker, "verify_source", unexpected)
+    result = run({"output": str(tmp_path), "output_tokens": output_tokens, "defer_verification": True})
+    assert result["mask_sample"] is True
+    assert result["failure_kind"] == "agentvista:setup"
+    assert result["verify"]["status"] == "ERROR"
+    assert "Invalid generation limits" in result["error"]
+    assert "verification_pending" not in result
+    assert "judge_responses" not in result
+
+
 @pytest.mark.parametrize("tool_name", ["web_search", "code_interpreter"])
 @pytest.mark.parametrize("judge", ["0", "1", "provider-error", "deferred"])
 def test_original_loop_tool_feedback_and_judge_status(tmp_path: Path, monkeypatch, judge: str, tool_name: str) -> None:

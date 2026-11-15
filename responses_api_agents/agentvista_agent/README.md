@@ -117,6 +117,11 @@ retain their direct judging mode for compatibility; Gym always enables deferred
 verification. Provider errors remain masked, and a measured wrong answer remains
 an unmasked zero. The Resources Server never accepts a worker-assigned reward.
 
+Both harnesses reject a nonpositive output budget or one at least as large as
+the context window as a masked `agentvista:setup` failure before inference.
+Judge outages are reported as `judge_failed`; retrying verification can grade
+the saved answer without rerunning the agent. Completed verdicts remain cached.
+
 The adapter refuses borrowed task sandboxes and required external tool grants
 with a terminal 422: its native tools and mandatory code namespace sandbox are
 benchmark-specific. It supports one server worker because admission and retry

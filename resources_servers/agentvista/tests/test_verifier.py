@@ -152,12 +152,13 @@ async def test_public_verify_retries_share_a_judge_and_persist_the_score(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_verifier_timeout_kills_its_process_and_masks_the_sample(tmp_path, monkeypatch):
+async def test_verifier_timeout_kills_its_process_and_allows_judge_recovery(tmp_path, monkeypatch):
     import asyncio
     from types import SimpleNamespace
     from unittest.mock import MagicMock
 
     from nemo_gym.client import ServerClient
+    from nemo_gym.verification import JudgeError
     from resources_servers.agentvista import app
 
     server = app.AgentVistaResources(
@@ -190,7 +191,9 @@ async def test_verifier_timeout_kills_its_process_and_masks_the_sample(tmp_path,
     kills = []
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     monkeypatch.setattr(app.os, "killpg", lambda pid, sig: kills.append((pid, sig)))
-    result = await server._judge({"result": {"verification_pending": True, "mask_sample": True}}, "timeout-test")
-    assert result["mask_sample"] and result["failure_kind"] == "agentvista:verifier"
+    with pytest.raises(JudgeError, match="TimeoutError"):
+        await server._judge({"result": {"verification_pending": True, "mask_sample": True}}, "timeout-test")
     assert kills == [(process.pid, app.signal.SIGKILL)]
     assert len(waits) == 2
+    assert not (tmp_path / "verification" / "timeout-test").exists()
+    assert len(list((tmp_path / "verification").glob("timeout-test.failed-*"))) == 1

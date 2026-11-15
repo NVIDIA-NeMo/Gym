@@ -73,6 +73,13 @@ def run(config: dict) -> dict:
     previous = {sig: signal.signal(sig, interrupt) for sig in (signal.SIGTERM, signal.SIGINT)}
     try:
         result["failure_kind"] = "agentvista:setup"
+        sampling = {
+            "temperature": config.get("temperature", 0.0),
+            "top_p": config.get("top_p", 1.0),
+            "max_tokens": config.get("output_tokens", 8192),
+        }
+        if not 0 < sampling["max_tokens"] < config.get("context_tokens", 65536):
+            raise ValueError("Invalid generation limits")
         if config.get("defer_verification"):
             # Upstream gates its terminal score callback on these two values. No credentials or calls are needed.
             os.environ.update(VERIFIER_API_KEY="deferred", VERIFIER_END_POINT="deferred")
@@ -152,11 +159,6 @@ def run(config: dict) -> dict:
                 raise
 
         api_processors.compute_score = strict_score
-        sampling = {
-            "temperature": config.get("temperature", 0.0),
-            "top_p": config.get("top_p", 1.0),
-            "max_tokens": config.get("output_tokens", 8192),
-        }
         result["failure_kind"] = "agentvista:execution"
         original = api_processors.process_single_sample(task["record"], args, sampling)
         if sandbox.failed:
