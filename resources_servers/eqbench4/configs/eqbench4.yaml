@@ -5,7 +5,7 @@ eqbench4_resources_server:
     eqbench4:
       entrypoint: app.py
       domain: rlhf
-      verified: false
+      verified: true
       description: EQ-Bench 4 applied emotional-intelligence roleplay benchmark with a simulated persona
       value: Measure perception, adaptability and repair in multi-turn conversations with simulated users
       # The pairwise judge panel; comparison n goes to judge n modulo the panel size, as in EQ-Bench 4.
