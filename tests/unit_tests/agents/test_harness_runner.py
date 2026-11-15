@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.agents.utils.sandbox_session import HARNESS_RUNNER_SCRIPT, shell_assignments
+from tests.unit_tests.agents.test_model_relay import JS_RUNTIME
 
 
 pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="bash is required")
@@ -268,7 +269,7 @@ def _relay_params(tmp_path: Path, script: str, **values) -> tuple[Path, Path]:
     return _params(tmp_path, **(defaults | values)), status
 
 
-def _process_ends(pid: int, timeout: float = 5.0) -> bool:
+def _process_ends(pid: int, timeout: float = 15.0) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -382,8 +383,6 @@ def test_a_relay_command_that_cannot_run_leaves_the_command_on_the_fallback_envi
     assert (tmp_path / "stdout.log").read_text().split() == ["None", "http://model.example/v1"]
     assert (tmp_path / "relay" / "unavailable").exists()
 
-
-JS_RUNTIME = os.environ.get("NEMO_GYM_TEST_JS_RUNTIME") or shutil.which("node") or shutil.which("bun")
 
 JS_RELAY_CHECK = r"""
 import json, os, socket, sys

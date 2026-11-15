@@ -449,7 +449,12 @@ function track(promise) {
       throw error;
     },
   );
-  tracked.promise.catch(() => {});
+  // Settles with no value once the promise has. Only this is raced against the endpoint change, which can stay
+  // pending for the whole launch: a race keeps what it settled with for as long as its slowest promise is pending.
+  tracked.settled = tracked.promise.then(
+    () => {},
+    () => {},
+  );
   return tracked;
 }
 
@@ -690,10 +695,10 @@ class Relay {
           ? Promise.reject(new RelayError(`no endpoint in ${this.endpointPath}`))
           : this.open(upstream, request, attempt),
       );
-      await Promise.race([opening.promise.catch(() => {}), changed.promise]);
+      await Promise.race([opening.settled, changed.promise]);
       if (!opening.done) {
         attempt.cancel();
-        await opening.promise.catch(() => {});
+        await opening.settled;
         this.resent += 1;
         failures = 0;
         failingSince = null;
@@ -711,6 +716,9 @@ class Relay {
           log("WARNING", `${request.method} ${request.target}: upstream unreachable for ${seconds}s: ${describe(error)}`);
           await this.replyError(client, 502, `model server unreachable: ${describe(error)}`);
           return;
+        }
+        if (failures === 0) {
+          log("WARNING", `${request.method} ${request.target}: gen ${gen} upstream failed, retrying: ${describe(error)}`);
         }
         const delay = BACKOFF_MS[Math.min(failures, BACKOFF_MS.length - 1)];
         failures += 1;
@@ -744,10 +752,10 @@ class Relay {
       let data = response.first;
       while (data.length) {
         const reading = track(response.nextChunk());
-        await Promise.race([reading.promise.catch(() => {}), changed.promise]);
+        await Promise.race([reading.settled, changed.promise]);
         if (!reading.done) {
           response.close();
-          await reading.promise.catch(() => {});
+          await reading.settled;
           log("WARNING", `${request.method} ${request.target}: endpoint changed after its response started; cutting it`);
           abort(client);
           throw Object.assign(new Error("response cut by an endpoint change"), { code: "ECONNRESET" });
@@ -776,6 +784,7 @@ class Relay {
     this.clients.add(client);
     client.on("error", () => {});
     const reader = new Reader(client);
+    let failed = false;
     try {
       for (;;) {
         let request;
@@ -796,11 +805,15 @@ class Relay {
           return;
         }
       }
-    } catch {
-      // A connection error or a cut response ends this client's connection.
+    } catch (error) {
+      // A connection error or a cut response ends this client's connection, with a reset: a half-sent response
+      // must never look complete.
+      failed = true;
+      if (!this.stopped) log("WARNING", `connection ended: ${describe(error)}`);
     } finally {
       this.clients.delete(client);
-      client.end();
+      if (failed) abort(client);
+      else client.end();
     }
   }
 }
