@@ -38,6 +38,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NgFailureEvent,
+    current_agent_instance,
 )
 from nemo_gym.verification import judge_failsafe
 from resources_servers.false_statement_judge.app import (
@@ -407,6 +408,14 @@ async def test_valid_judge_grade_is_observed_without_changing_score(use_chat: bo
     text = f"<points>{points}</points>"
     payload = _chat_payload(text) if use_chat else _responses_payload(text)
     server = _server_with_post(payload, use_chat=use_chat)
+    named = []
+    post = server.server_client.post
+
+    async def naming_post(**kwargs):
+        named.append(current_agent_instance())
+        return await post(**kwargs)
+
+    server.server_client.post = naming_post
     body = _request()
     row = await _verify_route(server, body)
     assert row["reward"] == points / 2
@@ -422,10 +431,9 @@ async def test_valid_judge_grade_is_observed_without_changing_score(use_chat: bo
     assert operation["result_binding_sha256"]
     [dependency] = operation["dependencies"]
     assert dependency["response_id"] == payload["id"]
-    assert (
-        server.server_client.post.await_args.kwargs["headers"]["x-ng-verifier-invocation-id"]
-        == invocation["invocation_id"]
-    )
+    # The judge call is made as the verifier run's agent instance; no header carries the run's identity.
+    assert named == [f"verify.{invocation['invocation_id']}"]
+    assert "headers" not in post.await_args.kwargs
 
 
 @pytest.mark.asyncio

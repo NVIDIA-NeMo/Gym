@@ -109,10 +109,17 @@ def test_task_env_prefixes_configured_gym_model_servers():
 
 
 @pytest.mark.parametrize(
-    "training_agent_instances, judge_segment",
-    [(None, ""), (["assistant", "judge"], "/training-token-capture")],
+    "training_agent_instances, assistant_segment, judge_segment",
+    [
+        (None, "/training-token-capture", ""),
+        (["assistant", "judge"], "/training-token-capture", "/training-token-capture"),
+        # Selecting only the judge takes the tag off the assistant's URL.
+        (["judge"], "", "/training-token-capture"),
+    ],
 )
-def test_task_env_names_the_assistant_and_the_judge(monkeypatch, training_agent_instances, judge_segment):
+def test_task_env_names_the_assistant_and_the_judge(
+    monkeypatch, training_agent_instances, assistant_segment, judge_segment
+):
     import nemo_gym.agents.base_responses_api_agent as base_agent
 
     agent = make_agent(
@@ -129,9 +136,7 @@ def test_task_env_names_the_assistant_and_the_judge(monkeypatch, training_agent_
 
     env = agent._task_env("task_x", "7-2")
 
-    assert (
-        env["MODEL_BASE_URL"] == "http://policy/ng-rollout/7-2/ng-agent-instance/assistant/training-token-capture/v1"
-    )
+    assert env["MODEL_BASE_URL"] == f"http://policy/ng-rollout/7-2/ng-agent-instance/assistant{assistant_segment}/v1"
     assert env["JUDGE_BASE_URL"] == f"http://judge/ng-rollout/7-2/ng-agent-instance/judge{judge_segment}/v1"
 
 

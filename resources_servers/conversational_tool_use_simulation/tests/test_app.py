@@ -30,6 +30,7 @@ from resources_servers.conversational_tool_use_simulation.app import (
     ConversationalToolUseSimulationServer,
     ConversationalToolUseVerifyRequest,
     ConversationMessage,
+    ConversationSessionState,
     Evaluation,
     MessageType,
     RecordAgentMessageRequest,
@@ -205,6 +206,52 @@ async def test_a_model_call_without_a_rollout_id_names_its_agent_instance_in_con
         )
 
     assert names == [("/v1/responses", "user"), ("/v1/responses", "judge")]
+
+
+async def test_each_simulator_role_calls_the_model_as_its_own_agent_instance(monkeypatch) -> None:
+    model = {"type": "responses_api_models", "name": "simulator_model"}
+    server = ConversationalToolUseSimulationServer(
+        config=ConversationalToolUseSimulationConfig(
+            host="0.0.0.0",
+            port=0,
+            entrypoint="app.py",
+            name="conversational_tool_use_simulation",
+            domain="agent",
+            enable_llm_judge=True,
+            simulator_model_server=model,
+            judge_model_server=model,
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    named = []
+
+    async def call_model(*, agent_instance, rollout_id=None, **kwargs):
+        named.append((agent_instance, rollout_id))
+        return make_judge_response("ok")
+
+    monkeypatch.setattr(server, "_call_model", call_model)
+    monkeypatch.setattr(server, "_user_simulator_messages", lambda state: [])
+    monkeypatch.setattr(server, "_environment_simulator_messages", lambda state: [])
+    state = ConversationSessionState(
+        domain_name="support",
+        profile="general",
+        policy="policy",
+        tool_signatures=[],
+        customer_scenario={},
+        rollout_id="7-2",
+    )
+    state.messages.append(MagicMock())
+
+    await server._generate_user_message(state)
+    await server._generate_tool_result(state)
+    await server._call_judge_model(
+        model_server=ModelServerRef(**model),
+        params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        messages=[NeMoGymEasyInputMessage(role="user", content="Evaluate.")],
+        rollout_id="7-2",
+    )
+
+    assert named == [("user", "7-2"), ("tool_simulation", "7-2"), ("judge", "7-2")]
 
 
 async def test_seed_session_starts_from_prefilled_policy_user_message() -> None:

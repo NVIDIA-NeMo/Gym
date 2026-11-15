@@ -15,6 +15,7 @@
 
 import asyncio
 import json
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -63,7 +64,8 @@ def test_failed_verifier_allocation_preserves_ungraded_patch(monkeypatch, golden
     (observation,) = row["ng_verifier_invocations"]
     assert observation["status"] == "incomplete"
     assert observation["failure_kind"] == "verifier_error"
-    assert observation["invocation_id"].startswith("verify-")
+    # A verifier invocation id is a bare uuid hex: the ``<id>`` of the agent instance ``verify.<id>``.
+    assert re.fullmatch(r"[0-9a-f]{32}", observation["invocation_id"])
 
 
 @pytest.mark.parametrize(

@@ -1088,7 +1088,8 @@ async def test_run_verify_reaches_registered_route_with_rollout_identity(fixture
     assert seen == [("rollout-1", "/seed_session"), ("rollout-1", "/verify")]
     dumped = result.model_dump(mode="json")
     (invocation,) = dumped["ng_verifier_invocations"]
-    assert invocation["invocation_id"].startswith("verify-")
+    # A verifier invocation id is a bare uuid hex: the ``<id>`` of the agent instance ``verify.<id>``.
+    assert re.fullmatch(r"[0-9a-f]{32}", invocation["invocation_id"])
     # The verify reply of an agent infrastructure failure carries _ng_failure_class, so its invocation is failed.
     assert invocation["status"] == (
         "completed"

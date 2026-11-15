@@ -1082,6 +1082,25 @@ def test_base_agent_rollout_correlation_adds_the_prefix_without_capture():
     assert not agent._model_call_capture_enabled()
 
 
+def test_base_agent_base_url_for_run_names_the_agent_instance_and_takes_the_tag_from_the_caller():
+    body = {TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1}
+    named = "http://h:1/ng-rollout/3-1/ng-agent-instance/user"
+
+    capturing = _make_base_agent(
+        {"observability_enabled": True, "token_id_capture": {"enabled": True}}, token_id_capture=True
+    )
+    # A name alone keeps the agent's own tag; ``token_capture=False`` drops it for that one URL.
+    assert capturing.base_url_for_run("http://h:1", body, agent_instance="user") == f"{named}/training-token-capture"
+    assert capturing.base_url_for_run("http://h:1", body, agent_instance="user", token_capture=False) == named
+
+    plain = _make_base_agent({"observability_enabled": True})
+    assert plain.base_url_for_run("http://h:1", body, agent_instance="user") == named
+    assert (
+        plain.base_url_for_run("http://h:1", body, agent_instance="user", token_capture=True)
+        == f"{named}/training-token-capture"
+    )
+
+
 def test_base_agent_propagates_explicit_token_capture_intent():
     body = {TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1}
     global_config = {
