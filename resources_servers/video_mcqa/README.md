@@ -133,8 +133,9 @@ Each server's `data/example_cohort.json` freezes its five example task IDs.
 
 `data/example_rollouts.jsonl` in each server holds one rollout per row from
 `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16` (BF16, one GPU), served by
-the vLLM nightly image `vllm-openai:nightly-c718e2d7402c` with the model card's
-video settings and the model's default sampling:
+vLLM `0.30.1rc1.dev143+g29468dde8` with the model card's video settings and the
+model's default sampling (temperature 0.6, top-p 0.95, at most 16,384 output
+tokens):
 
 ```bash
 vllm serve nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16 --max-model-len 131072 \
@@ -153,6 +154,10 @@ gym eval run --no-serve --agent videomme_v1_single_turn \
   --input resources_servers/videomme_v1/data/example.jsonl \
   --output resources_servers/videomme_v1/data/example_rollouts.jsonl
 ```
+
+In each server the model answers the first four questions correctly. On the
+counter it reads the final 5 as 9, or runs out of output tokens, so the rows also
+show the `incorrect` and `no_answer` outcomes.
 
 These are evaluation-only adapters. Dataset terms remain those of their
 authors; this Apache-2.0 code does not relicense or redistribute benchmark data.
