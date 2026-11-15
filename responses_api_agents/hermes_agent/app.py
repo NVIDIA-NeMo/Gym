@@ -112,7 +112,11 @@ def _is_limit_result(result: Mapping[str, Any]) -> bool:
         or (
             bool(result.get("partial"))
             and (
-                error == "Response truncated due to output length limit"
+                error
+                in {
+                    "Response truncated due to output length limit",
+                    "Response remained truncated after 3 continuation attempts",
+                }
                 or error.startswith("Request payload too large")
             )
         )

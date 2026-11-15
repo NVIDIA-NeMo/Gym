@@ -1741,6 +1741,7 @@ async def test_seed_allows_loopback_model_url_on_local_docker(agent, state, monk
         ({"stop_reason": "wall_time"}, "agent_limit"),
         ({"failed": True, "error": "First response truncated due to output length limit"}, "agent_limit"),
         ({"partial": True, "error": "Response truncated due to output length limit"}, "agent_limit"),
+        ({"partial": True, "error": "Response remained truncated after 3 continuation attempts"}, "agent_limit"),
         ({"partial": True, "error": "Request payload too large (413). Cannot compress further."}, "agent_limit"),
         (
             {"partial": True, "error": "Request payload too large: max compression attempts (3) reached."},
