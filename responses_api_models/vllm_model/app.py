@@ -657,9 +657,9 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             "declares only `exec` and `wait`) then refuses a string where it expects a number or a boolean. "
             "The Chat-to-Responses conversion gives the parameters listed here their type back: a string "
             "that spells a whole number of at most 18 digits becomes an `integer`, and `true` or `false` "
-            "becomes a `boolean`. Every other value, and every tool and parameter not listed, is returned "
-            "as the engine sent it. Empty by default, which converts nothing. Requires "
-            "`is_responses_native: false`."
+            "in any letter case becomes a `boolean`. Whitespace and quote characters around the value are "
+            "ignored. Every other value, and every tool and parameter not listed, is returned as the engine "
+            "sent it. Empty by default, which converts nothing. Requires `is_responses_native: false`."
         ),
     )
 

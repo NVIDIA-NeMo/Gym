@@ -329,10 +329,11 @@ def _retype_tool_arguments(arguments: Any, parameter_types: Optional[Dict[str, T
     maps a parameter name to its type. A parameter is converted only when its
     value is a string that spells a whole number of at most 18 ASCII digits,
     which every 64-bit integer type holds (for `integer`), or `true` or `false`
-    (for `boolean`), optionally inside one more pair of quotes. Every other
-    value is kept, and arguments that are not the text of a JSON object are
-    returned unchanged. When nothing was converted the same text is returned,
-    so a call that the backend already typed is not rewritten.
+    in any letter case (for `boolean`). Whitespace and quote characters around
+    the value are ignored, because a model also writes `"1000"` or `False`.
+    Every other value is kept, and arguments that are not the text of a JSON
+    object are returned unchanged. When nothing was converted the same text is
+    returned, so a call that the backend already typed is not rewritten.
     """
     if not parameter_types or not isinstance(arguments, str):
         return arguments
