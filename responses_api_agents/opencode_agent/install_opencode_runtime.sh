@@ -143,7 +143,9 @@ if [ "$cached" = true ]; then
   exit 0
 fi
 curl -fSL --retry 3 "https://github.com/anomalyco/opencode/releases/download/v${version}/opencode-linux-${arch}.tar.gz" -o "$runtime/opencode.tar.gz"
-tar -xzf "$runtime/opencode.tar.gz" -C "$runtime" opencode
+# The archive records its builder's uid; as root inside a user namespace that does not map it (rootless Podman or
+# Docker), restoring that owner fails with EINVAL, so the binary is owned by whoever extracts it.
+tar --no-same-owner -xzf "$runtime/opencode.tar.gz" -C "$runtime" opencode
 chmod +x "$runtime/opencode"
 actual=$("$runtime/opencode" --version)
 if [ "$actual" != "$version" ]; then
