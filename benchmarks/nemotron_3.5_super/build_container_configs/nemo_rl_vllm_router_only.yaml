@@ -16,5 +16,9 @@ vllm_router:
 
 # Use the output as CONTAINER in the RL launcher. Warm up and serve through RL:
 # Gym's serving stages would launch outside the vLLM actor environment.
+
+vllm: null
+mooncake: null
+flashinfer: null
 warmup: null
 run: null
