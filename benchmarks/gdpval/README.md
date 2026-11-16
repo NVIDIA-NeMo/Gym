@@ -107,6 +107,10 @@ The reference directory must be laid out as
 `<reference_deliverables_dir>/task_<task_id>/` with `finish_params.json` and
 the deliverable files (the same layout the Stirrup agent persists).
 
+A reference directory can also be an `s3://bucket/prefix` URI with that layout. `/verify` then downloads only the
+task it judges, skipping `history.json` and `history.pkl`, into `reference_cache_dir` (default: a directory under
+the temp dir), using the server's AWS credentials.
+
 ## Run multi-stage adaptive ELO (Best Practice - AA v2 Benchmark Method)
 
 Multi-stage ELO estimates the eval model's rating in a sequence of *stages*
