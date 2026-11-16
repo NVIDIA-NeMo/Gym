@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from resources_servers.pdf_analyst_qa.documents import sandbox_script_files
-from resources_servers.pdf_analyst_qa.sandbox_scripts import documents, network_probe
+from resources_servers.pdf_analyst_qa.sandbox_scripts import documents, network_probe, preflight
 
 
 @pytest.mark.parametrize("valid_checksum", [True, False])
@@ -94,3 +94,41 @@ def test_delivered_script_runs_without_installed_packages(tmp_path, script):
     )
     assert result.returncode == 0, result.stderr
     assert "usage:" in result.stdout
+
+
+@pytest.mark.parametrize("filename", ["report.pdf", "Report.PDF", "selected/Report.PdF", None, "directory.pdf"])
+def test_preflight_requires_a_pdf_file_with_case_insensitive_suffix(tmp_path, monkeypatch, filename):
+    docs = tmp_path / "workspace/docs"
+    docs.mkdir(parents=True)
+    (tmp_path / "workspace/task").mkdir()
+    if filename:
+        selected = docs / filename
+        selected.parent.mkdir(parents=True, exist_ok=True)
+        if filename == "directory.pdf":
+            selected.mkdir()
+        else:
+            selected.write_bytes(b"%PDF selected document")
+
+    def path(value, *parts):
+        return tmp_path / Path(value, *parts).relative_to("/")
+
+    def connect(address, *, timeout):
+        if address[0] == "model.example":
+            return SimpleNamespace(close=lambda: None)
+        raise OSError("public network blocked")
+
+    monkeypatch.setattr(preflight, "pathlib", SimpleNamespace(Path=path))
+    monkeypatch.setattr(
+        preflight,
+        "os",
+        SimpleNamespace(
+            geteuid=lambda: 65534, access=lambda *args: False, environ={}, R_OK=os.R_OK, X_OK=os.X_OK, W_OK=os.W_OK
+        ),
+    )
+    monkeypatch.setattr(preflight, "socket", SimpleNamespace(create_connection=connect))
+    if filename is None or filename == "directory.pdf":
+        with pytest.raises(RuntimeError, match="selected PDFs are missing"):
+            preflight.check(tmp_path / "private", "http://model.example:8000")
+    else:
+        preflight.check(tmp_path / "private", "http://model.example:8000")
+        assert not (tmp_path / "workspace/task/.write-probe").exists()

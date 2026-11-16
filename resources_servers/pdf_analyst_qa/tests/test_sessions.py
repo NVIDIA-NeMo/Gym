@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import EpisodeId, TaskId
@@ -121,7 +122,7 @@ async def test_seed_retries_reuse_one_sandbox_and_close_without_cookie(server):
     assert first == again
     assert len(sandboxes) == 1
     assert first.sandbox_access.workdir == "/workspace/task"
-    assert first.sandbox_access.user == 65534
+    assert first.sandbox_access.user is None
     preflight = shlex.split(sandboxes[0].exec.await_args.args[0])
     assert preflight == [
         "/opt/venv/bin/python",
@@ -327,3 +328,17 @@ async def test_preconfigured_managed_sandbox_option_is_rejected(server, monkeypa
     state = _SessionState(resource._load_task(resource.seed_request_model(**seed().task_data)), "example-document-v1")
     with pytest.raises(ValueError, match=f"{option}.*managed"):
         await START_SANDBOX(resource, state, WORKSPACE_ID)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [{}, {"provider_options": {}, "metadata": {"team": "test"}}, {"image": "ignored"}, {"env": {}, "ttl_s": 600}],
+)
+def test_sandbox_config_rejects_ignored_keys(server, options):
+    resource, _ = server
+    values = resource.config.model_dump() | {"sandbox_config": options}
+    if set(options) <= {"provider_options", "metadata"}:
+        assert PdfAnalystQaResourcesServerConfig.model_validate(values).sandbox_config == options
+    else:
+        with pytest.raises(ValidationError, match="sandbox_config supports only provider_options and metadata"):
+            PdfAnalystQaResourcesServerConfig.model_validate(values)

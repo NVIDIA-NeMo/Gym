@@ -7,6 +7,9 @@ pdf_analyst_qa_document_prefix: pdf-analyst-qa-example
 pdf_analyst_qa_agent:
   responses_api_agents:
     opencode_agent:
+      resources_server:
+        type: resources_servers
+        name: pdf_analyst_qa_resources_server
       datasets:
       - name: example
         type: example

@@ -14,7 +14,7 @@ from time import monotonic
 from typing import ClassVar
 
 from fastapi import FastAPI, Request
-from pydantic import ConfigDict, Field, JsonValue, PrivateAttr, ValidationError
+from pydantic import ConfigDict, Field, JsonValue, PrivateAttr, ValidationError, field_validator
 
 from nemo_gym.agents import restricted_network_policy, sandbox_server_url
 from nemo_gym.client import SESSION_ID_KEY
@@ -40,6 +40,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import VerifierFixture
 from resources_servers.pdf_analyst_qa.documents import (
     DOCUMENT_MANIFEST_PATH,
@@ -99,6 +100,14 @@ class PdfAnalystQaResourcesServerConfig(BaseResourcesServerConfig):
     max_active_sandboxes: int = Field(default=32, ge=1)
     sandbox_queue_timeout_s: float = Field(default=120, gt=0)
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNSUPPORTED
+
+    @field_validator("sandbox_config")
+    @classmethod
+    def read_sandbox_config_keys(cls, value: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        unknown = sorted(set(value) - {"provider_options", "metadata"})
+        if unknown:
+            raise ValueError(f"sandbox_config supports only provider_options and metadata, not {unknown}")
+        return value
 
 
 class PdfAnalystQaVerifyRequest(BaseVerifyRequest, PdfAnalystQaSeedRequest):
@@ -348,7 +357,6 @@ class PdfAnalystQaResourcesServer(SimpleResourcesServer):
                     descriptor=await state.sandbox.serialize(scope="operate"),
                 ),
                 workdir=TASK_ROOT,
-                user=65534,
             ),
         )
 
@@ -433,3 +441,5 @@ VERIFIER_FIXTURE = VerifierFixture(
 
 if __name__ == "__main__":
     PdfAnalystQaResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = PdfAnalystQaResourcesServer.run_webserver()

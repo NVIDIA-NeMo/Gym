@@ -7,18 +7,8 @@ import json
 import re
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Literal
 
-
-type AnswerFormat = Literal[
-    "bare_value",
-    "value_with_unit",
-    "tagged",
-    "value_with_citation",
-    "json_object",
-    "structured_json",
-    "bracket_list",
-]
+from resources_servers.pdf_analyst_qa.task_data import AnswerFormat
 
 
 @dataclass(frozen=True)

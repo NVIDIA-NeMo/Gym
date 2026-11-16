@@ -61,6 +61,7 @@ async def check(
                 files=sandbox_script_files(),
             )
         )
+        sandbox.set_default_user(65534)
         for name, user in [("root", 0), ("default", None)]:
             observed = await sandbox.exec("id -u", user=user, timeout_s=30)
             report[name] = {
@@ -81,7 +82,7 @@ async def check(
             }
         if node_cache_host_path:
             observed = await sandbox.exec(
-                "test -d /workspace/docs && ! touch /workspace/docs/probe-file", timeout_s=30
+                "test -d /workspace/docs && ! touch /workspace/docs/probe-file", user=0, timeout_s=30
             )
             report["missing_view_mount"] = {
                 "return_code": observed.return_code,

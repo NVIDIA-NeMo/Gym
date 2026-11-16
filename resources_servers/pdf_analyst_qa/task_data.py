@@ -5,18 +5,32 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, JsonValue
-
-from nemo_gym.server_runtime import BaseSeedSessionRequest
-from resources_servers.pdf_analyst_qa.verifiers.answer_formats import AnswerFormat
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 
-class PdfAnalystQaSeedRequest(BaseSeedSessionRequest):
+type AnswerFormat = Literal[
+    "bare_value",
+    "value_with_unit",
+    "tagged",
+    "value_with_citation",
+    "json_object",
+    "structured_json",
+    "bracket_list",
+]
+
+
+class PdfAnalystQaSeedRequest(BaseModel):
     """Task identity used to initialize an episode session."""
+
+    model_config = ConfigDict(extra="allow")
 
     task_id: str = Field(pattern=r"^task_[0-9a-f]{24}$")
     workspace_id: str = Field(pattern=r"^workspace_[0-9a-f]{24}$")
     prompt_version: str = Field(min_length=1)
+    development_trial: bool = False
+
+
+TaskData = PdfAnalystQaSeedRequest
 
 
 class AnswerFieldMetadata(BaseModel):

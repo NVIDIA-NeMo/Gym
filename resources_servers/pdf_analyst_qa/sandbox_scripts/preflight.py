@@ -15,7 +15,7 @@ def check(source_mount: pathlib.Path, model_url: str) -> None:
     if os.geteuid() != 65534:
         raise RuntimeError("document tools must run without root privileges")
     docs = pathlib.Path("/workspace/docs")
-    if not any(docs.rglob("*.pdf")):
+    if not any(path.is_file() and path.suffix.lower() == ".pdf" for path in docs.rglob("*")):
         raise RuntimeError("selected PDFs are missing")
     if os.access(str(source_mount), os.R_OK | os.X_OK):
         raise RuntimeError("unselected shared bucket PDFs are accessible")

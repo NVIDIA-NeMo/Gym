@@ -52,7 +52,20 @@ The helper copies the files and makes the PDFs read-only. Publish the copied `do
 
 ## Sandbox setup
 
-Build the sandbox image using the OfficeQA [Containerfile](../officeqa/Containerfile) followed by [Containerfile.opencode](../officeqa/Containerfile.opencode). Set the image and OpenCode checksum variables referenced by the environment config, along with the OpenSandbox provider credentials.
+Build the sandbox image from the repository root with the OfficeQA [Containerfile](../officeqa/Containerfile) followed by [Containerfile.opencode](../officeqa/Containerfile.opencode). This environment needs OpenCode 1.17.11 and a root image user for document staging:
+
+```bash
+docker build -f resources_servers/officeqa/Containerfile -t officeqa-tools .
+docker build -f resources_servers/officeqa/Containerfile.opencode \
+  --build-arg DOCUMENT_TOOLS_IMAGE=officeqa-tools \
+  --build-arg OPENCODE_VERSION=1.17.11 \
+  --build-arg SANDBOX_USER=root \
+  -t pdf-analyst-qa-opencode .
+```
+
+The build prints the SHA-256 of `/opt/cli/opencode`. Set `PDF_ANALYST_QA_DOCUMENT_IMAGE` to this image and `PDF_ANALYST_QA_OPENCODE_SHA256` to that SHA-256, along with the OpenSandbox provider credentials. Rebuild the image and update both variables when changing the OpenCode version.
+
+OpenCode 1.17.11 supports the request `temperature` and `top_p` fields supplied by NeMo RL. Set NeMo RL's `max_new_tokens` to at least 8192, the environment's configured per-call `max_output_tokens`; smaller request limits are rejected by the harness.
 
 Before running on a deployment, check sandbox access and model connectivity:
 
