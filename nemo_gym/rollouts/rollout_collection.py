@@ -807,8 +807,23 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
         and isinstance(result.get(NG_FAILURE_CLASS_KEY), str)
         else set()
     )
+    # Namespaced verifiers such as GDPVal retain their legacy terminal routing
+    # class beside the canonical kind. Keep this declared masked failure form
+    # so it reaches the failure sidecar instead of aborting the entire batch.
+    namespace, _, local_kind = kind.partition(":") if isinstance(kind, str) else ("", "", "")
+    verifier_markers = (
+        {NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY}
+        if namespace
+        and local_kind
+        and result.get(NG_FAILURE_CLASS_KEY) == local_kind
+        and result.get("mask_sample") is True
+        and result.get(NG_TERMINAL_KEY) is True
+        else set()
+    )
     reserved = sorted(
-        key for key in result if _is_collector_key(key) and key not in judge_markers | final_zero_markers
+        key
+        for key in result
+        if _is_collector_key(key) and key not in judge_markers | final_zero_markers | verifier_markers
     )
     if reserved:
         raise ValueError(
