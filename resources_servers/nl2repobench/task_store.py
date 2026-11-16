@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import functools
 import json
-
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -50,11 +49,11 @@ def task_image(task: Task, *, registry_template: str | None = None) -> str:
         return _image_map(registry_template[4:])[task.name]
     if registry_template is not None:
         # Docker/OCI image references must be lowercase; some task names are not (e.g.
-        # "LeapBeyond_scrubadub_pr54"). Scoped to the registry_template branch only - upstream's
-        # own hardcoded registry string below is left untouched since it's already
-        # working/trusted as-is and we have no evidence any of its 104 task names need this.
+        # "LeapBeyond_scrubadub_pr54").
         return registry_template.format(name=task.name.lower())
-    return f"ghcr.io/multimodal-art-projection/nl2repobench/{task.name}:1.0"
+    # Lowercased here too: upstream's "more-Itertools" is published as .../more-itertools:1.0, and the mixed-case
+    # reference is rejected, so that task never ran (2026-11-02). The other 103 upstream names are already lowercase.
+    return f"ghcr.io/multimodal-art-projection/nl2repobench/{task.name.lower()}:1.0"
 
 
 def _validate_nl2repobench_task(task_dir: Path) -> None:

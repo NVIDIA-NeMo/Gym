@@ -9,7 +9,7 @@
 # OpenHands needs an offline bundle for block_target_v2 and no_internet_preinstalled (their sandboxes cannot run the default pip-venv
 # install): build it with responses_api_agents/openhands_sdk_sandboxed_agent/build_bundle.sh and pass
 #   ++nl2repobench_opencode_sandboxed_agent.responses_api_agents.openhands_sdk_sandboxed_agent.bundle_path=<outdir>/openhands_bundle.tar.gz
-# The agent's `user_prompt` defaults to the prompt the OpenHands SFT data was collected with; set it to null to use the benchmark row's own prompt.
+# The task prompt comes from the benchmark row (user_prompt: null below), so OpenHands and OpenCode get the same one.
 config_paths:
   - responses_api_agents/openhands_sdk_sandboxed_agent/configs/openhands_sdk_sandboxed_agent.yaml
   - resources_servers/nl2repobench/configs/nl2repobench.yaml
@@ -31,6 +31,9 @@ nl2repobench_opencode_sandboxed_agent:
     openhands_sdk_sandboxed_agent:
       sandbox_timeout: 21600
       model_call_timeout_s: 14400
+      # The task prompt is the benchmark row's (resources_servers/nl2repobench/prepare.py: NL2RepoBench's own prompt plus a
+      # no-internet line), the same one the OpenCode harness gets; not the agent's built-in default.
+      user_prompt: null
       resources_server:
         type: resources_servers
         name: nl2repobench_opencode_resources_server
