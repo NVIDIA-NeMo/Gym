@@ -33,6 +33,7 @@ from nemo_gym.agents import (
     AGENT_OUTCOME_METADATA_KEY,
     AgentCloseSessionResponse,
     AgentOutcome,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -664,9 +665,9 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         """Borrow the resources server's sandbox for this episode."""
         required = sorted(access.name for access in self.effective_tool_accesses(body) if access.required)
         if required:
-            raise HTTPException(
-                422,
-                "Terminus 2 sessions cannot use required Resources Server tool grants: " + ", ".join(required),
+            raise AgentSeedRejectedError(
+                "Terminus 2 sessions drive only their terminal and cannot use required tool grants: "
+                + ", ".join(required)
             )
         if body.sandbox_access is None:
             raise HTTPException(422, "Terminus 2 needs sandbox_access from the resources server")

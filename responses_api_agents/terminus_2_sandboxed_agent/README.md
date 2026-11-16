@@ -20,6 +20,10 @@ the NeMo Gym resources server. It adapts the small Harbor environment interface
 that Terminus uses (`exec` and `is_dir`) to `AsyncSandbox`; task state therefore
 remains owned by the resources server.
 
+The agent drives only its tmux terminal. An episode session that is seeded with a required tool
+grant (an MCP or direct HTTP tool from the environment server) is refused with HTTP 422 at seed, so the
+episode fails once instead of running without the tool. Optional grants are ignored.
+
 Before launching, complete [OpenSandbox access and setup](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox/opensandbox#setup)
 for sandbox credentials, endpoint configuration, and resource limits.
 
