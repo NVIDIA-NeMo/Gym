@@ -45,11 +45,8 @@ from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated
 from urllib.parse import quote
 from uuid import uuid4
-
-from pydantic import AfterValidator
 
 from nemo_gym.config.global_config import (
     DEBUG_DIR_KEY_NAME,
@@ -87,19 +84,8 @@ _first_use_lock = threading.Lock()
 _checked_debug_roots: set[Path] = set()
 
 
-def _require_absolute(path: Path | None) -> Path | None:
-    """Refuse a relative per-server folder: a server would resolve it against its own source folder."""
-    if path is not None and not path.is_absolute():
-        raise ValueError(
-            f"A debug folder must be an absolute path, got {str(path)!r}: a server resolves a "
-            "relative path against its own source folder."
-        )
-    return path
-
-
-# A server's own ``debug_dir`` setting: ``None`` defers to the global one, and a relative path fails when the
-# server's configuration loads, rather than on every request that writes debug files.
-DebugDir = Annotated[Path | None, AfterValidator(_require_absolute)]
+# Relative per-server debug folders this process has already warned about, so each is reported once.
+_warned_relative_debug_dirs: set[Path] = set()
 
 
 def debug_folder(
@@ -108,6 +94,7 @@ def debug_folder(
     """Return a new folder for one unit of work's debug files, or ``None`` when debug files are off.
 
     The root is ``override`` when the server's own ``debug_dir`` names a folder.
+    A relative ``override`` turns debug files off for the server, with one warning, rather than failing requests.
     Otherwise it is ``<debug_dir>/<server_name>`` when the global ``debug_dir`` names one.
     Otherwise there is none.
     Below the root the folder is ``<kind>/<capture key>/<agent instance>/<UTC time>-[<label>-]<random>``.
@@ -130,7 +117,19 @@ def debug_folder(
     if not _KIND.fullmatch(kind):
         raise ValueError(f"kind must be lowercase letters, digits, '-' and '_', got {kind!r}")
     if override is not None:
-        root = _require_absolute(Path(override))
+        root = Path(override)
+        if not root.is_absolute():
+            # A server would resolve it against its own source folder. Debug files must never fail a request,
+            # so they are turned off for this server instead, with one warning.
+            if root not in _warned_relative_debug_dirs:
+                _warned_relative_debug_dirs.add(root)
+                logger.warning(
+                    "%s's debug_dir %r is not an absolute path, so its debug files are off; "
+                    "a relative path would resolve against the server's own source folder.",
+                    server_name,
+                    str(root),
+                )
+            return None
     else:
         global_root = (maybe_get_global_config_dict() or {}).get(DEBUG_DIR_KEY_NAME)
         if not global_root:
