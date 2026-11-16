@@ -82,7 +82,8 @@ class HarborAgentUtils:
             "truncation": "disabled",
             "usage": {
                 "input_tokens": 0,
-                "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+                # Replaced by extract_usage when the trial produced results; otherwise cache reads are unknown.
+                "input_tokens_details": {"cached_tokens": None, "cache_write_tokens": 0},
                 "output_tokens": 0,
                 "output_tokens_details": {"reasoning_tokens": 0},
                 "total_tokens": 0,
@@ -183,25 +184,26 @@ class HarborAgentUtils:
         """Build the ``usage`` dict for the NeMo Gym response.
 
         Prefers ATIF ``final_metrics`` (exact totals from the trajectory) and
-        falls back to ``agent_result`` token counts from ``result.json``.
+        falls back to ``agent_result`` token counts from ``result.json``. Cache reads Harbor did not
+        report stay unknown (None).
         """
         input_tokens = 0
         output_tokens = 0
-        cached_tokens = 0
+        cached_tokens = None
 
         # Try trajectory final_metrics first
         if trajectory:
             fm = trajectory.get("final_metrics", {})
             input_tokens = fm.get("total_prompt_tokens", 0)
             output_tokens = fm.get("total_completion_tokens", 0)
-            cached_tokens = fm.get("total_cached_tokens", 0)
+            cached_tokens = fm.get("total_cached_tokens")
 
         # Fall back to trial result agent_result
         if input_tokens == 0 and output_tokens == 0:
             agent_result = trial_result.get("agent_result") or {}
             input_tokens = agent_result.get("n_input_tokens", 0) or 0
             output_tokens = agent_result.get("n_output_tokens", 0) or 0
-            cached_tokens = agent_result.get("n_cache_tokens", 0) or 0
+            cached_tokens = agent_result.get("n_cache_tokens")
 
         return {
             "input_tokens": input_tokens,

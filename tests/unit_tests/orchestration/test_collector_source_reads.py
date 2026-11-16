@@ -46,26 +46,29 @@ import builtins, os, sys
 _open, _opens, _mode = builtins.open, [], os.environ.get("MUTATE")
 class _ABAReader:
     def __init__(self, path, handle):
-        self._path, self._handle = path, handle
+        self._path, self._handle, self._lines, self._original, self._stat = path, handle, 0, None, None
     def __enter__(self):
         return self
     def __exit__(self, *exc):
         self._handle.close()
-    def __iter__(self):
-        with _open(self._path, "rb") as handle:
-            original = handle.read()
-        stat = os.stat(self._path)
-        first = True
-        for line in self._handle:
-            yield line
-            if first:
-                first = False
-                with _open(self._path, "r+b") as handle:
-                    handle.seek(len(line))
-                    handle.write(original[len(line):].replace(b"x", b"y"))
-        with _open(self._path, "wb") as handle:
-            handle.write(original)
-        os.utime(self._path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    def readline(self, limit=-1):
+        if self._original is None:
+            with _open(self._path, "rb") as handle:
+                self._original = handle.read()
+            self._stat = os.stat(self._path)
+        if self._lines == 1:
+            with _open(self._path, "r+b") as handle:
+                handle.seek(self._first_length)
+                handle.write(self._original[self._first_length:].replace(b"x", b"y"))
+        line = self._handle.readline(limit)
+        if not line:
+            with _open(self._path, "wb") as handle:
+                handle.write(self._original)
+            os.utime(self._path, ns=(self._stat.st_atime_ns, self._stat.st_mtime_ns))
+        elif self._lines == 0:
+            self._first_length = len(line)
+        self._lines += 1
+        return line
 _frozen, _real_stat, _real_fstat = [], os.stat, os.fstat
 def _is_rollouts(path):
     return str(path).endswith(os.path.join("artifacts", "rollouts.jsonl"))
