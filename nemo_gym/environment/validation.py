@@ -221,6 +221,10 @@ class _StaticWiringParser(GlobalConfigDictParser):
             (("*", "responses_api_agents", "*", "sandbox_config", "image"), "static-validation-image"),
             (("*", "responses_api_models", "openai_model", "openai_base_url"), "https://judge.invalid/v1"),
             (("*", "responses_api_models", "openai_model", "openai_api_key"), "static-validation"),
+            # An auxiliary model the environment runs, such as a user simulator, is a deployment setting too.
+            (("*", "responses_api_models", "vllm_model", "base_url"), "https://model.invalid/v1"),
+            (("*", "responses_api_models", "vllm_model", "api_key"), "static-validation"),
+            (("*", "responses_api_models", "vllm_model", "model"), "static-validation"),
             (("*", "opensandbox", "connection", "domain"), "sandbox.invalid"),
             (("*", "opensandbox", "connection", "api_key"), "static-validation"),
         )
@@ -230,6 +234,11 @@ class _StaticWiringParser(GlobalConfigDictParser):
             if not pattern:
                 if node == "???" or (isinstance(node, str) and re.fullmatch(r"\$\{oc\.env:[^{}]+\}", node)):
                     OmegaConf.update(global_config_dict, ".".join(path), value)
+                elif isinstance(node, str) and (top_level := re.fullmatch(r"\$\{(\w+)\}", node)):
+                    # The leaf names a top-level setting that the deployment must supply.
+                    key = top_level.group(1)
+                    if isinstance(raw, dict) and raw.get(key) == "???":
+                        OmegaConf.update(global_config_dict, key, value)
                 return
             if not isinstance(node, dict):
                 return

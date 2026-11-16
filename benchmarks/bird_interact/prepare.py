@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from environment_servers.bird_interact.task_data import BirdInteractTask
+from nemo_gym.data import materialize_task
 
 
 BENCHMARK_DIR = Path(__file__).parent
@@ -101,7 +102,9 @@ def prepare(release: str = "lite", mode: str = "c_interact", ground_truth_jsonl:
     kept, left_out = select_tasks(rows, ground_truth)
     output = DATA_DIR / release / f"{mode}.jsonl"
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text("".join(json.dumps(row) + "\n" for row in kept))
+    # Materialized for the mode's taskset, so manifest validation reads each row as the server's task input.
+    taskset = f"bird_interact:{mode}"
+    output.write_text("".join(json.dumps(materialize_task(row, taskset=taskset)) + "\n" for row in kept))
     reasons = ", ".join(f"{count} with {reason}" for reason, count in sorted(left_out.items())) or "none"
     print(f"BIRD-Interact {release}: kept {len(kept)} of {len(rows)} tasks; left out: {reasons}.")
     return output
