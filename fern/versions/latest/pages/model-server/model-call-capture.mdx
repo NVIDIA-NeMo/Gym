@@ -264,7 +264,15 @@ A capture write started by a cancelled call runs detached, so a rollout's outsta
 waited for before its record is snapshotted. If one has not landed by the drain timeout, `gaps`
 includes `model_call_capture_pending`. The model server claims each call in
 `<rollout_id>.capture.claims` before forwarding it and releases the claim once its record is
-written; the file is removed once the rollout's record is snapshotted with nothing outstanding.
+written. The snapshot deletes the claims file only when no claim in it is outstanding. If a call
+was still in flight at the snapshot or arrived after it, the claims file stays next to its capture
+file until the same rollout ID is dispatched again.
+
+Claims rely on one file lock that every writer of the claims file shares. With node-local locks,
+such as a Lustre mount with `localflock`, a model server on another host that shares the capture
+directory can lose claims. Gym's own model server runs on the collector's node, so the default
+layout is safe. When the model server and the collector share a node, a node-local
+`model_call_capture_dir` avoids the shared filesystem altogether.
 
 The attachment is additive: it does not replace or rewrite the existing response, reward,
 `NeMoGymResponse`, token-id, or log-prob fields. Aggregate-metrics requests exclude it, and W&B
