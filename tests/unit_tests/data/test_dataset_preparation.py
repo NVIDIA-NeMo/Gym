@@ -1902,7 +1902,9 @@ class TestCollateTypedTaskRows:
         rs = _instance(
             "env_rs", "resources_servers", {"entrypoint": "app.py", "domain": "math", "datasets": [dataset]}
         )
-        paths = TrainDataProcessor()._collate_samples_single_type(type="example", server_instance_configs=[rs])
+        paths = TrainDataProcessor()._collate_samples_single_type(
+            type="example", server_instance_configs=[rs], output_dir=tmp_path / "prepared"
+        )
         return [json.loads(line) for line in open(paths[0])]
 
     def test_typed_rows_in_a_taskset_dataset_collate_unchanged(self, tmp_path, monkeypatch) -> None:
