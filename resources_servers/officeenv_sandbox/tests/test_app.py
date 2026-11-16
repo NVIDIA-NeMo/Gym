@@ -302,7 +302,10 @@ def sandboxes(monkeypatch) -> type[FakeSandbox]:
     return FakeSandbox
 
 
-SETTINGS = {"host": "10.0.0.1", "port": 8080, "entrypoint": "", "name": "oe", "expose_tools_over_mcp": True}
+# The server under the name the configs give it (configs/officeenv_sandbox_episodes.yaml), which names the environment:
+# the tests of what a sandbox reads find it wherever it reaches one.
+SERVER_NAME = "officeenv_sandbox_resources_server"
+SETTINGS = {"host": "10.0.0.1", "port": 8080, "entrypoint": "", "name": SERVER_NAME, "expose_tools_over_mcp": True}
 
 
 def make_server(**config: object) -> OfficeEnvSandboxResourcesServer:
@@ -369,7 +372,7 @@ def file_auth(server: OfficeEnvResourcesServer, session_id: str = "rs-1") -> dic
 def configured_mcp_settings() -> dict:
     """The MCP settings the sandbox configs give the server (configs/officeenv_sandbox_episodes.yaml)."""
     episodes = SANDBOX_CONFIG.with_name("officeenv_sandbox_episodes.yaml")
-    settings = yaml.safe_load(episodes.read_text())["oe"]["resources_servers"]["officeenv_sandbox"]
+    settings = yaml.safe_load(episodes.read_text())[SERVER_NAME]["resources_servers"]["officeenv_sandbox"]
     return {key: settings[key] for key in ("mcp_server_name", "mcp_bearer_token")}
 
 
@@ -1115,7 +1118,7 @@ def test_relay_ports_are_this_servers_and_the_model_servers() -> None:
     named = {
         "policy_model": {"responses_api_models": {"inference_provider": {"port": 18173}}},
         "judge": {"responses_api_models": {"vllm_model": {"port": 18200}}},
-        "pi_agent": {"responses_api_agents": {"pi_agent": {"port": 18300}}},
+        "officeenv_sandbox_pi_agent": {"responses_api_agents": {"pi_agent": {"port": 18300}}},
         "sandbox": {"docker": {}},
     }
     assert relay_ports(named, own_port=15824) == [15824, 18173, 18200]
@@ -1143,7 +1146,7 @@ OPENSANDBOX_NAMED = {
     "sandbox": {"opensandbox": {}},
     "policy_model": {"responses_api_models": {"vllm_model": {"host": "10.0.0.2", "port": 18173}}},
     "judge_model": {"responses_api_models": {"vllm_model": {"host": "127.0.0.1", "port": 18200}}},
-    "pi_agent": {"responses_api_agents": {"pi_agent": {"host": "10.0.0.9", "port": 18300}}},
+    "officeenv_sandbox_pi_agent": {"responses_api_agents": {"pi_agent": {"host": "10.0.0.9", "port": 18300}}},
 }
 
 
@@ -2460,12 +2463,14 @@ def test_in_sandbox_mode_a_token_signed_with_the_servers_name_is_refused(sandbox
 
 def test_sandbox_mode_signs_with_a_per_process_secret_and_names_its_cookie_neutrally(sandboxes) -> None:
     server = make_server()
-    named_key = f"{type(server).__name__}___oe"
+    named_key = f"{type(server).__name__}___{SERVER_NAME}"
     assert server.get_session_middleware_key() == named_key  # appears in logs and error text
     assert server.get_session_secret() not in (named_key, make_server().get_session_secret())
-    # a sandbox's calls get the cookie too, so its name says nothing of the environment, and stays unique
+    # a sandbox's calls get the cookie too, so its name says nothing of the environment, and stays unique: here beside
+    # a harness's copy of the server in the same run
     cookie = server.get_session_cookie_name()
-    assert cookie.startswith("sid_") and cookie != make_server(name="oe2").get_session_cookie_name()
+    copy = make_server(name="officeenv_sandbox_pi_resources_server").get_session_cookie_name()
+    assert cookie.startswith("sid_") and cookie != copy and environment_names(cookie + copy) == set()
     with mcp_client(server) as client:
         assert list(client.post("/seed_session", json=seed_body()).cookies) == [cookie]
     base = make_base_server()  # Gym's own name for the cookie, on the server the sandboxed one subclasses
@@ -2682,8 +2687,9 @@ def test_a_sandbox_reads_environment_names_only_in_the_model_url(sandboxes, expo
 
 
 def test_without_the_company_mcp_settings_the_sandbox_reads_gym(sandboxes) -> None:
-    """The check above can fail: Gym's MCP header is what the config's settings replace."""
-    assert {"nemo", "gym"} <= environment_names(sandbox_view(make_server(), sandboxes))
+    """The check above can fail: Gym's MCP header, and the server's instance name as the MCP endpoint's, are what the
+    config's settings replace."""
+    assert {"nemo", "gym", "officeenv"} <= environment_names(sandbox_view(make_server(), sandboxes))
 
 
 def test_the_opensandbox_probe_prints_a_plain_word() -> None:
@@ -2813,30 +2819,6 @@ def test_a_task_that_needs_document_tools_keeps_that_in_its_row(sandboxes, tmp_p
     with mcp_client(make_server(sandbox_config={**IMAGE, "images": [DOCUMENTS_IMAGE]})) as client:
         assert client.post("/seed_session", json=seed).status_code == 200
     assert [sandbox.spec.image for sandbox in sandboxes.started] == ["officeenv-sandbox:documents"]
-
-
-def test_each_harness_config_binds_its_harness_to_the_shared_episodes() -> None:
-    """Pi on MCP tools, Codex, mini-SWE, OpenCode, OpenClaw and Terminus 2 on commands: each config composes the same
-    episodes (configs/officeenv_sandbox_episodes.yaml) with its harness, and no other harness."""
-    configs = SANDBOX_CONFIG.parent
-    for name, agent, transports in [
-        ("officeenv_sandbox.yaml", "pi_agent", ["mcp"]),
-        ("officeenv_sandbox_codex.yaml", "codex_agent", []),
-        ("officeenv_sandbox_miniswe.yaml", "miniswe_sandboxed_agent", []),
-        ("officeenv_sandbox_opencode.yaml", "opencode_agent", []),
-        ("officeenv_sandbox_openclaw.yaml", "openclaw_agent", []),
-        ("officeenv_sandbox_terminus_2.yaml", "terminus_2_sandboxed_agent", []),
-    ]:
-        config = yaml.safe_load((configs / name).read_text())
-        assert config["config_paths"] == [
-            "resources_servers/officeenv_sandbox/configs/officeenv_sandbox_episodes.yaml",
-            f"responses_api_agents/{agent}/configs/{agent}.yaml",
-            "environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml",
-        ], name
-        binding = config["single_agent_turn_legacy"]["environment_servers"]["single_agent_turn_legacy"]
-        assert binding["agent_server"]["name"] == agent and binding["resources_server"]["name"] == "oe", name
-        assert binding["resources_tool_transports"] == transports, name
-        assert set(config) - {"config_paths", "oe", "single_agent_turn_legacy"} == {agent}, name
 
 
 # The committed rows.

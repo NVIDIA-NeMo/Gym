@@ -27,9 +27,10 @@ episodes saved 8 files to their workspaces, uploaded 5 and attached 1, and no sa
 
 ## Sandboxed harnesses
 
-`configs/officeenv_sandbox_episodes.yaml` is the resources server for sandboxed episodes, and each
-harness config composes it with a harness in agent-session mode behind the
-`single_agent_turn_legacy` environment server: `configs/officeenv_sandbox.yaml` runs Pi, with the
+`configs/officeenv_sandbox_episodes.yaml` is the resources server for sandboxed episodes
+(`officeenv_sandbox_resources_server`), and each harness config composes it with a harness in
+agent-session mode behind a `single_agent_turn_legacy` environment server, all under names of
+its own (see Instance names): `configs/officeenv_sandbox.yaml` runs Pi, with the
 tools over MCP as on the OfficeEnv server; `configs/officeenv_sandbox_codex.yaml` (Codex CLI),
 `configs/officeenv_sandbox_miniswe.yaml` (mini-SWE), `configs/officeenv_sandbox_opencode.yaml`
 (OpenCode), `configs/officeenv_sandbox_openclaw.yaml` (OpenClaw) and
@@ -109,6 +110,42 @@ cancelled so still finishes starting its sandbox (within 30 minutes), then stops
 or a verification cancelled while it stops its sandbox still stops it. A sandbox whose stop
 failed after its seed failed is stopped again at its session's close.
 
+### Instance names
+
+Each harness config names its instances after its harness, as Gym's benchmarks name theirs:
+`officeenv_sandbox_<harness>_agent` inherits Gym's instance of the harness (`_inherit_from`), and
+`officeenv_sandbox_<harness>_environment_server` (`_inherit_from: single_agent_turn_legacy`) binds
+it to the episodes. Pi, Codex and OpenCode name the MCP tools their own way, so each runs on its
+own copy of the episodes' server, `officeenv_sandbox_<harness>_resources_server` (`_copy`, with
+its `sandbox_config.mcp_tool_prefix`); mini-SWE, OpenClaw and Terminus 2 run on
+`officeenv_sandbox_resources_server` itself:
+
+| Harness | Agent | Environment server | Resources server |
+|---|---|---|---|
+| Pi | `officeenv_sandbox_pi_agent` | `officeenv_sandbox_pi_environment_server` | `officeenv_sandbox_pi_resources_server` |
+| Codex CLI | `officeenv_sandbox_codex_agent` | `officeenv_sandbox_codex_environment_server` | `officeenv_sandbox_codex_resources_server` |
+| OpenCode | `officeenv_sandbox_opencode_agent` | `officeenv_sandbox_opencode_environment_server` | `officeenv_sandbox_opencode_resources_server` |
+| OpenClaw | `officeenv_sandbox_openclaw_agent` | `officeenv_sandbox_openclaw_environment_server` | `officeenv_sandbox_resources_server` |
+| mini-SWE | `officeenv_sandbox_miniswe_agent` | `officeenv_sandbox_miniswe_environment_server` | `officeenv_sandbox_resources_server` |
+| Terminus 2 | `officeenv_sandbox_terminus_2_agent` | `officeenv_sandbox_terminus_2_environment_server` | `officeenv_sandbox_resources_server` |
+
+A copy takes the settings the episodes' server has in the merged config, a later config's and the
+command line's included: an override of `officeenv_sandbox_resources_server` reaches every
+harness's server, and one of `officeenv_sandbox_<harness>_resources_server` that harness's alone.
+So several harness configs compose in one run, each row going to the harness its `agent_ref`
+names (`--agent` names it for rows that name none):
+
+```bash
+gym env start --config resources_servers/officeenv_sandbox/configs/officeenv_sandbox.yaml \
+  --config resources_servers/officeenv_sandbox/configs/officeenv_sandbox_codex.yaml \
+  --config nemo_gym/sandbox/providers/docker/configs/docker.yaml <model and host arguments as below>
+```
+
+List `configs/officeenv_opensandbox.yaml` after the other harness configs: a harness config listed
+after it pulls the episodes' config in after the OpenSandbox settings, which then go back to the
+episodes' own. No instance name reaches a sandbox: the MCP endpoint lists itself as `company`
+(`mcp_server_name`), and the session cookie's name is a hash.
+
 ### Images and what a row needs
 
 A row may say what its task needs in the sandbox beyond the shell, curl and Python 3.12 with
@@ -186,8 +223,8 @@ refused, Gmail's attachments by path) serve every exposure: a command's `--help`
 documentation tool's answers describe the ops that move content as they behave here, as the
 tools' descriptions do. The workspace's `README.md` is written for the episode's exposure, and
 `sandbox_config.mcp_tool_prefix` names the MCP tools in it as the harness lists them (`company_`
-for Pi). `/verify` adds `sandbox_commands`, `sandbox_commands_refused` and
-`sandbox_endpoint_calls`.
+for Pi and OpenCode, `mcp__company__` for Codex, each set on the harness's own server).
+`/verify` adds `sandbox_commands`, `sandbox_commands_refused` and `sandbox_endpoint_calls`.
 
 Rows come from OfficeEnv's sandbox example tasks: `sandbox/prepare_rows.py` writes
 `data/sandbox_pilot.jsonl` with the OfficeEnv it imports (its sandbox tasks, nine in 1.14.0). A
@@ -204,19 +241,21 @@ collection, for Codex CLI:
 python resources_servers/officeenv_sandbox/sandbox/prepare_rows.py --exposure cli
 gym env start --config resources_servers/officeenv_sandbox/configs/officeenv_sandbox_codex.yaml \
   --config nemo_gym/sandbox/providers/docker/configs/docker.yaml <model and host arguments as above>
-gym eval run --no-serve <the same --config and arguments> --agent codex_agent \
+gym eval run --no-serve <the same --config and arguments> --agent officeenv_sandbox_codex_agent \
   --input resources_servers/officeenv_sandbox/data/sandbox_pilot_cli_prepare.jsonl --output results/codex_cli.jsonl
 ```
 
 mini-SWE, OpenCode, OpenClaw and Terminus 2 run the same way with their configs and
-`--agent miniswe_sandboxed_agent`, `opencode_agent`, `openclaw_agent` or
-`terminus_2_sandboxed_agent`. Pi runs these rows with `configs/officeenv_sandbox.yaml` and
-`++single_agent_turn_legacy.environment_servers.single_agent_turn_legacy.resources_tool_transports=[]`,
+`--agent officeenv_sandbox_miniswe_agent`, `officeenv_sandbox_opencode_agent`,
+`officeenv_sandbox_openclaw_agent` or `officeenv_sandbox_terminus_2_agent`. Pi runs these rows
+with `configs/officeenv_sandbox.yaml` and
+`++officeenv_sandbox_pi_environment_server.environment_servers.single_agent_turn_legacy.resources_tool_transports=[]`,
 and `api_search` rows with its MCP transport as it is; on both, no MCP tool ends the task, so Pi
-takes `++pi_agent.responses_api_agents.pi_agent.finish_tool_names=[]` and ends when the model stops.
-Any of Gym's harnesses that borrow an episode's sandbox and run a shell can be paired the same way
-(the agent's config, `agent_server.name`, no MCP transports); what each needs in the sandbox image
-(its own runtime, when sandboxes have no internet) is the harness's.
+takes `++officeenv_sandbox_pi_agent.responses_api_agents.pi_agent.finish_tool_names=[]` and ends
+when the model stops. Any of Gym's harnesses that borrow an episode's sandbox and run a shell can
+be paired the same way (an agent that inherits the harness's instance, an environment server that
+binds it to the episodes, no MCP transports, named as in Instance names); what each needs in the
+sandbox image (its own runtime, when sandboxes have no internet) is the harness's.
 
 What a sandbox reads of this server names a company's API, never the environment behind it or
 Gym: the variables above, the `/v1/...` routes, the workspace's `README.md`, the answers and
@@ -261,8 +300,8 @@ docker build -t officeenv-sandbox:pilot resources_servers/officeenv_sandbox/sand
 gym env start --config resources_servers/officeenv_sandbox/configs/officeenv_sandbox.yaml \
   --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
   --model-type inference_provider --model <model> --model-url <url> '+policy_api_key=...' \
-  ++oe.resources_servers.officeenv_sandbox.sandbox_config.host_relay=host.lima.internal
-gym eval run --no-serve <the same --config, --model and ++ arguments> --agent pi_agent \
+  ++officeenv_sandbox_resources_server.resources_servers.officeenv_sandbox.sandbox_config.host_relay=host.lima.internal
+gym eval run --no-serve <the same --config, --model and ++ arguments> --agent officeenv_sandbox_pi_agent \
   --input resources_servers/officeenv_sandbox/data/sandbox_pilot.jsonl --output results/sandbox_rollouts.jsonl
 ```
 
@@ -296,9 +335,10 @@ command.
 
 Known limits: Pi installs Node and its own package in every sandbox at session start (network
 access to nodejs.org and npm); token-ID capture through Pi needs a vLLM model server and is not
-validated here. Pi, Codex and Hermes take MCP tool grants in sandbox sessions; OpenCode and Claude
-Code refuse them, so they run only the commands' rows. Codex installs Node and its package, and
-mini-SWE its Python packages, in each sandbox at session start. What a sandbox still reads of Gym:
+validated here. Pi, Codex, OpenCode, OpenClaw and Hermes take MCP tool grants in sandbox sessions;
+Claude Code refuses them, so it runs only the commands' rows. Codex installs Node and its package,
+and mini-SWE its Python packages, in each sandbox at session start. What a sandbox still reads of
+Gym:
 
 - the policy's URL, which Gym's agents hand the harness with Gym's own path names:
   `/ng-rollout/<id>` from rollout correlation (`ROLLOUT_PATH_PREFIX`), `/training-token-capture`

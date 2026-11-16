@@ -23,16 +23,17 @@ from resources_servers.officeenv_sandbox.app import OfficeEnvSandboxConfig
 CONFIGS = "resources_servers/officeenv_sandbox/configs"
 DOCKER = "nemo_gym/sandbox/providers/docker/configs/docker.yaml"
 # The configs of the harnesses that run at most `concurrency` episodes at once, with the provider each runs on
-# (officeenv_opensandbox.yaml is Pi's on OpenSandbox). mini-SWE and Terminus 2 run every episode they are given.
+# (officeenv_opensandbox.yaml is Pi's on OpenSandbox), the harness their instances are named after and its agent type.
+# mini-SWE and Terminus 2 run every episode they are given.
 CAPPED = {
-    "pi": ([f"{CONFIGS}/officeenv_sandbox.yaml", DOCKER], "pi_agent"),
-    "pi-opensandbox": ([f"{CONFIGS}/officeenv_opensandbox.yaml"], "pi_agent"),
-    "codex": ([f"{CONFIGS}/officeenv_sandbox_codex.yaml", DOCKER], "codex_agent"),
-    "opencode": ([f"{CONFIGS}/officeenv_sandbox_opencode.yaml", DOCKER], "opencode_agent"),
-    "openclaw": ([f"{CONFIGS}/officeenv_sandbox_openclaw.yaml", DOCKER], "openclaw_agent"),
+    "pi": ([f"{CONFIGS}/officeenv_sandbox.yaml", DOCKER], "pi", "pi_agent"),
+    "pi-opensandbox": ([f"{CONFIGS}/officeenv_opensandbox.yaml"], "pi", "pi_agent"),
+    "codex": ([f"{CONFIGS}/officeenv_sandbox_codex.yaml", DOCKER], "codex", "codex_agent"),
+    "opencode": ([f"{CONFIGS}/officeenv_sandbox_opencode.yaml", DOCKER], "opencode", "opencode_agent"),
+    "openclaw": ([f"{CONFIGS}/officeenv_sandbox_openclaw.yaml", DOCKER], "openclaw", "openclaw_agent"),
 }
 # Every sandboxed harness config, by the harness it runs
-SANDBOXED = {name: paths for name, (paths, _) in CAPPED.items()} | {
+SANDBOXED = {name: paths for name, (paths, _, _) in CAPPED.items()} | {
     "miniswe": [f"{CONFIGS}/officeenv_sandbox_miniswe.yaml", DOCKER],
     "terminus-2": [f"{CONFIGS}/officeenv_sandbox_terminus_2.yaml", DOCKER],
 }
@@ -60,25 +61,30 @@ def _compose(monkeypatch, config_paths: list[str], overrides: dict | None = None
     return OmegaConf.to_container(parsed, resolve=True)
 
 
-def _environment(config: dict) -> dict:
-    return config["single_agent_turn_legacy"]["environment_servers"]["single_agent_turn_legacy"]
+def _environment(config: dict, harness: str) -> dict:
+    """The environment server that binds ``harness`` to the episodes, as its config names it."""
+    servers = config[f"officeenv_sandbox_{harness}_environment_server"]["environment_servers"]
+    return servers["single_agent_turn_legacy"]
 
 
-@pytest.mark.parametrize("config_paths,agent", CAPPED.values(), ids=CAPPED)
-def test_the_server_admits_no_more_episodes_than_the_harness_runs(monkeypatch, config_paths: list, agent: str) -> None:
+@pytest.mark.parametrize("config_paths,harness,agent_type", CAPPED.values(), ids=CAPPED)
+def test_the_server_admits_no_more_episodes_than_the_harness_runs(
+    monkeypatch, config_paths: list, harness: str, agent_type: str
+) -> None:
     # The seed lends an episode its sandbox, whose TTL runs from then, and the harness runs at most `concurrency`
     # episodes at once: an episode admitted beyond them waits for the harness while its sandbox's TTL runs. On an
     # OpenSandbox cell, 128 episodes seeded at once under Pi's 8, with a 1 h TTL, lost 30 sandboxes that way
     # ("Sandbox not found").
     config = _compose(monkeypatch, config_paths)
-    environment = _environment(config)
+    environment = _environment(config, harness)
+    agent = f"officeenv_sandbox_{harness}_agent"
     assert environment["agent_server"]["name"] == agent
     admitted = environment["max_concurrent_episodes"]
     assert admitted is not None  # unset, every episode a collection sends is seeded at once
-    assert admitted == config[agent]["responses_api_agents"][agent]["concurrency"]
+    assert admitted == config[agent]["responses_api_agents"][agent_type]["concurrency"]
     # the rest wait before their seed, holding no sandbox, as long as a large collection keeps the harness busy
     assert environment["queue_timeout_seconds"] >= 86400
-    SingleAgentTurnLegacyEnvironmentServerConfig.model_validate(environment | {"name": "single_agent_turn_legacy"})
+    SingleAgentTurnLegacyEnvironmentServerConfig.model_validate(environment | {"name": f"{harness} environment"})
 
 
 @pytest.mark.parametrize("config_paths", SANDBOXED.values(), ids=SANDBOXED)
@@ -93,9 +99,9 @@ def test_a_runs_end_leaves_the_server_time_to_stop_its_sandboxes(monkeypatch, co
 
 @pytest.mark.parametrize("concurrency", [None, 64])
 def test_the_admitted_episodes_follow_pis_concurrency(monkeypatch, concurrency: int | None) -> None:
-    pi = {"pi_agent": {"responses_api_agents": {"pi_agent": {"concurrency": concurrency}}}}
+    pi = {"officeenv_sandbox_pi_agent": {"responses_api_agents": {"pi_agent": {"concurrency": concurrency}}}}
     config = _compose(monkeypatch, CAPPED["pi-opensandbox"][0], pi if concurrency else None)
-    assert _environment(config)["max_concurrent_episodes"] == (concurrency or 8)  # 8: Pi's default
+    assert _environment(config, "pi")["max_concurrent_episodes"] == (concurrency or 8)  # 8: Pi's default
 
 
 def test_a_sandbox_create_outlasts_its_request_and_readiness_wait(monkeypatch, caplog) -> None:
@@ -104,7 +110,7 @@ def test_a_sandbox_create_outlasts_its_request_and_readiness_wait(monkeypatch, c
     # starting within its bounds, deletes it and starts again, and the provider warns.
     config = _compose(monkeypatch, CAPPED["pi-opensandbox"][0])
     monkeypatch.setattr(opensandbox_provider, "_BUDGET_WARNINGS", set())
-    server = config["oe"]["resources_servers"]["officeenv_sandbox"]
+    server = config["officeenv_sandbox_pi_resources_server"]["resources_servers"]["officeenv_sandbox"]
     sandbox = OfficeEnvSandboxConfig(**server["sandbox_config"])
     spec = sandbox.spec(server["sandbox_provider"], image=sandbox.image, workdir=sandbox.workdir, named_configs=config)
     provider = create_provider(resolve_provider_config(server["sandbox_provider"], config))
