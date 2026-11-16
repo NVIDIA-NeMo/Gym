@@ -242,7 +242,7 @@ def test_tasks_without_submitted_files_record_how_they_ended(server, root, tmp_p
     assert sorted(p.name for p in task_dir.iterdir()) == ["finish_params.json", "reference_files"]
 
 
-def test_an_agent_that_ran_out_of_wall_time_is_a_masked_timeout_and_persists_nothing(
+def test_an_agent_that_ran_out_of_wall_time_is_a_scored_zero_and_persists_nothing(
     server, root, tmp_path, stopped, references
 ):
     client = TestClient(server.setup_webserver())
@@ -253,8 +253,11 @@ def test_an_agent_that_ran_out_of_wall_time_is_a_masked_timeout_and_persists_not
 
     verified = _verify(client, response_metadata={"stop_reason": "wall_time"})
 
-    assert verified["_ng_failure_class"] == "agent_timeout"
-    assert (verified["failure_kind"], verified["mask_sample"], verified["reward"]) == ("agent_timeout", True, 0.0)
+    # The model's own result: a zero that stays in the denominator, typed with model attribution. No outcome action,
+    # so a timeout whose window held a server-side fault is still run again by recovery.
+    assert "_ng_failure_class" not in verified
+    assert (verified["failure_kind"], verified["mask_sample"], verified["reward"]) == ("agent_timeout", False, 0.0)
+    assert verified["failure_outcome_attribution"] == "model"
     assert "_ng_failure_terminal" not in verified
     assert not (tmp_path / "persist").exists(), "the partial work is not collected or judged"
     assert _close(client, seed).status_code == 200
