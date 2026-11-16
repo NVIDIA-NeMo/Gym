@@ -1,0 +1,3 @@
+# SaaS-Bench task rows and assets stay in the external source checkout.
+*
+!.gitignore
