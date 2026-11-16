@@ -6,18 +6,19 @@
 import asyncio
 import json
 import logging
+import re
 from abc import abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
 from time import perf_counter
-from typing import Any, ClassVar, Generic, Optional, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, Optional, TypeVar
 
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from anyio import CancelScope
 from fastapi import Body, FastAPI, Request
 from fastapi.responses import JSONResponse
-from pydantic import ConfigDict, Field, JsonValue, PositiveFloat, PositiveInt, model_validator
+from pydantic import ConfigDict, Field, JsonValue, PositiveFloat, PositiveInt, field_validator, model_validator
 from starlette.datastructures import Headers
 from typing_extensions import Self
 
@@ -49,9 +50,15 @@ from nemo_gym.server_runtime.tool_access import (
     TOOL_CALL_ID_HEADER,
     TOOL_ERROR_HEADER,
     DirectHTTPToolAccess,
+    MCPStreamableHTTPConnection,
+    MCPToolAccess,
     ToolAccess,
 )
 from nemo_gym.telemetry.concurrency import MeteredSemaphore
+
+
+if TYPE_CHECKING:
+    import mcp.types
 
 
 LOGGER = logging.getLogger(__name__)
@@ -649,8 +656,26 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         """Aggregate per-rollout scores into task-level metrics."""
 
 
+ToolTransport = Literal["direct_http", "mcp"]
+# The path ``nemo_gym.server_runtime.mcp_auto_exposure.mount_mcp_endpoint`` serves. Kept here so that a server without MCP never
+# imports the MCP SDK.
+_MCP_PATH = "/mcp"
+# MCP clients reject tool names outside this alphabet, such as a name with a dot.
+_MCP_TOOL_NAME = re.compile(r"[A-Za-z0-9_-]+")
+
+
 class BaseEnvironmentServerWithToolsConfig(BaseEnvironmentServerConfig):
-    """Configure how a ``BaseEnvironmentServerWithTools`` serves its episodes' tools."""
+    """Configure how a ``BaseEnvironmentServerWithTools`` grants and serves its episodes' tools."""
+
+    tool_transports: list[ToolTransport] = Field(
+        default_factory=lambda: ["direct_http"],
+        min_length=1,
+        description=(
+            "The transports serve_tools grants, in order. direct_http calls POST /<tool name>, for agents such as "
+            "simple_agent. mcp serves the episode's tools at /mcp, for agents that take only MCP grants, such as "
+            "Codex, Pi and Hermes. With both, each grant is optional, so each agent takes the one it supports."
+        ),
+    )
 
     tool_call_timeout_seconds: PositiveFloat | None = Field(
         default=None,
@@ -660,6 +685,13 @@ class BaseEnvironmentServerWithToolsConfig(BaseEnvironmentServerConfig):
             "episode's next calls wait. None lets a call run until it returns or the episode ends."
         ),
     )
+
+    @field_validator("tool_transports")
+    @classmethod
+    def validate_unique_transports(cls, transports: list[ToolTransport]) -> list[ToolTransport]:
+        if len(set(transports)) != len(transports):
+            raise ValueError("tool_transports must not repeat a transport")
+        return transports
 
 
 @dataclass
@@ -681,6 +713,19 @@ class _OpenEpisode:
     running: Optional[asyncio.Task] = None
     # The first handled episode failure a tool raised, such as a crashed sandbox; the episode fails with it.
     failure: Optional[NgFailureEvent] = None
+
+
+@dataclass(frozen=True)
+class _Refusal:
+    status: int
+    detail: str
+
+
+@dataclass(frozen=True)
+class _ToolOutcome:
+    status: int
+    output: JsonValue
+    is_error: bool
 
 
 class _EpisodeTokensOpenOnlyTools:
@@ -715,9 +760,14 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
     verification.
 
     ``run`` holds the episode's state, and ``serve_tools`` grants the agent the episode's tools until the episode
-    ends. A tool call is a separate request to ``POST /<tool name>`` at the server's root, as on a Resources
-    Server, with the episode token in the ``X-NeMo-Gym-Episode-Token`` header. A request with an episode token
-    reaches only the tools. Calls to one episode run one at a time, each under the episode's rollout, and each is
+    ends, over each transport in ``tool_transports``. Every call carries the episode token in the
+    ``X-NeMo-Gym-Episode-Token`` header:
+
+    - direct HTTP: a separate request to ``POST /<tool name>`` at the server's root, as on a Resources Server;
+    - MCP: ``tools/call`` on ``/mcp``, where ``tools/list`` shows only the episode's own tools.
+
+    Both transports check the token the same way. A request with an episode token reaches only the tools. Calls to
+    one episode run one at a time, whatever their transport, each under the episode's rollout, and each is
     recorded in ``ServedTools.calls``. When the episode ends, a call still running is cancelled. A call that runs
     longer than ``tool_call_timeout_seconds`` is cancelled and answered 504. A client that disconnects
     cancels its call, which is recorded.
@@ -756,6 +806,8 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
+        if "mcp" in self.config.tool_transports:
+            self._mount_mcp_endpoint(app)
         # Added before RolloutContextMiddleware, so it runs inside it and sees the path without a rollout prefix.
         app.add_middleware(_EpisodeTokensOpenOnlyTools, is_tool_path=self._is_tool_path)
         # A tool call under /ng-rollout/<id>/ (an agent that correlates its calls with the rollout) routes as bare.
@@ -769,6 +821,8 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
 
     def _is_tool_path(self, path: str) -> bool:
         segments = path.strip("/").split("/")
+        if segments[0] == _MCP_PATH.strip("/") and "mcp" in self.config.tool_transports:
+            return True
         return len(segments) == 1 and segments[0] not in self._reserved_tool_names
 
     def _recorded_episode_failure(self, request: EpisodeRequestT) -> NgFailureEvent | None:
@@ -784,9 +838,9 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
     ) -> ServedTools:
         """Grant the agent ``toolset`` for this episode, until the episode's cleanup runs.
 
-        Returns the grants for the agent's seed (``AgentSeedSessionRequest.tool_accesses``) and the list that
-        records each call. A call after the episode ends gets 410. Declare the tools to the model with
-        ``ToolSpec.function_tool``.
+        Returns one grant for each of ``tool_transports``, for the agent's seed
+        (``AgentSeedSessionRequest.tool_accesses``), and the list that records each call. A call after the episode
+        ends is refused. Declare the tools to the model with ``ToolSpec.function_tool``.
         """
         episode_id = request.episode_id
         if episode_id in self._open_episodes:
@@ -798,6 +852,10 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
         reserved = sorted(specs.keys() & self._reserved_tool_names)
         if reserved:
             raise ValueError(f"Episode tools cannot take the names of the server's routes: {', '.join(reserved)}")
+        if "mcp" in self.config.tool_transports:
+            unnamable = sorted(name for name in specs if not _MCP_TOOL_NAME.fullmatch(name))
+            if unnamable:
+                raise ValueError(f"MCP tool names may use only letters, digits, _ and -: {', '.join(unnamable)}")
 
         token, claims = self._episode_tokens.mint(episode_id)
         episode = _OpenEpisode(claims=claims, toolset=toolset, specs=specs, calls=[])
@@ -813,51 +871,106 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
                 await asyncio.wait({running})
 
         cleanup.register_cleanup("episode tools", stop_serving)
-        base_url = self.server_client._resolve_base_url(self.config.name)
-        grant = DirectHTTPToolAccess(
-            name=f"{self.config.name}.direct_http",
-            required=True,
-            base_url=base_url,
-            headers={EPISODE_TOKEN_HEADER: token},
+        base_url = self.server_client._resolve_base_url(self.config.name).rstrip("/")
+        headers = {EPISODE_TOKEN_HEADER: token}
+        # An agent refuses a required grant it cannot use, so with both transports each grant is optional.
+        required = len(self.config.tool_transports) == 1
+        grants: dict[ToolTransport, ToolAccess] = {
+            "direct_http": DirectHTTPToolAccess(
+                name=f"{self.config.name}.direct_http", required=required, base_url=base_url, headers=headers
+            ),
+            "mcp": MCPToolAccess(
+                name=self.config.name,
+                required=required,
+                connection=MCPStreamableHTTPConnection(url=f"{base_url}{_MCP_PATH}", headers=headers),
+            ),
+        }
+        return ServedTools(
+            tool_accesses=[grants[transport] for transport in self.config.tool_transports], calls=episode.calls
         )
-        return ServedTools(tool_accesses=[grant], calls=episode.calls)
 
     async def _tool_call_endpoint(self, tool_name: str, request: Request) -> JSONResponse:
-        claims = self._episode_tokens.read(request.headers.get(EPISODE_TOKEN_HEADER, ""))
-        if claims is None:
-            return _refusal(401, f"A tool call needs a valid {EPISODE_TOKEN_HEADER} header")
-        episode = self._open_episodes.get(claims.episode_id)
-        if episode is None:
-            return _refusal(410, f"Episode {claims.episode_id.capture_key} is not running on this server")
-        if not episode.claims.matches(claims):
-            return _refusal(403, "The episode token was not granted for this episode")
-
+        episode = self._episode_for_token(request.headers.get(EPISODE_TOKEN_HEADER))
+        if isinstance(episode, _Refusal):
+            return JSONResponse(status_code=episode.status, content={"detail": episode.detail})
         try:
             arguments = await request.json()
         except ValueError:
             arguments = None
-        call_id = request.headers.get(TOOL_CALL_ID_HEADER) or None
+        outcome = await self._run_tool(episode, tool_name, arguments, request.headers.get(TOOL_CALL_ID_HEADER) or None)
+        return JSONResponse(
+            status_code=outcome.status,
+            content=outcome.output,
+            headers={TOOL_ERROR_HEADER: "true"} if outcome.is_error else None,
+        )
+
+    def _mount_mcp_endpoint(self, app: FastAPI) -> None:
+        # Imported here, so the MCP SDK loads only in a server that grants MCP.
+        import mcp.types as types
+
+        from nemo_gym.server_runtime.mcp_auto_exposure import mount_mcp_endpoint, to_call_tool_result
+
+        def episode_for(request: Optional[Request]) -> "_OpenEpisode | _Refusal":
+            return self._episode_for_token(request.headers.get(EPISODE_TOKEN_HEADER) if request is not None else None)
+
+        async def list_tools(request: Optional[Request]) -> list["mcp.types.Tool"]:
+            episode = episode_for(request)
+            if isinstance(episode, _Refusal):
+                # An error, not an empty list: an MCP-only harness that checks only that its server connected
+                # would otherwise run the episode with no tools.
+                # The SDK answers an exception from a handler with a JSON-RPC error, in versions 1 and 2.
+                raise PermissionError(episode.detail)
+            return [
+                types.Tool(name=spec.name, description=spec.description, inputSchema=spec.parameters)
+                for spec in episode.specs.values()
+            ]
+
+        async def call_tool(request: Optional[Request], name: str, arguments: dict) -> "mcp.types.CallToolResult":
+            episode = episode_for(request)
+            if isinstance(episode, _Refusal):
+                return to_call_tool_result(episode.detail, is_error=True)
+            outcome = await self._run_tool(episode, name, arguments)
+            return to_call_tool_result(outcome.output, is_error=outcome.is_error)
+
+        mount_mcp_endpoint(app, self.config.name, list_tools, call_tool)
+
+    def _episode_for_token(self, token: Optional[str]) -> "_OpenEpisode | _Refusal":
+        """The open episode an episode token was granted for, or why the call is refused."""
+        claims = self._episode_tokens.read(token or "")
+        if claims is None:
+            return _Refusal(401, f"A tool call needs a valid {EPISODE_TOKEN_HEADER} header")
+        episode = self._open_episodes.get(claims.episode_id)
+        if episode is None:
+            return _Refusal(410, f"Episode {claims.episode_id.capture_key} is not running on this server")
+        if not episode.claims.matches(claims):
+            return _Refusal(403, "The episode token was not granted for this episode")
+        return episode
+
+    async def _run_tool(
+        self, episode: _OpenEpisode, name: str, arguments: Any, call_id: Optional[str] = None
+    ) -> _ToolOutcome:
+        """Run one tool call on the episode, after the calls before it, whatever its transport."""
+        capture_key = episode.claims.episode_id.capture_key
         async with episode.lock:
             # The episode can end while this call waits for its body or for the calls before it.
-            if self._open_episodes.get(claims.episode_id) is not episode:
-                return _refusal(410, f"Episode {claims.episode_id.capture_key} is not running on this server")
-            episode.running = asyncio.ensure_future(self._call_tool(episode, tool_name, arguments, call_id))
+            if self._open_episodes.get(episode.claims.episode_id) is not episode:
+                detail = f"Episode {capture_key} is not running on this server"
+                return _ToolOutcome(status=410, output={"detail": detail}, is_error=True)
+            episode.running = asyncio.ensure_future(self._call_tool(episode, name, arguments, call_id))
             try:
-                status, output, is_error = await episode.running
+                return await episode.running
             except asyncio.CancelledError:
                 if asyncio.current_task().cancelling():
                     raise
-                # The end of the episode cancelled the call, not this request.
-                return _refusal(410, f"Episode {claims.episode_id.capture_key} ended while the call ran")
+                # The end of the episode cancelled the call, not the caller.
+                detail = f"Episode {capture_key} ended while the call ran"
+                return _ToolOutcome(status=410, output={"detail": detail}, is_error=True)
             finally:
                 episode.running = None
-        return JSONResponse(
-            status_code=status, content=output, headers={TOOL_ERROR_HEADER: "true"} if is_error else None
-        )
 
     async def _call_tool(
         self, episode: _OpenEpisode, name: str, arguments: Any, call_id: Optional[str] = None
-    ) -> tuple[int, JsonValue, bool]:
+    ) -> _ToolOutcome:
         """Run one call, under the episode's rollout, and record it, including a call to a tool it does not have."""
         started = perf_counter()
         status, is_error = 200, False
@@ -910,7 +1023,7 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
             status, is_error = 500, True
             output = {"detail": f"Tool {name!r} returned a value that is not JSON, such as NaN or Infinity"}
         record(output)
-        return status, output, is_error
+        return _ToolOutcome(status=status, output=output, is_error=is_error)
 
 
 def _is_json(value: JsonValue) -> bool:
@@ -919,7 +1032,3 @@ def _is_json(value: JsonValue) -> bool:
     except ValueError:
         return False
     return True
-
-
-def _refusal(status: int, detail: str) -> JSONResponse:
-    return JSONResponse(status_code=status, content={"detail": detail})
