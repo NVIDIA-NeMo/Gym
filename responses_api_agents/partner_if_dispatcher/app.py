@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Route complete mixed-harness benchmark episodes to their existing environments."""
 
+import copy
 import json
 from collections.abc import Iterable, Mapping
 
@@ -29,7 +30,12 @@ from nemo_gym.core import (
     skips_token_capture,
 )
 from nemo_gym.data import materialize_task
-from nemo_gym.server_runtime import SingleAgentTurnRequest, SingleAgentTurnResponse
+from nemo_gym.server_runtime import (
+    AgentContext,
+    SingleAgentTurnAgentContext,
+    SingleAgentTurnRequest,
+    SingleAgentTurnResponse,
+)
 from nemo_gym.trajectory import (
     NG_AGENT_OBSERVATIONS_KEY,
     NG_TRAJECTORY_KEY,
@@ -147,6 +153,7 @@ class PartnerIFDispatcher(SimpleResponsesAPIAgent):
     config: PartnerIFDispatcherConfig
     _execution_agents: dict[str, str] = PrivateAttr(default_factory=dict)
     _episode_resources: dict[str, str] = PrivateAttr(default_factory=dict)
+    _replay_routes: set[str] = PrivateAttr(default_factory=set)
 
     @model_validator(mode="after")
     def validate_destinations(self) -> "PartnerIFDispatcher":
@@ -167,6 +174,11 @@ class PartnerIFDispatcher(SimpleResponsesAPIAgent):
                 if not isinstance(resources_name, str) or not resources_name:
                     raise ValueError(f"Single-agent environment must bind one resources server: {route.name}")
                 self._episode_resources[route.name] = resources_name
+                agent = self.server_client.global_config_dict.get(agent_name, {})
+                implementations = agent.get("responses_api_agents", {}) if isinstance(agent, Mapping) else {}
+                replay = implementations.get("ngc_recorded_context", {})
+                if isinstance(replay, Mapping) and replay.get("entrypoint") == "native_agent.py":
+                    self._replay_routes.add(route.name)
         return self
 
     def _episode_request_from_row(self, row: dict, *, route_name: str) -> SingleAgentTurnRequest:
@@ -177,12 +189,24 @@ class PartnerIFDispatcher(SimpleResponsesAPIAgent):
         capture_key = maybe_rollout_id_from_run_body(row)
         if capture_key is None:
             raise ValueError("An episode requires a rollout ID or task and rollout indices")
-        return SingleAgentTurnRequest(
+        episode = SingleAgentTurnRequest(
             episode_id=EpisodeId.from_capture_key(capture_key),
             task=materialize_task(row, taskset=row.get(TASK_SOURCE_KEY_NAME, self._episode_resources[route_name])),
             model_sampling=model_sampling_from_run_body(row),
             skip_token_capture=skips_token_capture(row),
         )
+        if route_name in self._replay_routes:
+            task_input = episode.task.task_input
+            previous = task_input.agent_seed_context
+            values = dict(previous.values) if previous is not None else {}
+            replay_context = {"task_data": copy.deepcopy(task_input.task_data)}
+            if "partner_if_replay" in values and values["partner_if_replay"] != replay_context:
+                raise ValueError("Replay agent context conflicts with the host-selected task data")
+            values["partner_if_replay"] = replay_context
+            task_input.agent_context = SingleAgentTurnAgentContext(
+                agent=AgentContext(values=values, artifacts=dict(previous.artifacts) if previous is not None else {})
+            )
+        return episode
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()

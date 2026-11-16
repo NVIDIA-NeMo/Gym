@@ -22,6 +22,21 @@ from responses_api_agents.ngc_recorded_context.replay import ReplayConfig
 
 
 def seed(identity="step1", **overrides):
+    overrides.setdefault(
+        "tool_accesses",
+        [
+            {
+                "kind": "direct_http",
+                "name": "partner_if.direct_http",
+                "required": True,
+                "base_url": "http://resources/ng-rollout/rollout-a1",
+                "cookies": {"session": "resource-cookie"},
+            }
+        ],
+    )
+    overrides.setdefault(
+        "agent_context", {"values": {"partner_if_replay": {"task_data": {"task_name": "synthetic-ordering-example"}}}}
+    )
     return AgentSeedSessionRequest(
         agent_session_id=identity,
         episode_id=EpisodeId(rollout_id="rollout", attempt=1),
@@ -40,6 +55,7 @@ def make_agent(tmp_path):
             "num_workers": 1,
             "model": "test",
             "model_server": {"type": "responses_api_models", "name": "policy_model"},
+            "resources_server": {"type": "resources_servers", "name": "partner_if"},
             "replay": ReplayConfig(
                 package_dir=SOURCE / "assets", artifacts_dir=tmp_path, coverage_profile="expanded-v4", max_new_turns=6
             ).model_dump(),
@@ -66,6 +82,25 @@ def activation(turn=1, previous=None):
     if previous:
         value.update(saved_prefix=previous.replay_artifacts_dir, saved_prefix_sha256=previous.saved_prefix_sha256)
     return adapter.ReplayActivation.model_validate(value)
+
+
+def actor_params():
+    return adapter.NeMoGymResponseCreateParamsNonStreaming.model_validate(copy.deepcopy(PARAMS))
+
+
+def terminal_reviewer(monkeypatch):
+    async def review(self, state, body):
+        digest = adapter.replay_request_sha256(body)
+        return adapter.PrefixReviewResponse(
+            response=adapter.canonical_replay_response(body.response, "a" * 32, digest),
+            reward=1,
+            mask_sample=False,
+            evaluation_completed=True,
+            receipt_id="a" * 32,
+            request_sha256=digest,
+        )
+
+    monkeypatch.setattr(adapter.NativeReplayAgent, "_review_prefix", review)
 
 
 def provider(monkeypatch, queue, seen):
@@ -139,12 +174,13 @@ async def test_seed_activation_retry_close_and_unknown_session(tmp_path, monkeyp
     seed_request = SimpleNamespace(session={})
     await agent.seed_agent_session(seed_request, seed())
     await agent.seed_agent_session(seed_request, seed())
-    req, body = request_for(), activation()
+    terminal_reviewer(monkeypatch)
+    req, body = request_for(), actor_params()
     reply = await agent.responses(req, body)
     assert (await agent.responses(req, body)).model_dump() == reply.model_dump()
     assert len(seen) == 1
     assert seen[0][1] == "http://gym/ng-rollout/rollout-a1/v1/chat/completions"
-    assert seen[0][2]["headers"]["x-session-id"] == "step1"
+    assert seen[0][2]["headers"]["x-session-id"] == "step1.prefix-1"
     assert seen[0][2]["_max_num_tries"] == 1
     assert seen[0][2]["_max_connection_retries"] == 0
     assert not seen[0][2]["_resend_after_disconnect"]
@@ -156,12 +192,12 @@ async def test_seed_activation_retry_close_and_unknown_session(tmp_path, monkeyp
     assert trajectory["tool_calls"][0]["timing_source"] == "executor"
     assert trajectory["tool_calls"][0]["duration_ms"] >= 0
     assert trajectory["turns"][0]["question"] == seen[0][2]["json"]["messages"]
-    saved_call = trajectory["invocations"][0]["conversation"][0]
+    saved_call = next(i for i in trajectory["invocations"] if i["conversation"])["conversation"][0]
     raw_call = trajectory["turns"][0]["answer"]["tool_calls"][0]
     assert saved_call["name"] == raw_call["function"]["name"]
     assert saved_call["arguments"] == raw_call["function"]["arguments"]
     assert saved_call["call_id"] == raw_call["id"]
-    for other in (activation(2),):
+    for other in (body.model_copy(update={"instructions": "changed request"}),):
         with pytest.raises(HTTPException) as error:
             await agent.responses(req, other)
         assert error.value.status_code == 409
@@ -175,7 +211,7 @@ async def test_seed_activation_retry_close_and_unknown_session(tmp_path, monkeyp
         req, AgentCloseSessionRequest(agent_session_id="step1", episode_id=seed().episode_id)
     )
     assert closed == again and closed.cleanup_confirmed
-    assert len(closed.agent_observations.records) == 2
+    assert len(closed.agent_observations.records) == 3
     for identity in ("step1", "missing"):
         with pytest.raises(HTTPException) as error:
             await agent.responses(request_for(identity), body)
@@ -297,7 +333,7 @@ async def test_close_cancels_inflight_call_and_keeps_failed_activation_from_retr
     monkeypatch.setattr(adapter, "http_request", waiting)
     monkeypatch.setattr(adapter.NativeReplayAgent, "resolve_model_base_url", lambda *args: "http://gym/v1")
     await agent.seed_agent_session(SimpleNamespace(session={}), seed())
-    running = asyncio.create_task(agent.responses(request_for(), activation()))
+    running = asyncio.create_task(agent.responses(request_for(), actor_params()))
     await asyncio.wait_for(began.wait(), 2)
     close = await asyncio.wait_for(
         agent.close_agent_session(
@@ -344,3 +380,22 @@ async def test_decoded_reasoning_is_retained_in_trace_and_history_but_not_verifi
     assert (
         reply.model_extra["_ng_trajectory"]["turns"][0]["reasoning_content"] == "Publish now? Check the sibling first."
     )
+
+
+@pytest.mark.asyncio
+async def test_successful_parent_does_not_hide_unknown_usage_from_a_failed_worker(tmp_path, monkeypatch):
+    agent = make_agent(tmp_path)
+    seen = []
+    provider(
+        monkeypatch,
+        [
+            response(call("Agent", {"prompt": "Read the skill", "subagent_type": "Explore"}, "worker")),
+            TimeoutError("worker policy response lost"),
+        ],
+        seen,
+    )
+    state = await agent._seed_agent_session_state(seed())
+    reply = await agent._execute_step(request_for(), state, activation())
+    assert len(seen) == 2 and reply.replay_diagnostics["model_calls"] == 2
+    assert reply.usage is None
+    assert any(gap.code == "usage_unavailable" for gap in state.gaps)

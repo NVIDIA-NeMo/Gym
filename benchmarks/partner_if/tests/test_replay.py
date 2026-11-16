@@ -271,7 +271,10 @@ def test_replay_config_routes_only_private_profile_without_a_container():
     assert destination == "partner_if_ngc_replay_environment_server"
     environment = OmegaConf.to_container(get_first_server_config_dict(cfg, destination), resolve=True)
     assert set(cfg[destination]["environment_servers"]) == {"single_agent_turn"}
-    assert environment["verifier_continuation"]["max_activations"] == config.replay.max_new_turns
+    assert "verifier_continuation" not in environment
+    assert environment["resources_tool_transports"] == ["direct_http"]
+    resources = OmegaConf.to_container(get_first_server_config_dict(cfg, "partner_if"), resolve=True)
+    assert resources["ordering_max_prefixes"] == config.replay.max_new_turns
     assert environment["agent_server"]["name"] == config.name
     assert environment["resources_server"]["name"] == dispatcher.resources_server.name == "partner_if"
     assert dispatcher_block["datasets"][0]["prepare_script"] == "benchmarks/partner_if/prepare_ngc_replay.py"

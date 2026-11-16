@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Exercise real replay/verifier/environment boundaries; scripted grades are not semantic calibration."""
 
+import asyncio
 import copy
+from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,13 +24,19 @@ from environment_servers.single_agent_turn.app import (
 from nemo_gym.client import ServerClient, get_response_json, raise_boundary_failure
 from nemo_gym.config import BaseServerConfig
 from nemo_gym.data import materialize_task
-from nemo_gym.server_runtime import SingleAgentTurnRequest, SingleAgentTurnResponse
+from nemo_gym.server_runtime import (
+    AgentContext,
+    SingleAgentTurnAgentContext,
+    SingleAgentTurnRequest,
+    SingleAgentTurnResponse,
+)
 from resources_servers.partner_if.app import PartnerIFResourcesServer, PartnerIFResourcesServerConfig
 from resources_servers.partner_if.engine import aggregate
 from resources_servers.partner_if.grading_contract import RawJudgment
 from resources_servers.partner_if.grading_service import GradeResponse
 from responses_api_agents.ngc_recorded_context.native_agent import NativeReplayAgent, NativeReplayAgentConfig
 from responses_api_agents.ngc_recorded_context.replay import ReplayConfig
+from responses_api_agents.ngc_recorded_context.saved_prefix import verification_digest
 
 
 class LocalClient(ServerClient):
@@ -46,12 +54,19 @@ class GenericReplayPair:
 
     directory: Path
     model: str = "test"
-    max_activations: int = 6
+    max_parent_turns: int = 6
     policy_responses: list[dict | Exception] | None = None
     fixture_passed: bool = True
     credentials: dict[str, str] | None = None
     trace: list[dict] = field(default_factory=list)
     policy_requests: list[dict] = field(default_factory=list)
+    grade_calls: list[dict] = field(default_factory=list)
+    lose_activation_reply: bool = False
+    lose_prefix_review_reply: bool = False
+    repeat_prefix_review: bool = False
+    block_policy_after: int | None = None
+    policy_blocked: asyncio.Event = field(default_factory=asyncio.Event)
+    release_policy: asyncio.Event = field(default_factory=asyncio.Event)
     client: LocalClient | None = None
     agent: NativeReplayAgent | None = None
     resources: PartnerIFResourcesServer | None = None
@@ -70,8 +85,19 @@ class GenericReplayPair:
                 record.state is None and record.close_response.cleanup_confirmed
                 for record in self.agent._session_records.values()
             ), "The verifier must see a closed, finalized agent capture"
+        if service == "partner_if" and request.path.endswith("/replay/prefix-review"):
+            assert self.agent is not None and self.agent._session_records
+            assert all(record.state is not None for record in self.agent._session_records.values())
+            captured = payload["response"]
+            directory = Path(captured["replay_artifacts_dir"])
+            assert verification_digest(directory) == captured["replay_verification_sha256"]
+            assert (directory / "native-trajectory.json").is_file()
+            event["settled_capture_reviewed_before_close"] = True
         if service == "policy_model":
             self.policy_requests.append(copy.deepcopy(payload))
+            if self.block_policy_after is not None and len(self.policy_requests) > self.block_policy_after:
+                self.policy_blocked.set()
+                await self.release_policy.wait()
             if self.policy_responses is not None:
                 assert self.policy_responses, "Unexpected duplicate or post-decision model request"
                 raw = self.policy_responses.pop(0)
@@ -89,6 +115,41 @@ class GenericReplayPair:
             content=await request.read(),
             headers={key: value for key, value in request.headers.items() if key.lower() != "host"},
         )
+        if service == "partner_if" and request.path.endswith("/replay/prefix-review"):
+            event["reply"] = forwarded.json()
+            if self.repeat_prefix_review and forwarded.status_code == 200:
+                self.repeat_prefix_review = False
+                duplicate = await self._asgi_clients[service].request(
+                    request.method,
+                    request.path_qs,
+                    content=await request.read(),
+                    headers={key: value for key, value in request.headers.items() if key.lower() != "host"},
+                )
+                assert duplicate.status_code == 200, duplicate.text
+                assert duplicate.json() == forwarded.json()
+                self.trace.append(
+                    {
+                        "server": service,
+                        "path": request.path,
+                        "json": copy.deepcopy(payload),
+                        "explicit_identical_retry": True,
+                        "reply": duplicate.json(),
+                    }
+                )
+        drop_activation = service == "agent" and request.path.endswith("/v1/responses") and self.lose_activation_reply
+        drop_review = (
+            service == "partner_if"
+            and request.path.endswith("/replay/prefix-review")
+            and self.lose_prefix_review_reply
+        )
+        if (drop_activation or drop_review) and forwarded.status_code == 200:
+            if drop_activation:
+                self.lose_activation_reply = False
+            if drop_review:
+                self.lose_prefix_review_reply = False
+            event["reply_dropped_after_execution"] = True
+            assert request.transport is not None
+            request.transport.close()
         return web.Response(
             status=forwarded.status_code,
             body=forwarded.content,
@@ -101,6 +162,7 @@ class GenericReplayPair:
 
     async def _fixture_grade(self, contract, evidence, **kwargs):
         """Only the semantic verdict is scripted; capture validation and ordering decisions remain real."""
+        self.grade_calls.append({"task_id": contract.task_id, "evidence": evidence})
         return GradeResponse(
             grading_result=aggregate(
                 contract,
@@ -117,7 +179,7 @@ class GenericReplayPair:
         )
 
     @asynccontextmanager
-    async def running(self):
+    async def running(self) -> AsyncIterator["GenericReplayPair"]:
         async with AsyncExitStack() as stack:
             transport = await stack.enter_async_context(aiohttp.ClientSession())
             with (
@@ -135,7 +197,7 @@ class GenericReplayPair:
                         return await self._dispatch(selected, request)
 
                     app.router.add_route("*", "/{path:.*}", dispatch)
-                    runner = web.AppRunner(app, access_log=None)
+                    runner = web.AppRunner(app, access_log=None, handler_cancellation=True)
                     await runner.setup()
                     stack.push_async_callback(runner.cleanup)
                     site = web.TCPSite(runner, "127.0.0.1", 0)
@@ -187,12 +249,13 @@ class GenericReplayPair:
                         port=1,
                         entrypoint="native_agent.py",
                         model=self.model,
+                        resources_server={"type": "resources_servers", "name": "partner_if"},
                         model_server={"type": "responses_api_models", "name": "policy_model"},
                         replay=ReplayConfig(
                             package_dir=SOURCE / "assets",
                             artifacts_dir=self.directory / "captures",
                             coverage_profile="expanded-v4",
-                            max_new_turns=6,
+                            max_new_turns=self.max_parent_turns,
                             max_policy_calls=8,
                             gym_reasoning_decode=True,
                         ),
@@ -208,6 +271,7 @@ class GenericReplayPair:
                         judge_model_server={"type": "responses_api_models", "name": "judge"},
                         accept_verification_input=True,
                         ordering_artifacts_dir=self.directory / "captures",
+                        ordering_max_prefixes=self.max_parent_turns,
                         judge_max_concurrency=1,
                         judge_responses_create_params={"input": [], "max_output_tokens": 32768, "temperature": 0.0},
                     ),
@@ -221,10 +285,9 @@ class GenericReplayPair:
                         entrypoint="app.py",
                         agent_server={"type": "responses_api_agents", "name": "agent"},
                         resources_server={"type": "resources_servers", "name": "partner_if"},
-                        resources_tool_transports=[],
+                        resources_tool_transports=["direct_http"],
                         tool_servers=[],
                         forward_agent_evidence=True,
-                        verifier_continuation={"max_activations": self.max_activations},
                         default_episode_timeout_seconds=900,
                         cleanup_timeout_seconds=5,
                     ),
@@ -276,7 +339,9 @@ class GenericReplayPair:
                 else:
                     yield self
 
-    async def run(self, *, task_name="pif_029", positional_identity=False):
+    def episode_request(
+        self, *, task_name: str = "pif_029", positional_identity: bool = False
+    ) -> SingleAgentTurnRequest:
         task = copy.deepcopy(TASK)
         task["task_name"] = task_name
         materialized = (
@@ -287,6 +352,17 @@ class GenericReplayPair:
         request = SingleAgentTurnRequest.model_validate(
             {"episode_id": {"rollout_id": "generic-replay", "attempt": 1}, "task": materialized}
         )
+        request.task.task_input.agent_context = SingleAgentTurnAgentContext(
+            agent=AgentContext(
+                values={"partner_if_replay": {"task_data": copy.deepcopy(request.task.task_input.task_data)}}
+            )
+        )
+        return request
+
+    async def run(
+        self, *, task_name: str = "pif_029", positional_identity: bool = False
+    ) -> tuple[dict, SingleAgentTurnRequest]:
+        request = self.episode_request(task_name=task_name, positional_identity=positional_identity)
         result = await self.client.post(server_name="environment", url_path="/run", json=request)
         await raise_boundary_failure(result)
         reply = SingleAgentTurnResponse.model_validate(await get_response_json(result))

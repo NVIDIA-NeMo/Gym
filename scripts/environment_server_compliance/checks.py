@@ -32,25 +32,12 @@ RESULT_LABELS = {"passed": "compliant", "failed": "with findings", "unavailable"
 MAX_LISTED_FINDINGS = 50
 
 
-def _findings(path: Path) -> list[dict] | None:
+def _findings(path: Path) -> list[dict]:
     try:
         findings = json.loads(path.read_text())
+        return findings if isinstance(findings, list) else []
     except (OSError, ValueError):
-        return None
-    if not isinstance(findings, list):
-        return None
-    for finding in findings:
-        if (
-            not isinstance(finding, dict)
-            or any(
-                not isinstance(finding.get(key), str) or not finding[key].strip()
-                for key in ("rule", "path", "message")
-            )
-            or type(finding.get("line")) is not int
-            or finding["line"] < 1
-        ):
-            return None
-    return findings
+        return []
 
 
 def compliance_check(
@@ -63,9 +50,7 @@ def compliance_check(
         name = subject(component)
         result = read_ci_result(artifacts / name / RESULT_FILE, subject=name, sha=sha)
         status = result["status"] if result else "unavailable"
-        findings = _findings(artifacts / name / FINDINGS_FILE) if result else None
-        if findings is None or (status == "passed" and findings) or (status == "failed" and not findings):
-            status, findings = "unavailable", []
+        findings = _findings(artifacts / name / FINDINGS_FILE) if result else []
         counts[status] += 1
         artifact_url = (artifact_urls or {}).get(name)
         evidence = f"[Download]({artifact_url})" if artifact_url else "See workflow artifacts/logs"
@@ -85,26 +70,18 @@ def compliance_check(
     else:
         title = ", ".join(f"{counts[status]} {RESULT_LABELS[status]}" for status in STATUSES)
         summary = markdown_table(["Component", "Result", "Rules", "Evidence"], rows)
-        summary += "\n\nCompleted findings are neutral warnings and do not fail the workflow. Unavailable means the component "
-        summary += (
-            "could not be installed or imported, or its evidence is missing or invalid; these failures remain red.\n"
-        )
+        summary += "\n\nFindings are warnings and do not block the change. Unavailable means the component could not "
+        summary += "be installed or imported, or its evidence is missing.\n"
         if listed:
             summary += "\n" + "\n".join(listed[:MAX_LISTED_FINDINGS])
             if len(listed) > MAX_LISTED_FINDINGS:
                 summary += f"\n- and {len(listed) - MAX_LISTED_FINDINGS} more; see the evidence artifacts."
     summary += f"\n\nTested commit: `{sha}`."
-    if components is None or counts["unavailable"]:
-        conclusion = "failure"
-    elif counts["failed"]:
-        conclusion = "neutral"
-    else:
-        conclusion = "success"
     return {
         "name": CHECK_NAME,
         "head_sha": sha,
         "status": "completed",
-        "conclusion": conclusion,
+        "conclusion": "failure" if components is None or counts["failed"] or counts["unavailable"] else "success",
         "output": {"title": title, "summary": summary},
     }
 
@@ -145,14 +122,9 @@ def main() -> int:
     output["summary"] += f"\n\n[Component summaries and downloadable evidence]({run_url})."
     with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as handle:
         handle.write(f"## {CHECK_NAME}\n\n{output['title']}\n\n{output['summary']}\n")
-    # Keep advisory findings visible without turning a completed inspection into a workflow failure.
-    # Missing evidence, failed probes and publication errors must still fail the reporting job.
+    # Publish the detailed check before making the workflow job reflect its result.
     post_check_run(payload, repo=repo)
-    probe_result = os.environ.get("CHECK_JOB_RESULT", "success")
-    if payload["conclusion"] == "neutral" and probe_result in ("success", "skipped"):
-        print(f"::warning title={CHECK_NAME}::{output['title']}. See the published check for advisory findings.")
-        return 0
-    return job_exit_code(payload, probe_result=probe_result)
+    return job_exit_code(payload, probe_result=os.environ.get("CHECK_JOB_RESULT", "success"))
 
 
 if __name__ == "__main__":

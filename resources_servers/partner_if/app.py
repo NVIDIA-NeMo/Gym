@@ -3,25 +3,42 @@
 """Shared IF verification of replies and live-agent captures, independent of task sources and native task rewards."""
 
 import asyncio
+import json
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
-from typing import ClassVar
+from time import time
+from typing import Annotated, ClassVar
 
-from fastapi import HTTPException
-from pydantic import Field, JsonValue, field_serializer, model_validator
+from fastapi import FastAPI, HTTPException
+from pydantic import BeforeValidator, ConfigDict, Field, JsonValue, TypeAdapter, model_validator
+from starlette.requests import Request
+from starlette.responses import Response
 
+from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, current_rollout_id
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
+    BaseSeedSessionRequest,
+    BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    CheckpointMode,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
+    ResourcesSeedRejectedError,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
     ReverifyMode,
     SimpleResourcesServer,
+    observe_verifier,
+    reject_partial_typed_seed,
 )
+from nemo_gym.telemetry import GymSpanGroup, trace_fn
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.verification import VerifierFixture
+from nemo_gym.verification import VerifierFixture, judge_failsafe
 from resources_servers.partner_if.checks import register_modules
 from resources_servers.partner_if.evidence import EvidenceBundle
 from resources_servers.partner_if.grading_contract import (
@@ -37,6 +54,16 @@ from resources_servers.partner_if.llm import MAX_JUDGE_INPUT_CHARS, PROTOCOL
 from resources_servers.partner_if.metrics import PartnerIFMetricsMixin
 from resources_servers.partner_if.native_evidence import LiveAgentCapture, live_agent_evidence, visible_events
 from resources_servers.partner_if.receipt import masked_fields, scoring_fields
+from resources_servers.partner_if.replay_protocol import (
+    REPLAY_RECEIPT_KEY,
+    PrefixReviewRequest,
+    PrefixReviewResponse,
+    canonical_replay_response,
+    json_sha256,
+    read_replay_receipt,
+    replay_request_sha256,
+)
+from resources_servers.partner_if.replay_receipts import ReplayReceiptStore
 from resources_servers.partner_if.schema import IFResult, VerifierMetadata, validate_input
 from resources_servers.partner_if.verifier_fixture import create_fixture_server
 
@@ -68,6 +95,7 @@ class PartnerIFResourcesServerConfig(PartnerIFGradingConfig):
     # Explicit opt-in: only replay envelopes below this root can request verifier-controlled continuation.
     ordering_artifacts_dir: Path | None = None
     ordering_max_policy_calls: int = Field(default=8, ge=1, le=64)
+    ordering_max_prefixes: int = Field(default=6, ge=1, le=32)
 
 
 UNSIGNED = "Rubric audit unsigned; enable allow_provisional_rubrics for provisional development scoring"
@@ -81,6 +109,9 @@ class VerifyRequest(BaseVerifyRequest):
 
 
 class VerifyResponse(VerifyRequest, BaseVerifyResponse):
+    # Judge failsafe fields and failure reports must survive durable replay receipt reuse.
+    model_config = ConfigDict(extra="allow")
+
     if_result: IFResult
     judge_protocol: str = PROTOCOL
     judge_response: NeMoGymResponse | None = None
@@ -90,17 +121,8 @@ class VerifyResponse(VerifyRequest, BaseVerifyResponse):
     grading_result: Evaluation | None = None
     # Whether grading ran to completion, as Gym's evidence gate reads it: a masked rollout's did not.
     evaluation_completed: bool | None = None
-    next_agent_request: NeMoGymResponseCreateParamsNonStreaming | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
     replay_artifacts_dir: str | None = Field(default=None, exclude_if=lambda value: value is None)
     replay_diagnostics: dict[str, JsonValue] | None = Field(default=None, exclude_if=lambda value: value is None)
-
-    @field_serializer("next_agent_request")
-    def _serialize_next_agent_request(self, value: NeMoGymResponseCreateParamsNonStreaming | None):
-        """Preserve omitted actor parameters across the verifier-to-environment wire boundary."""
-        # Leave the return type unannotated so the serialization schema retains the typed request.
-        return value.model_dump(mode="json", exclude_unset=True, exclude_none=True) if value is not None else None
 
     @model_validator(mode="after")
     def completion_follows_masking(self) -> "VerifyResponse":
@@ -235,11 +257,17 @@ class PartnerIFGradingMixin:
 
 
 class PartnerIFResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, SimpleResourcesServer):
-    # Verification keeps no session state, so a checkpoint can run it again after a crash instead of waiting for it.
+    # Ordinary verification is stateless. Replay opts into restart_only below: local durable receipts do not
+    # make an in-flight replay portable to a replacement server or promise a live checkpoint restore.
     checkpoint_mode = "stateless"
     checkpoint_verify = "replay"
 
     config: PartnerIFResourcesServerConfig
+
+    def checkpoint_mode_in_effect(self) -> CheckpointMode:
+        if self.config.ordering_artifacts_dir is not None:
+            return "restart_only"
+        return super().checkpoint_mode_in_effect()
 
     async def get_reverify_mode(self) -> ReverifyMode:
         # A live agent's capture is not in the row, so reverify cannot grade the row again.
@@ -247,22 +275,372 @@ class PartnerIFResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, Sim
             return ReverifyMode.UNSUPPORTED
         return await super().get_reverify_mode()
 
-    async def verify(self, body: VerifyRequest) -> VerifyResponse:
+    async def seed_session(
+        self,
+        body: ResourcesSeedSessionRequest
+        | Annotated[BaseSeedSessionRequest, BeforeValidator(reject_partial_typed_seed)],
+        *,
+        request: Request = None,
+    ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
+        """Bind replay cookies durably while ordinary PartnerIF configurations keep stateless lifecycle.
+
+        Implementing the base state hooks would opt every PartnerIF instance into stateful lifecycle, including
+        unrelated graders. This opt-in uses the documented seed/close overrides and a benchmark-local store.
+        """
+        if self.config.ordering_artifacts_dir is None or not isinstance(body, ResourcesSeedSessionRequest):
+            return await super().seed_session(body, request=request)
+        if request is None:
+            raise ResourcesSeedRejectedError("Replay typed seed requires an HTTP session")
+        if body.responses_create_params is None:
+            raise ResourcesSeedRejectedError("Replay typed seed requires the frozen actor parameters")
+        try:
+            params = NeMoGymResponseCreateParamsNonStreaming.model_validate(body.responses_create_params)
+        except ValueError as error:
+            raise ResourcesSeedRejectedError("Replay typed seed actor parameters are invalid") from error
+        store = self._replay_store()
+        identity = store.session_receipt_id(body.resources_session_id)
+        binding = {
+            "session_id": body.resources_session_id,
+            "episode_id": body.episode_id.model_dump(mode="json"),
+            "task_id": body.task_id.model_dump(mode="json"),
+            "task_data": body.task_data,
+            "responses_create_params": params.model_dump(mode="json", exclude_unset=True, exclude_none=True),
+        }
+        async with store.locked(identity):
+            previous = store.read(identity)
+            if previous is not None:
+                if previous.get("closed_until", 0) > time():
+                    raise ResourcesSessionConflictError("Replay resources session is already closed")
+                if not previous.get("closed_until") and previous.get("binding") != binding:
+                    raise ResourcesSessionConflictError("Replay resources session is already bound to another seed")
+            store.write(identity, {"receipt_id": identity, "state": "seed", "binding": binding})
+            request.session[SESSION_ID_KEY] = body.resources_session_id
+        return ResourcesSeedSessionResponse(resources_session_id=body.resources_session_id)
+
+    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
+        """Fence replay reviews, including close after a lost seed reply, under the review's own session lock."""
+        if self.config.ordering_artifacts_dir is None:
+            return await super().close_resources_session(body)
+        store = self._replay_store()
+        identity = store.session_receipt_id(body.resources_session_id)
+        episode = body.episode_id.model_dump(mode="json")
+        async with store.locked(identity):
+            previous = store.read(identity)
+            if previous is not None:
+                owner = (
+                    previous.get("close_episode_id")
+                    if previous.get("closed_until", 0) > time()
+                    else (previous.get("binding") or {}).get("episode_id") or previous.get("close_episode_id")
+                )
+                if owner != episode and (not previous.get("closed_until") or previous.get("closed_until", 0) > time()):
+                    raise ResourcesSessionConflictError("Replay close belongs to another episode")
+                if previous.get("closed_until", 0) > time():
+                    return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
+            store.write(
+                identity,
+                (previous or {"receipt_id": identity, "state": "seed"})
+                | {
+                    "close_episode_id": episode,
+                    "closed_until": time() + self.config.session_close_retry_window_seconds,
+                },
+            )
+        return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
+
+    @staticmethod
+    def _require_replay_seed(
+        store: ReplayReceiptStore, session_id: str, body: PrefixReviewRequest, *, allow_closed: bool = False
+    ) -> None:
+        record = store.read(store.session_receipt_id(session_id))
+        expected = {
+            "session_id": session_id,
+            "episode_id": body.episode_id.model_dump(mode="json"),
+            "task_id": body.task_id.model_dump(mode="json"),
+            "task_data": body.task_data,
+            "responses_create_params": body.model_dump(mode="json")["responses_create_params"],
+        }
+        if record is None or record.get("state") != "seed" or record.get("binding") != expected:
+            raise ResourcesSessionConflictError("Replay review differs from its durable typed Resources seed")
+        if record.get("closed_until") and not allow_closed:
+            raise ResourcesSessionConflictError("Replay resources session is already closed")
+
+    def register_protocol_routes(self, app: FastAPI) -> None:
+        """Keep stock lifecycle and ordinary verification, adding the benchmark's private review route."""
+        super().register_protocol_routes(app)
+        ordinary_route = next(route for route in app.routes if getattr(route, "path", None) == "/verify")
+        ordinary_verify = ordinary_route.endpoint
+        app.routes.remove(ordinary_route)
+        enabled = self._review_observability_enabled()
+        cached_verify = trace_fn(GymSpanGroup.VERIFY, "gym.verify")(
+            observe_verifier(
+                judge_failsafe(self.verify),
+                enabled=enabled,
+                verifier_name=self.config.name,
+                uninstrumented_models=True,
+            )
+        )
+
+        async def verify_endpoint(request: Request, body: VerifyRequest):
+            from resources_servers.partner_if.ordering import is_ordering_response
+
+            if is_ordering_response(body.response) or REPLAY_RECEIPT_KEY in (body.response.model_extra or {}):
+                return await cached_verify(body=body, request=request)
+            return await ordinary_verify(body=body, request=request)
+
+        app.post("/verify", name="verify")(verify_endpoint)
+        app.post("/replay/prefix-review", name="replay_prefix_review")(self.prefix_review)
+
+    def _review_observability_enabled(self) -> bool:
+        config = getattr(self.server_client, "global_config_dict", {})
+        return TypeAdapter(bool).validate_python(config.get("observability_enabled", False))
+
+    def _replay_store(self) -> ReplayReceiptStore:
+        if self.config.ordering_artifacts_dir is None or not self.config.accept_verification_input:
+            raise HTTPException(422, "Replay review requires explicitly configured live-agent artifacts")
+        return ReplayReceiptStore(self.config.ordering_artifacts_dir)
+
+    @staticmethod
+    def _review_verify_body(body: PrefixReviewRequest, response: NeMoGymResponse) -> VerifyRequest:
+        return VerifyRequest.model_validate(
+            body.task_data
+            | {
+                "responses_create_params": body.responses_create_params.model_dump(
+                    mode="json", exclude_unset=True, exclude_none=True
+                ),
+                "response": response.model_dump(mode="json"),
+            }
+        )
+
+    async def _compute_prefix_review(self, body: PrefixReviewRequest) -> dict:
+        from resources_servers.partner_if.ordering import verify_ordering
+
+        return await verify_ordering(
+            self._review_verify_body(body, body.response),
+            artifacts_dir=self.config.ordering_artifacts_dir,
+            max_policy_calls=self.config.ordering_max_policy_calls,
+            max_prefixes=self.config.ordering_max_prefixes,
+            review=body,
+            verify=self._verify_response,
+        )
+
+    async def prefix_review(self, body: PrefixReviewRequest, request: Request) -> PrefixReviewResponse:
+        """Review once, persist the observed reply, and replay it exactly after disconnects or restart."""
+        store = self._replay_store()
+        session_id = request.session.get(SESSION_ID_KEY)
+        if not isinstance(session_id, str) or not session_id:
+            raise HTTPException(422, "Replay review requires the Resources session cookie")
+        rollout_id = current_rollout_id()
+        if rollout_id is not None and rollout_id != body.episode_id.capture_key:
+            raise HTTPException(409, "Replay review belongs to another episode attempt")
+        if REPLAY_RECEIPT_KEY in (body.response.model_extra or {}):
+            raise HTTPException(422, "A submitted prefix must not already carry a review receipt")
+        verify_body = self._review_verify_body(body, body.response)
+        contract = verify_body.verifier_metadata.partner_if
+        if contract.evidence_mode != "live_agent":
+            raise HTTPException(422, "Replay review task identity does not match its grading contract")
+        scope = store.scope(session_id, body)
+        receipt_id = store.receipt_id(scope)
+        request_sha256 = replay_request_sha256(body)
+        async with store.locked(store.session_receipt_id(session_id)), store.locked(receipt_id):
+            self._require_replay_seed(store, session_id, body)
+            record = store.read(receipt_id)
+            if record is not None:
+                if record.get("scope") != scope or record.get("request_sha256") != request_sha256:
+                    raise HTTPException(409, "This replay prefix was already bound to different input")
+                if record.get("state") == "complete":
+                    return self._stored_prefix_review(record)
+            else:
+                if body.prefix_index > 1:
+                    self._validate_previous_review(store, scope, body)
+                record = {
+                    "receipt_id": receipt_id,
+                    "scope": scope,
+                    "request_sha256": request_sha256,
+                    "request": body.model_dump(mode="json"),
+                    "state": "in_progress",
+                }
+                # This marker must reach disk before the first possible judge call.
+                store.write(receipt_id, record)
+                canonical = canonical_replay_response(body.response, receipt_id, request_sha256)
+                observed = observe_verifier(
+                    judge_failsafe(self._compute_prefix_review),
+                    enabled=self._review_observability_enabled(),
+                    verifier_name=self.config.name,
+                    # Shared grading deliberately detaches model-call capture; do not infer a programmatic grade.
+                    uninstrumented_models=True,
+                )
+                result = await observed(body.model_copy(update={"response": canonical}))
+                if isinstance(result, Response):
+                    if result.status_code >= 400:
+                        raise HTTPException(result.status_code, "Replay prefix review failed; outcome is uncertain")
+                    fields = json.loads(result.body)
+                else:
+                    fields = result
+                if "if_result" not in fields:
+                    fields = (
+                        fields
+                        | masked_fields(
+                            contract,
+                            fields.get("failure_kind") or "partner_if:replay_judge_error",
+                            fields.get("failure_reason") or "Replay judge did not return a usable grading receipt",
+                        )
+                        | {"evaluation_completed": False, "next_parent_turn_limit": None}
+                    )
+                return self._complete_prefix_review(store, record, body, fields)
+
+            # An abandoned marker cannot prove whether the judge ran. Mask it without dispatching again.
+            async def uncertain_review(body: PrefixReviewRequest) -> dict:
+                return masked_fields(
+                    contract,
+                    "partner_if:replay_review_uncertain",
+                    "A prior review dispatch did not durably record its result; start a new episode attempt",
+                ) | {"evaluation_completed": False, "next_parent_turn_limit": None}
+
+            fields = await observe_verifier(
+                uncertain_review,
+                enabled=self._review_observability_enabled(),
+                verifier_name=self.config.name,
+                uninstrumented_models=True,
+            )(body)
+            return self._complete_prefix_review(store, record, body, fields)
+
+    @staticmethod
+    def _stored_prefix_review(record: dict) -> PrefixReviewResponse:
+        result = record.get("result")
+        if record.get("result_sha256") != json_sha256(result):
+            raise HTTPException(409, "The durable replay review result is corrupt")
+        return PrefixReviewResponse.model_validate(result)
+
+    @staticmethod
+    def _validate_previous_review(store: ReplayReceiptStore, scope: dict, body: PrefixReviewRequest) -> None:
+        previous_scope = scope | {"prefix_index": body.prefix_index - 1}
+        previous = store.read(store.receipt_id(previous_scope))
+        if previous is None or previous.get("scope") != previous_scope or previous.get("state") != "complete":
+            raise HTTPException(409, "Replay prefix has no completed preceding review")
+        decision = PartnerIFResourcesServer._stored_prefix_review(previous)
+        if decision.next_parent_turn_limit != body.prefix_index:
+            raise HTTPException(409, "The preceding Resources review did not authorize this prefix")
+        original = PrefixReviewRequest.model_validate(previous["request"])
+        if (
+            original.task_data != body.task_data
+            or original.model_dump(mode="json")["responses_create_params"]
+            != body.model_dump(mode="json")["responses_create_params"]
+        ):
+            raise HTTPException(409, "Replay task data or actor parameters changed between prefixes")
+
+    @staticmethod
+    def _complete_prefix_review(
+        store: ReplayReceiptStore, record: dict, body: PrefixReviewRequest, fields: dict
+    ) -> PrefixReviewResponse:
+        receipt_id, request_sha256 = record["receipt_id"], record["request_sha256"]
+        canonical = canonical_replay_response(
+            body.response,
+            receipt_id,
+            request_sha256,
+            masked=fields["mask_sample"] and not fields.get("evaluation_completed", False),
+        )
+        result = PrefixReviewResponse.model_validate(
+            fields
+            | {
+                "response": canonical.model_dump(mode="json"),
+                "receipt_id": receipt_id,
+                "request_sha256": request_sha256,
+            }
+        )
+        data = result.model_dump(mode="json")
+        store.write(
+            receipt_id,
+            record
+            | {
+                "state": "complete",
+                "result": data,
+                "result_sha256": json_sha256(data),
+                "response_sha256": json_sha256(canonical.model_dump(mode="json")),
+            },
+        )
+        return result
+
+    async def _reuse_replay_review(self, body: VerifyRequest, request: Request | None) -> VerifyResponse:
+        session_id = request.session.get(SESSION_ID_KEY) if request is not None else None
+        if isinstance(session_id, str) and self.config.ordering_artifacts_dir is not None:
+            store = self._replay_store()
+            async with store.locked(store.session_receipt_id(session_id)):
+                return await self._read_replay_review(body, request)
+        return await self._read_replay_review(body, request)
+
+    async def _read_replay_review(self, body: VerifyRequest, request: Request | None) -> VerifyResponse:
+        """Final stock /verify validates a terminal receipt and never dispatches another judge."""
+        from resources_servers.partner_if.ordering import OrderingPrefix
+
+        try:
+            store = self._replay_store()
+            reference = read_replay_receipt(body.response)
+            record = store.read(reference.id)
+            if record is None or record.get("state") != "complete":
+                raise ValueError("Terminal replay review receipt is missing or incomplete")
+            review = self._stored_prefix_review(record)
+            original = PrefixReviewRequest.model_validate(record["request"])
+            if (
+                reference.request_sha256 != record.get("request_sha256")
+                or replay_request_sha256(original) != reference.request_sha256
+            ):
+                raise ValueError("Terminal replay review request binding differs")
+            if review.next_parent_turn_limit is not None:
+                raise ValueError("A pending replay prefix cannot be verified as terminal")
+            session_id = request.session.get(SESSION_ID_KEY) if request is not None else None
+            if session_id != record["scope"]["session_id"]:
+                raise ValueError("Terminal replay review belongs to another Resources session")
+            rollout_id = current_rollout_id()
+            if rollout_id is not None and rollout_id != original.episode_id.capture_key:
+                raise ValueError("Terminal replay review belongs to another episode attempt")
+            self._require_replay_seed(store, session_id, original, allow_closed=True)
+            if store.scope(session_id, original) != record["scope"]:
+                raise ValueError("Terminal replay review scope differs")
+            if json_sha256(body.response.model_dump(mode="json")) != record.get("response_sha256"):
+                raise ValueError("Terminal replay response changed after Resources canonicalized it")
+            if (
+                body.responses_create_params.model_dump(mode="json", exclude_unset=True, exclude_none=True)
+                != original.model_dump(mode="json")["responses_create_params"]
+            ):
+                raise ValueError("Terminal replay actor parameters changed")
+            incoming = await request.json()
+            expected = original.task_data
+            protocol_keys = {
+                "responses_create_params",
+                "response",
+                "ng_trajectory",
+                "ng_agent_observations",
+                "failure_report",
+            }
+            if any(incoming.get(key) != value for key, value in expected.items()) or set(
+                incoming
+            ) - protocol_keys != set(expected):
+                raise ValueError("Terminal replay task data changed")
+            if not review.mask_sample:
+                OrderingPrefix.read(
+                    self._review_verify_body(original, original.response),
+                    self.config.ordering_artifacts_dir,
+                    review=original,
+                )
+            fields = review.model_dump(
+                mode="json",
+                exclude={"request_sha256", "receipt_id", "next_parent_turn_limit", "ng_verifier_invocations"},
+            )
+            return VerifyResponse.model_validate(body.model_dump() | fields)
+        except (OSError, ValueError, TypeError, KeyError, HTTPException) as error:
+            return VerifyResponse.model_validate(
+                body.model_dump()
+                | masked_fields(body.verifier_metadata.partner_if, "partner_if:replay_invalid_receipt", str(error))
+                | {"evaluation_completed": False}
+            )
+
+    async def verify(self, body: VerifyRequest, request: Request = None) -> VerifyResponse:
         contract = body.verifier_metadata.partner_if
         if contract.evidence_mode == "live_agent" and not self.config.accept_verification_input:
             raise HTTPException(422, "live_agent rows need a server with accept_verification_input: true")
+        from resources_servers.partner_if.ordering import is_ordering_response
 
-        if self.config.ordering_artifacts_dir is not None and contract.evidence_mode == "live_agent":
-            from resources_servers.partner_if.ordering import is_ordering_response, verify_ordering
-
-            if is_ordering_response(body.response):
-                fields = await verify_ordering(
-                    body,
-                    artifacts_dir=self.config.ordering_artifacts_dir,
-                    max_policy_calls=self.config.ordering_max_policy_calls,
-                    verify=self._verify_response,
-                )
-                return VerifyResponse.model_validate(body.model_dump() | fields)
+        if REPLAY_RECEIPT_KEY in (body.response.model_extra or {}) or is_ordering_response(body.response):
+            return await self._reuse_replay_review(body, request)
         return await self._verify_response(body)
 
     async def _verify_response(self, body: VerifyRequest) -> VerifyResponse:

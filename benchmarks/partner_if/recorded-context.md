@@ -5,24 +5,41 @@ The public runner contains no customer source, prompt, service address or creden
 The authenticated registry supplies actor inputs, recorded responses and a validated
 `runtime.json` declaring paths, aliases, asset hashes and probe identity.
 
-The existing `single_agent_turn` Environment Server closes each fresh agent
-session before shared verification. Its optional `verifier_continuation` loop follows
-the shared verifier's next request and enforces a six-activation ceiling. The verifier stops
-on the first decisive ordering result. A failed ordering requirement scores zero;
-a returned identity-verified prerequisite check can establish a pass. A cutoff,
-unsupported operation or infrastructure/judge error is masked. Supplied history is
-context; no final answer or successful tool result is invented.
+Gym's existing `single_agent_turn` Environment Server is used without changes.
+It seeds Resources and one replay-agent session, invokes the agent once, closes
+that session, and performs its normal final verification and cleanup.
 
-There is no separate replay Environment Server. Dataset-specific ordering decisions,
-receipt checks and inconclusive-run exclusions remain in `partner_if`. The generic
-environment owns sessions, bounded iteration, usage and trajectory aggregation.
-Repeated-activation episodes restart after interruption; exported checkpoint restoration
-for the existing single-activation mode is unchanged.
+The replay agent owns the bounded prefix loop inside that one activation. Each
+step settles its policy and tool calls and freezes its capture before asking the
+PartnerIF Resources Server's `/replay/prefix-review` endpoint whether to continue.
+The outer agent session stays open during these intermediate reviews. The
+verifier stops at the first decisive ordering result: a failed ordering
+requirement scores zero, while a returned identity-verified prerequisite check
+can establish a pass. Cutoffs, unsupported operations, and infrastructure or
+judge faults are masked. Supplied history remains context.
 
-The dispatcher wraps the prepared flat row in a typed episode request for
-`single_agent_turn` and converts its typed reply back to the collector's result
-format. The published task rows, actor input and rubric remain the pinned data;
-the request conversion carries the same task and attempt identities.
+There is no separate replay Environment Server and no extension to Gym's server
+runtime or episode types. The replay agent aggregates fresh usage, observations,
+and trajectories; task-specific ordering decisions and receipt validation stay
+in `resources_servers/partner_if`. Internal prefixes reuse saved policy replies
+without sending those calls again. The final agent close exports all fresh work
+and the intermediate verifier records.
+
+Resources durably binds its typed seed to the original task, attempt, task data
+and actor parameters, then retains each review under the configured artifact
+root. A terminal receipt binds the exact final response and cumulative usage to the original
+input, task, attempt, rubric and capture. After the agent closes, normal `/verify`
+validates that receipt and reuses its verdict without another judge request.
+Retries reuse completed review receipts. An interrupted review with uncertain
+judge completion is masked rather than silently judged again. Live replay does
+not support cross-process agent-session continuation or offline regrading.
+
+The dispatcher converts the prepared flat row to an ordinary typed episode and
+converts its reply back to the collector's format. Host-selected task metadata
+travels through the existing `agent_context` interface, outside the frozen model
+input. Published task rows, actor input, rubrics, and task/attempt identities are
+preserved. The agent uses the existing direct-HTTP Resources grant for reviews;
+that control endpoint is never advertised as a policy tool.
 
 ## Assets and configuration
 

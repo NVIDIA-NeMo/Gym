@@ -647,3 +647,48 @@ async def test_direct_cancellation_propagates_without_a_flat_failure(monkeypatch
 
     with pytest.raises(asyncio.CancelledError):
         await adapter.run(Request({"type": "http", "headers": []}, receive))
+
+
+def replay_server(upstream):
+    adapter, downstream = direct_server(upstream)
+    downstream.global_config_dict["agent-text"] = {
+        "responses_api_agents": {"ngc_recorded_context": {"entrypoint": "native_agent.py"}}
+    }
+    return type(adapter)(config=adapter.config, server_client=downstream), downstream
+
+
+def test_replay_rubric_context_is_bound_by_the_dispatcher_outside_frozen_model_input():
+    from responses_api_agents.ngc_recorded_context.replay import actor_identity
+
+    row = direct_row()
+    before = copy.deepcopy(row)
+    adapter, downstream = replay_server(_Upstream(json.dumps(direct_reply(row)).encode()))
+    with TestClient(adapter.setup_webserver()) as client:
+        response = client.post("/run", json=row)
+    assert response.status_code == 200, response.text
+    assert row == before
+    wire = json.loads(downstream.calls[0][2]["data"])
+    task_input = wire["task"]["task_input"]
+    assert task_input["agent_context"] == {
+        "agent": {"values": {"partner_if_replay": {"task_data": task_input["task_data"]}}, "artifacts": {}}
+    }
+    assert task_input["task_data"]["verifier_metadata"] == row["verifier_metadata"]
+    assert actor_identity(task_input["responses_create_params"]) == actor_identity(row["responses_create_params"])
+    assert "agent_context" not in task_input["task_data"]
+    assert "verifier_metadata" not in task_input["responses_create_params"]
+
+
+@pytest.mark.parametrize("conflicting", [False, True])
+def test_replay_context_must_agree_with_the_host_selected_task(conflicting):
+    row = direct_row()
+    adapter, downstream = replay_server(_Upstream(json.dumps(direct_reply(row)).encode()))
+    initial = adapter._episode_request_from_row(row, route_name="env-text")
+    row["agent_context"] = initial.task.task_input.agent_context.model_dump(mode="json")
+    if conflicting:
+        row["agent_context"]["agent"]["values"]["partner_if_replay"]["task_data"]["task_name"] = "another-task"
+    before = copy.deepcopy(row)
+    with TestClient(adapter.setup_webserver()) as client:
+        response = client.post("/run", json=row)
+    assert row == before
+    assert response.status_code == (422 if conflicting else 200), response.text
+    assert len(downstream.calls) == (0 if conflicting else 1)

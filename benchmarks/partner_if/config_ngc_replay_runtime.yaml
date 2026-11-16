@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Shared bounded replay wiring for the partner_if registry task.
+# Bounded replay inside one activation of Gym's unchanged single_agent_turn environment.
 replay_package_dir: benchmarks/partner_if/data/ngc_replay/registry
 replay_runtime_contract_path: null
 replay_runtime_contract_sha256: null
@@ -10,6 +10,7 @@ partner_if:
   resources_servers:
     partner_if:
       ordering_artifacts_dir: ${replay_artifacts}
+      ordering_max_prefixes: ${partner_if_ngc_replay_agent.responses_api_agents.ngc_recorded_context.replay.max_new_turns}
       ordering_max_policy_calls: ${partner_if_ngc_replay_agent.responses_api_agents.ngc_recorded_context.replay.max_policy_calls}
 partner_if_ngc_replay_model:
   _copy: policy_model
@@ -63,10 +64,8 @@ partner_if_ngc_replay_environment_server:
       agent_server:
         type: responses_api_agents
         name: partner_if_ngc_replay_agent
-      resources_tool_transports: []
+      resources_tool_transports: [direct_http]
       forward_agent_evidence: true
-      verifier_continuation:
-        max_activations: ${partner_if_ngc_replay_agent.responses_api_agents.ngc_recorded_context.replay.max_new_turns}
       max_concurrent_episodes: 1
       queue_timeout_seconds: 60
       default_episode_timeout_seconds: 900

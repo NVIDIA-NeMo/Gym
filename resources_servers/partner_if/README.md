@@ -182,14 +182,16 @@ Running the sandboxed mode outside `gym` needs Gym's `sandbox` extra (`uv sync -
   actor was given, its documents and artifact capture receipts). With
   `accept_verification_input: true`, the server grades it with the response's visible
   trajectory; rows never carry it.
-- Recorded-context rows can opt into ordering-prefix grading with
-  `ordering_artifacts_dir`, paired with the existing single-agent environment's
-  `verifier_continuation` setting. The verifier validates capture checksums beneath
-  that root, uses the shared judge, and returns `next_agent_request` only for an
-  undecided prefix. Terminal faults and inconclusive cutoffs remain masked.
-  Other rows keep the ordinary verification path; no separate Environment Server
-  is needed. The replay profile binds `ordering_max_policy_calls` to the agent's
-  configured call ceiling.
+- Recorded-context rows opt into ordering-prefix review with `ordering_artifacts_dir`,
+  `ordering_max_prefixes` and `ordering_max_policy_calls`. The replay agent uses its
+  direct-HTTP Resources grant to call `/replay/prefix-review` after settling and freezing
+  each prefix. Resources binds the typed seed to the original task and attempt, validates
+  capture checksums, runs the shared judge and retains an idempotent assessment. Terminal receipts bind the exact response and cumulative
+  usage to the original task, attempt, rubric and evidence. Normal `/verify`, called by
+  stock `single_agent_turn` after agent close, validates and reuses the terminal receipt
+  without repeating the judge. An uncertain interrupted review or inconclusive cutoff
+  is masked. Other rows retain the ordinary verification path. No changes to Gym's
+  Environment Servers or server-runtime types are needed.
 - `responses_api_agents/partner_if_dispatcher` routes each task of a mixed benchmark to
   its environment; its config runs both examples below under one score.
 

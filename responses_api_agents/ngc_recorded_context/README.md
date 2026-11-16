@@ -58,8 +58,9 @@ hashes; the benchmark composition is version 0.4.0.
 Seed `/v1/agent_sessions`, activate the rollout-prefixed `/v1/responses` once,
 then close. Unknown/closed sessions and changed duplicate activations are refused;
 identical retries return the retained response without another generation. The
-adapter rejects sandboxes, required external grants and harness-continuation
-requests; optional grants are unused. Sessions require one server worker.
+adapter requires the configured PartnerIF Resources direct HTTP grant and its
+session cookie. It rejects sandboxes, other required grants and harness-continuation
+requests; other optional grants are unused. Sessions require one server worker.
 
 A step uses a checksum-verified saved prefix only inside its configured artifact
 root, with exact same-model request reconstruction. Parent and joined Explore
@@ -69,19 +70,28 @@ and returns its actual observations. There is no fallback to a host shell.
 Tool-call IDs are scoped to the parent or worker conversation, so reused IDs
 cannot attach a worker's result to a parent call.
 
-The generic Environment Server closes each fresh agent session before invoking the shared verifier.
-An undecided prefix returns a standard Responses request through `next_agent_request`;
-its `metadata` carries `ngc_replay_parent_turn_limit`, `ngc_replay_saved_prefix` and
-`ngc_replay_saved_prefix_sha256`. The replay adapter removes these controls before
-checking the frozen actor input or making a policy request. The first activation
-defaults to one parent turn. No separate replay Environment Server is installed.
-The verifier checks receipt checksums inside `ordering_artifacts_dir` before grading.
-`ReplayConfig.first_answer` bounds each engine step; it does not change the
-verifier's prefix scoring boundary. The final episode response sums
-only fresh known usage; missing counts stay unknown. Sampling and call limits
-come from `replay` config, not generic single-response CLI overrides.
-The pairing uses a separate Model Server configuration to preserve those settings
-for both parent and Explore calls when other cohort routes override sampling.
+Gym's unmodified `single_agent_turn` invokes the replay agent once. Inside that
+activation, the agent executes bounded frozen-prefix steps, settles each step's
+work, and asks the PartnerIF `/replay/prefix-review` endpoint for a trusted
+continue/stop decision. The public agent session stays open during intermediate
+reviews. Prefix limits, saved-prefix paths and checksums stay internal to the
+integration; no continuation controls are inserted into actor parameters.
+
+Resources validates immutable capture receipts and retains each assessment.
+The agent returns Resources' canonical terminal response unchanged, including
+its cumulative fresh usage and terminal receipt. The ordinary environment then
+closes the agent and calls `/verify`, which validates and reuses the stored
+verdict. A repeated completed review does not call the judge again; an uncertain
+interrupted review is masked. Close returns the combined trajectory, fresh
+observations and intermediate verifier records. Prefix artifact history remains
+on the final response. No Environment Server or shared runtime extension is
+required.
+
+Sampling and call limits come from `replay` configuration. The pairing uses a
+separate Model Server configuration so parent and Explore requests retain those
+settings when other cohort routes override sampling. Missing usage remains
+unknown. The ordinary environment timeout and cleanup bound the outer episode;
+the replay configuration bounds internal prefix and policy calls.
 
 The `app.py` entrypoint is retained for historical saved-capture grading using
 `benchmarks/partner_if/config_ngc_replay_audit.yaml`; it refuses fresh policy

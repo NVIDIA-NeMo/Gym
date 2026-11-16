@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Verify immutable replay prefixes and request another generic agent activation."""
+"""Review immutable replay prefixes inside the PartnerIF agent activation."""
 
 import json
 from collections.abc import Awaitable, Callable
@@ -8,10 +8,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponse
 from resources_servers.partner_if.native_evidence import LiveAgentCapture
 from resources_servers.partner_if.receipt import masked_fields
+from resources_servers.partner_if.replay_protocol import PrefixReviewRequest
 from responses_api_agents.ngc_recorded_context.prefix import ordering_outcome
+from responses_api_agents.ngc_recorded_context.replay import actor_identity
 from responses_api_agents.ngc_recorded_context.runtime_contract import OrderingContract
 from responses_api_agents.ngc_recorded_context.saved_prefix import prefix_digest, verification_digest
 
@@ -20,13 +22,17 @@ if TYPE_CHECKING:
     from resources_servers.partner_if.app import VerifyRequest, VerifyResponse
 
 
-_CONTROLS = (
-    "ngc_replay_parent_turn_limit",
-    "ngc_replay_saved_prefix",
-    "ngc_replay_saved_prefix_sha256",
-)
 _SAFE_TERMINALS = frozenset({"turn_limit", "policy_call_limit", "first_answer_draft", "final_response"})
-_REPLAY_FIELDS = frozenset({"replay_ordering_contract", "replay_artifacts_dir", "replay_diagnostics"})
+_REPLAY_FIELDS = frozenset(
+    {
+        "replay_ordering_contract",
+        "replay_artifacts_dir",
+        "replay_diagnostics",
+        "replay_verification_sha256",
+        "saved_prefix_sha256",
+        "replay_review_error",
+    }
+)
 
 
 def is_ordering_response(response: NeMoGymResponse) -> bool:
@@ -45,7 +51,9 @@ class OrderingPrefix:
     saved_prefix_sha256: str | None
 
     @classmethod
-    def read(cls, body: "VerifyRequest", artifacts_dir: Path) -> "OrderingPrefix":
+    def read(
+        cls, body: "VerifyRequest", artifacts_dir: Path, *, review: PrefixReviewRequest | None = None
+    ) -> "OrderingPrefix":
         """Bind body-carried evidence to hash-checked receipts beneath an explicitly configured root."""
         extra = body.response.model_extra or {}
         root = artifacts_dir.expanduser().resolve()
@@ -98,6 +106,18 @@ class OrderingPrefix:
             or identity["settings"].get("max_new_turns") != limit
         ):
             raise ValueError("Replay model or turn identity differs from its immutable receipt")
+        if review is not None:
+            expected = {
+                "episode_id": review.episode_id.model_dump(mode="json"),
+                "task_id": review.task_id.model_dump(mode="json"),
+                "agent_session_id": review.agent_session_id,
+                "prefix_index": review.prefix_index,
+            }
+            if any(step.get(name) != value for name, value in expected.items()) or limit != review.prefix_index:
+                raise ValueError("Replay request identity differs from the immutable prefix execution")
+            params = review.responses_create_params.model_dump(mode="json", exclude_none=True, exclude_unset=True)
+            if actor_identity(step.get("responses_create_params", {})) != actor_identity(params):
+                raise ValueError("Replay actor parameters differ from the immutable prefix execution")
         ordering = OrderingContract.model_validate(step.get("ordering_contract"))
         if ordering.model_dump() != extra.get("replay_ordering_contract"):
             raise ValueError("Replay ordering declaration differs from its immutable receipt")
@@ -160,25 +180,14 @@ class OrderingPrefix:
             raise ValueError("A technically incomplete replay cannot advertise a resumable prefix")
         return cls(directory, captured, events, diagnostics, ordering, limit, saved_sha)
 
-    def next_request(self, params: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponseCreateParamsNonStreaming:
-        """Keep frozen actor parameters intact; only the agent adapter consumes these transport controls."""
-        value = params.model_dump(exclude_none=True, exclude_unset=True)
-        metadata = dict(value.pop("metadata", None) or {})
-        for name in _CONTROLS:
-            metadata.pop(name, None)
-        metadata.update(
-            ngc_replay_parent_turn_limit=str(self.parent_turn_limit + 1),
-            ngc_replay_saved_prefix=str(self.directory),
-            ngc_replay_saved_prefix_sha256=self.saved_prefix_sha256,
-        )
-        return NeMoGymResponseCreateParamsNonStreaming.model_validate(value | {"metadata": metadata})
-
 
 async def verify_ordering(
     body: "VerifyRequest",
     *,
     artifacts_dir: Path,
     max_policy_calls: int,
+    max_prefixes: int,
+    review: PrefixReviewRequest,
     verify: Callable[["VerifyRequest"], Awaitable["VerifyResponse"]],
 ) -> dict:
     """Use the unchanged shared judge, then apply the existing decisive-prefix boundary."""
@@ -186,7 +195,7 @@ async def verify_ordering(
     prefix = None
     grade = {}
 
-    def masked(terminal: str, reason: str, *, next_request=None) -> dict:
+    def masked(terminal: str, reason: str, *, next_parent_turn_limit: int | None = None) -> dict:
         diagnostics = dict(prefix.diagnostics) if prefix is not None else {}
         diagnostics.update(termination=terminal, evaluation_completed=False, evaluation_boundary="ordering_prefix_v1")
         directory = (body.response.model_extra or {}).get("replay_artifacts_dir")
@@ -196,17 +205,19 @@ async def verify_ordering(
             | {
                 "evaluation_completed": False,
                 "grading_result": None,
-                "response": body.response.model_copy(update={"status": "incomplete"}).model_dump(mode="json"),
+                "response": body.response.model_dump(mode="json"),
                 "replay_diagnostics": diagnostics,
                 "replay_artifacts_dir": directory if isinstance(directory, str) else None,
-                "next_agent_request": next_request,
+                "next_parent_turn_limit": next_parent_turn_limit,
             }
         )
 
     try:
-        prefix = OrderingPrefix.read(body, artifacts_dir)
+        prefix = OrderingPrefix.read(body, artifacts_dir, review=review)
     except (OSError, ValueError, TypeError) as error:
         return masked("invalid_capture", str(error))
+    if review.prefix_index > max_prefixes:
+        return masked("turn_limit", "Replay exceeded its configured prefix ceiling")
     terminal = prefix.diagnostics.get("termination")
     if terminal not in _SAFE_TERMINALS:
         return masked(str(terminal or "invalid_capture"), "Technical replay exclusion; see immutable capture receipts")
@@ -233,18 +244,16 @@ async def verify_ordering(
             "evaluation_completed": True,
             "replay_diagnostics": diagnostics,
             "replay_artifacts_dir": str(prefix.directory),
-            "next_agent_request": None,
+            "next_parent_turn_limit": None,
         }
     if terminal in {"first_answer_draft", "final_response"}:
         return masked("ordering_undecided", "No decisive ordering event before the captured final response")
     if terminal == "policy_call_limit" or prefix.diagnostics["model_calls"] >= max_policy_calls:
         return masked("policy_call_limit", "No decisive ordering event before the policy-call ceiling")
-    if prefix.parent_turn_limit >= 32:
+    if prefix.parent_turn_limit >= max_prefixes:
         return masked("turn_limit", "No decisive ordering event before the replay parent-turn ceiling")
     return masked(
         "ordering_pending",
         "The captured prefix is safe but has no decisive ordering event",
-        next_request=prefix.next_request(body.responses_create_params).model_dump(
-            mode="json", exclude_unset=True, exclude_none=True
-        ),
+        next_parent_turn_limit=prefix.parent_turn_limit + 1,
     )

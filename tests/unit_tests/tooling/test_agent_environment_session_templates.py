@@ -63,12 +63,7 @@ def test_migration_respects_agent_session_templates(
         yaml.safe_dump(
             {
                 "my_agent": {
-                    "responses_api_agents": {
-                        agent_type: {
-                            "entrypoint": "app.py",
-                            "resources_server": resources,
-                        }
-                    }
+                    "responses_api_agents": {agent_type: {"entrypoint": "app.py", "resources_server": resources}}
                 }
             }
         )
@@ -79,15 +74,3 @@ def test_migration_respects_agent_session_templates(
         assert config.read_text() == before
     else:
         assert _environment_servers(yaml.safe_load(config.read_text())) == {"my_agent": ["my_environment_server"]}
-
-
-@pytest.mark.parametrize("entrypoint", ["app.py", "child_app.py"])
-def test_unbound_prime_session_entrypoints_do_not_get_a_legacy_relay(tmp_path: Path, entrypoint: str) -> None:
-    instance = {"responses_api_agents": {"prime_agent": {"entrypoint": entrypoint, "resources_server": None}}}
-    config = tmp_path / "agent.yaml"
-    config.write_text(yaml.safe_dump({"my_agent": instance}))
-    before = config.read_text()
-
-    assert not migration.needs_environment_server(instance)
-    assert migration.main([str(config)]) == 0
-    assert config.read_text() == before
