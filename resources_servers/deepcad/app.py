@@ -17,10 +17,8 @@ from typing import Any, Literal
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
-from nemo_gym.sandbox import AsyncSandbox
-from nemo_gym.sandbox.config import resolve_provider_config
-from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, resolve_provider_config
+from nemo_gym.server_runtime import (
     BaseMultiRewardVerifyResponse,
     BaseResourcesServerConfig,
     BaseVerifyRequest,
