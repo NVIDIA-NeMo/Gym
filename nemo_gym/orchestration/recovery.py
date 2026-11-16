@@ -1762,6 +1762,8 @@ class CollectedEvidence(BaseModel):
     unreadable_files: list[str] = Field(default_factory=list)
     # rollouts_coverage.json's allocation_id: the scheduler allocation that last opened the Store for writing.
     coverage_allocation_id: str | None = None
+    # True when rollouts_coverage.json has no allocation_id key: a worker older than that field wrote it.
+    coverage_writer_unrecorded: bool = False
     # rollouts_coverage.json's (scored, expected): the rollouts collection scored into the metrics, of those expected.
     coverage_scored: tuple[int, int] | None = None
     # The aggregate's own (metric_coverage/trials, metric_coverage/expected, metric_coverage/name or None): the trials
@@ -2666,7 +2668,7 @@ def _requeue_continuation(job: Path, max_retries: int, max_walltime_s: float | N
             max_infra_retries=max_retries,
             max_walltime_s=max_walltime_s,
             live_job=False,
-            allocation_cut=allocation_cut_from_accounting(rows, collected.coverage_allocation_id),
+            allocation_cut=store_writer_cut_from_accounting(rows, collected),
         )
         requeued = requeue_note(collected.job_chain, rows)
         print(CONTINUATION_REASON_PREFIX + decision.reason + (f"; {requeued}" if requeued else ""))
@@ -2738,6 +2740,19 @@ def allocation_cut_from_accounting(rows: list[tuple[str, str, int, int]], alloca
     ended = ALLOCATION_ENDED_STATES | {"REQUEUED"} if later else ALLOCATION_ENDED_STATES
     states = {state for job_id, state, _, restarts in rows if job_id == allocation_id and restarts == 0}
     return allocation_id is not None and len(states) == 1 and states <= ended
+
+
+def store_writer_cut_from_accounting(rows: list[tuple[str, str, int, int]], collected: CollectedEvidence) -> bool:
+    """Whether the allocation that last wrote the Store has ended (``allocation_cut_from_accounting``).
+
+    A coverage report from a worker older than ``allocation_id`` names no writer, but its writer is in the job chain:
+    the prologue records each allocation there before the Store opens. Then every allocation of the chain must have
+    ended. A report that records no allocation (a writer outside Slurm) stays unknown.
+    """
+    if not collected.coverage_writer_unrecorded:
+        return allocation_cut_from_accounting(rows, collected.coverage_allocation_id)
+    chain = collected.job_chain
+    return bool(chain) and all(allocation_cut_from_accounting(rows, job_id) for job_id in chain)
 
 
 def _store_writer_ended(collected: CollectedEvidence, previous_job_id: str) -> bool:
