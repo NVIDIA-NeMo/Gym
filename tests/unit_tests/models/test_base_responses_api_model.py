@@ -1872,7 +1872,7 @@ def test_record_releases_the_claim_after_the_row_is_written(tmp_path, monkeypatc
     )
 
     assert store.has_pending("r") is False
-    assert [orjson.loads(line) for line in store.claims_path_for("r").read_bytes().splitlines()] == [
+    assert [orjson.loads(line) for line in store.claims_path_for("r").read_bytes().splitlines() if line] == [
         {"claim": "call-1"},
         {"release": "call-1"},
     ]

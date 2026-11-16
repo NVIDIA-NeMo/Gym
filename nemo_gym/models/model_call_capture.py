@@ -174,7 +174,8 @@ class CaptureStore:
         with self.claims_path_for(rollout_id).open("ab") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             try:
-                handle.write(orjson.dumps(entry, option=orjson.OPT_APPEND_NEWLINE))
+                # The leading newline ends a torn previous append, so it cannot swallow this entry.
+                handle.write(b"\n" + orjson.dumps(entry, option=orjson.OPT_APPEND_NEWLINE))
                 handle.flush()
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)

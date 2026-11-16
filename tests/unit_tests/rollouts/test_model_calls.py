@@ -440,3 +440,22 @@ async def test_await_quiescence_backs_off_while_a_claim_is_outstanding(tmp_path,
     assert await await_model_call_capture_quiescence("12-0", [tmp_path], timeout_s=0.5, poll_s=0.01) is False
     # A fixed 10 ms poll would read the claims about 50 times.
     assert len(polls) <= 10
+
+
+def test_a_torn_tail_cannot_swallow_the_next_claim(tmp_path):
+    store = CaptureStore(tmp_path)
+    store.claims_path_for("15-0").write_bytes(b'{"cla')
+
+    store.mark_pending("15-0", "next")
+    assert store.has_pending("15-0") is True
+    store.clear_pending("15-0", "next")
+    assert store.has_pending("15-0") is False
+
+
+def test_a_torn_tail_cannot_swallow_a_release(tmp_path):
+    store = CaptureStore(tmp_path)
+    store.claims_path_for("15-1").write_bytes(b'{"claim":"open"}\n{"rel')
+
+    assert store.has_pending("15-1") is True
+    store.clear_pending("15-1", "open")
+    assert store.has_pending("15-1") is False
