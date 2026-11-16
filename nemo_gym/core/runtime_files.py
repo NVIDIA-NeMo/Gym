@@ -40,6 +40,7 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
@@ -80,6 +81,9 @@ _UNKNOWN_HOST = "unknown"
 _checked_temp_parents: set[Path] = set()
 # This process's own folder under each parent, keyed by process id so a forked child makes its own.
 _process_folders: dict[tuple[int, Path], Path] = {}
+# Guards the first use of a parent: its check and cleanup, and creating this process's folder in it.
+# Requests start their temporary folders in worker threads, so a burst of first requests arrives together.
+_first_use_lock = threading.Lock()
 _checked_debug_roots: set[Path] = set()
 
 
@@ -125,14 +129,15 @@ def debug_folder(
     """
     if not _KIND.fullmatch(kind):
         raise ValueError(f"kind must be lowercase letters, digits, '-' and '_', got {kind!r}")
-    if server_name in ("", ".", ".."):
-        raise ValueError(f"server_name must name a server, got {server_name!r}")
     if override is not None:
         root = _require_absolute(Path(override))
     else:
         global_root = (maybe_get_global_config_dict() or {}).get(DEBUG_DIR_KEY_NAME)
         if not global_root:
             return None
+        # The name is used only here, so a request with debug files off never fails over it.
+        if server_name in ("", ".", ".."):
+            raise ValueError(f"server_name must name a server, got {server_name!r}")
         root = Path(global_root) / quote(server_name, safe="")
 
     leaf = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -222,13 +227,22 @@ def _remove_own_process_folders(pid: int) -> None:
             shutil.rmtree(folder, ignore_errors=True)
 
 
-def _process_folder(parent: Path) -> Path:
-    """This process's own folder under ``parent``, created once and removed when the process exits."""
+def _process_folder(parent: Path, *, recreate: bool = False) -> Path:
+    """This process's own folder under ``parent``, created once and removed when the process exits.
+
+    ``recreate`` makes it again after something outside the process removed it, keeping any files that remain.
+    """
     pid = os.getpid()
     folder = _process_folders.get((pid, parent))
-    if folder is None:
+    if folder is not None and not recreate:
+        return folder
+    with _first_use_lock:
+        folder = _process_folders.get((pid, parent))
+        if folder is not None:
+            folder.mkdir(parents=True, exist_ok=True)
+            return folder
         folder = parent / _process_folder_name()
-        # A folder with this name can only be left by an earlier process of the same id that has died.
+        # Before this process records it, a folder with this name can only be one a dead process of the same id left.
         shutil.rmtree(folder, ignore_errors=True)
         folder.mkdir()
         if not any(owner == pid for owner, _ in _process_folders):
@@ -242,23 +256,31 @@ def _temp_parent(parent: Path | None) -> Path:
         configured = (maybe_get_global_config_dict() or {}).get(TEMP_DIR_KEY_NAME)
         # Without a setting, the node's own temporary directory, as this process sees it.
         parent = Path(configured) if configured else Path(tempfile.gettempdir())
-    if parent not in _checked_temp_parents:
-        parent.mkdir(parents=True, exist_ok=True)
-        _checked_temp_parents.add(parent)
-        # Checked here, on the node that writes, because the mount table differs per node.
-        warn_if_unsuitable(TEMP_DIR_KEY_NAME, parent)
-        # Removing leftovers is housekeeping: it must never fail the request that triggered it.
-        try:
-            remove_stale_temp_folders(parent)
-        except Exception:
-            logger.warning("Could not remove leftover temporary folders under %s", parent, exc_info=True)
+    if parent in _checked_temp_parents:
+        return parent
+    with _first_use_lock:
+        if parent not in _checked_temp_parents:
+            parent.mkdir(parents=True, exist_ok=True)
+            # Checked here, on the node that writes, because the mount table differs per node.
+            warn_if_unsuitable(TEMP_DIR_KEY_NAME, parent)
+            # Removing leftovers is housekeeping: it must never fail the request that triggered it.
+            try:
+                remove_stale_temp_folders(parent)
+            except Exception:
+                logger.warning("Could not remove leftover temporary folders under %s", parent, exc_info=True)
+            _checked_temp_parents.add(parent)
     return parent
 
 
 def _create_temp_folder(kind: str, parent: Path | None) -> Path:
     if not _KIND.fullmatch(kind):
         raise ValueError(f"kind must be lowercase letters, digits, '-' and '_', got {kind!r}")
-    return Path(tempfile.mkdtemp(prefix=f"{kind}-", dir=_process_folder(_temp_parent(parent))))
+    parent = _temp_parent(parent)
+    try:
+        return Path(tempfile.mkdtemp(prefix=f"{kind}-", dir=_process_folder(parent)))
+    except FileNotFoundError:
+        # Something outside this process removed its folder, such as a cleaner of old temporary files.
+        return Path(tempfile.mkdtemp(prefix=f"{kind}-", dir=_process_folder(parent, recreate=True)))
 
 
 def _finish_temp_folder(path: Path, keep_as: Path | None) -> None:
