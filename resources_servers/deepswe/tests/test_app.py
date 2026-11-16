@@ -28,6 +28,8 @@ from nemo_gym.core import (
     failure_kinds,
     failure_report_for,
 )
+from nemo_gym.core.outcome_policy import is_policy_counted_zero
+from nemo_gym.rollouts.rollout_recovery import applied_failure_class
 from nemo_gym.sandbox import SandboxResources
 from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
@@ -36,6 +38,7 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
 from resources_servers.deepswe.app import (
+    TEST_DEADLINE,
     DeepSWEResourcesServer,
     DeepSWEResourcesServerConfig,
     DeepSWESeedSessionRequest,
@@ -61,6 +64,7 @@ def _config(
     *,
     golden: bool = True,
     agent_policy: dict | None = None,
+    verification_policy: dict | None = None,
     classification: dict | None = None,
 ) -> DeepSWEResourcesServerConfig:
     return DeepSWEResourcesServerConfig(
@@ -72,7 +76,16 @@ def _config(
         expected_task_count=1,
         is_verifying_golden_patch=golden,
         outcome_policy={
-            **({"by_stage": {"agent": agent_policy}} if agent_policy else {}),
+            **(
+                {
+                    "by_stage": {
+                        **({"agent": agent_policy} if agent_policy else {}),
+                        **({"verification": verification_policy} if verification_policy else {}),
+                    }
+                }
+                if agent_policy or verification_policy
+                else {}
+            ),
             **({"classification": classification} if classification else {}),
         },
         sandbox_provider="test",
@@ -1293,9 +1306,9 @@ async def test_an_unconfirmed_deadline_stays_an_ungraded_masked_result(
     assert response.verifier_timeout_s is None
 
 
-def _verify_server(task_assets: Path, monkeypatch: MonkeyPatch) -> tuple:
+def _verify_server(task_assets: Path, monkeypatch: MonkeyPatch, **policy: dict) -> tuple:
     server = DeepSWEResourcesServer(
-        config=_config(task_assets, golden=False), server_client=MagicMock(spec=ServerClient)
+        config=_config(task_assets, golden=False, **policy), server_client=MagicMock(spec=ServerClient)
     )
     agent_sandbox = AsyncMock()
     agent_sandbox.serialize.return_value = {"sandbox_id": "agent-sandbox", "workdir": "/app"}
@@ -1306,7 +1319,20 @@ def _verify_server(task_assets: Path, monkeypatch: MonkeyPatch) -> tuple:
     return server, verifier_sandbox
 
 
-async def test_a_model_patch_that_hangs_the_tests_is_a_graded_zero_in_one_attempt(
+def _assert_deadline_observed(response: DeepSWEVerifyResponse, log, server: DeepSWEResourcesServer) -> None:
+    """The same deadline evidence is recorded whichever action the policy selects."""
+    limit = server._task_store.get("example-task").config.verifier.timeout_sec
+    assert response.reward == 0.0
+    assert response.failure_kind == TEST_DEADLINE
+    assert response.failure_reason == f"Tests did not finish within {limit:g}s on the model's patch"
+    assert response.verifier_timeout_s == limit
+    assert response.verification_attempts == 1 and response.inconclusive_attempts == []
+    assert [(event.failure_kind, event.stage) for event in log.report.events.values()] == [
+        (TEST_DEADLINE, "verification")
+    ]
+
+
+async def test_a_model_patch_that_hangs_the_tests_is_a_counted_zero_by_default(
     task_assets: Path, monkeypatch: MonkeyPatch
 ) -> None:
     server, verifier_sandbox = _verify_server(task_assets, monkeypatch)
@@ -1314,14 +1340,44 @@ async def test_a_model_patch_that_hangs_the_tests_is_a_graded_zero_in_one_attemp
 
     response, log = await _verify(server)
 
-    assert response.reward == 0.0 and response.evaluation_completed is True
-    assert response.mask_sample is False
-    assert response.failure_kind is None and response.failure_reason is None
-    assert response.failure_outcome_action is None
-    assert response.verifier_timeout_s == server._task_store.get("example-task").config.verifier.timeout_sec
-    assert response.verification_attempts == 1 and response.inconclusive_attempts == []
-    assert len(log.report.events) == 0
+    assert response.evaluation_completed is True and response.mask_sample is False
+    assert response.failure_outcome_action == OutcomeAction.COUNT_AS_ZERO
+    assert response.failure_outcome_attribution == FailureClass.MODEL
+    _assert_deadline_observed(response, log, server)
     verifier_sandbox.stop.assert_awaited_once()
+    # The saved row keeps the applied decision, so a reader does not infer it from the evidence.
+    row = response.model_dump()
+    assert is_policy_counted_zero(row) and applied_failure_class(row) == FailureClass.MODEL
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [{"default_action": "fail"}, {"by_failure_class": {"model": "fail"}}],
+    ids=["default-action-fail", "model-class-fail"],
+)
+async def test_a_configured_fail_leaves_a_test_deadline_ungraded(
+    task_assets: Path, monkeypatch: MonkeyPatch, policy: dict
+) -> None:
+    server, verifier_sandbox = _verify_server(task_assets, monkeypatch, verification_policy=policy)
+    verifier_sandbox.exec.side_effect = _test_run(124)
+
+    response, log = await _verify(server)
+
+    assert response.evaluation_completed is False and response.mask_sample is True
+    assert response.failure_outcome_action == OutcomeAction.FAIL
+    assert response.failure_outcome_attribution == FailureClass.MODEL
+    _assert_deadline_observed(response, log, server)
+    row = response.model_dump()
+    assert not is_policy_counted_zero(row) and applied_failure_class(row) == FailureClass.MODEL
+
+
+def test_the_deadline_is_classified_as_the_models_and_a_classification_override_keeps_that(task_assets: Path) -> None:
+    kinds = _config(task_assets).outcome_policy.classification.by_stage["verification"].by_failure_kind
+    assert kinds == {TEST_DEADLINE: FailureClass.MODEL}
+    other = _config(
+        task_assets, classification={"by_stage": {"verification": {"by_failure_kind": {"custom:kind": "model"}}}}
+    ).outcome_policy.classification.by_stage["verification"]
+    assert other.by_failure_kind == {TEST_DEADLINE: FailureClass.MODEL, "custom:kind": FailureClass.MODEL}
 
 
 @pytest.mark.parametrize("status", [(1, None), (124, "timeout"), (2, None)])

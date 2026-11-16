@@ -30,9 +30,13 @@ run) is run again on a fresh sandbox with the same collected patch, at most `inc
 malformed verdict, a timeout and a conclusive result are not run again, and a patch that breaks the test script stays
 an inconclusive, masked result after the bound as before.
 
-Tests that GNU `timeout` stops at the task's limit (`verifier.timeout_sec`) inside the verifier sandbox leave the task
-unresolved: the model's patch scores 0 and `verifier_timeout_s` records the limit. A timeout reported only by the
-sandbox provider, and a golden patch past the limit, stay inconclusive.
+Tests that GNU `timeout` stops at the task's limit (`verifier.timeout_sec`) inside the verifier sandbox on the model's
+patch are a confirmed deadline: the failure kind `deepswe:test_deadline`, classified as the model's, at the
+`verification` stage. By default the model's patch scores 0 (`count_as_zero`, `verifier_timeout_s` records the limit).
+`outcome_policy.by_stage.verification.default_action: fail` (or `by_failure_class.model: fail`) leaves it ungraded and
+masked instead. A confirmed deadline is never run again, so any other action counts the zero. The applied action and
+classification are saved with the result (`failure_outcome_action`, `failure_outcome_attribution`). A timeout reported
+only by the sandbox provider, and a golden patch past the limit, stay inconclusive.
 
 ## Oracle checkpoint
 

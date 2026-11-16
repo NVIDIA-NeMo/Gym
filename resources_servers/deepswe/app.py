@@ -37,6 +37,7 @@ from nemo_gym.core import (
     SESSION_LOST,
     VERIFIER_ERROR,
     FailureBoundary,
+    FailureClass,
     FailureReport,
     FailureReportRow,
     NgFailureEvent,
@@ -104,6 +105,18 @@ _MAX_FAILURE_REASON_CHARS = 2000
 _NO_VERDICT_FILE = "Verifier did not produce /logs/verifier/reward.json"
 
 
+# The failure kind of a model patch whose tests the in-sandbox timeout stopped at the task's limit (see
+# ``_verifier_command``).
+TEST_DEADLINE = "deepswe:test_deadline"
+
+
+def _default_outcome_policy() -> StageOutcomePolicyConfig:
+    """The shared defaults, plus a confirmed test deadline classified as the model's."""
+    return StageOutcomePolicyConfig(
+        classification={"by_stage": {"verification": {"by_failure_kind": {TEST_DEADLINE: FailureClass.MODEL}}}}
+    )
+
+
 class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     REVERIFY_MODE = ReverifyMode.UNSUPPORTED
 
@@ -112,7 +125,7 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
     task_cpu_multiplier: float = Field(default=2.0, gt=0)
     task_memory_multiplier: float = Field(default=2.0, gt=0)
-    outcome_policy: StageOutcomePolicyConfig = Field(default_factory=StageOutcomePolicyConfig)
+    outcome_policy: StageOutcomePolicyConfig = Field(default_factory=_default_outcome_policy)
 
     sandbox_provider: str
     sandbox_config: dict[str, Any]
@@ -127,6 +140,12 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     # a reported command deadline and a conclusive result are not run again; a patch that breaks the
     # test script leaves no verdict every time, so after the bound the outcome stays masked as before.
     inconclusive_verification_retries: int = Field(default=2, ge=0)
+
+    @field_validator("outcome_policy", mode="before")
+    @classmethod
+    def keep_untouched_default_rules(cls, value: object) -> object:
+        """A partial override changes only the rules it names; the others keep this server's defaults."""
+        return StageOutcomePolicyConfig.overlay(_default_outcome_policy(), value)
 
     @field_validator("outcome_policy")
     @classmethod
@@ -996,11 +1015,32 @@ class DeepSWEResourcesServer(SandboxSessionResourcesServer):
                     file=sys.stderr,
                 )
 
+        test_deadline = result.verifier_timeout_s is not None
+        if test_deadline:
+            # The tests were stopped at the task's limit on the model's patch (``_run_verifier``). The verification
+            # policy decides: ``fail`` leaves the result ungraded and masked. Any other action counts the zero, since a
+            # confirmed deadline is never run again, so the stage's retry default (for inconclusive attempts) does not
+            # apply to it.
+            decision = choose_stage_outcome(
+                failure_kind=TEST_DEADLINE, http_status=None, stage="verification", config=self.config.outcome_policy
+            )
+            counts_as_zero = decision.action != OutcomeAction.FAIL
+            verification_failure_action = OutcomeAction.COUNT_AS_ZERO if counts_as_zero else OutcomeAction.FAIL
+            failure_outcome_attribution = decision.attribution
+            failure_kind = TEST_DEADLINE
+            result = result.model_copy(
+                update={
+                    "evaluation_completed": counts_as_zero,
+                    "verifier_error": f"Tests did not finish within {result.verifier_timeout_s:g}s on the model's patch",
+                }
+            )
+
         if self.config.clear_verifier_logs:
             rmtree(str(log_dir), ignore_errors=True)
             log_dir = ""
 
-        if not result.evaluation_completed and agent_oom_observation is None:
+        reports_failure = test_deadline or not result.evaluation_completed
+        if reports_failure and agent_oom_observation is None:
             # A lost session or failed patch collection happens before verification. Keep that
             # boundary and its cause distinct from an inconclusive verifier result.
             failure = NgFailureEvent(
@@ -1055,8 +1095,8 @@ class DeepSWEResourcesServer(SandboxSessionResourcesServer):
                 "failure_outcome_attribution": failure_outcome_attribution,
                 "failure_kind": PROVIDER_OOM_KILLED
                 if agent_oom_observation is not None
-                else (None if result.evaluation_completed else failure_kind),
-                "failure_reason": None if result.evaluation_completed else result.verifier_error,
+                else (failure_kind if reports_failure else None),
+                "failure_reason": result.verifier_error if reports_failure else None,
             }
             | agent_failure_fields
             | (lost_session_verification(patch_error) if failure_kind == SESSION_LOST else {})
