@@ -49,6 +49,6 @@ canonical_split: train
 standard_prompt_config: benchmarks/scicodepile/prompts/default.yaml
 adopted_from:
   source: https://huggingface.co/datasets/SciCodePile/SciCode-Runnable-Benchmark-Reviewed
-  ref: 9afb3a95c7fa8e470119cf6f74b44ec735c5a95b
+  ref: 9afb3a95c7fa8e470119cf6f74b44ec735c5a95b  # pragma: allowlist secret
   reconciled: '2026-09-22'
 lifecycle: active

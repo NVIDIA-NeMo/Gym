@@ -41,5 +41,5 @@ datasets:
     num_repeats: 1
 adopted_from:
   source: https://github.com/NVIDIA-NeMo/UserSim
-  ref: c91d9b2d9daaff4f749a8401e8213be5b481f982
+  ref: c91d9b2d9daaff4f749a8401e8213be5b481f982  # pragma: allowlist secret
   reconciled: '2026-11-19'

@@ -49,6 +49,6 @@ session_model: episode
 state: per_session
 adopted_from:
   source: https://huggingface.co/datasets/databricks/officeqa
-  ref: 763a8366abf2a3605c381d53586d844dc60fa756
+  ref: 763a8366abf2a3605c381d53586d844dc60fa756  # pragma: allowlist secret
   reconciled: '2026-11-09'
 lifecycle: active

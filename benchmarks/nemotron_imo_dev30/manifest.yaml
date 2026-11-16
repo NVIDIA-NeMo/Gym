@@ -46,6 +46,6 @@ canonical_split: test+train
 standard_prompt_config: benchmarks/nemotron_imo_dev30/prompts/default.yaml
 adopted_from:
   source: https://huggingface.co/datasets/nvidia/Nemotron-IMO-Bench
-  ref: 223023e8406f7117cbb7e43f9bc2cd3dc21f38c3
+  ref: 223023e8406f7117cbb7e43f9bc2cd3dc21f38c3  # pragma: allowlist secret
   reconciled: '2026-10-19'
 lifecycle: active

@@ -39,6 +39,6 @@ canonical_split: month_val+week_test+day_test
 prompt_source: prepared
 adopted_from:
   source: https://huggingface.co/datasets/MM-Lifelong/MM-Lifelong
-  ref: efa197479b25fbcf4f7881f9218d703c57dfc9bb
+  ref: efa197479b25fbcf4f7881f9218d703c57dfc9bb  # pragma: allowlist secret
   reconciled: '2026-11-21'
 lifecycle: active

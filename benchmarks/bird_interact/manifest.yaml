@@ -39,5 +39,5 @@ canonical_split: dev
 prompt_source: prepared
 adopted_from:
   source: https://huggingface.co/datasets/birdsql/bird-interact-lite
-  ref: f7881a9c2b9630cc4fc13b0c39279740b0a2fd87
+  ref: f7881a9c2b9630cc4fc13b0c39279740b0a2fd87  # pragma: allowlist secret
   reconciled: '2026-11-23'

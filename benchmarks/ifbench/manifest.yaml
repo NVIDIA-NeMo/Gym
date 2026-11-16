@@ -55,6 +55,6 @@ canonical_split: test
 standard_prompt_config: benchmarks/ifbench/prompts/default.yaml
 adopted_from:
   source: https://github.com/allenai/IFBench
-  ref: c6767a19bd82ac0536cab950f2f8f6bcc6fabe7c
+  ref: c6767a19bd82ac0536cab950f2f8f6bcc6fabe7c  # pragma: allowlist secret
   reconciled: '2026-04-07'
 lifecycle: active

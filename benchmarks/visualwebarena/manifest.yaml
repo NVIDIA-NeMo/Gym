@@ -37,6 +37,6 @@ canonical_split: full
 prompt_source: agent
 adopted_from:
   source: https://github.com/jayl940712/webarena_benchmarks
-  ref: 6a2977939b157b0ab9de7799bb089c721f1ac115
+  ref: 6a2977939b157b0ab9de7799bb089c721f1ac115  # pragma: allowlist secret
   reconciled: '2026-11-19'
 lifecycle: active

@@ -48,6 +48,6 @@ canonical_split: train
 prompt_source: prepared
 adopted_from:
   source: https://huggingface.co/datasets/UnipatAI/BabyVision
-  ref: 849cbeea2b1d00ad334e9e1e2b49a1960c9ff3f3
+  ref: 849cbeea2b1d00ad334e9e1e2b49a1960c9ff3f3  # pragma: allowlist secret
   reconciled: '2026-11-11'
 lifecycle: active

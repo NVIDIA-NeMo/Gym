@@ -39,6 +39,6 @@ canonical_split: test
 prompt_source: prepared
 adopted_from:
   source: https://huggingface.co/datasets/ScaleAI/SWE-bench_Pro
-  ref: 2d52cb3df914a3fcf80c7f66738b3a88ae37fc50
+  ref: 2d52cb3df914a3fcf80c7f66738b3a88ae37fc50  # pragma: allowlist secret
   reconciled: '2026-11-18'
 lifecycle: active

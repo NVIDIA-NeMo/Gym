@@ -48,6 +48,6 @@ canonical_split: dev
 standard_prompt_config: benchmarks/birdbench/prompts/default_sqlite.yaml
 adopted_from:
   source: https://github.com/RUCKBReasoning/OmniSQL
-  ref: a66d732010c89fac4353488d1c59e0b06f92b742
+  ref: a66d732010c89fac4353488d1c59e0b06f92b742  # pragma: allowlist secret
   reconciled: '2026-11-11'
 lifecycle: active

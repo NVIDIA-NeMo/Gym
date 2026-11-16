@@ -66,6 +66,6 @@ canonical_split: full
 prompt_source: agent
 adopted_from:
   source: https://github.com/benchflow-ai/skillsbench
-  ref: 12ebd8653093e0734c7902835cb20c054196026c
+  ref: 12ebd8653093e0734c7902835cb20c054196026c  # pragma: allowlist secret
   reconciled: '2026-10-27'
 lifecycle: active

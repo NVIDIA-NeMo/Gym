@@ -53,6 +53,6 @@ canonical_split: test
 prompt_source: prepared
 adopted_from:
   source: https://github.com/openai/simple-evals
-  ref: 5e623c2b400af62a1278e23595f95b0853d7fe8a
+  ref: 5e623c2b400af62a1278e23595f95b0853d7fe8a  # pragma: allowlist secret
   reconciled: '2026-04-21'
 lifecycle: active

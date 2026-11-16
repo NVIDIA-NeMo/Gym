@@ -47,6 +47,6 @@ canonical_split: test
 standard_prompt_config: benchmarks/prompts/eval/assaybench/paper.yaml
 adopted_from:
   source: https://huggingface.co/datasets/Genentech/assaybench
-  ref: bc37bf8f4842b43abcd6e9f781423d478b9aee4b
+  ref: bc37bf8f4842b43abcd6e9f781423d478b9aee4b  # pragma: allowlist secret
   reconciled: '2026-09-17'
 lifecycle: active

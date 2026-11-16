@@ -47,6 +47,6 @@ session_model: episode
 state: none
 adopted_from:
   source: https://huggingface.co/datasets/ai4bharat/indic-math-500
-  ref: 29557d8eaa22621b82f3af5557ab60babcf3feb5
+  ref: 29557d8eaa22621b82f3af5557ab60babcf3feb5  # pragma: allowlist secret
   reconciled: '2026-10-14'
 lifecycle: active

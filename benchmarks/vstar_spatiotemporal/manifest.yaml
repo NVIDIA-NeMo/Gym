@@ -38,6 +38,6 @@ canonical_split: test
 prompt_source: prepared
 adopted_from:
   source: https://github.com/V-STaR-Bench/V-STaR
-  ref: 1894682b15be0a0c0c5ab24be6e8252743cd6c2f
+  ref: 1894682b15be0a0c0c5ab24be6e8252743cd6c2f  # pragma: allowlist secret
   reconciled: '2026-11-18'
 lifecycle: active

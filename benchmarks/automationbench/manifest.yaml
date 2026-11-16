@@ -62,5 +62,5 @@ lifecycle: active
 resources_server: automationbench
 adopted_from:
   source: https://github.com/zapier/AutomationBench
-  ref: 4a8e1061254004d9dac807054eed33fad7d1ff14
+  ref: 4a8e1061254004d9dac807054eed33fad7d1ff14  # pragma: allowlist secret
   reconciled: '2026-11-04'

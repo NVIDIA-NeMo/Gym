@@ -44,6 +44,6 @@ session_model: episode
 state: none
 adopted_from:
   source: https://huggingface.co/datasets/ai4bharat/IN22-Gen
-  ref: e042ab3d3063110b1a85efa0a59bdbf8553bb928
+  ref: e042ab3d3063110b1a85efa0a59bdbf8553bb928  # pragma: allowlist secret
   reconciled: '2026-10-21'
 lifecycle: active

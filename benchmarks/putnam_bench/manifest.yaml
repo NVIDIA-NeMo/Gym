@@ -47,6 +47,6 @@ canonical_split: full
 standard_prompt_config: benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml
 adopted_from:
   source: https://github.com/trishullab/PutnamBench
-  ref: 64cedd86ef523f3d5f5dc7a21c10e3f69564c7d4
+  ref: 64cedd86ef523f3d5f5dc7a21c10e3f69564c7d4  # pragma: allowlist secret
   reconciled: '2026-04-23'
 lifecycle: active

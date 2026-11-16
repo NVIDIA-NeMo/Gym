@@ -51,5 +51,5 @@ prompt_source: prepared
 lifecycle: active
 adopted_from:
   source: https://github.com/harveyai/harvey-labs
-  ref: 9e9fa7fe126103de1fceb2227b7c70bf59b67f73
+  ref: 9e9fa7fe126103de1fceb2227b7c70bf59b67f73  # pragma: allowlist secret
   reconciled: '2026-11-21'

@@ -49,6 +49,6 @@ session_model: episode
 state: none
 adopted_from:
   source: https://huggingface.co/datasets/ai4bharat/indic-aime-2026
-  ref: 6cbc9d963bdd9f77e18f28de396f2f9b09bb180a
+  ref: 6cbc9d963bdd9f77e18f28de396f2f9b09bb180a  # pragma: allowlist secret
   reconciled: '2026-10-07'
 lifecycle: active

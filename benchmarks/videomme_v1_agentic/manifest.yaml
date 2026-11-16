@@ -38,6 +38,6 @@ canonical_split: test
 prompt_source: prepared
 adopted_from:
   source: https://huggingface.co/datasets/lmms-lab/Video-MME
-  ref: ead1408f75b618502df9a1d8e0950166bf0a2a0b
+  ref: ead1408f75b618502df9a1d8e0950166bf0a2a0b  # pragma: allowlist secret
   reconciled: '2026-11-21'
 lifecycle: active

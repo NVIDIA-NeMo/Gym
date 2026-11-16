@@ -44,6 +44,6 @@ canonical_split: full
 prompt_source: prepared
 adopted_from:
   source: https://github.com/NVIDIA-NeMo/Skills
-  ref: 54d2e113c2f64bf74bda72e15f23f01b524850da
+  ref: 54d2e113c2f64bf74bda72e15f23f01b524850da  # pragma: allowlist secret
   reconciled: '2026-03-27'
 lifecycle: active

@@ -33,7 +33,7 @@ prompt_source: prepared
 state: none
 adopted_from:
   source: https://huggingface.co/datasets/openai/healthbench
-  ref: 40ee1968852fc57f625934251ac22be47077a8fb
+  ref: 40ee1968852fc57f625934251ac22be47077a8fb  # pragma: allowlist secret
   reconciled: '2026-10-14'
 datasets:
 - name: healthbench

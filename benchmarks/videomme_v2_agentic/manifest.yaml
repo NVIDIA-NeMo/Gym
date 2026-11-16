@@ -38,6 +38,6 @@ canonical_split: test
 prompt_source: prepared
 adopted_from:
   source: https://huggingface.co/datasets/MME-Benchmarks/Video-MME-v2
-  ref: 6e4bebb03202e1ddbf3d37703e560e51c5aa2d64
+  ref: 6e4bebb03202e1ddbf3d37703e560e51c5aa2d64  # pragma: allowlist secret
   reconciled: '2026-11-21'
 lifecycle: active

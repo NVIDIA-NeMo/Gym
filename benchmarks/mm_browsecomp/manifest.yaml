@@ -50,6 +50,6 @@ canonical_split: full
 prompt_source: prepared
 adopted_from:
   source: https://github.com/MMBrowseComp/MM-BrowseComp
-  ref: cf82a2390aa7a7ed3d96f72969d22548eff3e101
+  ref: cf82a2390aa7a7ed3d96f72969d22548eff3e101  # pragma: allowlist secret
   reconciled: '2026-11-11'
 lifecycle: active
