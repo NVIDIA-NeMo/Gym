@@ -49,6 +49,13 @@ def test_terminal_verifier_failure_retains_masking_and_artifacts() -> None:
     assert "reward" not in saved.record
 
 
+def test_terminal_failure_of_any_verifier_namespace_is_accepted() -> None:
+    record = _episode_record(_reply(failure_kind="other_verifier:permanent_judge_error"))
+
+    assert record["_ng_failure_class"] == "permanent_judge_error"
+    assert record["_ng_failure_terminal"] is True
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
@@ -59,6 +66,9 @@ def test_terminal_verifier_failure_retains_masking_and_artifacts() -> None:
         {"failure_kind": "permanent_judge_error"},
         {"failure_kind": ":permanent_judge_error"},
         {"failure_kind": "gdpval:"},
+        {"failure_kind": "gdpval task:permanent_judge_error"},
+        {"failure_kind": "gdpval:permanent_judge_error:detail", "_ng_failure_class": "permanent_judge_error:detail"},
+        {"failure_kind": "GDPVal:permanent_judge_error"},
         {"_ng_failure_class": "reference_missing"},
         {"_ng_task_index": 99},
         {"_ng_failure_record": {}},
