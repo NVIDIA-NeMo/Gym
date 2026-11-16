@@ -4,7 +4,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # The policy response that eqbench4_agent sends to /verify carries the conversation under this key of its metadata, as
@@ -63,3 +63,17 @@ class TaskData(BaseModel):
     trait_prompt: SlottedPrompt = Field(json_schema_extra={"consumed_by": ["verify"]})
     trait_assistant_label: str = Field(json_schema_extra={"consumed_by": ["verify"]})
     opponents: list[Opponent] = Field(min_length=1, json_schema_extra={"consumed_by": ["verify", "metrics"]})
+
+    @model_validator(mode="after")
+    def _a_system_prompt_per_policy_turn(self) -> "TaskData":
+        check_system_prompts_cover_turns(self.evaluated_system_prompts, self.num_turns)
+        return self
+
+
+def check_system_prompts_cover_turns(evaluated_system_prompts: list[str], num_turns: int) -> None:
+    """Every policy turn has its system prompt; checked before any model call, which a short list would waste."""
+    if len(evaluated_system_prompts) < num_turns:
+        raise ValueError(
+            f"evaluated_system_prompts has {len(evaluated_system_prompts)} prompt(s) for {num_turns} policy turn(s); "
+            "it must cover every policy turn"
+        )

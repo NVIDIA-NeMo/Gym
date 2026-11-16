@@ -8,7 +8,7 @@ import pytest
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.trajectory.trajectory_record import grading_result_binding
+from nemo_gym.trajectory import grading_result_binding
 from resources_servers.eqbench4.task_data import CONVERSATION_METADATA_KEY
 from responses_api_agents.eqbench4_agent.app import (
     EQBench4Agent,
@@ -455,3 +455,56 @@ async def test_aggregate_metrics_are_computed_by_the_resources_server() -> None:
     metrics = await agent.aggregate_metrics(AggregateMetricsRequest(verify_responses=[{"reward": 0.5}]))
     assert captured == {"server_name": "eqbench4", "url_path": "/aggregate_metrics"}
     assert metrics.key_metrics == {"eqbench4_elo": 1234.5}
+
+
+async def test_a_training_frameworks_sampling_reaches_the_policy_but_not_the_persona() -> None:
+    from nemo_gym.core import MODEL_SAMPLING_NULL, current_model_sampling_segment, model_sampling_context
+
+    servers = FakeServers(policy=["Hi.", "Go on."], persona=[persona_text("Well."), persona_text("Bye.")])
+    seen: list[tuple[str, str | None]] = []
+    post = servers.post
+
+    async def recording(*, server_name: str, url_path: str, json: Any, **kwargs: Any) -> FakeResponse:
+        if url_path.endswith("/v1/responses"):
+            seen.append((server_name, current_model_sampling_segment()))
+        return await post(server_name=server_name, url_path=url_path, json=json, **kwargs)
+
+    agent = make_agent(servers)
+    agent.server_client.post = recording
+    # The run's model calls carry the framework's values, as the base agent sets them for a /run request.
+    with model_sampling_context("TRAINING-VALUES"):
+        await agent.run(request(), make_body())
+    assert seen == [
+        ("eqbench4_agent", "TRAINING-VALUES"),
+        ("persona", MODEL_SAMPLING_NULL),
+        ("eqbench4_agent", "TRAINING-VALUES"),
+        ("persona", MODEL_SAMPLING_NULL),
+    ]
+
+
+def test_a_row_must_give_every_policy_turn_its_system_prompt() -> None:
+    body = make_body(num_turns=2).model_dump()
+    with pytest.raises(ValueError, match="must cover every policy turn"):
+        EQBench4RunRequest.model_validate(body | {"evaluated_system_prompts": ["sys 1"]})
+
+
+def test_the_row_fields_the_agent_and_the_resources_server_share_do_not_drift() -> None:
+    """The prepared row's schema (TaskData) and the two request models declare the fields they share alike."""
+    from resources_servers.eqbench4.app import EQBench4RunRequest as ResourcesRunRequest
+    from resources_servers.eqbench4.task_data import TaskData
+
+    def declared(model: Any, name: str) -> tuple[Any, ...]:
+        field = model.model_fields[name]
+        return (field.annotation, field.is_required(), field.get_default(), repr(field.metadata))
+
+    for model in (EQBench4RunRequest, ResourcesRunRequest):
+        shared = (set(model.model_fields) & set(TaskData.model_fields)) - {"responses_create_params"}
+        assert shared, model
+        for name in sorted(shared):
+            assert declared(model, name) == declared(TaskData, name), (model.__module__, name)
+        # A row's other fields pass through to the server that reads them.
+        assert model.model_config.get("extra") == TaskData.model_config.get("extra") == "allow"
+    # Every field a request model reads from the row is part of the row's schema.
+    for model in (EQBench4RunRequest, ResourcesRunRequest):
+        own = set(model.model_fields) - set(TaskData.model_fields)
+        assert own <= {"responses_create_params"} | set(model.__mro__[1].model_fields), (model.__module__, own)

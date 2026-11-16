@@ -23,13 +23,14 @@ row's `pairwise_prompt` with seeded respondent codes. Judge `n` of `judge_model_
 `comparison_index` modulo the panel size. A reading's verdict is the JSON object in the reply (a fenced block, the
 whole reply, or its outermost braces); a dimension counts when its value is a respondent's code followed by `+` signs.
 Weighted margins from both readings are averaged; the policy's fraction is 0.5 plus or minus half the margin as a share
-of the largest possible margin. A reading without a JSON verdict is asked again up to `judge_max_attempts` times in
-all; then the comparison rests on the other order alone and records the failed one in `unreadable_orders`. When
-neither order has a verdict, the row fails with a judge error and is masked as `judge_failed`.
+of the largest possible margin. A reading without a verdict (no JSON object, or one whose scored dimensions hold
+neither `tie` nor a respondent's code) is asked again up to `judge_max_attempts` times in all; then the comparison
+rests on the other order alone and records the failed one in `unreadable_orders`. When neither order has a verdict,
+the row fails with a judge error and is masked as `judge_failed`.
 
 When `trait_judge_model_server` is set, the trait judge scores the conversation's behavioural traits from the row's
-`trait_prompt`. It starts outside the grading record and never changes the reward; a failure is kept in
-`trait_judge_error`.
+`trait_prompt`. It runs inside the grading record, as an informational dependency of the one grading operation, and
+never changes the reward; a failure is kept in `trait_judge_error`.
 
 The response adds `comparisons` (per opponent: fraction, margins, and each judge reading with its verdicts and text),
 `policy_turns`, `trait_scores`, `trait_judge_text`, `trait_judge_error`, and `evaluation_completed`: true for a judged
@@ -47,6 +48,7 @@ script) and fits Bradley-Terry ratings to them together with the policy's compar
 | `eqbench4_rank`, `eqbench4_models_ranked` | The policy's place among the rated models |
 | `eqbench4_ladder/<model>` | Each published model's rating in the same fit |
 | `eqbench4_win_rate` | Mean comparison fraction |
+| `eqbench4_unrated_opponents` | Opponents missing from the published comparisons (such as the synthetic example rows' opponent); when nonzero, no rating is reported, since the fit would leave those comparisons out |
 | `eqbench4_trait/<name>` | Mean trait score, when the trait judge runs |
 | `eqbench4_judged_conversations`, `eqbench4_persona_ended_rate`, `eqbench4_mean_policy_turns` | Statistics of the judged conversations |
 

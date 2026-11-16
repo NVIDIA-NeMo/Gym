@@ -24,7 +24,7 @@ from time import time
 from typing import Any, Literal
 
 from fastapi import Request, Response
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, model_validator
 
 from nemo_gym.agents import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.client import get_response_json, raise_for_status
@@ -35,11 +35,13 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseUsage,
     accumulate_response_usage,
+    model_sampling_context,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.trajectory import AgentInvocation, ModelCallRef, ObservationGap, TrajectoryRecord, TrajectoryTurn
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.eqbench4.judging import strip_thinking
-from resources_servers.eqbench4.task_data import CONVERSATION_METADATA_KEY
+from resources_servers.eqbench4.task_data import CONVERSATION_METADATA_KEY, check_system_prompts_cover_turns
 
 
 LOG = logging.getLogger(__name__)
@@ -79,6 +81,11 @@ class EQBench4RunRequest(BaseRunRequest):
     num_turns: int = Field(ge=1)
     evaluated_system_prompts: list[str] = Field(min_length=1)
     persona_system_prompt: str
+
+    @model_validator(mode="after")
+    def _a_system_prompt_per_policy_turn(self) -> "EQBench4RunRequest":
+        check_system_prompts_cover_turns(self.evaluated_system_prompts, self.num_turns)
+        return self
 
 
 class EQBench4AgentVerifyResponse(BaseVerifyResponse):
@@ -434,11 +441,14 @@ class EQBench4Agent(SimpleResponsesAPIAgent):
             params = self.config.persona_responses_create_params.model_copy(deep=True)
             params.input = [NeMoGymEasyInputMessage(role=m["role"], content=m["content"]) for m in messages]
             started_at = time()
-            response = await self.server_client.post(
-                server_name=self.config.persona_model_server.name,
-                url_path="/v1/responses",
-                json=params,
-            )
+            # The persona is not the policy: a training framework's sampling values for the run's model calls must
+            # not reach it, so it keeps its own (``null`` wherever the run carries values).
+            with model_sampling_context(self.model_sampling_segment_for_run(body, trained=False)):
+                response = await self.server_client.post(
+                    server_name=self.config.persona_model_server.name,
+                    url_path="/v1/responses",
+                    json=params,
+                )
             await raise_for_status(response)
             parsed = NeMoGymResponse.model_validate(await response.json())
             if trajectory is not None:
@@ -461,3 +471,5 @@ class EQBench4Agent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     EQBench4Agent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = EQBench4Agent.run_webserver()  # noqa: F401

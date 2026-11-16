@@ -16,12 +16,13 @@ import yaml
 from fastapi.responses import JSONResponse
 
 import nemo_gym.rollouts.rollout_recovery as recovery
-from nemo_gym.config.config_types import ConfigError
+from nemo_gym.config import ConfigError
 from nemo_gym.eval.rollout_reverification import InputRolloutPair, _build_verify_payload
-from nemo_gym.rollouts.rollout_recovery import RunManifest, resume_drift_path_for, validate_resume
+from nemo_gym.rollouts import RunManifest
+from nemo_gym.rollouts.rollout_recovery import resume_drift_path_for, validate_resume
 from nemo_gym.server_runtime import verifier_observability
 from nemo_gym.trajectory import VerifierInvocation, grading_result_binding
-from nemo_gym.verification.judge import judge_failsafe
+from nemo_gym.verification import judge_failsafe
 from resources_servers.eqbench4.app import EQBench4VerifyRequest
 from resources_servers.eqbench4.task_data import CONVERSATION_METADATA_KEY
 from resources_servers.eqbench4.verifier_fixture import fixture_verdict

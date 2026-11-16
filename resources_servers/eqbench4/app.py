@@ -32,6 +32,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     observe_llm_judge_grading,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import (
     JUDGE_FAILURES,
     JudgeError,
@@ -44,6 +45,7 @@ from resources_servers.eqbench4.judging import (
     NO_FINAL_STATE,
     PromptParts,
     combine_readings,
+    has_pairwise_verdict,
     pairwise_transcript,
     parse_json_object,
     parse_trait_scores,
@@ -258,10 +260,18 @@ class EQBench4ResourcesServer(SimpleResourcesServer):
         judge = judges[opponent.comparison_index % len(judges)].name
         policy_side = (pairwise_transcript([m.model_dump() for m in body.transcript]), NO_FINAL_STATE)
         opponent_side = (pairwise_transcript([m.model_dump() for m in opponent.transcript]), opponent.final_state)
-        results = await asyncio.gather(
-            self._read(body, opponent, judge, "policy_first", policy_side, opponent_side),
-            self._read(body, opponent, judge, "opponent_first", opponent_side, policy_side),
-        )
+        readings_in_flight = [
+            asyncio.ensure_future(self._read(body, opponent, judge, "policy_first", policy_side, opponent_side)),
+            asyncio.ensure_future(self._read(body, opponent, judge, "opponent_first", opponent_side, policy_side)),
+        ]
+        try:
+            results = await asyncio.gather(*readings_in_flight)
+        except BaseException:
+            # A failed or cancelled order stops the other one too, so it holds no judge slot and sends no more calls.
+            for task in readings_in_flight:
+                task.cancel()
+            await asyncio.gather(*readings_in_flight, return_exceptions=True)
+            raise
         readings = [result for result in results if isinstance(result, JudgeReading)]
         unreadable: dict[str, str] = {}
         for direction, result in zip(("policy_first", "opponent_first"), results):
@@ -323,7 +333,7 @@ class EQBench4ResourcesServer(SimpleResourcesServer):
                 )
             text = response_text(reply)
             verdicts = parse_json_object(text)
-            if verdicts:
+            if verdicts and has_pairwise_verdict(verdicts, first_code, second_code, body.pairwise_dimensions):
                 record_parsed_judge_verdict()
                 first_margin, second_margin = weighted_margins(
                     verdicts, first_code, second_code, body.pairwise_dimensions
@@ -345,6 +355,8 @@ class EQBench4ResourcesServer(SimpleResourcesServer):
             problem = (
                 f"judge output incomplete: {reply.incomplete_details.reason}"
                 if reply.incomplete_details and reply.incomplete_details.reason
+                else "no dimension verdict in the judge's JSON"
+                if verdicts
                 else "no JSON verdict in the judge output"
             )
             if attempt < self.config.judge_max_attempts:
@@ -449,3 +461,5 @@ VERIFIER_FIXTURE = VerifierFixture(
 
 if __name__ == "__main__":
     EQBench4ResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = EQBench4ResourcesServer.run_webserver()  # noqa: F401

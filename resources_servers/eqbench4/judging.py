@@ -148,6 +148,25 @@ def parse_dimension_verdict(verdict: str, first_code: str, second_code: str) -> 
     return None, 0
 
 
+def has_pairwise_verdict(
+    verdicts: Mapping[str, object],
+    first_code: str,
+    second_code: str,
+    dimension_weights: Mapping[str, float],
+) -> bool:
+    """Whether the judge's JSON object gives a verdict on at least one scored dimension: a tie, or one of the two
+    respondents. An object without one (an error object, a reply about something else) is not a reading: scored, it
+    would be a tie the judge never gave."""
+    for dimension in dimension_weights:
+        verdict = verdicts.get(dimension)
+        if isinstance(verdict, str) and (
+            verdict.strip().lower() == "tie"
+            or parse_dimension_verdict(verdict, first_code, second_code)[0] is not None
+        ):
+            return True
+    return False
+
+
 def weighted_margins(
     verdicts: Mapping[str, object],
     first_code: str,

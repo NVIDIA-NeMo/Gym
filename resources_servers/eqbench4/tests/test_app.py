@@ -409,6 +409,95 @@ def test_example_rows_are_valid_tasks() -> None:
         assert row["responses_create_params"]["input"][0]["content"] == row["evaluated_system_prompts"][0]
 
 
+ERROR_OBJECT = json.dumps({"error": "The model is overloaded; try again later."})
+
+
+async def test_a_json_object_without_a_verdict_is_not_a_tie(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # In both orders: asked again, then the row fails as a judge failure instead of scoring an invented 0.5.
+    judge = ScriptedJudge([ERROR_OBJECT] * 8)
+    monkeypatch.setattr(app_module, "call_judge", judge)
+    with pytest.raises(JudgeError, match="no dimension verdict in the judge's JSON"):
+        await make_server(tmp_path, judge_max_attempts=2).verify(make_request())
+
+    # In one order: the comparison rests on the order that has a verdict.
+    scripted = ScriptedJudge(winner="policy")
+
+    async def one_order(server_client: Any, *, server_name: str, **kwargs: Any) -> NeMoGymResponse:
+        prompt = kwargs["json"].input[-1].content
+        if prompt.index(MARKER) > prompt.index("Second"):
+            return _reply(ERROR_OBJECT)
+        return await scripted(server_client, server_name=server_name, **kwargs)
+
+    monkeypatch.setattr(app_module, "call_judge", one_order)
+    result = await make_server(tmp_path, judge_max_attempts=2).verify(make_request())
+    assert result.reward == pytest.approx(0.5 + 5 / 15 / 2) and not result.mask_sample
+    assert all(
+        comparison.unreadable_orders == {"opponent_first": "no dimension verdict in the judge's JSON"}
+        for comparison in result.comparisons
+    )
+
+
+async def test_a_verdict_of_ties_is_a_scored_tie(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    judge = ScriptedJudge([json.dumps({"rapport": "tie", "attunement": "tie"})] * 4)
+    monkeypatch.setattr(app_module, "call_judge", judge)
+    result = await make_server(tmp_path).verify(make_request())
+    assert result.reward == 0.5 and not result.mask_sample and result.evaluation_completed is True
+    assert len(judge.calls) == 4
+
+
+async def test_a_failed_order_stops_its_sibling_and_frees_its_judge_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    in_flight: list[str] = []
+    cancelled: list[str] = []
+    both_started = asyncio.Event()
+
+    async def judge(server_client: Any, *, server_name: str, **kwargs: Any) -> NeMoGymResponse:
+        prompt = kwargs["json"].input[-1].content
+        direction = "policy_first" if prompt.index(MARKER) < prompt.index("Second") else "opponent_first"
+        in_flight.append(direction)
+        if len(in_flight) == 2:
+            both_started.set()
+        if direction == "policy_first":
+            await both_started.wait()
+            raise JudgeError("judge endpoint down")
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.append(direction)
+            raise
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(app_module, "call_judge", judge)
+    server = make_server(tmp_path, judge_concurrency=2)
+    request = make_request()
+    request.opponents = request.opponents[:1]
+    with pytest.raises(JudgeError, match="judge endpoint down"):
+        await asyncio.wait_for(server.verify(request), timeout=10)
+    # The sibling was cancelled before verify raised, and both judge slots are free again.
+    assert cancelled == ["opponent_first"]
+    assert server._judge_semaphore._value == 2
+
+
+def test_comparisons_against_an_unrated_opponent_report_no_rating(tmp_path: Path) -> None:
+    server = make_server(tmp_path)
+    rollouts = [
+        {"reward": 0.6, "comparisons": [{"opponent": "ref-a", "fraction": 0.6}, {"opponent": "x", "fraction": 0.7}]}
+    ]
+    metrics = server.compute_metrics([rollouts])
+    assert "eqbench4_elo" not in metrics and metrics["eqbench4_unrated_opponents"] == 1
+    assert metrics["eqbench4_win_rate"] == pytest.approx(0.65)
+    assert server.compute_repeat_metrics([rollouts]) == {"eqbench4_win_rate": pytest.approx(0.65)}
+
+
+def test_a_row_must_give_every_policy_turn_its_system_prompt() -> None:
+    row = _example_rows()[0]
+    with pytest.raises(ValueError, match="must cover every policy turn"):
+        TaskData.model_validate(row | {"evaluated_system_prompts": row["evaluated_system_prompts"][:1]})
+
+
 async def test_verifier_fixture() -> None:
     results = await exercise_verifier_fixture(VERIFIER_FIXTURE, reward_range=[0.0, 1.0], determinism="stochastic")
     assert {result.kind for result in results} == {"full_reward", "zero_reward", "malformed"}

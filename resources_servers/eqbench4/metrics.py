@@ -95,6 +95,11 @@ def _models(reference: Sequence[Outcome]) -> list[str]:
     return sorted({outcome.model_a for outcome in reference} | {outcome.model_b for outcome in reference} | {POLICY})
 
 
+def _unrated_opponents(outcomes: Sequence[Outcome], models: Sequence[str]) -> set[str]:
+    """The policy's opponents that are not in the published comparisons (the synthetic example rows' opponents)."""
+    return {outcome.model_b for outcome in outcomes} - set(models)
+
+
 def eqbench4_metrics(
     tasks: Sequence[Sequence[dict[str, Any]]], reference: Sequence[Outcome], *, resamples: int
 ) -> dict[str, Any]:
@@ -119,8 +124,14 @@ def eqbench4_metrics(
         metrics[f"eqbench4_trait/{name}"] = sum(values) / len(values)
     if not outcomes:
         return metrics
-
+    metrics["eqbench4_win_rate"] = sum(outcome.fraction_a for outcome in outcomes) / len(outcomes)
     models = _models(reference)
+    if unrated := _unrated_opponents(outcomes, models):
+        # The fit leaves out a comparison against a model it does not know, so the rating would rest on the rest, or
+        # on none (the prior's 1200). Report no rating rather than one that ignores comparisons.
+        metrics["eqbench4_unrated_opponents"] = len(unrated)
+        return metrics
+
     ratings = rate_with_intervals(models, [*reference, *outcomes], resamples=resamples)
     policy = ratings[POLICY]
     metrics |= {
@@ -129,7 +140,6 @@ def eqbench4_metrics(
         "eqbench4_elo_ci_high": policy.ci_high,
         "eqbench4_rank": 1 + sum(rating.rating > policy.rating for rating in ratings.values()),
         "eqbench4_models_ranked": len(ratings),
-        "eqbench4_win_rate": sum(outcome.fraction_a for outcome in outcomes) / len(outcomes),
     }
     for model, rating in sorted(ratings.items(), key=lambda item: -item[1].rating):
         if model != POLICY:
@@ -142,11 +152,11 @@ def eqbench4_repeat_metrics(tasks: Sequence[Sequence[dict[str, Any]]], reference
     outcomes = policy_outcomes(_rollouts(tasks))
     if not outcomes:
         return {}
-    ratings = fit_ratings(_models(reference), [*reference, *outcomes])
-    return {
-        "eqbench4_elo": ratings[POLICY],
-        "eqbench4_win_rate": sum(outcome.fraction_a for outcome in outcomes) / len(outcomes),
-    }
+    metrics: dict[str, Any] = {"eqbench4_win_rate": sum(outcome.fraction_a for outcome in outcomes) / len(outcomes)}
+    models = _models(reference)
+    if _unrated_opponents(outcomes, models):
+        return metrics
+    return metrics | {"eqbench4_elo": fit_ratings(models, [*reference, *outcomes])[POLICY]}
 
 
 def key_metrics(agent_metrics: dict[str, Any]) -> dict[str, Any]:
