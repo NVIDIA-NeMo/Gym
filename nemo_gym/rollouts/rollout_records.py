@@ -908,14 +908,17 @@ class RolloutRecords:
         )
 
     def settled(self, identity: str) -> bool:
-        """Whether this rollout's outcome is final: a success no resume reruns, or a failure or omission none retries.
+        """Whether this rollout's outcome is final: a measured success, or a failure or omission no resume retries.
 
-        The complement of ``pending`` for a rollout with an outcome, so a later attempt can never change a settled one.
-        A settled judge failure keeps its saved answer, which the saved-answer re-judge pass can still grade again.
+        A success masked by infrastructure is never settled: below its attempt cap a resume runs it again, and at the
+        cap it stays unmeasured until a recovery extends the cap (``masked_exhausted`` in the coverage). A settled
+        judge failure keeps its saved answer, which the saved-answer re-judge pass can still grade again.
         """
         disposition = self.disposition(identity)
         if disposition == "success":
-            return not self.masked_retryable(identity)
+            return not (
+                self.payloads[(identity, self.latest[identity])].masked_infrastructure and self._retryable(identity)
+            )
         if disposition in ("failure", "omitted"):
             return not self._retryable(identity) or self.failure_count(identity) >= self.attempt_cap
         return False

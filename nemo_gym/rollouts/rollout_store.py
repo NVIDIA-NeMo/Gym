@@ -705,7 +705,7 @@ class RolloutStore:
         return self._state.masked_retryable(logical_rollout_id(row))
 
     def settled(self, row: dict) -> bool:
-        """Whether this rollout's outcome is final, so no resume runs it again (``RolloutRecords.settled``)."""
+        """Whether this rollout's outcome is final and measured where it succeeded (``RolloutRecords.settled``)."""
         return self._state.settled(logical_rollout_id(row))
 
     def selected(self, disposition: str) -> list[dict]:

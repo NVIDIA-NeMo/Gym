@@ -56,7 +56,7 @@ When one `gym eval run` collects rollouts for several agents with aggregation en
 
 When an agent is complete:
 
-- A rollout is settled when its outcome is final: a scored success, or a failure no resume retries (a terminal class or an exhausted attempt budget). A result masked by infrastructure, or a failure a resume will retry, keeps the agent pending until a resumed run reruns that rollout.
+- A rollout is settled when its outcome is final: a scored success, or a failure no resume retries (a terminal class or an exhausted attempt budget). A result masked by infrastructure, or a failure a resume will retry, keeps the agent pending until a resumed run reruns that rollout. A masked result at its attempt cap is never measured, so it keeps the agent pending until a recovery extends the cap (`--extend-attempts`) and measures it.
 - Failures enter the entry as they do at the end of the run: `count_failure_classes_as_zero` decides whether they count as zeros.
 - An agent with a persisted result that carries no reward gets no file.
 - Rollouts routed to an environment server and rows naming the agent behind it count as one agent. An agent fronted by several environment servers is labeled by the environment server in its file, while the run-wide file falls back to the agent name when only one of those servers ends with scored rollouts.

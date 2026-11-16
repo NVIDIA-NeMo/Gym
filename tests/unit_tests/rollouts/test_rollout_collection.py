@@ -1448,10 +1448,15 @@ class TestRolloutCollection:
     # A result the Environment Server masked because its provider failed: saved, but a resume runs it again.
     _PROVIDER_MASKED = {"response": {}, "reward": 0.0, "mask_sample": True, "failure_kind": "provider_unavailable"}
 
+    @pytest.mark.parametrize("attempt_cap", ["3", "1"], ids=["rerun-pending", "attempts-exhausted"])
     async def test_no_agent_completion_file_while_a_masked_rollout_awaits_its_rerun(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock, attempt_cap: str
     ) -> None:
-        """A rollout masked by infrastructure is saved but not settled, so its agent is not complete in this job."""
+        """A rollout masked by infrastructure is saved but not settled, so its agent is not complete in this job.
+
+        At its attempt cap it is never measured either: only a recovery that extends the cap can settle it.
+        """
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", attempt_cap)
         complete_dir = tmp_path / "rollouts_agent_complete"
         config = RolloutCollectionConfig(
             input_jsonl_fpath=str(self._write_agent_inputs(tmp_path, ("alpha", "alpha", "beta"))),
