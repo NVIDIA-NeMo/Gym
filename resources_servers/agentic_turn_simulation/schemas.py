@@ -4,7 +4,7 @@
 """The settings of a simulated turn (tool simulator, judges, scoring) and the bodies of the routes that serve one.
 
 Both servers that run these turns use them: the ``agentic_turn_simulation`` resources server, and the ``agent_arena``
-environment server, which reads its settings from that resources server's config.
+environment server, which reads its settings from that resources server's config and serves the row's tools itself.
 """
 
 from __future__ import annotations
@@ -90,6 +90,13 @@ class AgenticTurnSimulationRunRequest(BaseRunRequest):
 
 class AgenticTurnSimulationVerifyRequest(AgenticTurnSimulationRunRequest, BaseVerifyRequest):
     pass
+
+
+# The agent_arena environment server names the row's harness in the metadata of the agent's request, in place of
+# /harness: its stop tools (a JSON list) and its tool-call protocol. agentic_turn_simulation_agent takes them out before
+# it calls the model.
+STOP_TOOLS_METADATA_KEY = "agentic_turn_simulation_stop_tools"
+PROTOCOL_METADATA_KEY = "agentic_turn_simulation_protocol"
 
 
 class HarnessResponse(BaseModel):

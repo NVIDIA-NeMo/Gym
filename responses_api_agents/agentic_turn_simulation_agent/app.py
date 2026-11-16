@@ -11,8 +11,16 @@ README). Only its episode differs:
 * Cline rows (``cline_xml``) call tools as XML in the text, get all results back in one user message, and get
   Cline's "no tools used" error for a reply without a call.
 
-In an agent session (the ``agent_arena`` environment server's episode) both routes go through the session's direct HTTP
-grant: its URL, its headers and its cookies. The legacy ``/run`` calls the configured resources server.
+That is the legacy ``/run``, against the configured resources server. In an agent session (the ``agent_arena``
+environment server's episode) the environment server serves the row's tools behind the session's direct HTTP grant:
+
+* the row's stop tools and protocol come in the request's metadata (`STOP_TOOLS_METADATA_KEY`,
+  `PROTOCOL_METADATA_KEY`), which the agent takes out before it calls the model;
+* each tool call goes to ``POST /<tool name>`` through the grant (its URL, its headers and the session's cookies), with
+  its arguments as the body and its call id in ``X-NeMo-Gym-Tool-Call-Id``; error replies are retried as above;
+* a call the server cannot take is answered here: arguments that are not a JSON object, or a tool the row does not
+  have (refused by the server, or a name no grant can carry). Scoring gives such a turn 0 whatever it gets
+  (``malformed_arguments``, ``nonexistent_tool``).
 
 ``response.metadata.stop_reason`` says what ended the turn (the resources server's ``masked_stop_reasons`` match
 these strings; README "What ends the turn" describes each): ``final_message`` (a reply without a tool call;
@@ -51,7 +59,8 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
-from nemo_gym.server_runtime import Activation, DirectHTTPToolAccess
+from nemo_gym.server_runtime import TOOL_CALL_ID_HEADER, Activation, DirectHTTPToolAccess
+from nemo_gym.server_runtime.episode_tools import TOOL_NAME_PATTERN
 from nemo_gym.trajectory import (
     AgentInvocation,
     ModelCallRef,
@@ -62,6 +71,8 @@ from nemo_gym.trajectory import (
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.agentic_turn_simulation import cline_xml
+from resources_servers.agentic_turn_simulation.items import json_object
+from resources_servers.agentic_turn_simulation.schemas import PROTOCOL_METADATA_KEY, STOP_TOOLS_METADATA_KEY
 from resources_servers.agentic_turn_simulation.simulator import simulator_failure
 from responses_api_agents.simple_agent.app import (
     SimpleAgent,
@@ -81,6 +92,10 @@ CLINE_XML = "cline_xml"
 # vLLM's context-overflow errors: "maximum context length is W tokens ... (P in the messages, C in the completion)",
 # "... your prompt contains P input tokens" and "... your request has P input tokens".
 _CONTEXT_WINDOW = re.compile(r"maximum context length is (\d+)")
+_TOOL_NAME = re.compile(TOOL_NAME_PATTERN)
+# Replies of an environment server that refuse the call itself, not a failure to answer it: no such tool (404), or
+# arguments it does not take (422).
+_REFUSED_CALL_STATUSES = (404, 422)
 _PROMPT_TOKENS = (
     re.compile(r"\((\d+) in the messages"),
     re.compile(r"prompt contains (\d+) input tokens"),
@@ -89,7 +104,7 @@ _PROMPT_TOKENS = (
 
 
 class AgenticTurnSimulationAgentConfig(SimpleAgentConfig):
-    # Required (optional in SimpleAgentConfig): every tool call goes to its /simulate_tool_call.
+    # Required (optional in SimpleAgentConfig): the legacy /run's tool calls go to its /simulate_tool_call.
     resources_server: ResourcesServerRef
     # Kept model steps per turn (truncation and overflow retries are not steps). 0: no limit.
     max_steps: int = 50
@@ -106,9 +121,10 @@ class AgenticTurnSimulationAgentConfig(SimpleAgentConfig):
     context_margin_tokens: int = 256
     # cline_xml rows: replies in a row without a tool call before the turn ends (Cline's maxConsecutiveMistakes).
     cline_max_consecutive_mistakes: int = cline_xml.MAX_CONSECUTIVE_MISTAKES
-    # /simulate_tool_call attempts per tool call. An error reply (not 2xx or 3xx) is retried after 1, 2, 4, ... s;
-    # once every attempt has failed, the call's output is the resources server's simulator-failure output, so /verify
-    # masks the turn (simulator_failed) rather than judging a turn that got an error body as a tool result.
+    # Attempts per tool call (/simulate_tool_call, or the tool's route through a grant). An error reply (not 2xx or 3xx)
+    # is retried after 1, 2, 4, ... s; once every attempt has failed, the call's output is the resources server's
+    # simulator-failure output, so scoring masks the turn (simulator_failed) rather than judging a turn that got an
+    # error body as a tool result. A grant's 404 or 422 refuses the call and is not retried.
     simulate_max_attempts: int = Field(default=3, ge=1)
 
 
@@ -182,11 +198,25 @@ def _result_items(protocol: str, calls: list[_Call], results: list[str]) -> list
     """The results of a reply's calls as the agent sends them back: a function_call_output per call, or for Cline one
     user message with all of them (the resources server frames each result as Cline does)."""
     if protocol == CLINE_XML:
-        return [_user_message("\n".join(results))] if results else []
+        # The environment details close the message: only the last result keeps them (the legacy /simulate_tool_call
+        # has left them out of the others already).
+        kept = [_before_environment_details(result) for result in results[:-1]] + results[-1:]
+        return [_user_message("\n".join(kept))] if kept else []
     return [
         NeMoGymFunctionCallOutput(type="function_call_output", call_id=call.call_id, output=result)
         for call, result in zip(calls, results)
     ]
+
+
+def _before_environment_details(result: str) -> str:
+    if cline_xml.ENVIRONMENT_DETAILS not in result:
+        return result
+    return result[: result.index(cline_xml.ENVIRONMENT_DETAILS)].rstrip("\n")
+
+
+def _refused_call(call: _Call, reason: str) -> str:
+    """The result of a call the environment server does not run, which the turn's scoring gates."""
+    return f"Error: {reason}. The {call.name} call was not run."
 
 
 @dataclass(kw_only=True)
@@ -309,8 +339,8 @@ class AgenticTurnSimulationAgent(SimpleAgent):
     config: AgenticTurnSimulationAgentConfig
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> SimpleAgentSessionState:
-        """simple_agent's session, refused (422) without a direct HTTP grant: /harness and /simulate_tool_call are
-        reached only through it, so every turn of such a session would fail."""
+        """simple_agent's session, refused (422) without a direct HTTP grant: the row's tools are reached only through
+        it, so every turn of such a session would fail."""
         state = self._new_session_state(body)
         if state.tool_access is None:
             raise AgentSeedRejectedError(
@@ -339,14 +369,17 @@ class AgenticTurnSimulationAgent(SimpleAgent):
         collect_trajectory: bool = False,
         activation: Activation | None = None,
     ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
-        # An agent session reaches /harness and /simulate_tool_call only through its direct HTTP grant (the seed
-        # refuses one without). The legacy /run calls the configured resources server with the cookies its seed set.
-        # `activation` is not used: a restored turn starts over from its input. simple_agent's run() and responses()
-        # refuse execute_tools=false.
+        # An agent session calls the row's tools only through its direct HTTP grant (the seed refuses one without).
+        # The legacy /run calls the configured resources server with the cookies its seed set. `activation` is not
+        # used: a restored turn starts over from its input. simple_agent's run() and responses() refuse
+        # execute_tools=false.
         if in_session and tool_access is None:
             raise RuntimeError("agentic_turn_simulation_agent needs a direct HTTP tool access in an agent session")
         cfg = self.config
         body = self._strip_resource_only_metadata(body.model_copy(deep=True))
+        metadata = dict(body.metadata or {})
+        named = {key: metadata.pop(key) for key in (STOP_TOOLS_METADATA_KEY, PROTOCOL_METADATA_KEY) if key in metadata}
+        body.metadata = metadata or None
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
         ep = _Episode(
@@ -363,7 +396,7 @@ class AgenticTurnSimulationAgent(SimpleAgent):
                 rollout_id=rollout_id,
             ),
         )
-        stop_tools, protocol = await self._row_harness(ep)
+        stop_tools, protocol = self._named_harness(named) if tool_access is not None else await self._row_harness(ep)
         step = 0
         mistakes = 0  # cline_xml: consecutive replies without a tool call
         started = monotonic()
@@ -447,32 +480,31 @@ class AgenticTurnSimulationAgent(SimpleAgent):
         # responses() copies both cookie jars onto its reply: an empty one, not None, before any reply set it.
         return response, record, ep.model_cookies or {}, ep.resources_cookies or {}
 
-    async def _tools_post(self, ep: _Episode, url_path: str, json: Any = None) -> Any:
-        """POST to the server that simulates the tools: through an agent session's grant (its URL under the
-        activation's rollout prefix, its headers, the session's cookies), else to the configured resources server with
-        the episode's cookies."""
-        if ep.tool_access is not None:
-            return await http_request(
-                method="POST",
-                url=f"{_tools_base_url(ep.tool_access, ep.resources_prefix)}{url_path}",
-                json=json,
-                cookies=ep.resources_cookies,
-                headers=dict(ep.tool_access.headers),
-                _internal=True,
-            )
-        return await self.server_client.post(
-            server_name=self.config.resources_server.name, url_path=url_path, json=json, cookies=ep.resources_cookies
-        )
+    def _named_harness(self, named: dict[str, str]) -> tuple[list[str], str]:
+        """The row's stop tools and tool-call protocol, as the environment server named them in the request's
+        metadata. Without them the turn is refused: a Cline row run as native would be scored, not masked."""
+        try:
+            stop_tools = json.loads(named[STOP_TOOLS_METADATA_KEY])
+            protocol = named[PROTOCOL_METADATA_KEY]
+        except (KeyError, ValueError) as error:
+            raise RuntimeError(
+                "An agent session's request must name the row's harness in its metadata "
+                f"({STOP_TOOLS_METADATA_KEY}, {PROTOCOL_METADATA_KEY})"
+            ) from error
+        if not isinstance(stop_tools, list) or protocol not in (NATIVE, CLINE_XML):
+            raise ValueError(f"The request named an unknown harness: stop tools {stop_tools!r}, protocol {protocol!r}")
+        return stop_tools, protocol
 
     async def _row_harness(self, ep: _Episode) -> tuple[list[str], str]:
-        """The row's stop tools and tool-call protocol from /harness. A bare /v1/responses (no grant, no resources
-        cookies) has no session there (404): the config's stop tools and native calls. A 404 for cookies that
-        /seed_session set (the call reached another resources-server worker, with num_workers > 1, or the server
-        restarted) raises, since a Cline row run as native would be scored, not masked; so does any error through a
-        grant."""
-        http = await self._tools_post(ep, "/harness")
+        """The row's stop tools and tool-call protocol from the resources server's /harness. A bare /v1/responses (no
+        resources cookies) has no session there (404): the config's stop tools and native calls. A 404 for cookies
+        that /seed_session set (the call reached another resources-server worker, with num_workers > 1, or the server
+        restarted) raises, since a Cline row run as native would be scored, not masked."""
         cookies = ep.resources_cookies
-        if http.status == 404 and ep.tool_access is None:
+        http = await self.server_client.post(
+            server_name=self.config.resources_server.name, url_path="/harness", cookies=cookies
+        )
+        if http.status == 404:
             if cookies:
                 detail = (await http.content.read()).decode(errors="replace")
                 raise RuntimeError(f"/harness has no session for this episode's resources cookies: {detail[:200]}")
@@ -567,36 +599,80 @@ class AgenticTurnSimulationAgent(SimpleAgent):
 
     async def _simulate(self, ep: _Episode, call: _Call, turn: list[dict[str, Any]]) -> str:
         """One call's output. A successful reply's output is the tool's, an error the simulated tool reports included.
-        An error reply from the resources server is retried (`simulate_max_attempts`); once every attempt has failed,
-        the output is the resources server's simulator-failure output, which /verify masks as simulator_failed."""
+        An error reply is retried (`simulate_max_attempts`); once every attempt has failed, the output is the
+        resources server's simulator-failure output, which scoring masks as simulator_failed. Through a grant, a call
+        the environment server refuses (or could not take) is answered by `_refused_call`, unretried."""
         started = (time(), perf_counter())
+        if ep.tool_access is not None:
+            output, status = await self._call_granted_tool(ep, call)
+        else:
+            output, status = await self._call_resources_server(ep, call, turn)
+        ep.trajectory.tool_call(call, started, output, status)
+        return output
+
+    async def _call_resources_server(self, ep: _Episode, call: _Call, turn: list[dict[str, Any]]) -> tuple[str, int]:
+        """The legacy /run's call: the resources server's /simulate_tool_call, with the turn so far."""
         attempts = self.config.simulate_max_attempts
         for attempt in range(1, attempts + 1):
-            http = await self._tools_post(
-                ep,
-                "/simulate_tool_call",
-                {"call_id": call.call_id, "name": call.name, "arguments": call.arguments, "turn": turn},
+            http = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/simulate_tool_call",
+                json={"call_id": call.call_id, "name": call.name, "arguments": call.arguments, "turn": turn},
+                cookies=ep.resources_cookies,
             )
             # Merged, as simple_agent does: an error reply sets no cookie, and the session must survive it.
             ep.resources_cookies = {**dict(ep.resources_cookies or {}), **_cookies(http)}
             if 200 <= http.status < 400:
-                output = (await get_response_json(http)).get("output", "")
-                break
+                return (await get_response_json(http)).get("output", ""), http.status
             detail = (await http.content.read()).decode(errors="replace")
-            LOG.warning(
-                "/simulate_tool_call for %s failed (attempt %d of %d): HTTP %d: %s",
-                call.name,
-                attempt,
-                attempts,
-                http.status,
-                detail[:300],
-            )
+            self._log_failed_attempt("/simulate_tool_call", call, attempt, http.status, detail)
             if attempt < attempts:
                 await sleep(2 ** (attempt - 1))
-        else:
-            output = simulator_failure(f"HTTP {http.status}: {detail}")
-        ep.trajectory.tool_call(call, started, output, http.status)
-        return output
+        return simulator_failure(f"HTTP {http.status}: {detail}"), http.status
+
+    async def _call_granted_tool(self, ep: _Episode, call: _Call) -> tuple[str, int]:
+        """An agent session's call: ``POST /<tool name>`` through the grant, the arguments as the body."""
+        arguments = json_object(call.arguments or "{}")
+        if arguments is None:
+            return _refused_call(call, "its arguments are not a JSON object"), 422
+        if not _TOOL_NAME.match(call.name):
+            return _refused_call(call, f"there is no tool named {call.name!r}"), 404
+        url = f"{_tools_base_url(ep.tool_access, ep.resources_prefix)}/{call.name}"
+        attempts = self.config.simulate_max_attempts
+        for attempt in range(1, attempts + 1):
+            http = await http_request(
+                method="POST",
+                url=url,
+                json=arguments,
+                cookies=ep.resources_cookies,
+                headers=dict(ep.tool_access.headers) | {TOOL_CALL_ID_HEADER: call.call_id},
+                _internal=True,
+            )
+            ep.resources_cookies = {**dict(ep.resources_cookies or {}), **_cookies(http)}
+            if 200 <= http.status < 400:
+                output = await get_response_json(http)
+                return (output if isinstance(output, str) else json.dumps(output, ensure_ascii=False)), http.status
+            detail = (await http.content.read()).decode(errors="replace")
+            if http.status in _REFUSED_CALL_STATUSES:
+                reason = (
+                    "its arguments were refused" if http.status == 422 else f"there is no tool named {call.name!r}"
+                )
+                return _refused_call(call, reason), http.status
+            self._log_failed_attempt(f"/{call.name}", call, attempt, http.status, detail)
+            if attempt < attempts:
+                await sleep(2 ** (attempt - 1))
+        return simulator_failure(f"HTTP {http.status}: {detail}"), http.status
+
+    def _log_failed_attempt(self, route: str, call: _Call, attempt: int, status: int, detail: str) -> None:
+        LOG.warning(
+            "%s for %s failed (attempt %d of %d): HTTP %d: %s",
+            route,
+            call.name,
+            attempt,
+            self.config.simulate_max_attempts,
+            status,
+            detail[:300],
+        )
 
 
 if __name__ == "__main__":

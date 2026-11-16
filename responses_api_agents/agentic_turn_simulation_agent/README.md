@@ -6,24 +6,32 @@ answers the tool calls and scores the turn. It inherits `simple_agent`'s `/run`,
 and replaces only the episode loop.
 
 That server is the [`agent_arena`](../../environment_servers/agent_arena/README.md) Environment Server in an agent
-session: the session's direct HTTP grant points at it, and the agent sends `/harness` and `/simulate_tool_call` to the
-grant's URL with its headers and the session's cookies. A session seeded without such a grant is refused (422). On the
-deprecated `/run` relay it is the configured `resources_server`, with the cookies its `/seed_session` set.
+session: it serves the row's tools behind the session's direct HTTP grant, and names the row's harness in the request's
+metadata. A session seeded without such a grant is refused (422). On the deprecated `/run` relay it is the configured
+`resources_server`, with the cookies its `/seed_session` set, through its `/harness` and `/simulate_tool_call`.
 
 ## What the episode does differently
 
-- **The row's harness.** At the start of the turn the agent asks the server's `/harness`, with the session the row was
-  seeded with, for the row's stop tools and tool protocol (native function calls, or Cline's XML). A bare
-  `/v1/responses` call without a grant or a seeded session uses the config's `stop_tools` and native calls. A 404 for a
-  seeded session (the call reached another resources-server worker under `num_workers` > 1, or the server restarted)
-  fails the rollout instead of running a Cline row as native; so does any `/harness` error through a grant, any other
-  `/harness` error, or an unknown protocol.
-- **Every tool call goes to `/simulate_tool_call`**, with its `call_id`, `name`, raw `arguments` (parseable or not)
-  and the turn so far without reasoning: the simulator needs that context. A successful reply's output is the tool's
-  result, including an error the simulated tool reports (a missing file, a failed command), which is judged as usual.
-  An error reply from the resources server (not 2xx or 3xx) is retried, `simulate_max_attempts` times in all, after
-  1, 2, ... seconds. If every attempt fails, the tool result is the resources server's simulator-failure output, so
-  `/verify` masks the turn as `simulator_failed` instead of judging a turn that got an error page as a tool result.
+- **The row's harness**: its stop tools and tool protocol (native function calls, or Cline's XML).
+  - In an agent session, the request's metadata names it (`agentic_turn_simulation_stop_tools`, a JSON list, and
+    `agentic_turn_simulation_protocol`). The agent takes both keys out before it calls the model. A session request
+    without them fails the rollout instead of running a Cline row as native.
+  - On the relay, the agent asks the resources server's `/harness`, with the session the row was seeded with. A bare
+    `/v1/responses` call without a seeded session uses the config's `stop_tools` and native calls. A 404 for a seeded
+    session (the call reached another resources-server worker under `num_workers` > 1, or the server restarted) fails
+    the rollout; so does any other `/harness` error, or an unknown protocol.
+- **Every tool call is simulated.** A successful reply's output is the tool's result, including an error the simulated
+  tool reports (a missing file, a failed command), which is judged as usual. An error reply (not 2xx or 3xx) is
+  retried, `simulate_max_attempts` times in all, after 1, 2, ... seconds. If every attempt fails, the tool result is
+  the resources server's simulator-failure output, so scoring masks the turn as `simulator_failed` instead of judging a
+  turn that got an error page as a tool result.
+  - In an agent session, a call goes to `POST /<tool name>` through the grant: the arguments object is the body, the
+    call id is in `X-NeMo-Gym-Tool-Call-Id`, with the grant's headers and the session's cookies. The server rebuilds
+    the simulator's view of the turn from the episode's earlier calls. A call it cannot take is answered by the agent
+    without a retry: arguments that are not a JSON object, a name no grant can carry, or a tool the row lacks (the
+    server's 404). Scoring gives such a turn 0 (`malformed_arguments`, `nonexistent_tool`) whatever the call returned.
+  - On the relay, a call goes to `/simulate_tool_call` with its `call_id`, `name`, raw `arguments` (parseable or not)
+    and the turn so far without reasoning.
 - **What ends the turn** (`response.metadata.stop_reason`, with `steps`, `elapsed_seconds` and the per-call
   [token usage](#token-usage) `model_calls`):
 
@@ -74,16 +82,16 @@ A model-server error returns no reply and is not listed (a context overflow that
 ## Cline's XML protocol
 
 For `protocol: cline_xml` rows the model writes tool calls as XML in its reply text
-(`<read_file><path>src/app.ts</path></read_file>`), parsed with the resources server's `cline_xml` rules. Each call goes
-to `/simulate_tool_call` in order as `xml_<step>_<k>`, and the results return together as the next user message, as
-Cline sends them. A reply without a tool call gets Cline's own "no tools used" message and the latest
+(`<read_file><path>src/app.ts</path></read_file>`), parsed with the resources server's `cline_xml` rules. Each call is simulated in order
+as `xml_<step>_<k>`, and the results return together as the next user message, as Cline sends them: only the last
+result keeps the `<environment_details>` that close the message. A reply without a tool call gets Cline's own "no tools used" message and the latest
 `<environment_details>`, and the model tries again.
 
 ## Configuration
 
 | Field | Default | Meaning |
 |---|---|---|
-| `resources_server` | required | The `agentic_turn_simulation` resources server. |
+| `resources_server` | required | The `agentic_turn_simulation` resources server (the relay's tools). |
 | `model_server` | required | The policy model server. |
 | `max_steps` | `50` | Model steps per turn. `0` disables. |
 | `max_time_seconds` | `7200` | Wall-clock cap per turn. `null` or `0` disables. Lower it for training. |
@@ -92,7 +100,7 @@ Cline sends them. A reply without a tool call gets Cline's own "no tools used" m
 | `min_output_tokens` | `2048` | Smallest shrunk budget worth retrying with. |
 | `context_margin_tokens` | `256` | Tokens kept free when shrinking the budget to fit the context. |
 | `cline_max_consecutive_mistakes` | `3` | Cline rows: replies in a row without a tool call before the turn ends. |
-| `simulate_max_attempts` | `3` | `/simulate_tool_call` attempts per tool call before its result becomes a simulator failure (masked). |
+| `simulate_max_attempts` | `3` | Attempts per tool call before its result becomes a simulator failure (masked). |
 
 Inherited: `skip_verification`, `skip_verification_reward`, `token_id_capture` (set `true` for training).
 
