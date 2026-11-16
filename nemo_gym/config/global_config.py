@@ -227,6 +227,7 @@ ENVIRONMENT_SERVER_TYPE_KEY_NAME = "environment_servers"
 # so this list is the source of truth; a unit test keeps it in step with the agent apps.
 AGENT_SESSION_AGENT_TYPES = frozenset(
     {
+        "agentvista_agent",
         "browsecomp_agent",
         "claude_code_agent",
         "cline_agent",
@@ -250,6 +251,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "pi_agent",
         "pool_agent",
         "prime_agent",
+        "qwen_code_agent",
         "simple_agent",
         "simple_strands_agent",
         "stirrup_agent",
