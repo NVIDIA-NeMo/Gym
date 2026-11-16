@@ -887,6 +887,19 @@ class TestRunServiceProvider:
         assert raced.strip() in warning.getMessage()
 
     @pytest.mark.asyncio
+    async def test_a_service_that_timed_out_still_reports_an_accepted_snapshot_warning(self, tmp_path):
+        raced = "tar: ./rundir/sim_build/dump.fst: file changed as we read it\n"
+        fake = _FakeProvider(
+            SandboxExecResult(stdout=None, stderr="timed out", return_code=125, error_type="timeout"),
+            snapshot_result=SandboxExecResult(stdout=raced, stderr=None, return_code=1),
+        )
+        exit_code, output = await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        assert exit_code == -1
+        assert output.startswith("sandbox exec timed out after 30s")
+        assert "workspace snapshot after service 'direct' exited 1" in output
+        assert raced.strip() in output
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "stdout, stderr, return_code",
         [
@@ -1024,6 +1037,7 @@ services:
 """
 
 
+@pytest.mark.skipif(shutil.which("tar") is None, reason="tar is not installed")
 class TestServiceHandoffWithRealTar:
     @pytest.mark.asyncio
     async def test_second_service_sees_the_files_the_first_one_wrote(self, tmp_path):
@@ -1056,6 +1070,7 @@ class TestSnapshotRaceWithRealTar:
                 "tar",
                 "-czf",
                 str(archive),
+                "--numeric-owner",
                 "-C",
                 str(workspace),
                 ".",

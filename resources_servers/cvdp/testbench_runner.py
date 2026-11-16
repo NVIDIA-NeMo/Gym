@@ -611,7 +611,7 @@ class TestbenchRunner:
             return 1, f"sandbox operation failed for service '{service}': {exc}"
 
         if result.error_type == "timeout":
-            return -1, f"sandbox exec timed out after {self.config.container_timeout}s"
+            return -1, f"sandbox exec timed out after {self.config.container_timeout}s{snapshot_note}"
 
         combined = (result.stderr or "") + (result.stdout or "") + snapshot_note
         return result.return_code, combined
