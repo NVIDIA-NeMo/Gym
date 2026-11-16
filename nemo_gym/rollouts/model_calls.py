@@ -9,10 +9,17 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+import orjson
+
 from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
+from nemo_gym.core.failure_records import FailureReport
 from nemo_gym.core.failure_transport import FailureReportRow, StreamFailureReportReader
-from nemo_gym.models.model_call_capture import CaptureStore, ModelCallCaptureConfig
+from nemo_gym.models.model_call_capture import (
+    CaptureStore,
+    ModelCallCaptureConfig,
+    reconstruct_complete_streamed_response,
+)
 from nemo_gym.server_runtime.verifier_observability import merge_verifier_call_observation
 from nemo_gym.trajectory.model_call_record import (
     ModelCallRecord,
@@ -34,13 +41,48 @@ from nemo_gym.trajectory.trajectory_record import (
 logger = logging.getLogger(__name__)
 
 
+def _parse_cancelled_call_body(exchange: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Parse the raw body of a cancelled call that already has a 2xx status and a complete body."""
+    if exchange.get("error_category") != "cancelled" or isinstance(exchange.get("response"), dict):
+        return None
+    status = exchange.get("status_code")
+    if type(status) is not int or not 200 <= status < 300:
+        return None
+    raw_text = exchange.get("response_raw")
+    if not isinstance(raw_text, str) or not raw_text.strip():
+        return None
+    try:
+        parsed = orjson.loads(raw_text)
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, dict):
+        return parsed
+    dialect = exchange.get("dialect")
+    return reconstruct_complete_streamed_response(raw_text.encode(), dialect) if isinstance(dialect, str) else None
+
+
+def _build_captured_model_call_record(exchange: dict[str, Any], *, call_index: int) -> ModelCallRecord:
+    """Recover complete cancelled bodies before normalizing the captured exchange."""
+    response = _parse_cancelled_call_body(exchange)
+    if response is not None:
+        reader = StreamFailureReportReader()
+        reader.feed_text(exchange["response_raw"])
+        reader.finish()
+        exchange = {**exchange, "response": response, "response_raw": None}
+        if reader.report is not None:
+            report = FailureReport.model_validate(exchange.get("failure_report") or {}).merged(reader.report)
+            exchange["failure_report"] = report.model_dump(mode="json")
+    return build_model_call_record(exchange, call_index=call_index)
+
+
 # --- Model-call records read from captured exchanges ---
 
 
 def read_model_call_records(store: CaptureStore, rollout_id: str) -> list[ModelCallRecord]:
     """Read captured exchanges in durable append order."""
     return [
-        build_model_call_record(exchange, call_index=index) for index, exchange in enumerate(store.read(rollout_id))
+        _build_captured_model_call_record(exchange, call_index=index)
+        for index, exchange in enumerate(store.read(rollout_id))
     ]
 
 
@@ -58,7 +100,7 @@ def _read_capture_records(
     verifier_invocations: dict[str, "VerifierInvocation"] = {}
     for index, exchange in exchanges:
         try:
-            call = build_model_call_record(exchange, call_index=index)
+            call = _build_captured_model_call_record(exchange, call_index=index)
             calls.append(call)
             merge_verifier_call_observation(verifier_invocations, exchange, model_call_id=call.model_call_id)
         except Exception:
@@ -202,18 +244,19 @@ def merge_model_call_capture_into_record(
     # Captured SSE preserves the terminal report even when an external client ignores the extension.
     # A model call's selected failure is only an observation of the enclosing episode.
     for call in calls:
+        report = call.failure_report if call.error_category == "cancelled" else None
         if isinstance(call.response_raw, str) and call.dialect in {"responses", "chat"}:
             reader = StreamFailureReportReader()
             reader.feed_text(call.response_raw)
             reader.finish()
             if reader.report is not None:
-                observed = reader.report.model_copy(update={"failure_id": None})
-                existing = FailureReportRow.report(record)
-                if any(
-                    key in existing.events and existing.events[key] != event for key, event in observed.events.items()
-                ):
-                    observed = observed.model_copy(update={"omitted": True})
-                record.update(FailureReportRow.merged_into(record, observed))
+                report = report.merged(reader.report) if report is not None else reader.report
+        if report is not None:
+            observed = report.model_copy(update={"failure_id": None})
+            existing = FailureReportRow.report(record)
+            if any(key in existing.events and existing.events[key] != event for key, event in observed.events.items()):
+                observed = observed.model_copy(update={"omitted": True})
+            record.update(FailureReportRow.merged_into(record, observed))
     observations = record.get(NG_AGENT_OBSERVATIONS_KEY)
     if observations is not None:
         try:

@@ -326,7 +326,26 @@ def _normalized_trajectory_calls(trajectory: dict[str, Any]) -> list[dict[str, A
     return calls
 
 
+def _is_delivered_cancelled(call: dict[str, Any]) -> bool:
+    """Recognize recovered cancelled calls as delivered from their terminal metadata.
+
+    A completed Responses status or a finish reason suffices unless the response explicitly failed.
+    This includes ``response.incomplete`` with a reason such as ``max_output_tokens``: delivered here
+    does not mean the answer is complete. A cancelled call with neither stays failed.
+    """
+    status = call.get("status_code")
+    return (
+        call.get("error_category") == "cancelled"
+        and type(status) is int
+        and 200 <= status < 300
+        and (call.get("response_status") == "completed" or call.get("finish_reason") is not None)
+        and call.get("response_status") not in {"failed", "error", "cancelled"}
+    )
+
+
 def _is_failed(call: dict[str, Any]) -> bool:
+    if _is_delivered_cancelled(call):
+        return False
     status = call.get("status_code")
     response_status = call.get("response_status")
     return (
