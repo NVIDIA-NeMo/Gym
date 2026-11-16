@@ -362,6 +362,10 @@ class SandboxExecError(Exception):
         self.failure_kind = failure_kind
 
 
+class WorktreeCommitError(Exception):
+    """Git ran and rejected the required commit; score the attempt as a task failure."""
+
+
 class PrefixPassKAgent(SimpleResponsesAPIAgent):
     config: PrefixPassKAgentConfig
 
@@ -552,11 +556,16 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
                 TRANSPORT_PEER_DROP if isinstance(exc, (ConnectionError, ClientConnectionError)) else AGENT_RUN_ERROR
             )
             raise SandboxExecError(kind, f"worktree commit failed: {type(exc).__name__}: {exc}"[:500]) from exc
-        if result.return_code != 0 or result.error_type:
+        if result.error_type:
             raise SandboxExecError(
                 AGENT_RUN_ERROR,
                 f"worktree commit failed (exit={result.return_code}, error={result.error_type}): "
                 f"{result.stderr or result.stdout or 'no details'}"[:500],
+            )
+        if result.return_code != 0:
+            raise WorktreeCommitError(
+                f"worktree commit rejected (exit={result.return_code}): "
+                f"{result.stderr or result.stdout or 'no details'}"[:500]
             )
 
     async def _worktree_patch(self, sandbox: AsyncSandbox, base: Optional[str]) -> Optional[str]:
@@ -860,6 +869,7 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
 
             stats = self._session_id_to_stats.setdefault(session_key, {})
             aborted = stats.get("exec_errors", 0) > 0
+            commit_failed = False
             if not aborted:
                 # Skipped on an aborted attempt: its sandbox just failed to run a command.
                 if self.config.record_git_state:
@@ -873,7 +883,10 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
                     except SandboxExecError as exc:
                         aborted = True
                         stats.update(exec_errors=1, failure_kind=exc.failure_kind, failure_reason=str(exc))
-                if self.config.uncommit_worktree and not aborted:
+                    except WorktreeCommitError as exc:
+                        commit_failed = True
+                        stats.update(failure_kind="prefix_pass_k:commit_rejected", failure_reason=str(exc))
+                if self.config.uncommit_worktree and not (aborted or commit_failed):
                     # After record_git_state, so the diagnostic still shows what the model did.
                     await self._uncommit_worktree(sandbox, initial_head)
 
@@ -889,7 +902,7 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
                 await raise_for_status(verify_response)
                 verify_json = await get_response_json(verify_response)
             except Exception:
-                if not aborted:
+                if not (aborted or commit_failed):
                     raise
                 print("prefix_pass_k: verify failed on an aborted attempt", format_exc(), file=sys.stderr)
                 verify_json = verify_request.model_dump()
@@ -899,6 +912,8 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
                 # The infrastructure failed, not the candidate: whatever the verifier saw is
                 # not a measurement of it, so the sample is masked out of pass@k.
                 verify_json = verify_json | {"reward": 0.0, "mask_sample": True}
+            elif commit_failed:
+                verify_json = verify_json | {"reward": 0.0, "mask_sample": False}
             return PrefixPassKVerifyResponse.model_validate(verify_json | stats)
         finally:
             # Whatever ended the attempt -- a model or verifier error, a cancelled

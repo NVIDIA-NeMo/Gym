@@ -497,7 +497,7 @@ class RepoSandbox:
 
     async def exec(self, command, timeout_s=None):
         done = self.run(command)
-        return SimpleNamespace(stdout=done.stdout, stderr=done.stderr, return_code=done.returncode)
+        return SimpleNamespace(stdout=done.stdout, stderr=done.stderr, return_code=done.returncode, error_type=None)
 
 
 @pytest.mark.skipif(shutil.which("git") is None or shutil.which("bash") is None, reason="needs git and bash")
@@ -900,7 +900,6 @@ class TestSandboxIsReleasedOnEveryExit:
 @pytest.mark.parametrize(
     "failure,kind",
     [
-        (_result(stdout="fatal: cannot commit", return_code=128), "agent_run_error"),
         (_result(stderr="provider error", error_type="sandbox"), "agent_run_error"),
         (_result(stderr="timed out", error_type="timeout"), "agent_run_error"),
         (ConnectionResetError("peer reset"), "transport_peer_drop"),
@@ -1070,3 +1069,78 @@ def test_deepswe_builder_joins_full_task_names_and_preserves_multicall_observati
         assert block["prefix"][0]["captured_observations"] == [f"ls {label}", f"pwd {label}"]
         assert block["prefix"][1]["observation"] == f"format error {label}"
         assert block["target"]["action"] == "DECISIVE"
+
+
+@pytest.mark.parametrize("reject_commit", [False, True])
+@pytest.mark.parametrize("verify_fails", [False, True])
+def test_required_commit_with_real_git(tmp_path, monkeypatch, reject_commit, verify_fails):
+    """Score Git rejection as an unmasked zero and successful commits with the verifier reward."""
+    repo = RepoSandbox(tmp_path)
+    initialized = repo.run("git init -q && printf base > tracked && git add tracked && git commit -qm base")
+    assert initialized.returncode == 0, initialized.stderr
+    assert repo.run("git config user.name seed && git config user.email seed@example.com").returncode == 0
+    repo.ENV = {"PATH": os.environ["PATH"]}
+    helper = TestSandboxIsReleasedOnEveryExit()
+    verified = []
+
+    async def responses(request, params):
+        """Apply candidate edits and optionally invalidate the repository's Git identity."""
+        (tmp_path / "tracked").write_text("candidate change")
+        (tmp_path / "new-file").write_text("untracked change")
+        staged = repo.run("git add tracked")
+        assert staged.returncode == 0
+        if reject_commit:
+            assert repo.run("git config --local user.name ''").returncode == 0
+        return helper._response()
+
+    def verify(params):
+        """Read committed files as a committed-only collector would."""
+        verified.append(repo.run("git show HEAD:tracked").stdout)
+        if verify_fails:
+            raise RuntimeError("verifier failed after commit rejection")
+        return params | {"reward": 1.0}
+
+    agent, stops, request, body = helper._agent(monkeypatch, responses, verify)
+    agent.config.commit_worktree = True
+    agent.config.uncommit_worktree = True
+    connect = agent._connect_sandbox
+    commands = []
+
+    async def exec_command(command, timeout_s=None):
+        """Execute the required commit in a real Git repository."""
+        commands.append(command)
+        return await repo.exec(command, timeout_s=timeout_s)
+
+    async def connect_with_exec(seed):
+        """Attach real Git execution while retaining the sandbox cleanup recorder."""
+        sandbox = await connect(seed)
+        sandbox.exec = exec_command
+        return sandbox
+
+    async def uncommit(sandbox, base):
+        """Ensure only successful commits permit later Git mutations."""
+        assert not reject_commit
+
+    object.__setattr__(agent, "_connect_sandbox", connect_with_exec)
+    object.__setattr__(agent, "_uncommit_worktree", uncommit)
+    if verify_fails and not reject_commit:
+        with pytest.raises(RuntimeError, match="verifier failed"):
+            asyncio.run(agent.run(request, body))
+    else:
+        result = asyncio.run(agent.run(request, body))
+        assert (result.reward, result.mask_sample) == (0.0 if reject_commit else 1.0, False)
+        if reject_commit:
+            assert result.failure_kind == "prefix_pass_k:commit_rejected"
+            assert "worktree commit rejected" in result.failure_reason
+        else:
+            assert repo.run("git show HEAD:new-file").stdout == "untracked change"
+    assert verified == ["base" if reject_commit else "candidate change"]
+    assert len(commands) == 1
+    helper._assert_released(agent, stops)
+
+
+@pytest.mark.parametrize("return_code", [1, 128])
+def test_plain_git_exit_is_not_evidence_of_infrastructure_failure(return_code):
+    """Ambiguous nonzero process exits follow the unmasked task-failure policy."""
+    with pytest.raises(AGENT.WorktreeCommitError, match=f"exit={return_code}"):
+        asyncio.run(_bare_agent()._commit_worktree(FakeSandbox(_result(return_code=return_code))))

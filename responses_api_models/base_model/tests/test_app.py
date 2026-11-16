@@ -31,7 +31,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.client.server_client import ServerClient
+from nemo_gym.client import ServerClient
 
 
 def _load(name: str, path: Path):
@@ -434,7 +434,7 @@ def test_multiworker_import_exports_app(monkeypatch, module_name, worker):
     """Import the entrypoint as a worker and expose its FastAPI application."""
     from fastapi import FastAPI
 
-    from nemo_gym.models.base_responses_api_model import SimpleResponsesAPIModel
+    from nemo_gym.models import SimpleResponsesAPIModel
     from nemo_gym.utils import server_process
 
     app = FastAPI()
