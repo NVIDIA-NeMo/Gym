@@ -143,6 +143,19 @@ async def test_unbound_compatibility_run_fails_before_calling_resources(agent):
     agent.server_client.post.assert_not_awaited()
 
 
+def test_gzip_rejects_local_execution_before_calling_resources(agent):
+    agent.config.gzip_requests_enabled = True
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/responses", json={"input": "task"})
+        assert response.status_code == 422
+        assert response.json()["detail"] == "gzip_requests_enabled requires an agent session"
+
+        run = client.post("/run", json={"responses_create_params": {"input": "task"}})
+        assert run.status_code == 422
+        assert run.json()["detail"] == "gzip_requests_enabled requires an agent session"
+    agent.server_client.post.assert_not_called()
+
+
 async def test_unbound_direct_responses_remains_available(agent):
     agent.config.resources_server = None
     result = episode(agent)

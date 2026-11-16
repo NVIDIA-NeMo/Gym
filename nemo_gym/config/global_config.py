@@ -931,17 +931,32 @@ Duplicate config paths:
 
     def raise_on_gzip_mismatch(self, global_config_dict: DictConfig) -> None:
         """Require gzip senders and receivers to be enabled on connected servers."""
+        boolean = TypeAdapter(bool)
+
+        def gzip_enabled(server_config: DictConfig, setting: str) -> bool:
+            try:
+                return boolean.validate_python(server_config.get("gzip_requests_enabled", False))
+            except ValidationError as error:
+                raise ConfigError(f"'{setting}' must be a boolean or a value accepted as a boolean.") from error
+
         models = {
             instance.name: instance.get_inner_run_server_config_dict()
             for instance in self.filter_for_server_instance_configs(global_config_dict)
             if instance.SERVER_TYPE == MODEL_SERVER_TYPE_KEY_NAME
         }
+        model_gzip_enabled: Dict[str, bool] = {}
+        for model_name, model_config in models.items():
+            model_type = model_type_for(global_config_dict, model_name)
+            if model_type == "dummy_model":
+                continue
+            setting = f"{model_name}.{MODEL_SERVER_TYPE_KEY_NAME}.{model_type}.gzip_requests_enabled"
+            model_gzip_enabled[model_name] = gzip_enabled(model_config, setting)
         models_with_compressing_agents: Set[str] = set()
         errors: List[str] = []
         for agent in self._agent_instances(global_config_dict):
-            if not agent.server_config.get("gzip_requests_enabled", False):
-                continue
             agent_setting = f"{agent.name}.{AGENT_SERVER_TYPE_KEY_NAME}.{agent.agent_type}.gzip_requests_enabled"
+            if not gzip_enabled(agent.server_config, agent_setting):
+                continue
             reference = self._model_server_reference(agent.server_config)
             if reference is None or reference.get("type") != MODEL_SERVER_TYPE_KEY_NAME:
                 errors.append(
@@ -950,14 +965,17 @@ Duplicate config paths:
                 )
                 continue
             model_name = reference["name"]
+            # Preparation and planning inject a placeholder without a runtime receiver.
+            if model_type_for(global_config_dict, model_name) == "dummy_model":
+                continue
             models_with_compressing_agents.add(model_name)
-            if not models[model_name].get("gzip_requests_enabled", False):
+            if not model_gzip_enabled[model_name]:
                 errors.append(
                     f"{agent_setting}=true but model '{model_name}' has gzip_requests_enabled=false. "
                     "Enable gzip_requests_enabled on that model or disable it on the harness."
                 )
-        for model_name, model_config in models.items():
-            if model_config.get("gzip_requests_enabled", False) and model_name not in models_with_compressing_agents:
+        for model_name, enabled in model_gzip_enabled.items():
+            if enabled and model_name not in models_with_compressing_agents:
                 errors.append(
                     f"Model '{model_name}' has gzip_requests_enabled=true, but no connected harness enables gzip. "
                     "Enable gzip_requests_enabled on at least one harness referencing this model, "

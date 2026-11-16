@@ -1073,6 +1073,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
         rollout_id: Optional[str] = None,
         observation_collector: Optional[Callable[[AgentObservationBundle], None]] = None,
     ) -> NeMoGymResponse:
+        if self.config.gzip_requests_enabled:
+            raise HTTPException(422, "gzip_requests_enabled requires an agent session")
         if (body.metadata or {}).get(AGENT_TIMEOUT_METADATA_KEY) is not None:
             LOG.warning("Hermes host execution does not bound the run by %s", AGENT_TIMEOUT_METADATA_KEY)
         payload = self._worker_payload(body, agent_session_id=uuid4().hex, rollout_id=rollout_id, mcp_accesses=[])
@@ -1229,6 +1231,8 @@ class HermesAgent(SimpleResponsesAPIAgent):
     async def run(self, request: Request, body: HermesAgentRunRequest) -> HermesAgentVerifyResponse:
         if self._agent_session_id_from_request(request) is not None:
             raise AgentSessionConflictError("Use the agent session responses and close routes")
+        if self.config.gzip_requests_enabled:
+            raise HTTPException(422, "gzip_requests_enabled requires an agent session")
         if self.config.resources_server is None:
             raise HTTPException(422, "Hermes /run requires resources_server; use Environment Server /run for sessions")
         async with self.sem:

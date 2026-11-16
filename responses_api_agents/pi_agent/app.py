@@ -1683,6 +1683,8 @@ class PiAgent(SimpleResponsesAPIAgent):
         rollout_id: Optional[str] = None,
         collect_observations: bool = True,
     ) -> AgentEpisode:
+        if self.config.gzip_requests_enabled:
+            raise HTTPException(422, "gzip_requests_enabled requires an agent session")
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -1809,6 +1811,8 @@ class PiAgent(SimpleResponsesAPIAgent):
     async def run(self, request: Request, body: PiAgentRunRequest) -> PiAgentVerifyResponse:
         if self._agent_session_id_from_request(request) is not None:
             raise AgentSessionConflictError("Pi sessions require EnvironmentServer /run")
+        if self.config.gzip_requests_enabled:
+            raise HTTPException(422, "gzip_requests_enabled requires an agent session")
         if self.config.resources_server is None:
             raise HTTPException(
                 422, "Pi /run requires resources_server; use EnvironmentServer /run for sandbox sessions"

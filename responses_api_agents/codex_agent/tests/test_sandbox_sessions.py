@@ -245,6 +245,22 @@ def close_body(session_id):
     return {"agent_session_id": session_id, "episode_id": seed().episode_id.model_dump()}
 
 
+def test_gzip_rejects_local_execution_before_calling_resources(setup):
+    agent, sandbox = setup
+    agent.config.gzip_requests_enabled = True
+    agent.config.resources_server = {"type": "resources_servers", "name": "resources"}
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/responses", json={"input": "task"})
+        assert response.status_code == 422
+        assert response.json()["detail"] == "gzip_requests_enabled requires an agent session"
+
+        run = client.post("/run", json={"responses_create_params": {"input": "task"}})
+        assert run.status_code == 422
+        assert run.json()["detail"] == "gzip_requests_enabled requires an agent session"
+    agent.server_client.post.assert_not_called()
+    sandbox.exec.assert_not_awaited()
+
+
 @pytest.mark.parametrize("gzip_enabled", [False, True])
 def test_gzip_helper_is_uploaded_only_when_enabled(setup, gzip_enabled):
     agent, sandbox = setup

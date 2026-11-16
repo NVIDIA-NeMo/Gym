@@ -940,6 +940,14 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     def command_parts(self) -> list[str]:
         return shlex.split(self.command)
 
+    @model_validator(mode="after")
+    def _validate_gzip_version(self) -> Self:
+        if self.gzip_requests_enabled and opencode_major(self.opencode_version) >= 2:
+            raise ValueError(
+                "gzip_requests_enabled supports OpenCode 1 sandbox sessions only; OpenCode 2 is unsupported"
+            )
+        return self
+
 
 class OpenCodeAgentRunRequest(BaseRunRequest):
     """Request for the deprecated local episode entry point in ``legacy_app.py``."""
@@ -1325,6 +1333,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         rollout_id: Optional[str] = None,
         collect_observations: bool = True,
     ) -> AgentEpisode:
+        if self.config.gzip_requests_enabled:
+            raise HTTPException(422, "gzip_requests_enabled requires an agent session")
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]

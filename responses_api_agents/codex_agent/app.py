@@ -1950,6 +1950,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
     ) -> NeMoGymResponse:
+        if self.config.gzip_requests_enabled:
+            raise HTTPException(422, "gzip_requests_enabled requires an agent session")
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -2052,6 +2054,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
     async def run(self, request: Request, body: CodexAgentRunRequest) -> CodexAgentVerifyResponse:
         if self._session_marker(request) is not None:
             raise AgentSessionConflictError("Use the agent session responses and close routes")
+        if self.config.gzip_requests_enabled:
+            raise HTTPException(422, "gzip_requests_enabled requires an agent session")
         if self.config.resources_server is None:
             raise HTTPException(422, "Legacy /run requires resources_server")
         async with self.sem:

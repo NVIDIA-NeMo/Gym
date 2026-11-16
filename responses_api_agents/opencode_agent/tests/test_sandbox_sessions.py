@@ -293,6 +293,34 @@ def active_sessions(agent):
     return {key: record.state for key, record in agent._session_records.items() if record.state is not None}
 
 
+def test_gzip_rejects_local_execution_before_calling_resources(setup):
+    agent, sandbox = setup
+    agent.config.gzip_requests_enabled = True
+    agent = OpenCodeLegacyAgent(config=agent.config, server_client=agent.server_client)
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/responses", json={"input": "task"})
+        assert response.status_code == 422
+        assert response.json()["detail"] == "gzip_requests_enabled requires an agent session"
+
+        run = client.post("/run", json={"responses_create_params": {"input": "task"}})
+        assert run.status_code == 422
+        assert run.json()["detail"] == "gzip_requests_enabled requires an agent session"
+    agent.server_client.post.assert_not_called()
+    sandbox.exec.assert_not_awaited()
+
+
+def test_gzip_rejects_opencode_2_configuration():
+    with pytest.raises(ValidationError, match="OpenCode 2 is unsupported"):
+        OpenCodeAgentConfig(
+            name="opencode",
+            host="localhost",
+            port=8001,
+            entrypoint="app.py",
+            opencode_version="2.2.7",
+            gzip_requests_enabled=True,
+        )
+
+
 @pytest.mark.parametrize("stage", ["prepare", "install"])
 @pytest.mark.parametrize("error_type", ["timeout", "sandbox"])
 @pytest.mark.parametrize("owned", [False, True])
