@@ -13,14 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import hashlib
+import logging
 import re
 import sys
 from glob import glob
 from pathlib import Path
 from shlex import quote
-from shutil import rmtree
-from tempfile import TemporaryDirectory
+from shutil import copytree, rmtree
+from tempfile import TemporaryDirectory, mkdtemp
 from time import monotonic, time
 from traceback import format_exc
 from typing import Any, Dict, Optional, Sequence, Tuple
@@ -72,6 +74,7 @@ from resources_servers.swebench.swebench_patches import (
     run_instance,
 )
 from resources_servers.swebench.task_data import SWEBenchImageAssets, SWEBenchTestAsset, image_assets_from_json
+from resources_servers.swebench.verification_logs import verification_log_path
 
 
 # The longest failure_reason a failure event accepts.
@@ -98,6 +101,9 @@ def restore_test_assets_from_staging(test_spec: TestSpec, assets: Sequence[SWEBe
         test_spec.eval_script_list[position] = f"cp {quote(staged_test_asset_path(index))} {quote(asset.path)}"
 
 
+LOG = logging.getLogger(__name__)
+
+
 class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
     apply_anti_cheating: bool = True
@@ -111,12 +117,18 @@ class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_provider: str
     sandbox_config: Dict[str, Any]
 
-    clear_swebench_debug_logs: bool = True
+    # The harness writes each verification's logs to a temporary folder that is removed afterwards.
+    # To keep a copy, give an absolute node-local path such as one under /tmp.
+    verification_log_dir: Path | None = None
+    # No longer has an effect: the harness logs are always removed after each verify.
+    # It is still accepted so existing configs load.
+    clear_swebench_debug_logs: bool | None = None
 
     def model_post_init(self, context: Any, /) -> None:
-        if self.is_verifying_golden_patch and self.clear_swebench_debug_logs:
-            print("Turning off logs clear since `is_verifying_golden_patch=true`")
-            self.clear_swebench_debug_logs = False
+        if self.clear_swebench_debug_logs is False and self.verification_log_dir is None:
+            LOG.warning(
+                "clear_swebench_debug_logs no longer keeps logs. Set verification_log_dir to keep a copy of each verify's logs."
+            )
 
 
 class SWEBenchInstanceRequest(BaseModel):
@@ -541,19 +553,31 @@ Stderr:
 
         # Res has 2 keys: completed (whether evaluation completed or not), resolved (whether the issue is resolved)
         start_time = time()
-        res = await run_instance(
-            test_spec=test_spec,
-            pred={
-                "instance_id": test_spec.instance_id,
-                "model_patch": model_patch,
-            },
-            rm_image=False,
-            force_rebuild=False,
-            client=mock_container,
-            run_id=run_id,
-            timeout=self.config.evaluation_timeout,
-            rewrite_reports=False,
-        )
+        # The harness writes its logs under its working directory by default, which is this server's source folder.
+        # A temporary folder keeps them off the checkout, and removing it in `finally` covers interrupted verifies.
+        log_root = Path(mkdtemp(prefix="swebench-verify-"))
+        try:
+            res = await run_instance(
+                test_spec=test_spec,
+                pred={
+                    "instance_id": test_spec.instance_id,
+                    "model_patch": model_patch,
+                },
+                rm_image=False,
+                force_rebuild=False,
+                client=mock_container,
+                run_id=run_id,
+                timeout=self.config.evaluation_timeout,
+                rewrite_reports=False,
+                log_root=log_root,
+            )
+            test_output_fpaths = glob(str(log_root / "**" / "test_output.txt"), recursive=True)
+            test_output = Path(test_output_fpaths[0]).read_text() if test_output_fpaths else ""
+            log_dir = verification_log_path(self.config.verification_log_dir, body.instance_id)
+            if log_dir is not None:
+                await asyncio.to_thread(copytree, log_root, log_dir, symlinks=True)
+        finally:
+            rmtree(log_root, ignore_errors=True)
         patch_verification_time_taken = time() - start_time
         verifier_sandbox_wall_time_s = monotonic() - verifier_sandbox_lifecycle_started_at
 
@@ -595,18 +619,6 @@ Stderr:
                 )
             )
 
-        log_dir = Path(__file__).parent / "logs/run_evaluation" / run_id
-
-        test_output_fpaths = glob(str(log_dir / "**" / "test_output.txt"), recursive=True)
-        test_output = ""
-        if test_output_fpaths:
-            test_output_fpath = Path(test_output_fpaths[0])
-            test_output = test_output_fpath.read_text()
-
-        if self.config.clear_swebench_debug_logs:
-            rmtree(str(log_dir), ignore_errors=True)
-            log_dir = ""
-
         return SWEBenchVerifyResponse(
             **body.model_dump(),
             # run_instance returns "completed"; the response field is "evaluation_completed".
@@ -623,7 +635,7 @@ Stderr:
             failure_kind=VERIFIER_ERROR if failure_reason is not None else None,
             failure_reason=failure_reason,
             test_output=test_output,
-            log_dir=str(log_dir),
+            log_dir=str(log_dir) if log_dir is not None else "",
             verifier_sandbox_observation=verifier_sandbox_observation,
         )
 
