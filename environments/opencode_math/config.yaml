@@ -15,7 +15,7 @@ math_with_judge:
 opencode_math_agent:
   responses_api_agents:
     opencode_agent:
-      entrypoint: app.py
+      entrypoint: legacy_app.py
       resources_server:
         type: resources_servers
         name: math_with_judge

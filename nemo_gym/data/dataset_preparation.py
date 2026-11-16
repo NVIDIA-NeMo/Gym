@@ -609,6 +609,17 @@ class TrainDataProcessor(BaseModel):
     ) -> List[ServerInstanceConfig]:
         parser = GlobalConfigDictParser()
         server_instance_configs = parser.filter_for_server_instance_configs(global_config_dict)
+        for instance in server_instance_configs:
+            inner = instance.get_inner_run_server_config()
+            if inner.datasets is not None:
+                declared = instance.get_inner_run_server_config_dict().datasets
+                # An unused dataset may reference unavailable input paths; resolve only selected types.
+                inner.datasets = [
+                    type(dataset).model_validate(OmegaConf.to_container(raw, resolve=True))
+                    if dataset.type in config.in_scope_dataset_types
+                    else dataset
+                    for dataset, raw in zip(inner.datasets, declared, strict=True)
+                ]
         self._all_server_instance_configs = list(server_instance_configs)
 
         # Datasets may be declared by resources servers (the normal, decoupled home: the RS owns
@@ -1304,7 +1315,14 @@ This could be due to a change in how metrics are calculated, leading to outdated
                         # Count each source row once, using its original JSONL line index.
                         if validator is not None and row_index % d.num_repeats == 0:
                             validator.validate_row(row_index // d.num_repeats, row)
-                        if d.taskset is not None:
+                        if d.taskset is not None and is_materialized_task_row(row):
+                            # A prepared task row already names its taskset; it must be this dataset's.
+                            if row["task_id"].get("taskset") != d.taskset:
+                                raise ValueError(
+                                    f"{d.jsonl_fpath} row {row_index}: task_id.taskset "
+                                    f"{row['task_id'].get('taskset')!r} differs from the dataset taskset {d.taskset!r}"
+                                )
+                        elif d.taskset is not None:
                             # Keep collector identity outside task_data so shards and retries
                             # retain their capture keys after materialization, and keep a row's
                             # request to skip token capture.

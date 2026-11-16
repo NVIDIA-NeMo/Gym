@@ -313,11 +313,19 @@ _gym_chain_settled() {{
         NF != 4 || !($1 in want) || $3 !~ /^[0-9]+$/ || $4 !~ /^[0-9]+$/ {{ bad = 1; next }}
         {{
             split($2, words, " "); state = words[1]; sub(/[+]$/, "", state)
-            if (state !~ /^(COMPLETED|FAILED|CANCELLED|TIMEOUT|OUT_OF_MEMORY|NODE_FAIL|BOOT_FAIL|DEADLINE|PREEMPTED)$/) bad = 1
+            # REQUEUED is what sacct keeps for an incarnation that a later one followed: it has ended. It is terminal
+            # only then (checked below); the last incarnation still REQUEUED waits to run again.
+            if (state == "REQUEUED") requeued_at[$1, $4 + 0] = 1
+            else if (state !~ /^(COMPLETED|FAILED|CANCELLED|TIMEOUT|OUT_OF_MEMORY|NODE_FAIL|BOOT_FAIL|DEADLINE|PREEMPTED)$/) bad = 1
             rows[$1]++; seen[$1, $4 + 0]++
+            if (($4 + 0) > last[$1]) last[$1] = $4 + 0
         }}
         END {{
             if (bad) exit 1
+            for (key in requeued_at) {{
+                split(key, part, SUBSEP)
+                if (part[2] + 0 >= last[part[1]]) exit 1
+            }}
             for (id in want) {{
                 if (!(id in rows)) exit 1
                 for (r = 0; r < rows[id]; r++) if (seen[id, r] != 1) exit 1

@@ -66,7 +66,7 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
-from nemo_gym.server_runtime import BaseRunRequest, MCPToolAccess
+from nemo_gym.server_runtime import MCPToolAccess
 from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
@@ -652,9 +652,6 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
             records=[invocation, *tool_calls, sandbox],
             gaps=[ObservationGap(**gap) for gap in report["gaps"]],
         )
-
-    async def run(self, request: Request, body: BaseRunRequest = Body()) -> None:
-        raise HTTPException(409, "CrewAI runs only in agent sessions; use an Environment Server")
 
 
 if __name__ == "__main__":
