@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Stateless VideoMME-v2 verification with fixed-cohort coverage accounting."""
+"""VideoMME-v2 verification with fixed-cohort coverage accounting.
+
+Grading is stateless. In the agentic setting the server can also lend each episode a sandbox that holds the video
+(video_mcqa/sandbox.py).
+"""
 
 from collections import Counter
 from pathlib import Path
@@ -11,14 +15,10 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.server_runtime import (
-    BaseResourcesServerConfig,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    ReverifyMode,
-    SimpleResourcesServer,
-)
+from nemo_gym.server_runtime import BaseVerifyRequest, BaseVerifyResponse, ReverifyMode
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from resources_servers.video_mcqa.app import response_failure
+from resources_servers.video_mcqa.sandbox import VideoSandboxServer, VideoSandboxServerConfig
 from resources_servers.videomme_v2.metrics import (
     MetricSlice,
     QuestionGroup,
@@ -26,7 +26,6 @@ from resources_servers.videomme_v2.metrics import (
     validate_metric_cohort,
 )
 from resources_servers.videomme_v2.scoring import (
-    EXECUTION_FAILURE_METADATA_KEY,
     AnswerPolicy,
     Outcome,
     QuestionScore,
@@ -58,7 +57,7 @@ class CohortManifest(BaseModel):
         return self
 
 
-class VideoMMEV2ResourcesServerConfig(BaseResourcesServerConfig):
+class VideoMMEV2ResourcesServerConfig(VideoSandboxServerConfig):
     """A run must declare its cohort before any results are collected."""
 
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
@@ -97,8 +96,8 @@ def final_assistant_text(response: NeMoGymResponse) -> str:
     return ""
 
 
-class VideoMMEV2ResourcesServer(SimpleResourcesServer):
-    """No tools, process launches, LLM judge, mutable sessions or answer repair."""
+class VideoMMEV2ResourcesServer(VideoSandboxServer):
+    """No tools, LLM judge or answer repair; the only session state is the agentic setting's lent sandbox."""
 
     config: VideoMMEV2ResourcesServerConfig
     checkpoint_verify: ClassVar[Literal["replay"]] = "replay"
@@ -130,19 +129,7 @@ class VideoMMEV2ResourcesServer(SimpleResourcesServer):
         self._validate_metadata(body.verifier_metadata)
         if body.setting != cohort.setting:
             raise ValueError("Result setting differs from the frozen cohort")
-        failure = None
-        failure_reason = None
-        if body.response.status == "failed" or body.response.error is not None:
-            failure = "infrastructure_failure"
-            failure_reason = "The model endpoint reported a failed response; no answer was measured."
-        elif body.setting == "single_turn" and any(item.type == "function_call" for item in body.response.output):
-            failure = "execution_failure"
-            failure_reason = "A tool call is not a valid single-turn answer."
-        elif (
-            body.setting == "agentic" and (body.response.metadata or {}).get(EXECUTION_FAILURE_METADATA_KEY) == "true"
-        ):
-            failure = "execution_failure"
-            failure_reason = "The agent run failed; its final answer is not scored."
+        failure, failure_reason = response_failure(body.response, setting=body.setting)
         score = grade_answer(
             final_assistant_text(body.response),
             body.verifier_metadata,

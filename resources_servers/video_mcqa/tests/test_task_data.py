@@ -230,3 +230,37 @@ def test_schema_fields_match_the_runtime_models():
     assert set(VideoBinding.model_fields) == {"source", "sandbox_path", "sha256"}
     for request in WIRE.values():
         assert {"task_id", "setting", "verifier_metadata"} <= set(request.model_fields)
+
+
+@pytest.mark.parametrize("owner", OWNERS)
+def test_agentic_examples_ask_the_single_turn_questions_about_the_bound_committed_clips(owner):
+    data = SERVERS / owner / "data"
+    path = data / "example_agentic.jsonl"
+    lines = path.read_text().splitlines()
+    result = validate_jsonl_rows(owner, load_task_data_schema(SERVERS / owner), str(path), lines)
+    assert result.rows == 5 and result.clean, result.summary()
+    cohort_type = CohortManifest if owner == "videomme_v2" else AccuracyCohort
+    cohort = cohort_type.model_validate_json((data / "example_agentic_cohort.json").read_text())
+    single = cohort_type.model_validate_json((data / "example_cohort.json").read_text())
+    assert cohort.setting == "agentic" and cohort.model_copy(update={"setting": "single_turn"}) == single
+    single_rows = {
+        json.loads(line)["task_id"]: json.loads(line) for line in (data / "example.jsonl").read_text().splitlines()
+    }
+    for row in map(json.loads, lines):
+        assert (
+            row["setting"] == "agentic"
+            and row["verifier_metadata"] == single_rows[row["task_id"]]["verifier_metadata"]
+        )
+        binding = VideoBinding.model_validate(row["video_binding"])
+        clip = SERVERS.parent / binding.source
+        assert (
+            hashlib.sha256(clip.read_bytes()).hexdigest() == binding.sha256 == row["verifier_metadata"]["video_sha256"]
+        )
+        (text,) = [part["text"] for part in row["responses_create_params"]["input"][0]["content"]]
+        assert f"Video: /testbed/{binding.sandbox_path}\n" in text
+        (single_text,) = [
+            part["text"]
+            for part in single_rows[row["task_id"]]["responses_create_params"]["input"][0]["content"]
+            if part["type"] == "input_text"
+        ]
+        assert text.replace(f"\n\nVideo: /testbed/{binding.sandbox_path}", "") == single_text

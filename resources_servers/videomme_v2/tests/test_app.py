@@ -22,7 +22,6 @@ from resources_servers.videomme_v2.app import (
     VideoMMEV2VerifyRequest,
     final_assistant_text,
 )
-from resources_servers.videomme_v2.scoring import EXECUTION_FAILURE_METADATA_KEY
 from resources_servers.videomme_v2.task import VideoQuestion, prepare_agentic, prepare_single_turn
 
 
@@ -155,18 +154,21 @@ async def test_agentic_tool_calls_do_not_invalidate_a_final_answer(agentic_serve
 
 @pytest.mark.parametrize(
     "updates",
-    [{}, {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}],
-    ids=["failed_run", "length_limited"],
+    [
+        {"status": "failed", "error": {"code": "invalid_prompt", "message": "fixture: the model refused the request"}},
+        {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}},
+    ],
+    ids=["failed_run", "incomplete_run"],
 )
-async def test_failed_agent_run_stays_zero_when_its_saved_answer_is_replayed(agentic_server, updates) -> None:
+async def test_failed_or_incomplete_agent_run_is_zero_also_when_replayed(agentic_server, updates) -> None:
     row = prepare_agentic(question(), expected_answer="B", video_path="video/shapes.mp4")
-    failed = response(metadata={EXECUTION_FAILURE_METADATA_KEY: "true"}, **updates).model_dump()
-    saved, replayed = await grade_failed_run_and_replay(agentic_server, VideoMMEV2VerifyRequest, row, failed)
+    generated = response(**updates).model_dump()
+    saved, replayed = await grade_failed_run_and_replay(agentic_server, VideoMMEV2VerifyRequest, row, generated)
     assert final_assistant_text(NeMoGymResponse.model_validate(saved["response"])) == r"\boxed{B}"
     for result in (saved, replayed.model_dump()):
         assert (result["outcome"], result["predicted_answer"], result["reward"]) == ("execution_failure", None, 0)
         assert result["evaluation_completed"] and not result["mask_sample"]
-    plain = response(**updates).model_dump()
+    plain = response().model_dump()
     assert (
         await agentic_server.verify(VideoMMEV2VerifyRequest.model_validate({**row, "response": plain}))
     ).outcome == ("correct")

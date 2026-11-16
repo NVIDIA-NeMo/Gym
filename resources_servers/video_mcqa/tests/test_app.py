@@ -20,7 +20,6 @@ from resources_servers.video_mcqa.app import (
     final_assistant_text,
 )
 from resources_servers.video_mcqa.prepare import prepare_dataset
-from resources_servers.video_mcqa.scoring import EXECUTION_FAILURE_METADATA_KEY
 from resources_servers.video_mcqa.tests.helpers import (
     REVISION,
     grade_failed_run_and_replay,
@@ -114,24 +113,35 @@ async def test_model_failure_is_masked_and_cannot_be_called_correct(tmp_path, be
 @pytest.mark.parametrize("benchmark", ["videomme_v1", "lvbench"])
 @pytest.mark.parametrize(
     "updates",
-    [{}, {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}],
-    ids=["failed_run", "length_limited"],
+    [
+        {"status": "failed", "error": {"code": "invalid_prompt", "message": "fixture: the model refused the request"}},
+        {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}},
+    ],
+    ids=["failed_run", "incomplete_run"],
 )
-async def test_failed_agent_run_stays_zero_when_its_saved_answer_is_replayed(tmp_path, benchmark, updates) -> None:
+async def test_failed_or_incomplete_agent_run_is_zero_also_when_replayed(tmp_path, benchmark, updates) -> None:
     server, rows, _ = make_server(tmp_path, benchmark=benchmark, setting="agentic")
-    failed = response(metadata={EXECUTION_FAILURE_METADATA_KEY: "true"}, **updates)
-    saved, replayed = await grade_failed_run_and_replay(server, VideoMCQAVerifyRequest, rows[0], failed)
-    # The saved row keeps the correct-looking answer for inspection.
+    saved, replayed = await grade_failed_run_and_replay(server, VideoMCQAVerifyRequest, rows[0], response(**updates))
+    # The saved row keeps the correct-looking answer for inspection; its status decides the score on replay too.
     assert final_assistant_text(NeMoGymResponse.model_validate(saved["response"])) == r"\boxed{B}"
     for result in (saved, replayed.model_dump()):
         assert (result["outcome"], result["predicted_answer"], result["reward"]) == ("execution_failure", None, 0)
         assert result["evaluation_completed"] and not result["mask_sample"]
-    # Without the agent's marker the same answer is correct; a failed model call stays inconclusive.
-    assert (await server.verify(request(rows[0], response=response(**updates)))).outcome == "correct"
-    infrastructure = await server.verify(
-        request(rows[0], response={**failed, "status": "failed", "error": {"code": "server_error", "message": "x"}})
-    )
-    assert infrastructure.outcome == "infrastructure_failure" and infrastructure.mask_sample
+    direct = await server.verify(request(rows[0], response=response(**updates)))
+    assert direct.failure_kind == f"{benchmark}:execution_failure" and direct.failure_reason
+    # The same answer in a completed run is correct.
+    assert (await server.verify(request(rows[0]))).outcome == "correct"
+
+
+async def test_a_failed_model_call_is_masked_only_in_the_single_turn_setting(tmp_path) -> None:
+    failed = response(status="failed", error={"code": "server_error", "message": "fixture"})
+    for setting, outcome, masked in (
+        ("single_turn", "infrastructure_failure", True),
+        ("agentic", "execution_failure", False),
+    ):
+        server, rows, _ = make_server(tmp_path, setting=setting)
+        result = await server.verify(request(rows[0], response=failed))
+        assert (result.outcome, result.mask_sample, result.reward) == (outcome, masked, 0)
 
 
 @pytest.mark.parametrize("setting", ["single_turn", "agentic"])

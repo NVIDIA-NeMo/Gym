@@ -1,4 +1,4 @@
-# VideoMME-v2: single-turn video evaluation
+# VideoMME-v2: single-turn and agentic video evaluation
 
 This resources server provides the shared task/scoring primitives and a
 stateless Gym verifier. Its single-turn config runs the stock `simple_agent`
@@ -8,9 +8,14 @@ on the prepared video, followed by deterministic verification, and reports Raw
 Acc and the official Nonlinear Score, overall and by L1/L2/L3, under
 `Video_MME_v2`.
 
-An agentic setting (a sandboxed agent with video tools) is planned as a
-separate change. The verifier already accepts `setting: agentic` cohorts and
-reports them under their own namespace, `Video_MME_v2_agentic`.
+The agentic config, `configs/videomme_v2_agentic.yaml`, runs the stock
+`opencode_agent` with the video tools `watch_video` and `view_image` in a
+sandbox that this server lends each episode, through a
+`single_agent_turn_legacy` Environment Server (see the shared
+[agentic setting](../video_mcqa/README.md#agentic-setting)). It needs
+`videomme_v2_agentic_cohort_manifest`, `videomme_v2_agentic_video_roots` and a
+sandbox image (`VIDEO_MCQA_SANDBOX_IMAGE`), and reports under its own
+namespace, `Video_MME_v2_agentic`.
 
 This is not an EF-certified benchmark: a registered dataset artifact and a full
 real-model baseline are separate steps. No checkpoint, credential, benchmark
@@ -25,9 +30,9 @@ and optional level/group. It has no gold-answer field.
 
 `prepare_single_turn()` emits one user turn containing an already-prepared
 `input_video` and question text. It does not choose sampling parameters.
-`prepare_agentic()` emits question text plus the bound sandbox video path for
-the planned agentic setting; it does not force a tool call or add
-benchmark-specific system instructions.
+`prepare_agentic()` emits question text plus the sandbox path of the video for
+the agentic setting; it does not force a tool call or add benchmark-specific
+system instructions.
 
 Both builders return the standard `responses_create_params` /
 `verifier_metadata` separation. Gold and provenance stay in verifier metadata.

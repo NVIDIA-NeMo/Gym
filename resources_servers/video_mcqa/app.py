@@ -3,7 +3,8 @@
 
 """Shared fixed-cohort verifier for VideoMME-v1 and LVBench accuracy.
 
-Run directly (configs/video_mcqa_single_turn.yaml), it scores the benchmark its cohort names.
+Run directly (configs/video_mcqa_single_turn.yaml), it scores the benchmark its cohort names. In the agentic setting
+it can also lend each episode a sandbox that holds the video (sandbox.py).
 """
 
 from collections import Counter
@@ -15,17 +16,11 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.server_runtime import (
-    BaseResourcesServerConfig,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    ReverifyMode,
-    SimpleResourcesServer,
-)
+from nemo_gym.server_runtime import BaseVerifyRequest, BaseVerifyResponse, ReverifyMode
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.video_mcqa.dataset import SOURCES, Benchmark, validate_subsets
+from resources_servers.video_mcqa.sandbox import VideoSandboxServer, VideoSandboxServerConfig
 from resources_servers.video_mcqa.scoring import (
-    EXECUTION_FAILURE_METADATA_KEY,
     AnswerPolicy,
     Failure,
     Outcome,
@@ -66,7 +61,7 @@ class AccuracyCohort(BaseModel):
         return self
 
 
-class VideoMCQAResourcesServerConfig(BaseResourcesServerConfig):
+class VideoMCQAResourcesServerConfig(VideoSandboxServerConfig):
     """The task cohort is a required input, not inferred from returned results."""
 
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
@@ -105,7 +100,29 @@ def final_assistant_text(response: NeMoGymResponse) -> str:
     return ""
 
 
-class VideoMCQAResourcesServer(SimpleResourcesServer):
+def response_failure(response: NeMoGymResponse, *, setting: Setting) -> tuple[Failure | None, str | None]:
+    """Why a response is not graded on its answer, from its own status, so a replayed row scores the same.
+
+    Single-turn: a failed model call is masked (no answer was measured), and a tool call is a wrong answer. Agentic:
+    the Environment Server sends verify only the failed runs that its outcome policy scores (a model 400, 413 or 422,
+    an out-of-memory kill, or a run without an outcome), and an incomplete run ended on a time, output or context
+    limit; both score 0 even when an earlier text holds an answer.
+    """
+    if setting == "agentic":
+        if response.status == "failed" or response.error is not None:
+            return "execution_failure", "The agent run failed; its final answer is not scored."
+        if response.status == "incomplete":
+            limit = getattr(response.incomplete_details, "reason", None) or "a limit"
+            return "execution_failure", f"The agent run stopped at {limit}; its final answer is not scored."
+        return None, None
+    if response.status == "failed" or response.error is not None:
+        return "infrastructure_failure", "The model endpoint failed; no answer was measured."
+    if any(item.type == "function_call" for item in response.output):
+        return "execution_failure", "Tool calls are not allowed in the single-turn setting."
+    return None, None
+
+
+class VideoMCQAResourcesServer(VideoSandboxServer):
     """Common deterministic verifier; concrete servers fix the benchmark, this one takes the cohort's."""
 
     config: VideoMCQAResourcesServerConfig
@@ -134,19 +151,7 @@ class VideoMCQAResourcesServer(SimpleResourcesServer):
     async def verify(self, body: VideoMCQAVerifyRequest) -> VideoMCQAVerifyResponse:
         """Score final answers only; masked infrastructure failures remain inconclusive."""
         self._validate_metadata(body.verifier_metadata, setting=body.setting)
-        failure: Failure | None = None
-        reason = None
-        if body.response.status == "failed" or body.response.error is not None:
-            failure = "infrastructure_failure"
-            reason = "The model endpoint failed; no answer was measured."
-        elif body.setting == "single_turn" and any(item.type == "function_call" for item in body.response.output):
-            failure = "execution_failure"
-            reason = "Tool calls are not allowed in the single-turn setting."
-        elif (
-            body.setting == "agentic" and (body.response.metadata or {}).get(EXECUTION_FAILURE_METADATA_KEY) == "true"
-        ):
-            failure = "execution_failure"
-            reason = "The agent run failed; its final answer is not scored."
+        failure, reason = response_failure(body.response, setting=body.setting)
         score = grade_answer(
             final_assistant_text(body.response),
             body.verifier_metadata,

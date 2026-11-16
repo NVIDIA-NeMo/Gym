@@ -2,8 +2,8 @@
 
 Evaluation-only support for [Video-MME](https://github.com/MME-Benchmarks/Video-MME),
 not VideoMME-v2: single-turn video multiple-choice QA with a deterministic
-verifier and a frozen annotation cohort. An agentic setting is planned as a
-separate change; the verifier already accepts `setting: agentic` cohorts.
+verifier and a frozen annotation cohort. The agentic setting runs OpenCode with
+video tools in a sandbox that the server lends each episode.
 
 ## Inputs and configuration
 
@@ -20,12 +20,17 @@ The resulting rows are standard Gym input JSONL; gold remains verifier-only.
 | Setting | Config | Required cohort variable | Agent |
 | --- | --- | --- | --- |
 | Single-turn | `configs/videomme_v1_single_turn.yaml` | `videomme_v1_cohort_manifest` | `simple_agent`, one step |
+| Agentic | `configs/videomme_v1_agentic.yaml` | `videomme_v1_agentic_cohort_manifest` (and `videomme_v1_agentic_video_roots`) | `opencode_agent` in a lent sandbox |
 
 Compose the config with a `policy_model` such as the stock `vllm_model`, then
 use Gym's standard run/eval/aggregate commands. The config runs `simple_agent`
 through a `single_agent_turn_legacy` Environment Server. Rows carry the video
 as a `data:` or `file://` URL; see
 [single-turn inputs](../video_mcqa/README.md#single-turn-inputs).
+The agentic config runs the stock `opencode_agent` with `watch_video` and
+`view_image` through the same Environment Server; its rows bind the original
+video file, and it needs a sandbox image (`VIDEO_MCQA_SANDBOX_IMAGE`). See the
+shared [agentic setting](../video_mcqa/README.md#agentic-setting).
 
 ## Scores
 
