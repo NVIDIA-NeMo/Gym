@@ -238,3 +238,28 @@ def test_event_adapter_uses_supplied_classification_without_mutating_event():
     assert failure_outcome_policy(failure, config=policy) == "fail"
     assert failure_outcome_policy(failure, config=policy, classification=classification) == "retry"
     assert failure.to_record() == before
+
+
+def test_a_boundary_overlay_keeps_its_default_classification_under_a_partial_override() -> None:
+    defaults = StageOutcomePolicyConfig(
+        classification={
+            "by_stage": {"agent": {"by_failure_kind": {"demo:cut_off": "evaluation", "demo:other": "model"}}}
+        },
+        by_stage={"agent": {"by_failure_class": {"evaluation": "retry"}}},
+    )
+    override = {"classification": {"by_stage": {"agent": {"by_failure_kind": {"demo:cut_off": "model"}}}}}
+
+    policy = StageOutcomePolicyConfig.model_validate(StageOutcomePolicyConfig.overlay(defaults, override))
+
+    kinds = policy.classification.by_stage["agent"].by_failure_kind
+    assert (kinds["demo:cut_off"], kinds["demo:other"]) == ("model", "model")
+    assert kinds[PROVIDER_OOM_KILLED] == "model"  # the shared default stays
+    assert policy.by_stage["agent"].by_failure_class == {"evaluation": "retry"}
+    # With no classification override at all, the boundary's classification stands.
+    untouched = StageOutcomePolicyConfig.model_validate(StageOutcomePolicyConfig.overlay(defaults, {}))
+    assert untouched.classification.by_stage["agent"].by_failure_kind["demo:cut_off"] == "evaluation"
+    # The boundary's own rules still select the action, and the attribution follows the classification.
+    cut_off = choose_stage_outcome(failure_kind="demo:cut_off", http_status=None, stage="agent", config=untouched)
+    assert (cut_off.action, cut_off.attribution) == ("retry", "evaluation")
+    other = choose_stage_outcome(failure_kind="demo:other", http_status=None, stage="agent", config=untouched)
+    assert (other.action, other.attribution) == ("fail", "model")
