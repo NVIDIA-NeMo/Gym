@@ -720,17 +720,31 @@ def _score_program_html_snapshot_records(
             continue
         full_value = str(record.get("value") or "")
         before_value = str(record.get("before_value") or "")
-        # Exclusions apply to the whole final target, including old content.
-        if "must_exclude" in required and not _score_program_html_required(
-            {"must_exclude": required["must_exclude"]}, full_value, judge_log_path
-        ):
+        # Strict predicates grade observed content. Removing baseline tokens
+        # must never manufacture an exact answer or a valid numeric value.
+        strict = {
+            kind: value
+            for kind, value in required.items()
+            if kind in {"exact_match", "required_values", "must_exclude"}
+        }
+        if strict and not _score_program_html_required(strict, full_value, judge_log_path):
             continue
         before_score = _score_program_html_required(required, before_value, judge_log_path)
         delta_value = str(record.get("delta_value") or "").strip()
         if delta_value:
             fresh_value = _new_program_html_text(before_value, full_value)
-            if fresh_value:
-                score = max(score, _score_program_html_required(required, fresh_value, judge_log_path))
+            semantic = {kind: value for kind, value in required.items() if kind in {"must_include", "fuzzy_match"}}
+            if fresh_value and semantic:
+                fresh_score = _score_program_html_required(semantic, fresh_value, judge_log_path)
+                # Novel fragments establish freshness; the observed added
+                # text must also satisfy the matcher without token removal.
+                if fresh_score:
+                    observed_score = (
+                        fresh_score
+                        if fresh_value == delta_value
+                        else _score_program_html_required(semantic, delta_value, judge_log_path)
+                    )
+                    score = max(score, min(fresh_score, observed_score))
 
         # A confirmed empty target/absence can satisfy a deletion criterion.
         # Require improvement over the baseline, including for empty strings.

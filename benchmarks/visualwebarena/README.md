@@ -148,3 +148,8 @@ The [second review follow-up](validation-2026-11-16-followup.md) records combine
 predicate, complete image capture, empty-image-delta and semantic-freshness
 repairs, the benchmark manifest, inspectable native-judge smoke and the
 remaining onboarding/reference decisions.
+
+The [observed-value repair](validation-2026-11-16-exact-match.md) fixes task 568's
+exact-format regression: freshness cannot trim an invalid observed comment into
+a passing answer. It retains all 60 before/after cases and the separate strict
+format model smoke.
