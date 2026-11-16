@@ -469,7 +469,7 @@ dependencies = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "usersim", git = "https://github.com/NVIDIA-NeMo/UserSim.git?rev=e6282672a5e5359bccbed20f42753c3054dd6209" }]
+requires-dist = [{ name = "usersim", git = "https://github.com/NVIDIA-NeMo/UserSim.git?rev=c91d9b2d9daaff4f749a8401e8213be5b481f982" }]
 
 [[package]]
 name = "h11"
@@ -1908,8 +1908,8 @@ wheels = [
 
 [[package]]
 name = "usersim"
-version = "0.3.0"
-source = { git = "https://github.com/NVIDIA-NeMo/UserSim.git?rev=e6282672a5e5359bccbed20f42753c3054dd6209#e6282672a5e5359bccbed20f42753c3054dd6209" }
+version = "0.3.2"
+source = { git = "https://github.com/NVIDIA-NeMo/UserSim.git?rev=c91d9b2d9daaff4f749a8401e8213be5b481f982#c91d9b2d9daaff4f749a8401e8213be5b481f982" }
 dependencies = [
     { name = "data-designer" },
     { name = "filelock" },
