@@ -48,11 +48,12 @@ async def test_reservation_after_a_quiet_interval_is_not_delayed():
     await reservations.reserve({"id": 0})
     await asyncio.sleep(0.1)
 
-    started = time.monotonic()
-    await reservations.reserve({"id": 1})
+    waiter = asyncio.create_task(reservations.reserve({"id": 1}))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
 
-    assert time.monotonic() - started < 0.05
     assert batches == [[{"id": 0}], [{"id": 1}]]
+    await waiter
 
 
 async def test_cancelled_waiter_is_not_reserved():
@@ -64,7 +65,7 @@ async def test_cancelled_waiter_is_not_reserved():
     kept = asyncio.create_task(reservations.reserve({"id": 2}))
     await asyncio.sleep(0)
     cancelled.cancel()
-    await kept
+    await asyncio.wait_for(kept, timeout=1.0)
 
     assert batches == [[{"id": 0}], [{"id": 2}]]
     assert cancelled.cancelled()
@@ -92,7 +93,7 @@ async def test_write_failure_reaches_every_waiter_in_the_batch():
     reservations = _DispatchReservations(fail, interval_s=0.0)
     waiters = [asyncio.create_task(reservations.reserve({"id": i})) for i in (0, 1)]
 
-    results = await asyncio.gather(*waiters, return_exceptions=True)
+    results = await asyncio.wait_for(asyncio.gather(*waiters, return_exceptions=True), timeout=1.0)
 
     assert [type(result) for result in results] == [OSError, OSError]
 
