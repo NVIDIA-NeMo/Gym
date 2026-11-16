@@ -503,7 +503,8 @@ def test_a_window_already_past_is_reported_and_the_driver_runs_on(tmp_path):
 
 
 def test_a_term_to_the_job_archives_the_dir_first(tmp_path):
-    driver = f"{_WRITE_EVIDENCE}; : > \"$GYM_NODE_LOCAL_DIR/../written\"; trap 'exit 143' TERM; sleep 600 & wait"
+    # The driver outlives the TERM, as a step does until Slurm kills it: only the job's own trap can archive.
+    driver = f"trap '' TERM; {_WRITE_EVIDENCE}; : > \"$GYM_NODE_LOCAL_DIR/../written\"; sleep 600 & wait"
     process = _start_job(tmp_path, driver=driver, fakes={"scontrol": "exit 1"})
     try:
         _wait_for(tmp_path / "host" / "written")
