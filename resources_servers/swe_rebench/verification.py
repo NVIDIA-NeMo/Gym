@@ -316,15 +316,15 @@ async def run_verification(
         )
 
     interrupted = result.return_code < 0 and TEST_OUTPUT_END not in output
+    # Without the end marker the test section would run to the end of the combined log, which also holds
+    # every line the script wrote to stderr, install output included. A completed run never parses stderr
+    # either, since it follows the end marker, so an interrupted run parses stdout only.
+    test_log = slice_test_output(result.stdout or "") if interrupted else slice_test_output(output)
     try:
         # Also off the loop. The parsers are regex passes over the whole test log, so they are
         # CPU-bound; running them inline serialises every concurrent verification behind them.
         # An interrupted install is not evidence of a failed test: only parse after the test phase began.
-        statuses = (
-            await asyncio.to_thread(parser, slice_test_output(output))
-            if not interrupted or TEST_OUTPUT_BEGIN in output
-            else {}
-        )
+        statuses = await asyncio.to_thread(parser, test_log) if not interrupted or TEST_OUTPUT_BEGIN in output else {}
     except Exception as exc:  # a parser crash is a grading failure, never a silent zero
         return VerificationResult(
             completed=False,
@@ -345,15 +345,20 @@ async def run_verification(
             observed.get(normalize_test_name(name)) == "FAILED"
             for name in (*inputs.fail_to_pass, *inputs.pass_to_pass)
         )
+        error = None
+        if not conclusive:
+            error = f"Test execution ended before output was complete (return code {result.return_code})"
+        if test_patch_failed:
+            # A row defect repeats on every retry, so name it ahead of the interruption.
+            error = f"held-out test patch did not apply; {error}"
         return VerificationResult(
             completed=conclusive,
             resolved=False,
             patch_applied=TEST_OUTPUT_BEGIN in output,
-            test_results=report,
+            # Passing partial output can make grade() report resolved; the interrupted run is never resolved.
+            test_results={**report, "resolved": False},
             test_output=output,
-            error=None
-            if conclusive
-            else f"Test execution ended before output was complete (return code {result.return_code})",
+            error=error,
             test_patch_failed=test_patch_failed,
         )
     return VerificationResult(

@@ -258,6 +258,7 @@ class TestRunVerification:
         )
         assert result.completed is False and result.resolved is False
         assert result.test_results["tests_observed"] == 1
+        assert result.test_results["resolved"] is False
         assert parsed == ["\na PASSED\n"]
         assert result.test_output == process.stdout
         assert "return code -9" in result.error
@@ -331,6 +332,7 @@ class TestRunVerification:
         )
         assert result.completed is False and result.resolved is False
         assert result.test_results["tests_observed"] == 0
+        assert result.patch_applied is False
 
     @pytest.mark.asyncio
     async def test_interrupted_log_parser_failure_is_incomplete(self) -> None:
@@ -345,6 +347,38 @@ class TestRunVerification:
         assert result.completed is False and result.resolved is False
         assert result.test_results is None
         assert "truncated test result" in result.error
+
+    @pytest.mark.asyncio
+    async def test_interrupted_failure_after_a_failed_test_patch_is_incomplete(self) -> None:
+        """A required FAILED is not a verdict when the held-out tests never applied."""
+        result = await run_verification(
+            sandbox=_FakeSandbox(f"{TEST_PATCH_FAILED}\n{TEST_OUTPUT_BEGIN}\na: FAILED", return_code=-1),
+            inputs=_inputs(fail_to_pass=["a"], pass_to_pass=[]),
+            parser=lambda log: dict(line.rsplit(": ", 1) for line in log.splitlines() if ": " in line),
+        )
+        assert result.completed is False and result.resolved is False
+        assert result.test_patch_failed is True and result.patch_applied is True
+        assert result.error.startswith("held-out test patch did not apply")
+        assert "return code -1" in result.error
+
+    @pytest.mark.asyncio
+    async def test_interrupted_output_ignores_appended_stderr(self) -> None:
+        """Without the end marker, stderr (install output included) must not supply the verdict."""
+        sandbox = _FakeSandbox(f"{TEST_OUTPUT_BEGIN}\na: PASSED", return_code=-1)
+        sandbox._result.stderr = "a: FAILED"
+        parsed: list[str] = []
+
+        def parse(log: str) -> dict[str, str]:
+            parsed.append(log)
+            return dict(line.rsplit(": ", 1) for line in log.splitlines() if ": " in line)
+
+        result = await run_verification(
+            sandbox=sandbox, inputs=_inputs(fail_to_pass=["a"], pass_to_pass=[]), parser=parse
+        )
+        assert parsed == ["\na: PASSED"]
+        assert result.completed is False and result.resolved is False
+        assert result.test_results["resolved"] is False
+        assert result.test_output.endswith("\na: FAILED")
 
     @pytest.mark.asyncio
     async def test_a_test_patch_that_does_not_apply_is_incomplete(self) -> None:
