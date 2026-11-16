@@ -144,32 +144,45 @@ async def await_model_call_capture_quiescence(
         poll_s = min(poll_s * 2, _CAPTURE_DRAIN_MAX_POLL_S)
 
 
-def clear_model_call_captures_for_rollouts(
-    records: list[Any], capture_dirs: list[Path], *, before_dispatch: bool = True
-) -> None:
+def _rollout_ids(records: list[Any]) -> set[str]:
+    return {rollout_id for record in records if (rollout_id := maybe_rollout_id_from_run_body(record))}
+
+
+def clear_model_call_captures_for_rollouts(records: list[Any], capture_dirs: list[Path]) -> None:
     """Remove stale per-rollout capture files for these records before dispatch.
 
     Capture files are keyed by a deterministic rollout id (task-rollout-attempt), so without this a
     fresh run or a kill-shaped retry would append onto the previous attempt's capture for the same
     id. The caller passes only rows about to be dispatched, after assigning any retry suffix.
-    Before dispatch, claims and earlier Gym versions' pending markers of these ids go too, with one
-    listing of each directory per call. After a snapshot (``before_dispatch=False``) claims go only
-    once settled, and nothing is listed.
+    Their claims files and earlier Gym versions' pending markers go too, with one listing of each
+    directory per call.
     """
     if not capture_dirs:
         return
-    rollout_ids = {rollout_id for record in records if (rollout_id := maybe_rollout_id_from_run_body(record))}
+    rollout_ids = _rollout_ids(records)
     for directory in capture_dirs:
         store = CaptureStore(directory)
         for rollout_id in rollout_ids:
             store.path_for(rollout_id).unlink(missing_ok=True)
             store.incomplete_path_for(rollout_id).unlink(missing_ok=True)
-            if before_dispatch:
-                store.delete_claims(rollout_id)
-            else:
-                store.delete_claims_if_settled(rollout_id)
-        if before_dispatch and rollout_ids:
+            store.delete_claims(rollout_id)
+        if rollout_ids:
             store.remove_pending_markers(rollout_ids)
+
+
+def clear_model_call_captures_after_snapshot(records: list[Any], capture_dirs: list[Path]) -> None:
+    """Remove the capture files of rollouts whose records were snapshotted with their calls merged.
+
+    A claims file goes only once no claim in it is outstanding, so a call still in flight or taken after
+    the snapshot stays visible until the rollout ID is dispatched again. Nothing is listed.
+    """
+    rollout_ids = _rollout_ids(records)
+    for directory in capture_dirs:
+        store = CaptureStore(directory)
+        for rollout_id in rollout_ids:
+            store.path_for(rollout_id).unlink(missing_ok=True)
+            store.incomplete_path_for(rollout_id).unlink(missing_ok=True)
+            store.delete_claims_if_settled(rollout_id)
 
 
 def merge_model_call_capture_into_record(

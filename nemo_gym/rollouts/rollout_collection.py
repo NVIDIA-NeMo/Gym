@@ -131,6 +131,7 @@ from nemo_gym.rollouts.batch_status import (
 from nemo_gym.rollouts.health.types import RunHealthConfig
 from nemo_gym.rollouts.model_calls import (
     await_model_call_capture_quiescence,
+    clear_model_call_captures_after_snapshot,
     clear_model_call_captures_for_rollouts,
     merge_model_call_capture_into_record,
     model_call_capture_dirs_from_config,
@@ -1094,7 +1095,7 @@ async def enrich_run_result(
     _attach_ng_perf(result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms)
 
     if delete_capture and safe_to_delete:
-        clear_model_call_captures_for_rollouts([result], capture_dirs, before_dispatch=False)
+        clear_model_call_captures_after_snapshot([result], capture_dirs)
     return result
 
 

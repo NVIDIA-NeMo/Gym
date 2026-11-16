@@ -387,6 +387,7 @@ async def test_capture_reads_never_list_the_capture_directory(tmp_path, monkeypa
 
     from nemo_gym.rollouts.model_calls import (
         await_model_call_capture_quiescence,
+        clear_model_call_captures_after_snapshot,
         clear_model_call_captures_for_rollouts,
         merge_model_call_capture_into_record,
     )
@@ -408,7 +409,7 @@ async def test_capture_reads_never_list_the_capture_directory(tmp_path, monkeypa
 
     assert await await_model_call_capture_quiescence("10-0", [tmp_path]) is True
     merge_model_call_capture_into_record(record, [tmp_path])
-    clear_model_call_captures_for_rollouts([record], [tmp_path], before_dispatch=False)
+    clear_model_call_captures_after_snapshot([record], [tmp_path])
     assert scans == []
 
     # Before dispatch, each directory is listed once per call for earlier Gym versions' markers, however many rows.
@@ -583,7 +584,7 @@ def test_settled_claims_that_cannot_be_removed_still_read_as_settled(tmp_path, m
 
 
 def test_clearing_after_a_snapshot_keeps_an_outstanding_claim(tmp_path):
-    from nemo_gym.rollouts.model_calls import clear_model_call_captures_for_rollouts
+    from nemo_gym.rollouts.model_calls import clear_model_call_captures_after_snapshot
 
     store = CaptureStore(tmp_path)
     for rollout_index in (0, 1):
@@ -593,12 +594,40 @@ def test_clearing_after_a_snapshot_keeps_an_outstanding_claim(tmp_path):
     (tmp_path / "14-0.old.capture.pending").touch()
 
     rows = [{"_ng_task_index": 14, "_ng_rollout_index": rollout_index} for rollout_index in (0, 1)]
-    clear_model_call_captures_for_rollouts(rows, [tmp_path], before_dispatch=False)
+    clear_model_call_captures_after_snapshot(rows, [tmp_path])
 
     assert not store.path_for("14-0").exists() and not store.claims_path_for("14-0").exists()
     assert store.has_pending("14-1") is True
     # Earlier Gym versions' markers are a pre-dispatch concern.
     assert (tmp_path / "14-0.old.capture.pending").exists()
+
+
+def test_deleting_a_merged_capture_keeps_a_claim_admitted_after_the_merge(tmp_path, monkeypatch):
+    import asyncio
+
+    import nemo_gym.rollouts.rollout_collection as collection
+
+    store = CaptureStore(tmp_path)
+    store.mark_pending("22-0", "call-1")
+    store.record("22-0", {"model_call_id": "call-1", "dialect": "responses", "request": {}, "response": {"id": "r"}})
+    store.clear_pending("22-0", "call-1")
+    merge = collection.merge_model_call_capture_into_record
+
+    def merge_then_admit(record, *args, **kwargs):
+        merged = merge(record, *args, **kwargs)
+        store.mark_pending("22-0", "late")
+        return merged
+
+    monkeypatch.setattr(collection, "merge_model_call_capture_into_record", merge_then_admit)
+    row = {"_ng_task_index": 22, "_ng_rollout_index": 0}
+    asyncio.run(
+        collection.enrich_run_result(
+            row, dict(row), capture_dirs=[tmp_path], observability_enabled=True, delete_capture=True
+        )
+    )
+
+    assert not store.path_for("22-0").exists()
+    assert store.has_pending("22-0") is True
 
 
 def test_merge_keeps_the_calls_it_read_when_the_claims_cannot_be_checked(tmp_path, monkeypatch, caplog):
