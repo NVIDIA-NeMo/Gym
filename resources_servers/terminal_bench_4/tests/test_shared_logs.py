@@ -89,6 +89,11 @@ async def test_efs_snapshot_matches_host_restore_and_survives_agent_deletion(tmp
     box.path("/logs/artifacts/report.txt").write_bytes(b"original\x00bytes")
     box.path("/logs/artifacts/report.txt").chmod(0o751)
     box.path("/logs/artifacts/link").symlink_to("report.txt")
+    box.path("/logs/artifacts/escape").symlink_to("/etc/passwd")
+    os.link(box.path("/logs/artifacts/escape"), box.path("/logs/artifacts/escape-hardlink"), follow_symlinks=False)
+    os.mkfifo(box.path("/logs/artifacts/pipe"))
+    box.path("/logs/artifacts/tool").write_text("#!/bin/sh\n")
+    box.path("/logs/artifacts/tool").chmod(0o6755)
     box.path("/logs/artifacts/empty").mkdir()
     box.path("/logs/artifacts/omit.secret").write_text("excluded")
     box.path("/app/source.txt").write_text("normal artifact")
@@ -110,6 +115,10 @@ async def test_efs_snapshot_matches_host_restore_and_survives_agent_deletion(tmp
     assert target.path("/logs/artifacts/link").is_symlink()
     assert target.path("/logs/artifacts/link").read_bytes() == b"original\x00bytes"
     assert target.path("/logs/artifacts/empty").is_dir()
+    for name in ("escape", "escape-hardlink", "pipe"):
+        assert not target.path(f"/logs/artifacts/{name}").is_symlink()
+        assert not target.path(f"/logs/artifacts/{name}").exists()
+    assert target.path("/logs/artifacts/tool").stat().st_mode & 0o7777 == 0o755
     assert not target.path("/logs/artifacts/omit.secret").exists()
     assert not target.path("/logs/undeclared.txt").exists()
     assert not list(target.path("/logs/agent").iterdir())

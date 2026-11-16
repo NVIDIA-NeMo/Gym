@@ -41,6 +41,7 @@ if TYPE_CHECKING:
         TaskId,
     )
     from nemo_gym.core.failure_kinds import (
+        AGENT_COMMAND_NOT_ALLOWED,
         AGENT_INVALID_OUTPUT,
         AGENT_LIMIT,
         AGENT_ROUTE_FAILED,
@@ -54,6 +55,7 @@ if TYPE_CHECKING:
         MODEL_CONTEXT_LIMIT,
         MODEL_POLICY_RESPONSE_TIMEOUT,
         MODEL_REQUEST_ERROR,
+        MODEL_SERVER_QUEUE_TIMEOUT,
         MODEL_TRANSPORT_ERROR,
         PROVIDER_IO_TIMEOUT,
         PROVIDER_OOM_KILLED,
@@ -177,6 +179,7 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "AGENT_COMMAND_NOT_ALLOWED": "failure_kinds",
     "MediaFile": "media",
     "UnsupportedContentError": "media",
     "split_text_and_media": "media",
@@ -215,6 +218,7 @@ _PUBLIC_API = {
     "JUDGE_UNPARSEABLE": "failure_kinds",
     "MODEL_CONTEXT_LIMIT": "failure_kinds",
     "MODEL_POLICY_RESPONSE_TIMEOUT": "failure_kinds",
+    "MODEL_SERVER_QUEUE_TIMEOUT": "failure_kinds",
     "MODEL_REQUEST_ERROR": "failure_kinds",
     "MODEL_SAMPLING_HEADER": "model_call_sampling",
     "MODEL_SAMPLING_NULL": "model_call_sampling",

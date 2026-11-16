@@ -31,6 +31,22 @@ async def _verify(server, tmp_path: Path, files: dict[str, str]) -> dict:
     return _row(await judge_failsafe(server.verify)(NO_SESSION, verify_body(deliverables(tmp_path, files))))
 
 
+async def test_an_agent_that_ran_out_of_wall_time_is_a_scored_zero_not_a_masked_row(
+    make_server, tmp_path: Path, monkeypatch
+) -> None:
+    server = make_server(reward_mode="all")
+    judged = AsyncMock(side_effect=AssertionError("nothing was delivered, so nothing is judged"))
+    monkeypatch.setattr(server, "_binary_call", judged)
+    body = verify_body(deliverables(tmp_path, {"report.md": "half a report"}))
+    body.response.metadata = {"stop_reason": "wall_time"}
+
+    row = _row(await judge_failsafe(server.verify)(NO_SESSION, body))
+
+    assert (row["reward"], row["mask_sample"]) == (0.0, False)
+    assert (row["failure_kind"], row["failure_outcome_attribution"]) == ("agent_timeout", "model")
+    judged.assert_not_called()
+
+
 async def test_a_failed_binary_judge_call_masks_the_row_and_keeps_the_deliverable(
     make_server, tmp_path: Path, monkeypatch
 ) -> None:
