@@ -2,12 +2,12 @@
 # package, installed as the server's README.md says; rows come from `officeenv emit` and carry
 # the officeenv version that emitted them.
 #
-# Its rows run on Gym's single_agent_turn, which drives the simple agent one step per activation and reads the
-# resources session's task state between steps (end_on_task_state), so an episode ends before the next model call
-# once its task has ended (complete_task), when the model answers without calling a tool, or after
-# max_episode_steps steps.
+# Its rows run on Gym's single_agent_turn_legacy, which takes flat rows and taskset episodes alike. It drives the
+# simple agent one step per activation and reads the resources session's task state between steps (end_on_task_state),
+# so an episode ends before the next model call once its task has ended (complete_task), when the model answers
+# without calling a tool, or after max_episode_steps steps.
 config_paths:
-  - environment_servers/single_agent_turn/configs/single_agent_turn.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
 
 officeenv_resources_server:
   resources_servers:
@@ -23,9 +23,14 @@ officeenv_resources_server:
       # The environment server below ends an episode at the step that ends its task, so the calls that step makes
       # after the one that ended it are refused rather than run.
       close_tools_on_task_end: true
-      # The step loop drives the simple agent one step per activation. An agent that runs its own loop would take
-      # steps after the task ended, so `gym env resolve` refuses an --agent-type swap before anything starts.
-      allowed_agents: [simple_agent]
+      # `--agent-type` adds the named agent's config. A template that leaves its resources server unset is composed in
+      # place of officeenv_simple_agent, and this list refuses any other such template before anything starts. The
+      # simple agent stays on the step loop. The compaction agent keeps no agent session, so composition relays it
+      # through a legacy_agent server to its own /run, which runs its own loop and takes flat rows. A session harness
+      # such as hermes_agent resolves as its own environment server, and these rows still run on
+      # officeenv_simple_agent. An agent_server set directly to another agent is refused by the step loop's check at
+      # startup.
+      allowed_agents: [simple_agent, simple_agent_with_compaction]
 officeenv_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -36,17 +41,15 @@ officeenv_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      # One step per activation: the environment server drives the steps and keeps the episode's limit.
-      max_steps: 1
       datasets:
       - name: example
         type: example
         jsonl_fpath: resources_servers/officeenv/data/example.jsonl
         taskset: officeenv:example
 officeenv_environment_server:
-  _inherit_from: single_agent_turn
+  _inherit_from: single_agent_turn_legacy
   environment_servers:
-    single_agent_turn:
+    single_agent_turn_legacy:
       resources_server:
         type: resources_servers
         name: officeenv_resources_server
@@ -55,6 +58,7 @@ officeenv_environment_server:
         name: officeenv_simple_agent
       # The agent calls the tool routes directly, with the episode's session cookie.
       resources_tool_transports: [direct_http]
+      # One step per activation: each names this limit, and the simple agent takes one step whatever its max_steps.
       max_episode_steps: 50
       end_on_task_state: true
 
