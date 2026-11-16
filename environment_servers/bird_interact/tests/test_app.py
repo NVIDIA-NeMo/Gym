@@ -68,6 +68,7 @@ from nemo_gym.client import ServerClient
 from nemo_gym.config import AgentServerRef, BaseServerConfig, ModelServerRef
 from nemo_gym.core import EpisodeId, MaterializedTask, NeMoGymResponse, TaskId
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
+from nemo_gym.server_runtime import END_ACTIVATION_HEADER
 from nemo_gym.trajectory import AgentObservationBundle
 
 
@@ -656,7 +657,10 @@ class TestCInteract:
 
         async def turn(tools: _Tools) -> str:
             for question in ("First?", "Second?", "Third?"):
-                answers.append(await tools.observe("ask_user", question=question))
+                reply = await tools.call("ask_user", question=question)
+                # A question does not end the turn.
+                assert END_ACTIVATION_HEADER not in reply.headers
+                answers.append(reply.json())
             await tools.observe("submit_sql", sql=CORRECT_1)
             return "Submitted."
 
@@ -669,11 +673,17 @@ class TestCInteract:
 
     async def test_a_turn_ends_at_its_submission(self) -> None:
         replies: list[Any] = []
+        ends: list[bool] = []
 
         async def turn(tools: _Tools) -> str:
-            replies.append(await tools.observe("submit_sql", sql=WRONG))
-            replies.append(await tools.observe("submit_sql", sql=CORRECT_1))
-            replies.append(await tools.observe("ask_user", question="Was that right?"))
+            for name, arguments in (
+                ("submit_sql", {"sql": WRONG}),
+                ("submit_sql", {"sql": CORRECT_1}),
+                ("ask_user", {"question": "Was that right?"}),
+            ):
+                reply = await tools.call(name, **arguments)
+                replies.append(reply.json())
+                ends.append(reply.headers.get(END_ACTIVATION_HEADER))
             return "Submitted."
 
         server, client = _server(turns=[turn, _submit(CORRECT_1)])
@@ -685,6 +695,8 @@ class TestCInteract:
             SUBMITTED_REPLY,
             SUBMITTED_REPLY,
         ]
+        # The submission's reply ends the agent's activation, as the ADK's callback ends its run; a question does not.
+        assert ends == ["true", "true", "true"]
         assert client.user_requests == []
         assert _opening(client, 2) == DEBUG_WRONG_RESULT_MESSAGE
         assert _phases(response) == [{"phase": 1, "passed": True, "attempts": 2, "reward": 0.5}]
