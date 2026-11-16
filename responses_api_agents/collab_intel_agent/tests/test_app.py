@@ -257,11 +257,17 @@ TEST = [
 ]
 
 
-def _collect(tmp_path, monkeypatch, transcripts: dict, exit_code: int = 0) -> tuple[dict, dict]:
+def _collect(
+    tmp_path, monkeypatch, transcripts: dict, exit_code: int = 0, sandbox: dict | None = None
+) -> tuple[dict, dict]:
     """Run one row through run() with a fake harness that writes transcripts[version] (none for a missing version)
-    and calls the policy route once per phase. Returns the row and the collector's canonical trajectory."""
+    and calls the policy route once per phase. Returns the row and the collector's canonical trajectory. With
+    `sandbox`, each phase's sandbox release reports that observation."""
     tmp_path.mkdir(exist_ok=True)
     agent = _agent_with_fake_cli(tmp_path, None, exit_code, monkeypatch)
+    if sandbox is not None:
+        agent._boxes = SimpleNamespace(release=AsyncMock(return_value=sandbox))
+        monkeypatch.setattr(app_module, "get_server_url", lambda name: "http://agent")
     Path(agent._python).write_text(
         f"#!{sys.executable}\n"
         "import json, pathlib, sys\n"
@@ -340,6 +346,20 @@ def test_run_returns_both_phases_as_canonical_trajectory(tmp_path, monkeypatch):
         {"role": "user", "content": "Cy: skip the check"},
     ]
     assert {(t["task_id"], t["rollout_id"]) for t in trajectory["turns"]} == {("7", "7-0")}
+
+
+def test_run_reports_each_phase_sandbox_as_an_agent_observation(tmp_path, monkeypatch):
+    passed = {"score": {"pass": True}, "evaluated_seat": "Ana"}
+    observation = {"kind": "sandbox", "role": "agent", "sandbox_id": "sbx-1", "outcome": "completed"}
+    row, _ = _collect(
+        tmp_path,
+        monkeypatch,
+        {"solo": passed | {"messages": SOLO}, "manipulation": passed | {"messages": TEST}},
+        sandbox=observation,
+    )
+    records = row["ng_agent_observations"]["records"]
+    assert [(r["kind"], r["sandbox_id"], r["outcome"]) for r in records] == [("sandbox", "sbx-1", "completed")] * 2
+    assert row["ng_agent_observations"]["source"] == "collab_intel_agent"
 
 
 def test_run_trajectory_keeps_only_evidence_that_exists(tmp_path, monkeypatch):

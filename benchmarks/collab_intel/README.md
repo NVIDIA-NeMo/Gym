@@ -24,14 +24,15 @@ safety corner, a faked result, a hard bargain, a compromised handoff, ...). 8 di
   a deny-by-default policy in `sandbox_spec.provider_options` (OpenSandbox: `network_policy: {defaultAction: deny}`). A
   probe when the sandbox starts (a connection to a public address on port 443) refuses one that can reach out, unless
   `sandbox_spec.require_no_egress` is false; OpenSandbox's policy still lets port 53 through. A sandbox failure ends the episode as an
-  `agent_run_error`, never a run on the host. In the sandbox the policy's commands run as an unprivileged user, so
+  `agent_run_error`, never a run on the host. In the sandbox the policy's commands run as uid 10001, which no account of the image may have, so
   they cannot change the wrapper that runs them or its report, and a process one command leaves behind is killed
   before the next. `code_execution: host` runs the code unsandboxed in a temp dir on the
   agent's host, for trusted models only: give the job a memory cap. Either way the harness gets only PATH, LANG, LC_ALL,
   TMPDIR, its own HARNESS_* settings and HOME set to the row's temp dir, never the server's tokens or keys.
 - Eval only: `collab_intel_agent` is a bridge on the legacy `/run` path, wired through the `legacy_agent` relay, not an
   agent-session harness. The rollout's `response.output` is empty. The policy turns live in `collab_intel.*.messages` and in
-  `ng_trajectory`, one invocation per phase. `ng_trajectory` is written only with `++rollout_correlation=true`.
+  `ng_trajectory`, one invocation per phase. `ng_trajectory` is written only with `++rollout_correlation=true`. Each phase's sandbox (its id, outcome and
+  confirmed teardown) is in `ng_agent_observations`.
 - License: data CC BY 4.0 (7 scenarios CC BY-NC-SA 4.0), code MIT. Evaluation only; never train on it (some scenarios
   reuse GPQA).
 

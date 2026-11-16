@@ -265,6 +265,26 @@ def test_a_sandbox_that_cannot_drop_privileges_is_refused():
         asyncio.run(_boxes().run("p", _request(runtime=True)))
 
 
+def test_release_reports_the_sandbox_outcome(monkeypatch):
+    monkeypatch.setattr(
+        boxed_exec,
+        "lifecycle_observation",
+        lambda box, role: {"kind": "sandbox", "role": role, "sandbox_id": "s", "outcome": "unknown"},
+    )
+    boxes = _boxes()
+
+    async def go():
+        await boxes.run("ok", _request(runtime=True))
+        FakeBox.wrapper_result = {"too_large": True}
+        await boxes.run("bad", _request(runtime=True))
+
+    with pytest.raises(SandboxExecError):
+        asyncio.run(go())
+    assert asyncio.run(boxes.release("ok"))["outcome"] == "completed"
+    assert asyncio.run(boxes.release("bad"))["outcome"] == "sandbox_error"
+    assert asyncio.run(boxes.release("never")) is None
+
+
 def test_release_stops_the_sandbox_and_close_closes_the_provider():
     boxes = _boxes()
     asyncio.run(boxes.run("p", _request(runtime=True)))
@@ -315,6 +335,16 @@ def test_wrapper_maps_the_workspace_placeholder_and_reports_a_timeout(tmp_path):
 @pytest.mark.skipif(os.geteuid() == 0, reason="checks the refusal a non-root sandbox user gets")
 def test_wrapper_refuses_to_run_the_policy_as_its_own_user(tmp_path):
     assert _wrapper(tmp_path, ["@python", "-c", "pass"], policy_uid=boxed_exec.POLICY_UID) == {"not_root": True}
+
+
+def test_wrapper_refuses_a_policy_uid_that_an_account_of_the_image_has(tmp_path):
+    assert _wrapper(tmp_path, ["@python", "-c", "pass"], policy_uid=os.getuid()) == {"uid_in_use": True}
+
+
+def test_a_sandbox_whose_image_uses_the_policy_uid_is_refused():
+    FakeBox.wrapper_result = {"uid_in_use": True}
+    with pytest.raises(SandboxExecError, match="uid 10001"):
+        asyncio.run(_boxes().run("p", _request(runtime=True)))
 
 
 def test_wrapper_stops_collecting_past_the_byte_limit(tmp_path):

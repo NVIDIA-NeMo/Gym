@@ -61,7 +61,15 @@ from nemo_gym.core import (
 )
 from nemo_gym.sandbox import SandboxResources, SandboxSpec, resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.trajectory import AgentInvocation, ModelCallRef, ObservationGap, TrajectoryRecord, TrajectoryTurn
+from nemo_gym.trajectory import (
+    NG_AGENT_OBSERVATIONS_KEY,
+    AgentInvocation,
+    AgentObservationBundle,
+    ModelCallRef,
+    ObservationGap,
+    TrajectoryRecord,
+    TrajectoryTurn,
+)
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.collab_intel.task_data import TaskData
 from responses_api_agents.collab_intel_agent.boxed_exec import BoxedExec, SandboxExecError
@@ -362,7 +370,7 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
 
     async def _phase(self, path: Path, version: str, seed: int, out: Path) -> dict[str, Any]:
         """_run plus what the trajectory needs: the start time and the policy response ids of this phase."""
-        key, started = uuid4().hex, time.time()
+        key, started, sandbox = uuid4().hex, time.time(), None
         self._response_ids[key] = []
         try:
             result = await self._run(path, version, seed, out, key)
@@ -370,8 +378,8 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
             ids = self._response_ids.pop(key)
             if self._boxes is not None:
                 with CancelScope(shield=True):  # a client disconnect must not leave the phase's sandbox running
-                    await self._boxes.release(key)
-        return {"version": version, "started": started, "response_ids": ids, "result": result}
+                    sandbox = await self._boxes.release(key)
+        return {"version": version, "started": started, "response_ids": ids, "result": result, "sandbox": sandbox}
 
     def _trajectory(self, body: CollabIntelRunRequest, phases: list[dict[str, Any]]) -> TrajectoryRecord | None:
         """The canonical trajectory: one invocation per phase (solo, then manipulation) with the team chat as the
@@ -509,6 +517,9 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
         verified = await get_response_json(verify)
         if trajectory is not None:
             verified["ng_trajectory"] = trajectory.model_dump(mode="json")
+        if sandboxes := [phase["sandbox"] for phase in phases if phase.get("sandbox")]:
+            bundle = AgentObservationBundle(source="collab_intel_agent", records=sandboxes)
+            verified[NG_AGENT_OBSERVATIONS_KEY] = bundle.model_dump(mode="json")
         return CollabIntelVerifyResponse.model_validate(verified)
 
 

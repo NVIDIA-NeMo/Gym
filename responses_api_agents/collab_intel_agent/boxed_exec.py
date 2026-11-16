@@ -35,14 +35,16 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from nemo_gym.agents.utils.sandbox_observation import lifecycle_observation
 from nemo_gym.sandbox import AsyncSandbox, SandboxProvider, SandboxSpec, create_provider
 
 
 logger = logging.getLogger(__name__)
 
 RUNTIME_DIR = "_rt"
-# the policy's commands run as this user (nobody), so they cannot change the wrapper, the runtime or the report
-POLICY_UID = 65534
+# the policy's commands run as this user, so they cannot change the wrapper, the runtime or the report. A uid no account
+# in the image has (the wrapper checks), so killing what its commands leave behind never hits a service of the sandbox.
+POLICY_UID = 10001
 RUNS_DIR = "runs"
 # the changed files of one run that come back, in bytes
 MAX_CHANGED_BYTES = 8 * 1024 * 1024
@@ -58,9 +60,12 @@ EGRESS_PROBE = (
 )
 # runs in the sandbox for one command ("@python" is its interpreter, "@dir" the unpacked workspace): unpack the
 # workspace, run, report the output and the files the run changed
-WRAPPER = """import base64, hashlib, json, os, shutil, subprocess, sys, tarfile
+WRAPPER = """import base64, hashlib, json, os, pwd, shutil, subprocess, sys, tarfile
 a = json.loads(base64.b64decode(sys.argv[1]))
 d, uid = a["dir"], a["policy_uid"]
+if uid is not None and uid in [u.pw_uid for u in pwd.getpwall()]:
+    print(json.dumps({"uid_in_use": True}))
+    sys.exit(0)
 if uid is not None and os.geteuid() != 0:
     print(json.dumps({"not_root": True}))
     sys.exit(0)
@@ -163,6 +168,7 @@ class BoxedExec:
         self._boxes: dict[str, AsyncSandbox] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._ended: set[str] = set()
+        self._failed: set[str] = set()  # phases with a command that failed in the sandbox
         self._unstopped: list[AsyncSandbox] = []  # boxes that never served a phase and whose stop failed
 
     async def _put(self, box: AsyncSandbox, data: bytes, remote: str) -> None:
@@ -239,6 +245,13 @@ class BoxedExec:
         if phase in self._ended:
             raise SandboxExecError("the phase has ended")
         try:
+            return await self._run(phase, request)
+        except SandboxExecError:
+            self._failed.add(phase)
+            raise
+
+    async def _run(self, phase: str, request: dict[str, Any]) -> dict[str, Any]:
+        try:
             runtime = base64.b64decode(request["runtime"]) if request.get("runtime") else None
             box = await self._start(phase, runtime)
             run_dir = f"{self._workdir}/{RUNS_DIR}/{uuid.uuid4().hex}"
@@ -272,6 +285,8 @@ class BoxedExec:
             raise SandboxExecError(
                 "the sandbox does not run commands as root, so the policy's code could change the wrapper and its report"
             )
+        if result.get("uid_in_use"):
+            raise SandboxExecError(f"uid {POLICY_UID} belongs to an account of the sandbox image: use another image")
         if result.pop("too_large", False):
             raise SandboxExecError(f"the command changed more than {MAX_CHANGED_BYTES} bytes of files")
         return result
@@ -288,13 +303,21 @@ class BoxedExec:
         if not await self._stop(box):
             self._unstopped.append(box)
 
-    async def release(self, phase: str) -> None:
-        """End the phase and stop its sandbox. Idempotent: a call after a failed stop retries it."""
+    async def release(self, phase: str) -> dict[str, Any] | None:
+        """End the phase and stop its sandbox. Idempotent: a call after a failed stop retries it. Returns the
+        sandbox's observation (None if the phase had none): completed, or sandbox_error if a command or the stop
+        failed."""
         self._ended.add(phase)
         self._locks.pop(phase, None)
         box = self._boxes.get(phase)
-        if box is not None and await self._stop(box):
+        if box is None:
+            return None
+        if await self._stop(box):
             self._boxes.pop(phase, None)
+        observation = lifecycle_observation(box, role="agent")
+        if observation is not None and observation["outcome"] == "unknown":
+            observation["outcome"] = "sandbox_error" if phase in self._failed else "completed"
+        return observation
 
     async def close(self) -> None:
         for phase in list(self._boxes):
