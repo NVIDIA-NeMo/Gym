@@ -1,8 +1,7 @@
 # GDP.pdf Agent
 
 A thin `simple_agent` subclass that embeds a pre-rendered document into the model request at
-rollout time, with a reactive DPI backoff for policy models that reject or truncate oversized
-requests.
+rollout time, with a reactive DPI backoff for policy models that reject oversized requests.
 
 GDP.pdf rows reference their document by a prepare-time manifest
 (`verifier_metadata.document_manifest`) rather than inlining anything: the corpus averages ~46
@@ -40,6 +39,8 @@ vision input.
 | `include_text` | `true` | Attach the manifest's extracted text |
 | `include_images` | `true` | Attach the manifest's rendered page images |
 | `strip_images_from_output` | `true` | Drop base64 from the saved rollout artifacts |
+| `regenerate_on_incomplete_output` | `false` | Regenerate an incomplete answer with a smaller image footprint instead of keeping it as the result. Only for reproducing the earlier behaviour; counted in `document_delivery.output_truncation_regenerations` |
+| `mask_failed_attempts` | `false` | Training only: mark attempts that end without a gradable answer with `mask_sample` (see below) |
 
 `max_steps: 1` — GDP.pdf is single-turn with no tools.
 
@@ -55,10 +56,11 @@ problem, the agent reacts and retries:
   `image_count` (server reported a numeric image cap — widen compositing, up to 4 pages/image),
   `payload`/`context` (request or context too large — reduce DPI by 20%, toward the `min_dpi`
   floor), or `None` (unclassified — see below).
-- **A silent truncation** (`status == "incomplete"`, no exception raised) is treated the same as a
-  size problem: some servers accept an oversized request and simply run out of output room instead
-  of rejecting it outright. The agent reduces DPI and retries rather than keeping the truncated
-  answer, as long as images are actually part of the payload.
+- **An incomplete answer** (`status == "incomplete"`, no exception raised) is the row's result: the
+  model spent its output budget, while an input that does not fit is rejected up front. The answer
+  goes to the verifier as is and is not generated again, since regenerating would re-sample a model
+  result. `regenerate_on_incomplete_output: true` restores the earlier behaviour for comparison:
+  reduce DPI and regenerate while images are part of the payload.
 - **Auth/rate-limit errors** (401/403/429) are systemic, not per-document, so they propagate
   instead of being retried — every other row would fail identically.
 - **Any other exception** (an unclassified HTTP error, or a non-HTTP exception like an upstream
@@ -73,8 +75,23 @@ explains that later pages remain in the extracted text.
 `document_delivery` in each rollout row records the DPI/compositing actually used, plus every
 rejected attempt along the way. It includes `image_pages_covered`, `image_pages_omitted`, and
 `image_coverage_end_page`, so a degraded or failed delivery is visible rather than silently mistaken
-for a model failure. `strip_images_from_output` keeps rollout JSONL readable; redaction is recorded
+for a model failure. Two counts summarize the rejected attempts: `input_limit_rejections` (requests
+the endpoint rejected for their input size, each answered by a smaller delivery) and
+`output_truncation_regenerations` (nonzero only with `regenerate_on_incomplete_output`). The row
+also carries them as `agent_adaptations`, which the run's failure facts sum per run under
+`failures.agent_adaptations`. `strip_images_from_output` keeps rollout JSONL readable; redaction is recorded
 as a `multimodal_history_redacted` gap on the trajectory.
+
+## Failed attempts in training
+
+An attempt can end without a gradable answer when the input still does not fit after the backoff
+(a context, image-count or payload limit). It then scores 0 and carries a `failure_reason`.
+Evaluation should count that zero, so `mask_failed_attempts` is off by default. For training the
+zero says nothing about an answer, so set `mask_failed_attempts: true`: such attempts get
+`mask_sample: true` and a `failure_kind` (`model_context_limit` for a context limit,
+`model_request_error` for an image-count or payload limit), and the trainer leaves them out of the
+loss. A failed policy call or `/verify` is masked in either mode, and rows whose judge call failed
+are already masked by `judge_failsafe`.
 
 ## Text-only models
 

@@ -18,9 +18,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from nemo_gym.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import NeMoGymResponse
+from nemo_gym.server_runtime import BaseResourcesServerConfig
 from resources_servers.example_multi_turn_gymnasium.app import ExampleMultiTurnEnv
 from resources_servers.gymnasium import EnvStepRequest
 

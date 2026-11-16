@@ -33,8 +33,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Sequence
 
-from nemo_gym.deliverables import IGNORE_FILES as IGNORE_FILES
-from nemo_gym.deliverables import is_deliverable as is_deliverable
+from nemo_gym.environment import IGNORE_FILES as IGNORE_FILES
+from nemo_gym.environment import is_deliverable as is_deliverable
 
 # judge_panel owns the canonical audio/video extension sets and the GDPVal
 # resources server routes tasks to judges from them. Importing rather than

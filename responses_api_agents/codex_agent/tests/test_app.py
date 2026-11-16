@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import orjson
 import pytest
 import yaml
-from fastapi import Request
+from fastapi import HTTPException, Request
 from pydantic import ValidationError
 
 from nemo_gym.client import ServerClient
@@ -996,6 +996,27 @@ class TestConfigYaml:
         assert inner["sandbox_mode"] == "danger-full-access"
         # The YAML spells out the model defaults, so overrides merge into them.
         assert inner["features"] == _config().features
+
+
+@pytest.mark.parametrize("role", ["user", "system", "developer"])
+async def test_local_images_require_session(role: str) -> None:
+    agent = _make_agent()
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {
+                "role": role,
+                "content": [
+                    {"type": "input_text", "text": "Describe the image."},
+                    {"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo=", "detail": "auto"},
+                ],
+            }
+        ]
+    )
+    with patch.object(CodexAgent, "_run_codex", new_callable=AsyncMock) as run_codex:
+        with pytest.raises(HTTPException, match="Codex prompt images require an agent session") as exc:
+            await agent._create_response(body)
+    assert exc.value.status_code == 422
+    run_codex.assert_not_awaited()
 
 
 @pytest.mark.parametrize("budget,expected", [(None, 1800), ("12.5", 12.5), ("3600", 1800), ("invalid", 1800)])

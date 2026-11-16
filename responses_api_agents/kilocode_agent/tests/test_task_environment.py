@@ -19,7 +19,42 @@ from responses_api_agents.kilocode_agent.tests.test_sandbox import stage_locally
 
 
 PLUGIN = Path(__file__).parents[1] / "task_environment.mjs"
+HEADER_PLUGIN = PLUGIN.parents[1] / "opencode_agent" / "assistant_message_header.js"
 TASK_DIRECTORIES = ("HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME")
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required for the Kilo plugin")
+def test_background_services_belong_to_task_sandbox(tmp_path: Path) -> None:
+    shutil.copyfile(HEADER_PLUGIN, tmp_path / "assistant_message_header.mjs")
+    shutil.copyfile(PLUGIN, tmp_path / PLUGIN.name)
+    (tmp_path / "task-env.json").write_text(json.dumps({key: f"/task/{key}" for key in TASK_DIRECTORIES}))
+    (tmp_path / "input.json").write_text("{}")
+    probe = """
+import { TaskEnvironment } from "./task_environment.mjs";
+const hooks = await TaskEnvironment();
+const cases = [
+  ["background_process", {action: "start", command: "python server.py"}],
+  ["background_process", {action: "start", command: "python server.py", inherit: true}],
+  ["background_process", {action: "start", command: "python server.py", persistent: false}],
+  ["background_process", {action: "stop", id: "service"}],
+  ["bash", {command: "echo hello"}],
+];
+for (const [tool, args] of cases) await hooks["tool.execute.before"]({tool}, {args});
+console.log(JSON.stringify(cases));
+"""
+    result = subprocess.run(
+        [shutil.which("node"), "--input-type=module", "-e", probe],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    cases = json.loads(result.stdout)
+    for _, args in cases[:3]:
+        assert args == {"action": "start", "command": "python server.py", "persistent": True}
+    assert cases[3][1] == {"action": "stop", "id": "service"}
+    assert cases[4][1] == {"command": "echo hello"}
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required for the Kilo plugin")
@@ -28,6 +63,7 @@ async def test_shell_environment_keeps_task_files_after_session_close(tmp_path: 
     session, workdir, home = tmp_path / "session", tmp_path / "task", tmp_path / "task-home"
     for directory in (session, workdir, home):
         directory.mkdir()
+    shutil.copyfile(HEADER_PLUGIN, session / "assistant_message_header.mjs")
     shutil.copyfile(PLUGIN, session / PLUGIN.name)
     # The probe stands in for Kilo: it loads the plugin, applies its shell.env hook, and runs a tool shell.
     (session / "probe.mjs").write_text(
@@ -76,6 +112,7 @@ console.log(JSON.stringify({cliHome: process.env.HOME, cliConfig: process.env.XD
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required for the Kilo plugin")
 @pytest.mark.parametrize("failure", ["missing", "malformed", "missing_home", "relative_home", "invalid_xdg"])
 def test_invalid_task_environment_cannot_acknowledge_hook_initialization(tmp_path: Path, failure: str) -> None:
+    shutil.copyfile(HEADER_PLUGIN, tmp_path / "assistant_message_header.mjs")
     shutil.copyfile(PLUGIN, tmp_path / PLUGIN.name)
     env = {key: f"/task/{key.lower()}" for key in TASK_DIRECTORIES}
     if failure == "missing_home":
@@ -129,6 +166,7 @@ def test_pinned_cli_reports_whether_required_plugin_initialized(tmp_path: Path, 
     if binary is None:
         pytest.skip("Set GYM_TEST_KILO_BINARY to the pinned Kilo 7.4.15 executable")
     plugin = tmp_path / PLUGIN.name
+    shutil.copyfile(HEADER_PLUGIN, plugin.parent / "assistant_message_header.mjs")
     shutil.copyfile(PLUGIN, plugin)
     if task_environment == "plugin_error":
         plugin.write_text(
@@ -193,6 +231,7 @@ def _plugin_probe(
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is required for the Kilo plugin")
+    shutil.copyfile(HEADER_PLUGIN, tmp_path / "assistant_message_header.mjs")
     shutil.copyfile(PLUGIN, tmp_path / PLUGIN.name)
     (tmp_path / "task-env.json").write_text(
         json.dumps({key: str(tmp_path / "task" / key.lower()) for key in TASK_DIRECTORIES})
@@ -389,6 +428,7 @@ async def test_pinned_cli_mcp_preflight_uses_grant_without_inference(tmp_path: P
     session.mkdir()
     workdir.mkdir()
     plugin = session / PLUGIN.name
+    shutil.copyfile(HEADER_PLUGIN, plugin.parent / "assistant_message_header.mjs")
     shutil.copyfile(PLUGIN, plugin)
     if behavior == "missing_tool_hook":
         plugin.write_text(plugin.read_text().replace('"tool.definition":', '"unused.tool.definition":'))

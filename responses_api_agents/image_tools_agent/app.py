@@ -11,26 +11,21 @@ from fastapi import Request, Response
 from PIL import Image
 from pydantic import ConfigDict, PrivateAttr
 
-from nemo_gym.base_resources_server import (
-    AggregateMetrics,
-    AggregateMetricsRequest,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.client import get_response_json, raise_for_status
-from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     accumulate_response_usage,
 )
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.image_tools import (
     ImageToolsGymToolConfig,
     ImageToolsGymToolLogic,
@@ -387,3 +382,6 @@ class ImageToolsAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     ImageToolsAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ImageToolsAgent.run_webserver()  # noqa: F401

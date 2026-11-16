@@ -16,12 +16,13 @@
 """Tests for CLI help system parameter printing and example formatting."""
 
 import re
+import sys
 from typing import Dict, Optional, TypedDict
 
 import pytest
 from pydantic import Field
 
-from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
+from nemo_gym.config.config_types import BaseNeMoGymCLIConfig, ignoring_command_line
 
 
 class ParsedHelpOutput(TypedDict):
@@ -109,6 +110,27 @@ def parse_help_output(output: str) -> ParsedHelpOutput:
                 result["parameters"][param_name] = line.strip()
 
     return result
+
+
+class TestIgnoringCommandLine:
+    class _Config(BaseNeMoGymCLIConfig):
+        value: int = 1
+
+    def test_help_on_the_command_line_exits_the_program_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "argv", ["trainer", "--help"])
+
+        with pytest.raises(SystemExit):
+            self._Config()
+
+    def test_help_on_the_command_line_is_not_read_for_a_library_caller(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys, "argv", ["trainer", "--help"])
+
+        with ignoring_command_line():
+            config = self._Config(value=2)
+
+        assert config.value == 2
+        with pytest.raises(SystemExit):
+            self._Config()
 
 
 class TestHelpOutput:

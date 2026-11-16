@@ -2,14 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import sys
 import types
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from pydantic import TypeAdapter
 
 from benchmarks.automationbench import prepare
-from nemo_gym.task_data import validate_jsonl_rows
+from nemo_gym.data import validate_jsonl_rows
 from responses_api_agents.verifiers_agent.task_data import TaskData
 
 
@@ -30,9 +32,19 @@ SOURCE_ROWS = [
 ]
 
 
+TOOL_DEFS = [
+    types.SimpleNamespace(
+        name="api_search",
+        description="Search available API endpoints by keyword.",
+        parameters={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+        strict=True,
+    )
+]
+
+
 def _prepared_rows(tmp_path: Path) -> list[dict]:
     fake_env_module = types.ModuleType("automationbench_env")
-    fake_env_module.load_environment = lambda **kwargs: types.SimpleNamespace(dataset=SOURCE_ROWS)
+    fake_env_module.load_environment = lambda **kwargs: types.SimpleNamespace(dataset=SOURCE_ROWS, tool_defs=TOOL_DEFS)
 
     with patch.dict("sys.modules", {"automationbench_env": fake_env_module}):
         output_fpath = prepare.prepare(out=tmp_path / "automationbench.jsonl")
@@ -56,6 +68,23 @@ def test_prepared_rows_carry_task_name_and_example_id_as_task_id(tmp_path: Path)
     assert [row["example_id"] for row in rows] == [501, 503, 501]
 
 
+def test_prepared_rows_carry_the_environment_tools_and_output_budget(tmp_path: Path) -> None:
+    rows = _prepared_rows(tmp_path)
+
+    for row in rows:
+        params = row["responses_create_params"]
+        assert params["tools"] == [
+            {
+                "type": "function",
+                "name": "api_search",
+                "description": "Search available API endpoints by keyword.",
+                "parameters": TOOL_DEFS[0].parameters,
+                "strict": True,
+            }
+        ]
+        assert params["max_output_tokens"] == prepare.MAX_OUTPUT_TOKENS
+
+
 def test_task_ids_are_unique_when_example_ids_repeat_across_domains(tmp_path: Path) -> None:
     rows = _prepared_rows(tmp_path)
 
@@ -75,3 +104,13 @@ def test_example_rows_carry_task_ids_and_are_clean_under_the_verifiers_agent_sch
 
     assert [row["task_id"] for row in rows] == [f"{row['info']['task_name']}/{row['example_id']}" for row in rows]
     assert _validate(rows).clean
+
+
+def test_missing_dependency_guidance_uses_isolated_project(monkeypatch):
+    monkeypatch.setitem(sys.modules, "verifiers", None)
+    command = "uv run --locked --project benchmarks/automationbench python benchmarks/automationbench/prepare.py"
+    with pytest.raises(SystemExit, match="Could not import automationbench_env") as error:
+        prepare.prepare()
+    assert command in str(error.value)
+    readme = Path(prepare.__file__).with_name("README.md").read_text()
+    assert command in readme

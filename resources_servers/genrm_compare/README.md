@@ -495,6 +495,9 @@ this.
     each scored member.
   - Token-usage metrics count completed comparisons only.
   - Each failed comparison is logged when it fails, and each masked member is logged with its reason.
+  - In failure reports, a masked member's failure has its failed comparison's Gym failure, such as the judge's
+    HTTP error, as its cause, also after a checkpoint restore. The scored members' reports list that failure
+    without selecting it.
 - **Trade-off:** a failed comparison costs two members' training signal, where scoring them from their remaining
   comparison would keep it. In exchange, no scored member is scored from fewer comparisons than its siblings.
 
@@ -629,7 +632,7 @@ client for callers that already hold all answers for a batch comparison.
 - **Comparison Strategies**: `comparison_strategies.py` (in this package) - Strategy infrastructure
 - **Base VLLM Model**: `responses_api_models/vllm_model/` - Generic model (unchanged)
 - **Type Definitions**: `nemo_gym/core/responses_api_types.py` - Custom role type support
-- **Rollout Collection**: `nemo_gym/rollout_collection.py` - Collects per-rollout agent results
+- **Rollout Collection**: `nemo_gym/rollouts/rollout_collection.py` - Collects per-rollout agent results
 
 ## License
 

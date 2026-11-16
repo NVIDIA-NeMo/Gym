@@ -28,7 +28,10 @@ from typing import ClassVar, List, Optional
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.metrics import compute_pass_majority_metrics, compute_subset_metrics, highest_k_metrics
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
@@ -36,9 +39,6 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.config import ModelServerRef
-from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.metrics import compute_pass_majority_metrics, compute_subset_metrics, highest_k_metrics
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JudgeError, VerifierFixture, call_judge
 from resources_servers.proof_jury_judge.verifier_fixture import create_proof_jury_judge_server, invoke_proof_jury_judge

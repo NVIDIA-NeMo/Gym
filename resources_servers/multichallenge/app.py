@@ -36,19 +36,20 @@ from typing import Any, List, Optional
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
-)
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.server_runtime import (
+    BaseResourcesServerConfig,
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+)
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import call_judge
 
 
@@ -388,3 +389,6 @@ class MultiChallengeServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     MultiChallengeServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = MultiChallengeServer.run_webserver()  # noqa: F401

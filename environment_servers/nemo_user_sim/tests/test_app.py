@@ -31,13 +31,16 @@ from environment_servers.nemo_user_sim.app import (
 )
 from environment_servers.nemo_user_sim.episode_contracts import UserSimEpisodeRequest, UserSimEpisodeResult
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.config import AgentServerRef, ModelServerRef, ResourcesServerRef
-from nemo_gym.core import EpisodeId, TaskId
-from nemo_gym.episode_types import MaterializedTask
-from nemo_gym.rollout_collection import _episode_record
-from nemo_gym.server_utils import BaseServerConfig
-from nemo_gym.task_materialization import materialize_task
-from resources_servers.nemo_user_sim.app import UserSimResourcesServer, UserSimResourcesServerConfig
+from nemo_gym.config import AgentServerRef, BaseServerConfig, ModelServerRef, ResourcesServerRef
+from nemo_gym.core import EpisodeId, MaterializedTask, TaskId
+from nemo_gym.data import materialize_task
+from nemo_gym.rollouts.rollout_collection import _episode_record
+from nemo_gym.server_runtime import is_handled_episode_failure
+from resources_servers.nemo_user_sim.app import (
+    UserSimResourcesServer,
+    UserSimResourcesServerConfig,
+    installed_usersim_revision,
+)
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimSimulationResult,
     UserSimTaskInput,
@@ -62,6 +65,34 @@ def _server() -> UserSimEnvironmentServer:
             resources_server=ResourcesServerRef(type="resources_servers", name="nemo_user_sim_resources"),
         ),
         server_client=MagicMock(spec=ServerClient),
+    )
+
+
+@pytest.mark.parametrize(
+    ("capture_training_tokens", "skip_token_capture", "path"),
+    [
+        (True, False, "/ng-rollout/rollout/training-token-capture/v1/responses"),
+        # The user simulator is never captured.
+        (False, False, "/ng-rollout/rollout/v1/responses"),
+        # A rollout that skips capture captures no participant, the assistant included.
+        (True, True, "/ng-rollout/rollout/v1/responses"),
+    ],
+)
+def test_only_the_assistant_of_a_captured_episode_is_activated_with_the_training_tag(
+    capture_training_tokens: bool, skip_token_capture: bool, path: str
+) -> None:
+    server = _server()
+    server.server_client.global_config_dict = OmegaConf.create(
+        {
+            "token_id_capture": {"enabled": True, "all_agents": True},
+            "nemo_user_sim_assistant": {"responses_api_agents": {"simple_agent": {}}},
+        }
+    )
+    request = _request().model_copy(update={"skip_token_capture": skip_token_capture})
+
+    assert (
+        server.responses_path("nemo_user_sim_assistant", request, capture_training_tokens=capture_training_tokens)
+        == path
     )
 
 
@@ -730,7 +761,7 @@ def _resolved_row() -> dict[str, Any]:
         "trajectory_id": "trajectory",
         "usersim_config": {"max_turns": 1},
         "usersim_provenance": {
-            "code_sha": "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee",  # pragma: allowlist secret
+            "code_sha": installed_usersim_revision(),
             "nemotron_personas_version": "synthetic",
         },
     }
@@ -962,7 +993,7 @@ async def test_non_retryable_assistant_response_failure_is_verified_as_reward_ze
         server_client=MagicMock(spec=ServerClient),
     )
     resources_server.session_id_to_seed = {}
-    resources_server.closed_resources_session_ids = {}
+    resources_server.fenced_resources_session_ids = {}
     resources_request = SimpleNamespace(session={SESSION_ID_KEY: "real-resources-session"})
     seed_body = next(call[2]["json"] for call in client.calls if call[1] == "/seed_session")
     verify_body = next(call[2]["json"] for call in client.calls if call[1] == "/verify")
@@ -1037,9 +1068,10 @@ def test_an_agent_seed_refusal_fails_with_the_agents_reason() -> None:
     refusal = ClientResponseError(MagicMock(), (), status=422, message="Unprocessable Content")
     refusal.response_content = b'{"detail":"Simple Agent does not support sandbox access"}'
 
-    failure = UserSimEnvironmentServer._failure("agent", refusal).failure
+    failure = UserSimEnvironmentServer._failure("agent", refusal)
 
-    assert failure.terminal is True
+    assert is_handled_episode_failure(failure) and (failure.boundary, failure.stage) == ("environment", "agent")
+    assert failure.episode_terminal is True and failure.__cause__ is refusal
     assert "Simple Agent does not support sandbox access" in failure.failure_reason
 
 
@@ -1047,9 +1079,10 @@ def test_a_participant_turn_refusal_fails_with_the_agents_reason() -> None:
     refusal = ClientResponseError(MagicMock(), (), status=422, message="Unprocessable Content")
     refusal.response_content = b'{"detail":"user_model agent cannot serve this tool_choice"}'
 
-    failure = UserSimEnvironmentServer._failure("agent", _ParticipantActivationError("user_model", refusal)).failure
+    failure = UserSimEnvironmentServer._failure("agent", _ParticipantActivationError("user_model", refusal))
 
-    assert failure.terminal is True
+    assert is_handled_episode_failure(failure) and (failure.boundary, failure.stage) == ("environment", "agent")
+    assert failure.episode_terminal is True
     assert "user_model agent cannot serve this tool_choice" in failure.failure_reason
 
 

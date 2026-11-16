@@ -26,7 +26,7 @@ import json
 from pathlib import Path
 from typing import Any, Optional, Union
 
-from nemo_gym.vision_input import build_image_input
+from nemo_gym.data import build_image_input
 
 
 BENCHMARK_DIR = Path(__file__).parent
@@ -97,13 +97,13 @@ def format_entry(row: dict, prompt_config: Any = None) -> dict:
         # Metadata for analysis; not used for grading.
         "answer_type": row.get("answer_type"),
         "uuid": row["id"],
+        "modality": "vision" if row.get("image") else "text",
         "task_id": row["id"],
         "category": row.get("category"),
         "raw_subject": row.get("raw_subject"),
         "verified_class": VERIFIED_CLASSES_MAP.get(row.get("Verified_Classes"), row.get("Verified_Classes")),
     }
     if prompt_config is not None:
-        entry["has_image"] = bool(row.get("image"))
         entry["responses_create_params"] = {
             "input": build_image_input(prompt_config, row["question"], row.get("image") or "")
         }
@@ -141,7 +141,7 @@ def prepare(
 
     prompt_config = None
     if include_vision:
-        from nemo_gym.prompt import load_prompt_config
+        from nemo_gym.data import load_prompt_config
 
         prompt_config = load_prompt_config(str(PROMPT_CONFIG_FPATH))
 

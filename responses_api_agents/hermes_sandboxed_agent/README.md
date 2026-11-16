@@ -136,7 +136,7 @@ compile failures without infrastructure evidence keep their zero score.
 
 ```bash
 pytest responses_api_agents/hermes_sandboxed_agent/tests \
-  resources_servers/swebench_pro/tests tests/unit_tests/test_apptainer_provider.py
+  resources_servers/swebench_pro/tests tests/unit_tests/sandbox/test_apptainer_provider.py
 ruff check responses_api_agents/hermes_sandboxed_agent \
   resources_servers/swebench_pro nemo_gym/sandbox/providers/apptainer/provider.py
 ```

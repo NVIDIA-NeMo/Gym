@@ -11,7 +11,7 @@ It is intentionally **synchronous** because it is meant to run inside a
 FastAPI side and dispatches one Ray task per rollout.
 
 OSWorld is an optional runtime dependency — it is heavy
-(torch + paddleocr + …) and only needed when actually executing rollouts.
+(torch + …) and only needed when actually executing rollouts.
 The imports are gated so unit tests and module-level introspection don't
 trigger them.
 """
@@ -40,6 +40,7 @@ import requests
 
 from responses_api_agents.osworld_agent.action_parser import parse_actions, strip_thinking
 from responses_api_agents.osworld_agent.proxy import inspect_proxy_config_file, task_requires_proxy
+from responses_api_agents.osworld_agent.reward_modes import REWARD_MODES, reward_from_score
 from responses_api_agents.osworld_agent.rollout_outcome import (
     RUNTIME_ADMISSION_POLICY_ID,
     RolloutOutcomeFacts,
@@ -48,8 +49,10 @@ from responses_api_agents.osworld_agent.rollout_outcome import (
 from responses_api_agents.osworld_agent.runner_registry import load_attr, resolve_runner_spec
 from responses_api_agents.osworld_agent.runtime_errors import (
     OSWorldActionTimeoutError,
+    OSWorldGuestStartTimeoutError,
     OSWorldModelTimeoutError,
 )
+from responses_api_agents.osworld_agent.taskgen_plugins import clear_task_plugins, register_task_plugins
 
 
 LOG = logging.getLogger("nemo_gym.osworld_agent.client")
@@ -157,6 +160,10 @@ class RolloutResult:
     # Resolved Gym-owned model/history behavior. It is deliberately distinct
     # from request-owned sampling parameters and infrastructure provenance.
     agent_contract: Optional[Dict[str, Any]] = None
+    # Set when the sandbox guest never became ready for an infrastructure reason:
+    # {"provider", "http_status", "message", "sandbox_id"}. The agent reports it as a
+    # retryable infrastructure_error instead of a masked result.
+    sandbox_start_failure: Optional[Dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -1256,6 +1263,18 @@ def _safe_task_id(task_config: Dict[str, Any]) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", raw)[:120] or "unknown"
 
 
+def _guest_start_timeout(error: BaseException) -> Optional[OSWorldGuestStartTimeoutError]:
+    """The guest start timeout ``error`` is or was raised from, if any (the OSWorld environment may wrap it)."""
+    seen: set[int] = set()
+    current: Optional[BaseException] = error
+    while current is not None and id(current) not in seen:
+        if isinstance(current, OSWorldGuestStartTimeoutError):
+            return current
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return None
+
+
 def _safe_artifact_component(value: Any, *, fallback: str = "unknown") -> str:
     component = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or fallback)).strip("._")
     return component[:120] or fallback
@@ -1731,7 +1750,7 @@ def run_osworld_task(
     this module on a machine without OSWorld installed still works — only
     actually *running* a rollout requires it.
     """
-    if reward_mode not in {"raw", "binary"}:
+    if reward_mode not in REWARD_MODES:
         raise ValueError(f"Unsupported reward_mode: {reward_mode!r}")
     if step_timeout <= 0:
         raise ValueError("step_timeout must be positive")
@@ -1873,6 +1892,7 @@ def run_osworld_task(
     operation_failure_reason: Optional[str] = None
     evaluation_error: Optional[str] = None
     proxy_setup_error = False
+    sandbox_start_failure: Optional[Dict[str, Any]] = None
     rollout_phase = "before_environment"
     task_start = time.monotonic()
     recording_path: Optional[str] = None
@@ -1989,6 +2009,15 @@ def run_osworld_task(
         if linked_cache_files:
             LOG.info(
                 "Linked %d pre-staged setup cache entries for task %s", linked_cache_files, _safe_task_id(task_config)
+            )
+        # Generated tasks may judge with getters/metrics they carry themselves; DesktopEnv resolves them by name
+        # during reset(), so they are registered first (and refused on the remote Resources Server path).
+        plugin_functions = register_task_plugins(task_config, remote=use_remote_resources)
+        if plugin_functions:
+            LOG.info(
+                "Registered %d task evaluator plugin function(s) for task %s",
+                len(plugin_functions),
+                _safe_task_id(task_config),
             )
         rollout_phase = "environment_reset"
         env.reset(task_config=task_config)
@@ -2555,39 +2584,47 @@ def run_osworld_task(
     except Exception as exc:  # noqa: BLE001 — top-level guard so caller sees error not crash.
         proxy_setup_error = bool(requires_proxy and enable_proxy and rollout_phase == "environment_reset")
         error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
+        start_timeout = _guest_start_timeout(exc)
+        if start_timeout is not None and start_timeout.is_infrastructure_failure:
+            sandbox_start_failure = {
+                "provider": start_timeout.provider,
+                "http_status": start_timeout.http_status,
+                "message": str(start_timeout),
+                "sandbox_id": start_timeout.sandbox_id,
+            }
         LOG.exception("OSWorld rollout failed before evaluation")
     finally:
-        if pointer_io_context_token is not None:
-            _POINTER_MODEL_IO_CONTEXT.reset(pointer_io_context_token)
-        if "pointer_log_handler" in locals() and pointer_log_handler is not None:
-            try:
-                pointer_log_handler.flush()
-                pointer_log_handler.close()
-                pointer_logger = getattr(pointer_log_handler, "_nemo_gym_logger", None)
-                if pointer_logger is not None:
-                    pointer_logger.removeHandler(pointer_log_handler)
-            except Exception:
-                LOG.exception("Pointer log handler close raised")
-        if _recording_started and env is not None:
-            try:
-                os.makedirs(_record_dir, exist_ok=True)
-                _task_id = task_config.get("id", "unknown")
-                _mp4_path = os.path.join(_record_dir, f"{_task_id}.mp4")
-                env.controller.end_recording(_mp4_path)
-                recording_path = _mp4_path
-                task_logger.info("Saved VM recording: %s", _mp4_path)
-            except Exception:  # noqa: BLE001 — best-effort.
-                LOG.exception("end_recording() failed; mp4 may be missing or partial")
-        if env is not None:
-            try:
-                env.close()
-            except Exception:
-                LOG.exception("env.close() raised")
+        try:
+            if pointer_io_context_token is not None:
+                _POINTER_MODEL_IO_CONTEXT.reset(pointer_io_context_token)
+            if "pointer_log_handler" in locals() and pointer_log_handler is not None:
+                try:
+                    pointer_log_handler.flush()
+                    pointer_log_handler.close()
+                    pointer_logger = getattr(pointer_log_handler, "_nemo_gym_logger", None)
+                    if pointer_logger is not None:
+                        pointer_logger.removeHandler(pointer_log_handler)
+                except Exception:
+                    LOG.exception("Pointer log handler close raised")
+            if _recording_started and env is not None:
+                try:
+                    os.makedirs(_record_dir, exist_ok=True)
+                    _task_id = task_config.get("id", "unknown")
+                    _mp4_path = os.path.join(_record_dir, f"{_task_id}.mp4")
+                    env.controller.end_recording(_mp4_path)
+                    recording_path = _mp4_path
+                    task_logger.info("Saved VM recording: %s", _mp4_path)
+                except Exception:  # noqa: BLE001 — best-effort.
+                    LOG.exception("end_recording() failed; mp4 may be missing or partial")
+            if env is not None:
+                try:
+                    env.close()
+                except Exception:
+                    LOG.exception("env.close() raised")
+        finally:
+            clear_task_plugins()
 
-    if reward_mode == "raw":
-        reward = float(final_score)
-    else:
-        reward = 1.0 if final_score >= 1.0 else 0.0
+    reward = reward_from_score(reward_mode, final_score, agent_terminal_action)
 
     if timed_out:
         infrastructure_failure_reason = "timeout"
@@ -2646,6 +2683,7 @@ def run_osworld_task(
         artifact_dir=task_artifacts.directory if task_artifacts is not None else None,
         termination_reason=outcome.termination_reason,
         agent_contract=effective_agent_contract,
+        sandbox_start_failure=sandbox_start_failure,
     )
     _finalize_task_artifacts(
         task_artifacts,

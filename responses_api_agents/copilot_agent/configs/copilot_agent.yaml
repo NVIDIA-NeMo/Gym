@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Copilot borrows SandboxAccess from EnvironmentServer. The run configuration
+# binds the independent benchmark and agent; this config selects only the harness and model.
+copilot_agent:
+  responses_api_agents:
+    copilot_agent:
+      entrypoint: app.py
+      num_workers: 1
+      resources_server: null
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      copilot_version: 1.0.103
+      timeout: 900
+      network_access: inherit
+      allow_web_fetch: false
+      # For offline installation, set all three to a trusted version-matched image runtime.
+      copilot_binary: null
+      copilot_binary_sha256: null
+      copilot_dist_dir: null

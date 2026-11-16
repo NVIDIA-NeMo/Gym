@@ -24,14 +24,14 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.responses_converter import ResponsesConverter
+from nemo_gym.models.chat_completions_converter import ChatCompletionsConverter
+from nemo_gym.server_runtime.base_resources_server import ReverifyMode
 from nemo_gym.trajectory.atif_reverification import (
     AtifProjectionError,
     AtifReverifyManifestEntry,
@@ -195,7 +195,7 @@ def test_atif_and_equivalent_native_response_receive_the_same_reward() -> None:
     assert final_step.extra is not None
     raw_request = final_step.extra["llm_request"]
     raw_response = final_step.extra["llm_response"]
-    converter = ResponsesConverter(return_token_id_information=False, uses_reasoning_parser=False)
+    converter = ChatCompletionsConverter(return_token_id_information=False, uses_reasoning_parser=False)
     native_items = converter.chat_completions_messages_to_responses_items(
         deepcopy(raw_request["messages"][2:]) + [deepcopy(raw_response["choices"][0]["message"])]
     )

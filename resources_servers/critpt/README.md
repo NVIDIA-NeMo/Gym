@@ -43,6 +43,34 @@ already has it. With `num_repeats=N` and 70 problems, this produces N independen
 70 unique `problem_id`s — N AA API calls total, each scored as a separate run. Assumes
 uniform `num_repeats` across problems (which `gym eval run --no-serve` enforces).
 
+## Grading errors
+
+Real runs send full batches of 70 real submissions only; a smoke run never calls AA (see below).
+
+- **Quota or key errors stop the run.** AA answers HTTP 429 when the quota is exhausted and 401 or 403
+  when the key is rejected or its account is not approved. Retrying cannot help, so every row of the
+  batch fails like a judge failure: it lands in the failures file with its saved answer kept, typed
+  `provider_quota_exhausted` (429; the reason carries the reset time from `Retry-After`: `AA quota
+  exhausted, resets at <UTC time>; grade with replay or resubmit after the reset`) or
+  `provider_credentials_rejected` (401/403). The run stops with that kind and does not retry. Before the
+  reset, a recovery decision on that state is STOP; after it, `gym eval resubmit --recover` grades the
+  saved answers again with no model calls. With a rejected key, fix the key (or get the account approved)
+  first. `replay` grades the cached submissions the same way.
+- **Partial grader errors are tolerated.** If AA reports `judge_error_count <= max_judge_errors` (server
+  config, default `3`: the benchmark PIC's v1 value, about 5% of a 70 batch, to be tuned empirically), the batch
+  is accepted and its accuracy is rescaled to the graded items:
+  `accuracy * batch_size / (batch_size - judge_error_count)`, clamped to 1.0. This assumes AA's accuracy is
+  correct items over the whole batch, so an ungraded item counts as incorrect. Every row records
+  `judge_error_count` and `graded_items`. With more errors than that the batch fails as `judge_failed`
+  (masked, graded again). `replay` takes the same threshold as `--max-judge-errors`.
+- **A re-judge of fewer than `batch_size` rows cannot be graded alone.** AA only grades full batches and nothing
+  is padded, so a smaller set (the last 23 rows of a run, say) waits for more rows. When
+  `verify_timeout_seconds` passes, every waiter fails as `judge_failed` ("N saved answers pending, fewer than
+  batch_size; grade them with replay together with other runs or after more rows arrive"): masked, saved answer
+  kept. Set `verify_timeout_seconds` low for re-judge jobs, and `num_samples_in_parallel` to at least
+  `batch_size`, or a full re-judge never fills a batch.
+- **Any other AA failure** (a 4xx/5xx, a timeout) is `judge_failed`: the rows are masked and graded again.
+
 ## Dataset Format
 
 Two JSONL files coexist with different shapes:
@@ -73,8 +101,9 @@ Both signals surface in the run log, prefixed with the resources-server instance
   always increases), `<B>` is the pending-batch index, and `<K>/70` is that batch's fill.
 - Batch-fire log line (WARNING level):
   `CritPt batch full (70 submissions); firing AA API.`
-- On AA API failure, full exception + traceback is logged via `LOG.exception(...)` and
-  every waiter in that batch is failed with the same exception.
+- On a quota or key error, an ERROR line names the cause and the cache path. On any other AA API
+  failure, the full exception + traceback is logged via `LOG.exception(...)` and every waiter in that
+  batch is failed as `judge_failed`.
 
 `GET /status` returns the live buffer count:
 
@@ -128,34 +157,29 @@ gym env start --benchmark critpt --model-type openai_model
 
 ## Smoke test (5 example problems)
 
-**Note:** The AA API rejects sub-70 batches. To run e2e on the 5 example problems, the resources server
-has one opt-in config knob:
+**Note:** The AA API rejects sub-70 batches, and a smoke run must not call the AA server at all. To run e2e
+on the 5 example problems, the resources server has one opt-in config knob:
 
-- `fire_after: int` — fire the batch after this many real submissions arrive, then pad
-  up to `batch_size` (70) with empty padding submissions for the missing problem_ids (drawn from the
-  hardcoded canonical CritPt problem list, `Challenge_<N>_main` for `N` in 1..70)
+- `fire_after: int` — fire the batch after this many real submissions arrive. The batch is **not** sent
+  to AA: the submissions are written to the cache (when `cache_dir` is set) and every row comes back masked
+  (`mask_sample: true`, no accuracy) with `failure_kind: judge_skipped` and a reason naming smoke
+  mode. A smoke run therefore proves the wiring only; a real score needs a full run of 70 problems.
 
 Defaults to `None`/unset, so production behavior is unchanged. Set it only for testing purposes:
 
 ```bash
-gym env start --benchmark critpt --model-type openai_model \
-    '++critpt_benchmark_resources_server.resources_servers.critpt.fire_after=5'
+gym env start --benchmark critpt --model-type openai_model     '++critpt_benchmark_resources_server.resources_servers.critpt.fire_after=5'
 ```
 
 ## Collecting rollouts
 
 ```bash
-gym eval run --no-serve \
-    --agent critpt_benchmark_agent \
-    --input resources_servers/critpt/data/example.jsonl \
-    --output results/critpt_smoke.jsonl \
-    --num-repeats 1 \
-    --temperature 0.0
+gym eval run --no-serve     --agent critpt_benchmark_agent     --input resources_servers/critpt/data/example.jsonl     --output results/critpt_smoke.jsonl     --num-repeats 1     --temperature 0.0
 ```
 
 What this exercises: agent runs Turn 1 + Turn 2 on exactly 5 problems -> 5 verify() calls
-arrive -> server fires the batch after the 5th, pads with 65 empty padding slots -> real AA
-call -> aggregate distributed to the 5 real rollouts.
+arrive -> server fires the batch after the 5th, logs `smoke mode: batch of 5 submissions not sent to AA`
+and resolves the 5 rollouts as not graded. No AA call is made.
 
 ## Tests
 

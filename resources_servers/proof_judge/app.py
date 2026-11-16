@@ -24,18 +24,18 @@ from typing import Any, Optional
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
-)
 from nemo_gym.client import get_response_json
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.server_runtime import (
+    BaseResourcesServerConfig,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
 )
 from nemo_gym.verification import reraise_judge_errors
 
@@ -219,6 +219,9 @@ class IncorrectGroupCoordinator(BaseModel):
 
 
 class ProofWithJudgeResourcesServer(SimpleResourcesServer):
+    # Its judge calls go through an external SDK client that notes no model request.
+    grading_may_use_uninstrumented_model = True
+
     config: ProofWithJudgeResourcesServerConfig
 
     _ext_clients: Optional[list] = PrivateAttr(default=None)

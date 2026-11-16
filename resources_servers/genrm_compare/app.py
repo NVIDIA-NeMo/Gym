@@ -45,20 +45,24 @@ from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseErr
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, field_validator, model_validator
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY, get_response_json, raise_for_status
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, ModelServerRef
+from nemo_gym.core import (
+    FailureReport,
+    NeMoGymEasyInputMessage,
+    NeMoGymResponseCreateParamsNonStreaming,
+    RequestFailureLog,
+    failure_report_for,
+    rebuild_failure,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.client import SESSION_ID_KEY, get_response_json, raise_for_status
-from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, ModelServerRef
-from nemo_gym.core import (
-    NeMoGymEasyInputMessage,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
-from nemo_gym.verification import JudgeError
+from nemo_gym.verification import JUDGE_FAILURES, JudgeError, is_judge_failure
 from resources_servers.genrm_compare.utils import (
     GenRMOutputParseError,
     aggregate_scores,
@@ -129,6 +133,15 @@ class _CohortMember:
     waiters: List[asyncio.Future[VerifyResult]] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class _MemberFailure:
+    """Why one member of a completed cohort was masked alone."""
+
+    reason: str
+    # The cause's id in the cohort's ``failure_report``, when the failed comparison had a Gym failure as its cause.
+    failure_id: Optional[str] = None
+
+
 @dataclass
 class _CohortState:
     """Process-local state for one prompt cohort."""
@@ -140,9 +153,11 @@ class _CohortState:
     members: Dict[int, _CohortMember] = field(default_factory=dict)
     phase: Literal["collecting", "evaluating", "completed", "failed"] = "collecting"
     results: Dict[int, VerifyResult] = field(default_factory=dict)
-    # In a completed cohort, the members masked alone because a comparison of theirs failed, with the reason.
-    member_failures: Dict[int, str] = field(default_factory=dict)
+    # In a completed cohort, the members masked alone because a comparison of theirs failed.
+    member_failures: Dict[int, _MemberFailure] = field(default_factory=dict)
     failure: Optional[str] = None
+    failure_report: FailureReport = field(default_factory=FailureReport)
+    failure_log: Optional[RequestFailureLog] = field(default=None, repr=False)
     failure_kind: Literal["cohort", "judge"] = "cohort"
     terminal_at: Optional[float] = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -176,6 +191,7 @@ class _CompletedMemberState(BaseModel):
     judge_failure: Optional[str] = None
     # One of this member's comparisons failed, so it was masked, but its cohort completed.
     masked_alone: bool = False
+    failure_report: Optional[FailureReport] = None
 
     @model_validator(mode="after")
     def _one_outcome(self) -> "_CompletedMemberState":
@@ -183,6 +199,8 @@ class _CompletedMemberState(BaseModel):
             raise ValueError("a saved GenRM member needs exactly one of result and judge_failure")
         if self.masked_alone and self.judge_failure is None:
             raise ValueError("a GenRM member masked alone needs its judge_failure")
+        if self.result is not None and self.failure_report is not None and self.failure_report.failure_id is not None:
+            raise ValueError("a completed GenRM member cannot select a failure")
         return self
 
 
@@ -559,6 +577,12 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             result = await asyncio.shield(future)
         except CohortEvaluationError:
             self._raise_cohort_failure(body, cohort)
+        except JudgeError:
+            # Only a member masked alone gets a JudgeError; a failed cohort sets CohortEvaluationError. The cohort
+            # completed, so its report goes with this failure as it goes with a reward.
+            if log := RequestFailureLog.current():
+                log.add(cohort.failure_report)
+            raise
         except asyncio.CancelledError:
             # The logical member remains registered, but this HTTP request no
             # longer needs a result. Mark its waiter consumed so a later cohort
@@ -568,10 +592,13 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             future.cancel()
             await asyncio.shield(self._remove_waiter(cohort, rollout_index, future))
             raise
-        return self._verify_response(body, result)
+        return self._verify_response(body, result, cohort.failure_report)
 
     @staticmethod
     def _raise_cohort_failure(body: GenRMCompareVerifyRequest, cohort: _CohortState) -> None:
+        if log := RequestFailureLog.current():
+            log.add(cohort.failure_report)
+        cause = rebuild_failure(cohort.failure_report)
         message = cohort.failure or "GenRM cohort evaluation failed"
         if cohort.group_id is None:
             message += (
@@ -580,8 +607,12 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             )
         if cohort.failure_kind == "judge":
             # The shared failsafe preserves the answer and sets both masking contracts.
-            raise JudgeError(message)
-        raise HTTPException(status_code=503, detail=message)
+            error = JudgeError(message)
+        else:
+            error = HTTPException(status_code=503, detail=message)
+        if cause is not None:
+            raise error from cause
+        raise error
 
     @classmethod
     def _completed_member_response(
@@ -589,12 +620,27 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     ) -> GenRMCompareVerifyResponse:
         failure = cohort.member_failures.get(rollout_index)
         if failure is not None:
-            # Masked alone: the shared failsafe sets both masking contracts, as for a failed cohort.
-            raise JudgeError(failure)
-        return cls._verify_response(body, cohort.results[rollout_index])
+            if log := RequestFailureLog.current():
+                log.add(cohort.failure_report)
+            raise cls._member_error(cohort, failure)
+        return cls._verify_response(body, cohort.results[rollout_index], cohort.failure_report)
 
     @staticmethod
-    def _verify_response(body: GenRMCompareVerifyRequest, result: VerifyResult) -> GenRMCompareVerifyResponse:
+    def _member_error(cohort: _CohortState, failure: _MemberFailure) -> JudgeError:
+        """The JudgeError of a member masked alone, caused by its failed comparison's Gym failure if it had one.
+
+        The shared failsafe then sets both masking contracts, as for a failed cohort.
+        """
+        error = JudgeError(failure.reason)
+        error.__cause__ = rebuild_failure(cohort.failure_report.model_copy(update={"failure_id": failure.failure_id}))
+        return error
+
+    @staticmethod
+    def _verify_response(
+        body: GenRMCompareVerifyRequest, result: VerifyResult, failure_report: Optional[FailureReport] = None
+    ) -> GenRMCompareVerifyResponse:
+        if failure_report is not None and (log := RequestFailureLog.current()) is not None:
+            log.add(failure_report)
         response_obj = body.response.model_dump() if hasattr(body.response, "model_dump") else body.response
         reasoning_text, answer_text = extract_from_response_obj(response_obj)
         return GenRMCompareVerifyResponse(
@@ -751,7 +797,24 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         cohort: _CohortState,
         members: Dict[int, _CohortMember],
     ) -> None:
-        """Evaluate exactly one immutable snapshot and publish results to all waiters."""
+        """Own the shared report without inheriting any member's rollout, capture or checkpoint context."""
+        with RequestFailureLog.capture() as failure_log:
+            # Server shutdown can publish a failure while this owner is still running. It snapshots
+            # this cohort-owned log under the same outcome lock; only report data enters checkpoints.
+            cohort.failure_log = failure_log
+            try:
+                await self._evaluate_verify_cohort_observed(prompt_key, cohort, members, failure_log)
+            finally:
+                cohort.failure_log = None
+
+    async def _evaluate_verify_cohort_observed(
+        self,
+        prompt_key: str,
+        cohort: _CohortState,
+        members: Dict[int, _CohortMember],
+        failure_log: RequestFailureLog,
+    ) -> None:
+        """Evaluate exactly one immutable snapshot and publish its outcomes and report together."""
         try:
             sorted_indices = sorted(members)
             first_body = members[sorted_indices[0]].body
@@ -817,7 +880,9 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             if len(member_failures) == len(sorted_indices):
                 # No member can be scored, so the whole group fails as a judge failure.
                 first = member_failures[min(member_failures)]
-                raise JudgeError(f"GenRM masked all {len(member_failures)} rollouts of the group; first: {first}")
+                raise JudgeError(
+                    f"GenRM masked all {len(member_failures)} rollouts of the group; first: {first}"
+                ) from first
             if not all(isfinite(reward) for position, reward in enumerate(rewards) if position not in member_failures):
                 raise ValueError("GenRM returned non-finite cohort rewards")
             results_by_index = {
@@ -833,30 +898,56 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 for position, index in enumerate(sorted_indices)
                 if position not in member_failures
             }
-            failures_by_index = {sorted_indices[position]: reason for position, reason in member_failures.items()}
-            for reason in failures_by_index.values():
-                logger.warning("GenRM masked one rollout of key=%r: %s", prompt_key[:160], reason[:500])
-            await self._publish_verify_cohort(prompt_key, cohort, results_by_index, failures_by_index)
-        except asyncio.CancelledError:
+            causes = {}
+            for position, error in member_failures.items():
+                logger.warning("GenRM masked one rollout of key=%r: %s", prompt_key[:160], str(error)[:500])
+                # The cohort's report keeps the cause, so the member's reply names it, also after a restore.
+                cause = failure_report_for(error)
+                failure_log.add(cause)
+                causes[sorted_indices[position]] = (str(error), cause.failure_id)
+            failure_report = failure_log.reply_report(None)
+            # A full log drops new events, and with them a cause's id.
+            failures_by_index = {
+                index: _MemberFailure(reason, failure_id if failure_id in failure_report.events else None)
+                for index, (reason, failure_id) in causes.items()
+            }
+            await self._publish_verify_cohort(prompt_key, cohort, results_by_index, failures_by_index, failure_report)
+        except asyncio.CancelledError as error:
             await asyncio.shield(
                 self._fail_verify_cohort(
                     cohort,
                     "GenRM cohort evaluation was cancelled",
                     expected_phase="evaluating",
+                    failure_report=failure_log.reply_report(error),
                 )
             )
             raise
-        except JudgeError as error:
-            await self._fail_verify_cohort(
-                cohort, str(error), expected_phase="evaluating", failure_kind="judge", hold_for_checkpoint=True
-            )
-        except TimeoutError:
+        except JUDGE_FAILURES as error:
+            if is_judge_failure(error):
+                await self._fail_verify_cohort(
+                    cohort,
+                    str(error),
+                    expected_phase="evaluating",
+                    failure_kind="judge",
+                    hold_for_checkpoint=True,
+                    failure_report=failure_log.reply_report(error),
+                )
+            else:
+                logger.exception("GenRM cohort evaluation failed for %s", prompt_key)
+                await self._fail_verify_cohort(
+                    cohort,
+                    f"GenRM cohort evaluation failed: {type(error).__name__}: {str(error)[:1000]}",
+                    expected_phase="evaluating",
+                    failure_report=failure_log.reply_report(error),
+                )
+        except TimeoutError as error:
             await self._fail_verify_cohort(
                 cohort,
                 f"GenRM cohort evaluation deadline exceeded after {self.config.cohort_evaluation_timeout_s}s",
                 expected_phase="evaluating",
                 failure_kind="judge",
                 hold_for_checkpoint=True,
+                failure_report=failure_log.reply_report(error),
             )
         except Exception as error:
             logger.exception("GenRM cohort evaluation failed for %s", prompt_key)
@@ -864,6 +955,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 cohort,
                 f"GenRM cohort evaluation failed: {type(error).__name__}: {str(error)[:1000]}",
                 expected_phase="evaluating",
+                failure_report=failure_log.reply_report(error),
             )
 
     async def _publish_verify_cohort(
@@ -871,7 +963,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         prompt_key: str,
         cohort: _CohortState,
         results_by_index: Dict[int, VerifyResult],
-        member_failures: Optional[Dict[int, str]] = None,
+        member_failures: Optional[Dict[int, _MemberFailure]] = None,
+        failure_report: Optional[FailureReport] = None,
     ) -> None:
         """Publish rewards, retiring legacy cohorts and compacting explicit-ID tombstones."""
         participant = self.checkpoint_participant
@@ -884,7 +977,9 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 await participant.wait_open()
             async with cohort.lock:
                 if participant is None or participant.accepting:
-                    self._publish_verify_cohort_locked(prompt_key, cohort, results_by_index, member_failures or {})
+                    self._publish_verify_cohort_locked(
+                        prompt_key, cohort, results_by_index, member_failures or {}, failure_report
+                    )
                     return
 
     def _publish_verify_cohort_locked(
@@ -892,7 +987,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         prompt_key: str,
         cohort: _CohortState,
         results_by_index: Dict[int, VerifyResult],
-        member_failures: Dict[int, str],
+        member_failures: Dict[int, _MemberFailure],
+        failure_report: Optional[FailureReport] = None,
     ) -> None:
         """Publish under ``cohort.lock``, with no await, so every member gets its outcome at once.
 
@@ -905,6 +1001,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             raise RuntimeError(f"cannot publish GenRM rewards while cohort is {cohort.phase}")
         cohort.results = results_by_index
         cohort.member_failures = member_failures
+        if failure_report is not None:
+            cohort.failure_report = failure_report
         cohort.phase = "completed"
         cohort.terminal_at = time.monotonic()
         cohort.evaluation_task = None
@@ -913,7 +1011,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 if waiter.done():
                     continue
                 if index in member_failures:
-                    waiter.set_exception(JudgeError(member_failures[index]))
+                    waiter.set_exception(self._member_error(cohort, member_failures[index]))
                 else:
                     waiter.set_result(results_by_index[index])
             # A tombstone only needs the digest and result. Do not retain
@@ -938,6 +1036,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         expected_phase: Literal["collecting", "evaluating"],
         failure_kind: Literal["cohort", "judge"] = "cohort",
         hold_for_checkpoint: bool = False,
+        failure_report: Optional[FailureReport] = None,
     ) -> bool:
         # A judge failure reaches callers as a masked row they record like a reward, so with
         # ``hold_for_checkpoint`` it waits out an open checkpoint the same way; see _publish_verify_cohort.
@@ -947,7 +1046,9 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 await participant.wait_open()
             async with cohort.lock:
                 if participant is None or participant.accepting:
-                    return self._fail_verify_cohort_locked(cohort, message, expected_phase, failure_kind)
+                    return self._fail_verify_cohort_locked(
+                        cohort, message, expected_phase, failure_kind, failure_report
+                    )
 
     def _fail_verify_cohort_locked(
         self,
@@ -955,13 +1056,18 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         message: str,
         expected_phase: Literal["collecting", "evaluating"],
         failure_kind: Literal["cohort", "judge"],
+        failure_report: Optional[FailureReport] = None,
     ) -> bool:
         """Fail under ``cohort.lock``, with no await, so every member gets the failure at once."""
         if cohort.phase != expected_phase:
             return False
-        cohort.phase = "failed"
         cohort.failure = message
         cohort.failure_kind = failure_kind
+        if failure_report is None and cohort.failure_log is not None:
+            failure_report = cohort.failure_log.reply_report(None)
+        if failure_report is not None:
+            cohort.failure_report = failure_report
+        cohort.phase = "failed"
         cohort.terminal_at = time.monotonic()
         timeout_task = cohort.collection_timeout_task
         cohort.collection_timeout_task = None
@@ -1082,8 +1188,12 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         cohort = self._verify_cohorts.get(cohort_key)
         if cohort is None or cohort.group_id is None or rollout_index not in cohort.members:
             return {}
+        failure_report = cohort.failure_report
         if cohort.phase == "completed" and rollout_index in cohort.member_failures:
-            outcome: Dict[str, Any] = {"judge_failure": cohort.member_failures[rollout_index], "masked_alone": True}
+            failure = cohort.member_failures[rollout_index]
+            outcome: Dict[str, Any] = {"judge_failure": failure.reason, "masked_alone": True}
+            # The member's report names its own cause; the cohort's names none.
+            failure_report = failure_report.model_copy(update={"failure_id": failure.failure_id})
         elif cohort.phase == "completed":
             outcome = {"result": cohort.results[rollout_index]}
         elif cohort.phase == "failed" and cohort.failure_kind == "judge":
@@ -1091,7 +1201,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         else:
             # Still collecting or evaluating, or failed without a recorded row: every member replays, as before.
             return {}
-        return _CompletedMemberState(
+        state = _CompletedMemberState(
             cohort_key=cohort_key,
             prompt_digest=cohort.prompt_digest,
             group_id=cohort.group_id,
@@ -1099,10 +1209,15 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             rollout_index=rollout_index,
             response_digest=cohort.members[rollout_index].response_digest,
             response_digest_scheme=RESPONSE_DIGEST_SCHEME,
+            failure_report=failure_report,
             **outcome,
-        ).model_dump(mode="json", exclude_defaults=True)
+        )
+        # Only a masked member carries the flag, so other states stay readable by servers that predate it.
+        return state.model_dump(
+            mode="json", exclude_none=True, exclude=None if state.masked_alone else {"masked_alone"}
+        )
 
-    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
         """Export the outcome of each session's member whose cohort has finished; an empty state otherwise."""
         return {session_id: self._finished_member_state(session_id) for session_id in session_ids}
 
@@ -1119,7 +1234,13 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             failed = state.result is None and not state.masked_alone
             phase: Literal["completed", "failed"] = "failed" if failed else "completed"
             cohort_failure = state.judge_failure if failed else None
-            member_failure = state.judge_failure if state.masked_alone else None
+            restored_report = state.failure_report if state.failure_report is not None else FailureReport(omitted=True)
+            member_failure = None
+            if state.masked_alone:
+                assert state.judge_failure is not None  # Checked by _CompletedMemberState.
+                # A masked member's report names its own cause; the cohort's names none.
+                member_failure = _MemberFailure(state.judge_failure, restored_report.failure_id)
+                restored_report = restored_report.model_copy(update={"failure_id": None})
             cohort = cohorts.get(state.cohort_key)
             if cohort is None:
                 cohort = _CohortState(
@@ -1129,6 +1250,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     group_attempt=state.group_attempt,
                     phase=phase,
                     failure=cohort_failure,
+                    failure_report=restored_report,
                     failure_kind="judge",
                 )
                 cohorts[state.cohort_key] = cohort
@@ -1140,6 +1262,10 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 cohort_failure,
             ):
                 raise ValueError(f"session {session_id!r} names cohort {state.cohort_key!r} inconsistently")
+            if cohort.failure_report != restored_report:
+                raise ValueError(
+                    f"session {session_id!r} names cohort {state.cohort_key!r} with a different failure report"
+                )
             existing = cohort.members.get(state.rollout_index)
             if existing is not None and (
                 existing.response_digest != state.response_digest
@@ -1269,21 +1395,23 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
 
         A trainable response with a failed comparison gets no score, so every scored response is scored from all of
         its comparisons. Its entries in the per-response lists are None, and the last element maps its position to
-        the reason it is masked; when every trainable response is in it, the caller fails the group. A masked
+        the JudgeError it is masked with, caused by its first failed comparison; when every trainable response is in
+        it, the caller fails the group. A masked
         response's successful comparisons still score its neighbors, but the group adjustments see only the scored
         responses.
         """
         count = trainable_count if trainable_count is not None else len(response_objs)
         failed = [isinstance(result, JudgeError) for result in raw_results]
-        masked: Dict[int, str] = {}
+        masked: Dict[int, JudgeError] = {}
         for result, item in zip(raw_results, metadata):
             if isinstance(result, JudgeError):
                 for index in item[:2]:
                     if index < count and index not in masked:
-                        masked[index] = (
+                        masked[index] = JudgeError(
                             f"GenRM rollout_index={index} lost a comparison to a judge failure ({sum(failed)} of "
                             f"{len(raw_results)} comparisons failed): {str(result)[:1500]}"
                         )
+                        masked[index].__cause__ = result
         drop_metrics = {
             "genrm_failed_comparison_rate_per_group": sum(failed) / max(1, len(raw_results)),
             "genrm_masked_rollout_rate_per_group": len(masked) / max(1, count),
@@ -1511,7 +1639,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         rewards, _, _, metrics, comparison_results, _, _, _, masked = aggregate_result
         if masked:
             # This API has no per-response mask, so a failed comparison fails the request.
-            raise JudgeError(masked[min(masked)])
+            raise masked[min(masked)]
         return rewards, metrics, comparison_results, comparison_metadata
 
     async def _run_fixed_baseline_compare(
@@ -1588,7 +1716,9 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 principle=body.principle,
                 expected_rubric_ids=body.expected_rubric_ids,
             )
-        except JudgeError as error:
+        except JUDGE_FAILURES as error:
+            if not is_judge_failure(error):
+                raise
             raise HTTPException(status_code=503, detail=str(error)) from error
         detailed_results = [
             {
@@ -1640,7 +1770,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
 
         # input carries only the conversation history (standard OpenAI roles).
         # The comparison payload is passed via metadata so the request schema stays
-        # generic and GenRMModelMixin._preprocess_chat_completion_create_params can
+        # generic and the genrm_model server (append_genrm_roles in its common.py) can
         # inject the GenRM-specific roles (response_1, response_2, principle) server-side.
         messages: List[NeMoGymEasyInputMessage] = [
             NeMoGymEasyInputMessage(

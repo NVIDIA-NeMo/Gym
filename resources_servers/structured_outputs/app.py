@@ -26,12 +26,13 @@ import yaml
 from fastapi import FastAPI
 from openapi_schema_validator import validate as validate_against_schema_openapi
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 class StructuredOutputsResourcesServerConfig(BaseResourcesServerConfig):
@@ -467,3 +468,6 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     StructuredOutputsResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = StructuredOutputsResourcesServer.run_webserver()  # noqa: F401

@@ -16,7 +16,6 @@ from unittest.mock import MagicMock
 
 from pytest import approx
 
-from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.client import ServerClient
 from nemo_gym.core import (
     NeMoGymResponse,
@@ -24,6 +23,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.server_runtime import ReverifyMode
 from resources_servers.equivalence_rule.app import (
     EquivalenceRuleResourcesServer,
     EquivalenceRuleResourcesServerConfig,

@@ -21,16 +21,16 @@ from pydantic import (
     model_validator,
 )
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.core import JUDGE_UNPARSEABLE, NeMoGymResponse
+from nemo_gym.metrics import compute_aggregate_metrics
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.core import JUDGE_UNPARSEABLE, NeMoGymResponse
-from nemo_gym.metrics import compute_aggregate_metrics
 from resources_servers.voicebench.legacy import replay_rule_rows
 from resources_servers.voicebench.metrics import MetricValue, compute_voicebench_metrics
 from resources_servers.voicebench.scorers.base import ScoringResult

@@ -2,20 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """Gym preparation entrypoint for the throughput_16k split."""
 
-import sys
 from pathlib import Path
 
-
-# Gym imports this file by module path; make the shared sibling helper available.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from _prepare_common import DEFAULT_DATASET_REPO, prepare_one_config  # noqa: E402
+from .prepare import DATA_DIR, DEFAULT_DATASET_REPO, prepare_one_config
 
 
 def prepare(
     *,
     dataset_repo: str = DEFAULT_DATASET_REPO,
     dataset_revision: str | None = None,
+    output_dir: Path = DATA_DIR,
 ) -> Path:
     """Prepare throughput_16k using Gym's existing preparation interface."""
-    return prepare_one_config("throughput_16k", dataset_repo=dataset_repo, dataset_revision=dataset_revision)
+    return prepare_one_config(
+        "throughput_16k", dataset_repo=dataset_repo, dataset_revision=dataset_revision, output_dir=output_dir
+    )

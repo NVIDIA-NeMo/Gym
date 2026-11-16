@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 
 # Accession is matched permissively rather than as the 18 digits EDGAR actually
@@ -72,9 +72,14 @@ class SecArchivesUrl:
         return unquote(self.document).strip("/").rsplit("/", 1)[-1].lower()
 
     @property
-    def flat_document(self) -> str:
-        """The document path collapsed into a single filename component."""
-        return self.document.strip("/").replace("/", "_")
+    def cache_filename(self) -> str:
+        """The document path as a single filename component, empty if there is none.
+
+        Percent-encoding is reversible, so distinct document paths never share a
+        cache file. Filing caches written by different servers rely on this name
+        matching for the same URL.
+        """
+        return quote(self.document_path, safe="")
 
 
 def parse_sec_archives_url(url: str) -> SecArchivesUrl | None:

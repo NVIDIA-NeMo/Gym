@@ -103,6 +103,8 @@ class EnvironmentSettings(PhaseSettings):
 
 
 class AgentSettings(PhaseSettings):
+    # 8 h per task is the official Terminal-Bench 4.0 agent budget (TB 4.0 release notes, "Calibrating resources"):
+    # every TB 4.0 task is set to this flat agent timeout, and a task that declares none gets it here.
     timeout_sec: float = Field(default=28800, gt=0)
     user: str | int | None = None
 

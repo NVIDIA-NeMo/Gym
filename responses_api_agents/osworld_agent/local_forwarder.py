@@ -17,6 +17,7 @@ not a workstation proxy.
 
 from __future__ import annotations
 
+import os
 import re
 import socket
 import ssl
@@ -46,6 +47,17 @@ _HOP_BY_HOP_RESPONSE_HEADERS = (
 _WS_URL_RE = re.compile(rb"wss?://[^/\"]+/")
 
 
+def _ca_bundle() -> str | None:
+    """The CA bundle this process names for TLS, or None for the default trust store.
+
+    The forwarder's requests session sets ``trust_env = False`` so that proxy variables
+    never reroute guest traffic. That also hides REQUESTS_CA_BUNDLE from requests, which
+    then verifies only against its own bundle and rejects a gateway signed by a private
+    CA. Read the bundle explicitly and hand it to both the HTTP and the WebSocket path.
+    """
+    return os.environ.get("REQUESTS_CA_BUNDLE") or os.environ.get("SSL_CERT_FILE") or None
+
+
 def _open_upstream_socket(
     *,
     scheme: str,
@@ -54,7 +66,7 @@ def _open_upstream_socket(
 ) -> socket.socket:
     upstream = socket.create_connection((host, port), timeout=30)
     if scheme == "https":
-        context = ssl.create_default_context()
+        context = ssl.create_default_context(cafile=_ca_bundle())
         upstream = context.wrap_socket(upstream, server_hostname=host)
     upstream.settimeout(None)
     return upstream
@@ -151,6 +163,7 @@ def start_forwarder(
             try:
                 with requests.Session() as session:
                     session.trust_env = False
+                    session.verify = _ca_bundle() or True
                     upstream = session.request(
                         self.command,
                         base + self.path,

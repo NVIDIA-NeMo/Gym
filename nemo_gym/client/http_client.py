@@ -16,8 +16,10 @@
 
 import asyncio
 import atexit
+import json
 import socket
 import time
+from collections.abc import Callable
 from traceback import print_exc
 from typing import Any, NamedTuple, Optional, Type, Union, Unpack
 
@@ -29,8 +31,10 @@ from aiohttp import (
     ClientResponseError,
     ClientSession,
     ClientTimeout,
+    ConnectionTimeoutError,
     DummyCookieJar,
     ServerDisconnectedError,
+    UploadTracker,
 )
 from aiohttp.client import _RequestOptions
 from multidict import CIMultiDict
@@ -42,9 +46,11 @@ from nemo_gym.config.global_config import (
     get_global_config_dict,
     maybe_get_global_config_dict,
 )
-from nemo_gym.core.episode import (
+from nemo_gym.core.episode_context import (
     current_rollout_id,
 )
+from nemo_gym.core.failure_transport import FailureHeader, observe_reply
+from nemo_gym.core.typed_exceptions import NgFailureEvent, rebuild_failure
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_attributes
 from nemo_gym.telemetry.connection_pool import (
     QueueTimedTCPConnector,
@@ -147,6 +153,24 @@ class GlobalAIOHTTPAsyncClientConfig(BaseModel):
             "Applies to outgoing aiohttp connections and to connections accepted by Gym servers."
         ),
     )
+    global_aiohttp_sock_connect_timeout_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        description=(
+            "Seconds one outgoing TCP handshake may take. It does not count the wait for a free connection-pool "
+            "slot, so a request queued behind a busy pool is not cut short. Total and read time stay unlimited "
+            "unless the caller passes its own timeout."
+        ),
+    )
+    global_aiohttp_internal_retry_budget_seconds: float = Field(
+        default=600.0,
+        ge=0,
+        description=(
+            "Wall-clock budget for retries of a call between Gym servers when the caller passes no attempt or "
+            "retry-window limit: an unbroken run of connection errors, or retries of other errors, ends in the last "
+            "error once it is spent. 0 retries without a time limit."
+        ),
+    )
 
 
 def get_global_aiohttp_client(
@@ -156,7 +180,18 @@ def get_global_aiohttp_client(
     global _GLOBAL_AIOHTTP_CLIENT
 
     if _GLOBAL_AIOHTTP_CLIENT is not None:
-        return _GLOBAL_AIOHTTP_CLIENT
+        # aiohttp binds a session to the loop it was made on (its own `_loop`), so a later `asyncio.run` in this
+        # process (such as the end-of-run re-judge after collection) must not get it: it is closed, and the running
+        # loop gets a new client.
+        owner_loop = getattr(_GLOBAL_AIOHTTP_CLIENT, "_loop", None)
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        # Outside a running loop no new client can be made, so the cached one is returned as before.
+        if not isinstance(owner_loop, asyncio.AbstractEventLoop) or running_loop in (None, owner_loop):
+            return _GLOBAL_AIOHTTP_CLIENT
+        _close_detached_clients(owner_loop, _detach_global_aiohttp_clients())
 
     # Read only a config this process already has, cached or injected through NEMO_GYM_CONFIG_DICT; never parse
     # its argv here, which in a Ray task worker exits the process. A process with neither gets the default client
@@ -224,7 +259,7 @@ def set_global_aiohttp_client(cfg: GlobalAIOHTTPAsyncClientConfig) -> ClientSess
     )
     client_session = ClientSession(
         connector=connector,
-        timeout=ClientTimeout(),
+        timeout=ClientTimeout(sock_connect=cfg.global_aiohttp_sock_connect_timeout_seconds),
         cookie_jar=DummyCookieJar(),
     )
 
@@ -259,7 +294,7 @@ def get_global_aiohttp_control_client() -> ClientSession:  # pragma: no cover
                     probes=cfg.global_aiohttp_tcp_keepalive_probes,
                 ),
             ),
-            timeout=ClientTimeout(),
+            timeout=ClientTimeout(sock_connect=cfg.global_aiohttp_sock_connect_timeout_seconds),
             cookie_jar=DummyCookieJar(),
         )
     return _GLOBAL_AIOHTTP_CONTROL_CLIENT
@@ -288,6 +323,27 @@ def _detach_global_aiohttp_clients() -> list[ClientSession]:
     _GLOBAL_AIOHTTP_CONTROL_CLIENT = None
     _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY = False
     return clients
+
+
+_CLOSING_DETACHED_CLIENTS: set[asyncio.Task] = set()
+
+
+def _close_detached_clients(owner_loop: asyncio.AbstractEventLoop, clients: list[ClientSession]) -> None:
+    """Close clients detached from a loop other than the running one, on their owner loop while it still runs."""
+
+    async def close_clients() -> None:
+        for client in clients:
+            await client.close()
+
+    if not clients:
+        return
+    if owner_loop.is_running():
+        asyncio.run_coroutine_threadsafe(close_clients(), owner_loop)
+        return
+    # The owner loop has stopped: no owner-loop work is left, and the close only marks the sessions closed.
+    task = asyncio.get_running_loop().create_task(close_clients())
+    _CLOSING_DETACHED_CLIENTS.add(task)
+    task.add_done_callback(_CLOSING_DETACHED_CLIENTS.discard)
 
 
 def global_aiohttp_client_exit():  # pragma: no cover
@@ -362,10 +418,17 @@ async def request(
     _max_num_tries: Optional[int] = None,
     _control: bool = False,
     _resend_after_disconnect: bool = True,
+    _on_transport_failure: Callable[[Exception, bool | None], None] | None = None,
     _read_body: bool = False,
+    _retry_other_errors: bool = True,
+    *,
+    _connection_retry_window: Optional["ConnectionRetryWindow"] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """Make an outbound HTTP call through Gym's shared aiohttp client.
+
+    The private transport-failure observer runs before retry decisions and must not raise. It is not
+    forwarded to aiohttp; cancellation bypasses it.
 
     This is the only place Gym talks to another server, so it is also the only place
     trace context has to be injected: every agent -> model and agent -> resources hop goes
@@ -377,24 +440,48 @@ async def request(
     and redirects and is not forwarded to aiohttp.
 
     ``_max_num_tries`` caps this call's total attempts on every exception path. It replaces the
-    default generic-error limit (``MAX_NUM_TRIES`` attempts for external calls, unbounded for
+    default generic-error limit (``MAX_NUM_TRIES`` attempts for external calls, the internal retry budget for
     internal ones). A ``_max_connection_retries`` limit still applies as well.
 
+    An internal call (``_internal=True``) that sets none of ``_max_num_tries``, ``_max_connection_retries`` or
+    ``_connection_retry_window`` gets ``global_aiohttp_internal_retry_budget_seconds`` (600 s by default, ``0`` for no
+    limit). The budget is a connection retry window, which starts at the first connection error, and an elapsed cap
+    on retries of other errors, which starts when the call does. A call with its own limit uses that limit and not
+    the budget.
+
     ``_resend_after_disconnect=False`` raises a dropped connection instead of sending the request again, because the
-    server may already have received it. A connection that was never made is still retried.
+    server may already have received it. A connection that was never made, refused or timed out connecting
+    (``ClientConnectorError``, ``ConnectionTimeoutError``), is still retried.
+
+    ``_retry_other_errors=False`` resends only a dropped or refused connection (``ServerDisconnectedError``,
+    ``ClientOSError``) or one that timed out connecting (``ConnectionTimeoutError``) within the caller's bound; any
+    other error, a read timeout or a body cut off mid-read included, is raised at once.
 
     ``_read_body=True`` reads a success reply's body before returning, but only within a ``_max_num_tries`` or
     ``_max_connection_retries`` bound and only when resending is allowed, so a reply cut off mid-body is sent again
     within that bound. Otherwise, and for an error reply, the response is returned unread: the caller's own read gets
     the complete body or raises the original error, so the caller's failure handling (for collection, its rollout
     attempt budget) decides whether the request runs again.
+
+    ``_connection_retry_window`` caps the wall-clock time spent retrying connection errors, counted from the
+    first one, and closed when the server answers; past it the last connection error is raised. After the first
+    connection error the window also bounds each attempt's wait for a free pool slot. Share one window across the
+    calls of one logical request so they draw on a single budget. None means no window of the caller's: an internal
+    call then gets the internal retry budget above, and any other call retries connection errors without a time
+    limit.
     """
     if _max_num_tries is not None and _max_num_tries < 1:
         raise ValueError("_max_num_tries must be at least 1")
 
     # Faster JSON dumps than the default aiohttp json
     if kwargs.get("json"):
-        kwargs["data"] = orjson.dumps(kwargs.pop("json"))
+        body = kwargs.pop("json")
+        try:
+            kwargs["data"] = orjson.dumps(body)
+        except TypeError:
+            # orjson rejects integers wider than 64 bits and lone surrogates, which a model can write into a
+            # tool argument. The stdlib encoder escapes non-ASCII text, so both still produce valid UTF-8.
+            kwargs["data"] = json.dumps(body, separators=(",", ":")).encode("utf-8")
         kwargs.setdefault("headers", dict())
         kwargs["headers"]["Content-Type"] = "application/json"
 
@@ -405,7 +492,7 @@ async def request(
     send = _traced_request if traced else _request_with_retries
     counts = request_counts()
     if counts is None:
-        return await send(
+        response = await send(
             method,
             url,
             _internal=_internal,
@@ -414,13 +501,20 @@ async def request(
             _server_name=_server_name,
             _control=_control,
             _resend_after_disconnect=_resend_after_disconnect,
+            _on_transport_failure=_on_transport_failure,
             _read_body=_read_body,
+            _retry_other_errors=_retry_other_errors,
+            _connection_retry_window=_connection_retry_window,
             **kwargs,
         )
+        # A Gym server's reply may forward failures it recovered from; they join this request's observations,
+        # whether or not traces are exported.
+        observe_reply(getattr(response, "headers", None))
+        return response
     # With metrics exporting, count calls until this helper returns or raises, including eligible body reads.
     counts.outbound_in_flight += 1
     try:
-        return await send(
+        response = await send(
             method,
             url,
             _internal=_internal,
@@ -429,9 +523,16 @@ async def request(
             _server_name=_server_name,
             _control=_control,
             _resend_after_disconnect=_resend_after_disconnect,
+            _on_transport_failure=_on_transport_failure,
             _read_body=_read_body,
+            _retry_other_errors=_retry_other_errors,
+            _connection_retry_window=_connection_retry_window,
             **kwargs,
         )
+        # A Gym server's reply may forward failures it recovered from; they join this request's observations,
+        # whether or not traces are exported.
+        observe_reply(getattr(response, "headers", None))
+        return response
     finally:
         counts.outbound_in_flight -= 1
 
@@ -445,7 +546,11 @@ async def _traced_request(
     _max_num_tries: Optional[int] = None,
     _control: bool = False,
     _resend_after_disconnect: bool = True,
+    _on_transport_failure: Callable[[Exception, bool | None], None] | None = None,
     _read_body: bool = False,
+    _retry_other_errors: bool = True,
+    *,
+    _connection_retry_window: Optional["ConnectionRetryWindow"] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """`_request_with_retries` wrapped in a CLIENT span, with `traceparent` injected.
@@ -489,7 +594,10 @@ async def _traced_request(
             _server_name=_server_name,
             _control=_control,
             _resend_after_disconnect=_resend_after_disconnect,
+            _on_transport_failure=_on_transport_failure,
             _read_body=_read_body,
+            _retry_other_errors=_retry_other_errors,
+            _connection_retry_window=_connection_retry_window,
             **kwargs,
         )
 
@@ -527,6 +635,8 @@ def format_exception_with_response_body(error: BaseException) -> str:
     such as an agent's ``AgentSeedRejectedError`` detail, is in the body that ``raise_for_status`` keeps on
     ``response_content``.
     """
+    if isinstance(error, NgFailureEvent) and error.http_error is not None:
+        error = error.http_error
     content = getattr(error, "response_content", None) if isinstance(error, ClientResponseError) else None
     if not content:
         return str(error)
@@ -547,6 +657,79 @@ def _format_upstream_error_log(server_name: str, error: ClientResponseError) -> 
     )
 
 
+def is_unsent_connection_failure(error: BaseException) -> bool:
+    """Whether ``error`` means the request was never sent: the connection was refused or could not be made in time.
+
+    A handshake or pool-wait timeout (``ConnectionTimeoutError``) is the same case as a refused connection: the
+    server cannot have received the request, so resending it cannot run it twice.
+    """
+    return isinstance(error, (ClientConnectorError, ConnectionTimeoutError))
+
+
+class ConnectionRetryWindow:
+    """Wall-clock budget for connection-error retries of one logical request.
+
+    The window opens at the first connection error and closes when the server answers, so it
+    bounds only an unbroken run of connection failures. While open, each attempt may wait for a
+    connection only as long as the budget has left, but a connected attempt is never cut short.
+    """
+
+    __slots__ = ("timeout_s", "first_error_at", "last_error")
+
+    def __init__(self, timeout_s: float) -> None:
+        if timeout_s <= 0:
+            raise ValueError("timeout_s must be positive")
+        self.timeout_s = timeout_s
+        self.first_error_at: Optional[float] = None
+        self.last_error: Optional[BaseException] = None
+
+    def record(self, error: BaseException) -> None:
+        if self.first_error_at is None:
+            self.first_error_at = time.monotonic()
+        self.last_error = error
+
+    def close(self) -> None:
+        """The server answered: a later connection error opens a fresh window."""
+        self.first_error_at = None
+        self.last_error = None
+
+    def remaining(self) -> Optional[float]:
+        """Seconds left in the budget, or None while no connection error has happened."""
+        if self.first_error_at is None:
+            return None
+        return self.timeout_s - (time.monotonic() - self.first_error_at)
+
+    def expired(self) -> bool:
+        remaining = self.remaining()
+        return remaining is not None and remaining <= 0
+
+    def bound_connect(self, timeout: ClientTimeout) -> ClientTimeout:
+        """Cap connection setup, including the wait for a pool slot, at the time left."""
+        remaining = self.remaining()
+        if remaining is None:
+            return timeout
+        connect = remaining if timeout.connect is None else min(timeout.connect, remaining)
+        return ClientTimeout(
+            total=timeout.total,
+            connect=connect,
+            sock_read=timeout.sock_read,
+            sock_connect=timeout.sock_connect,
+            ceil_threshold=timeout.ceil_threshold,
+        )
+
+
+def _request_upload_complete(upload: UploadTracker | None) -> bool | None:
+    """Whether the one observed HTTP attempt finished sending its body, including EOF.
+
+    Pending/cancelled state or an unobserved aiohttp resend is unknown; it cannot qualify a response timeout.
+    """
+    if upload is None or upload.attempts != 1 or not upload.upload_complete.done():
+        return None
+    if upload.upload_complete.cancelled():
+        return None
+    return upload.upload_complete.exception() is None
+
+
 async def _request_with_retries(
     method: str,
     url: str,
@@ -556,7 +739,11 @@ async def _request_with_retries(
     _max_num_tries: Optional[int] = None,
     _control: bool = False,
     _resend_after_disconnect: bool = True,
+    _on_transport_failure: Callable[[Exception, bool | None], None] | None = None,
     _read_body: bool = False,
+    _retry_other_errors: bool = True,
+    *,
+    _connection_retry_window: Optional["ConnectionRetryWindow"] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_control_client() if _control else get_global_aiohttp_client()
@@ -567,11 +754,31 @@ async def _request_with_retries(
         explicit_tries = 0
         retries = 0
         retry_start = time.monotonic()
+        window = _connection_retry_window
+        # A call between Gym servers retries blips quietly, but not forever: without a caller-owned bound it gets the
+        # configured budget, which covers a run of connection errors (the window) and retries of other errors.
+        internal_budget_s: Optional[float] = None
+        if _internal and _max_num_tries is None and _max_connection_retries is None and window is None:
+            cfg = _GLOBAL_AIOHTTP_CLIENT_CONFIG or GlobalAIOHTTPAsyncClientConfig()
+            if cfg.global_aiohttp_internal_retry_budget_seconds > 0:
+                internal_budget_s = cfg.global_aiohttp_internal_retry_budget_seconds
+                window = ConnectionRetryWindow(internal_budget_s)
         while True:
+            if window is not None and window.expired():
+                raise window.last_error
             if _max_num_tries is not None:
                 explicit_tries += 1
+            # A tracker belongs to exactly one request. Do not reuse a completed upload across retries.
+            upload = UploadTracker() if _on_transport_failure is not None else None
+            attempt_kwargs = dict(kwargs)
+            if upload is not None:
+                attempt_kwargs["upload_tracker"] = upload
+            if window is not None and window.first_error_at is not None:
+                attempt_kwargs["timeout"] = window.bound_connect(kwargs.get("timeout") or client.timeout)
             try:
-                response = await client.request(method=method, url=url, **kwargs)
+                response = await client.request(method=method, url=url, **attempt_kwargs)
+                if window is not None:
+                    window.close()
                 if (
                     _read_body
                     and _resend_after_disconnect
@@ -583,7 +790,9 @@ async def _request_with_retries(
                     # reply goes back unread, so the caller's own read raises the original error, with its status.
                     await response.read()
                 return response
-            except ServerDisconnectedError:
+            except ServerDisconnectedError as error:
+                if _on_transport_failure is not None:
+                    _on_transport_failure(error, _request_upload_complete(upload))
                 if not _resend_after_disconnect:
                     raise
                 global _NUM_SERVER_DISCONNECTED_ERROR
@@ -601,17 +810,28 @@ async def _request_with_retries(
                 # Retrying forever is wrong if the endpoint is expected to sometimes die and move.
                 if _max_connection_retries is not None and retries >= _max_connection_retries:
                     raise
+                if window is not None:
+                    window.record(error)
+                    if window.expired():
+                        raise
 
-                await asyncio.sleep(0.5)
-            except ClientOSError as error:
-                if not _resend_after_disconnect and not isinstance(error, ClientConnectorError):
-                    raise
+                await asyncio.sleep(_connection_backoff_s(window))
+            except (ClientOSError, ConnectionTimeoutError) as error:
                 global _NUM_CLIENT_OS_ERROR
-                _NUM_CLIENT_OS_ERROR += 1
+                if _on_transport_failure is not None:
+                    _on_transport_failure(error, _request_upload_complete(upload))
+                timed_out = isinstance(error, ConnectionTimeoutError)
+                if timed_out and window is not None and window.expired():
+                    # The connect cap set from the window ran out: report the connection error it stood for.
+                    raise window.last_error from error
+                if not _resend_after_disconnect and not is_unsent_connection_failure(error):
+                    raise
+                if not timed_out:
+                    _NUM_CLIENT_OS_ERROR += 1
                 retries += 1
                 if _max_num_tries is not None and explicit_tries >= _max_num_tries:
                     raise
-                if _NUM_CLIENT_OS_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
+                if not timed_out and _NUM_CLIENT_OS_ERROR % DISCONNECTED_CLIENT_OS_PRINT_INTERVAL == 0:
                     print(
                         f"[request_retry url={url} error=ClientOSError retry={retries} elapsed_s={time.monotonic() - retry_start:.1f}] "
                         f"Hit {_NUM_CLIENT_OS_ERROR} global `ClientOSError` while querying {url}.\n{DISCONNECTED_CLIENT_OS_HELP_TEXT}",
@@ -620,32 +840,42 @@ async def _request_with_retries(
 
                 if _max_connection_retries is not None and retries >= _max_connection_retries:
                     raise
+                if window is not None:
+                    # A timeout under an open window is the cap's own, not a new error: keep the original one.
+                    if not timed_out or window.first_error_at is None:
+                        window.record(error)
+                    if window.expired():
+                        raise
 
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(_connection_backoff_s(window))
             except Exception as e:
+                if _on_transport_failure is not None:
+                    _on_transport_failure(e, _request_upload_complete(upload))
                 if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                     print_exc()
-                if not _resend_after_disconnect:
-                    # A connection that was never made is a ClientOSError, handled above;
-                    # anything else may have sent it.
+                if not _resend_after_disconnect or not _retry_other_errors:
+                    # A connection that was never made (refused, or timed out connecting) is handled above;
+                    # anything else may have sent it, or returned part of a reply.
                     raise
 
                 # num_tries only advances on the default path, so count explicit attempts when capped.
                 attempts = explicit_tries if _max_num_tries is not None else num_tries
                 if _max_connection_retries is not None and attempts >= _max_connection_retries:
                     raise
+                if internal_budget_s is not None and time.monotonic() - retry_start >= internal_budget_s:
+                    raise
 
                 if _max_num_tries is not None:
                     if explicit_tries >= _max_num_tries:
                         raise
                 else:
-                    # Internal calls skip this print and the MAX_NUM_TRIES limit, since the head server shuts
-                    # everything down if a Gym server fails. They still advance `num_tries`, so the
-                    # `_max_connection_retries` check above stops them. Connection errors count in `retries`.
+                    # Internal calls skip this print and the MAX_NUM_TRIES limit so a restarting Gym server is
+                    # retried quietly. They are bounded by `_max_connection_retries` above, or by the internal
+                    # retry budget when the caller passed no bound. Connection errors count in `retries`.
                     if not _internal:
                         print(
                             f"""Hit an exception while making a request (try {num_tries}): {type(e)}: {e}
-Sleeping 0.5s and retrying...
+Sleeping {_connection_backoff_s(window):.2f}s and retrying...
 """
                         )
                         if num_tries >= MAX_NUM_TRIES:
@@ -653,10 +883,15 @@ Sleeping 0.5s and retrying...
 
                     num_tries += 1
 
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(_connection_backoff_s(window))
     finally:
         if token is not None:
             reset_server_name(token)
+
+
+def _connection_backoff_s(window: Optional[ConnectionRetryWindow]) -> float:
+    remaining = None if window is None else window.remaining()
+    return 0.5 if remaining is None else max(0.0, min(0.5, remaining))
 
 
 async def raise_for_status(response: ClientResponse, content: Optional[bytes] = None) -> None:  # pragma: no cover
@@ -686,7 +921,30 @@ Response content: {content}""")
             e.history = ()
             e.headers = CIMultiDict(e.headers) if e.headers is not None else None
             e.args = (e.request_info, e.history)
+            # A Gym server's own failure, rebuilt from its header, is the explicit cause of this HTTP error, so the
+            # caller's failure chain reaches the remote failure with its id, kind and reason.
+            remote = rebuild_failure(FailureHeader.decode(e.headers))
+            if remote is not None:
+                raise e from remote
             raise e
+
+
+async def raise_boundary_failure(response: ClientResponse, content: bytes | None = None) -> None:
+    """Raise a valid remote ``NgFailureEvent`` with its original IDs and explicit causes.
+
+    ``error.http_error`` retains this hop's status, body and request information. Without a final remote
+    failure, raise the original ``ClientResponseError``. Call ``raise_for_status`` where callers require
+    that HTTP exception type even for typed replies, such as a model client's retry/routing logic.
+    """
+    try:
+        await raise_for_status(response, content)
+    except ClientResponseError as http_error:
+        remote = http_error.__cause__
+        if not isinstance(remote, NgFailureEvent):
+            raise
+        http_error.__cause__ = None
+        remote.http_error = http_error
+        raise remote
 
 
 async def get_response_json(response: ClientResponse) -> Any:

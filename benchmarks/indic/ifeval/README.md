@@ -112,7 +112,7 @@ the upstream harness, including its eight loose-scoring response variants.
 ## Checks
 
 ```bash
-pytest tests/unit_tests/test_indic_ifeval.py tests/unit_tests/test_rollout_seed_metadata.py
+pytest tests/unit_tests/benchmarks/test_indic_ifeval.py tests/unit_tests/rollouts/test_rollout_seed_metadata.py
 gym env test --resources-server instruction_following +should_validate_data=true
 gym env test +entrypoint=responses_api_models/vllm_model
 pre-commit run --all-files

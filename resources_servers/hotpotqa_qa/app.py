@@ -32,14 +32,15 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.hotpotqa_qa.scoring import (
     answer_exact_match,
     answer_f1_score,
@@ -251,3 +252,6 @@ def _task_should_remove(rollouts: List[Dict[str, Any]]) -> bool:
 
 if __name__ == "__main__":
     HotpotQAQAResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = HotpotQAQAResourcesServer.run_webserver()  # noqa: F401

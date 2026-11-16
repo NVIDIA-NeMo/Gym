@@ -31,10 +31,10 @@ from app import (
 from metrics import canonical_smiles, canonical_species, compare_step_products, score_pathway, strip_atom_mapping
 from task_data import TaskData
 
-from nemo_gym.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
 from nemo_gym.metrics import compute_aggregate_metrics
+from nemo_gym.server_runtime import BaseResourcesServerConfig
 
 
 def _load_prepare_module():

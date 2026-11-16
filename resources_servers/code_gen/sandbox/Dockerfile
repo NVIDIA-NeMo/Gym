@@ -3,9 +3,9 @@
 
 # Runtime for code_gen's sandboxed unit tests. The runner next to this file and the grading
 # code are uploaded with every verification, not built in (see ../sandbox_execution.py), so
-# the image pins what that code imports plus the libraries candidates can import on the Ray
-# path (scipy, pandas). Keep Python, numpy, scipy and pandas in step with the code_gen server
-# environment (requirements.txt) so both paths grade alike.
+# the image pins what that code imports plus the libraries candidates can import (scipy,
+# pandas). Keep Python, numpy, scipy and pandas in step with the code_gen server's pyproject.toml
+# so local provider tests exercise the same scientific stack.
 #
 # The interpreter is uv's managed CPython, the same build the server venv uses. Time limits
 # make interpreter speed part of the grade: the official python:3.13-slim build ran a

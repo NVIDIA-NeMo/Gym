@@ -95,7 +95,7 @@ gym eval run --no-serve \
 
 ## Adding a New Environment
 
-Adding a new OpenEnv environment requires **no Python code** -- only a YAML config, JSONL data, and the environment's package in `requirements.txt`.
+Adding a new OpenEnv environment requires **no Python code** -- only a YAML config, JSONL data, and the environment's package in `pyproject.toml`.
 
 ### Step 1: Create a YAML Config
 
@@ -173,13 +173,21 @@ Create `resources_servers/openenv/data/<name>/example.jsonl` with 5+ examples:
 
 ### Step 3: Add Dependencies and Run
 
-Add the environment's package to `resources_servers/openenv/requirements.txt`:
+Add the environment's package to the `project.dependencies` array in
+`resources_servers/openenv/pyproject.toml`, pinning its reviewed Git commit:
 
-```
-openenv-my-env @ git+https://github.com/meta-pytorch/OpenEnv.git#subdirectory=envs/my_env
+```toml
+"openenv-my-env @ git+https://github.com/meta-pytorch/OpenEnv.git@<reviewed-commit>#subdirectory=envs/my_env",
 ```
 
-Then start servers and collect rollouts:
+Regenerate and commit the project and lock together before setup:
+
+```bash
+uv lock --project resources_servers/openenv
+uv lock --check --project resources_servers/openenv
+```
+
+Then start servers and collect rollouts; setup uses `uv sync --locked`:
 
 ```bash
 # Terminal 1: Start servers
@@ -201,9 +209,32 @@ gym eval run --no-serve \
 
 1. **`POST /seed_session`** — Creates an environment instance and calls `env.reset()`.
 2. **`POST /<tool_name>`** (MCP) or **`POST /step`** (non-MCP) — Calls `env.step(action)` and accumulates reward.
-3. **`POST /verify`** — Returns accumulated reward, closes the environment, cleans up session. If `verifier_metadata.expected_output` is present, checks stdout match instead.
+3. **`POST /verify`** — Returns accumulated reward and releases the environment, keeping only a bounded retry record.
 
 For MCP environments, tool endpoints are discovered at startup via `ListToolsAction`.
+
+### Sessions under an Environment Server
+
+`SimpleResourcesServer` supplies seed, close, and checkpoint retirement. OpenEnv implements live-state lookup,
+environment initialization, and environment release. Its `/verify` uses the shared `verifying` context to lock the
+session, release its environment, and retain the measured reward for retries. The base owns identity checks,
+closed-session masking, failed-initialization cleanup, and retry bookkeeping. A partly reset environment stays
+reachable for cleanup but cannot serve tools or supply a verification reward.
+
+An Environment Server such as `single_agent_turn` seeds with a typed `ResourcesSeedSessionRequest`. The environment instance is keyed by its `resources_session_id`, and the session cookie is bound to that ID so
+the agent's tool calls reach it. Seeding the same ID again for the same episode keeps the instance it already has; a
+seed that binds the ID to another episode is refused with 409. The rows carry no task fields, so the seed reads nothing from `task_data`.
+
+`/verify` closes the environment before checkpoint tracking ends. It keeps only the measured
+reward and the session identity for `session_close_retry_window_seconds`, so a lost reply can be retried without
+keeping an environment alive. `/close_session` releases any still-active or incomplete
+instance, drops that record and fences the episode, so a later `/verify` is masked. If `env.close()` raises, ownership is retained and close or checkpoint retirement can retry. An instance
+whose reset and cleanup both failed remains owned until cleanup succeeds. Checkpoint retirement also releases live
+instances. A typed seed cannot reopen a verified or closed ID.
+
+A tool call (`/step` or `/<tool_name>`) for a session the server no longer holds fails with 404
+(`failure_kind: session_lost`), and `/verify` for it returns a masked sample (`mask_sample: true`) instead of a
+reward of 0.
 
 ## Tests
 
