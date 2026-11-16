@@ -633,7 +633,9 @@ class TestFailureOnlyGrading:
     """SWE-bench grades Chart.js, marked and p5.js from failures alone, so their success needs a completed suite."""
 
     async def _run(self, monkeypatch: MonkeyPatch, tmp_path: Path, tests_printed: str) -> dict:
-        monkeypatch.chdir(tmp_path)  # run_instance writes its logs under the working directory
+        # An empty working directory shows whether run_instance writes anywhere but log_root.
+        (tmp_path / "cwd").mkdir()
+        monkeypatch.chdir(tmp_path / "cwd")
         test_spec = make_server()._make_test_spec(SWEBenchVerifyRequest.model_validate(CHART_ROW))
         container = DockerContainer(id="run-id", instance_id=test_spec.instance_id)
         container._inner_container = _FakeEvalSandbox(tests_printed)
@@ -644,7 +646,18 @@ class TestFailureOnlyGrading:
             force_rebuild=False,
             client=container,
             run_id="run-id",
+            log_root=tmp_path / "logs",
         )
+
+    async def test_logs_are_written_under_log_root_and_nowhere_else(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        await self._run(monkeypatch, tmp_path, "Chrome 120.0.0.0 (Linux x86_64): Executed 1545 of 1545 SUCCESS")
+
+        instance_dir = tmp_path / "logs" / "run-id" / "None" / CHART_ROW["instance_id"]
+        assert (instance_dir / "test_output.txt").is_file()
+        assert (instance_dir / "report.json").is_file()
+        assert not any((tmp_path / "cwd").iterdir())
 
     async def test_a_suite_that_never_started_has_no_verdict(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
         result = await self._run(
