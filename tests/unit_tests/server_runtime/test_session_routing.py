@@ -105,6 +105,44 @@ def _wait_until(condition, timeout: float = 5.0) -> None:
         time.sleep(0.01)
 
 
+class _WindowClock:
+    """Stands in for ``monotonic`` where session routing times close retry windows; it stands still until resumed.
+
+    While it stands still, a request takes no time on it, so a slow runner cannot end a window between two requests.
+    The owner's sweeper still runs on real time and releases the ownership the clock has ended.
+    """
+
+    def __init__(self) -> None:
+        self._now: Optional[float] = time.monotonic()
+        self._offset = 0.0
+
+    def __call__(self) -> float:
+        now = self._now
+        return time.monotonic() + self._offset if now is None else now
+
+    def advance(self, seconds: float) -> None:
+        assert self._now is not None, "the clock was resumed"
+        self._now += seconds
+        # The owner's sweeper runs every quarter window, 0.075 s for 0.3 s: it runs twice and releases what ended.
+        time.sleep(0.15)
+
+    def resume(self) -> None:
+        """Follow real time from here, so every window ends.
+
+        The owner records a request after its reply is sent, so it can start a window after the test's last advance.
+        """
+        assert self._now is not None, "the clock was resumed"
+        self._offset = self._now - time.monotonic()
+        self._now = None
+
+
+@pytest.fixture
+def window_clock(monkeypatch) -> _WindowClock:
+    clock = _WindowClock()
+    monkeypatch.setattr("nemo_gym.server_runtime.request_handling.session_routing.monotonic", clock)
+    return clock
+
+
 def _sign_cookie(secret: str, session: dict) -> str:
     """A session cookie as Starlette's SessionMiddleware signs it."""
     return itsdangerous.TimestampSigner(secret).sign(b64encode(json.dumps(session).encode())).decode()
@@ -775,37 +813,43 @@ class TestOwnershipLifetime:
     """Ownership ends once its session's last record on the owner is gone; one worker writes no owner files."""
 
     def test_an_episode_session_keeps_its_owner_while_open_and_releases_it_a_window_after_its_close(
-        self, socket_dir: str
+        self, socket_dir: str, window_clock: _WindowClock
     ) -> None:
         a = Worker("a", socket_dir, close_retry_window_seconds=0.2)
         b = Worker("b", socket_dir, close_retry_window_seconds=0.2)
         with a.client, b.client:
             assert b.seed().status_code == 200
-            time.sleep(0.4)
+            window_clock.advance(0.4)
             open_after_window = _owner(socket_dir, "s")
             assert a.close().json()["resources_session_id"] == "s@b"
-            closed_now = _owner(socket_dir, "s")
+            window_clock.advance(0.1)
+            half_a_window_after_close = _owner(socket_dir, "s")
             # No further request: the owner's sweep releases it.
+            window_clock.resume()
             _wait_until(lambda: _owner(socket_dir, "s") is None)
 
-        assert open_after_window == closed_now == b.routing_id
+        assert open_after_window == half_a_window_after_close == b.routing_id
         assert not b.app.state.nemo_gym_session_owners._mine
 
-    def test_a_new_session_keeps_its_owner_until_verify_and_a_window_after(self, socket_dir: str) -> None:
+    def test_a_new_session_keeps_its_owner_until_verify_and_a_window_after(
+        self, socket_dir: str, window_clock: _WindowClock
+    ) -> None:
         a = Worker("a", socket_dir, close_retry_window_seconds=0.2)
         b = Worker("b", socket_dir, close_retry_window_seconds=0.2)
         with a.client, b.client:
             seeded = b.post("/seed_session", json={})
             session_id = b.session(seeded)[SESSION_ID_KEY]
             cookie = seeded.cookies[b.cookie_name]
-            time.sleep(0.4)
+            window_clock.advance(0.4)
             assert a.post("/store", json={"value": 3}, cookie=cookie).json() == {"worker": "b"}
             verified = a.post("/verify", json={}, cookie=cookie)
             assert verified.json() == {"worker": "b", "value": 3}
-            owned_after_verify = _owner(socket_dir, session_id)
+            window_clock.advance(0.1)
+            half_a_window_after_verify = _owner(socket_dir, session_id)
+            window_clock.resume()
             _wait_until(lambda: _owner(socket_dir, session_id) is None)
 
-        assert owned_after_verify == b.routing_id
+        assert half_a_window_after_verify == b.routing_id
 
     def test_a_verify_that_says_a_close_follows_keeps_the_session_open_until_the_close(self, socket_dir: str) -> None:
         a = Worker("a", socket_dir, close_retry_window_seconds=0.2)
@@ -834,7 +878,7 @@ class TestOwnershipLifetime:
             _wait_until(lambda: _owner(socket_dir, session_id) is None)
 
     def test_a_session_started_by_another_request_keeps_its_owner_a_window_after_each_request(
-        self, socket_dir: str
+        self, socket_dir: str, window_clock: _WindowClock
     ) -> None:
         a = Worker("a", socket_dir, close_retry_window_seconds=0.3)
         b = Worker("b", socket_dir, close_retry_window_seconds=0.3)
@@ -842,16 +886,18 @@ class TestOwnershipLifetime:
             stored = b.post("/store", json={"value": 1})
             session_id = b.session(stored)[SESSION_ID_KEY]
             cookie = stored.cookies[b.cookie_name]
+            # Half a window between requests, two windows in all.
             for _ in range(4):
-                time.sleep(0.15)
+                window_clock.advance(0.15)
                 assert a.post("/store", json={"value": 2}, cookie=cookie).json() == {"worker": "b"}
             still_owned = _owner(socket_dir, session_id)
+            window_clock.resume()
             _wait_until(lambda: _owner(socket_dir, session_id) is None)
 
         assert still_owned == b.routing_id
 
     def test_a_failed_episode_seed_keeps_its_owner_for_the_cleanup_close_then_releases_it(
-        self, socket_dir: str
+        self, socket_dir: str, window_clock: _WindowClock
     ) -> None:
         a = Worker("a", socket_dir, close_retry_window_seconds=0.3)
         b = Worker("b", socket_dir, close_retry_window_seconds=0.3)
@@ -859,12 +905,14 @@ class TestOwnershipLifetime:
             a.server.fail_seed = True
             failed = a.seed()
             assert failed.status_code == 500 and a.cookie_name not in failed.cookies
+            window_clock.advance(0.2)
 
             closed = b.close()
 
             assert closed.status_code == 200, closed.text
             assert closed.json()["resources_session_id"] == "s@a"
             assert a.server.closes == ["s"] and not a.server.sessions and b.server.closes == []
+            window_clock.resume()
             _wait_until(lambda: _owner(socket_dir, "s") is None)
 
     def test_a_delayed_episode_seed_after_a_close_of_an_unknown_id_is_refused(self, workers) -> None:
