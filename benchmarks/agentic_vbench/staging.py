@@ -14,9 +14,11 @@ byte for byte:
 
 Exit 75 (``EX_TEMPFAIL``) without a reward is what the ``harbor`` environment server masks as
 ``harbor:verifier_unavailable``, so infrastructure failures at verification time never count as 0. Both stages
-also declare ``/workspace/output`` as the step's artifact, so with the server's ``separate_verifier_for_artifacts``
-the judged and repair verifiers grade in a fresh sandbox of the task image, where the agent can neither read the
-judge key nor fake the exit code.
+also declare the step's artifacts (``/workspace/output``, plus ``/workspace/materials`` for repair), so with the
+server's ``separate_verifier_for_artifacts`` the judged and repair verifiers grade in a fresh sandbox of the task
+image: the agent's sandbox never runs the verifier process, so it cannot read the judge key or exit 75 itself. The
+exit code is decided from the Hub's answers and the download's outcome alone; what the agent hands over (the size
+or length of its output) only ever fails its own rubric items (``hub_judge.py``).
 """
 
 import hashlib
@@ -276,7 +278,9 @@ def stage_judge(task_path: Path, *, staging: Path, output: Path, protocol: str) 
 # bounded below the 1800 s verifier budget so a stalled download ends as "could not grade", not as the verifier
 # timeout.
 MATERIALS_RETRY = "--retry 5 --retry-delay 3"
-MATERIALS_RETRY_PATCHED = "--retry 12 --retry-delay 20 --retry-all-errors --max-time 300 --retry-max-time 1200"
+# `--retry-max-time 900`: the last attempt can start just before it and run its full `--max-time`, which leaves the
+# verifier about 600 s of its 1800 s for unzip and the metrics.
+MATERIALS_RETRY_PATCHED = "--retry 12 --retry-delay 20 --retry-all-errors --max-time 300 --retry-max-time 900"
 MATERIALS_FETCH = '"$MATERIALS_URL"'
 # When the download still fails, the verifier says why and exits 75 instead of exiting without a reward.
 MATERIALS_FETCH_GUARD = (

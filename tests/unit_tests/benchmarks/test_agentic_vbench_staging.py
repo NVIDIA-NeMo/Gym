@@ -6,6 +6,7 @@ import hashlib
 import importlib
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -262,7 +263,9 @@ def test_materials_download_retries_longer_and_a_failed_fetch_exits_75(tmp_path:
     assert staged != task
     patched = (staged / "steps/solve/tests/test.sh").read_text()
     assert MATERIALS_RETRY_PATCHED in patched and MATERIALS_RETRY not in patched
-    assert "--max-time" in MATERIALS_RETRY_PATCHED and "--retry-max-time" in MATERIALS_RETRY_PATCHED
+    # The last attempt can start just before --retry-max-time and run its full --max-time: 900 + 300 s leaves the
+    # verifier about 600 s of its 1800 s budget for unzip and the metrics.
+    assert "--max-time 300" in MATERIALS_RETRY_PATCHED and "--retry-max-time 900" in MATERIALS_RETRY_PATCHED
     assert patched.count(MATERIALS_FETCH_GUARD) == 1
     assert '"$MATERIALS_URL" -o /tmp/g.zip' + MATERIALS_FETCH_GUARD in patched
     assert patched.endswith("unzip -qo /tmp/g.zip 'golden/*' -d /tmp/g\n")
@@ -307,6 +310,20 @@ def test_guarded_materials_fetch_exits_75_with_the_reason_when_curl_fails(tmp_pa
     assert result.returncode == 75
     assert "verifier unavailable: golden assets download from MATERIALS_URL failed (curl exit 22)" in result.stderr
     assert "unzip" not in result.stderr  # the script stopped at the fetch
+
+
+def test_materials_fetch_guard_follows_a_multi_line_curl_command() -> None:
+    from benchmarks.agentic_vbench.staging import _guard_materials_fetch
+
+    script = 'set -e\ncurl --fail \\\n  "$MATERIALS_URL" \\\n  -o /tmp/g.zip\nunzip /tmp/g.zip\n'
+    guarded = _guard_materials_fetch(script)
+    lines = guarded.split("\n")
+    # The guard goes after the command's last line, not after the line that names the URL.
+    assert lines[1] == "curl --fail \\" and lines[2] == '  "$MATERIALS_URL" \\'
+    assert lines[3] == "  -o /tmp/g.zip" + MATERIALS_FETCH_GUARD and lines[4] == "unzip /tmp/g.zip"
+    assert _guard_materials_fetch(guarded) == guarded
+    with pytest.raises(ValueError, match="without a curl fetch"):
+        _guard_materials_fetch("echo no fetch\n")
 
 
 def test_tasks_without_materials_download_are_unchanged(tmp_path: Path) -> None:
@@ -499,10 +516,27 @@ def _truncate_body(conn) -> None:
     _drain(conn)
 
 
+def _truncate_error_body(conn) -> None:
+    conn.recv(65536)
+    conn.sendall(
+        b'HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: 400\r\n\r\n{"error": {'
+    )
+    _drain(conn)
+
+
 def _stall(conn) -> None:
     conn.recv(65536)
     # Not time.sleep: the tests replace the module's time.sleep, which is the global one, with a no-op.
     threading.Event().wait(1.0)
+
+
+def _hub_env(module, monkeypatch: pytest.MonkeyPatch, server) -> None:
+    monkeypatch.setenv("AVB_JUDGE_BASE_URL", f"http://127.0.0.1:{server.getsockname()[1]}")
+    monkeypatch.setenv("NVINFERENCE_API_KEY", "k")
+    monkeypatch.setattr(module.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(module, "_PREFLIGHT_DONE", True)
+    monkeypatch.setattr(module, "_HUB_WAITED", 0.0)
+    module.FAILURES.clear()
 
 
 @pytest.mark.parametrize(
@@ -510,10 +544,13 @@ def _stall(conn) -> None:
     [
         # A reset instead of the EOF is possible when the peer closes first; both are transport failures.
         (_drop_before_status_line, ("RemoteDisconnected", "ConnectionResetError")),
-        (_truncate_body, ("IncompleteRead", "ConnectionResetError", "RemoteDisconnected")),
+        (_truncate_body, ("IncompleteRead",)),
+        # A 5xx whose error body is cut short: still the Hub's failure, read for its status, not a dropped read
+        # that escapes the retries.
+        (_truncate_error_body, ("HTTP 503",)),
         (_stall, ("TimeoutError",)),
     ],
-    ids=["dropped-before-status-line", "truncated-body", "stalled"],
+    ids=["dropped-before-status-line", "truncated-body", "truncated-503-body", "stalled"],
 )
 def test_hub_post_records_transport_failures_as_unavailable(
     hub_judge, monkeypatch: pytest.MonkeyPatch, handler, expected: tuple[str, ...]
@@ -521,11 +558,8 @@ def test_hub_post_records_transport_failures_as_unavailable(
     module, _ = hub_judge
     server = _socket_server(handler)
     try:
-        monkeypatch.setenv("AVB_JUDGE_BASE_URL", f"http://127.0.0.1:{server.getsockname()[1]}")
-        monkeypatch.setenv("NVINFERENCE_API_KEY", "k")
-        monkeypatch.setattr(module.time, "sleep", lambda _s: None)
+        _hub_env(module, monkeypatch, server)
         monkeypatch.setattr(module, "CALL_TIMEOUT_SECONDS", 0.2)
-        module.FAILURES.clear()
         with pytest.raises(RuntimeError, match="|".join(expected)):
             module.real_post("/v1/messages", {"model": "m"})
         recorded = next(iter(module.FAILURES.values()))
@@ -534,7 +568,24 @@ def test_hub_post_records_transport_failures_as_unavailable(
         server.close()
 
 
-def test_hub_post_records_5xx_and_size_rejections_but_forgets_a_failure_a_retry_scored(
+def test_hub_preflight_exits_75_on_a_truncated_error_body(
+    hub_judge, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    module, _ = hub_judge
+    server = _socket_server(_truncate_error_body)
+    try:
+        _hub_env(module, monkeypatch, server)
+        monkeypatch.setattr(module, "_PREFLIGHT_DONE", False)
+        monkeypatch.setattr(module, "post", module.real_post)
+        with pytest.raises(SystemExit) as info:
+            module.preflight()
+        assert info.value.code == 75
+        assert "Claude judge route /v1/messages is not usable with this key" in capsys.readouterr().err
+    finally:
+        server.close()
+
+
+def test_hub_post_keys_failures_by_payload_and_lets_a_final_answer_supersede_them(
     hub_judge, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import io
@@ -543,23 +594,36 @@ def test_hub_post_records_5xx_and_size_rejections_but_forgets_a_failure_a_retry_
     monkeypatch.setenv("AVB_JUDGE_BASE_URL", "https://hub.example")
     monkeypatch.setenv("NVINFERENCE_API_KEY", "k")
     monkeypatch.setattr(module.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(module, "_PREFLIGHT_DONE", True)
+    monkeypatch.setattr(module, "_HUB_WAITED", 0.0)
     module.FAILURES.clear()
-    monkeypatch.setattr(
-        module.urllib.request, "urlopen", lambda request, timeout: (_ for _ in ()).throw(_http_error(request, 503))
-    )
+
+    def answer(code: int, body: bytes = b"x"):
+        monkeypatch.setattr(
+            module.urllib.request,
+            "urlopen",
+            lambda request, timeout: (_ for _ in ()).throw(_http_error(request, code, body)),
+        )
+
+    # Two payloads on one route fail: two failures, one per request.
+    answer(503)
     with pytest.raises(RuntimeError, match="HTTP 503"):
         module.real_post("/v1/messages", {"item": 1})
-    assert len(module.FAILURES) == 1
-    # A request the Hub refuses for its size is the Hub's limit, not a judge error of the item.
-    big = json.dumps({"error": {"message": "Request payload size exceeds the limit"}}).encode()
-    monkeypatch.setattr(
-        module.urllib.request,
-        "urlopen",
-        lambda request, timeout: (_ for _ in ()).throw(_http_error(request, 413, big)),
-    )
-    with pytest.raises(RuntimeError, match="HTTP 413"):
-        module.real_post("/v1beta/models/m:generateContent", {"item": 2})
+    with pytest.raises(RuntimeError, match="HTTP 503"):
+        module.real_post("/v1/messages", {"item": 2})
     assert len(module.FAILURES) == 2
+    # A request the route refuses for its size or length is this item's error, as upstream: the agent's output
+    # decides the request's size, so it must not select "could not grade". It also supersedes that request's
+    # earlier outage; the other payload's failure stands.
+    for code, body in ((413, b'{"error": {"message": "Request payload size exceeds the limit"}}'),):
+        answer(code, body)
+    with pytest.raises(RuntimeError, match="HTTP 413"):
+        module.real_post("/v1/messages", {"item": 1})
+    assert len(module.FAILURES) == 1
+    answer(400, b'{"error": {"message": "input token count exceeds the maximum"}}')
+    with pytest.raises(RuntimeError, match="HTTP 400 \\(input token count exceeds the maximum\\)"):
+        module.real_post("/v1beta/models/m:generateContent", {"item": 3})
+    assert len(module.FAILURES) == 1
 
     class Resp(io.BytesIO):
         def __enter__(self):
@@ -570,21 +634,161 @@ def test_hub_post_records_5xx_and_size_rejections_but_forgets_a_failure_a_retry_
 
     # The judge's own item retry repeats the same request and scores it: that failure no longer counts.
     monkeypatch.setattr(module.urllib.request, "urlopen", lambda request, timeout: Resp(b'{"ok": true}'))
-    assert module.real_post("/v1/messages", {"item": 1}) == {"ok": True}
-    assert len(module.FAILURES) == 1 and "HTTP 413" in next(iter(module.FAILURES.values()))
+    assert module.real_post("/v1/messages", {"item": 2}) == {"ok": True}
+    assert module.FAILURES == {}
 
 
-def test_hub_post_stops_at_the_overall_deadline(hub_judge, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_hub_allowance_counts_waiting_on_the_hub_not_local_work(hub_judge, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The allowance is time spent waiting on the Hub. Local work over the agent's output does not consume it, a
+    spent allowance stops new calls, the backoff is bounded by it, and a call in flight ends at the bound."""
+    import io
+
     module, _ = hub_judge
-    monkeypatch.setenv("AVB_JUDGE_BASE_URL", "https://hub.example")
+    original_urlopen = module.urllib.request.urlopen
+
+    class Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    # Local preparation after import, then a healthy Hub: scored, nothing recorded.
+    server = _socket_server(_stall)
+    try:
+        _hub_env(module, monkeypatch, server)
+        monkeypatch.setattr(module, "HUB_WAIT_SECONDS", 1.0)
+        threading.Event().wait(1.2)
+        monkeypatch.setattr(module.urllib.request, "urlopen", lambda request, timeout: Resp(b'{"ok": true}'))
+        assert module.real_post("/v1/messages", {"item": 1}) == {"ok": True}
+        assert module.FAILURES == {} and module.hub_remaining() > 0.5
+        # Spent allowance: no new call, recorded as unavailable.
+        calls = []
+        monkeypatch.setattr(module.urllib.request, "urlopen", lambda request, timeout: calls.append(request))
+        monkeypatch.setattr(module, "_HUB_WAITED", 1.0)
+        with pytest.raises(RuntimeError, match="allowance of 1 s waiting on the Hub is spent"):
+            module.real_post("/v1/messages", {"item": 2})
+        assert calls == [] and len(module.FAILURES) == 1
+        # Expiry during the backoff after a 503: the sleep is bounded by what is left, and the next attempt is not
+        # made (one attempt in all).
+        module.FAILURES.clear()
+        monkeypatch.setattr(module, "_HUB_WAITED", 0.0)
+        monkeypatch.setattr(module, "HUB_WAIT_SECONDS", 1.5)
+        attempts = []
+
+        def fail_503(request, timeout):
+            attempts.append(timeout)
+            raise _http_error(request, 503)
+
+        slept = []
+        monkeypatch.setattr(module.time, "sleep", slept.append)
+        monkeypatch.setattr(module.urllib.request, "urlopen", fail_503)
+        with pytest.raises(RuntimeError, match="allowance of 1.5 s waiting on the Hub is spent"):
+            module.real_post("/v1/messages", {"item": 3})
+        # The failed call itself took a moment of the allowance; the sleep is what was left.
+        assert len(attempts) == 1 and slept == [pytest.approx(1.5, abs=0.05)] and len(module.FAILURES) == 1
+        # A call in flight ends at the bound: a stalled response with 0.4 s left is a TimeoutError after about
+        # 0.4 s, not the socket timeout's 2 s, and a result after the bound would be dropped.
+        _hub_env(module, monkeypatch, server)
+        monkeypatch.setattr(module.urllib.request, "urlopen", original_urlopen)
+        monkeypatch.setattr(module, "HUB_WAIT_SECONDS", 0.4)
+        monkeypatch.setattr(module, "CALL_TIMEOUT_SECONDS", 2.0)
+        monkeypatch.setattr(module, "ATTEMPTS", 1)
+        started = time.monotonic()
+        with pytest.raises(RuntimeError, match="TimeoutError"):
+            module.real_post("/v1/messages", {"item": 4})
+        assert time.monotonic() - started < 1.0
+        assert len(module.FAILURES) == 1 and module.hub_remaining() <= 0
+    finally:
+        server.close()
+
+
+def test_hub_probes_use_the_real_request_shapes_and_run_before_the_first_call(hub_judge, monkeypatch) -> None:
+    module, calls = hub_judge
     monkeypatch.setenv("NVINFERENCE_API_KEY", "k")
-    calls = []
-    monkeypatch.setattr(module.urllib.request, "urlopen", lambda request, timeout: calls.append(request))
-    monkeypatch.setattr(module, "_STARTED", time.monotonic() - module.DEADLINE_SECONDS - 1)
+    monkeypatch.setattr(module, "_PREFLIGHT_DONE", False)
+    probes = module.probes()
+    claude_path, claude, claude_headers = probes["Claude"]
+    assert claude_path == "/v1/messages" and claude_headers == {"anthropic-version": "2023-06-01"}
+    assert claude["system"] and claude["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    gemini_path, gemini, _ = probes["Gemini"]
+    assert gemini_path.endswith(":generateContent")
+    assert gemini["generationConfig"] == {
+        "thinkingConfig": {"thinkingLevel": "low"},
+        "temperature": 0.0,
+        "maxOutputTokens": 16,
+    }
+    # The probes go out once, through post() before its first real call, not at import or at main(): the real
+    # post() runs them (through the fixture's fake post, which records them) and then makes its own call.
+    import io
+
+    class Resp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setenv("AVB_JUDGE_BASE_URL", "https://hub.example")
+    monkeypatch.setattr(module, "_HUB_WAITED", 0.0)
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda request, timeout: Resp(b'{"ok": true}'))
+    assert module.real_post("/v1/messages", {"model": "m"}) == {"ok": True}
+    assert module.real_post("/v1/messages", {"model": "m"}) == {"ok": True}
+    assert [path for path, _, _ in calls] == [claude_path, gemini_path]
+
+
+def test_hub_judge_runs_the_judge_without_probes_when_it_makes_no_hub_call(
+    hub_judge, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # An output the judge rejects locally (too short, unreadable) scores 0 during an outage instead of being
+    # masked: the probes run lazily, before the first Hub call, and here there is none.
+    module, calls = hub_judge
+    monkeypatch.setenv("NVINFERENCE_API_KEY", "k")
+    monkeypatch.setattr(module, "_PREFLIGHT_DONE", False)
+    _stub_original_judge(module, monkeypatch, tmp_path, results=True)
     module.FAILURES.clear()
-    with pytest.raises(RuntimeError, match="deadline"):
-        module.real_post("/v1/messages", {})
-    assert calls == [] and len(module.FAILURES) == 1
+    module.main()
+    assert calls == []
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None, reason="ffmpeg not installed")
+def test_hub_gemini_inlines_a_bounded_proxy_of_a_large_clip(
+    hub_judge, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    module, _ = hub_judge
+    clip = tmp_path / "repurpose.mp4"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=duration=2:size=320x240:rate=10",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=2", "-shortest", "-pix_fmt", "yuv420p", str(clip)],
+        check=True,
+    )  # fmt: skip
+    monkeypatch.setattr(module, "VIDEO_INLINE_BUDGET_BYTES", clip.stat().st_size // 2)
+    module.MEDIA_TRANSFORMS.clear()
+    module._PROXIES.clear()
+    handle = module.HubGemini().upload(file=str(clip))
+    proxy = Path(handle.name)
+    assert proxy != clip and proxy.is_file() and proxy.name == clip.name
+    record = module.MEDIA_TRANSFORMS[str(clip)]
+    assert record["original_bytes"] == clip.stat().st_size and record["proxy_bytes"] == proxy.stat().st_size
+    assert record["max_height"] == 720 and record["duration_s"] == pytest.approx(2.0, abs=0.2)
+    # Made once per file; a clip within the budget goes as it is.
+    assert Path(module.HubGemini().upload(file=str(clip)).name) == proxy
+    monkeypatch.setattr(module, "VIDEO_INLINE_BUDGET_BYTES", clip.stat().st_size)
+    module._PROXIES.clear()
+    assert Path(module.HubGemini().upload(file=str(clip)).name) == clip
+
+
+def test_hub_gemini_sends_a_large_clip_as_it_is_without_ffmpeg(
+    hub_judge, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    module, _ = hub_judge
+    clip = tmp_path / "repurpose.mp4"
+    clip.write_bytes(b"\0" * 4096)
+    monkeypatch.setattr(module, "VIDEO_INLINE_BUDGET_BYTES", 1024)
+    monkeypatch.setattr(module.shutil, "which", lambda _name: None)
+    module.MEDIA_TRANSFORMS.clear()
+    module._PROXIES.clear()
+    assert Path(module.HubGemini().upload(file=str(clip)).name) == clip and module.MEDIA_TRANSFORMS == {}
 
 
 def _stub_original_judge(module, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, results: bool) -> Path:
@@ -607,15 +811,14 @@ def test_hub_judge_merges_provenance_into_every_result_when_the_hub_served_every
     base = _stub_original_judge(module, monkeypatch, tmp_path, results=True)
     module.FAILURES.clear()
 
+    module.MEDIA_TRANSFORMS.clear()
+    module.MEDIA_TRANSFORMS["/ws/repurpose.mp4"] = {"original_bytes": 3, "proxy_bytes": 2}
     module.main()
 
-    # One preflight request per route went out before the judge ran.
-    assert [path for path, _, _ in calls] == [
-        "/v1/messages",
-        f"/v1beta/models/{JUDGE_PROTOCOLS['nvinference-upstream']['AVB_JUDGE_GEMINI_MODEL']}:generateContent",
-    ]
     result = json.loads((base / "results" / "harbor_trial_p1.json").read_text())
     assert result["pass"] is True and result["judge_provider"] == "nvidia-inference-hub"
+    assert result["judge_media_transforms"] == {"/ws/repurpose.mp4": {"original_bytes": 3, "proxy_bytes": 2}}
+    assert result["judge_video_inline_budget_bytes"] == module.VIDEO_INLINE_BUDGET_BYTES
     assert result["judge_claude_model"] == JUDGE_PROTOCOLS["nvinference-upstream"]["AVB_JUDGE_CLAUDE_MODEL"]
     assert json.loads((tmp_path / "artifacts" / "harbor_trial_p1.json").read_text()) == result
     assert "verifier unavailable" not in capsys.readouterr().err
@@ -632,15 +835,24 @@ def test_hub_judge_exits_75_on_missing_configuration_unusable_routes_and_outages
     assert info.value.code == 75
     assert "verifier unavailable: missing verifier configuration: NVINFERENCE_API_KEY" in capsys.readouterr().err
 
-    # A route the key cannot use fails its preflight request: the whole verification is unavailable, before the
-    # judge scores a single item 0.
+    # A route the key cannot use fails its probe, sent before the judge's first Hub call: the whole verification is
+    # unavailable, before the judge scores a single item 0.
     monkeypatch.setenv("NVINFERENCE_API_KEY", "k")
+    monkeypatch.setattr(module, "_PREFLIGHT_DONE", False)
+    judge = tmp_path / "avb-original-judge.py"
+    stub = judge.read_text()
+    judge.write_text(
+        stub
+        + "import sys\nsys.modules['benchmarks.agentic_vbench.hub_judge'].real_post('/v1/messages', {'model': 'm'})\n"
+    )
 
     def refuse_gemini(path: str, payload: dict, headers: dict | None = None) -> dict:
         if "generateContent" in path:
             raise RuntimeError("Hub judge HTTPError HTTP 404 (model not found)")
         return {"content": []}
 
+    # The judge's first Hub call (the real post()) runs the probes first, through the module's post, which here
+    # answers for the routes: Gemini refused, so the verification is unavailable before any item is judged.
     monkeypatch.setattr(module, "post", refuse_gemini)
     with pytest.raises(SystemExit) as info:
         module.main()
@@ -648,7 +860,9 @@ def test_hub_judge_exits_75_on_missing_configuration_unusable_routes_and_outages
     err = capsys.readouterr().err
     assert "Gemini judge route" in err and "HTTP 404" in err
 
-    # The judge ran (stubbed), but a Hub call failed on the way and no later attempt scored it: unavailable.
+    # The judge ran (stubbed, making no Hub call of its own), but a Hub call failed on the way and no later attempt
+    # scored it: unavailable.
+    judge.write_text(stub)
     monkeypatch.setattr(module, "post", lambda path, payload, headers=None: {"content": [], "candidates": []})
     module.FAILURES.clear()
     module.FAILURES["abc"] = "/v1/messages: Hub judge HTTPError HTTP 403 (not available for this API key)"
