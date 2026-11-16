@@ -93,6 +93,15 @@ How you think:
   conventions; linters own that. A name that misstates what something does
   is a clarity NOTE, not a style comment.
 
+### Failure handling guidance
+
+For changes to failures, retries, timeouts, verification, scoring/masking, recovery or failure-report
+consumers, consult [failure-contracts](../failure-contracts/SKILL.md) from the trusted base snapshot.
+It links the public guidance and a walkthrough from producer through policy to upstream consumers.
+Shared policies, named `NgFailureEvent` observations and report propagation are a strong SHOULD,
+not a MUST. Alternatives can reach main. Treat adoption suggestions as non-blocking; a blocking
+finding needs a concrete correctness consequence, not merely deviation from the golden path.
+
 ### Component checks
 
 Apply the checks for the areas the diff touches.

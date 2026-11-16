@@ -1,9 +1,50 @@
 ---
-title: Failure observations
-description: Failure evidence, explicit causes, reports and shared outcome policies.
+title: Failure handling contracts
+description: The recommended path for configurable failure handling, upstream evidence and health reporting.
 ---
 
-Gym records an observed failure as one `NgFailureEvent` exception. The same object
+<Note>
+This is NeMo Gym's **strongly recommended golden path (SHOULD, not MUST)** for failure handling.
+Shared recovery, observability and health tooling increasingly relies on these conventions.
+Other implementations can still reach main: deviation alone is not a merge blocker, and this guide
+adds no required CI gate. When choosing another path, explain the tradeoff and any effect on callers
+or tooling so reviewers can assess the behavior. Existing API validation and correctness requirements
+still apply when using those APIs.
+</Note>
+
+## Recommended path
+
+Contributors should use this pattern when adding or changing failure handling in sandbox providers,
+model clients, harnesses, Agent Servers, Resources Servers, Environment Servers and collection:
+
+1. **Record what happened.** Raise `NgFailureEvent` with a named kind from
+   [failure_kinds.py](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/core/failure_kinds.py),
+   an explicit observing boundary and the originating stage when known. Prefer an existing kind;
+   add a shared kind for a new reusable observation. Keep occurrence details in `failure_reason` or
+   typed details. Namespaced kinds remain available for component-specific observations, although
+   shared policy kind rules currently validate against the registered vocabulary.
+2. **Choose treatment through configuration.** Reuse the shared outcome-policy mechanism and
+   the consuming boundary's supported actions and defaults. A failure kind or class describes an
+   observation or interpretation; it does not itself prescribe retry, scoring or a health verdict.
+3. **Execute at the owning boundary.** Keep attempt budgets, cancellation, deadlines, saved-output
+   prerequisites and replay safety with the executor. A configured retry does not make an uncertain
+   command safe to repeat or create another retry allowance.
+4. **Pass evidence upstream.** Forward events and reports through callers on both failure and
+   recovered-success paths, preserving IDs, originating stages and explicit causes. Wrap an event
+   only to report a distinct failure of the caller's own operation. Retain the diagnostics-omitted
+   flag when the transport cannot carry a report.
+5. **Preserve the result and its meaning.** Collection and readers should retain the applied
+   outcome decision and failure evidence through persistence. A consumer should honor a saved
+   decision rather than silently choose it again from current defaults. Recovery of unresolved work
+   can make a separate decision at its own boundary.
+
+Use the [failure-contracts skill](https://github.com/NVIDIA-NeMo/Gym/tree/main/.agents/skills/failure-contracts)
+for a short implementation and review walkthrough. Adoption is incremental; this page does not claim
+that every existing path already follows the pattern.
+
+## Failure observations
+
+NeMo Gym records an observed failure as one `NgFailureEvent` exception. The same object
 is raised and serialized with `to_record()`; `from_record()` reconstructs it. It names the boundary that observed it (`model`, `harness`,
 `agent`, `sandbox`, `resources_server`, `environment` or `collection`), its kind, stage, HTTP
 status and the event ID of its explicit cause. Existing handlers, outcome policy,
@@ -24,6 +65,58 @@ The flow for one failure:
    path for callers whose retry or routing logic depends on `ClientResponseError`.
 5. Collection saves the report beside the existing result or failure record
    (`_ng_failure_events`, `_ng_failure_id`).
+
+## Configurable actions
+
+[OutcomeAction and OutcomePolicyConfig](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/core/outcome_policy.py)
+provide the shared vocabulary and selector. Each boundary supports only actions it can execute.
+
+| Action | Meaning at the executing boundary |
+| --- | --- |
+| `retry` | Try the operation again within its existing safety and budget constraints. |
+| `verify` | Grade available output; retrying a failed judge request is a separate retry operation. |
+| `fail` | Stop ungraded; stopping retries does not imply a zero score. |
+| `count_as_zero` | Apply an explicit zero-score treatment, including that zero in the denominator. |
+
+Masking represents an ungraded sample; it is not a separate `OutcomeAction` and should not contradict
+an applied `count_as_zero`. Preserve execution status, verification outcome and applied scoring
+choice separately: incomplete execution does not by itself determine the score.
+
+This standalone example selects treatment for an observed model failure. It uses public APIs;
+in a server, expose the policy through its typed configuration rather than constructing fixed rules
+inside the error handler. Prefer the existing boundary config when one is available.
+
+```python
+from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
+    NgFailureEvent,
+    OutcomeAction,
+    OutcomePolicyConfig,
+    choose_action,
+)
+
+failure = NgFailureEvent(
+    boundary="model",
+    failure_kind=MODEL_REQUEST_ERROR,
+    failure_reason="Model endpoint returned HTTP 503",
+    stage="agent",
+    http_status=503,
+)
+policy = OutcomePolicyConfig(default_action="fail", by_status_code={503: "retry"})
+assert choose_action(
+    failure_kind=failure.failure_kind, http_status=failure.http_status, config=policy,
+) == OutcomeAction.RETRY
+
+# Change treatment without changing the observed failure.
+override = OutcomePolicyConfig(default_action="fail", by_status_code={503: "fail"})
+assert choose_action(
+    failure_kind=failure.failure_kind, http_status=failure.http_status, config=override,
+) == OutcomeAction.FAIL
+assert failure.http_status == 503
+```
+
+The selector does not execute retries. Use a boundary's validated configuration to restrict supported
+actions; the stage-aware configuration below also preserves unspecified defaults on partial overrides.
 
 ## Policy by execution stage
 
@@ -143,3 +236,71 @@ flag, and Collection saves `_ng_failure_events_omitted`. The real status and bod
 still arrive. This diagnostic loss does not change the task outcome. Old records with
 no failure report keep their meaning. The final saved-record migration remains a
 separate change.
+
+## Forwarding a cause
+
+Within one process, a bare `raise` forwards the original event. A caller reporting its own failed
+operation raises a new event `from` the inner failure. Across process boundaries, use the shared
+report and reconstruction helpers rather than replacing the failure with its message or HTTP status.
+This standalone round-trip illustrates the distinction:
+
+```python
+import json
+
+from nemo_gym.core import AGENT_RUN_ERROR, MODEL_REQUEST_ERROR, NgFailureEvent
+
+model_failure = NgFailureEvent(
+    boundary="model", failure_kind=MODEL_REQUEST_ERROR,
+    failure_reason="Model endpoint returned HTTP 503", stage="agent", http_status=503,
+)
+try:
+    raise NgFailureEvent(
+        boundary="agent", failure_kind=AGENT_RUN_ERROR,
+        failure_reason="Agent run failed after a model request", stage="agent",
+    ) from model_failure
+except NgFailureEvent as agent_failure:
+    restored = NgFailureEvent.from_record(json.loads(json.dumps(agent_failure.to_record())))
+    assert restored.event_id == agent_failure.event_id
+    assert restored.__cause__.event_id == model_failure.event_id
+    assert restored.event_id != restored.__cause__.event_id
+```
+
+Before retrying, retain the event with `observe_failure` as described above. A recovered-success
+report carries the observed events without naming a terminal failure. Cleanup should preserve the
+original failure while retaining any separate cleanup observations. Recording or forwarding an event
+does not create an operation attempt or spend a retry budget.
+
+## Health and reporting
+
+Health readers should distinguish observed failure events, failed episode attempts and final outcomes.
+A recovered event remains useful evidence without automatically failing the rollout or making it
+unhealthy. Deduplicate event counts by ID; forwarding one event through several callers is not several
+failed attempts. Keep unavailable or disabled health checks distinguishable from observed healthy
+checks, and report missing execution coverage separately from scored rows.
+
+Use the shared classification and configured health thresholds rather than inferring attribution
+from a failure-name prefix, exception text or a zero reward. Reporting a health verdict and enforcing
+whether a score may be published are separate consumer behaviors. See
+[Rollout Health Checks](/main/evaluation/rollout-health).
+
+## Suggested validation and review
+
+Choose checks relevant to the behavior being changed. These are useful demonstrations of the golden
+path, not a mandatory suite or a new merge gate:
+
+- Override treatment for the same failure and confirm the facts and cause links stay unchanged;
+  check partial overrides and the boundary's unsupported-action validation where applicable.
+- Exercise a failed attempt followed by success: the result and reward remain successful, with
+  the recovered event still visible to the caller.
+- Follow a failure through the actual caller or transport and save/reload path, checking IDs,
+  causes, originating stages, omission flags and the applied decision.
+- Exercise exhaustion and cleanup: neither silently converts an ungraded failure into a counted zero,
+  loses the original failure, or reopens a terminal decision.
+
+Existing examples live in
+[policy tests](https://github.com/NVIDIA-NeMo/Gym/blob/main/tests/unit_tests/core/test_outcome_policy.py),
+[report tests](https://github.com/NVIDIA-NeMo/Gym/blob/main/tests/unit_tests/core/test_failure_reports.py) and
+[agent/environment/collection tests](https://github.com/NVIDIA-NeMo/Gym/blob/main/tests/unit_tests/rollouts/test_agent_environment_collection_failures.py).
+Reuse core coverage for shared serialization behavior and focus adapter checks on its own wiring.
+Reviewers should assess demonstrated behavior and consumer impact. A different implementation alone
+is not a defect or grounds to block a merge; distinguish adoption suggestions from correctness findings.

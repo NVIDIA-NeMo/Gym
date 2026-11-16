@@ -23,6 +23,15 @@ Humans: see [Development Setup → Use of AI and LLM Tools](https://docs.nvidia.
 - Docs live under `fern/versions/latest/pages/`. Bleeding-edge nav is `fern/versions/main.yml`. See `fern/README.md` and the `nemo-gym-docs` skill.
 - Do not introduce licenses incompatible with Apache-2.0. New source files need the standard NVIDIA SPDX header.
 
+## Failure handling guidance
+
+For changes or reviews involving runtime failures, retries, timeouts, verification, scoring/masking,
+recovery, failure reports or health consumers, consult
+[the failure-contracts skill](.agents/skills/failure-contracts/SKILL.md). Contributors SHOULD prefer
+shared configurable outcome policies, `NgFailureEvent` with named kinds, and upstream report propagation.
+This is a strongly recommended golden path, not a MUST or merge gate: alternatives can reach main.
+Explain tradeoffs and consumer impact; deviation alone is not a blocking review finding.
+
 ## Code provenance
 
 - Avoid copying or adapting code from other repositories. Write an independent implementation whenever possible.
