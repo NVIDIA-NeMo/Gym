@@ -469,11 +469,7 @@ def build_exact_trace_envelope(
         }
         if model_response.get("routed_experts") is not None:
             assistant_item["routed_experts"] = model_response["routed_experts"]
-        # Keep every call in the evidence sidecars above, including parser
-        # retries, but expose only accepted actions through ordinary output.
-        # Output is the training-membership carrier; evidence is not.
-        if model_call.get("loss_member", model_call.get("accepted")) is True:
-            model_call_output.append(assistant_item)
+        model_call_output.append(assistant_item)
 
         previous_context = [*prompt_token_ids, *sampled_token_ids]
         previous_media_ids = media_ids

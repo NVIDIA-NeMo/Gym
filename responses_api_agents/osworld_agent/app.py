@@ -1841,9 +1841,8 @@ def _build_response(
         if exact_fields.get("media_assets") != trajectory_fields.get("media_assets"):
             raise ValueError("Semantic trajectory and exact evidence disagree about media assets")
         exact_fields.pop("media_assets")
-        # Ordinary output is the loss-membership carrier. Exact sidecars retain
-        # every model call, including parser retries, while output contains only
-        # calls the agent accepted as executable actions.
+        # Exact model calls, including parser retries, are the trainable units.
+        # Semantic step messages remain available through trajectory_transitions.
         output = exact_fields.pop("model_call_output")
         if exact_trace_transport_version == 3:
             # The schema-3 sidecar and canonical output arrays retain all
