@@ -146,7 +146,7 @@ class Conversation:
 """
 
 
-# Records each required-server probe; STUB_MCP_DOWN names a server that does not connect.
+# Records each server probe; STUB_MCP_DOWN names a server that does not connect.
 MCP_STUB = """
 import contextlib, json, os
 
@@ -164,7 +164,7 @@ def create_mcp_tools(config, timeout):
     if name == os.environ.get("STUB_MCP_DOWN"):
         raise ConnectionError("refused")
     class Client:
-        tools = ["finish"]
+        tools = [type("Tool", (), {"name": name})() for name in json.loads(os.environ.get("STUB_MCP_TOOLS", '["finish"]'))]
     yield Client()
 """
 
@@ -207,12 +207,14 @@ def start(tmp_path: Path, stub: Path, mode: str, **extra: object) -> tuple[subpr
         "state_dir": str(session / "state"),
         "events_path": str(session / "events.jsonl"),
         "result_path": str(session / "result.json"),
-        **{key: value for key, value in extra.items() if key != "mcp_down"},
+        **{key: value for key, value in extra.items() if key not in {"mcp_down", "mcp_tools"}},
     }
     (session / "input.json").write_text(json.dumps(runner_input))
     env = {"PYTHONPATH": str(stub), "STUB_MODE": mode, "STUB_LOG": str(tmp_path / "stub.log"), "PATH": "/usr/bin:/bin"}
     if extra.get("mcp_down"):
         env["STUB_MCP_DOWN"] = str(extra["mcp_down"])
+    if "mcp_tools" in extra:
+        env["STUB_MCP_TOOLS"] = json.dumps(extra["mcp_tools"])
     with (tmp_path / "stderr.log").open("w") as stderr:
         process = subprocess.Popen(
             [sys.executable, str(RUNNER_SOURCE), str(session / "input.json")], env=env, stderr=stderr
@@ -362,6 +364,63 @@ def test_a_required_mcp_server_that_does_not_connect_fails_before_the_conversati
     result = json.loads((session / "result.json").read_text())
     assert result["status"] == "error"
     assert not any("conversation" in entry for entry in notes(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "servers,finish_tool_names,mcp_down,mcp_tools",
+    [
+        ({}, ["finish"], None, ["finish"]),
+        (GRANTS, ["finsh"], None, ["finish"]),
+        ({"search": GRANTS["search"]}, ["finish"], "search", ["finish"]),
+        ({"search": GRANTS["search"]}, ["finish"], None, []),
+    ],
+    ids=["no-grants", "unknown-name", "optional-grant-down", "optional-grant-empty"],
+)
+def test_missing_task_finish_fails_before_the_conversation(
+    tmp_path, stub, servers, finish_tool_names, mcp_down, mcp_tools
+):
+    process, session = start(
+        tmp_path,
+        stub,
+        "finish",
+        mcp_servers=servers,
+        finish_tool_names=finish_tool_names,
+        mcp_down=mcp_down,
+        mcp_tools=mcp_tools,
+    )
+    assert process.wait(timeout=60) == 1
+    assert json.loads((session / "result.json").read_text())["status"] == "error"
+    assert "No MCP grant offers a tool in finish_tool_names" in (tmp_path / "stderr.log").read_text()
+    assert not any("conversation" in entry for entry in notes(tmp_path))
+
+
+def test_a_required_mcp_server_with_no_tools_fails_before_the_conversation(tmp_path, stub):
+    process, session = start(tmp_path, stub, "finish", mcp_servers=GRANTS, mcp_tools=[])
+    assert process.wait(timeout=60) == 1
+    assert json.loads((session / "result.json").read_text())["status"] == "error"
+    assert (
+        "Required MCP server gdpval_resources_server did not connect: it offers no tools"
+        in (tmp_path / "stderr.log").read_text()
+    )
+    assert not any("conversation" in entry for entry in notes(tmp_path))
+
+
+@pytest.mark.parametrize("required", [False, True])
+def test_task_finish_from_a_reachable_grant_allows_an_unreachable_optional_grant(tmp_path, stub, required):
+    servers = {**GRANTS, "gdpval_resources_server": {**GRANTS["gdpval_resources_server"], "required": required}}
+    process, session = start(
+        tmp_path,
+        stub,
+        "task_finish",
+        mcp_servers=servers,
+        finish_tool_names=["finish", "abandon_task_finish"],
+        mcp_down="search",
+    )
+    assert process.wait(timeout=60) == 0
+    log = notes(tmp_path)
+    probes = [entry["mcp_probe"] for entry in log if "mcp_probe" in entry]
+    assert [list(probe) for probe in probes] == [["gdpval_resources_server"], ["search"]]
+    assert json.loads((session / "result.json").read_text())["execution_status"] == "finished"
 
 
 def test_a_successful_task_finish_ends_the_run_and_hides_openhands_finish(tmp_path, stub):

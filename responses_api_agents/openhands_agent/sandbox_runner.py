@@ -93,20 +93,30 @@ def mcp_config(servers: dict[str, dict[str, object]]) -> dict[str, dict[str, obj
     }
 
 
-def check_required_mcp(servers: dict[str, dict[str, object]]) -> None:
-    """Connect to every required grant once; OpenHands itself skips a server it cannot reach, with a warning."""
-    required = mcp_config({name: server for name, server in servers.items() if server.get("required")})
-    if not required:
-        return
-    from openhands.sdk.mcp import MCPServer, create_mcp_tools
+def check_required_mcp(servers: dict[str, dict[str, object]], *, finish_tool_names: list[str]) -> None:
+    """Check required grants and discover a task finish tool before removing OpenHands' own finish.
 
-    for name, server in required.items():
+    OpenHands skips unreachable servers with a warning, so probe optional grants too when they may supply finish.
+    """
+    probed = mcp_config(
+        {name: server for name, server in servers.items() if server.get("required") or finish_tool_names}
+    )
+    offered: set[str] = set()
+    if probed:
+        from openhands.sdk.mcp import MCPServer, create_mcp_tools
+
+    for name, server in probed.items():
+        required = bool(servers[name].get("required"))
         try:
             with create_mcp_tools({name: MCPServer(**server)}, timeout=60) as client:
-                if not client.tools:
+                if required and not client.tools:
                     raise RuntimeError("it offers no tools")
+                offered.update(tool.name for tool in client.tools)
         except Exception as error:
-            raise RuntimeError(f"Required MCP server {name} did not connect: {error}") from error
+            if required:
+                raise RuntimeError(f"Required MCP server {name} did not connect: {error}") from error
+    if finish_tool_names and not offered.intersection(finish_tool_names):
+        raise RuntimeError(f"No MCP grant offers a tool in finish_tool_names {finish_tool_names}")
 
 
 def finished_by_task_tool(event: object, finish_tool_names: list[str]) -> bool:
@@ -197,7 +207,7 @@ def main(argv: list[str]) -> int:
             get_default_condenser(llm.model_copy(update={"usage_id": "condenser"})) if config["condenser"] else None
         )
         servers = config.get("mcp_servers") or {}
-        check_required_mcp(servers)
+        check_required_mcp(servers, finish_tool_names=finish_tool_names)
         agent = Agent(
             llm=llm,
             tools=tools,

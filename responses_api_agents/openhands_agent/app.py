@@ -139,7 +139,8 @@ class OpenHandsAgentConfig(BaseResponsesAPIAgentConfig):
         default_factory=list,
         description=(
             "Tools from the episode's MCP grants whose successful call ends the run. When set, OpenHands' own finish "
-            "tool is not offered, so a run cannot end without submitting through one of them."
+            "tool is not offered, and at least one configured name must be available from a grant. A reply without "
+            "a tool call or a run limit can still end the run without submitting."
         ),
     )
     mcp_tool_timeout_seconds: float = Field(

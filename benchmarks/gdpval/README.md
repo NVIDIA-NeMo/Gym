@@ -584,14 +584,15 @@ gym eval run \
   `finish`, `abandon_task_finish`, `web_search` and `fetch_web_page`, next to OpenHands' own `terminal`,
   `file_editor`, `task_tracker` and `think`.
 - A successful `finish` or `abandon_task_finish` ends the run (`finish_tool_names`), and OpenHands' own `finish` is
-  not offered, so the run cannot end without submitting. The files are collected when the run ends.
+  not offered. A reply without a tool call also ends the run, and so do the `timeout` and `max_iterations` limits.
+  Those endings submit nothing. The files are collected when the run ends.
 - The agent server builds the OpenHands runtime with uv on its own host at the first seed and uploads it, so the task
   sandbox needs no egress for the install.
 - The request's `temperature`, `top_p` and `max_output_tokens` reach OpenHands (the last as a per-call limit), so
   `gym eval run` may set them; otherwise the model server's settings apply.
-- A run that reaches its `timeout` reports `stop_reason: wall_time`, so GDPVal treats it as `agent_timeout`, as for
-  Stirrup and Pi. A run that reaches `max_iterations` (250 here) ends as incomplete and is judged on its last
-  `finish`, or as an empty submission without one.
+- OpenHands reports a run that reaches its `timeout` as `stop_reason: timeout`, so GDPVal's `agent_timeout` rule
+  (which requires `wall_time`) does not apply, as for Codex. A timed-out run that reaches verification without
+  submitting is judged as an empty submission, and so is a run that reaches `max_iterations` (250 here).
 - Change a harness setting with `++gdpval_openhands_agent.responses_api_agents.openhands_agent.<key>=<value>`.
 
 ## Multi-judge panel

@@ -270,6 +270,7 @@ MODEL_AND_TOOL_HOSTS = {
         # model_only keeps an optional grant's host closed; model_and_tools opens it for the MCP grant.
         ("model_only", [mcp_grant(required=False)], MODEL_HOST_ONLY),
         ("model_and_tools", [mcp_grant(required=False)], MODEL_AND_TOOL_HOSTS),
+        ("model_and_tools", [mcp_grant(required=True)], MODEL_AND_TOOL_HOSTS),
     ],
 )
 async def test_network_access_limits_an_owned_sandbox_to_the_model_host(
@@ -637,10 +638,11 @@ async def test_retry_shares_the_activation_and_rejects_a_changed_body(monkeypatc
     response.model_copy.return_value = response
     activate = AsyncMock(return_value=response)
     monkeypatch.setattr(app.OpenHandsAgent, "_activate", activate)
-    body = NeMoGymResponseCreateParamsNonStreaming(input="Build it")
+    body = NeMoGymResponseCreateParamsNonStreaming(input="Build it", temperature=0.6, top_p=0.9, max_output_tokens=512)
     assert await instance.responses(request(), body) is response
     assert await instance.responses(request(), body) is response
     assert activate.await_count == 1
+    assert activate.await_args.kwargs["sampling"] == {"temperature": 0.6, "top_p": 0.9, "max_output_tokens": 512}
     for changed_request, changed_body in [
         (request(), NeMoGymResponseCreateParamsNonStreaming(input="Changed")),
         (request(rollout="other"), body),

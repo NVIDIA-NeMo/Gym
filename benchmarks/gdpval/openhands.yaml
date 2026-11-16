@@ -5,7 +5,8 @@
 # reaches the task tools (finish, abandon_task_finish, web_search, fetch_web_page) over MCP. The rows use the
 # harness-neutral prompt. See "Run another harness" in README.md for the run command.
 # A successful finish or abandon_task_finish ends the run (finish_tool_names), and OpenHands' own finish is not
-# offered, so a run cannot end without submitting. The resources server collects the files when the run ends.
+# offered. A reply without a tool call, timeout or max_iterations can still end the run without submitting.
+# The resources server collects the files when the run ends.
 config_paths:
   - benchmarks/gdpval/config.yaml
 
