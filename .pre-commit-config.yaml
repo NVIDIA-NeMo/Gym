@@ -74,7 +74,8 @@ repos:
         name: Keep server runtime writes out of the source checkout
         language: python
         entry: python scripts/check_runtime_write_paths.py
-        files: ^(nemo_gym|resources_servers|responses_api_agents|responses_api_models|environment_servers)/.*\.py$|^scripts/(check_runtime_write_paths\.py|runtime_write_paths_allowlist\.txt)$
+        additional_dependencies: [pyyaml]
+        files: ^(nemo_gym|resources_servers|responses_api_agents|responses_api_models|environment_servers)/.*\.(py|yaml)$|^(benchmarks|environments)/.*\.yaml$|^scripts/(check_runtime_write_paths\.py|runtime_write_paths_allowlist\.txt)$
         pass_filenames: false
       - id: import-linter
         name: Check package layering (import-linter)
