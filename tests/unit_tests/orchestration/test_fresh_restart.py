@@ -198,3 +198,14 @@ def test_a_fresh_restart_from_a_launcher_of_another_revision_is_refused(tmp_path
     assert {path: path.read_bytes() for path in files} == files
     assert not (slurm_bin / "env").exists() and not (job_dir.parent / WALLTIME_JOURNAL_NAME).exists()
     assert not (job_dir / ".gym_chain_incomplete").exists()
+
+
+def test_the_verdict_of_a_fresh_restart_is_its_own_resubmit_command_not_a_new_submission(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.submit import inspect_recovery, recover
+
+    job_dir = _cut_before_inventory(tmp_path, slurm_bin)
+
+    for out in (recover(*_handle(job_dir)), inspect_recovery(*_handle(job_dir))):
+        verdict = out.operator_verdict
+        assert verdict["state"] == "needs_action" and "`gym eval submit`" not in verdict["action"]
+        assert verdict["action"].endswith(f"`{COMMAND}`")
