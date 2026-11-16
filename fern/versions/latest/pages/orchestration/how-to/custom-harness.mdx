@@ -33,6 +33,7 @@ driver:
 | `NEMO_GYM_POLICY_BASE_URL` | The policy's OpenAI-compatible base URL. Set when `driver.policy_model` is set. |
 | `NEMO_GYM_POLICY_MODEL_NAME` | The served model name. Set when `driver.policy_model` is set. |
 | `NEMO_GYM_POLICY_API_KEY` | The API key to present. Set when `driver.policy_model` is set. |
+| `NEMO_GYM_NODE_LOCAL_DIR` | A directory on the driver node's own disk, for files that should stay off shared storage. Set when the benchmark sets `node_local`. See [node_local](/orchestration/configuration#node_local). |
 
 The driver clones Gym into a fresh temporary checkout when `gym_install` is set, so a script that sits next to your submit config is not copied there. Put the harness on a shared cluster path, mount it with `driver.mounts`, and call it by absolute path, as `/harness/run_my_harness.py` above.
 

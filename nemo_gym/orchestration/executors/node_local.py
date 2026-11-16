@@ -35,7 +35,7 @@ from nemo_gym.orchestration.executors.script_templates import NODE_LOCAL_ARCHIVE
 from nemo_gym.orchestration.jobs import EVAL_SUCCEEDED_FILENAME
 
 
-NODE_LOCAL_DIR_ENV = "GYM_NODE_LOCAL_DIR"
+NODE_LOCAL_DIR_ENV = "NEMO_GYM_NODE_LOCAL_DIR"
 # The marker (NODE_LOCAL_ARCHIVE_DONE_MARKER_ENV) the job creates once its archive step has ended; the exports wait
 # for it.
 _ARCHIVE_DONE_MARKER_NAME = ".gym_node_local_archive_done"

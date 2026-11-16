@@ -468,7 +468,7 @@ _NODE_LOCAL_BASE_DIR_RE = re.compile(r"/[A-Za-z0-9._/-]+")
 class NodeLocalConfig(_StrictModel):
     """A directory on the driver's node for files that should stay off shared storage.
 
-    The driver and the servers it starts find it in `GYM_NODE_LOCAL_DIR`. When the driver step ends, the job writes
+    The driver and the servers it starts find it in `NEMO_GYM_NODE_LOCAL_DIR`. When the driver step ends, the job writes
     the files it added or changed into the job dir as one archive,
     `node-local/<SLURM_JOB_ID>.<SLURM_RESTART_COUNT>.tar.gz`, and removes the directory.
     """

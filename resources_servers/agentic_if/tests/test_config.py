@@ -151,7 +151,7 @@ def test_stock_gym_resolves_the_composition():
 
 
 def test_the_resolved_server_config_validates_with_absolute_artifacts_and_known_task_backends(tmp_path, monkeypatch):
-    monkeypatch.delenv("GYM_NODE_LOCAL_DIR", raising=False)
+    monkeypatch.delenv("NEMO_GYM_NODE_LOCAL_DIR", raising=False)
     config, server = resolved()
     validated = AgenticIFResourcesServerConfig.model_validate(server | {"host": "127.0.0.1", "port": 1, "name": "x"})
     assert validated.artifacts_dir == Path(config["results_dir"]) / "agentic_if"
@@ -164,7 +164,7 @@ def test_the_resolved_server_config_validates_with_absolute_artifacts_and_known_
 
 def test_a_job_with_a_node_local_dir_keeps_the_episodes_there(tmp_path, monkeypatch):
     # A submitted job's node-local dir is archived into the job dir and restored by its later jobs.
-    monkeypatch.setenv("GYM_NODE_LOCAL_DIR", str(tmp_path / "node-local"))
+    monkeypatch.setenv("NEMO_GYM_NODE_LOCAL_DIR", str(tmp_path / "node-local"))
     _, server = resolved()
     assert server["artifacts_dir"] == str(tmp_path / "node-local" / "agentic_if")
     _, chosen = resolved(agentic_if_artifacts_dir=str(tmp_path / "job" / "agentic_if"))

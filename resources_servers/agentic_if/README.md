@@ -33,7 +33,7 @@ and instruction checks that exercise the features the benchmark rows use.
 - `judge_api_key` for the judge model server, and `judge_base_url` to use another endpoint.
 - The sandbox provider's settings, for example `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY`.
 - `agentic_if_artifacts_dir`, optional: an absolute directory for the saved episodes. It defaults to
-  `$GYM_NODE_LOCAL_DIR/agentic_if` in a submitted job with a node-local directory (`node_local` in the
+  `$NEMO_GYM_NODE_LOCAL_DIR/agentic_if` in a submitted job with a node-local directory (`node_local` in the
   benchmark's `gym eval submit` config), and to `<results_dir>/agentic_if` otherwise.
 - `opencode_runtime_files`, optional: host files that seed copies into each task sandbox's bundle directory
   (`/tmp/nemo-gym-agentic-if/`), for `opencode_agent` to read by in-sandbox path; relative paths are under the Gym

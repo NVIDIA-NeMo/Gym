@@ -118,7 +118,7 @@ gym eval run --benchmark agentic_if --split benchmark --model-type vllm_model \
 
 Each episode saves several files, so a full run writes thousands. In a run submitted with `gym eval submit`,
 set `node_local: true` on the benchmark: the episodes then go to the job's node-local directory
-(`$GYM_NODE_LOCAL_DIR/agentic_if`) instead of shared storage, and each Slurm job leaves one archive of the files it
+(`$NEMO_GYM_NODE_LOCAL_DIR/agentic_if`) instead of shared storage, and each Slurm job leaves one archive of the files it
 added or changed, `<benchmark dir>/node-local/<SLURM_JOB_ID>.<SLURM_RESTART_COUNT>.tar.gz`. Keep `restore` on (the
 default): a later job of the run, including the re-grading job `gym eval resubmit --recover` queues, then extracts
 every earlier archive and finds every earlier episode. A job that ends without archiving (a failed node, for
@@ -135,7 +135,7 @@ names=$(ls | grep -xE '[0-9]+[.][0-9]+[.]tar[.]gz' | sort -t. -k1,1n -k2,2n)
 { cat ../.gym_job_chain 2>/dev/null; printf '%s\n' "$names" | cut -d. -f1; } | awk '/^[0-9]+$/ && !seen[$0]++' |
     while read -r id; do printf '%s\n' "$names" | grep "^$id[.]"; done |
     while read -r name; do tar -xzf "$name" -C "$dir" || echo "cannot extract $name"; done
-GYM_NODE_LOCAL_DIR="$dir" gym eval reverify ...
+NEMO_GYM_NODE_LOCAL_DIR="$dir" gym eval reverify ...
 ```
 
 ## Limitations

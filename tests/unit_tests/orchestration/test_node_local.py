@@ -208,7 +208,7 @@ for arg in "$@"; do
     case "$arg" in --container-mounts=*)
         IFS=, read -ra mounts <<< "${arg#--container-mounts=}"
         for mount in "${mounts[@]}"; do
-            [[ "${mount#*:}" != "${GYM_NODE_LOCAL_DIR:-}" ]] || export GYM_NODE_LOCAL_DIR="${mount%%:*}"
+            [[ "${mount#*:}" != "${NEMO_GYM_NODE_LOCAL_DIR:-}" ]] || export NEMO_GYM_NODE_LOCAL_DIR="${mount%%:*}"
         done ;;
     esac
 done
@@ -318,7 +318,7 @@ def _write_archive(path: Path, files: dict[str, str]) -> None:
             archive.addfile(info, io.BytesIO(text.encode()))
 
 
-_WRITE_EVIDENCE = 'mkdir -p "$GYM_NODE_LOCAL_DIR/ev" && echo row1 > "$GYM_NODE_LOCAL_DIR/ev/1.json"'
+_WRITE_EVIDENCE = 'mkdir -p "$NEMO_GYM_NODE_LOCAL_DIR/ev" && echo row1 > "$NEMO_GYM_NODE_LOCAL_DIR/ev/1.json"'
 
 
 def test_a_driver_that_ends_leaves_one_archive_of_the_dir_and_its_status(tmp_path):
@@ -340,7 +340,7 @@ def test_restore_extracts_every_archive_by_job_id_and_the_new_one_holds_only_wha
     _write_archive(archives / "9.0.tar.gz", {"ev/a.json": "nine\n", "ev/9.json": "row9\n"})
     _write_archive(archives / "10.0.tar.gz", {"ev/a.json": "ten\n", "ev/10.json": "row10\n"})
     driver = (
-        'd="$GYM_NODE_LOCAL_DIR/ev"; [ "$(cat "$d/a.json")" = ten ] && cat "$d/9.json" "$d/10.json" '
+        'd="$NEMO_GYM_NODE_LOCAL_DIR/ev"; [ "$(cat "$d/a.json")" = ten ] && cat "$d/9.json" "$d/10.json" '
         f'&& echo changed >> "$d/10.json" && {_WRITE_EVIDENCE}'
     )
 
@@ -365,7 +365,7 @@ def test_restore_follows_the_job_chain_then_archives_it_does_not_name(tmp_path):
     _write_archive(archives / "20.0.tar.gz", {"ev/a.json": "first\n"})
     _write_archive(archives / "9.0.tar.gz", {"ev/a.json": "second\n"})
     _write_archive(archives / "5.0.tar.gz", {"ev/judge.json": "judged\n"})
-    driver = 'd="$GYM_NODE_LOCAL_DIR/ev"; [ "$(cat "$d/a.json")" = second ] && cat "$d/judge.json"'
+    driver = 'd="$NEMO_GYM_NODE_LOCAL_DIR/ev"; [ "$(cat "$d/a.json")" = second ] && cat "$d/judge.json"'
 
     returncode = _finish(_start_job(tmp_path, driver=driver))
 
@@ -386,7 +386,7 @@ def test_a_requeued_attempt_restores_its_earlier_attempt_and_keeps_its_archive(t
     returncode = _finish(
         _start_job(
             tmp_path,
-            driver=f'cat "$GYM_NODE_LOCAL_DIR/ev/0.json" && {_WRITE_EVIDENCE}',
+            driver=f'cat "$NEMO_GYM_NODE_LOCAL_DIR/ev/0.json" && {_WRITE_EVIDENCE}',
             env={"SLURM_RESTART_COUNT": "1"},
         )
     )
@@ -465,7 +465,7 @@ def test_an_archives_dir_that_cannot_be_listed_stops_the_job_before_the_driver(t
 
 
 def test_without_an_archives_dir_the_dir_starts_empty(tmp_path):
-    returncode = _finish(_start_job(tmp_path, driver='test -z "$(ls -A "$GYM_NODE_LOCAL_DIR")"'))
+    returncode = _finish(_start_job(tmp_path, driver='test -z "$(ls -A "$NEMO_GYM_NODE_LOCAL_DIR")"'))
 
     assert returncode == 0
     assert "No earlier archive in" in (tmp_path / "job.out").read_text()
@@ -487,7 +487,7 @@ def test_without_restore_the_dir_starts_empty_and_every_archive_is_kept(tmp_path
     archives = tmp_path / "run" / "b" / "node-local"
     for job in (8, 9, 10):
         _write_archive(archives / f"{job}.0.tar.gz", {f"ev/{job}.json": "row\n"})
-    driver = f'test -z "$(ls -A "$GYM_NODE_LOCAL_DIR")" && {_WRITE_EVIDENCE}'
+    driver = f'test -z "$(ls -A "$NEMO_GYM_NODE_LOCAL_DIR")" && {_WRITE_EVIDENCE}'
 
     returncode = _finish(_start_job(tmp_path, driver=driver, node_local={"restore": False}))
 
@@ -628,7 +628,7 @@ def test_only_a_job_with_node_local_and_exports_waits_for_the_archive():
 
 def test_a_term_to_the_job_archives_the_dir_first(tmp_path):
     # The driver outlives the TERM, as a step does until Slurm kills it: only the job's own trap can archive.
-    driver = f"trap '' TERM; {_WRITE_EVIDENCE}; : > \"$GYM_NODE_LOCAL_DIR/../written\"; sleep 600 & wait"
+    driver = f"trap '' TERM; {_WRITE_EVIDENCE}; : > \"$NEMO_GYM_NODE_LOCAL_DIR/../written\"; sleep 600 & wait"
     process = _start_job(tmp_path, driver=driver)
     try:
         _wait_for(tmp_path / "host" / "written")
@@ -676,7 +676,7 @@ def test_a_tar_that_exits_1_keeps_the_archive_and_any_other_failure_drops_it(tmp
 
 def test_a_term_to_a_job_without_services_archives_at_once(tmp_path):
     # The watch keeps the driver in the background, so the batch shell's TERM trap does not wait for the driver.
-    driver = f"trap '' TERM; {_WRITE_EVIDENCE}; : > \"$GYM_NODE_LOCAL_DIR/../written\"; sleep 600 & wait"
+    driver = f"trap '' TERM; {_WRITE_EVIDENCE}; : > \"$NEMO_GYM_NODE_LOCAL_DIR/../written\"; sleep 600 & wait"
     process = _start_job(tmp_path, driver=driver, services={})
     try:
         _wait_for(tmp_path / "host" / "written")
