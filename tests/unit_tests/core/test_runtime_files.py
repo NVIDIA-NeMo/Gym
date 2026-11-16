@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -537,3 +538,64 @@ def test_a_server_name_with_a_slash_stays_one_segment(set_global_config, tmp_pat
 
     assert path is not None
     assert path.relative_to(tmp_path).parts[0] == "..%2Fescape"
+
+
+def test_concurrent_first_use_of_a_parent_loses_no_request(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(runtime_files, "_process_folders", {})
+    monkeypatch.setattr(runtime_files, "_checked_temp_parents", set())
+    count = 16
+    start, written = threading.Barrier(count), threading.Barrier(count)
+    errors: list[BaseException] = []
+    missing: list[Path] = []
+
+    def request(index: int) -> None:
+        try:
+            start.wait(5)
+            with temp_folder(kind="workspace", parent=tmp_path) as path:
+                (path / f"{index}.txt").write_text("x")
+                # Every request holds its folder open until all have written, so a lost file shows here.
+                written.wait(5)
+                if not (path / f"{index}.txt").exists():
+                    missing.append(path)
+        except BaseException as error:
+            errors.append(error)
+
+    threads = [threading.Thread(target=request, args=(index,)) for index in range(count)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+
+    assert errors == []
+    assert missing == []
+
+
+def test_a_process_folder_removed_from_outside_is_made_again(set_global_config, tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(runtime_files, "_process_folders", {})
+    set_global_config({"temp_dir": str(tmp_path)})
+    with temp_folder(kind="workspace") as first:
+        pass
+    shutil.rmtree(first.parent)
+
+    with temp_folder(kind="workspace") as second:
+        assert second.parent == first.parent
+
+
+def test_the_server_name_is_checked_only_where_it_is_used(set_global_config, tmp_path: Path) -> None:
+    set_global_config(None)
+    assert debug_folder(server_name="", kind="verification") is None
+
+    path = debug_folder(server_name="", kind="verification", override=tmp_path)
+    assert path is not None and path.is_relative_to(tmp_path)
+
+
+def test_a_forked_child_gets_a_free_first_use_lock(monkeypatch) -> None:
+    held = threading.Lock()
+    held.acquire()
+    monkeypatch.setattr(runtime_files, "_first_use_lock", held)
+
+    # What os.register_at_fork runs in the child after a fork.
+    runtime_files._reset_first_use_lock()
+
+    assert runtime_files._first_use_lock is not held
+    assert runtime_files._first_use_lock.acquire(blocking=False)
