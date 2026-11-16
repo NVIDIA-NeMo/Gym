@@ -1125,6 +1125,7 @@ def harbor_benchmark(config_path: str | Path) -> HarborBenchmark | None:
             instance_name=agents[0],
             impl_name=impl_name,
             runs_in_sandbox=runs_in_sandbox(impl_name, impl_config),
+            has_output_limit=declares_config_field(impl_name, impl_config, HARNESS_OUTPUT_LIMIT_FIELD),
             benchmark_settings=settings or None,
         ),
     )
