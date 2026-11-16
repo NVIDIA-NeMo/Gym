@@ -10694,6 +10694,10 @@ def test_messages_preserve_native_provider_causes_and_saved_response_population(
     if stream:
         events = [json.loads(line[6:]) for line in received.text.splitlines() if line.startswith("data: ")]
         served = next(event["message"] for event in events if event["type"] == "message_start")
+        assert served["stop_reason"] is None
+        assert served["usage"] == {"input_tokens": 3, "output_tokens": 0}
+        [final] = [event for event in events if event["type"] == "message_delta"]
+        served = {**served, **final["delta"], "usage": {**served["usage"], **final["usage"]}}
         assert events[-1]["type"] == "message_stop"
         assert [event["delta"]["text"] for event in events if event["type"] == "content_block_delta"] == [
             "Retained answer."
