@@ -36,7 +36,7 @@ from nemo_gym.sandbox import (
     SandboxAccess,
     SandboxSpec,
 )
-from nemo_gym.server_runtime import DirectHTTPToolAccess
+from nemo_gym.server_runtime import BaseRunRequest, DirectHTTPToolAccess
 from responses_api_agents.crewai_agent import app
 from responses_api_agents.crewai_agent.app import CrewAIAgent, CrewAIAgentConfig
 from responses_api_agents.crewai_agent.sandbox_runner import configure_crewai
@@ -216,9 +216,11 @@ async def test_an_activation_outside_the_seeded_session_is_refused():
     with pytest.raises(HTTPException) as unseeded:
         await agent.responses(_request(), _body())
     with pytest.raises(HTTPException) as legacy:
-        await agent.run(_request(), SimpleNamespace())
+        await agent.run(BaseRunRequest(responses_create_params=_body()))
 
-    assert unseeded.value.status_code == legacy.value.status_code == 409
+    assert unseeded.value.status_code == 409
+    assert legacy.value.status_code == 422
+    assert "does not implement /run" in legacy.value.detail
 
 
 # --- episodes on the local provider -----------------------------------------------------------------------
@@ -406,6 +408,7 @@ async def test_a_crew_that_runs_out_of_time_answers_incomplete(
     assert time.monotonic() - started < 60
     assert (response.status, response.metadata["crewai_stop_reason"]) == ("incomplete", "timeout")
     assert ROLLOUT_STOP_METADATA_KEY not in response.metadata
+    assert len(model.requests) == 2
     assert (workdir / "partial.txt").read_text() == "partial\n"
     # The second model call never returned, so the run's usage is unknown.
     assert response.usage is None
@@ -757,12 +760,21 @@ async def test_a_deadline_during_a_command_answers_incomplete_with_the_call_canc
     model = _model(
         monkeypatch, completion(None, ("shell", {"command": "echo partial > partial.txt; sleep 30"}), id="chatcmpl-1")
     )
+    # As above, distinguish a deadline in the command from one spent importing the runtime.
+    episode = asyncio.create_task(_episode(_agent(timeout=30), access))
     try:
-        response, close = await _episode(_agent(timeout=5), access)
+        async with asyncio.timeout(25):
+            while not (workdir / "partial.txt").exists():
+                await asyncio.sleep(0.05)
+        response, close = await asyncio.wait_for(episode, 60)
     finally:
+        if not episode.done():
+            episode.cancel()
+        await asyncio.gather(episode, return_exceptions=True)
         model.close()
 
     assert response.status == "incomplete"
+    assert len(model.requests) == 1
     assert (workdir / "partial.txt").read_text() == "partial\n"
     [invocation] = _records(close, "agent_invocation")
     [tool] = _records(close, "tool_call")
