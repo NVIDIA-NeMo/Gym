@@ -516,6 +516,18 @@ class TestImageAssets:
             line for line in upstream if not line.startswith("curl ")
         ]
 
+    def test_a_javascript_row_without_image_assets_builds_the_upstream_script(self) -> None:
+        # SWE-bench Multilingual JavaScript rows have no image_assets.
+        # SWE-bench's JavaScript harness reads the key whenever it is present,
+        # so the request's null default must not reach it.
+        row = {key: value for key, value in CHART_ROW.items() if key != "image_assets"}
+        request = SWEBenchVerifyRequest.model_validate(row)
+        assert request.image_assets is None
+
+        script = make_server()._make_test_spec(request).eval_script_list
+
+        assert script == make_test_spec(row, namespace="swebench").eval_script_list
+
     def test_image_assets_stored_as_a_json_string_are_read(self) -> None:
         request = SWEBenchVerifyRequest.model_validate(
             CHART_ROW | {"image_assets": json.dumps(CHART_ROW["image_assets"])}

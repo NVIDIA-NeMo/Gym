@@ -129,9 +129,9 @@ Critical rules:
 - If the benchmark auto-installs its tool (see Step 3b), add a `pytest_configure` hook in `conftest.py` to run the install before test collection — `skipif` evaluates at import time, before fixtures run
 
 If the server keeps state per session (a sandbox handle, a connection, a session dict):
-- Set `num_workers: 1` and enforce it in `model_post_init` (raise `ValueError` otherwise). The framework checks this for agent servers, not for resources servers
-- Override `close_resources_session()`; do not add your own `/close_session` route. It must succeed for a session that is already closed or never seeded, must not let a later seed recreate the session, and must raise if the release fails
-- Hold a per-session `asyncio.Lock` around the session dict, so a close racing a seed cannot leak a sandbox
+- State keyed by the session ID needs no `num_workers: 1`: session routing sends every request of a session to the worker that owns it, and a lost owner answers 410. Override `multiple_workers_unsupported_reason()` only for state keyed by another ID in the request body
+- Implement the state hooks `has_session_state()`, `initialize_session_state()` and `release_session_state()`, and set `seed_request_model`; the base then serves seed, close and checkpoint retirement under a per-session lock. Score inside `async with self.verifying(session_id) as verification`; mask `verification.is_lost`, and use `verification.retain(payload)` for compact retry evidence. Call `retain` before an awaited judge; use `retain(None)` explicitly only when the request contains everything needed to score a retry. Omitting retention makes the retry `session_lost`, including after a judge failure. The context releases state even when scoring raises. Cleanup failure is observed without replacing the score or original scoring exception, and ownership stays available for close or retirement to retry release. Release hooks must be async, idempotent, and retain handles on failure. Exported servers restore ownership through `restore_session_identity()` or `restore_session_identities()`. Use `verifying(session_id, allow_missing=True)` for a request-scored verifier that accepts an unseeded call. A seed override that widens the cookie arm declares it as `Annotated[CookieModel, BeforeValidator(reject_partial_typed_seed)]`. Override `seed_session()` and `close_resources_session()` only when the hooks cannot express the lifecycle, refuse an unfixable seed with `ResourcesSeedRejectedError` (422) or `ResourcesSessionConflictError` (409) and never a plain exception, and never add your own `/close_session` route. Close must succeed for a session that is already closed or never seeded, must not let a later seed recreate the session, and must raise if the release fails
+- A custom lifecycle holds a per-session `asyncio.Lock` around the session dict, so a close racing a seed cannot leak a sandbox
 - If seed fails after allocating a resource, free it before re-raising
 - Export `VERIFIER_FIXTURE` (`gym env test` needs it). Set `REVERIFY_MODE = ReverifyMode.STATELESS` on the config only when `verify()` uses just the request payload
 
@@ -232,6 +232,8 @@ For an external benchmark: reproduce the original repo's published numbers first
 
 The evidence gate in the exit checks and the session-contract checker (named at the end of this step) are necessary but not sufficient for failure handling. They do not show that the benchmark's grade is observable, that its characteristic failures are typed, or that interrupted work resumes correctly. A benchmark is conformant when a small real run shows all three. Submit, resume, recover and the acceptance gates are in [run-and-babysit-eval](../run-and-babysit-eval/SKILL.md); this step adds what a new benchmark has to provide for them to work.
 
+The state hooks and `verifying()` manage resource ownership and compact retry evidence; they do not record a grade. Moving scoring into that context does not replace any grading path below. The registered base `/verify` route still applies `observe_verifier`; a custom route must preserve its observation wrapper. An in-memory retry receipt is neither a saved policy answer nor durable grading evidence: keep the policy answer in the rollout, declare `REVERIFY_MODE` truthfully, and test any state-dependent re-judge before claiming offline recovery. Only servers that explicitly call `verifying()` adopt its release behavior.
+
 **1. Declare the grading path.** Name who grades, pick one path and say which in the benchmark's README. Every scored result, including a legitimate wrong-answer zero, must bind the graded response and the reward to that grader. Grading that nothing records reads `UNVERIFIED`.
 
 | Path | What to provide |
@@ -264,6 +266,8 @@ pre-commit run --all-files
 First run may fail as hooks auto-modify files (`verified: false` flag, README table). Stage changes and run again.
 
 Set `verified: true` in YAML config after the exit checks pass. Link the run folder and its `quality_summary.json` in the PR description.
+
+CI does not start on its own for unverified commits or external contributors; a maintainer must comment `/ok to test <full-sha>`. Use the `nemo-gym-pr-checks-and-labels` skill for CI routing and labels.
 
 To avoid committing unrelated auto-fixes from other servers, scope pre-commit to your files:
 ```bash

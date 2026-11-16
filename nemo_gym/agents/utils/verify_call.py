@@ -16,11 +16,11 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from aiohttp import ClientConnectionError, ClientPayloadError
+from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 
 from nemo_gym.client.http_client import get_response_json, raise_for_status
 from nemo_gym.client.server_client import ServerClient
-from nemo_gym.core.failure_kinds import AGENT_ROUTE_FAILED
+from nemo_gym.core.failure_kinds import AGENT_ROUTE_FAILED, JUDGE_FAILED
 from nemo_gym.core.failure_records import FailureBoundary
 from nemo_gym.core.failure_transport import observe_failure
 from nemo_gym.core.typed_exceptions import NgFailureEvent
@@ -97,3 +97,27 @@ async def verify_with_transport_retry(
                     continue
             raise failure from error
     raise AssertionError("unreachable")  # pragma: no cover
+
+
+def masked_verify_failure(
+    answer: dict[str, Any], failure: NgFailureEvent, *, regradable: bool = True
+) -> dict[str, Any]:
+    """``answer`` (the verify request, with the generated response) as a masked zero for a verify call that failed.
+
+    Return this from ``/run`` instead of raising: the HTTP boundary would drop the generated answer, and a resume
+    would generate again. The typed failure is the one ``verify_with_transport_retry`` raised.
+
+    A verifier that replied with a server error or a rate limit could not grade the answer: the row is a
+    ``judge_failed`` mask, which recovery grades again from the saved answer with ``/verify`` only. A call lost in
+    transport keeps its ``agent_route_failed`` kind, which recovery selects too. A verifier that cannot grade one saved
+    answer alone (``regradable=False``, a verifier that grades only full batches) keeps ``agent_route_failed`` for
+    every cause, so recovery does not claim it can settle the row.
+    """
+    cause = failure.__cause__
+    ungradable = regradable and isinstance(cause, ClientResponseError) and (cause.status >= 500 or cause.status == 429)
+    return answer | {
+        "reward": 0.0,
+        "mask_sample": True,
+        "failure_kind": JUDGE_FAILED if ungradable else failure.failure_kind,
+        "failure_reason": failure.failure_reason,
+    }

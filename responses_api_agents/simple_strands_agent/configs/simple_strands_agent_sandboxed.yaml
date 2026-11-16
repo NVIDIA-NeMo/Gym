@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Simple Strands Agent runs on the agent server and runs its tools in the task sandbox the
+# Environment Server supplies. The run configuration binds the independent benchmark and agent;
+# this config selects only the harness and model. For the host /run path, use simple_strands_agent.yaml.
+simple_strands_agent:
+  responses_api_agents:
+    simple_strands_agent:
+      entrypoint: app.py
+      num_workers: 1
+      resources_server: null
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      concurrency: 8
+      max_turns: 100
+      max_output_tokens: 32768
+      temperature: null
+      reasoning_effort: null
+      # Seconds per activation; the runner is stopped at the deadline.
+      timeout: 3600
+      model_timeout: 600
+      # Seconds per tool command in the task sandbox.
+      shell_timeout: 120
+      conversation_window: 300
+      tools: [bash, str_replace_editor]
+      prompt_tag: swe_generic_v2
+      native_user_prompt: false
+      system_prompt: null
+      workspace_root: outputs/simple_strands_agent/workspaces
+      keep_workspaces: false
+      session_close_timeout_seconds: 60
+      # Only for an agent-owned sandbox, when Resources supplies no sandbox_access.
+      sandbox_provider: null
+      sandbox_config: {}

@@ -4,6 +4,11 @@
       "pyarrow>=25.0.1,<26"
     ]
   },
+  "resources_servers/agentic_mme": {
+    "override-dependencies": [
+      "opencv-python-headless==5.0.0.93"
+    ]
+  },
   "resources_servers/code_fim": {
     "override-dependencies": [
       "pathspec"
@@ -19,13 +24,12 @@
       "cryptography"
     ]
   },
-  "resources_servers/longmt_eval": {
+  "resources_servers/longmt_eval/scoring": {
+    "standalone": true,
+    "reason": "Python 3.12 SEGALE/COMET 2.2.7 environment: Transformers 4.x compatibility and protobuf 4.25.9 retained from the validated scoring stack. These are explicit compatibility exceptions, not a claim that older versions meet the root security floor.",
     "constraint-dependencies": [
-      "transformers>=4.17,<5"
-    ],
-    "override-dependencies": [
-      "torchvision==0.27.0",
-      "protobuf==6.33.6"
+      "transformers>=4.17,<5",
+      "protobuf==4.25.9"
     ]
   },
   "resources_servers/nemo_user_sim": {
@@ -82,6 +86,16 @@
       "protobuf==6.33.6"
     ]
   },
+  "responses_api_agents/agentic_mme_agent": {
+    "override-dependencies": [
+      "opencv-python-headless==5.0.0.93"
+    ]
+  },
+  "responses_api_agents/harbor_agent": {
+    "override-dependencies": [
+      "pathspec"
+    ]
+  },
   "responses_api_agents/harbor_agent_general": {
     "override-dependencies": [
       "pathspec",
@@ -97,14 +111,14 @@
   },
   "responses_api_agents/nemo_fabric_agent": {
     "override-dependencies": [
-      "openai==2.44.0",
+      "openai==2.45.0",
       "pyjwt==2.15.1",
       "certifi>=2026.10.19"
     ]
   },
   "responses_api_agents/nooa_agent": {
     "override-dependencies": [
-      "openai==2.44.0"
+      "openai==2.45.0"
     ]
   },
   "responses_api_agents/osworld_agent": {
@@ -116,7 +130,9 @@
       "alibabacloud-ecs20140526",
       "alibabacloud-tea-openapi",
       "alibabacloud-tea-util",
-      "volcengine-python-sdk"
+      "volcengine-python-sdk",
+      "paddleocr",
+      "paddlepaddle"
     ],
     "override-dependencies": [
       "grpcio-status==1.71.2",
@@ -132,7 +148,7 @@
   "responses_api_agents/simple_strands_agent": {
     "override-dependencies": [
       "numpy==2.3.2",
-      "openai==2.44.0",
+      "openai==2.45.0",
       "pyarrow>=25.0.1"
     ]
   },
