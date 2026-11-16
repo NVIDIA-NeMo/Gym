@@ -20,16 +20,11 @@ import json
 
 import pytest
 
+from nemo_gym.eval.recovery.decision import IdentityEvidence, IdentityState, RecoveryAction, RecoveryDecision
+from nemo_gym.eval.recovery.gate import operator_verdict
+from nemo_gym.eval.recovery.planner import decide_from_collected
 from nemo_gym.orchestration import submit
 from nemo_gym.orchestration.executors import resume_script
-from nemo_gym.orchestration.recovery import (
-    IdentityEvidence,
-    IdentityState,
-    RecoveryAction,
-    RecoveryDecision,
-    decide_from_collected,
-    operator_verdict,
-)
 from tests.unit_tests.orchestration.test_eval_resubmit import _handle
 from tests.unit_tests.orchestration.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.orchestration.test_eval_resubmit import slurm_bin as slurm_bin
@@ -374,7 +369,7 @@ def test_a_run_with_every_rollout_flagged_keeps_its_delivery_state_in_the_verdic
 
 
 def test_a_flag_like_word_inside_a_quoted_metric_key_is_a_value_not_an_option():
-    from nemo_gym.orchestration.recovery import _flags
+    from nemo_gym.eval.recovery.gate import _flags
 
     option = '--score-key \'["agent", "--max-walltime"]\''
     assert _flags(option) == {"--score-key"}

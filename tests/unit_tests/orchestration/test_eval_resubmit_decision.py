@@ -3174,7 +3174,7 @@ def _skipped_job(tmp_path, kind: str = "judge_skipped", n: int = 5):
 
 
 def test_an_all_skipped_run_is_a_complete_noop_and_the_gate_reads_unverified(tmp_path) -> None:
-    from nemo_gym.orchestration.recovery import gate_summary_from_collected
+    from nemo_gym.eval.recovery.gate import gate_summary_from_collected
 
     collected = collect(_skipped_job(tmp_path))
     decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
@@ -3220,7 +3220,7 @@ def test_the_verdict_of_an_all_skipped_run_reports_it_unverified_by_configuratio
 
 
 def test_a_masked_result_of_any_other_kind_still_stops_the_run(tmp_path) -> None:
-    from nemo_gym.orchestration.recovery import gate_summary_from_collected
+    from nemo_gym.eval.recovery.gate import gate_summary_from_collected
 
     collected = collect(_skipped_job(tmp_path, kind="provider_unavailable", n=2))
     decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)

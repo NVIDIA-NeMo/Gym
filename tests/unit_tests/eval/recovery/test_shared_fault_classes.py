@@ -158,7 +158,7 @@ def _policy_zero(*, kind="provider_oom_killed"):
 @pytest.mark.parametrize("kind", ["provider_oom_killed", "provider_unavailable", "verifier_error"])
 @pytest.mark.parametrize("omitted_report", [False, True])
 def test_policy_counted_zero_stays_measured_incomplete_without_reinspecting_evidence(kind, omitted_report):
-    from nemo_gym.orchestration.recovery import metric_coverage
+    from nemo_gym.eval.recovery.gate import metric_coverage
 
     collected = _policy_zero(kind=kind)
     row = collected.results[0]
@@ -406,7 +406,9 @@ def test_trial_health_uses_the_final_event_stage(stage, expected):
 
 
 def test_gate_configuration_roundtrip_changes_class_without_changing_saved_facts():
-    from nemo_gym.orchestration.recovery import RecoveryDecision, RecoveryOutcomePolicyConfig, decide_from_collected
+    from nemo_gym.eval.recovery.decision import RecoveryDecision
+    from nemo_gym.eval.recovery.planner import decide_from_collected
+    from nemo_gym.eval.recovery.policy import RecoveryOutcomePolicyConfig
 
     collected = _stage_zero("agent")
     policy = RecoveryOutcomePolicyConfig.model_validate(
@@ -434,7 +436,7 @@ def test_gate_configuration_roundtrip_changes_class_without_changing_saved_facts
 
 def test_saved_unknown_class_wins_over_new_gate_override():
     from nemo_gym.core.failure_kinds import FailureClassificationConfig
-    from nemo_gym.orchestration.recovery import decide_from_collected
+    from nemo_gym.eval.recovery.planner import decide_from_collected
 
     collected = _stage_zero("agent")
     collected.results[0]["failure_outcome_attribution"] = "unknown"
@@ -461,7 +463,7 @@ def test_recovered_stage_failure_does_not_turn_success_into_a_final_fault():
             "stage": "verification",
         }
     }
-    from nemo_gym.orchestration.recovery import CollectedEvidence
+    from nemo_gym.eval.recovery.evidence import CollectedEvidence
 
     collected = CollectedEvidence.model_validate_json(collected.model_dump_json())
     decision, (passed, reason, report), _ = _gate(collected)
@@ -493,7 +495,7 @@ def test_collector_preserves_final_failure_stage_for_shared_health_classificatio
 
 
 def test_recovery_uses_configured_class_after_policy_save_reload(tmp_path):
-    from nemo_gym.orchestration.recovery import RecoveryOutcomePolicyConfig
+    from nemo_gym.eval.recovery.policy import RecoveryOutcomePolicyConfig
     from tests.unit_tests.orchestration.test_eval_resubmit_decision import INFRA, _decide, ident, write_job_dir
 
     row = ident(0, **INFRA)
@@ -526,7 +528,7 @@ def test_recovery_uses_configured_class_after_policy_save_reload(tmp_path):
 
 
 def test_recovery_rejects_zero_scoring_through_a_class_rule():
-    from nemo_gym.orchestration.recovery import RecoveryOutcomePolicyConfig
+    from nemo_gym.eval.recovery.policy import RecoveryOutcomePolicyConfig
 
     with pytest.raises(ValueError, match="does not support count_as_zero"):
         RecoveryOutcomePolicyConfig(by_failure_class={"model": "count_as_zero"})

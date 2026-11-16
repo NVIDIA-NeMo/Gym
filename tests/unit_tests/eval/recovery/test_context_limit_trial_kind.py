@@ -126,7 +126,7 @@ def test_an_lmarena_style_trial_rejected_upstream_for_its_context_is_an_exact_mo
 )
 def test_a_refined_rejection_uses_shared_classification_with_its_events_context(rules):
     from nemo_gym.core.failure_kinds import FailureClassificationConfig
-    from nemo_gym.orchestration.recovery import trial_verdict
+    from nemo_gym.eval.recovery.gate import trial_verdict
 
     collected = _lmarena_style_run()
     [call] = collected.results[0]["ng_trial_observations"]["model_calls"]
@@ -143,7 +143,7 @@ def test_a_refined_rejection_uses_shared_classification_with_its_events_context(
 @pytest.mark.parametrize("policy_call", [True, False], ids=["server-error", "non-policy-rejection"])
 def test_stage_rules_match_the_observed_kind_before_http_reporting_labels(policy_call):
     from nemo_gym.core.failure_kinds import FailureClassificationConfig
-    from nemo_gym.orchestration.recovery import trial_verdict
+    from nemo_gym.eval.recovery.gate import trial_verdict
 
     collected = (
         _lmarena_style_run(upstream=503, kind="model_request_error")

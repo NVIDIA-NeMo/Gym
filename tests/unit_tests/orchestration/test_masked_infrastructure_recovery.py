@@ -479,7 +479,7 @@ def test_saved_launcher_classification_drives_store_resume_and_planner(tmp_path)
         )
     )
     assert len(RolloutStore.read(output).pending()) == 1
-    from nemo_gym.orchestration.recovery import decide_from_collected
+    from nemo_gym.eval.recovery.planner import decide_from_collected
 
     collected, _ = _decide(job, allocation_cut=False)
     decision = decide_from_collected(

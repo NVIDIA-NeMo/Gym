@@ -18,13 +18,10 @@ import json
 import subprocess
 import sys
 
-from nemo_gym.orchestration.recovery import (
-    COLLECT_SCRIPT,
-    CollectedEvidence,
-    decide_from_collected,
-    gate_summary_from_collected,
-)
-from tests.unit_tests.orchestration.test_eval_recovery_gate import inventory, scored
+from nemo_gym.eval.recovery.evidence import COLLECT_SCRIPT, CollectedEvidence
+from nemo_gym.eval.recovery.gate import gate_summary_from_collected
+from nemo_gym.eval.recovery.planner import decide_from_collected
+from tests.unit_tests.eval.recovery.test_eval_recovery_gate import inventory, scored
 
 
 DIGEST = "ab" * 32

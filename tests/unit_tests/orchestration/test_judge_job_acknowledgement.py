@@ -297,7 +297,8 @@ def test_the_verdict_names_the_block_and_the_acknowledgement_before_and_after_a_
 
 
 def test_the_verdict_of_a_block_without_a_job_id_offers_no_acknowledgement():
-    from nemo_gym.orchestration.recovery import IdentityState, RecoveryDecision, operator_verdict
+    from nemo_gym.eval.recovery.decision import IdentityState, RecoveryDecision
+    from nemo_gym.eval.recovery.gate import operator_verdict
 
     stop = failed_judge_jobs_stop([None, "12"], "reverification")
     decision = RecoveryDecision(
@@ -322,7 +323,7 @@ def test_the_command_prints_one_verdict_in_the_json_the_gate_and_stderr(
     tmp_path, judge_slurm_bin, capsys, inspect_only
 ):
     from nemo_gym.cli.main import _eval_resubmit, build_parser
-    from nemo_gym.orchestration.recovery import operator_verdict_line
+    from nemo_gym.eval.recovery.gate import operator_verdict_line
 
     job_dir = _blocked_run(tmp_path, judge_slurm_bin)
     argv = ["eval", "resubmit", *_handle(job_dir), "--recover"]

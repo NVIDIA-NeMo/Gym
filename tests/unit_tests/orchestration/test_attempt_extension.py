@@ -328,7 +328,7 @@ def test_a_fresh_run_at_the_same_path_does_not_inherit_an_earlier_runs_extension
 
 
 def _verdict(decision):
-    from nemo_gym.orchestration.recovery import operator_verdict
+    from nemo_gym.eval.recovery.gate import operator_verdict
 
     return operator_verdict({"status": "FAILED", "expected_samples": decision.expected, "errors": []}, decision)
 

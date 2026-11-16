@@ -13,25 +13,22 @@ from omegaconf import OmegaConf
 
 from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER, current_rollout_id
 from nemo_gym.core.responses_api_types import NeMoGymResponse
+from nemo_gym.eval.recovery.evidence import select_managed_evidence
+from nemo_gym.eval.recovery.gate import trial_verdict
+from nemo_gym.eval.recovery.grading import grading_artifact
+from nemo_gym.eval.recovery.planner import decide_from_collected
+from nemo_gym.eval.recovery.trials import _bound_artifact, trial_counts
 from nemo_gym.models.model_call_capture import CaptureStore
-from nemo_gym.orchestration.recovery import (
-    _bound_artifact,
-    decide_from_collected,
-    grading_artifact,
-    select_managed_evidence,
-    trial_counts,
-    trial_verdict,
-)
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 from nemo_gym.rollouts.rollout_health import run_health_checks
 from nemo_gym.server_runtime.verifier_observability import observe_llm_judge_grading, observe_verifier
 from nemo_gym.trajectory.trajectory_record import grading_result_binding
 from nemo_gym.verification.judge import call_judge, record_parsed_judge_verdict
 from tests.helpers.single_agent_turn import _agent_response, _Client, _environment_server, _request, _Response
+from tests.unit_tests.eval.recovery.test_grading_artifacts import _ungraded
+from tests.unit_tests.eval.recovery.test_verifier_recorded_trial_coverage import _in_process, _judge_row
 from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect_with_score
-from tests.unit_tests.orchestration.test_grading_artifacts import _ungraded
 from tests.unit_tests.orchestration.test_recovery_health_binding import row as raw_trial
-from tests.unit_tests.orchestration.test_verifier_recorded_trial_coverage import _in_process, _judge_row
 from tests.unit_tests.rollouts.test_model_calls import _capture_exchange
 from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, install_fake_server_client
 

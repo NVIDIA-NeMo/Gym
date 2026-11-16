@@ -18,14 +18,10 @@ import json
 import subprocess
 import sys
 
-from nemo_gym.orchestration.recovery import (
-    COLLECT_SCRIPT,
-    CollectedEvidence,
-    decide_from_collected,
-    failure_facts,
-    gate_summary_from_collected,
-)
-from tests.unit_tests.orchestration.test_eval_recovery_gate import ident, inventory
+from nemo_gym.eval.recovery.evidence import COLLECT_SCRIPT, CollectedEvidence
+from nemo_gym.eval.recovery.gate import failure_facts, gate_summary_from_collected
+from nemo_gym.eval.recovery.planner import decide_from_collected
+from tests.unit_tests.eval.recovery.test_eval_recovery_gate import ident, inventory
 
 
 POLICY = "policy_model"

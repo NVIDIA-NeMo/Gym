@@ -16,17 +16,15 @@
 
 import pytest
 
-from nemo_gym.orchestration.recovery import (
-    CollectedEvidence,
+from nemo_gym.eval.recovery.decision import (
     IdentityEvidence,
     IdentityState,
     RecoveryAction,
     RecoveryDecision,
     RecoveryOutcome,
-    operator_verdict,
-    operator_verdict_line,
-    with_operator_verdict,
 )
+from nemo_gym.eval.recovery.evidence import CollectedEvidence
+from nemo_gym.eval.recovery.gate import operator_verdict, operator_verdict_line, with_operator_verdict
 from tests.unit_tests.orchestration.test_evaluation_health import _gate, _run
 
 
@@ -487,7 +485,7 @@ def test_recovered_judge_history_does_not_displace_an_unrelated_current_cause():
 
 def _spent_attempts_and_retries(tmp_path):
     """One scored and one exhausted rollout of a Store run whose infra-retry budget is used (3 of 3)."""
-    from nemo_gym.orchestration.recovery import select_managed_evidence
+    from nemo_gym.eval.recovery.evidence import select_managed_evidence
     from tests.unit_tests.orchestration.test_managed_recovery_selection import collect, prepare_managed
 
     prepare_managed(tmp_path, "exhausted", n=2)
@@ -496,7 +494,8 @@ def _spent_attempts_and_retries(tmp_path):
 
 
 def _budget_verdict(collected, **options):
-    from nemo_gym.orchestration.recovery import decide_from_collected, gate_summary_from_collected
+    from nemo_gym.eval.recovery.gate import gate_summary_from_collected
+    from nemo_gym.eval.recovery.planner import decide_from_collected
 
     decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False, **options)
     task = gate_summary_from_collected(decision, collected, max_unhealthy_fraction=None, mlflow_status="none")
@@ -521,7 +520,7 @@ def test_spent_attempts_and_infra_retries_name_both_extensions_at_every_stop(tmp
 
 
 def test_spent_attempts_alone_still_name_only_the_attempt_extension(tmp_path):
-    from nemo_gym.orchestration.recovery import select_managed_evidence
+    from nemo_gym.eval.recovery.evidence import select_managed_evidence
     from tests.unit_tests.orchestration.test_managed_recovery_selection import collect, prepare_managed
 
     prepare_managed(tmp_path, "exhausted", n=2)
@@ -534,7 +533,8 @@ def test_spent_attempts_alone_still_name_only_the_attempt_extension(tmp_path):
 
 
 def test_reservations_without_an_outcome_wait_for_the_allocation_not_a_fresh_submit(tmp_path):
-    from nemo_gym.orchestration.recovery import decide_from_collected, select_managed_evidence
+    from nemo_gym.eval.recovery.evidence import select_managed_evidence
+    from nemo_gym.eval.recovery.planner import decide_from_collected
     from tests.unit_tests.orchestration.test_managed_recovery_selection import collect, prepare_managed
 
     prepare_managed(tmp_path, "prior_reservation")

@@ -380,12 +380,12 @@ async def test_a_failed_pass_records_what_it_settled_and_is_not_counted_as_settl
 
     from aiohttp import ServerDisconnectedError
 
+    from nemo_gym.eval.recovery.decision import failed_judge_jobs_blocking
     from nemo_gym.eval.rollout_reverification import (
         RolloutReverificationConfig,
         RolloutReverificationHelper,
         write_settle_receipt,
     )
-    from nemo_gym.orchestration.recovery import failed_judge_jobs_blocking
 
     _, output, (answered, lost) = _job(tmp_path, judge_failures=2)
 
@@ -463,8 +463,8 @@ def _settling_pass(helper, output: Path, tmp_path: Path):
 
 
 async def test_a_grade_saved_before_the_coverage_write_failed_counts_as_settled(tmp_path, monkeypatch):
+    from nemo_gym.eval.recovery.decision import failed_judge_jobs_blocking
     from nemo_gym.eval.rollout_reverification import RolloutReverificationHelper
-    from nemo_gym.orchestration.recovery import failed_judge_jobs_blocking
 
     _, output, identities = _job(tmp_path, judge_failures=2)
 
@@ -540,7 +540,7 @@ async def test_a_failed_pass_counts_each_withdrawn_admission_once(tmp_path, monk
     ],
 )
 def test_the_note_on_a_failed_judge_job_says_what_it_settled_and_withdrew(counts, says):
-    from nemo_gym.orchestration.recovery import judge_job_note
+    from nemo_gym.eval.recovery.gate import judge_job_note
 
     job = {"job_id": "1", "state": "failed", "ended_at": "2026-01-01T00:00:00Z", "error": "OSError: disk full"}
     assert judge_job_note(job | counts) == f"judge-only job 1 failed: OSError: disk full; {says}"

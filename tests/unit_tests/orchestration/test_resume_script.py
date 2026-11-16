@@ -1504,8 +1504,8 @@ def test_inspection_names_a_chain_stopped_on_rejected_sandbox_credentials(tmp_pa
 
 
 def test_inspection_names_a_chain_stopped_on_a_producer_protocol_violation(tmp_path):
+    from nemo_gym.eval.recovery.planner import decide_from_collected
     from nemo_gym.orchestration.executors.resume_script import PROTOCOL_VIOLATION_REASON
-    from nemo_gym.orchestration.recovery import decide_from_collected
     from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect, ident, write_job_dir
 
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
@@ -1519,8 +1519,8 @@ def test_inspection_names_a_chain_stopped_on_a_producer_protocol_violation(tmp_p
 
 
 def test_inspection_names_a_chain_stopped_on_an_exhausted_grading_quota(tmp_path):
+    from nemo_gym.eval.recovery.planner import decide_from_collected
     from nemo_gym.orchestration.executors.resume_script import QUOTA_EXHAUSTED_REASON
-    from nemo_gym.orchestration.recovery import decide_from_collected
     from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect, ident, write_job_dir
 
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])

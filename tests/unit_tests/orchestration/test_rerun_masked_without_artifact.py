@@ -471,7 +471,7 @@ def test_an_approval_belongs_to_the_rollouts_file_it_was_journaled_beside(tmp_pa
 
 
 def test_the_verdict_of_a_masked_stop_names_the_rerun_not_a_fresh_submit(tmp_path):
-    from nemo_gym.orchestration.recovery import operator_verdict
+    from nemo_gym.eval.recovery.gate import operator_verdict
 
     _run(tmp_path, [[_kept()]])
     decision = _decide(tmp_path)
