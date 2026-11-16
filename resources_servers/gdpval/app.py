@@ -1177,6 +1177,23 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 **_gdpval_failure("missing_rubric", terminal=True),
             )
 
+        # Collection publishes the finish marker atomically with the submitted
+        # files. A completed collection with no output must not be scored on the
+        # agent's claims about files it never submitted. Legacy text-only inputs
+        # without this marker still use the response-text fallback below.
+        directory = Path(body.deliverables_dir) if body.deliverables_dir else None
+        if (
+            directory is not None
+            and (directory / persisted_layout.FINISH_PARAMS_FILE).is_file()
+            and not any(is_deliverable(path) for path in directory.iterdir())
+        ):
+            return GDPValVerifyResponse(
+                **body.model_dump(),
+                reward=0.0,
+                verify_mode="rubric",
+                judge_response={"manual_imputation": "no_deliverable_as_zero"},
+            )
+
         judges = self._resolve_judges()
         # Route tasks with audio/video deliverables per modality: video goes to
         # video-capable judge(s) (error/warn when none); audio a judge can't read

@@ -104,6 +104,62 @@ def _verify_request(**fields) -> GDPValVerifyRequest:
     )
 
 
+class TestRubricEmptyCollectedSubmission:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mode", ["structured", "binary"])
+    @pytest.mark.parametrize("finish", [None, {"paths": []}, {"reason": "cannot complete"}])
+    async def test_completed_collection_without_output_is_zero(self, tmp_path, mode, finish) -> None:
+        (tmp_path / persisted_layout.FINISH_PARAMS_FILE).write_text(json.dumps(finish))
+        (tmp_path / "metadata.json").write_text('{"status": "completed"}')
+        references = tmp_path / "reference_files"
+        references.mkdir()
+        (references / "input.txt").write_text("Reference material is not an agent submission.")
+        body = _verify_request(
+            deliverables_dir=str(tmp_path),
+            deliverable_text="I created Sample.xlsx with all required analysis.",
+            rubric_json=[{"criterion": "Submit the completed workbook", "score": 1}],
+        )
+        server = _server(rubric_scoring_mode=mode)
+        scorer = AsyncMock(return_value=(1.0, {}))
+        with (
+            patch("resources_servers.gdpval.scoring.score_with_rubric_structured", new=scorer),
+            patch("resources_servers.gdpval.scoring.score_with_rubric", new=scorer),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+        ):
+            response = await server.verify(_NO_SESSION, body)
+
+        assert response.reward == 0.0
+        assert response.mask_sample is False
+        assert response.failure_kind is None
+        assert response.judge_response == {"manual_imputation": "no_deliverable_as_zero"}
+        scorer.assert_not_awaited()
+        assert json.loads((tmp_path / persisted_layout.FINISH_PARAMS_FILE).read_text()) == finish
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("collected", [False, True])
+    async def test_real_file_and_legacy_text_still_reach_judge(self, tmp_path, collected) -> None:
+        text = "Submitted policy content." if collected else "Legacy text deliverable."
+        if collected:
+            (tmp_path / persisted_layout.FINISH_PARAMS_FILE).write_text('{"paths": ["policy.txt"]}')
+            (tmp_path / "policy.txt").write_text(text)
+        body = _verify_request(
+            deliverables_dir=str(tmp_path),
+            deliverable_text="I wrote a policy." if collected else text,
+            rubric_json=[{"criterion": "Write the policy", "score": 1}],
+        )
+        server = _server(rubric_scoring_mode="structured")
+        scorer = AsyncMock(return_value=(0.5, {}))
+        with (
+            patch("resources_servers.gdpval.scoring.score_with_rubric_structured", new=scorer),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+        ):
+            response = await server.verify(_NO_SESSION, body)
+
+        assert response.reward == 0.5
+        scorer.assert_awaited_once()
+        assert text in scorer.call_args.kwargs["deliverable_text"]
+
+
 class TestStrictComparisonTrials:
     @staticmethod
     def _comparison_server_and_body(tmp_path, *, strict: bool | None, num_references: int = 1):
