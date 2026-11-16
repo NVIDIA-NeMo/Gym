@@ -79,6 +79,27 @@ def test_rating_uses_reference_and_policy_comparisons_together(inputs) -> None:
     }
 
 
+def test_a_policy_stop_counts_in_the_score_but_not_in_the_judged_conversation_statistics(inputs) -> None:
+    tasks = [
+        [_rollout("completed", 8, [("a", 0.6)], {"warmth": 6.0})],
+        [_rollout("policy_failed", 3, [("b", 0.0)])],
+        # A row with no policy turn is a stop as well, whatever its status says (as in ``verify``).
+        [_rollout("completed", 0, [("c", 0.0)])],
+    ]
+    metrics = eqbench4_metrics(tasks, inputs, resamples=5)
+    assert metrics["eqbench4_judged_conversations"] == 1
+    assert metrics["eqbench4_mean_policy_turns"] == 8
+    assert metrics["eqbench4_persona_ended_rate"] == 0.0
+    assert metrics["eqbench4_trait/warmth"] == 6.0
+    # The losses still count: three comparisons, a win rate of 0.6 / 3, and a rating that includes them.
+    assert metrics["eqbench4_comparisons"] == 3
+    assert metrics["eqbench4_win_rate"] == pytest.approx(0.2)
+    outcomes = [Outcome(POLICY, "a", 0.6), Outcome(POLICY, "b", 0.0), Outcome(POLICY, "c", 0.0)]
+    assert metrics["eqbench4_elo"] == pytest.approx(
+        stand_in_rating(["a", "b", "c", POLICY], [*REFERENCE, *outcomes])[POLICY]
+    )
+
+
 def test_key_metrics_select_the_headline() -> None:
     assert key_metrics({"eqbench4_elo": 1100.0, "eqbench4_conversations": 3}) == {"eqbench4_elo": 1100.0}
 

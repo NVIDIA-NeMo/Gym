@@ -11,10 +11,11 @@ from pathlib import Path
 import pytest
 
 from resources_servers.eqbench4 import prepare as P
+from resources_servers.eqbench4 import upstream_rating
 from resources_servers.eqbench4.judging import PromptParts
 from resources_servers.eqbench4.task_data import TaskData
 from resources_servers.eqbench4.tests.stand_in_solver import STAND_IN_FILES
-from resources_servers.eqbench4.upstream_rating import UpstreamSolver
+from resources_servers.eqbench4.upstream_rating import UpstreamSolver, write_solver
 
 
 STAND_IN_PROMPTS = """
@@ -118,8 +119,6 @@ def stand_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "src/eqbench/__init__.py": b"",
         "src/eqbench/core/prompts.py": STAND_IN_PROMPTS.encode(),
         "src/eqbench/prompts/pairwise_judge_prompt.txt": PAIRWISE_TEMPLATE.encode(),
-        "src/eqbench/rubrics/pairwise_dimensions.txt": b"# dims\nbond_and_rapport: Rapport.\n\nattunement: Reading.\n",
-        "src/eqbench/rubrics/pairwise_dimensions_weights.txt": b"bond_and_rapport: 2.0\n",
         "results/r1.json": json.dumps(
             _run_file(
                 "alpha",
@@ -135,7 +134,8 @@ def stand_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         ).encode(),
         "results/r2.json": json.dumps(_run_file("beta", [_comparison("beta", "gamma", "s2", 0.6)])).encode(),
         "results/r3.json": json.dumps(_run_file("gamma", [])).encode(),
-        # The rating solver, a stand-in pinned by the conftest.
+        # The rating solver, a stand-in pinned by the conftest, with the two rubric files its settings read (which the
+        # prompts use too).
         **STAND_IN_FILES,
     }
     for path, data in files.items():
@@ -210,7 +210,10 @@ def test_reference_runs_dedupe_and_ladder(stand_in: Path) -> None:
         {"model_a": "alpha", "model_b": "gamma", "fraction_a": 1.0, "scenario_id": "s2"},
         {"model_a": "beta", "model_b": "gamma", "fraction_a": 0.6, "scenario_id": "s2"},
     ]
-    assert references.ladder(UpstreamSolver(stand_in)) == ["alpha", "beta", "gamma"]
+    # The solver runs from the files prepare writes (line endings restored), not from the checkout.
+    solver_files = {path: P.load_source(path, source_dir=stand_in) for path in upstream_rating.SOLVER_SHA256}
+    write_solver(stand_in / "solver", solver_files)
+    assert references.ladder(UpstreamSolver(stand_in / "solver")) == ["alpha", "beta", "gamma"]
 
 
 def test_select_opponents_spreads_and_rotates() -> None:

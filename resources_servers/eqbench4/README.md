@@ -55,7 +55,7 @@ other metrics are:
 | `eqbench4_win_rate` | Mean comparison fraction |
 | `eqbench4_unrated_comparisons` | Comparisons against models missing from the published comparisons (such as the synthetic example rows' opponent); when nonzero, no rating is reported, since the fit would leave them out |
 | `eqbench4_trait/<name>` | Mean trait score, when the trait judge runs |
-| `eqbench4_judged_conversations`, `eqbench4_persona_ended_rate`, `eqbench4_mean_policy_turns` | Statistics of the judged conversations |
+| `eqbench4_judged_conversations`, `eqbench4_persona_ended_rate`, `eqbench4_mean_policy_turns` | Statistics of the judged conversations; a conversation the policy stopped was not judged and is not counted here, though its losses count in the win rate and rating |
 
 `compute_repeat_metrics` reports each repeat's rating and win rate without an interval.
 

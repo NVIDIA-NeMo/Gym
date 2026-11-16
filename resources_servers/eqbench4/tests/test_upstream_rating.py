@@ -7,7 +7,11 @@ from pathlib import Path
 import pytest
 
 from resources_servers.eqbench4 import upstream_rating
-from resources_servers.eqbench4.tests.stand_in_solver import install_stand_in_solver, stand_in_rating
+from resources_servers.eqbench4.tests.stand_in_solver import (
+    STAND_IN_DIMENSIONS,
+    install_stand_in_solver,
+    stand_in_rating,
+)
 from resources_servers.eqbench4.upstream_rating import SOLVER_SHA256, Outcome, UpstreamSolver, canonical
 
 
@@ -26,6 +30,24 @@ def test_the_solver_is_called_through_its_own_functions(tmp_path: Path, monkeypa
         assert (rated[model].rating, rated[model].ci_low, rated[model].ci_high) == pytest.approx(
             (value, value - 7, value + 7)
         )
+
+
+def test_the_settings_read_their_rubric_beside_the_eqbench_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Upstream's config.py imports eqbench and reads rubrics/*.txt beside eqbench.__file__ when it is imported. The
+    # stand-in does the same, so this checks the loader's eqbench package against the layout write_solver produces.
+    solver = UpstreamSolver(install_stand_in_solver(tmp_path, monkeypatch))
+    assert solver._solver.PAIRWISE_DIMENSIONS == STAND_IN_DIMENSIONS
+    # Without the rubric beside the package, importing the settings fails, and loading the solver with it.
+    (tmp_path / "src/eqbench/rubrics/pairwise_dimensions.txt").unlink()
+    monkeypatch.setattr(
+        upstream_rating,
+        "SOLVER_SHA256",
+        {path: pin for path, pin in upstream_rating.SOLVER_SHA256.items() if not path.endswith("dimensions.txt")},
+    )
+    with pytest.raises(FileNotFoundError, match="pairwise_dimensions.txt"):
+        UpstreamSolver(tmp_path)
 
 
 def test_loading_the_solver_leaves_no_eqbench_package_behind(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

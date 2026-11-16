@@ -77,7 +77,8 @@ class EQBench4AgentConfig(BaseResponsesAPIAgentConfig):
     # Shown to the persona after an unusable reply; ``{problems}`` lists what was wrong.
     persona_correction_message: str
     # Policy replies per turn, as in EQ-Bench 4; a turn whose replies all have no visible text ends the conversation,
-    # which is then left out of the score with the reason recorded. A context-window overflow is not asked again.
+    # which the resources server scores as a loss to every opponent, with the reason recorded. A context-window
+    # overflow is not asked again.
     policy_max_attempts: int = Field(default=7, ge=1)
 
 
@@ -348,7 +349,7 @@ class EQBench4Agent(SimpleResponsesAPIAgent):
                         f"no visible policy reply in turn {policy_turns + 1} after {attempt} attempt(s): {stop_reason}"
                     )
                     LOG.warning(
-                        "EQ-Bench 4 scenario %s: %s; the conversation is left out of the score",
+                        "EQ-Bench 4 scenario %s: %s; the conversation is scored as a loss to every opponent",
                         body.model_extra.get("scenario_id"),
                         error,
                     )

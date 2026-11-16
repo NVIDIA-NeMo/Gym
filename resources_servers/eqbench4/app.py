@@ -8,8 +8,10 @@ both transcripts twice, once in each order, and the comparison's fraction for th
 margins. The reward is the policy's mean fraction. ``compute_metrics`` adds the policy's comparisons to the published
 comparison graph and fits Bradley-Terry ratings, which places the policy on the EQ-Bench 4 leaderboard scale.
 
-A conversation the policy or the persona could not finish is left out of the score, as in EQ-Bench 4, and
-``aggregate_metrics`` reports how many conversations were left out and why.
+A conversation the policy stopped is scored as a loss to every opponent, without a judge; one the persona simulator
+broke (only from an older agent: the current agent fails the run, so it is retried) is left out of the score.
+EQ-Bench 4 instead rates only completed conversations and finishes the rest on a resumed run. ``aggregate_metrics``
+reports how many conversations the policy stopped or were left out, and why.
 """
 
 import asyncio
@@ -167,7 +169,8 @@ class OpponentComparison(BaseModel):
 
 
 class EQBench4VerifyResponse(EQBench4VerifyRequest, BaseVerifyResponse):
-    # Whether the conversation was judged. A conversation left out of the score was never judged.
+    # Whether the conversation was scored: judged, or a policy stop scored as a loss. A conversation left out of the
+    # score was not.
     evaluation_completed: bool = True
     comparisons: list[OpponentComparison] = Field(default_factory=list)
     policy_turns: int = 0

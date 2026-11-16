@@ -22,12 +22,12 @@ from types import ModuleType
 
 
 SOLVER_SHA256 = {
-    "src/eqbench/ranking/config.py": "de27fb4778ce39b2d1e3133f1e85c26fda5e578c9f4409e82fadef8d6e330277",
-    "src/eqbench/ranking/soft_bt_solver.py": "79953bd642e7bab64cacff3cfb57ca82e97fde3e978a78ceda350f15f35c9695",
+    "src/eqbench/ranking/config.py": "de27fb4778ce39b2d1e3133f1e85c26fda5e578c9f4409e82fadef8d6e330277",  # pragma: allowlist secret
+    "src/eqbench/ranking/soft_bt_solver.py": "79953bd642e7bab64cacff3cfb57ca82e97fde3e978a78ceda350f15f35c9695",  # pragma: allowlist secret
     # Read by config.py when it is imported, from beside the ``eqbench`` package.
-    "src/eqbench/rubrics/pairwise_dimensions.txt": "a3da48ffcd5bf3902a944c3653fd6799dbdff8a5d0c523a6ef0cc437a623845f",
+    "src/eqbench/rubrics/pairwise_dimensions.txt": "a3da48ffcd5bf3902a944c3653fd6799dbdff8a5d0c523a6ef0cc437a623845f",  # pragma: allowlist secret
     "src/eqbench/rubrics/pairwise_dimensions_weights.txt": (
-        "23c7166ca47128c4b12544cbed0b8cd14d386ea42ed04a381bab7c72768d7a83"
+        "23c7166ca47128c4b12544cbed0b8cd14d386ea42ed04a381bab7c72768d7a83"  # pragma: allowlist secret
     ),
 }
 _PACKAGE_DIR = "src/eqbench"

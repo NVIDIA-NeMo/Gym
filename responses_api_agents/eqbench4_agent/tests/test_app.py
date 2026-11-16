@@ -6,6 +6,9 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import ClientResponseError, RequestInfo
+from multidict import CIMultiDict, CIMultiDictProxy
+from yarl import URL
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
@@ -208,7 +211,7 @@ async def test_unusable_persona_replies_are_corrected_then_fail_the_run_for_a_re
     )
     # The simulator broke the conversation, not the policy: the run fails, so the attempt is retried (a routed
     # failure is a retryable agent_run_error) and the scenario keeps its place in the score.
-    with pytest.raises(PersonaUnavailableError, match="turn 2 after 2 attempt\(s\): no <dialogue> section"):
+    with pytest.raises(PersonaUnavailableError, match=r"turn 2 after 2 attempt\(s\): no <dialogue> section"):
         await make_agent(servers, persona_max_attempts=2).run(request(), make_body())
     persona = servers.bodies("persona")
     assert len(persona) == 4
@@ -216,6 +219,44 @@ async def test_unusable_persona_replies_are_corrected_then_fail_the_run_for_a_re
         ("assistant", "<dialogue>no monologue</dialogue>"),
         ("user", "Fix it: no <internal> section"),
     ]
+    assert not [path for _, path, _ in servers.calls if path == "/verify"]
+
+
+class UnavailableResponse:
+    """An HTTP error status from the policy's model server, once its own retries are spent."""
+
+    ok = False
+    status = 503
+
+    def __init__(self) -> None:
+        self.content = MagicMock()
+        self.content.read = AsyncMock(return_value=b"busy")
+
+    def raise_for_status(self) -> None:
+        url = URL("http://policy/v1/responses")
+        info = RequestInfo(url, "POST", CIMultiDictProxy(CIMultiDict()), url)
+        raise ClientResponseError(info, (), status=self.status, message="Service Unavailable")
+
+
+@pytest.mark.parametrize("outage", ["connection error", "503"])
+async def test_a_policy_outage_fails_the_run_so_it_is_retried_not_scored(outage: str) -> None:
+    servers = FakeServers(policy=["Hi."], persona=[persona_text("Go on.")])
+
+    async def post(*, server_name: str, url_path: str, json: Any, **kwargs: Any) -> Any:
+        if server_name == "eqbench4_agent" and url_path == "/v1/responses" and servers.bodies("eqbench4_agent"):
+            servers.calls.append((server_name, url_path, json))
+            if outage == "connection error":
+                raise ConnectionError("policy endpoint down")
+            return UnavailableResponse()
+        return await FakeServers.post(servers, server_name=server_name, url_path=url_path, json=json, **kwargs)
+
+    agent = make_agent(servers)
+    agent.server_client.post = post
+    # Turn 1 is answered; the policy's turn-2 call fails. A policy stop scores 0, so an outage must not become one:
+    # the run fails (a routed failure is a retryable agent_run_error) and nothing is verified.
+    with pytest.raises(ConnectionError if outage == "connection error" else ClientResponseError):
+        await agent.run(request(), make_body())
+    assert len(servers.bodies("eqbench4_agent")) == 2 and len(servers.bodies("persona")) == 1
     assert not [path for _, path, _ in servers.calls if path == "/verify"]
 
 

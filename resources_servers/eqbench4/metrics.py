@@ -96,6 +96,11 @@ def _rollouts(tasks: Sequence[Sequence[dict[str, Any]]]) -> list[dict[str, Any]]
     return [rollout for task in tasks for rollout in task]
 
 
+def _policy_stopped(rollout: dict[str, Any]) -> bool:
+    """Whether the row is a policy stop the resources server scored as a loss without a judge (as in ``verify``)."""
+    return rollout.get("conversation_status") == "policy_failed" or rollout.get("policy_turns") == 0
+
+
 def policy_outcomes(rollouts: Sequence[dict[str, Any]]) -> list[Outcome]:
     """One outcome per judged comparison, with the policy as model A."""
     return [
@@ -138,21 +143,23 @@ def _rateable(
 def eqbench4_metrics(
     tasks: Sequence[Sequence[dict[str, Any]]], rating_inputs: Callable[[], RatingInputs], *, resamples: int
 ) -> dict[str, Any]:
-    """The policy's Bradley-Terry rating among the published models, its 95% interval, and conversation statistics."""
+    """The policy's Bradley-Terry rating among the published models, its 95% interval, and conversation statistics.
+
+    The rating and win rate count every scored comparison, a policy stop's losses included; the conversation
+    statistics describe the judged conversations only, which leaves out the policy stops."""
     rollouts = _rollouts(tasks)
     outcomes = policy_outcomes(rollouts)
+    judged = [rollout for rollout in rollouts if not _policy_stopped(rollout)]
     metrics: dict[str, Any] = {
-        "eqbench4_judged_conversations": len(rollouts),
+        "eqbench4_judged_conversations": len(judged),
         "eqbench4_comparisons": len(outcomes),
     }
-    if rollouts:
-        statuses = [rollout.get("conversation_status") for rollout in rollouts]
-        metrics["eqbench4_persona_ended_rate"] = statuses.count("persona_ended") / len(rollouts)
-        metrics["eqbench4_mean_policy_turns"] = sum(rollout.get("policy_turns", 0) for rollout in rollouts) / len(
-            rollouts
-        )
+    if judged:
+        statuses = [rollout.get("conversation_status") for rollout in judged]
+        metrics["eqbench4_persona_ended_rate"] = statuses.count("persona_ended") / len(judged)
+        metrics["eqbench4_mean_policy_turns"] = sum(rollout.get("policy_turns", 0) for rollout in judged) / len(judged)
     traits: dict[str, list[float]] = defaultdict(list)
-    for rollout in rollouts:
+    for rollout in judged:
         for name, value in (rollout.get("trait_scores") or {}).items():
             traits[name].append(value)
     for name, values in sorted(traits.items()):

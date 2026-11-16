@@ -26,7 +26,9 @@ Runs one EQ-Bench 4 roleplay conversation between the policy and a simulated per
   `context_limit` (the context-window overflow mark; not asked again, since the same prompt overflows again),
   `content_filter` (a refusal, or an incomplete reply cut by a content filter), `output_budget` (an incomplete reply
   cut at `max_output_tokens`), or `empty_reply`. The agent logs a warning with the scenario, turn and cause; the
-  resources server leaves the conversation out of the score and reports how many stopped and why.
+  resources server scores the conversation as a loss to every opponent and reports how many stopped and why.
+- A failed policy call (a connection error, or an error status once the model server's own retries are spent) fails
+  the run without calling `/verify`, so the conversation runs again on resume rather than being scored.
 - Each side speaks at most `num_turns` times (eight in EQ-Bench 4), so a full conversation ends with the persona.
 
 The agent forwards `/aggregate_metrics` to its resources server, which holds the published comparisons the rating needs.
