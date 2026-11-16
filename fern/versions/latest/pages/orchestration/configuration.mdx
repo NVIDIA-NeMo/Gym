@@ -176,7 +176,7 @@ Each key under `driver.benchmarks` is a benchmark name. It must match `^[A-Za-z0
 | `run` | `{}` | Overrides forwarded to `gym eval run`. |
 | `command` | `null` | A shell script that runs **instead of** `gym eval run`. See [Custom Harness](/orchestration/how-to/custom-harness). Cannot be combined with `run` or `resumable`. |
 | `resumable` | `false` | `true` for auto-resume with defaults, or `{max_retries, max_walltime}` to tune it. See [Resumable Runs](/orchestration/how-to/resumable-runs). |
-| `node_local` | `false` | `true`, or a mapping, gives the driver a directory on its node's own disk, archived into the job dir once per Slurm job. Slurm only. See [node_local](#node_local). |
+| `node_local` | `false` | `true`, or a mapping, gives the driver a directory on its node's own disk, archived into the benchmark directory once per Slurm job. Slurm only. See [node_local](#node_local). |
 | `export` | `{}` | Exports of the finished run, by exporter name (`atif`, `mlflow`, `wandb`). Each value is that exporter's settings; they override `job.export` setting by setting, and `null` drops an inherited export. Slurm only, and not combinable with `command`. See [export](#export). |
 
 `prepare` and `run` are nested mappings that are flattened to Hydra overrides: `{split: benchmark, config_paths: [a.yaml, b.yaml]}` becomes `+split=benchmark` and `+config_paths=[a.yaml,b.yaml]`, and nested keys become dotted paths.
