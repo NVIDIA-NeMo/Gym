@@ -1,0 +1,38 @@
+# OfficeEnv's episodes without a sandbox, beside the sandboxed harnesses: the OfficeEnv server's own instances
+# (resources_servers/officeenv/configs/officeenv.yaml: its resources server, the simple agent and the environment
+# server that drives it), copied under names of their own, so a run composes them with this server's harness configs
+# while the OfficeEnv server's instances stay as they are. Rows name officeenv_sandbox_simple_agent (agent_ref), and
+# officeenv_sandbox_environment_server, the one environment server that fronts it, runs them. The copies (`_copy`) take
+# whatever the OfficeEnv server's instances configure, and point at one another:
+#
+#   gym env start \
+#     --config resources_servers/officeenv_sandbox/configs/officeenv_sandboxless.yaml \
+#     --config resources_servers/officeenv_sandbox/configs/officeenv_sandbox.yaml <provider, model and host arguments>
+config_paths:
+  - resources_servers/officeenv/configs/officeenv.yaml
+
+officeenv_sandboxless_resources_server:
+  _copy: officeenv_resources_server
+
+officeenv_sandbox_simple_agent:
+  _copy: officeenv_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: officeenv_sandboxless_resources_server
+      # The rows that name this agent are the run's: the OfficeEnv server's example dataset stays with its own agent,
+      # and its taskset with its own environment server.
+      datasets: []
+
+# A copy takes its source as written, before the source's own `_inherit_from` applies, and
+# officeenv_environment_server inherits the instance of the server type it runs. So this copy takes that instance,
+# then officeenv_environment_server's own settings for it, with the references pointing at the copies above.
+officeenv_sandbox_environment_server:
+  _copy: single_agent_turn
+  environment_servers:
+    single_agent_turn:
+      _copy: officeenv_environment_server.environment_servers.single_agent_turn
+      resources_server:
+        name: officeenv_sandboxless_resources_server
+      agent_server:
+        name: officeenv_sandbox_simple_agent
