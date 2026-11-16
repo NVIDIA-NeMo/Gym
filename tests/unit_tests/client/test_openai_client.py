@@ -16,14 +16,17 @@
 
 import json
 import re
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
-from aiohttp import ClientOSError, ClientResponseError, ClientTimeout
+from aiohttp import ClientOSError, ClientPayloadError, ClientResponseError, ClientSession, ClientTimeout, web
+from aiohttp.test_utils import TestServer
 from pydantic import ValidationError
 
+from nemo_gym.client import http_client
 from nemo_gym.client import openai_client as openai_client_module
 from nemo_gym.client.http_client import ConnectionRetryWindow
 from nemo_gym.client.openai_client import (
@@ -34,6 +37,7 @@ from nemo_gym.client.openai_client import (
     _error_body_is_permanent_quota,
 )
 from nemo_gym.core.episode_context import rollout_context
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 
 
 @pytest.fixture(autouse=True)
@@ -1040,3 +1044,96 @@ async def test_alog_api_cost_writes_in_a_worker_thread_only_when_enabled(tmp_pat
     await alog_api_cost("/responses", {"model": "m"}, {}, {"usage": {}})
     assert len(threads) == 1 and threads[0] is not threading.main_thread()
     assert json.loads((tmp_path / "cost.jsonl").read_text())["model"] == "m"
+
+
+def _sse(payload: dict) -> bytes:
+    return b"data: " + json.dumps(payload).encode() + b"\r\n\r\n"
+
+
+def _chunk(delta: dict, finish_reason: str | None = None) -> bytes:
+    choice = {"index": 0, "delta": delta, "finish_reason": finish_reason}
+    return _sse({"id": "c1", "object": "chat.completion.chunk", "created": 1, "model": "m", "choices": [choice]})
+
+
+@asynccontextmanager
+async def _chat_stream_server(monkeypatch: pytest.MonkeyPatch, writes: list[bytes]):
+    """A real endpoint that answers /chat/completions with ``writes`` as an SSE body; yields a client and the body
+    the client sent."""
+    sent = {}
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        sent.update(await request.json())
+        response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        for data in writes:
+            await response.write(data)
+        return response
+
+    app = web.Application()
+    app.router.add_post("/v1/chat/completions", handler)
+    async with TestServer(app) as server, ClientSession() as session:
+        monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
+        yield NeMoGymAsyncOpenAI(base_url=str(server.make_url("/v1")), api_key="k"), sent
+
+
+async def test_create_chat_completion_stream_assembles_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A streamed call returns the reply a non-streaming call would, from pieces split across chunks and writes."""
+    tool_call = _chunk({"tool_calls": [{"index": 0, "id": "t1", "type": "function", "function": {"name": "f"}}]})
+    writes = [
+        _chunk({"role": "assistant", "content": ""}),
+        _chunk({"reasoning_content": "Let me "}),
+        _chunk({"reasoning_content": "think."}),
+        _chunk({"content": "Calling f"}),
+        tool_call[:30],  # an event split across two writes
+        tool_call[30:],
+        _chunk({"tool_calls": [{"index": 0, "function": {"arguments": '{"a": '}}]}),
+        _chunk({"tool_calls": [{"index": 0, "function": {"arguments": "1}"}}]}),
+        _chunk({}, "tool_calls"),
+        _sse(
+            {"id": "c1", "created": 1, "model": "m", "choices": [], "usage": {"prompt_tokens": 3, "total_tokens": 9}}
+        ),
+        b"data: [DONE]\n\n",
+    ]
+    async with _chat_stream_server(monkeypatch, writes) as (client, sent):
+        reply = await client.create_chat_completion(_stream=True, model="m", messages=[])
+
+    assert sent["stream"] is True and sent["stream_options"] == {"include_usage": True}
+    assert reply == {
+        "id": "c1",
+        "object": "chat.completion",
+        "created": 1,
+        "model": "m",
+        "usage": {"prompt_tokens": 3, "total_tokens": 9},
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "reasoning_content": "Let me think.",
+                    "content": "Calling f",
+                    "tool_calls": [
+                        {"id": "t1", "type": "function", "function": {"name": "f", "arguments": '{"a": 1}'}}
+                    ],
+                },
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        pytest.param([_sse({"error": {"message": "upstream disconnected"}}), b"data: [DONE]\n\n"], id="error-event"),
+        pytest.param([], id="ends-without-done"),
+    ],
+)
+async def test_create_chat_completion_stream_failure_is_body_failure(
+    monkeypatch: pytest.MonkeyPatch, tail: list[bytes]
+) -> None:
+    """A stream that fails after the 200 status is the attempt's body failure, never a partial reply."""
+    async with _chat_stream_server(monkeypatch, [_chunk({"content": "Partial"}), *tail]) as (client, _):
+        with pytest.raises(ClientPayloadError) as caught:
+            await client.create_chat_completion(_stream=True, model="m", messages=[])
+
+    assert isinstance(caught.value.__cause__, NgFailureEvent)

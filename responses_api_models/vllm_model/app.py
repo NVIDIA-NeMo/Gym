@@ -834,6 +834,9 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Total time limit for each HTTP attempt to the engine, not for the whole call; None means no limit.
     # A timed-out attempt is retried like any other transport error, so the call's attempt count is unchanged.
     request_timeout_seconds: Optional[PositiveFloat] = None
+    # Stream each /v1/chat/completions call from the engine and assemble the reply, so a gateway that cuts a
+    # request sending nothing for minutes lets a long generation finish. Plain chat completions only.
+    stream_upstream: bool = False
     # Wall-clock cap on connection-error retries per model call, on every client including
     # rebuilt endpoint clients. None waits without limit so a training run can ride out an engine restart.
     endpoint_connection_retry_timeout_s: Optional[float] = Field(default=None, gt=0)
@@ -871,6 +874,18 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     @model_validator(mode="after")
     def _validate_chat_conversion_options(self) -> "VLLMModelConfig":
+        if self.stream_upstream:
+            # These read token fields or structured message parts the stream does not carry, or do not call /v1/chat/completions.
+            for option in (
+                "return_token_id_information",
+                "request_prompt_and_generation_token_ids",
+                "dynamo_frontend",
+                "use_completions_api",
+                "is_responses_native",
+                "preserve_thinking_blocks",
+            ):
+                if getattr(self, option):
+                    raise ValueError(f"stream_upstream assembles plain chat completions and requires {option}=false")
         if self.is_responses_native:
             # stream_keepalive_s is also refused by setup_webserver, but only after a local engine has started.
             for option in (
@@ -1316,7 +1331,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 if self.config.continue_final_assistant_message:
                     raise ValueError("Framework context requires continue_final_assistant_message=false")
                 validate_framework_context_options(overrides)
-            if overrides.get("stream"):
+            if overrides.get("stream") or self.config.stream_upstream:
                 raise ValueError("external staging requires non-streaming backend requests")
             if self.config.use_completions_api:
                 raise ValueError("token_id_capture.external_staging does not support use_completions_api=true")
@@ -2060,6 +2075,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             transport_options["_headers"] = {MODEL_SAMPLING_HEADER: MODEL_SAMPLING_NULL}
         if extra_headers:
             transport_options["_headers"] = {**transport_options.get("_headers", {}), **extra_headers}
+        if self.config.stream_upstream:
+            transport_options["_stream"] = True
         try:
             try:
                 chat_completion_dict = await self._engine_chat_completion(

@@ -911,6 +911,7 @@ class TestApp:
         session_key_headers: list[str] | None = None,
         return_token_id_information: bool = False,
         dynamo_frontend: bool = False,
+        stream_upstream: bool = False,
     ):
         config = VLLMModelConfig(
             host="0.0.0.0",
@@ -930,6 +931,7 @@ class TestApp:
             endpoint_retry_after_s=endpoint_retry_after_s,
             forward_session_id_as_conversation_id=forward_session_id_as_conversation_id,
             session_key_headers=session_key_headers or [],
+            stream_upstream=stream_upstream,
         )
 
         get_global_config_dict_mock = MagicMock()
@@ -1456,6 +1458,46 @@ class TestApp:
                 )
             else:
                 assert response.json()["choices"][0]["finish_reason"] == finish_reason
+
+    @mark.parametrize("stream_upstream", [False, True])
+    def test_stream_upstream_streams_the_engine_call(self, monkeypatch: MonkeyPatch, stream_upstream: bool) -> None:
+        server = self._setup_server(monkeypatch, stream_upstream=stream_upstream)
+        provider = MagicMock(spec=NeMoGymAsyncOpenAI)
+        provider.create_chat_completion = AsyncMock(return_value=self._provider_reply("stop"))
+        server._clients = [provider]
+        app = server.setup_webserver()
+        server.setup_exception_middleware(app)
+        response = TestClient(app).post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+        assert response.status_code == 200
+        assert provider.create_chat_completion.call_args.kwargs.get("_stream", False) is stream_upstream
+
+    @mark.parametrize(
+        "option",
+        [
+            "return_token_id_information",
+            "request_prompt_and_generation_token_ids",
+            "dynamo_frontend",
+            "use_completions_api",
+            "is_responses_native",
+            "preserve_thinking_blocks",
+        ],
+    )
+    def test_stream_upstream_refuses_non_chat_options(self, option: str) -> None:
+        fields = {
+            "host": "0.0.0.0",
+            "port": 8081,
+            "base_url": "http://vllm/v1",
+            "api_key": "dummy_key",  # pragma: allowlist secret
+            "model": "dummy_model",
+            "entrypoint": "",
+            "name": "",
+            "return_token_id_information": False,
+            "uses_reasoning_parser": False,
+            "stream_upstream": True,
+            option: True,
+        }
+        with raises(ValueError, match=f"stream_upstream .* requires {option}=false"):
+            VLLMModelConfig(**fields)
 
     @mark.parametrize(
         "max_model_retries,abort_count",

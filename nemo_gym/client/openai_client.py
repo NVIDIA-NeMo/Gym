@@ -32,13 +32,16 @@ from email.utils import parsedate_to_datetime
 from time import monotonic
 from typing import (
     Any,
+    Awaitable,
+    Callable,
     Dict,
     List,
     Literal,
     Optional,
 )
 
-from aiohttp import ClientError, ClientResponseError, ClientTimeout, ConnectionTimeoutError
+import orjson
+from aiohttp import ClientError, ClientPayloadError, ClientResponseError, ClientTimeout, ConnectionTimeoutError
 from pydantic import (
     BaseModel,
     Field,
@@ -435,6 +438,68 @@ async def alog_api_cost(endpoint: str, request: Dict[str, Any], headers: Any, bo
     if not os.environ.get(API_COST_LOG_ENV_VAR_NAME):
         return
     await asyncio.to_thread(log_api_cost, endpoint, request, headers, body)
+
+
+async def _read_chat_stream(response: ClientResponse) -> Dict[str, Any]:
+    """Assemble a streamed chat completion into the ``chat.completion`` a non-streaming call returns."""
+    if response.content_type != "text/event-stream":
+        return await get_response_json(response)  # The endpoint answered without streaming.
+    completion: Dict[str, Any] = {}
+    choices: Dict[int, Dict[str, Any]] = {}
+    buffer, done = b"", False
+    try:
+        # Whole chunks, not lines: aiohttp's line reader raises LineTooLong, which is not a ClientError.
+        async for data in response.content.iter_any():
+            *events, buffer = (buffer + data.replace(b"\r", b"")).split(b"\n\n")
+            for event in events:
+                payload = b"\n".join(line[5:].strip() for line in event.split(b"\n") if line.startswith(b"data:"))
+                if payload == b"[DONE]":
+                    done = True
+                elif payload:
+                    _add_chat_chunk(completion, choices, orjson.loads(payload))
+    finally:
+        response.close()  # A no-op after a full read; drops a half-read stream instead of pooling its connection.
+    if not done or not choices or any(c["fields"].get("finish_reason") is None for c in choices.values()):
+        # aiohttp's error for a cut-off body, so the failure is recorded like a truncated reply.
+        raise ClientPayloadError("Chat completion stream ended before it finished")
+    completion["object"] = "chat.completion"
+    completion["choices"] = []
+    for _, choice in sorted(choices.items()):
+        message = {"role": "assistant", **{key: "".join(parts) for key, parts in choice["text"].items()}}
+        if choice["calls"]:
+            message["tool_calls"] = [
+                {
+                    "id": c.get("id"),
+                    "type": c["type"],
+                    "function": {"name": c.get("name"), "arguments": "".join(c["args"])},
+                }
+                for _, c in sorted(choice["calls"].items())
+            ]
+        logprobs = {"logprobs": {"content": choice["logprobs"]}} if choice["logprobs"] else {}
+        completion["choices"].append({**choice["fields"], **logprobs, "message": message})
+    return completion
+
+
+def _add_chat_chunk(completion: Dict[str, Any], choices: Dict[int, Dict[str, Any]], chunk: Dict[str, Any]) -> None:
+    """Fold one ``chat.completion.chunk`` into the reply being assembled. Text pieces are joined at the end."""
+    if chunk.get("error"):
+        # A gateway reports a failure that follows the 200 status inside the stream.
+        raise ClientPayloadError(f"Chat completion stream failed: {chunk['error']}")
+    completion.update((k, v) for k, v in chunk.items() if k not in ("object", "choices") and v is not None)
+    for part in chunk.get("choices") or []:
+        choice = choices.setdefault(part.get("index", 0), {"fields": {}, "text": {}, "calls": {}, "logprobs": []})
+        choice["fields"].update((k, v) for k, v in part.items() if k not in ("delta", "logprobs") and v is not None)
+        choice["logprobs"] += (part.get("logprobs") or {}).get("content") or []
+        for key, value in (part.get("delta") or {}).items():
+            if key == "tool_calls":
+                for call in value or []:
+                    slot = choice["calls"].setdefault(call.get("index", 0), {"type": "function", "args": []})
+                    function = call.get("function") or {}
+                    named = (("id", call.get("id")), ("type", call.get("type")), ("name", function.get("name")))
+                    slot.update((k, v) for k, v in named if v)
+                    slot["args"].append(function.get("arguments") or "")
+            elif key != "role" and isinstance(value, str) and value:
+                choice["text"].setdefault(key, []).append(value)
 
 
 class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
@@ -871,9 +936,11 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
         await _raise_exhausted(response, None, getattr(response, "_ng_attempt_failure", None))
 
-    async def _read_response_json(self, response: ClientResponse) -> Dict[str, Any]:
+    async def _read_response_json(
+        self, response: ClientResponse, read: Optional[Callable[[ClientResponse], Awaitable[Any]]] = None
+    ) -> Dict[str, Any]:
         try:
-            return await get_response_json(response)
+            return await (read or get_response_json)(response)
         except (ClientError, TimeoutError) as error:
             observer = getattr(response, "_ng_observe_body_failure", None)
             if observer is not None:
@@ -888,8 +955,16 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         return await self._read_response_json(response)
 
     async def create_chat_completion(
-        self, *, _resend_after_disconnect: bool = True, _headers: Optional[Dict[str, str]] = None, **kwargs
+        self,
+        *,
+        _resend_after_disconnect: bool = True,
+        _headers: Optional[Dict[str, str]] = None,
+        _stream: bool = False,
+        **kwargs,
     ) -> Dict[str, Any]:
+        if _stream:
+            # Tokens keep the connection busy, so a gateway that cuts silent requests lets a long answer finish.
+            kwargs |= {"stream": True, "stream_options": {"include_usage": True}}
         request_kwargs = dict(
             url=f"{self.base_url}/chat/completions",
             json=kwargs,
@@ -901,7 +976,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        body = await self._read_response_json(response)
+        body = await self._read_response_json(response, _read_chat_stream if _stream else None)
         await alog_api_cost("/chat/completions", kwargs, getattr(response, "headers", None), body)
         return body
 
