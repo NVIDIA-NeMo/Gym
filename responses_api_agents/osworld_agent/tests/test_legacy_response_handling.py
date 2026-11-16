@@ -327,6 +327,30 @@ def test_masked_context_limit_ends_the_rollout_without_a_terminal_action() -> No
     assert info["stop_rollout"] is True
 
 
+def test_context_limit_stop_names_the_last_accepted_call_as_terminal() -> None:
+    _, actions, info = _predict(
+        _legacy_agent(context_overflow_policy="stop", context_prompt_token_limit=38000),
+        [{**_over_guard_reply(), "response_id": "chatcmpl-2"}],
+    )
+    result, _ = _result(terminal_loss_member=False)
+    result["steps"][1]["info"]["agent"] = {
+        "forced_terminal": info["forced_terminal"],
+        "model_calls": info["model_calls"],
+    }
+
+    dumped = _build_response(
+        _request(), result, "policy", 1.0, 1.0, served_call_output=True, policy_model_ref=_POLICY
+    ).model_dump()
+
+    assert actions == ["FAIL"]
+    assert [call["response_id"] for call in dumped["response"]["trajectory_model_calls"]] == [
+        "chatcmpl-1",
+        "chatcmpl-2",
+    ]
+    assert dumped["terminal_response_id"] == "chatcmpl-1"
+    assert _trajectory_response_ids(dumped) == ["chatcmpl-1"]
+
+
 def test_masked_context_limit_leaves_invalid_responses_trained() -> None:
     agent = _legacy_agent(context_overflow_policy="stop", context_prompt_token_limit=38000, mask_context_limit=True)
     _, actions, info = _predict(agent, [_served_reply(NO_CODE)])

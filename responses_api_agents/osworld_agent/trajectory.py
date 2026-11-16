@@ -432,6 +432,7 @@ def collect_model_calls(
                     # terminal call when train_invalid_terminal_call is set.
                     "loss_member": raw_call.get("accepted") is True or raw_call.get("loss_member") is True,
                     "parse_error": raw_call.get("parse_error"),
+                    "failure_kind": raw_call.get("failure_kind"),
                     "parsed_actions": list(parsed_actions),
                     "reward": reward,
                     "done": bool(step.get("done", False)),

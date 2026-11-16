@@ -1977,10 +1977,12 @@ def _served_model_call_output(
     reply) provide no usable returned-content witness. Both are skipped; the
     capture ledger independently records what ran. Rejected calls remain in
     trajectory evidence but not in accepted history. The terminal still names
-    the last observed non-empty served response,
-    even when rejected. A returned-history consumer must reject an absent
-    terminal or missing selected parent, not silently select another call;
-    an explicit all-captured policy may include rejected calls.
+    the last observed non-empty served response, even when rejected, except a
+    reply that the prompt-token guard discarded: like the step horizon, a
+    context-limit stop names the last accepted call. A returned-history
+    consumer must reject an absent terminal or missing selected parent, not
+    silently select another call; an explicit all-captured policy may include
+    rejected calls.
     """
 
     output: List[Dict[str, Any]] = []
@@ -1992,6 +1994,8 @@ def _served_model_call_output(
             continue
         raw_content = response.get("raw_content")
         if not isinstance(raw_content, str) or not raw_content:
+            continue
+        if model_call.get("failure_kind") == "context_overflow" and not _is_loss_member(model_call):
             continue
         response_id = response.get("response_id")
         terminal_response_id = response_id if isinstance(response_id, str) and response_id else None
