@@ -81,6 +81,8 @@ The agent independently enforces its configured allowed source roots and hash.
 Gold labels, source provenance, task categories, durations-as-subsets and
 LVBench `time_reference` are never injected into the user prompt. The prompt
 asks to watch the video, answer the question and box the selected letter.
+`--prompt videomme_v1` (or `lvbench`) writes the benchmark's bare-letter prompt
+instead, for the judge-read policy; see [letter prompts](#letter-prompts).
 
 ## Running the shared verifier directly
 
@@ -99,7 +101,9 @@ results. Duplicate tasks or unexpected repeat indices cannot be aggregated.
 
 Default answer policy is `boxed_only_v1`. `boxed_or_letter_v1` is an explicit
 alternative for saved predictions that contain only a bare uppercase letter.
-No LLM judge, answer repair, rationale scoring or substring guessing is used.
+Neither uses an LLM judge, answer repair, rationale scoring or substring
+guessing. `llm_extraction_v1` is an opt-in policy in which a judge model reads
+the chosen option; see [answer extraction](#answer-extraction-by-a-judge-model).
 
 `raw_acc` is a percentage; `mean/<benchmark>` is the matching 0-1 Gym alias.
 Missing answers, ambiguous answers and execution failures receive zero credit.
@@ -119,6 +123,83 @@ LVBench multi-label questions count once overall and once in each assigned
 capability. Category labels are percent-encoded as metric path components.
 Both settings use separate namespaces. Neither v1 nor LVBench reports v2's
 nonlinear score.
+
+## Answer extraction by a judge model
+
+`llm_extraction_v1` reads answers that are not boxed, such as the bare letters
+the benchmarks' own prompts ask for. A judge model reports which option the
+final answer gives, and the verifier scores that option against the gold
+label. The judge gets one user message (`LLM_EXTRACTION_PROMPT` in
+`scoring.py`): the text of the prompt the policy model received, without its
+video, and the final answer, without its reasoning. It never gets the gold
+label or the verifier metadata, and it is told not to decide which option is
+correct. It replies with one JSON object, `{"choice": "<letter or none>"}`.
+The wording is the one NVIDIA's Video-MME-v2 evaluations use, so both read
+answers alike.
+
+| Final answer | Outcome | Reward |
+| --- | --- | --- |
+| The judge reads an available letter | `correct` or `incorrect` | 1 or 0 |
+| The judge reads `none`: no option, several, or unclear | `no_choice` | 0 |
+| Empty, or only an unfinished reasoning block (no judge call) | `no_answer` | 0 |
+
+A reply without that JSON object, or with a letter the question does not
+offer, is no reading. Neither it nor a failed judge call (after `call_judge`'s
+retries) is a wrong answer: Gym's judge failsafe masks the row
+(`failure_kind: judge_failed`) and keeps it, with the policy model's answer, in
+the run's failures file. The frozen cohort counts that task as missing until
+the saved answer is judged again (`gym eval reverify --judge-failed-only`, or a
+resume). Failed model calls, single-turn tool calls and failed agent runs are
+classified before any judge call, as under the other policies.
+
+The cohort declares the policy (`prepare.py --answer-policy llm_extraction_v1`),
+and a server whose cohort uses it refuses to start without `judge_model_server`.
+Each benchmark has a single-turn config that is its plain single-turn config
+plus the judge:
+
+| Benchmark | Config |
+| --- | --- |
+| VideoMME-v2 | `resources_servers/videomme_v2/configs/videomme_v2_single_turn_llm_extraction.yaml` |
+| VideoMME-v1 | `resources_servers/videomme_v1/configs/videomme_v1_single_turn_llm_extraction.yaml` |
+| LVBench | `resources_servers/lvbench/configs/lvbench_single_turn_llm_extraction.yaml` |
+
+Their judge, `video_mcqa_answer_judge`, is Gym's `openai_model` server, so any
+OpenAI-compatible chat model works, hosted or served with vLLM. Set it in
+`env.yaml`:
+
+```yaml
+judge_base_url: https://<openai-compatible-endpoint>/v1
+judge_api_key: <key>
+judge_model_name: <judge model>
+```
+
+The judge request is the resources server's
+`judge_chat_completion_create_params` plus the one message, sent to
+`/v1/chat/completions`. Add sampling or reasoning settings there, for example
+`reasoning_effort: high` for a reasoning model. Responses keep
+`answer_policy`, `outcome` and `predicted_answer`, so a `no_choice` row shows
+that the judge read no option.
+
+An agentic config turns the policy on the same way: its cohort declares
+`llm_extraction_v1`, and its resources server gets one line,
+`judge_model_server: {type: responses_api_models, name: video_mcqa_answer_judge}`,
+with the `video_mcqa_answer_judge` block above added to the config.
+
+### Letter prompts
+
+`prepare_single_turn(..., prompt=...)` and `prepare.py --prompt` choose how a
+single-turn question asks for its answer. `boxed` (the default) is the prompt
+described above. The other styles ask for the bare letter in a benchmark's
+evaluation wording, after the video, so read their answers with
+`llm_extraction_v1`:
+
+| `prompt` | Text | Source |
+| --- | --- | --- |
+| `videomme_v1` | `Select the best answer to the following multiple-choice question based on the video. Respond with only the letter (A, B, C, or D) of the correct option.`, the question, the `A. ...` options, `The best answer is:` | The prompt in the [Video-MME README](https://github.com/MME-Benchmarks/Video-MME) |
+| `videomme_v2` | The question, the `A. ...` options, `Respond with only the letter (A, B, ..., or H) of the correct option.` naming the question's letters, `Answer: ` | The letter instruction of the [official script](https://github.com/MME-Benchmarks/Video-MME-v2/blob/28fc3bcfbd4d162594c8e4bad866b694d9b035aa/evaluation/test_video_mme_v2.py), in the form NVIDIA's evaluations use: without its frame sentence, `Question:` and `Select the best answer ...`, and with `Answer: ` |
+| `lvbench` | The question, the `(A) ...` options, `Answer with the option's letter from the given choices directly.` | LVBench publishes no prompt; this is the common multiple-choice instruction of LLaVA-style evaluations (lmms-eval's default for Video-MME) |
+
+The lines are joined with newlines. Agentic rows keep the boxed prompt.
 
 ## Example data
 

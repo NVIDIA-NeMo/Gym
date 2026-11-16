@@ -3,6 +3,7 @@
 
 """Question-level accuracy with explicit parser policy and failure accounting."""
 
+import json
 import re
 from collections import Counter
 from collections.abc import Collection, Iterable
@@ -12,27 +13,34 @@ from typing import Literal
 from resources_servers.video_mcqa.task import LABELS, Setting, VerifierMetadata
 
 
-AnswerPolicy = Literal["boxed_only_v1", "boxed_or_letter_v1"]
+# llm_extraction_v1: a judge model reads which option the final answer chooses (llm_extraction_prompt); the verifier
+# asks it and passes its reading to grade_answer.
+AnswerPolicy = Literal["boxed_only_v1", "boxed_or_letter_v1", "llm_extraction_v1"]
 Failure = Literal["execution_failure", "infrastructure_failure"]
+# no_choice: the judge read no single chosen option in a nonempty final answer.
 Outcome = Literal[
     "correct",
     "incorrect",
     "no_answer",
     "format_error",
     "ambiguous_answer",
+    "no_choice",
     "execution_failure",
     "infrastructure_failure",
 ]
-_POLICIES = ("boxed_only_v1", "boxed_or_letter_v1")
+_POLICIES = ("boxed_only_v1", "boxed_or_letter_v1", "llm_extraction_v1")
 _OUTCOMES = (
     "correct",
     "incorrect",
     "no_answer",
     "format_error",
     "ambiguous_answer",
+    "no_choice",
     "execution_failure",
     "infrastructure_failure",
 )
+# The judge's reading of a final answer that chooses no single option.
+NO_CHOICE = "none"
 _BOXED = re.compile(r"\\boxed\s*\{\s*(?:([A-Z])|\\(?:text|mathrm)\s*\{\s*([A-Z])\s*\})\s*\}")
 # Boxed letters count up to H, as for the eight-option benchmarks, or up to the question's last option.
 _EIGHT_OPTIONS = 8
@@ -100,7 +108,8 @@ class AccuracySummary:
     outcome_counts: dict[str, int]
 
 
-def _final_text(text: str | None) -> str:
+def final_answer_text(text: str | None) -> str:
+    """The answer after any reasoning block; empty while a reasoning block is unfinished."""
     if text is None:
         return ""
     if not isinstance(text, str):
@@ -118,11 +127,15 @@ def grade_answer(
     setting: Setting,
     answer_policy: AnswerPolicy = "boxed_only_v1",
     failure: Failure | None = None,
+    judged_choice: str | None = None,
 ) -> QuestionScore:
     """Grade FINAL assistant text only, never a transcript or tool responses.
 
     ``boxed_or_letter_v1`` additionally accepts an exact standalone uppercase
     letter. It does not search prose for a convenient letter or invoke a judge.
+    ``llm_extraction_v1`` grades ``judged_choice``, what the judge model read in
+    the final answer: an available label, or ``NO_CHOICE`` (no_choice). An empty
+    final answer is no_answer and needs no judgment.
     A setup/transport failure is inconclusive; a completed execution failure is
     zero even if its partial text happens to contain the correct answer.
     """
@@ -130,15 +143,25 @@ def grade_answer(
         raise ValueError("Unknown setting or answer policy")
     if failure not in (None, "execution_failure", "infrastructure_failure"):
         raise ValueError("Unknown failure classification")
+    if judged_choice is not None and answer_policy != "llm_extraction_v1":
+        raise ValueError("Only llm_extraction_v1 grades a judged choice")
     predicted = None
     if failure is not None:
         outcome = failure
     else:
-        text = _final_text(final_text)
+        text = final_answer_text(final_text)
         counted = set(LABELS[: max(_EIGHT_OPTIONS, metadata.option_count)])
         letters = {plain or wrapped for plain, wrapped in _BOXED.findall(text)} & counted
         if not text:
             outcome = "no_answer"
+        elif answer_policy == "llm_extraction_v1":
+            if judged_choice == NO_CHOICE:
+                outcome = "no_choice"
+            elif judged_choice in tuple(LABELS[: metadata.option_count]):
+                predicted = judged_choice
+                outcome = "correct" if predicted == metadata.expected_answer else "incorrect"
+            else:
+                raise ValueError("llm_extraction_v1 needs the judge's reading: an available label or NO_CHOICE")
         elif len(letters) > 1:
             outcome = "ambiguous_answer"
         else:
@@ -207,3 +230,70 @@ def aggregate_scores(
         is_complete=completed == len(expected),
         outcome_counts=dict(counts),
     )
+
+
+# llm_extraction_v1. The judge model sees the text of the prompt the model received (question, options and answer
+# instructions; never the video) and the final answer, and reports only the option that answer gives. The wording is
+# the one NVIDIA's Video-MME-v2 evaluations use, so both read answers alike.
+LLM_EXTRACTION_PROMPT = """You check one model answer to a multiple-choice question about a video. You do not see the video.
+
+The prompt the model received (the video is left out):
+<prompt>
+{prompt}
+</prompt>
+
+The model's final answer:
+<final_answer>
+{answer}
+</final_answer>
+
+Report the option letter that the final answer gives as its answer. Use only the final answer. If it gives no option, \
+more than one option, or is empty, use "none". Do not decide which option is correct.
+
+Reply with one JSON object only: {{"choice": "<letter or none>"}}"""
+_JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
+
+
+def prompt_text(request_input: object) -> str:
+    """The text parts of a request's input messages, in order; media parts are left out."""
+    if isinstance(request_input, str):
+        return request_input
+    parts = []
+    for message in request_input if isinstance(request_input, list) else []:
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, str):
+            parts.append(content)
+        else:
+            parts.extend(
+                part.get("text", "")
+                for part in content or []
+                if isinstance(part, dict) and part.get("type") in ("input_text", "text")
+            )
+    return "\n".join(parts)
+
+
+def llm_extraction_prompt(prompt: str, final_answer: str) -> str:
+    """The judge's request for ``final_answer`` to the question in ``prompt``."""
+    return LLM_EXTRACTION_PROMPT.format(prompt=prompt, answer=final_answer)
+
+
+def parse_llm_choice(reply: str | None, *, option_count: int) -> str:
+    """The option the judge reports: an available label or ``NO_CHOICE``.
+
+    A reasoning block the judge's server returns inline is dropped first. A reply that names neither raises
+    ``ValueError``: it is an unusable reading, not a wrong answer.
+    """
+    text = final_answer_text(reply)
+    match = _JSON_OBJECT.search(text)
+    try:
+        verdict = json.loads(match.group(0)) if match else None
+    except json.JSONDecodeError:
+        verdict = None
+    if not isinstance(verdict, dict):
+        raise ValueError(f"The judge's reply has no JSON object: {text[:300]!r}")
+    choice = str(verdict.get("choice", "")).strip()
+    if choice.lower() == NO_CHOICE:
+        return NO_CHOICE
+    if choice.upper() not in tuple(LABELS[:option_count]):
+        raise ValueError(f"The judge chose {choice[:50]!r}, not one of options A-{LABELS[option_count - 1]}")
+    return choice.upper()
