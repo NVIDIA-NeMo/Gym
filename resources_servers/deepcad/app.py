@@ -11,6 +11,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Literal
 
@@ -313,6 +314,7 @@ class DeepCADResourcesServer(SimpleResourcesServer):
                     if probe.return_code or probe.error_type:
                         raise RuntimeError("Sandbox image cannot import CadQuery")
                     preload_flag = " --preload-cq" if self.config.preload_cq else ""
+                    execution_deadline = time.monotonic() + self.config.execution_timeout_s
                     execution = await sandbox.exec(
                         f"{python} /sandbox/runner.py{preload_flag} > /sandbox/run.log 2>&1",
                         timeout_s=self.config.execution_timeout_s,
@@ -340,7 +342,33 @@ class DeepCADResourcesServer(SimpleResourcesServer):
                             "failure_kind": "deepcad:artifact",
                             "failure_reason": "Missing or oversized STEP artifact",
                         }
-                    await sandbox.download("/sandbox/prediction.step", prediction)
+                    remaining = execution_deadline - time.monotonic()
+                    if remaining <= 0:
+                        return {
+                            "reward": 0.0,
+                            "failure_kind": "deepcad:execution",
+                            "failure_reason": "Execution budget exhausted",
+                        }
+                    # Fresh isolated Python cannot reuse generated code's monkeypatches. Root owns
+                    # the sealed directory, so the model user cannot race the subsequent download.
+                    sealing = await sandbox.exec(
+                        f"{python} -I -c {shlex.quote((HERE / 'seal_prediction.py').read_text())} {self.config.max_step_bytes}",
+                        user="root",
+                        env={"HOME": "/root"},
+                        timeout_s=remaining,
+                    )
+                    if sealing.error_type and sealing.error_type != "timeout":
+                        raise RuntimeError(f"Sandbox artifact sealing failed: {sealing.error_type}")
+                    if sealing.return_code or sealing.error_type:
+                        return {
+                            "reward": 0.0,
+                            "failure_kind": "deepcad:geometry",
+                            "failure_reason": "Artifact fusion failed or exceeded execution budget",
+                        }
+                    sealed_path = json.loads(sealing.stdout or "")["path"]
+                    if not re.fullmatch(r"/tmp/deepcad-sealed-[A-Za-z0-9_-]+/prediction\.step", sealed_path):
+                        raise RuntimeError("Invalid sealed artifact path")
+                    await sandbox.download(sealed_path, prediction)
                 failure_kind = VERIFIER_ERROR
                 scored = await self._score(prediction, reference, view_mode=view_mode, artifact_dir=None)
                 return scored

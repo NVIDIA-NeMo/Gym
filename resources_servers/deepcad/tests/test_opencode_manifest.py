@@ -114,8 +114,8 @@ def test_composed_config_resolves_offline_without_a_legacy_agent_relay():
     config = GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(
             initial_global_config_dict=OmegaConf.merge(
-                OmegaConf.load(CONFIG),
                 OmegaConf.load(root / "responses_api_models/vllm_model/configs/vllm_model.yaml"),
+                OmegaConf.load(CONFIG),
                 {
                     "default_host": "192.0.2.10",
                     "policy_base_url": "http://192.0.2.10:8000/v1",
@@ -132,6 +132,8 @@ def test_composed_config_resolves_offline_without_a_legacy_agent_relay():
     assert config.deepcad_opencode.resources_servers.deepcad.host == "127.0.0.1"
     assert config.policy_model.responses_api_models.vllm_model.host == "192.0.2.10"
     assert list(config.deepcad_opencode_environment_server.environment_servers) == ["single_agent_turn_legacy"]
+    assert config.policy_model.responses_api_models.vllm_model.return_token_id_information is True
+    assert config.policy_model.responses_api_models.vllm_model.supply_prefix_token_ids is True
     SingleAgentTurnLegacyEnvironmentServerConfig(
         name="deepcad_opencode_environment_server",
         **OmegaConf.to_container(
@@ -153,3 +155,56 @@ def test_operation_hint_after_single_turn_rules_survives_conversion(tmp_path):
     assert "do not read files" not in system
     assert "Output ONLY" not in system
     assert result["verifier_metadata"]["operation_hint_applied"] is True
+
+
+def test_lazy_preparation_defers_rendering_and_applies_workspace_prompt_after_materialization(tmp_path):
+    from unittest.mock import patch
+
+    from resources_servers.deepcad.dataset import lazy_inputs
+    from resources_servers.deepcad.tests import test_lazy_inputs as fixtures
+
+    fixture = fixtures.LazyInputTests()
+    fixture.setUp()
+    try:
+        row = fixture.example
+        row["verifier_metadata"] = {"task_id": fixture.record["task_id"], "reference_step": "0000_00000007.step"}
+        row["responses_create_params"]["max_output_tokens"] = 32768
+        source, output = tmp_path / "lazy.jsonl", tmp_path / "opencode.jsonl"
+        source.write_text(json.dumps(row) + "\n")
+        with patch.object(lazy_inputs.subprocess, "run", side_effect=AssertionError("manifest conversion rendered")):
+            assert prepare(source, output) == 1
+        converted = json.loads(output.read_text())
+        assert converted["deepcad_lazy"]["config"]["harness"] == "opencode"
+        with patch.object(lazy_inputs.subprocess, "run", side_effect=fixture.worker) as render:
+            lazy_inputs.materialize_examples([converted])
+        assert render.call_count == 1 and "deepcad_lazy" not in converted
+        assert converted["task_source"] == "deepcad_opencode"
+        assert converted["responses_create_params"]["max_output_tokens"] == 32768
+        system = converted["responses_create_params"]["input"][0]["content"]
+        assert "model.py" in system and "read tool" in system and "Output ONLY" not in system
+    finally:
+        fixture.doCleanups()
+
+
+def test_real_environment_task_conversion_keeps_resource_seed_images(tmp_path):
+    from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
+    from resources_servers.deepcad.opencode_app import WorkspaceSeedRequest
+
+    _, row = prepared(tmp_path)
+    row.update(_ng_task_index=0, _ng_rollout_index=0)
+    config = OmegaConf.to_container(OmegaConf.load(CONFIG), resolve=True)
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = config
+    env = SingleAgentTurnLegacyEnvironmentServer(
+        config=SingleAgentTurnLegacyEnvironmentServerConfig(
+            name="deepcad_opencode_environment_server",
+            port=8080,
+            **config["deepcad_opencode_environment_server"]["environment_servers"]["single_agent_turn_legacy"],
+        ),
+        server_client=client,
+    )
+    episode = env._episode_request_from_row(row)
+    task_data = episode.task.task_input.task_data
+    assert "responses_create_params" not in task_data
+    seeded = WorkspaceSeedRequest.model_validate(task_data)
+    assert seeded.target_images == row["target_images"]

@@ -26,6 +26,47 @@ Do not delegate or compact the conversation.
 """
 
 
+def prepare_row(row: dict) -> dict:
+    """Convert one materialized image task without changing the caller's sampling fields."""
+    row = deepcopy(row)
+    metadata = TaskData.model_validate(row["verifier_metadata"])
+    params = NeMoGymResponseCreateParamsNonStreaming.model_validate(row["responses_create_params"])
+    system, content = [], []
+    for message in params.input:
+        role = getattr(message, "role", None)
+        if role not in ("system", "developer", "user"):
+            raise ValueError("Prepared CAD rows require system/developer/user messages")
+        parts = (
+            [{"type": "input_text", "text": message.content}]
+            if isinstance(message.content, str)
+            else [
+                part.model_dump(exclude_none=True) if hasattr(part, "model_dump") else dict(part)
+                for part in message.content
+            ]
+        )
+        for part in parts:
+            if part["type"] == "input_text":
+                text = re.sub(r"Output ONLY[^\n]*(?:\n-[^\n]*)*", "", part["text"]).strip()
+                if role == "user":
+                    content.append({"type": "input_text", "text": text})
+                elif text:
+                    system.append(text)
+            elif role == "user" and part["type"] == "input_image":
+                content.append(part)
+            else:
+                raise ValueError("CAD tasks support user images and text only")
+    if not any(part["type"] == "input_image" for part in content):
+        raise ValueError("Prepared CAD tasks require target images")
+    views = view_prompt(metadata.view_mode, engineering_annotations=metadata.engineering_annotations)
+    row["responses_create_params"]["input"] = [
+        {"role": "system", "content": "\n".join([INSTRUCTIONS, views.partition("Output ONLY")[0], *system])},
+        {"role": "user", "content": content},
+    ]
+    row["target_images"] = [part["image_url"] for part in content if part["type"] == "input_image"]
+    row["task_source"] = "deepcad_opencode"
+    return row
+
+
 def prepare(source: Path, output: Path) -> int:
     """Validate prepared image rows, add workspace instructions, and route to the CAD resources instance."""
     if source.resolve() == output.resolve():
@@ -35,40 +76,23 @@ def prepare(source: Path, output: Path) -> int:
     with source.open() as src, output.open("x") as dst:
         for line in src:
             row = deepcopy(json.loads(line))
-            metadata = TaskData.model_validate(row["verifier_metadata"])
-            params = NeMoGymResponseCreateParamsNonStreaming.model_validate(row["responses_create_params"])
-            system, content = [], []
-            for message in params.input:
-                role = getattr(message, "role", None)
-                if role not in ("system", "developer", "user"):
-                    raise ValueError("Prepared CAD rows require system/developer/user messages")
-                parts = (
-                    [{"type": "input_text", "text": message.content}]
-                    if isinstance(message.content, str)
-                    else [
-                        part.model_dump(exclude_none=True) if hasattr(part, "model_dump") else dict(part)
-                        for part in message.content
-                    ]
-                )
-                for part in parts:
-                    if part["type"] == "input_text":
-                        text = re.sub(r"Output ONLY[^\n]*(?:\n-[^\n]*)*", "", part["text"]).strip()
-                        if role == "user":
-                            content.append({"type": "input_text", "text": text})
-                        elif text:
-                            system.append(text)
-                    elif role == "user" and part["type"] == "input_image":
-                        content.append(part)
-                    else:
-                        raise ValueError("CAD tasks support user images and text only")
-            if not any(part["type"] == "input_image" for part in content):
-                raise ValueError("Prepared CAD tasks require target images")
-            views = view_prompt(metadata.view_mode, engineering_annotations=metadata.engineering_annotations)
-            row["responses_create_params"]["input"] = [
-                {"role": "system", "content": "\n".join([INSTRUCTIONS, views.partition("Output ONLY")[0], *system])},
-                {"role": "user", "content": content},
-            ]
-            row["task_source"] = "deepcad_opencode"
+            if "deepcad_lazy" in row:
+                from resources_servers.deepcad.dataset.lazy_inputs import LazyRenderConfig
+
+                metadata = TaskData.model_validate(row["verifier_metadata"])
+                config = LazyRenderConfig.model_validate(row["deepcad_lazy"]["config"])
+                record = row["deepcad_lazy"]["record"]
+                if (
+                    record["task_id"] != metadata.task_id
+                    or Path(record["reference_step"]).name != metadata.reference_step
+                    or not record["source_sha256"]
+                ):
+                    raise ValueError("Lazy CAD record does not match its task metadata")
+                config.harness = "opencode"
+                row["deepcad_lazy"]["config"] = config.model_dump()
+                row["task_source"] = "deepcad_opencode"
+            else:
+                row = prepare_row(row)
             dst.write(json.dumps(row) + "\n")
             count += 1
     return count

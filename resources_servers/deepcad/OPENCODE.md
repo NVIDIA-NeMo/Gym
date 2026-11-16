@@ -25,7 +25,7 @@ resources-server worker.
 ## Prepare and run
 
 From the repository root, first build the network-disabled verifier image, then
-the workspace image (the pinned OpenCode binary is Linux x86-64):
+the workspace image (the default configuration pins Linux x86-64):
 
 ```bash
 docker build --platform linux/amd64 -t deepcad-cadquery:2.8.0 resources_servers/deepcad
@@ -34,14 +34,17 @@ docker build --platform linux/amd64 -t deepcad-opencode:1.17.11 \
 python -m resources_servers.deepcad.prepare_opencode INPUT.jsonl OUTPUT.jsonl
 ```
 
-`INPUT.jsonl` must already contain valid `verifier_metadata`, task text, and inline
-target images, as produced by `dataset/prepare_gym.py`. Raw lazy corpus records
-must be materialized first. The conversion preserves images, metadata, and
+`INPUT.jsonl` may contain prepared image tasks or validated metadata-only
+`deepcad_lazy` tasks. Lazy conversion marks the row for the OpenCode harness
+without rendering. The CAD dataset hook materializes selected rows and applies
+workspace instructions before image processing. Unstructured corpus records
+are not accepted. The conversion preserves images, metadata, and
 sampling fields; it replaces single-turn output instructions with file-based
 workspace instructions and routes rows to `deepcad_opencode`.
 
-Load `resources_servers/deepcad/configs/opencode.yaml` with the deployment's model
-configuration. Set `reference_root` to the external reference directory, and make
+Load the deployment's model configuration first, followed by
+`resources_servers/deepcad/configs/opencode.yaml`, so CAD's token-capture settings
+override model-adapter defaults. Set `reference_root` to the external reference directory, and make
 only the model endpoint reachable from the workspace. Then use the standard
 `gym env resolve`, `gym env validate`, `gym env start`, and `gym eval run --no-serve`
 commands, with `OUTPUT.jsonl` and agent name `deepcad_opencode_agent`.
@@ -53,6 +56,16 @@ Docker refuses that setting. Non-model services explicitly bind loopback. Check
 the final resolved addresses and probe the actual deployment: a network policy
 that permits the model's host permits every port on that host, and a host-network
 sandbox is not isolated by loopback pins.
+
+For native Linux ARM64, build both images with `--platform linux/arm64` and
+set these two fields under
+`deepcad_opencode_agent.responses_api_agents.opencode_agent` in the deployment
+configuration (the plugin archive includes an architecture-specific dependency):
+
+```yaml
+sandbox_executable_sha256: e51b4a9c0e8dfa90c3387f0aa41e7c362d56b1939eec102ae76c1aac0d911186
+sandbox_plugin_dependencies_sha256: 12ce5f79b27aa8886b64082c1f5d23ab4bc7410e193b7d98146f5df1a61f243a
+```
 
 ## Limits and training compatibility
 

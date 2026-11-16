@@ -191,7 +191,12 @@ async def test_sandbox_outcomes(
     server.config.operation_bonus.enabled = bonus_enabled
     monkeypatch.setenv("BASH_FUNC_exit-dramatically%%", "() { exit 1; }")
     sandbox = AsyncMock()
-    sandbox.exec.side_effect = [probe, execution, check]
+    sandbox.exec.side_effect = [
+        probe,
+        execution,
+        check,
+        SandboxExecResult('{"path":"/tmp/deepcad-sealed-test/prediction.step"}', "", 0),
+    ]
     context = MagicMock()
     context.__aenter__ = AsyncMock(return_value=sandbox)
     context.__aexit__ = AsyncMock(return_value=False)
@@ -206,7 +211,12 @@ async def test_sandbox_outcomes(
     else:
         assert result["reward"] == 0.82
         sandbox.download.assert_awaited_once()
-        assert sandbox.exec.await_count == 3
+        assert sandbox.exec.await_count == 4
+        seal = sandbox.exec.call_args_list[-1]
+        assert " -I -c " in seal.args[0]
+        assert seal.kwargs["user"] == "root" and seal.kwargs["env"] == {"HOME": "/root"}
+        assert 0 < seal.kwargs["timeout_s"] <= server.config.execution_timeout_s
+        assert sandbox.download.await_args.args[0] == "/tmp/deepcad-sealed-test/prediction.step"
     assert "--trace-operations" not in str(sandbox.exec.call_args_list)
     spec = factory.call_args.args[1]
     assert set(spec.files) == {"/sandbox/model.py", "/sandbox/runner.py"}
@@ -437,7 +447,12 @@ async def test_verifier_retries_same_source_in_fresh_sandbox(server, recover):
     sandboxes = [AsyncMock(), AsyncMock()]
     sandboxes[0].exec.return_value = SandboxExecResult("", "", 0, "runtime")
     sandboxes[1].exec.side_effect = (
-        [SandboxExecResult("", "", 0), SandboxExecResult("", "", 0), SandboxExecResult("100", "", 0)]
+        [
+            SandboxExecResult("", "", 0),
+            SandboxExecResult("", "", 0),
+            SandboxExecResult("100", "", 0),
+            SandboxExecResult('{"path":"/tmp/deepcad-sealed-test/prediction.step"}', "", 0),
+        ]
         if recover
         else [SandboxExecResult("", "", 0, "runtime")]
     )
@@ -472,6 +487,7 @@ async def test_scoring_exception_exhausts_retry_with_verifier_kind(server):
         SandboxExecResult("", "", 0),
         SandboxExecResult("", "", 0),
         SandboxExecResult("100", "", 0),
+        SandboxExecResult('{"path":"/tmp/deepcad-sealed-test/prediction.step"}', "", 0),
     ]
     context = MagicMock()
     context.__aenter__ = AsyncMock(return_value=sandbox)
@@ -497,3 +513,51 @@ async def test_model_execution_failure_does_not_retry(server):
     factory.assert_called_once()
     assert result.reward == 0 and not result.mask_sample and result.evaluation_completed
     assert result.failure_kind == "deepcad:execution"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "sealed,kind,mask",
+    [
+        (SandboxExecResult("", "", 1), "deepcad:geometry", False),
+        (SandboxExecResult("", "", 124, "timeout"), "deepcad:geometry", False),
+        (SandboxExecResult("", "", 125, "runtime"), PROVIDER_UNAVAILABLE, True),
+        (SandboxExecResult('{"path":"/etc/passwd"}', "", 0), PROVIDER_UNAVAILABLE, True),
+    ],
+)
+async def test_sealing_failures_preserve_model_and_infrastructure_distinction(server, sealed, kind, mask):
+    server.config.inconclusive_verification_retries = 0
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = [
+        SandboxExecResult("", "", 0),
+        SandboxExecResult("", "", 0),
+        SandboxExecResult("100", "", 0),
+        sealed,
+    ]
+    context = MagicMock(__aenter__=AsyncMock(return_value=sandbox), __aexit__=AsyncMock(return_value=False))
+    with patch("resources_servers.deepcad.app.AsyncSandbox", return_value=context):
+        result = await server.verify(request("result=1"))
+    assert result.reward == 0 and result.mask_sample is mask
+    assert result.failure_kind == kind and result.evaluation_completed is (not mask)
+    sandbox.download.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fusion_cannot_extend_the_model_execution_budget(server):
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = [
+        SandboxExecResult("", "", 0),
+        SandboxExecResult("", "", 0),
+        SandboxExecResult("100", "", 0),
+    ]
+    context = MagicMock(__aenter__=AsyncMock(return_value=sandbox), __aexit__=AsyncMock(return_value=False))
+    with (
+        patch("resources_servers.deepcad.app.AsyncSandbox", return_value=context),
+        patch("resources_servers.deepcad.app.time") as clock,
+    ):
+        clock.monotonic.side_effect = [0, server.config.execution_timeout_s + 1]
+        result = await server.verify(request("result=1"))
+    assert result.reward == 0 and not result.mask_sample
+    assert result.failure_kind == "deepcad:execution"
+    assert sandbox.exec.await_count == 3
+    sandbox.download.assert_not_awaited()

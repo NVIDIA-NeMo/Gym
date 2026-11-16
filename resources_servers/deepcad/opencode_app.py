@@ -17,7 +17,7 @@ from pydantic import BeforeValidator, Field, PrivateAttr
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import VERIFIER_ERROR, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.sandbox import SandboxAccess, SandboxConfig
 from nemo_gym.server_runtime import (
     BaseSeedSessionRequest,
@@ -62,7 +62,7 @@ class WorkspaceVerifyRequest(DeepCADVerifyRequest):
 
 class WorkspaceSeedRequest(BaseSeedSessionRequest):
     verifier_metadata: TaskData
-    responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+    target_images: list[str] = Field(min_length=1, max_length=3)
 
 
 class DeepCADOpenCodeVerifyResponse(DeepCADVerifyResponse):
@@ -115,28 +115,20 @@ class DeepCADOpenCodeResourcesServer(DeepCADResourcesServer):
             raise ResourcesSeedRejectedError("CAD workspaces require an Environment Server's episode seed")
         try:
             metadata = body.verifier_metadata
-            params = body.responses_create_params
             files: dict[str, str | bytes] = {}
-            for message in params.input:
-                if getattr(message, "role", None) != "user" or isinstance(message.content, str):
-                    continue
-                for part in message.content:
-                    part = part.model_dump() if hasattr(part, "model_dump") else part
-                    if part["type"] != "input_image":
-                        continue
-                    url = part.get("image_url")
-                    if not isinstance(url, str) or not url.startswith("data:image/") or ";base64," not in url:
-                        raise ValueError("Materialize target images as inline data URLs before seeding")
-                    encoded = url.split(",", 1)[1]
-                    if len(encoded) > 4 * ((self.config.max_input_image_bytes + 2) // 3):
-                        raise ValueError("Target image exceeds max_input_image_bytes")
-                    data = base64.b64decode(encoded, validate=True)
-                    if len(data) > self.config.max_input_image_bytes:
-                        raise ValueError("Target image exceeds max_input_image_bytes")
-                    with Image.open(io.BytesIO(data)) as image:
-                        output = io.BytesIO()
-                        image.convert("RGB").save(output, format="PNG")
-                    files[f"{WORKDIR}/target-{len(files)}.png"] = output.getvalue()
+            for url in body.target_images:
+                if not isinstance(url, str) or not url.startswith("data:image/") or ";base64," not in url:
+                    raise ValueError("Materialize target images as inline data URLs before seeding")
+                encoded = url.split(",", 1)[1]
+                if len(encoded) > 4 * ((self.config.max_input_image_bytes + 2) // 3):
+                    raise ValueError("Target image exceeds max_input_image_bytes")
+                data = base64.b64decode(encoded, validate=True)
+                if len(data) > self.config.max_input_image_bytes:
+                    raise ValueError("Target image exceeds max_input_image_bytes")
+                with Image.open(io.BytesIO(data)) as image:
+                    output = io.BytesIO()
+                    image.convert("RGB").save(output, format="PNG")
+                files[f"{WORKDIR}/target-{len(files)}.png"] = output.getvalue()
             if not files:
                 raise ValueError("CAD workspaces require target images")
             files[f"{WORKDIR}/.cad/settings.json"] = json.dumps(
@@ -201,6 +193,7 @@ class DeepCADOpenCodeResourcesServer(DeepCADResourcesServer):
                         body.model_dump() | lost_session_verification("CAD workspace or retained final source is lost")
                     ),
                     reward_components=dict.fromkeys(weights, 0.0),
+                    evaluation_completed=False,
                     final_file_status="workspace_lost",
                 )
             if verification.is_live:
@@ -215,6 +208,7 @@ class DeepCADOpenCodeResourcesServer(DeepCADResourcesServer):
                         **body.model_dump(),
                         reward=0.0,
                         mask_sample=True,
+                        evaluation_completed=False,
                         failure_kind=VERIFIER_ERROR,
                         failure_reason=str(error),
                         reward_components=dict.fromkeys(weights, 0.0),
@@ -222,12 +216,23 @@ class DeepCADOpenCodeResourcesServer(DeepCADResourcesServer):
                     )
                 # Keep the source before any cleanup or scoring await. A verify retry never re-reads model.py.
                 verification.retain(frozen)
-                try:
-                    await self.release_session_state(session_id)
-                except Exception:
-                    LOG.warning("Could not stop CAD workspace before grading; cleanup will retry", exc_info=True)
             else:
                 frozen = verification.retained
+            if self.has_session_state(session_id):
+                try:
+                    await self.release_session_state(session_id)
+                except Exception as error:
+                    LOG.warning("Could not stop CAD workspace before grading; cleanup will retry", exc_info=True)
+                    return DeepCADOpenCodeVerifyResponse(
+                        **body.model_dump(),
+                        reward=0.0,
+                        mask_sample=True,
+                        evaluation_completed=False,
+                        failure_kind=VERIFIER_ERROR,
+                        failure_reason=str(error),
+                        reward_components=dict.fromkeys(weights, 0.0),
+                        final_file_status="cleanup_failed",
+                    )
             code, status = frozen
             result = await super().verify(WorkspaceVerifyRequest(**body.model_dump(), final_code=code))
             if status == "agent_incomplete":

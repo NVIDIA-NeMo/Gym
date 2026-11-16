@@ -70,7 +70,9 @@ def octree_iou(a: np.ndarray, b: np.ndarray, depth: int) -> float:
     return (directed(a, b) + directed(b, a)) / 2
 
 
-def prepare(shape: cq.Shape, resolution: int, config: MixedIoUConfig, *, fuse_solids: bool = True):
+def prepare(
+    shape: cq.Shape, resolution: int, config: MixedIoUConfig, *, fuse_solids: bool = True
+) -> tuple[cq.Shape, np.ndarray, np.ndarray]:
     """Build metric inputs; skip fusion only for a sandbox-produced solid union."""
     # Meshing a shape can attach invalid polygon-on-triangulation caches to OCC
     # edges. Tessellate only a deep copy; Boolean operands remain pristine.

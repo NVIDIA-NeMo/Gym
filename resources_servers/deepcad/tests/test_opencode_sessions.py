@@ -39,6 +39,7 @@ def seed(session: str = "cad-session") -> ResourcesSeedSessionRequest:
         episode_id=EpisodeId(rollout_id=f"rollout-{session}"),
         task_id=TaskId(taskset="cad", task_id="box"),
         task_data={
+            "target_images": [image_url()],
             "verifier_metadata": {
                 "task_id": "box",
                 "reference_step": "private-reference.step",
@@ -271,9 +272,7 @@ def test_cookie_and_partial_typed_seeds_are_rejected(runtime, body):
 
 def test_invalid_target_is_rejected_before_lending(runtime):
     body = seed().model_dump(mode="json")
-    body["task_data"]["responses_create_params"]["input"][0]["content"][0]["image_url"] = (
-        "https://target.invalid/a.png"
-    )
+    body["task_data"]["target_images"][0] = "https://target.invalid/a.png"
     assert runtime.client.post("/seed_session", json=body).status_code == 422
     runtime.lending.lend.assert_not_awaited()
 
@@ -314,3 +313,22 @@ def test_failed_seed_releases_partial_state_and_can_retry(runtime):
     assert not runtime.server.has_session_state("cad-session")
     runtime.lending.lend.side_effect = lend
     start(runtime)
+
+
+def test_failed_workspace_stop_blocks_grading_and_retry_uses_frozen_source(runtime):
+    start(runtime)
+    release = runtime.lending.release.side_effect
+    workspace = runtime.workspaces["cad-session"]
+    runtime.lending.release.side_effect = RuntimeError("provider down")
+    result = runtime.client.post("/verify", json=verify_body())
+    assert result.status_code == 200
+    assert result.json()["failure_kind"] == "verifier_error"
+    assert result.json()["evaluation_completed"] is False and result.json()["mask_sample"]
+    runtime.evaluate.assert_not_awaited()
+    workspace.source = b"changed while cleanup was failing"
+    runtime.lending.release.side_effect = release
+    retried = runtime.client.post("/verify", json=verify_body())
+    assert retried.status_code == 200 and retried.json()["reward"] == 0.75
+    assert runtime.evaluate.await_args.args[0] == CODE
+    assert workspace.download.await_count == 1
+    assert not runtime.workspaces
