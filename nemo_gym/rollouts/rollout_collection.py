@@ -2376,6 +2376,16 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         ),
     )
 
+    dispatch_reservation_interval_s: float = Field(
+        default=1.0,
+        ge=0,
+        description=(
+            "Least number of seconds between the run manifest writes that reserve dispatched attempts. Attempts "
+            "admitted within the interval share one write, so each rollout may wait up to the interval inside its "
+            "concurrency slot before its request is sent. 0 writes once per event-loop turn."
+        ),
+    )
+
     dispatch_longest_first: bool = Field(
         default=False,
         description=(
@@ -3463,10 +3473,6 @@ class _RowResultIterator:
             outcomes.append(outcome)
         self._finish()
         return outcomes
-
-
-# Matches the batch status throttle: a run rewrites its manifest at most this often, not once per finished rollout.
-DISPATCH_RESERVATION_INTERVAL_SECONDS = 5.0
 
 
 class _DispatchReservations:
@@ -4577,6 +4583,7 @@ executions → not run again (left to recovery)
                 interleave_by_agent=True,
                 dispatch_budget_s=config.dispatch_budget_s,
                 drain_margin_s=config.drain_margin_s,
+                dispatch_reservation_interval_s=config.dispatch_reservation_interval_s,
                 latency_tracker=latency_tracker,
                 **({"run_timing": run_timing} if run_timing is not None else {}),
             )
@@ -5537,6 +5544,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         interleave_by_agent: bool = False,
         dispatch_budget_s: Optional[float] = None,
         drain_margin_s: Optional[float] = None,
+        dispatch_reservation_interval_s: float = 0.0,
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
         retry_requests: bool = True,
         _max_num_tries: Optional[int] = None,
@@ -5558,6 +5566,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         ``dispatch_budget_s`` stops starting rows that many seconds after this call, and
         ``drain_margin_s`` stops sooner for rows that would not have time to finish. A row
         drained this way resolves to a Gym-built ``_dispatch_drained_result``.
+
+        ``dispatch_reservation_interval_s`` spaces the ``on_dispatch_batch`` writes. The default, 0, writes once per
+        event-loop turn; collection passes its configured interval.
 
         Identical contract to ``run_examples``, but each future resolves to a ``_CompletedRollout``
         that carries ``rollout_latency_ms`` alongside the raw ``/run`` result instead of inside it,
@@ -5614,7 +5625,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         # reservations before releasing any request to the server.
         reservations = (
             _DispatchReservations(
-                on_dispatch_batch, interval_s=DISPATCH_RESERVATION_INTERVAL_SECONDS, drained=drained_result
+                on_dispatch_batch, interval_s=dispatch_reservation_interval_s, drained=drained_result
             )
             if on_dispatch_batch is not None
             else None

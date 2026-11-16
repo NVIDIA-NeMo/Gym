@@ -8,6 +8,7 @@ import copy
 import multiprocessing
 import os
 import signal
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -796,6 +797,43 @@ async def test_production_dispatch_batches_reservations_before_http(runner_confi
     install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
     await collection.RolloutCollectionHelper().run_from_config(runner_config)
     assert writes == [{}, {"0-0": 1, "1-0": 1, "2-0": 1}]
+
+
+async def test_production_dispatch_reserves_before_http_when_the_write_is_delayed(runner_config, monkeypatch):
+    # More rows than slots: a row admitted within the interval waits for a later write, still before its request.
+    from tests.unit_tests.rollouts.test_rollout_collection import failing_row
+
+    output = Path(runner_config.output_jsonl_fpath)
+    Path(runner_config.input_jsonl_fpath).write_bytes(
+        b"".join(orjson.dumps(failing_row(task) | {"task": task}) + b"\n" for task in range(5))
+    )
+    runner_config.num_samples_in_parallel = 2
+    runner_config.dispatch_reservation_interval_s = 0.1
+    writes = []
+    original = RunManifest.write
+
+    def write(manifest, path, **kwargs):
+        writes.append((time.monotonic(), dict(manifest.next_attempt)))
+        original(manifest, path, **kwargs)
+
+    monkeypatch.setattr(RunManifest, "write", write)
+    posted = []
+
+    async def post(**kwargs):
+        row = kwargs["json"]
+        saved = RunManifest.model_validate_json(manifest_path_for(output).read_bytes())
+        assert saved.next_attempt[collection.logical_rollout_id(row)] > row["_ng_attempt_index"]
+        posted.append(row["task"])
+        return FakeResponse(200, {"response": {}, "reward": 1.0})
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    await collection.RolloutCollectionHelper().run_from_config(runner_config)
+
+    assert sorted(posted) == list(range(5))
+    reservations = [(at, attempts) for at, attempts in writes if attempts]
+    assert len(reservations) > 1 and reservations[-1][1] == {f"{task}-0": 1 for task in range(5)}
+    gaps = [later - earlier for (earlier, _), (later, _) in zip(reservations, reservations[1:])]
+    assert min(gaps) >= 0.08, "reservation writes must keep the configured interval apart"
 
 
 async def test_invalid_reply_without_routing_explains_how_to_continue(runner_config, monkeypatch):

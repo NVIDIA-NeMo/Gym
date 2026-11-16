@@ -611,6 +611,7 @@ _COLLECTION_OPTIONS = frozenset(
         "checkpoint_timeout_s",
         "dispatch_budget_s",
         "drain_margin_s",
+        "dispatch_reservation_interval_s",
         "dispatch_longest_first",
         "retry_terminal_timeouts",
         "allow_unsafe_resume",
