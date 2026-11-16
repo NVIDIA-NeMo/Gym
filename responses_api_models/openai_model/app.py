@@ -268,6 +268,8 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             base_url=self.config.openai_base_url,
             api_key=self.config.openai_api_key,
             default_headers=self.config.openai_default_headers,
+            # An outside provider, never a NeMo Gym server: its busy answers are waited out on a time budget.
+            internal=False,
             session_key_headers=self.config.session_key_headers,
             max_num_tries=self.config.upstream_max_num_tries,
             # A provider that refuses connections fails the call after max_http_attempts tries, like an HTTP

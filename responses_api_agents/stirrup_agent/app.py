@@ -68,6 +68,7 @@ from nemo_gym.trajectory import (
     ObservationGap,
     ToolCallObservation,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.stirrup_agent.sandbox import StirrupSessionState
 from responses_api_agents.stirrup_agent.stirrup_utils import messages_from_input
 
@@ -208,6 +209,14 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         "max_completion_tokens. Absorbs the residual gap between our estimate "
         "(messages + tool-schema JSON) and the exact prompt the server sees after chat-template "
         "rendering. See ``nemo_client.DynamicMaxTokensChatCompletionsClient``.",
+    )
+    image_token_estimate: int = Field(
+        default=1536,
+        ge=0,
+        description="Prompt tokens counted for each image when sizing per-call max_completion_tokens; the image's "
+        "base64 bytes are not counted. A model that spends more than this on an image takes the difference out of "
+        "``completion_token_buffer``, so the buffer has to cover n_images * (real tokens per image - this estimate). "
+        "Raise this value to the model's real per-image cost (or raise the buffer) for high-resolution images.",
     )
     context_window_tokens: int = Field(
         default=262144,
@@ -412,6 +421,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 ),
                 "max_tokens": self.config.context_window_tokens,
                 "completion_token_buffer": self.config.completion_token_buffer,
+                "image_token_estimate": self.config.image_token_estimate,
                 "temperature": self.config.temperature if body.temperature is None else body.temperature,
                 "top_p": self.config.top_p if body.top_p is None else body.top_p,
                 "enable_thinking": self.config.enable_thinking,
@@ -490,3 +500,6 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     StirrupAgentWrapper.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = StirrupAgentWrapper.run_webserver()  # noqa: F401

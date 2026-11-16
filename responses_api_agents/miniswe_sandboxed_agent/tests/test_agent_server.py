@@ -15,6 +15,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.server_runtime import RolloutContextMiddleware
+from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from nemo_gym.utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 from responses_api_agents.miniswe_sandboxed_agent import app as module
 from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessOutcome
@@ -139,6 +140,7 @@ async def test_run_uses_sandbox_reachable_model_url_with_rollout_capture(fixture
     f.agent.config = module.MiniSWESandboxedConfig.model_validate(
         f.agent.config.model_dump() | {"sandbox_model_base_url": "https://sandbox-model:8443/gym/v1/"}
     )
+    monkeypatch.setattr(module.MiniSWESandboxedAgent, "_token_id_capture_configured", lambda self: True)
     monkeypatch.setattr(module.MiniSWESandboxedAgent, "_token_id_capture_enabled", lambda self: True)
     body = f.body.model_copy(update={"capture_rollout_id": "rollout", "capture_token_ids": True})
     await f.agent.run(f.request, body)
@@ -531,3 +533,26 @@ def test_legacy_and_session_configurations_log_the_adapter_deprecation_once(
         "mini_swe_agent/README.md#agent-sessions",
     ):
         assert phrase in module.DEPRECATION_WARNING
+
+
+def test_several_workers_are_refused_only_with_the_run_path(tmp_path) -> None:
+    """Episode sessions are routed by agent_session_id; the agent's own /run replays retries from this process."""
+
+    def agent(**resources_server) -> module.MiniSWESandboxedAgent:
+        return module.MiniSWESandboxedAgent(
+            config=module.MiniSWESandboxedConfig(
+                host="localhost",
+                port=1,
+                name="agent",
+                entrypoint="app.py",
+                num_workers=2,
+                model_server={"type": "responses_api_models", "name": "model"},
+                artifacts_dir=tmp_path,
+                **resources_server,
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+    with pytest.raises(ValueError, match="needs num_workers=1: its own /run path replays a retried run"):
+        refuse_unsupported_num_workers(agent(resources_server={"type": "resources_servers", "name": "resources"}))
+    refuse_unsupported_num_workers(agent())

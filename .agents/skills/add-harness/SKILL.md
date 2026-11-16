@@ -46,7 +46,7 @@ Before moving on, confirm each of these in the code:
 - [ ] A seed the adapter cannot serve (a sandbox it cannot use, a required tool grant it never consumes) raises `AgentSeedRejectedError`; optional grants it does not use are skipped.
 - [ ] If the adapter supports MCP grants, it wires the episode URL and headers into the harness and enforces required-server readiness before inference. Follow [MCP grant integration](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#mcp-grant-integration), including runtimes that silently skip failed plugins. MCP access and sandbox ownership are independent decisions.
 - [ ] Close returns an `AgentObservationBundle`, with gaps for evidence the harness cannot report, even when activation failed.
-- [ ] Agent sessions run with `num_workers: 1`.
+- [ ] All agent-session state lives in the session, so several workers are safe; anything else overrides `multiple_workers_unsupported_reason()`.
 - [ ] A sandbox failure never falls back to running on the host.
 - [ ] An adapter that creates its own sandbox exposes `network_access` (`inherit`, `model_only`, `model_and_tools`) and passes the spec through `restrict_sandbox_network` before creating it. Settings it cannot enforce raise `AgentSeedRejectedError` (a final 422), and a restricted sandbox gets its runtime by upload or from a preinstalled `sandbox_runtime_dir`. See [Restrict the egress of an owned sandbox](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#restrict-the-egress-of-an-owned-sandbox).
 - [ ] Controls the harness does not support are rejected or documented, not silently dropped.
@@ -101,7 +101,7 @@ Conformance is a merge check from the Observability level up (Step 7). At the Ev
 - **The probes apply** to a harness that offers the model a shell tool through function calling: the scripted replies call the shell tool listed in the request's `tools`. Register the harness as the [runner guide](../../../scripts/harness_conformance/README.md) describes: an entry in `registry.HARNESSES`, its runtime install in `ci.install_runtime`, and its episode configuration. The registry key is the adapter's directory name without `_agent`. The probes give the adapter its own local sandbox rather than a borrowed one. Run on Linux with a new output directory:
 
   ```bash
-  python scripts/run_harness_conformance.py --harness <registry-key> --output <new-dir>
+  python -m scripts.run_harness_conformance --harness <registry-key> --output <new-dir>
   ```
 
   Sort each failure by where it comes from, and change only that side:

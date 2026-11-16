@@ -77,9 +77,10 @@ class _ListingConfigParser(GlobalConfigDictParser):
 
 
 def _parse_no_environment_tolerating_unset_values(initial_config_dict: DictConfig) -> DictConfig:
-    """`parse_no_environment` for listing: fill unset `???`, `${...}` and environment values (runtime-only
-    things like API keys/endpoints) with a placeholder so the config still resolves enough to identify the
-    component. Never mutates the input; other config and resolver errors propagate.
+    """Offline `parse` for listing, which reads no CLI or dotenv, like `parse_no_environment`.
+    It fills unset `???`, `${...}` and environment values (runtime-only things like API keys/endpoints)
+    with a placeholder so the config still resolves enough to identify the component.
+    Never mutates the input; other config and resolver errors propagate.
     """
     working = deepcopy(initial_config_dict)  # never mutate the caller's config
     parser = _ListingConfigParser()
@@ -89,7 +90,17 @@ def _parse_no_environment_tolerating_unset_values(initial_config_dict: DictConfi
     injected: set[str] = set()
     while True:
         try:
-            return parser.parse_no_environment(initial_global_config_dict=working)
+            # Listing only reads configs, so it parses offline.
+            # Offline parsing skips the `use_absolute_ip` host lookup, port probes, UV_* writes and exporters.
+            return parser.parse(
+                parse_config=GlobalConfigDictParserConfig(
+                    dotenv_path=None,
+                    initial_global_config_dict=working,
+                    skip_load_from_cli=True,
+                    skip_load_from_dotenv=True,
+                    offline=True,
+                )
+            )
         except InterpolationKeyError as e:
             # The missing key name is only in the message text — omegaconf never stores it on an attribute
             # (`e.key`/`e.full_key` point at the containing node), so a regex is the only way to read it.

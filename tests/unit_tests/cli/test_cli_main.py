@@ -153,6 +153,8 @@ class TestEvalRunFlags:
             (["--output", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["-o", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["--limit", "1024"], "+limit=1024"),
+            (["--task-ids", "a, b"], '+task_ids=["a","b"]'),
+            (["--task-ids-file", "subset_v1.txt"], "+task_ids_fpath='subset_v1.txt'"),
             (["--num-repeats", "4"], "+num_repeats=4"),
             (["--interleave-repeats"], "+interleave_repeats=true"),
             (["--concurrency", "10"], "+num_samples_in_parallel=10"),
@@ -1698,7 +1700,6 @@ class TestAgentSelector:
         assert [(instance.name, instance.agent_type) for instance in instances] == [(new_name, "langgraph_agent")]
         agent = resolved[new_name].responses_api_agents.langgraph_agent
         assert agent.entrypoint == f"{flavor}_agent.py"
-        assert agent.num_workers == 1
         for binding in ("resources_server", "model_server", "datasets"):
             assert agent[binding] == original[old_name].responses_api_agents.simple_agent[binding]
         environment = resolved.aime24_math_with_judge_environment_server.environment_servers

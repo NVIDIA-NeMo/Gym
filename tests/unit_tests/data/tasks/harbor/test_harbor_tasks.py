@@ -2418,6 +2418,7 @@ class TestCli:
             "kilocode_agent",
             "stirrup_agent",
             "nooa_agent",
+            "terminus_2_agent",
         ],
     )
     def test_shipped_sandboxed_harnesses_declare_model_calls_from_sandbox(self, impl_name):
@@ -2425,9 +2426,9 @@ class TestCli:
         list of names, so a run with it advertises a reachable model server without ++use_absolute_ip=true."""
         assert runs_in_sandbox(impl_name, {"entrypoint": "app.py"}) is True
 
-    @pytest.mark.parametrize("impl_name", ["terminus_2_sandboxed_agent", "terminus_2_agent", "harbor_oracle_agent"])
+    @pytest.mark.parametrize("impl_name", ["terminus_2_sandboxed_agent", "harbor_oracle_agent"])
     def test_host_side_harnesses_declare_nothing(self, impl_name):
-        # Terminus 2 drives a tmux session in the sandbox but calls the model from the agent server.
+        # The sandboxed Terminus 2 drives a tmux session in the sandbox but calls the model from the agent server.
         assert runs_in_sandbox(impl_name, {"entrypoint": "app.py"}) is False
 
     def test_runs_in_sandbox_from_declaration_or_config_key(self, tmp_path, monkeypatch):

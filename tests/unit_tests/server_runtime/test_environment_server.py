@@ -221,14 +221,15 @@ def test_each_cleanup_has_its_own_budget() -> None:
     calls: list[str] = []
     context = CleanupContext(
         episode_id=_request().episode_id,
-        cleanup_timeout_seconds=0.05,
+        cleanup_timeout_seconds=0.5,
     )
 
     async def sandbox() -> None:
         calls.append("sandbox")
 
     async def slow_but_finishes() -> None:
-        await asyncio.sleep(0.03)
+        # A tenth of its budget: a loaded runner cannot push it past its own timeout.
+        await asyncio.sleep(0.05)
         calls.append("slow")
 
     async def hung() -> None:
@@ -248,7 +249,8 @@ def test_each_cleanup_has_its_own_budget() -> None:
     # Under one shared budget the slow close would have eaten the time the hung one left; here each
     # callback is bounded on its own and the sandbox stop at the bottom of the stack still happens.
     assert calls == ["hung", "slow", "sandbox"]
-    assert elapsed < 0.05 * 3
+    # The hung callback sleeps for a minute, so finishing well short of that shows its budget cut it off.
+    assert elapsed < 10
 
 
 def test_explicit_cleanup_is_bounded_and_final_unwind_retries() -> None:

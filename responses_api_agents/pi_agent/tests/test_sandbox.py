@@ -612,6 +612,19 @@ def test_session_output_limit_uses_config_default(setup):
         assert models["providers"]["nemo"]["models"][0]["maxTokens"] == 4096
 
 
+def test_session_remaining_context_policy_drops_the_output_cap(setup):
+    agent, sandbox = setup
+    agent.config.output_token_policy = "remaining_context"
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 200
+        assert client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Fix the code"}).status_code == 200
+        command = staged(sandbox)["command"]
+        extension = f"{sandbox.directory}/remaining-context.mjs"
+        assert command[command.index("--extension") + 1] == extension
+        assert sandbox.files[extension] == Path(__file__).parents[1].joinpath("remaining-context.mjs").read_text()
+        assert f"{sandbox.directory}/output-limit.mjs" not in command
+
+
 def test_invalid_session_config_output_limit_does_not_consume_activation(setup):
     agent, sandbox = setup
     agent.config.max_output_tokens = 0
