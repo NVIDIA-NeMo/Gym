@@ -651,11 +651,6 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         if self.config.resources_server is not None:
             _warn_deprecated_once()
         self._session_sandboxes: dict[str, AsyncSandbox] = {}
-        # Episode sessions are process-local. A deployment without a resources server exists only to serve
-        # sessions, so a hand-written config with several workers fails at `gym env start` rather than on
-        # every seed; a benchmark composition keeps the legacy /run route, where workers are independent.
-        if self.config.resources_server is None and self.config.num_workers not in (None, 1):
-            raise ValueError("Process-local Terminus 2 episode sessions require num_workers=1")
 
         if not self.config.debug:
             harbor_logger.setLevel(logging.WARNING)

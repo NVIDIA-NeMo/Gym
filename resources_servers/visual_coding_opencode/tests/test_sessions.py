@@ -234,3 +234,29 @@ def test_a_stateless_server_refuses_a_malformed_typed_seed_and_accepts_a_cookie_
 def test_sandbox_settings_that_cannot_work_are_refused_at_startup(fields, message) -> None:
     with pytest.raises(ValueError, match=message):
         VisualCodingOpenCodeServer(config=_config(**fields), server_client=MagicMock(spec=ServerClient))
+
+
+def test_a_worker_keeps_the_session_until_its_close_stops_the_sandbox(root, monkeypatch) -> None:
+    # verify leaves the lent sandbox running, so with several workers routing must keep sending the session to this
+    # worker until the close stops it.
+    stops: list[AsyncSandbox] = []
+    real_stop = AsyncSandbox.stop
+
+    async def stop(self: AsyncSandbox) -> None:
+        stops.append(self)
+        if len(stops) == 1:
+            raise RuntimeError("provider unavailable")
+        await real_stop(self)
+
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    server = _server(root)
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    assert not server.session_release_pending("session")
+    assert client.post("/seed_session", json=_seed().model_dump(mode="json")).status_code == 200
+    assert server.session_release_pending("session")
+
+    close = ResourcesCloseSessionRequest(resources_session_id="session", episode_id=_seed().episode_id)
+    assert client.post("/close_session", json=close.model_dump(mode="json")).status_code >= 500
+    assert server.session_release_pending("session")
+    assert client.post("/close_session", json=close.model_dump(mode="json")).status_code == 200
+    assert not server.session_release_pending("session")

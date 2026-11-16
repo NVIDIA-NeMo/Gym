@@ -40,6 +40,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JUDGE_FAILURES, JudgeError, VerifierFixture, call_judge, is_judge_failure
 from resources_servers.agentic_if.episode import bundle
 from resources_servers.agentic_if.episode.agent_user import is_root_agent_user
@@ -96,6 +97,7 @@ class AgenticIFResourcesServerConfig(BaseResourcesServerConfig):
     # The model server that answers judge questions. It must serve the model `if_grading/data/judge.yaml` names: the
     # judge's prompts and model settings are sent as that file sets them.
     judge_model_server: ModelServerRef
+    # Per worker: with num_workers > 1, each worker grades this many episodes at once.
     max_concurrent_grades: int = Field(default=8, gt=0)
     # The Resources Servers that own the task sandboxes, by the row's `agentic_if.task_backend`.
     task_resources: dict[TaskBackend, ResourcesServerRef] = Field(min_length=1)
@@ -222,8 +224,6 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("agentic IF sessions hold sandbox connections in one process: num_workers must be 1")
         if missing := [str(path) for path in self.config.opencode_runtime_files if not path.is_file()]:
             raise ValueError(
                 f"opencode_runtime_files are missing: {missing}; for the benchmark, run "
@@ -731,3 +731,5 @@ VERIFIER_FIXTURE = VerifierFixture(
 
 if __name__ == "__main__":
     AgenticIFResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = AgenticIFResourcesServer.run_webserver()  # noqa: F401

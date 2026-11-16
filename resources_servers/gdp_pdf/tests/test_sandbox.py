@@ -15,6 +15,7 @@ from nemo_gym.server_runtime import (
     ResourcesSessionConflictError,
     check_resources_session_contract,
 )
+from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from resources_servers.gdp_pdf import sandbox_app as module
 from resources_servers.gdp_pdf.tests.test_app import _verify_request, config  # noqa: F401
 
@@ -278,3 +279,32 @@ async def test_retirement_releases_sandbox_and_retries_failed_stop(setup):
     await server.retire_session_state(body.resources_session_id)
     assert not server._seeds
     assert sandbox.stop.await_count == 2
+
+
+def test_the_server_runs_with_several_workers(setup):
+    server, _, _, _ = setup
+    # Built afresh, so the server's own setup sees the worker count.
+    two_workers = module.GdpPdfSandboxResourcesServer(
+        config=server.config.model_copy(update={"num_workers": 2}), server_client=server.server_client
+    )
+    assert two_workers.multiple_workers_unsupported_reason() is None
+    refuse_unsupported_num_workers(two_workers)
+
+
+async def test_a_worker_keeps_the_session_until_its_close_stops_the_sandbox(setup):
+    # verify leaves the lent sandbox running, so routing must keep sending the session to this worker until the close.
+    server, sandbox, body, _ = setup
+    session_id = body.resources_session_id
+    assert not server.session_release_pending(session_id)
+    await server.seed_session(Request({"type": "http", "session": {}}), body)
+    server._judge_criterion = AsyncMock(return_value=module.CriterionEvaluation(criterion="cap", passed=True))
+    await server.verify(_verify_request("The cap is $5M."))
+    assert server.session_release_pending(session_id)
+    sandbox.stop.side_effect = RuntimeError("stop failed")
+    close = ResourcesCloseSessionRequest(resources_session_id=session_id, episode_id=body.episode_id)
+    with pytest.raises(RuntimeError, match="stop failed"):
+        await server.close_resources_session(close)
+    assert server.session_release_pending(session_id)
+    sandbox.stop.side_effect = None
+    await server.close_resources_session(close)
+    assert not server.session_release_pending(session_id)

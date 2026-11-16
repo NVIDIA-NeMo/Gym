@@ -54,6 +54,7 @@ from nemo_gym.sandbox import (
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.trajectory import AgentObservationBundle, ObservationGap, SandboxObservation
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.openhands_agent.conversion import (
     RunOutcome,
     classify_error,
@@ -120,6 +121,7 @@ class OpenHandsAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: Optional[ResourcesServerRef] = None
     model_server: ModelServerRef
     model: str = Field(description="Model name OpenHands sends to the Gym Model Server.")
+    # Per worker: with num_workers > 1, each worker runs this many turns at once.
     concurrency: int = Field(default=8, gt=0)
     timeout: int = Field(default=1800, gt=0, description="Seconds one activation may run.")
     max_iterations: int = Field(
@@ -552,3 +554,5 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     OpenHandsAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = OpenHandsAgent.run_webserver()  # noqa: F401

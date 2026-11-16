@@ -52,6 +52,7 @@ from nemo_gym.server_runtime import (
     observe_llm_judge_grading,
     reject_partial_typed_seed,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JudgeError, VerifierFixture, call_judge, record_parsed_judge_verdict
 from resources_servers.visual_coding_opencode.task_data import TaskData
 from resources_servers.visual_coding_opencode.verifier_fixture import (
@@ -206,9 +207,6 @@ class VisualCodingOpenCodeServer(SimpleResourcesServer):
     _fences: ResourcesSessionFences[EpisodeId] = PrivateAttr()
     _lent_sandboxes: LentSandboxes | None = PrivateAttr(default=None)
 
-    def multiple_workers_unsupported_reason(self) -> str:
-        return "lent sandboxes live in one worker's memory"
-
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         self._locks = ResourcesSessionLocks()
@@ -274,6 +272,11 @@ class VisualCodingOpenCodeServer(SimpleResourcesServer):
             self._sessions[session_id] = (body.episode_id, body.task_id)
             request.session[SESSION_ID_KEY] = session_id
             return ResourcesSeedSessionResponse(resources_session_id=session_id, sandbox_access=sandbox_access)
+
+    def session_release_pending(self, session_id: str) -> bool:
+        # verify leaves the lent sandbox running until close, so with several workers the close must still reach
+        # the worker that holds it.
+        return session_id in self._sessions or super().session_release_pending(session_id)
 
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
         """Stop the episode's sandbox. Safe to repeat, and for a session never seeded."""
@@ -366,3 +369,5 @@ VERIFIER_FIXTURE = VerifierFixture(
 
 if __name__ == "__main__":
     VisualCodingOpenCodeServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = VisualCodingOpenCodeServer.run_webserver()  # noqa: F401

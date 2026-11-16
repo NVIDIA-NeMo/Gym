@@ -13,7 +13,6 @@ openhands_agent:
         type: responses_api_models
         name: policy_model
       model: ${policy_model_name}
-      num_workers: 1
       concurrency: 8
       # Seconds per activation. Raise it for long-horizon benchmarks.
       timeout: 1800

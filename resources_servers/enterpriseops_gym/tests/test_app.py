@@ -20,6 +20,7 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionRequest,
     check_resources_session_contract,
 )
+from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from resources_servers.enterpriseops_gym import app as app_module
 from resources_servers.enterpriseops_gym.app import (
     EnterpriseOpsGymResourcesServer,
@@ -566,6 +567,8 @@ def test_shutdown_logs_a_sandbox_it_cannot_stop(archive, gyms, sandboxes, caplog
     assert "Failed to stop the sandboxes of EnterpriseOps-Gym session session" in caplog.text
 
 
-def test_sessions_live_in_one_worker(archive):
-    with pytest.raises(ValueError, match="num_workers=1"):
-        _server(archive, num_workers=2)
+def test_the_server_runs_with_several_workers(archive):
+    # Sessions are keyed by resources_session_id, which session routing follows to the worker that holds them.
+    server = _server(archive, num_workers=2)
+    assert server.multiple_workers_unsupported_reason() is None
+    refuse_unsupported_num_workers(server)

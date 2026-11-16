@@ -21,6 +21,7 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionRequest,
     check_resources_session_contract,
 )
+from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from resources_servers.vibench import app as app_module
 from resources_servers.vibench.app import (
     GraderConfigError,
@@ -633,9 +634,15 @@ def test_shutdown_stops_the_sandboxes_of_open_sessions(server, root, stopped):
     assert len(stopped) == 1
 
 
-def test_sessions_require_a_single_worker(checkout, root):
-    with pytest.raises(ValueError, match="num_workers=1"):
-        _server(checkout, root, num_workers=2)
+def test_the_server_runs_with_several_workers_unless_it_serves_the_legacy_relay(checkout, root, tmp_path):
+    # Sessions are keyed by resources_session_id, which session routing follows to the worker that holds them.
+    server = _server(checkout, root, num_workers=2)
+    assert server.multiple_workers_unsupported_reason() is None
+    refuse_unsupported_num_workers(server)
+    # vibench_agent never closes the session its seed opens, so a relay deployment keeps one worker.
+    refuse_unsupported_num_workers(_server(checkout, root, artifact_dir=str(tmp_path)))
+    with pytest.raises(ValueError, match="needs num_workers=1: the legacy relay path"):
+        refuse_unsupported_num_workers(_server(checkout, root, artifact_dir=str(tmp_path), num_workers=2))
 
 
 def test_close_follows_the_session_contract(server, root, graded):
@@ -715,3 +722,24 @@ def test_failed_initial_prd_delivery_retains_cleanup(server, root, monkeypatch):
     assert _close(client, seed).status_code == 200
     assert stop.await_count == 3
     assert not session.scratch_dir.exists()
+
+
+def test_uvicorn_workers_import_a_module_level_app(monkeypatch):
+    # With num_workers > 1, each uvicorn worker imports the entrypoint module's `app`.
+    import runpy
+    from pathlib import Path
+    from unittest.mock import MagicMock
+
+    from nemo_gym.server_runtime import SimpleServer
+    from nemo_gym.utils import IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME, IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
+
+    path = str(Path(__file__).parents[1] / "app.py")
+    started = MagicMock(return_value=object())
+    monkeypatch.setattr(SimpleServer, "run_webserver", started)
+    for key in (IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME):
+        monkeypatch.delenv(key, raising=False)
+    assert "app" not in runpy.run_path(path, run_name="resources_servers.vibench.app")
+    started.assert_not_called()
+    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1")
+    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME, "resources_servers/vibench/app.py")
+    assert runpy.run_path(path, run_name="resources_servers.vibench.app")["app"] is started.return_value

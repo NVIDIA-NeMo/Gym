@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse
 from nemo_gym.server_runtime import SimpleResourcesServer
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import call_judge, reraise_judge_errors
 from nemo_gym.web import WebVerifierResult
 from resources_servers.webvoyager_judge.config import WebVoyagerJudgeConfig
@@ -265,3 +266,5 @@ class WebVoyagerJudgeResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     WebVoyagerJudgeResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = WebVoyagerJudgeResourcesServer.run_webserver()  # noqa: F401

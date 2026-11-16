@@ -207,13 +207,6 @@ class ChartographyResourcesServer(SimpleResourcesServer):
     _sandbox_access: dict[str, SandboxAccess] = PrivateAttr(default_factory=dict)
     _lent_sandboxes: Optional[LentSandboxes] = PrivateAttr(default=None)
 
-    def multiple_workers_unsupported_reason(self) -> Optional[str]:
-        # Like visual_coding_opencode, a lending server runs with one worker: several workers are not tested
-        # with lent sandboxes. The no-tools setting keeps nothing per worker.
-        if self.config.sandbox_provider is None:
-            return None
-        return "lent sandboxes live in one worker's memory"
-
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
         limit = self.config.judge_endpoint_max_concurrency

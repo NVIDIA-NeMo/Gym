@@ -108,7 +108,7 @@ class CrewAIAgentConfig(BaseResponsesAPIAgentConfig):
         default=None,
         description="Model name sent on each request when the request names none. The vLLM Model Server sends its own.",
     )
-    concurrency: int = Field(default=16, ge=1, description="Crew runs at once.")
+    concurrency: int = Field(default=16, ge=1, description="Crew runs at once, per worker.")
     timeout: float = Field(
         default=1800,
         gt=0,
@@ -267,9 +267,6 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
-        # A session lives in the process that seeded it.
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("CrewAI agent sessions are process-local and require num_workers=1")
         self._semaphore = asyncio.Semaphore(self.config.concurrency)
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> CrewAISessionState:

@@ -23,6 +23,7 @@ from nemo_gym.server_runtime import (
     entrypoint_ray_enabled,
     harvest_tools,
 )
+from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from nemo_gym.verification import exercise_verifier_fixture, load_verifier_fixture
 from resources_servers.partner_if import mock_tools_app as api
 from resources_servers.partner_if.evidence import MAX_EVIDENCE_CHARS
@@ -569,11 +570,12 @@ def test_an_oversized_artifact_is_a_capture_error_for_the_items_that_need_it(ser
     }
 
 
-def test_episodes_live_in_one_worker_and_the_server_never_joins_ray(tmp_path, plugin):
-    for workers in (None, 1):
-        make_server(tmp_path, num_workers=workers)
-    with pytest.raises(ValueError, match="num_workers=1"):
-        make_server(tmp_path, num_workers=2)
+def test_the_server_runs_with_several_workers_and_never_joins_ray(tmp_path, plugin):
+    # Episodes are keyed by resources_session_id, which session routing follows to the worker that holds them.
+    for workers in (None, 1, 2):
+        server = make_server(tmp_path, num_workers=workers)
+        assert server.multiple_workers_unsupported_reason() is None
+        refuse_unsupported_num_workers(server)
     # Declared on the class the entrypoint runs, where Gym reads it before it decides whether to start Ray.
     assert api.MockToolsResourcesServer.ray_enabled is False
     assert entrypoint_ray_enabled(Path(api.__file__)) is False

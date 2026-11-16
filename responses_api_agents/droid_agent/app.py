@@ -70,7 +70,7 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
 )
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, SandboxObservation
-from nemo_gym.utils import bounded_text
+from nemo_gym.utils import bounded_text, is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.droid_agent.parsing import DroidRun, parse_events
 from responses_api_agents.droid_agent.runtime import install_sandbox_runtime
 from responses_api_agents.droid_agent.sandbox import RUNTIME_PREFIX, SESSION_ROOT, DroidSandboxSession
@@ -113,6 +113,7 @@ class DroidAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
     model: str
     droid_version: str = Field(default=DEFAULT_DROID_VERSION, pattern=r"^\d+\.\d+\.\d+$")
+    # Per worker: with num_workers > 1, each worker runs this many turns at once.
     concurrency: int = Field(default=32, gt=0)
     # Ceiling on one activation's model and tool work; a task's metadata.agent_timeout_sec can lower it.
     timeout: float = Field(default=1800, gt=0, allow_inf_nan=False)
@@ -553,3 +554,5 @@ class DroidAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     DroidAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = DroidAgent.run_webserver()  # noqa: F401

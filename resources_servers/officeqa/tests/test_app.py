@@ -30,6 +30,7 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionRequest,
     check_resources_session_contract,
 )
+from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from resources_servers.officeqa import app as officeqa_app
 from resources_servers.officeqa.app import (
     VERIFIER_FIXTURE,
@@ -473,3 +474,34 @@ async def test_successful_session_cycles_release_inactive_locks(server, sandbox)
         assert not server._sessions
         assert not server._locks._locks
     assert sandbox.start.await_count == sandbox.stop.await_count == 30
+
+
+def test_the_server_runs_with_several_workers(server):
+    # Document sandboxes are keyed by resources_session_id, which session routing follows to the worker that holds them.
+    # Built afresh, so the server's own setup sees the worker count.
+    two_workers = OfficeQAResourcesServer.model_construct(
+        config=server.config.model_copy(update={"num_workers": 2}), server_client=server.server_client
+    )
+    assert two_workers.multiple_workers_unsupported_reason() is None
+    refuse_unsupported_num_workers(two_workers)
+
+
+def test_uvicorn_workers_import_a_module_level_app(monkeypatch):
+    # With num_workers > 1, each uvicorn worker imports the entrypoint module's `app`.
+    import runpy
+    from pathlib import Path
+    from unittest.mock import MagicMock
+
+    from nemo_gym.server_runtime import SimpleServer
+    from nemo_gym.utils import IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME, IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
+
+    path = str(Path(__file__).parents[1] / "app.py")
+    started = MagicMock(return_value=object())
+    monkeypatch.setattr(SimpleServer, "run_webserver", started)
+    for key in (IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME):
+        monkeypatch.delenv(key, raising=False)
+    assert "app" not in runpy.run_path(path, run_name="resources_servers.officeqa.app")
+    started.assert_not_called()
+    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1")
+    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME, "resources_servers/officeqa/app.py")
+    assert runpy.run_path(path, run_name="resources_servers.officeqa.app")["app"] is started.return_value

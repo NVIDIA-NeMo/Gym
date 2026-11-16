@@ -19,6 +19,7 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionRequest,
     check_resources_session_contract,
 )
+from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from resources_servers.chartography.app import ChartographyConfig, ChartographyResourcesServer
 from resources_servers.chartography.tests.test_app import (
     GOLDEN,
@@ -357,9 +358,12 @@ def test_without_a_sandbox_provider_a_cookie_seed_is_accepted() -> None:
     assert client.post("/seed_session", json={"task_id": "t-1"}).status_code == 200
 
 
-def test_only_the_no_tools_setting_runs_with_several_workers(root) -> None:
-    assert _plain_server().multiple_workers_unsupported_reason() is None
-    assert _server(root).multiple_workers_unsupported_reason() == "lent sandboxes live in one worker's memory"
+def test_both_settings_run_with_several_workers(root) -> None:
+    # Lent sandboxes are keyed by resources_session_id, which session routing follows to the worker that holds them.
+    for server in (_plain_server(), _server(root)):
+        server.config.num_workers = 2
+        assert server.multiple_workers_unsupported_reason() is None
+        refuse_unsupported_num_workers(server)
 
 
 @pytest.mark.parametrize(

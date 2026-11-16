@@ -958,3 +958,24 @@ def test_invalid_provider_blocks_are_final_refusals_before_connect(monkeypatch, 
     check_agent_seed_rejected(instance.setup_webserver(), seed(borrowed=borrowed))
     constructor.assert_not_called()
     constructor.connect.assert_not_awaited()
+
+
+def test_uvicorn_workers_import_a_module_level_app(monkeypatch) -> None:
+    # With num_workers > 1, each uvicorn worker imports the entrypoint module's `app`.
+    import runpy
+    from pathlib import Path
+    from unittest.mock import MagicMock
+
+    from nemo_gym.server_runtime import SimpleServer
+    from nemo_gym.utils import IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME, IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
+
+    path = str(Path(__file__).parents[1] / "app.py")
+    started = MagicMock(return_value=object())
+    monkeypatch.setattr(SimpleServer, "run_webserver", started)
+    for key in (IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME):
+        monkeypatch.delenv(key, raising=False)
+    assert "app" not in runpy.run_path(path, run_name="responses_api_agents.droid_agent.app")
+    started.assert_not_called()
+    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1")
+    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME, "responses_api_agents/droid_agent/app.py")
+    assert runpy.run_path(path, run_name="responses_api_agents.droid_agent.app")["app"] is started.return_value

@@ -50,6 +50,7 @@ class PartnerIFGradingConfig(BaseResourcesServerConfig):
             input=[], max_output_tokens=8192, temperature=0
         )
     )
+    # Per worker: with num_workers > 1, each worker allows this many judge calls at once.
     judge_max_concurrency: int = Field(default=8, gt=0)
     # Characters of the judge's user message (the serialized rubrics and evidence); size it to the judge's
     # context window. A larger input is not sent: the checks that gate reward are judged alone, and any item

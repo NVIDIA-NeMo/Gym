@@ -18,8 +18,9 @@ and returns borrowed `SandboxAccess`. Agents work in `/workspace/task` and read
 PDFs from `/workspace/docs`. Configure the latter as a read-only mount containing
 only the prepared document store.
 
-Session state is process-local: use one worker. Repeated seeding with the same
-request reuses the sandbox. `/close_session` is idempotent for the same episode;
+Each worker keeps the sessions it seeded in its memory; with several workers, session
+routing sends every request of a session to the worker that holds it. Repeated seeding
+with the same request reuses the sandbox. `/close_session` is idempotent for the same episode;
 failed cleanup retains ownership so close can retry. Shutdown stops remaining
 sandboxes, and a finite provider TTL bounds leaks.
 

@@ -2377,7 +2377,8 @@ class TestCli:
         assert terminus_path != config_path and terminus_path.name == "run_config_terminus_2_sandboxed_agent.yaml"
         written = yaml.safe_load(terminus_path.read_text())
         generated = written["harbor_ds_agent"]["responses_api_agents"]["terminus_2_sandboxed_agent"]
-        assert generated["num_workers"] == 1
+        # Episode sessions are routed to the worker that holds them, so the instance keeps the template's workers.
+        assert "num_workers" not in generated
         # The shipped template leaves `resources_server.name` unset for benchmark composition; the Harbor
         # instance declares none, so it is neither a swap source nor bound to a resources server.
         assert "resources_server" in generated and generated["resources_server"] is None
