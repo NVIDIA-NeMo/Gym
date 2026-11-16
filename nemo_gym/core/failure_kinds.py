@@ -97,6 +97,9 @@ MODEL_REQUEST_ERROR = "model_request_error"
 MODEL_TRANSPORT_ERROR = "model_transport_error"
 # A policy-model operation whose observed attempts all timed out after a confirmed upload.
 MODEL_POLICY_RESPONSE_TIMEOUT = "model_policy_response_timeout"
+# A policy response timeout whose every attempt ended while the model server had requests waiting in its queue:
+# the server's capacity, not the model, held the request back.
+MODEL_SERVER_QUEUE_TIMEOUT = "model_server_queue_timeout"
 # Explicit evidence that the model's context window was exceeded, not an HTTP status alone.
 MODEL_CONTEXT_LIMIT = "model_context_limit"
 
@@ -234,6 +237,7 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         MODEL_REQUEST_ERROR,
         MODEL_TRANSPORT_ERROR,
         MODEL_POLICY_RESPONSE_TIMEOUT,
+        MODEL_SERVER_QUEUE_TIMEOUT,
         MODEL_CONTEXT_LIMIT,
         JUDGE_FAILED,
         JUDGE_UNPARSEABLE,
@@ -335,6 +339,7 @@ _DEFAULT_CLASSIFICATION.update(
             SERVER_START_FAILED,
             MODEL_TRANSPORT_ERROR,
             MODEL_SERVER_ERROR,
+            MODEL_SERVER_QUEUE_TIMEOUT,
             AGENT_TIMEOUT_INFRASTRUCTURE,
             *PROVIDER_FAILURE_KINDS,
         ),
