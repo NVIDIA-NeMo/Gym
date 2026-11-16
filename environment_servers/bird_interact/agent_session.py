@@ -85,7 +85,12 @@ class AgentSession:
         global_config = self.server_client.global_config_dict
         block = global_config.get(TOKEN_CAPTURE_BLOCK) or {}
         agent_config = get_first_server_config_dict(global_config, self.agent.name)
-        capture = bool(block.get("enabled")) and (block.get("all_agents") or agent_config.get("token_id_capture"))
+        # A request that opts out of token capture, such as a validation rollout, stays off the training route.
+        capture = (
+            not self.request.skip_token_capture
+            and bool(block.get("enabled"))
+            and bool(block.get("all_agents") or agent_config.get("token_id_capture"))
+        )
         segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if capture else ""
         return f"/ng-rollout/{self.request.episode_id.capture_key}{segment}/v1/responses"
 
