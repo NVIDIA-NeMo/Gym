@@ -73,10 +73,13 @@ Point Gym at one or more extra roots so your own benchmarks, environments, resou
 <root>/
 ├── benchmarks/<name>/
 ├── environments/<name>/
+├── tasksets/<name>/
 ├── resources_servers/<name>/
 ├── responses_api_agents/<name>/
 └── responses_api_models/<name>/
 ```
+
+A folder in `tasksets/` holds one set of tasks, used for evaluation, training, or both: its `manifest.yaml` and the config, tasks, and data the manifest points to. Gym lists and selects a task set only through its manifest, by the manifest's `name`, and takes its kind from the manifest's `kind` field: `--benchmark` selects a task set with `kind: benchmark` and `--environment` one with `kind: environment`. Within one root, a task set cannot have the same name as a benchmark or environment of the same kind in `benchmarks/` or `environments/`. See [Names](/main/contribute/environments/new-environment#names).
 
 Set it as an `os.pathsep`-separated list (`:` on Linux/macOS):
 

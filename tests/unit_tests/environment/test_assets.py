@@ -10,7 +10,7 @@ import pytest
 
 from nemo_gym.environment.assets import asset_config_path
 from nemo_gym.environment.registry import RegistryError, resolve_catalog_entry
-from tests.unit_tests.environment.test_registry import _manifest, _write_manifest
+from tests.unit_tests.environment.test_registry import _manifest, _write_manifest, _write_taskset
 
 
 def _use_roots(monkeypatch: pytest.MonkeyPatch, *roots: Path) -> None:
@@ -148,10 +148,43 @@ def test_typo_suggestions_include_environment_flavors(roots: tuple[Path, Path]) 
 
 
 @pytest.mark.parametrize("kind", ["benchmark", "environment"])
-@pytest.mark.parametrize("name", ["stable_id", "suite/stable_id"])
-def test_typo_suggestions_include_declared_ids(roots: tuple[Path, Path], kind: str, name: str) -> None:
+def test_a_task_set_is_selected_by_its_name_with_its_kinds_flag(roots: tuple[Path, Path], kind: str) -> None:
     _, later = roots
-    _write_manifest(later, f"{kind}s", "group/moved", _manifest(name, kind))
+    manifest = _write_taskset(later, "folder", _manifest("stable_id", kind))
+    config = (manifest.parent / "configs/folder.yaml").resolve()
+
+    assert Path(asset_config_path(kind, "stable_id")) == resolve_catalog_entry("stable_id", kind).config_path == config
+    other_kind = "environment" if kind == "benchmark" else "benchmark"
+    with pytest.raises(ValueError, match="does not exist"):
+        asset_config_path(other_kind, "stable_id")
+
+
+def test_a_task_set_in_an_earlier_root_wins_over_a_benchmark_in_a_later_one(
+    roots: tuple[Path, Path], caplog: pytest.LogCaptureFixture
+) -> None:
+    earlier, later = roots
+    moved = _write_taskset(earlier, "shared", _manifest("shared", "benchmark"))
+    _write_manifest(later, "benchmarks", "shared", _manifest("shared", "benchmark"))
+
+    with caplog.at_level(logging.WARNING):
+        selected = Path(asset_config_path("benchmark", "shared"))
+
+    assert selected == resolve_catalog_entry("shared", "benchmark").config_path
+    assert selected == (moved.parent / "configs/shared.yaml").resolve()
+    assert "matches multiple configs" in caplog.text
+
+
+@pytest.mark.parametrize("kind", ["benchmark", "environment"])
+@pytest.mark.parametrize("name", ["stable_id", "suite/stable_id"])
+@pytest.mark.parametrize("in_tasksets", [False, True])
+def test_typo_suggestions_include_declared_ids(
+    roots: tuple[Path, Path], kind: str, name: str, in_tasksets: bool
+) -> None:
+    _, later = roots
+    if in_tasksets:
+        _write_taskset(later, "moved", _manifest(name, kind))
+    else:
+        _write_manifest(later, f"{kind}s", "group/moved", _manifest(name, kind))
 
     with pytest.raises(ValueError) as error:
         asset_config_path(kind, name.removesuffix("id") + "if")

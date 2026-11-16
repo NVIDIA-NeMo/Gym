@@ -49,6 +49,23 @@ class EnvironmentKind(StrEnum):
     BENCHMARK = "benchmark"
 
 
+TASKSETS_SUBDIR = "tasksets"
+# The folders of a search root that hold manifests, with the kind each folder requires. A task set in tasksets/ can be
+# either kind, so its manifest's `kind` decides.
+CATALOG_SUBDIRS: dict[str, EnvironmentKind | None] = {
+    "benchmarks": EnvironmentKind.BENCHMARK,
+    "environments": EnvironmentKind.ENVIRONMENT,
+    TASKSETS_SUBDIR: None,
+}
+
+
+def catalog_subdirs(kind: EnvironmentKind | str) -> tuple[str, str]:
+    """The folders of a search root that can hold a manifest of ``kind``, in lookup order: that kind's own folder,
+    then ``tasksets/``. Within one search root, a name selects at most one manifest of a kind across both."""
+    own = next(subdir for subdir, subdir_kind in CATALOG_SUBDIRS.items() if subdir_kind == EnvironmentKind(kind))
+    return own, TASKSETS_SUBDIR
+
+
 class IntegrationProfile(StrEnum):
     CUSTOM_GYM_VERIFIER = "custom-gym-verifier"
     CUSTOM_GYM_AGENT_LOOP = "custom-gym-agent-loop"
@@ -430,7 +447,7 @@ class ManifestError(ConfigError):
 
 
 def resolve_manifest_config_path(manifest_path: str | Path, manifest: EnvironmentManifest) -> Path:
-    """Resolve a relative config without leaving its benchmarks/environments tree.
+    """Resolve a relative config without leaving its benchmarks/, environments/ or tasksets/ tree.
 
     Standalone manifests are confined to their own directory. Resolve symlinks
     before checking containment so a linked config cannot escape the catalog.
@@ -439,7 +456,7 @@ def resolve_manifest_config_path(manifest_path: str | Path, manifest: Environmen
     config_path = Path(manifest.config_path)
     if config_path.is_absolute():
         raise ManifestError(f"Manifest '{path}' config_path must be relative.")
-    catalog = next((parent for parent in path.parents if parent.name in {"benchmarks", "environments"}), path.parent)
+    catalog = next((parent for parent in path.parents if parent.name in CATALOG_SUBDIRS), path.parent)
     resolved = (path.parent / config_path).resolve()
     if not resolved.is_relative_to(catalog.resolve()):
         raise ManifestError(f"Manifest '{path}' config_path escapes catalog tree '{catalog}'.")
