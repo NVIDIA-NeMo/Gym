@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -29,6 +30,7 @@ from nemo_gym.core import (
     RequestFailureLog,
     SandboxFailureDetails,
     TaskId,
+    choose_stage_outcome,
     failure_kinds,
     failure_report_for,
 )
@@ -1350,17 +1352,25 @@ async def test_a_model_patch_that_hangs_the_tests_is_a_counted_zero_by_default(
     assert response.failure_outcome_attribution == FailureClass.MODEL
     _assert_deadline_observed(response, log, server)
     verifier_sandbox.stop.assert_awaited_once()
-    # The saved row keeps the applied decision, so a reader does not infer it from the evidence.
-    row = response.model_dump()
+    # The saved row keeps the applied decision, so a reader does not infer it from the evidence. Read it back
+    # from its JSON, as the collection does: these are the facts the accounting counts as a scored zero.
+    row = json.loads(response.model_dump_json())
     assert is_policy_counted_zero(row) and applied_failure_class(row) == FailureClass.MODEL
+    assert row["failure_kind"] == TEST_DEADLINE and row["evaluation_completed"] is True
+    assert (row["failure_outcome_action"], row["failure_outcome_attribution"]) == ("count_as_zero", "model")
+    assert row["mask_sample"] is False and row["reward"] == 0.0 and row.get("_ng_failure_class") is None
 
 
 @pytest.mark.parametrize(
     "policy",
-    [{"default_action": "fail"}, {"by_failure_class": {"model": "fail"}}],
-    ids=["default-action-fail", "model-class-fail"],
+    [
+        {"default_action": "fail"},  # the configuration of the review, verbatim
+        {"by_failure_class": {"model": "fail"}},
+        {"default_action": "fail", "by_failure_class": {"evaluation": "retry"}},
+    ],
+    ids=["default-action-fail", "model-class-fail", "default-action-fail-with-other-rules"],
 )
-async def test_a_configured_fail_leaves_a_test_deadline_ungraded(
+async def test_an_explicit_fail_for_the_stage_leaves_a_test_deadline_ungraded(
     task_assets: Path, monkeypatch: MonkeyPatch, policy: dict
 ) -> None:
     server, verifier_sandbox = _verify_server(task_assets, monkeypatch, verification_policy=policy)
@@ -1370,10 +1380,66 @@ async def test_a_configured_fail_leaves_a_test_deadline_ungraded(
 
     assert response.evaluation_completed is False and response.mask_sample is True
     assert response.failure_outcome_action == OutcomeAction.FAIL
-    assert response.failure_outcome_attribution == FailureClass.MODEL
     _assert_deadline_observed(response, log, server)
-    row = response.model_dump()
+    row = json.loads(response.model_dump_json())
     assert not is_policy_counted_zero(row) and applied_failure_class(row) == FailureClass.MODEL
+    assert row["mask_sample"] is True and row["evaluation_completed"] is False
+
+
+@pytest.mark.parametrize(
+    "policy,action",
+    [
+        ({"default_action": "retry"}, "count_as_zero"),  # the shared default; a deadline is never run again
+        ({"by_failure_class": {"model": "retry"}}, "count_as_zero"),
+        ({"default_action": "fail", "by_failure_kind": {TEST_DEADLINE: "count_as_zero"}}, "count_as_zero"),
+        ({"by_failure_kind": {TEST_DEADLINE: "fail"}}, "fail"),
+        ({"default_action": "retry", "by_failure_kind": {TEST_DEADLINE: "fail"}}, "fail"),
+    ],
+    ids=["default-retry", "model-class-retry", "kind-rule-beats-fail", "kind-rule-fail", "kind-rule-beats-retry"],
+)
+async def test_the_deadlines_own_rule_and_an_explicit_fail_decide_over_the_boundary_default(
+    task_assets: Path, monkeypatch: MonkeyPatch, policy: dict, action: str
+) -> None:
+    server, verifier_sandbox = _verify_server(task_assets, monkeypatch, verification_policy=policy)
+    verifier_sandbox.exec.side_effect = _test_run(124)
+
+    response, _ = await _verify(server)
+
+    assert response.failure_outcome_action == action
+    assert response.mask_sample is (action == "fail")
+
+
+def test_the_deadline_default_is_a_counted_zero_without_any_policy_configured(task_assets: Path) -> None:
+    config = _config(task_assets).model_dump()
+    config.pop("outcome_policy")
+    built = DeepSWEResourcesServerConfig(**config)
+
+    decision = choose_stage_outcome(
+        failure_kind=TEST_DEADLINE, http_status=None, stage="verification", config=built.outcome_policy
+    )
+    assert (decision.action, decision.attribution) == (OutcomeAction.COUNT_AS_ZERO, FailureClass.MODEL)
+    # The stage's other rules keep the shared defaults for inconclusive attempts.
+    other = choose_stage_outcome(
+        failure_kind="verifier_error", http_status=None, stage="verification", config=built.outcome_policy
+    )
+    assert other.action == OutcomeAction.RETRY
+
+
+@pytest.mark.parametrize(
+    "policy,message",
+    [
+        ({"by_failure_kind": {TEST_DEADLINE: "retry"}}, "a confirmed test deadline is never run again"),
+        ({"by_failure_kind": {TEST_DEADLINE: "verify"}}, "a confirmed test deadline is never run again"),
+        ({"by_failure_kind": {"verifier_error": "count_as_zero"}}, "verification policy supports only fail, retry"),
+        ({"by_failure_class": {"model": "count_as_zero"}}, "verification policy supports only fail, retry"),
+        ({"default_action": "count_as_zero"}, "verification policy supports only fail, retry"),
+    ],
+)
+def test_a_verification_policy_cannot_retry_a_deadline_or_count_other_zeros(
+    task_assets: Path, policy: dict, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        _config(task_assets, verification_policy=policy)
 
 
 def test_the_deadline_is_classified_as_the_models_and_a_classification_override_keeps_that(task_assets: Path) -> None:

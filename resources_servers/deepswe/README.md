@@ -36,11 +36,15 @@ an inconclusive, masked result after the bound as before.
 
 Tests that GNU `timeout` stops at the task's limit (`verifier.timeout_sec`) inside the verifier sandbox on the model's
 patch are a confirmed deadline: the failure kind `deepswe:test_deadline`, classified as the model's, at the
-`verification` stage. By default the model's patch scores 0 (`count_as_zero`, `verifier_timeout_s` records the limit).
-`outcome_policy.by_stage.verification.default_action: fail` (or `by_failure_class.model: fail`) leaves it ungraded and
-masked instead. A confirmed deadline is never run again, so any other action counts the zero. The applied action and
-classification are saved with the result (`failure_outcome_action`, `failure_outcome_attribution`). A timeout reported
-only by the sandbox provider, and a golden patch past the limit, stay inconclusive.
+`verification` stage. This server's default for that kind is `count_as_zero`, so the patch scores 0
+(`verifier_timeout_s` records the limit). The default gives way to what the deployment writes: an explicit
+`outcome_policy.by_stage.verification.default_action: fail` (or `by_failure_class.model: fail`) leaves the deadline
+ungraded and masked, and a rule `by_failure_kind.deepswe:test_deadline` decides it over everything (`count_as_zero` or
+`fail`; `retry` is refused at load, since a confirmed deadline is never run again). A `retry` as the stage's default
+is for inconclusive attempts and does not apply to the deadline. `count_as_zero` is accepted only for the deadline's
+own rule: the other verification rules also decide inconclusive attempts. The applied action and classification are
+saved with the result (`failure_outcome_action`, `failure_outcome_attribution`). A timeout reported only by the
+sandbox provider, and a golden patch past the limit, stay inconclusive.
 
 ## Oracle checkpoint
 

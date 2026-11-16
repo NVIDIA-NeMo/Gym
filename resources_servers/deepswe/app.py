@@ -49,11 +49,13 @@ from nemo_gym.core import (
     RequestFailureLog,
     SandboxFailureDetails,
     StageOutcomePolicyConfig,
+    StagePolicyConfig,
     choose_stage_outcome,
     current_verifier_invocation_id,
     failure_kinds,
     observe_failure,
 )
+from nemo_gym.core.outcome_policy import declare_action_kind
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -119,11 +121,51 @@ _NO_VERDICT_FILE = "Verifier did not produce /logs/verifier/reward.json"
 TEST_DEADLINE = "deepswe:test_deadline"
 
 
+declare_action_kind(TEST_DEADLINE)
+
+
 def _default_outcome_policy() -> StageOutcomePolicyConfig:
     """The shared defaults, plus a confirmed test deadline classified as the model's."""
     return StageOutcomePolicyConfig(
         classification={"by_stage": {"verification": {"by_failure_kind": {TEST_DEADLINE: FailureClass.MODEL}}}}
     )
+
+
+def _with_deadline_default(override: object) -> object:
+    """Add this server's boundary default for a confirmed test deadline: it counts as a zero.
+
+    The default is only a default. A rule the deployment wrote for the deadline itself wins, and so does an explicit
+    ``fail`` as the verification stage's default action or for the model's class, which leaves the deadline ungraded.
+    A ``retry`` there is the shared default for inconclusive attempts; a confirmed deadline is never run again, so it
+    does not apply to it.
+    """
+    if isinstance(override, StageOutcomePolicyConfig):
+        override = override.model_dump(exclude_unset=True)
+    if not isinstance(override, dict):
+        return override
+    stages = override.get("by_stage", {})
+    rules = stages.get("verification", {}) if isinstance(stages, dict) else {}
+    if isinstance(rules, StagePolicyConfig):
+        rules = rules.model_dump(exclude_unset=True)
+    if not isinstance(rules, dict):
+        return override
+    kinds = rules.get("by_failure_kind", {})
+    classes = rules.get("by_failure_class", {})
+    if (
+        TEST_DEADLINE in kinds
+        or rules.get("default_action") == OutcomeAction.FAIL
+        or classes.get(FailureClass.MODEL) == OutcomeAction.FAIL
+    ):
+        return override
+    default_rule = {
+        "verification": {**rules, "by_failure_kind": {**kinds, TEST_DEADLINE: OutcomeAction.COUNT_AS_ZERO}}
+    }
+    return {**override, "by_stage": {**stages, **default_rule}}
+
+
+def _overlay_on_defaults(override: object) -> object:
+    """An override on this server's own defaults: the shared ones, the deadline's classification and its zero."""
+    return StageOutcomePolicyConfig.overlay(_default_outcome_policy(), _with_deadline_default(override))
 
 
 class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
@@ -134,7 +176,9 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
     task_cpu_multiplier: float = Field(default=2.0, gt=0)
     task_memory_multiplier: float = Field(default=2.0, gt=0)
-    outcome_policy: StageOutcomePolicyConfig = Field(default_factory=_default_outcome_policy)
+    outcome_policy: StageOutcomePolicyConfig = Field(
+        default_factory=lambda: StageOutcomePolicyConfig.model_validate(_overlay_on_defaults({}))
+    )
 
     sandbox_provider: str
     sandbox_config: dict[str, Any]
@@ -158,7 +202,7 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     @classmethod
     def keep_untouched_default_rules(cls, value: object) -> object:
         """A partial override changes only the rules it names; the others keep this server's defaults."""
-        return StageOutcomePolicyConfig.overlay(_default_outcome_policy(), value)
+        return _overlay_on_defaults(value)
 
     @field_validator("outcome_policy")
     @classmethod
@@ -171,9 +215,19 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
         }
         for stage, allowed in supported.items():
             rules = policy.by_stage.get(stage, policy.default_policy)
+            kind_rules = dict(rules.by_failure_kind)
+            if stage == "verification":
+                # The deadline's rule: its zero is counted, never retried. The other rules also decide
+                # inconclusive attempts, so they cannot count a zero.
+                deadline = kind_rules.pop(TEST_DEADLINE, None)
+                if deadline not in (None, OutcomeAction.COUNT_AS_ZERO, OutcomeAction.FAIL):
+                    raise ValueError(
+                        f"DeepSWE verification by_failure_kind.{TEST_DEADLINE} supports only count_as_zero, fail: "
+                        "a confirmed test deadline is never run again"
+                    )
             actions = {
                 rules.default_action,
-                *rules.by_failure_kind.values(),
+                *kind_rules.values(),
                 *rules.by_status_code.values(),
                 *rules.by_failure_class.values(),
             }
@@ -1092,14 +1146,13 @@ class DeepSWEResourcesServer(SandboxSessionResourcesServer):
         test_deadline = result.verifier_timeout_s is not None
         if test_deadline:
             # The tests were stopped at the task's limit on the model's patch (``_run_verifier``). The verification
-            # policy decides: ``fail`` leaves the result ungraded and masked. Any other action counts the zero, since a
-            # confirmed deadline is never run again, so the stage's retry default (for inconclusive attempts) does not
-            # apply to it.
+            # policy decides, and its default for this kind counts the zero; ``fail`` leaves the result ungraded and
+            # masked. A confirmed deadline is never run again (the validator refuses ``retry`` for it).
             decision = choose_stage_outcome(
                 failure_kind=TEST_DEADLINE, http_status=None, stage="verification", config=self.config.outcome_policy
             )
-            counts_as_zero = decision.action != OutcomeAction.FAIL
-            verification_failure_action = OutcomeAction.COUNT_AS_ZERO if counts_as_zero else OutcomeAction.FAIL
+            counts_as_zero = decision.action == OutcomeAction.COUNT_AS_ZERO
+            verification_failure_action = decision.action
             failure_outcome_attribution = decision.attribution
             failure_kind = TEST_DEADLINE
             result = result.model_copy(
