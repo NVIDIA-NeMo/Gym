@@ -714,6 +714,8 @@ class BaseServerConfig(BaseModel):
     num_workers: Optional[int] = None
     # Overrides the top-level `uvicorn_reuse_port` for this server when set.
     uvicorn_reuse_port: Optional[bool] = None
+    # Overrides the top-level `debug_files` for this server when set; see nemo_gym/core/runtime_files.py.
+    debug_files: Optional[bool] = None
 
 
 class BaseRunServerConfig(BaseServerConfig):

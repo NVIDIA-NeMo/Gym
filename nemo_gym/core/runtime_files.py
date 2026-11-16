@@ -17,16 +17,19 @@
 A server starts with its own source folder as the working directory.
 A relative path, or one built from ``Path.cwd()``, therefore writes into the Gym checkout.
 On a cluster that checkout is on a shared filesystem, and every such write loads its metadata servers.
-Each kind of runtime file has one global setting, named by what it holds, and one helper here:
+Runtime files go to one of three places, each named by what it holds and how long it lives:
 
-- A request's or session's temporary folder: :func:`temp_folder` or :func:`async_temp_folder`, under ``temp_dir``.
+- ``temp_dir``: a request's or session's temporary folder, from :func:`temp_folder` or :func:`async_temp_folder`.
   The folder is removed when the block exits.
   Each process keeps its request folders inside one folder of its own, removed when the process exits;
   the next process on the same host removes the folder of a process that was killed.
-- Debug files, such as verification logs, screenshots, trajectories and failure records: :func:`debug_folder`.
-  They are written only when ``debug_dir`` or the server's own ``debug_dir`` names a folder.
-- Model-call capture: ``model_call_capture_dir``.
-- Caches: ``cache_dir``. Run output that a later run reads back: the server's ``output_dir``, under ``results_dir``.
+- ``results_dir``: everything kept after the job.
+  A server's output goes in its ``output_dir``, by default ``<results_dir>/<server name>``.
+  Debug files, such as verification logs, screenshots, trajectories and failure records, go in a
+  :func:`debug_folder` under it, and only when ``debug_files`` or the server's own ``debug_files`` is on.
+- ``cache_dir``: files reused across runs.
+
+Model-call capture keeps its own ``model_call_capture_dir``, because several components read it.
 
 A kind of file gets a top-level setting of its own only when its lifetime or cleanup owner differs from every
 existing setting, and where it lives is a deployment decision an entry point makes for every process that uses it.
@@ -49,7 +52,8 @@ from urllib.parse import quote
 from uuid import uuid4
 
 from nemo_gym.config.global_config import (
-    DEBUG_DIR_KEY_NAME,
+    DEBUG_FILES_KEY_NAME,
+    RESULTS_DIR_KEY_NAME,
     TEMP_DIR_KEY_NAME,
     maybe_get_global_config_dict,
 )
@@ -65,8 +69,6 @@ _KIND = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _MAX_LABEL_LENGTH = 100
 # The debug folder segment for a request that carries no rollout id.
 NO_ROLLOUT_SEGMENT = "no-rollout"
-# The debug folder segment for a request that runs as no named agent instance.
-UNNAMED_AGENT_INSTANCE_SEGMENT = "unnamed"
 # Each process keeps its temporary folders in one folder of its own under a parent, named for the process:
 # nemo-gym-<host boot id>-<pid namespace>-<pid>. Request folders inside it carry no process data.
 # PID namespace numbers repeat across hosts (every host's initial namespace has the same one), so the boot id is
@@ -90,83 +92,79 @@ def _reset_first_use_lock() -> None:
 
 
 os.register_at_fork(after_in_child=_reset_first_use_lock)
-_checked_debug_roots: set[Path] = set()
 
 
-# Relative per-server debug folders this process has already warned about, so each is reported once.
-_warned_relative_debug_dirs: set[Path] = set()
+# Relative per-server output folders this process has already warned about, so each is reported once.
+_warned_relative_output_dirs: set[Path] = set()
 
 
 def debug_folder(
-    *, server_name: str, kind: str, label: str | None = None, override: str | Path | None = None
+    *,
+    server_name: str,
+    kind: str,
+    label: str | None = None,
+    debug_files: bool | None = None,
+    output_dir: str | Path | None = None,
 ) -> Path | None:
     """Return a new folder for one unit of work's debug files, or ``None`` when debug files are off.
 
-    The root is ``override`` when the server's own ``debug_dir`` names a folder.
-    A relative ``override`` turns debug files off for the server, with one warning, rather than failing requests.
-    Otherwise it is ``<debug_dir>/<server_name>`` when the global ``debug_dir`` names one.
-    Otherwise there is none.
-    Below the root the folder is ``<kind>/<capture key>/<agent instance>/<UTC time>-[<label>-]<random>``.
-    The capture key and agent instance come from the request context.
-    So every server separates rollouts and agent instances the same way.
-    Outside a rollout those segments are ``no-rollout`` and ``unnamed``.
+    ``debug_files`` is the server's own switch; ``None`` follows the global ``debug_files``.
+    The folder is ``<output>/debug/<kind>/<rollout>/<UTC time>-[<label>-]<random>``, where ``<output>`` is the
+    server's ``output_dir`` or ``<results_dir>/<server_name>``.
+    A relative ``output_dir`` turns debug files off for the server, with one warning, rather than failing requests:
+    it would resolve against the server's own source folder.
+    The rollout comes from the request context, and is ``no-rollout`` outside a rollout.
     The random part keeps two calls from sharing a folder.
     That covers two calls in one rollout, and two runs that reuse task and rollout indices.
 
     Call this once per unit of work that owns the files.
     That is once per request, or once when a session opens, keeping the folder on the session.
     Nothing is created here; the folder exists only if the caller writes into it.
+    To keep a unit of work's files off shared storage while it runs, pass the folder as ``keep_as`` to
+    :func:`temp_folder` and write into the temporary folder instead.
 
     Debug folders are grouped by rollout only while the request carries a rollout id.
     Today that holds when model-call capture is on; with it off, folders fall under ``no-rollout``.
 
-    Only a process started with Gym's configuration sees the global ``debug_dir``, and only a request sees its rollout.
+    Only a process started with Gym's configuration sees the global settings, and only a request sees its rollout.
     So call this in the server's request and pass the folder it returns to a Ray task or helper process.
     """
     if not _KIND.fullmatch(kind):
         raise ValueError(f"kind must be lowercase letters, digits, '-' and '_', got {kind!r}")
-    if override is not None:
-        root = Path(override)
-        if not root.is_absolute():
-            # A server would resolve it against its own source folder. Debug files must never fail a request,
-            # so they are turned off for this server instead, with one warning.
-            if root not in _warned_relative_debug_dirs:
-                _warned_relative_debug_dirs.add(root)
+    global_config = maybe_get_global_config_dict() or {}
+    if debug_files is None:
+        debug_files = bool(global_config.get(DEBUG_FILES_KEY_NAME))
+    if not debug_files:
+        return None
+    if output_dir is not None:
+        output = Path(output_dir)
+        if not output.is_absolute():
+            # Debug files must never fail a request, so they are turned off for this server instead.
+            if output not in _warned_relative_output_dirs:
+                _warned_relative_output_dirs.add(output)
                 logger.warning(
-                    "%s's debug_dir %r is not an absolute path, so its debug files are off; "
+                    "%s's output_dir %r is not an absolute path, so its debug files are off; "
                     "a relative path would resolve against the server's own source folder.",
                     server_name,
-                    str(root),
+                    str(output),
                 )
             return None
     else:
-        global_root = (maybe_get_global_config_dict() or {}).get(DEBUG_DIR_KEY_NAME)
-        if not global_root:
-            return None
         # The name is used only here, so a request with debug files off never fails over it.
         if server_name in ("", ".", ".."):
             raise ValueError(f"server_name must name a server, got {server_name!r}")
-        root = Path(global_root) / quote(server_name, safe="")
+        results_dir = global_config.get(RESULTS_DIR_KEY_NAME)
+        if not results_dir:
+            # Only a process started without Gym's configuration gets here, and it has no results folder.
+            return None
+        output = Path(results_dir) / quote(server_name, safe="")
 
     leaf = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     if label:
         leaf += "-" + quote(label, safe="")[:_MAX_LABEL_LENGTH]
     leaf += "-" + uuid4().hex[:12]
-    if root not in _checked_debug_roots:
-        _checked_debug_roots.add(root)
-        warn_if_unsuitable(DEBUG_DIR_KEY_NAME, root)
     rollout = quote(current_rollout_id() or NO_ROLLOUT_SEGMENT, safe="")
-    agent_instance = quote(_current_agent_instance() or UNNAMED_AGENT_INSTANCE_SEGMENT, safe="")
-    return root / kind / rollout / agent_instance / leaf
-
-
-def _current_agent_instance() -> str | None:
-    """The agent instance the current request runs as, or ``None`` when it is unnamed.
-
-    Requests carry no agent instance name in context yet.
-    Once named agent sessions set one, this function reads it, and callers do not change.
-    """
-    return None
+    return output / "debug" / kind / rollout / leaf
 
 
 def _host_id() -> str:

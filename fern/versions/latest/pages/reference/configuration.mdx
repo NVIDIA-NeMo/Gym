@@ -32,51 +32,71 @@ Servers that pre-staged setup trees next to the package (the layout before `cach
 
 ### Files Written at Runtime
 
-A server runs with its own source folder as its working directory. A relative path, or one built from `Path.cwd()`, therefore writes into the Gym checkout, which is on a shared filesystem on clusters. Under this convention, every file a server or agent writes while it runs belongs to one global setting, named by what it holds. Servers adopt it as they migrate; until then, some keep their own locations, as the section above says. The helpers are in `nemo_gym/core/runtime_files.py`.
+A server runs with its own source folder as its working directory. A relative path, or one built from `Path.cwd()`, therefore writes into the Gym checkout, which is on a shared filesystem on clusters. Under this convention, every file a server or agent writes while it runs goes to one of three places, each named by what it holds and how long it lives. Servers adopt it as they migrate; until then, some keep their own locations, as the section above says. The helpers are in `nemo_gym/core/runtime_files.py`.
 
 | Setting | Holds | Lifetime | Storage it needs |
 |---------|-------|----------|------------------|
-| `results_dir` | The run's artifacts, including each server's `output_dir` | Kept | Durable, seen by every node of the run |
-| `cache_dir` | Downloads and installs reused across runs | Across runs | Any |
-| `nemo_gym_log_dir` | Server process logs | Kept | Any |
-| `model_call_capture_dir` | Model-call capture ledgers | The run in NeMo RL, which reads the rows into training as it goes; kept as run output in an evaluation run | Private to the host; many small files |
-| `temp_dir` | Each request's or session's temporary folder (`temp_folder` / `async_temp_folder`) | One request or session | Private to the host; many small files |
-| `debug_dir` | Debug files servers write: verification logs, screenshots, trajectories, failure records (`debug_folder`) | Kept by whoever turned it on | Many small files |
+| `temp_dir` | Each request's or session's temporary folder (`temp_folder` / `async_temp_folder`): workspaces, payloads, logs that are parsed and discarded | One request or session; removed by the process that made it | The node's own disk, not memory |
+| `results_dir` | Everything kept after the job: the run's artifacts, each server's `output_dir`, and debug files when they are on | Kept | Durable, seen by every node of the run |
+| `cache_dir` | Downloads, installs and model weights reused across runs | Across runs | Any |
+
+`nemo_gym_log_dir` (server process logs) and `model_call_capture_dir` (model-call capture ledgers, which several components read) keep their own settings.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `temp_dir` | `null`: the node's own temporary directory, found by each process on its node | Entry points that know the cluster set it, for example to the node's local disk. |
-| `debug_dir` | `null` (off) | Turns on debug files for every server, each under `<debug_dir>/<server name>/`. A server's own `debug_dir` overrides it for that server. |
+| `temp_dir` | `null`: the node's own temporary directory, found by each process on its node | Entry points that know the cluster set it, for example to the node's local disk. Made absolute at parse time without following symlinks, unlike `results_dir` and `cache_dir`, which are resolved: every node uses the path, and a symlink on the driver may point elsewhere, or nowhere, on another node. |
+| `debug_files` | `false` | Turns on debug files for every server: verification logs, screenshots, trajectories, failure records. A server's own `debug_files` overrides it for that server. |
 
-Both are made absolute at parse time without following symlinks, unlike `results_dir` and `cache_dir`, which are resolved: every node uses these paths, and a symlink on the driver may point elsewhere, or nowhere, on another node. Each process that writes into `temp_dir` or `debug_dir`, and each model server that writes `model_call_capture_dir`, checks the folder on its own node and logs a warning when it is on a filesystem shared by many hosts (Lustre, NFS, GPFS, BeeGFS, Ceph, CIFS, WekaFS and others), where every small file loads the metadata servers that the whole cluster shares, or in memory (`tmpfs`), where it counts against the job's memory. For capture the warning notes that a shared folder is expected when capture is kept as run output. The setting still applies.
+Each process that writes into `temp_dir`, and each model server that writes `model_call_capture_dir`, checks the folder on its own node and logs a warning when it is on a filesystem shared by many hosts (Lustre, NFS, GPFS, BeeGFS, Ceph, CIFS, WekaFS and others), where every small file loads the metadata servers that the whole cluster shares, or in memory (`tmpfs`), where it counts against the job's memory. For capture the warning notes that a shared folder is expected when capture is kept as run output. The setting still applies.
 
-A temporary folder is private to its request: a server passes data to another process in the request, over HTTP or Ray, never as a path. Code that runs without Gym's configuration, such as a Ray task on another node, does not see `temp_dir` or `debug_dir`: the server that starts it passes the folders. For temporary files it passes its `temp_dir` as `temp_folder(parent=...)`. For debug files it calls `debug_folder()` in its own request, where the rollout is known, and passes the folder that returns. Each temporary folder is removed when its request or session ends, including on an error or cancellation. Each process keeps its temporary folders inside one folder of its own under `temp_dir`, named for the host's boot, the PID namespace and the process, and removes that folder when it exits. A killed process cannot, so the next Gym process on the same host and namespace that uses the same `temp_dir` removes the folders of processes that are no longer running, with everything inside them. That holds on a shared filesystem too, because each host removes only its own boot's folders, and removing leftovers never fails the request that triggers it.
+A temporary folder is private to its request: a server passes data to another process in the request, over HTTP or Ray, never as a path. Code that runs without Gym's configuration, such as a Ray task on another node, does not see `temp_dir`, `results_dir` or `debug_files`: the server that starts it passes the folders. For temporary files it passes its `temp_dir` as `temp_folder(parent=...)`. For debug files it calls `debug_folder()` in its own request, where the rollout is known, and passes the folder that returns.
+
+The process that made a temporary folder removes it, at one of three points:
+
+1. When its block exits, including on an error or cancellation. A session's folder goes when the server closes the block at session close.
+2. When the process exits. Each process keeps its temporary folders inside one folder of its own under `temp_dir`, named for the host's boot, the PID namespace and the process, and removes that folder when it exits.
+3. After a kill, when the next Gym process on the same host and namespace that uses the same `temp_dir` starts. It removes the folders of processes that are no longer running, with everything inside them. That holds on a shared filesystem too, because each host removes only its own boot's folders, and removing leftovers never fails the request that triggers it.
+
+A session that is never closed keeps its folder until the server process exits.
 
 #### Where a file goes
 
 One question decides it: who needs the file after the request that wrote it ends?
 
-| Who needs it afterwards | Where it goes | Per-server override |
-|-------------------------|---------------|---------------------|
-| Nobody: a harness workspace, a payload, a log that is parsed and discarded | `temp_folder()` / `async_temp_folder()` under `temp_dir` | None |
-| Only a person diagnosing the run: verification logs, screenshots, trajectories, failure records | `debug_folder()` under `debug_dir`; returns `None` when debug files are off | The server's `debug_dir`, an absolute path; a relative one turns that server's debug files off with a warning |
-| The run, or a later run that reads it back | The server's `output_dir` | `output_dir` |
-| Any later run, because it is rebuilt from its inputs | `cache_dir` | None |
-| Several components that must agree on the path | `model_call_capture_dir` | None |
+| Who needs it afterwards | Where it goes |
+|-------------------------|---------------|
+| Nobody: a harness workspace, a payload, a log that is parsed and discarded | `temp_folder()` / `async_temp_folder()` under `temp_dir` |
+| Only a person diagnosing the run: verification logs, screenshots, trajectories, failure records | `debug_folder()` under the server's output; returns `None` when debug files are off |
+| The run, or a later run that reads it back | The server's `output_dir`, by default `<results_dir>/<server name>` |
+| Any later run, because it is rebuilt from its inputs | `cache_dir` |
+| Several components that must agree on the path | `model_call_capture_dir` |
 
-A file that is both scratch and evidence, such as a harness log the server parses and someone may want to read later, goes in a `temp_folder` with `keep_as` set to a `debug_folder`: deleted when debug files are off, kept when they are on. The whole folder moves, so use `keep_as` for a folder of logs, never a workspace, and give each temporary folder its own `keep_as` that does not exist yet, such as a fresh `debug_folder()`: a folder that already exists receives the temporary folder inside it.
+A file that is both scratch and evidence, such as a harness log the server parses and someone may want to read later, goes in a `temp_folder` with `keep_as` set to a `debug_folder`: deleted when debug files are off, moved once to the server's debug folder when they are on, so it never reaches shared storage as many small writes while the request runs. The whole folder moves, so use `keep_as` for a folder of logs, never a workspace, and give each temporary folder its own `keep_as` that does not exist yet, such as a fresh `debug_folder()`: a folder that already exists receives the temporary folder inside it.
 
-A server keeps a setting of its own only to override a global one, with one name per kind: `debug_dir` for debug files, `output_dir` for run output that a later run reads back, and `log_dir` for the server's own logs. `debug_dir` is supported today; `output_dir` (default `<results_dir>/<server name>`) and `log_dir` (default `<nemo_gym_log_dir>/<server name>`) are the names servers adopt as they migrate. "Artifacts" keeps one meaning: the files a run leaves next to its rollouts.
+```python
+async with async_temp_folder(
+    kind="verification",
+    keep_as=debug_folder(
+        server_name=self.config.name,
+        kind="verification",
+        label=instance_id,
+        debug_files=self.config.debug_files,
+    ),
+) as log_dir:
+    ...  # run the harness with log_dir as its log folder, parse its output, compute the reward
+```
 
-A kind of file gets a top-level setting of its own only when its lifetime or cleanup owner differs from every existing setting, and where it lives is a deployment decision an entry point makes for every process that uses it. `temp_dir`, `debug_dir` and `model_call_capture_dir` meet both. Files that one server writes go through the helpers above instead.
+Every server config accepts `debug_files`; `null`, the default, follows the global switch. A server that keeps output a later run reads back declares its own `output_dir`, an absolute path, and passes it to `debug_folder(output_dir=...)` so its debug files sit with its output; a relative one turns that server's debug files off with a warning. Temporary folders have no per-server setting. "Artifacts" keeps one meaning: the files a run leaves next to its rollouts.
 
-Debug files are laid out so that rollouts and agent instances never share a folder:
+A kind of file gets a top-level setting of its own only when its lifetime or cleanup owner differs from every existing setting, and where it lives is a deployment decision an entry point makes for every process that uses it. `temp_dir` and `model_call_capture_dir` meet both. Debug files do not: they live as long as the run's output and need the same storage, so they are a switch under `results_dir`.
+
+Debug files are laid out so that servers and rollouts never share a folder:
 
 ```
-<root>/<kind>/<capture key>/<agent instance>/<UTC time>-[<label>-]<random>/
+<output>/debug/<kind>/<capture key>/<UTC time>-[<label>-]<random>/
 ```
 
-`<root>` is the server's `debug_dir` or `<debug_dir>/<server name>`. `<kind>` names what is written, such as `verification`. The capture key and agent instance come from the request; outside a rollout they are `no-rollout` and `unnamed`. Today a request carries its rollout id only when model-call capture is on, so with capture off every debug folder falls under `no-rollout` and is told apart only by its time and random part. The random part keeps repeated writes within one rollout, and runs that reuse task and rollout indices, apart.
+`<output>` is the server's `output_dir` or `<results_dir>/<server name>`. `<kind>` names what is written, such as `verification`. The capture key comes from the request; outside a rollout it is `no-rollout`. Today a request carries its rollout id only when model-call capture is on, so with capture off every debug folder falls under `no-rollout` and is told apart only by its time and random part. The random part keeps repeated writes within one rollout, and runs that reuse task and rollout indices, apart.
 
 A capture folder is deleted only by a consumer that has already taken what it needs from it: NeMo RL reads the capture rows into training during the run and resumes from its own checkpoints, so it deletes the capture folders it chose at shutdown. An evaluation run keeps capture as run output, because it can be the only copy of the request and response bodies.
 

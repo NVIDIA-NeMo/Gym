@@ -138,8 +138,9 @@ UV_LOCK_TIMEOUT_KEY_NAME = "uv_lock_timeout_seconds"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
 RESULTS_DIR_KEY_NAME = "results_dir"
 CACHE_DIR_KEY_NAME = "cache_dir"
-# Debug files servers write: verification logs, screenshots, trajectories, failure records. Null turns them off.
-DEBUG_DIR_KEY_NAME = "debug_dir"
+# Whether servers write debug files: verification logs, screenshots, trajectories, failure records.
+# They go under each server's results; a server's own `debug_files` overrides this.
+DEBUG_FILES_KEY_NAME = "debug_files"
 # Each request's or session's temporary folder. Null means the node's own temporary directory.
 TEMP_DIR_KEY_NAME = "temp_dir"
 INHERIT_FROM_KEY_NAME = "_inherit_from"
@@ -205,7 +206,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     UV_VENV_DIR_KEY_NAME,
     RESULTS_DIR_KEY_NAME,
     CACHE_DIR_KEY_NAME,
-    DEBUG_DIR_KEY_NAME,
+    DEBUG_FILES_KEY_NAME,
     TEMP_DIR_KEY_NAME,
     INHERIT_FROM_KEY_NAME,
     COPY_KEY_NAME,
@@ -2094,18 +2095,18 @@ Set the keys individually, in a config or as overrides, e.g.:
                     raise ConfigError(f"{dir_key_name} must be a non-empty path string, got {dir_value!r}.")
                 global_config_dict[dir_key_name] = str(Path(dir_value).expanduser().resolve())
 
-            # Runtime file roots; see nemo_gym/core/runtime_files.py.
-            # Debug files stay off unless a root is set.
+            # Runtime files; see nemo_gym/core/runtime_files.py.
+            debug_files = global_config_dict.setdefault(DEBUG_FILES_KEY_NAME, False)
+            if not isinstance(debug_files, bool):
+                raise ConfigError(f"{DEBUG_FILES_KEY_NAME} must be a boolean (true/false), got {debug_files!r}.")
             # An unset temp_dir is resolved by each process on its own node, never here.
-            for dir_key_name in (DEBUG_DIR_KEY_NAME, TEMP_DIR_KEY_NAME):
-                dir_value = global_config_dict.setdefault(dir_key_name, None)
-                if dir_value is None:
-                    continue
-                if not isinstance(dir_value, str) or not dir_value:
-                    raise ConfigError(f"{dir_key_name} must be a non-empty path string, got {dir_value!r}.")
+            temp_dir = global_config_dict.setdefault(TEMP_DIR_KEY_NAME, None)
+            if temp_dir is not None:
+                if not isinstance(temp_dir, str) or not temp_dir:
+                    raise ConfigError(f"{TEMP_DIR_KEY_NAME} must be a non-empty path string, got {temp_dir!r}.")
                 # Made absolute without following symlinks: the path is used on every node, and a symlink on the
                 # driver may point elsewhere, or nowhere, on another node.
-                global_config_dict[dir_key_name] = os.path.abspath(os.path.expanduser(dir_value))
+                global_config_dict[TEMP_DIR_KEY_NAME] = os.path.abspath(os.path.expanduser(temp_dir))
 
             # UV related configuration
             # An explicit `uv_cache_dir` wins, then a UV_CACHE_DIR the user already exported, then a
