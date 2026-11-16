@@ -40,6 +40,18 @@ class EpisodeRecord(CheckpointRecord):
     task_digest: str
     # ``None`` for an episode that had not recorded a boundary yet: it starts over from its input.
     boundary: JsonPayload
+    # Seconds of the episode's time budget spent when the checkpoint exported it, not counting time parked for
+    # checkpoints.
+    # Sampled when the checkpoint exports the episode, so a step in flight, such as an agent activation, counts in full.
+    # The replacement attempt is charged it when it begins, and has only the rest.
+    elapsed_s: float = 0.0
+
+    def to_json_record(self) -> dict[str, Any]:
+        record = super().to_json_record()
+        # Left out when nothing was spent, so a Gym from before the field existed still restores the record.
+        if not self.elapsed_s:
+            del record["elapsed_s"]
+        return record
 
 
 def task_digest(task: Any) -> str:
@@ -87,6 +99,7 @@ class EnvironmentParticipant(CheckpointParticipant):
     ) -> None:
         """Register a starting episode, attaching its restored boundary if it continues one.
 
+        An episode that continues one is charged the time budget the attempt it continues had spent.
         A ``restart`` episode is never exported: it starts over from its input after a crash.
         ``task_alone`` is the episode's task when ``task`` also names its comparison group: a checkpoint recorded
         before groups were recorded holds the task's digest alone, and the episode still continues it.
@@ -114,6 +127,8 @@ class EnvironmentParticipant(CheckpointParticipant):
             )
         except ValueError as error:
             raise ControlError(str(error)) from error
+        if restored is not None:
+            self.steps.charge(key, restored.elapsed_s)
         self._restored.pop(key, None)
         self._task_digests[key] = digest
 
@@ -171,11 +186,14 @@ class EnvironmentParticipant(CheckpointParticipant):
     def export_records(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
         # Only episodes within the commit's scope: another participant may report one of these as a restart.
         scope = None if episode_ids is None else {episode_id.capture_key for episode_id in episode_ids}
+        # Every exported episode is parked or inside a replay step, whose deadline is suspended while admission is
+        # closed, so its elapsed time is the time when the checkpoint exported it.
         live = [
             EpisodeRecord(
                 episode_id=EpisodeId.from_capture_key(key),
                 task_digest=self._task_digests[key],
                 boundary=boundary,
+                elapsed_s=self.steps.elapsed(key) or 0.0,
             )
             for key, boundary in self.steps.exported().items()
             if scope is None or key in scope
@@ -185,7 +203,10 @@ class EnvironmentParticipant(CheckpointParticipant):
         # while the commit's scope still continues it.
         unclaimed = [
             EpisodeRecord(
-                episode_id=EpisodeId.from_capture_key(key), task_digest=record.task_digest, boundary=record.boundary
+                episode_id=EpisodeId.from_capture_key(key),
+                task_digest=record.task_digest,
+                boundary=record.boundary,
+                elapsed_s=record.elapsed_s,
             )
             for key, record in self._restored.items()
             if scope is None or key in scope

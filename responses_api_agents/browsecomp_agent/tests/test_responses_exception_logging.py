@@ -17,7 +17,7 @@
 Diagnostic instrumentation, added because a full-400 eval lost 6 samples to
 `ClientResponseError: 500` from the agent's own /v1/responses and **the log contained no
 traceback at all** — no `🚨` marker, no app.py frame, nothing. The malformed-JSON bug
-printed a full ExceptionGroup via exception_handling_middleware, so the absence here means
+printed a full ExceptionGroup via the exception middleware, so the absence here means
 the failure does not surface as an ordinary application exception.
 
 Without a traceback the cause can only be bounded, not named. These tests pin the

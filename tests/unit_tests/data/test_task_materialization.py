@@ -56,6 +56,7 @@ def test_conversion_preserves_model_and_verifier_fields_without_mutating_source(
         "_ng_attempt_index": 1,
         "_ng_rollout_id": "rollout",
         "_ng_custom_metadata": "collector-only",
+        "_rowidx": 7,
     }
     original = deepcopy(row)
     task = materialize_task(row, taskset="test")
@@ -236,7 +237,10 @@ def _collate_one_taskset_row(tmp_path, row: dict) -> Path:
 @pytest.mark.parametrize("task_index", [100, 200])
 @pytest.mark.parametrize("explicit_rollout_id", [False, True])
 @pytest.mark.parametrize("group", [{}, {"_ng_group_id": "cohort", "_ng_group_attempt": 1}], ids=["ungrouped", "group"])
-def test_collation_preserves_shard_and_retry_identity(tmp_path, task_index, explicit_rollout_id, group):
+@pytest.mark.parametrize("skip_token_capture", [False, True])
+def test_collation_preserves_shard_and_retry_identity(
+    tmp_path, task_index, explicit_rollout_id, group, skip_token_capture
+):
     row = {
         "responses_create_params": {"input": "same prompt across shards"},
         "_ng_task_index": task_index,
@@ -246,6 +250,8 @@ def test_collation_preserves_shard_and_retry_identity(tmp_path, task_index, expl
     }
     if explicit_rollout_id:
         row["_ng_rollout_id"] = f"shard-{task_index}"
+    if skip_token_capture:
+        row["_ng_skip_token_capture"] = True
     output = _collate_one_taskset_row(tmp_path, row).parent
     prepared = json.loads((output / "example.jsonl").read_text())
     for key, value in row.items():
@@ -262,6 +268,7 @@ def test_collation_preserves_shard_and_retry_identity(tmp_path, task_index, expl
     request = SingleAgentTurnRequest.model_validate(_episode_request_body(loaded))
     assert request.episode_id.rollout_id == (f"shard-{task_index}" if explicit_rollout_id else f"{task_index}-0")
     assert request.episode_id.attempt == 2
+    assert request.skip_token_capture is skip_token_capture
     # A source row's group reaches the episode's rollout coordinates, as a flat row's does.
     assert request.rollout_coordinates == RolloutCoordinates(
         task_index=task_index,
@@ -443,3 +450,32 @@ def test_single_agent_task_data_container_merges_flat_fields_and_rejects_conflic
 def test_single_agent_input_rejects_invalid_task_data_container(invalid):
     with pytest.raises(ValidationError):
         SingleAgentTurnTaskInput.model_validate({"responses_create_params": {"input": "x"}, "task_data": invalid})
+
+
+@pytest.mark.parametrize("unexpected", [None, "unknown_task_field"])
+def test_rl_stream_index_stays_outside_strict_seed_task(unexpected: str | None) -> None:
+    class StrictSeed(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        question: str
+
+    row = {
+        "_rowidx": 7,
+        "_ng_task_index": 3,
+        "_ng_rollout_index": 7,
+        "_ng_rollout_id": "rollout",
+        "responses_create_params": {"input": "Answer the question"},
+        "question": "What is 2 + 2?",
+    }
+    if unexpected is not None:
+        row[unexpected] = "must remain visible to schema validation"
+    request = SingleAgentTurnRequest.model_validate(
+        {"episode_id": {"rollout_id": "rollout"}, "task": materialize_task(row, taskset="test")}
+    )
+    assert row["_rowidx"] == 7
+    task_data = request.task.task_input.task_data
+    assert "_rowidx" not in task_data
+    if unexpected is None:
+        assert StrictSeed.model_validate(task_data).question == row["question"]
+    else:
+        with pytest.raises(ValidationError, match="extra_forbidden"):
+            StrictSeed.model_validate(task_data)

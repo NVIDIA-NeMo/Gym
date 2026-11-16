@@ -156,6 +156,28 @@ async def test_session_is_released_when_the_cdp_connect_fails():
 
 
 @pytest.mark.asyncio
+async def test_a_hung_cdp_close_does_not_stop_the_provider_release(monkeypatch):
+    """A dead CDP endpoint must not keep the close from ending the provider session."""
+    import browser.page as page_module
+
+    monkeypatch.setattr(page_module, "_CLOSE_STEP_TIMEOUT_S", 0.1)
+
+    class _HungBrowser:
+        async def close(self):
+            await asyncio.Event().wait()
+
+    provider = FakeProvider("ws://unused")
+    backend = RemoteCDPBackend(provider)
+    backend._handle = await provider.acquire(BrowserSessionSpec())
+    backend._browser = _HungBrowser()
+
+    # The outer bound only turns a regression into a failure instead of a hung test run.
+    await asyncio.wait_for(backend.close(), timeout=5)
+
+    assert [handle.session_id for handle in provider.released] == ["s1"]
+
+
+@pytest.mark.asyncio
 async def test_session_without_a_cdp_url_is_reported_and_released():
     provider = FakeProvider("")
     backend = RemoteCDPBackend(provider)

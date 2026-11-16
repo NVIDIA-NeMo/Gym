@@ -7,7 +7,8 @@ from contextvars import ContextVar
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from pydantic import ConfigDict, PositiveFloat
+from fastapi.exceptions import RequestValidationError
+from pydantic import ConfigDict, PositiveFloat, ValidationError
 
 from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
@@ -27,6 +28,8 @@ from nemo_gym.core import (
     FailureReportRow,
     RolloutCoordinates,
     maybe_rollout_id_from_run_body,
+    model_sampling_from_run_body,
+    skips_token_capture,
 )
 from nemo_gym.data import materialize_task
 from nemo_gym.server_runtime import (
@@ -58,8 +61,10 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
-        # Flat rows still run the episode protocol through run_request, so its episodes checkpoint too.
+        # Flat rows still run the episode protocol through run_request, so its episodes checkpoint too, and their
+        # cleanups finish at shutdown.
         self.setup_environment_checkpoint(app)
+        self.setup_shutdown_sweep(app)
         app.post("/run")(self.run_legacy)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
         return app
@@ -72,9 +77,12 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
                 if is_episode_request
                 else self._episode_request_from_row(row)
             )
+        except ValidationError as error:
+            # A row that fails the episode request model, such as a malformed agent_context, gets a terminal 422, as on
+            # the episode request route, instead of a 500 that a caller retries.
+            raise RequestValidationError(error.errors(include_url=False)) from None
         except ValueError as error:
-            # A row this server cannot run, such as malformed rollout coordinates, is the caller's error.
-            raise HTTPException(status_code=422, detail=str(error)) from error
+            raise HTTPException(422, str(error)) from None
         if is_episode_request:
             # An episode request is answered with the episode reply it asks for.
             return (await self.run_request(request)).model_dump(mode="json")
@@ -128,6 +136,8 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
             task=materialize_task(row, taskset=task_source),
             # materialize_task drops the row's _ng_* keys; the coordinates among them travel typed to /verify.
             rollout_coordinates=RolloutCoordinates.from_row(row),
+            model_sampling=model_sampling_from_run_body(row),
+            skip_token_capture=skips_token_capture(row),
         )
 
     def _legacy_result(self, response: SingleAgentTurnResponse) -> dict[str, Any]:

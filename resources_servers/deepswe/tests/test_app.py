@@ -1,11 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
+import re
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
+import yaml
+from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
 import resources_servers.deepswe.app as app_module
@@ -13,19 +17,27 @@ from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     ENVIRONMENT_SERVER_FAILED,
+    PROVIDER_IO_TIMEOUT,
     PROVIDER_OOM_KILLED,
     SESSION_LOST,
     VERIFIER_ERROR,
+    EpisodeId,
     FailureBoundary,
     FailureClass,
     NgFailureEvent,
     OutcomeAction,
     RequestFailureLog,
     SandboxFailureDetails,
+    TaskId,
     failure_kinds,
     failure_report_for,
 )
-from nemo_gym.sandbox import SandboxResources
+from nemo_gym.sandbox import AsyncSandbox, SandboxResources
+from nemo_gym.server_runtime import (
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+    check_resources_session_contract,
+)
 from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
 from resources_servers.deepswe.app import (
     DeepSWEResourcesServer,
@@ -37,6 +49,7 @@ from resources_servers.deepswe.app import (
     _resolve_task,
     _resolve_task_id,
 )
+from resources_servers.deepswe.prepare import DEFAULT_RIPGREP_PATH, RIPGREP_SHA256
 from resources_servers.deepswe.task_store import task_collect_hook, task_id, task_image
 
 
@@ -1356,6 +1369,237 @@ async def test_failed_agent_git_setup_cannot_start_a_session(
     assert "|| true" not in sandbox.exec.await_args.args[0]
 
 
+def test_opencode_recipe_uses_the_pinned_agent_ripgrep() -> None:
+    recipe_path = Path(__file__).resolve().parents[3] / "benchmarks" / "deepswe" / "opencode.yaml"
+    recipe = yaml.safe_load(recipe_path.read_text(encoding="utf-8"))
+    agent = recipe["deepswe_opencode_agent"]["responses_api_agents"]["opencode_agent"]
+    resources = recipe["deepswe_opencode_resources_server"]["resources_servers"]["deepswe"]
+
+    assert agent["sandbox_ripgrep_sha256"] == RIPGREP_SHA256
+    assert agent["sandbox_ripgrep_path"] == app_module.AGENT_RIPGREP
+    assert app_module.AGENT_RUNTIME_DIR in agent["sandbox_path_prefix"]
+    assert app_module.NEMO_GYM_ROOT / resources["agent_ripgrep_path"] == DEFAULT_RIPGREP_PATH
+
+
+async def test_ripgrep_is_staged_readable_into_the_agent_sandbox(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    ripgrep = tmp_path / "rg"
+    ripgrep.write_bytes(b"rg")
+    config = _config(task_assets, golden=False)
+    config.agent_ripgrep_path = ripgrep
+    server = DeepSWEResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = SimpleNamespace(return_code=0, error_type=None, stderr="")
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+    await server._create_sandbox(server._task_store.get("example-task"), phase="agent")
+    setup = sandbox.start_with_setup.await_args.args[1]
+    await setup(sandbox)
+    remote = sandbox.upload.await_args.args[1]
+    assert remote != app_module.AGENT_RIPGREP
+    sandbox.upload.assert_awaited_once_with(ripgrep, remote)
+    sandbox.assert_has_calls(
+        [
+            call.exec("mkdir -p /tmp/nemo-gym-deepswe", timeout_s=60),
+            call.upload(ripgrep, remote),
+            call.exec(
+                f"chmod 0755 /tmp/nemo-gym-deepswe {remote} && mv -f -- {remote} /tmp/nemo-gym-deepswe/rg",
+                timeout_s=60,
+            ),
+        ]
+    )
+
+
+async def test_ripgrep_uploads_are_limited_to_two_per_server(task_assets: Path, tmp_path: Path) -> None:
+    server = DeepSWEResourcesServer(config=_config(task_assets), server_client=MagicMock(spec=ServerClient))
+    entered = asyncio.Queue()
+    release = asyncio.Event()
+    active = 0
+    peak = 0
+
+    async def upload(source, destination):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        entered.put_nowait(destination)
+        try:
+            await release.wait()
+        finally:
+            active -= 1
+
+    sandboxes = [AsyncMock() for _ in range(3)]
+    for sandbox in sandboxes:
+        sandbox.exec.return_value = SimpleNamespace(return_code=0, error_type=None, stderr="")
+        sandbox.upload.side_effect = upload
+    tasks = [asyncio.create_task(server._stage_agent_ripgrep(sandbox, tmp_path / "rg")) for sandbox in sandboxes]
+    try:
+        await asyncio.wait_for(entered.get(), 5)
+        await asyncio.wait_for(entered.get(), 5)
+        await asyncio.sleep(0)
+        assert peak == 2
+        assert entered.empty()
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*tasks), 5)
+    assert peak == 2 and active == 0
+    assert sum(sandbox.upload.await_count for sandbox in sandboxes) == 3
+
+
+@pytest.mark.parametrize("typed", [False, True], ids=["timeout", "provider-io-timeout"])
+async def test_ripgrep_upload_timeout_retries_once_at_a_fresh_path_before_publication(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch, typed: bool
+) -> None:
+    server = DeepSWEResourcesServer(config=_config(task_assets), server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = SimpleNamespace(return_code=0, error_type=None, stderr="")
+    error = _sandbox_failure(PROVIDER_IO_TIMEOUT, "upload timed out") if typed else TimeoutError("upload timed out")
+    sandbox.upload.side_effect = [error, None]
+    sleep = AsyncMock()
+    monkeypatch.setattr(app_module.asyncio, "sleep", sleep)
+
+    await server._stage_agent_ripgrep(sandbox, tmp_path / "rg")
+
+    paths = [upload.args[1] for upload in sandbox.upload.await_args_list]
+    assert len(paths) == len(set(paths)) == 2
+    assert all(path != app_module.AGENT_RIPGREP for path in paths)
+    assert all(re.fullmatch(r"/tmp/nemo-gym-deepswe/\.rg-[0-9a-f]{32}", path) for path in paths)
+    assert sandbox.exec.await_args.args[0] == (
+        f"chmod 0755 {app_module.AGENT_RUNTIME_DIR} {paths[1]} && mv -f -- {paths[1]} {app_module.AGENT_RIPGREP}"
+    )
+    assert sandbox.exec.await_count == 2  # mkdir, then publication of only the successful attempt
+    sleep.assert_awaited_once()
+    assert 15 <= sleep.await_args.args[0] <= 30
+
+
+@pytest.mark.parametrize("typed", [False, True], ids=["timeout", "provider-io-timeout"])
+async def test_two_ripgrep_upload_timeouts_propagate_without_publication(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch, typed: bool
+) -> None:
+    server = DeepSWEResourcesServer(config=_config(task_assets), server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = SimpleNamespace(return_code=0, error_type=None, stderr="")
+    errors = [
+        _sandbox_failure(PROVIDER_IO_TIMEOUT, "upload timed out") if typed else TimeoutError("upload timed out")
+        for _ in range(2)
+    ]
+    sandbox.upload.side_effect = errors
+    sleep = AsyncMock()
+    monkeypatch.setattr(app_module.asyncio, "sleep", sleep)
+
+    with pytest.raises(type(errors[-1])) as caught:
+        await server._stage_agent_ripgrep(sandbox, tmp_path / "rg")
+
+    assert caught.value is errors[-1]
+    paths = [upload.args[1] for upload in sandbox.upload.await_args_list]
+    assert len(paths) == len(set(paths)) == 2
+    assert all("mv -f --" not in command.args[0] for command in sandbox.exec.await_args_list)
+    sleep.assert_awaited_once()
+
+
+@pytest.mark.parametrize("failure", ["ordinary", "provider", "other-boundary", "cancelled"])
+async def test_ripgrep_non_timeout_failure_is_not_retried_or_published(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch, failure: str
+) -> None:
+    server = DeepSWEResourcesServer(config=_config(task_assets), server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = SimpleNamespace(return_code=0, error_type=None, stderr="")
+    error = {
+        "ordinary": RuntimeError("upload refused"),
+        "provider": _sandbox_failure(PROVIDER_OOM_KILLED, "sandbox lost"),
+        "other-boundary": NgFailureEvent(
+            boundary=FailureBoundary.HARNESS, failure_kind=PROVIDER_IO_TIMEOUT, failure_reason="unrelated timeout"
+        ),
+        "cancelled": asyncio.CancelledError(),
+    }[failure]
+    sandbox.upload.side_effect = error
+    sleep = AsyncMock()
+    monkeypatch.setattr(app_module.asyncio, "sleep", sleep)
+
+    with pytest.raises(type(error)) as caught:
+        await server._stage_agent_ripgrep(sandbox, tmp_path / "rg")
+
+    assert caught.value is error
+    sandbox.upload.assert_awaited_once()
+    sleep.assert_not_awaited()
+    assert all("mv -f --" not in command.args[0] for command in sandbox.exec.await_args_list)
+
+
+@pytest.mark.parametrize("stage", ["mkdir", "promote"])
+@pytest.mark.parametrize("return_code,error_type", [(7, None), (0, "timeout")])
+async def test_ripgrep_setup_reports_exec_status_and_does_not_retry_failed_commands(
+    task_assets: Path, tmp_path: Path, stage: str, return_code: int, error_type: str | None
+) -> None:
+    server = DeepSWEResourcesServer(config=_config(task_assets), server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    failed = SimpleNamespace(return_code=return_code, error_type=error_type, stderr="setup failed")
+    ok = SimpleNamespace(return_code=0, error_type=None, stderr="")
+    sandbox.exec.side_effect = [failed] if stage == "mkdir" else [ok, failed]
+
+    with pytest.raises(RuntimeError) as caught:
+        await server._stage_agent_ripgrep(sandbox, tmp_path / "rg")
+
+    assert f"return_code={return_code}" in str(caught.value)
+    assert f"error_type={error_type!r}" in str(caught.value)
+    assert "setup failed" in str(caught.value)
+    if stage == "mkdir":
+        sandbox.upload.assert_not_awaited()
+    else:
+        sandbox.upload.assert_awaited_once()
+
+
+async def test_the_verifier_sandbox_gets_no_ripgrep(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    ripgrep = tmp_path / "rg"
+    ripgrep.write_bytes(b"rg")
+    config = _config(task_assets, golden=False)
+    config.agent_ripgrep_path = ripgrep
+    server = DeepSWEResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+    await server._create_sandbox(server._task_store.get("example-task"), phase="verifier")
+    await sandbox.start_with_setup.await_args.args[1](sandbox)
+    sandbox.upload.assert_not_awaited()
+
+
+async def test_a_failed_ripgrep_staging_cannot_start_a_session(
+    task_assets: Path, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    ripgrep = tmp_path / "rg"
+    ripgrep.write_bytes(b"rg")
+    config = _config(task_assets, golden=False)
+    config.agent_ripgrep_path = ripgrep
+    server = DeepSWEResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = AsyncMock()
+    ok = SimpleNamespace(return_code=0, error_type=None, stderr="")
+    sandbox.exec.side_effect = [ok, ok, SimpleNamespace(return_code=1, error_type=None, stderr="read-only")]
+
+    async def start_with_setup(spec, setup):
+        return await AsyncSandbox.start_with_setup(sandbox, spec, setup)
+
+    sandbox.start_with_setup.side_effect = start_with_setup
+    monkeypatch.setattr(app_module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *_: MagicMock())
+    monkeypatch.setattr(app_module, "resolve_provider_metadata", lambda *_: {})
+    monkeypatch.setattr(app_module, "AsyncSandbox", MagicMock(return_value=sandbox))
+    with pytest.raises(RuntimeError, match="could not stage ripgrep"):
+        await server._create_sandbox(server._task_store.get("example-task"), phase="agent")
+    sandbox.stop.assert_awaited_once()
+
+
+def test_a_missing_ripgrep_refuses_to_start_the_server(task_assets: Path, tmp_path: Path) -> None:
+    config = _config(task_assets, golden=False)
+    config.agent_ripgrep_path = tmp_path / "rg"
+    with pytest.raises(ValueError, match=re.escape("run `gym eval prepare --benchmark deepswe/opencode`")):
+        DeepSWEResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+
 @pytest.mark.parametrize("return_code,error_type", [(1, None), (0, "timeout")])
 async def test_failed_patch_capture_is_never_downloaded(
     task_assets: Path, return_code: int, error_type: str | None
@@ -1669,3 +1913,192 @@ async def test_verifier_uses_shared_class_override_for_actions_and_saved_result(
     assert restored.mask_sample is True and restored.evaluation_completed is False
     assert response.failure_report == restored.failure_report
     assert all(log.report.events[error.event_id].failure_kind == "provider_unavailable" for error in errors[:attempts])
+
+
+def _environment_seed(
+    session_id: str = "resources-session-1", task: str = "example-task"
+) -> ResourcesSeedSessionRequest:
+    """The seed single_agent_turn_legacy sends for a prepared DeepSWE row."""
+    row = _request()
+    return ResourcesSeedSessionRequest(
+        resources_session_id=session_id,
+        episode_id=EpisodeId(rollout_id="rollout-1"),
+        task_id=TaskId(taskset="deepswe_opencode_resources_server", task_id=task),
+        task_data={key: row[key] for key in ("task_id", "image", "verifier_metadata")} | {"split": "test"},
+    )
+
+
+def _environment_verify_body(seed: ResourcesSeedSessionRequest) -> dict:
+    """The flat verify body single_agent_turn_legacy sends with the seed's session cookie."""
+    return seed.task_data | {key: _request()[key] for key in ("responses_create_params", "response")}
+
+
+def _close_body(seed: ResourcesSeedSessionRequest) -> dict:
+    return ResourcesCloseSessionRequest(
+        resources_session_id=seed.resources_session_id, episode_id=seed.episode_id
+    ).model_dump(mode="json")
+
+
+def _session_server(
+    task_assets: Path, monkeypatch: MonkeyPatch, *, golden: bool = False
+) -> tuple[DeepSWEResourcesServer, list[AsyncMock], AsyncMock]:
+    """A server whose sandboxes are fakes, registered with their session as the real start does."""
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=golden), server_client=MagicMock(spec=ServerClient)
+    )
+    sandboxes: list[AsyncMock] = []
+
+    async def create_sandbox(task, *, phase: str, session_id: str | None = None) -> AsyncMock:
+        sandbox = AsyncMock()
+        sandbox.serialize.return_value = {"sandbox_id": f"{phase}-sandbox-{len(sandboxes) + 1}", "workdir": "/app"}
+        sandboxes.append(sandbox)
+        if session_id is not None:
+            server._session_id_to_sandbox[session_id] = sandbox
+        return sandbox
+
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(side_effect=create_sandbox))
+    collect_model_patch = AsyncMock(return_value=b"agent patch\n")
+    monkeypatch.setattr(server, "_collect_model_patch", collect_model_patch)
+    monkeypatch.setattr(
+        server, "_run_verifier", AsyncMock(return_value=VerifierResult(evaluation_completed=True, reward=1.0))
+    )
+    return server, sandboxes, collect_model_patch
+
+
+def test_environment_session_follows_the_resources_session_contract(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server, sandboxes, _ = _session_server(task_assets, monkeypatch)
+    seed = _environment_seed()
+
+    check_resources_session_contract(
+        server.setup_webserver(),
+        seed,
+        keeps_state=True,
+        holds_state=lambda session_id: session_id in server._session_id_to_sandbox,
+        verify_body=_environment_verify_body(seed),
+    )
+
+    # The repeated seed lent the same sandbox, and close stopped it once.
+    assert server._create_sandbox.await_args_list[0].kwargs == {
+        "phase": "agent",
+        "session_id": seed.resources_session_id,
+    }
+    sandboxes[0].stop.assert_awaited_once()
+    assert seed.resources_session_id not in server._episode_agent_sandboxes
+
+
+def test_environment_session_lends_the_agent_sandbox_and_verify_grades_its_capture(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server, sandboxes, collect_model_patch = _session_server(task_assets, monkeypatch)
+    seed = _environment_seed()
+    verify_body = _environment_verify_body(seed)
+
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        seeded = client.post("/seed_session", json=seed.model_dump(mode="json"))
+        assert seeded.status_code == 200, seeded.text
+        assert seeded.json()["sandbox_access"] == {
+            "connection": {
+                "kind": "direct",
+                "provider_config_ref": "test",
+                "descriptor": {"sandbox_id": "agent-sandbox-1", "workdir": "/app"},
+            },
+            "workdir": "/app",
+        }
+        # The agent may operate the sandbox but not destroy it: verify still collects the patch from it.
+        sandboxes[0].serialize.assert_any_await(scope="operate")
+        sandboxes[0].stop.assert_not_awaited()
+
+        verified = client.post("/verify", json=verify_body)
+        assert verified.status_code == 200, verified.text
+        assert verified.json()["reward"] == 1.0
+        assert verified.json()["model_patch"] == "agent patch\n"
+        assert verified.json()["sandbox_handle"] == "agent-sandbox-1"
+        assert collect_model_patch.await_args.args[0] is sandboxes[0]
+        sandboxes[0].stop.assert_awaited_once()
+
+        # An identical retry replays the verdict instead of grading an empty patch.
+        repeated = client.post("/verify", json=verify_body)
+        assert repeated.status_code == 200, repeated.text
+        assert repeated.json() == verified.json()
+        assert len(sandboxes) == 2 and collect_model_patch.await_count == 1
+
+        # A sandbox that verify consumed cannot be lent again.
+        assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 409
+        assert client.post("/close_session", json=_close_body(seed)).status_code == 200
+        assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 409
+        lost = client.post("/verify", json=verify_body)
+        assert lost.status_code == 200, lost.text
+        assert lost.json()["mask_sample"] is True and lost.json()["failure_kind"] == SESSION_LOST
+
+    sandboxes[0].stop.assert_awaited_once()
+    assert server._session_id_to_sandbox == {} and server._episode_agent_sandboxes == {}
+
+
+def test_failed_stop_after_capture_is_retried_with_the_captured_patch(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server, sandboxes, collect_model_patch = _session_server(task_assets, monkeypatch)
+    seed = _environment_seed()
+    verify_body = _environment_verify_body(seed)
+
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 200
+        sandboxes[0].stop.side_effect = [RuntimeError("provider unavailable"), None]
+
+        assert client.post("/verify", json=verify_body).status_code == 500
+        assert server._session_id_to_sandbox[seed.resources_session_id] is sandboxes[0]
+
+        retried = client.post("/verify", json=verify_body)
+        assert retried.status_code == 200, retried.text
+        assert retried.json()["reward"] == 1.0
+        assert retried.json()["model_patch"] == "agent patch\n"
+        assert retried.json()["sandbox_handle"] == "agent-sandbox-1"
+
+    collect_model_patch.assert_awaited_once()
+    assert sandboxes[0].stop.await_count == 2
+
+
+def test_failed_close_keeps_the_agent_sandbox_for_a_retry(task_assets: Path, monkeypatch: MonkeyPatch) -> None:
+    server, sandboxes, _ = _session_server(task_assets, monkeypatch)
+    seed = _environment_seed()
+
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 200
+        sandboxes[0].stop.side_effect = [RuntimeError("provider unavailable"), None]
+
+        assert client.post("/close_session", json=_close_body(seed)).status_code == 500
+        assert server._session_id_to_sandbox[seed.resources_session_id] is sandboxes[0]
+        assert client.post("/close_session", json=_close_body(seed)).status_code == 200
+        assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 409
+
+    assert sandboxes[0].stop.await_count == 2
+    assert server._session_id_to_sandbox == {}
+
+
+def test_an_episode_session_that_is_never_closed_is_stopped_at_shutdown(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server, sandboxes, _ = _session_server(task_assets, monkeypatch)
+
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=_environment_seed().model_dump(mode="json")).status_code == 200
+        sandboxes[0].stop.assert_not_awaited()
+
+    sandboxes[0].stop.assert_awaited_once()
+    assert server._session_id_to_sandbox == {}
+
+
+@pytest.mark.parametrize("golden", [False, True])
+def test_environment_seed_that_names_another_task_or_runs_in_golden_mode_is_rejected(
+    task_assets: Path, monkeypatch: MonkeyPatch, golden: bool
+) -> None:
+    server, _, _ = _session_server(task_assets, monkeypatch, golden=golden)
+    seed = _environment_seed() if golden else _environment_seed(task="other-task")
+
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        response = client.post("/seed_session", json=seed.model_dump(mode="json"))
+
+    assert response.status_code == 422, response.text
+    server._create_sandbox.assert_not_awaited()

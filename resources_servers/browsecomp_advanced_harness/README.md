@@ -27,6 +27,14 @@ judge_model_api_key: ""
 judge_model_name: Qwen/Qwen3-235B-A22B-Instruct-2507
 ```
 
+## Provider call limits
+
+A search or browse call to Tavily or Exa ends. A rate limit (429, 502, 503, 504 or 520) is waited out without
+spending the call's three attempts, but only for `provider_rate_limit_wait_seconds` (default 600) per call. Past
+that, rate limits count as attempts and the call fails with the provider's last error, which the agent sees as a
+tool error. `0` spends attempts from the first rate limit. `provider_request_timeout_seconds` (default 120) is the
+total time of one HTTP attempt, and a dropped connection is retried at most three times within an attempt.
+
 ## Workspace sandbox
 
 Workspace tools require a configured sandbox provider. Add these fields under the resources server's

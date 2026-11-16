@@ -18,8 +18,9 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import ClassVar
 
-from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi import Body, HTTPException, Request
 
 from nemo_gym.agents import (
     AgentCloseSessionResponse,
@@ -38,6 +39,7 @@ from nemo_gym.core import (
 from nemo_gym.sandbox import AsyncSandbox, create_provider, resolve_provider_config
 from nemo_gym.server_runtime import DirectHTTPToolAccess
 from nemo_gym.trajectory import AgentInvocation
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
 from responses_api_agents.nooa_agent.result import finalize_run_result, is_transient_infrastructure_error
 from responses_api_agents.nooa_agent.runner import (
@@ -69,6 +71,9 @@ class NOOAAgent(SimpleResponsesAPIAgent):
     """Run one NOOA activation per Environment Server-owned episode."""
 
     config: NOOAAgentConfig
+    # Sandboxed mode runs NOOA inside the task sandbox, which calls the model server from there. Embedded mode
+    # calls it from this host, which reaches the advertised node address as well.
+    calls_model_from_sandbox: ClassVar[bool] = True
 
     def classify_outcome(self, native_result: Mapping[str, object]) -> AgentOutcome:
         """Report a trusted model rejection; the environment owns grading and retry policy."""
@@ -80,14 +85,6 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         ):
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
         return AgentOutcome(failure_kind="unknown")
-
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-        app.router.routes = [route for route in app.router.routes if getattr(route, "path", None) != "/run"]
-        return app
-
-    async def run(self, body: object) -> None:
-        raise NotImplementedError("Use the single_agent_turn Environment Server")
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> NOOASessionState:
         accesses = self.effective_tool_accesses(body)
@@ -293,3 +290,6 @@ class NOOAAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     NOOAAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = NOOAAgent.run_webserver()  # noqa: F401

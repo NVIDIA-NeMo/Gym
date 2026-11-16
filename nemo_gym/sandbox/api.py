@@ -16,6 +16,8 @@
 
 import asyncio
 import inspect
+import os
+import stat
 import tempfile
 import threading
 import time
@@ -23,6 +25,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, TypeVar
@@ -41,12 +44,15 @@ from nemo_gym.sandbox.providers import (
     SandboxSpec,
     SandboxStatus,
     SupportsSandboxBackgroundServices,
+    SupportsSandboxCheckpointPolling,
     SupportsSandboxEndpoint,
     SupportsSandboxIndependentUploads,
+    SupportsSandboxParkedPolling,
     SupportsSandboxPauseResume,
     SupportsSandboxPty,
     SupportsSandboxPtyAttach,
     SupportsSandboxSidecars,
+    SupportsSandboxSnapshot,
     create_provider,
 )
 from nemo_gym.sandbox.resource_telemetry import (
@@ -58,10 +64,14 @@ from nemo_gym.sandbox.resource_telemetry import (
 )
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
 from nemo_gym.telemetry.gym_metrics import (
+    SandboxTransferDirection,
+    SandboxTransferOutcome,
     record_sandbox_active,
     record_sandbox_exec_duration,
     record_sandbox_startup,
+    record_sandbox_transfer,
 )
+from nemo_gym.telemetry.setup import is_metrics_exporter_active, is_span_group_or_metrics_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
@@ -402,6 +412,65 @@ def _sandbox_id(handle: Any) -> str | None:
     return getattr(handle, "sandbox_id", None)
 
 
+def _file_size(path: Path) -> int | None:
+    """The size of a regular file, or None when it cannot be read, so telemetry never fails a transfer.
+
+    One ``stat`` call: on a shared filesystem such as Lustre, each one is a metadata server round trip.
+    """
+    try:
+        result = os.stat(path)
+    except OSError:
+        return None
+    return result.st_size if stat.S_ISREG(result.st_mode) else None
+
+
+async def _instrumented_transfer(
+    direction: SandboxTransferDirection,
+    transfer: Callable[[], Awaitable[None]],
+    *,
+    local_path: Path,
+    provider: str,
+    span_attributes: Mapping[str, Any],
+) -> None:
+    """Run one file transfer with a span, a duration sample and a byte count when spans or metrics are on.
+
+    ``local_path`` is the host side of the transfer.
+    Its size is read once after the transfer succeeds, and only when a recording span or a metrics exporter uses it.
+    Paths are deliberately not recorded.
+    A path can name task content, the same way an exec command can.
+    """
+    if not is_span_group_or_metrics_active(GymSpanGroup.SANDBOX):
+        await transfer()
+        return
+    started = time.perf_counter()
+    outcome: SandboxTransferOutcome = "error"
+    size_bytes: int | None = None
+    try:
+        with managed_span(
+            GymSpanGroup.SANDBOX,
+            f"gym.sandbox.{direction}",
+            **{"nemo.gym.sandbox.provider": provider, **default_span_attributes(), **span_attributes},
+        ) as span:
+            await transfer()
+            recording = span is not None and span.is_recording()
+            if recording or is_metrics_exporter_active():
+                size_bytes = _file_size(local_path)
+            if recording and size_bytes is not None:
+                safe_set_span_attributes(span, {"nemo.gym.sandbox.transfer.size_bytes": size_bytes})
+        outcome = "ok"
+    except asyncio.CancelledError:
+        outcome = "cancelled"
+        raise
+    finally:
+        record_sandbox_transfer(
+            (time.perf_counter() - started) * 1000.0,
+            provider=provider,
+            direction=direction,
+            outcome=outcome,
+            size_bytes=size_bytes if outcome == "ok" else None,
+        )
+
+
 def _missing_keywords(method: Callable[..., Any], keywords: Mapping[str, Any]) -> list[str]:
     """The names in ``keywords`` that ``method`` does not take, none when it takes them all or ``**kwargs``."""
     try:
@@ -495,12 +564,53 @@ class AsyncSandbox:
             raise RuntimeError("Sandbox has not been started")
         return self._handle
 
+    @property
+    def provider(self) -> SandboxProvider:
+        """The provider this sandbox runs on."""
+        return self._provider
+
+    @property
+    def owns_provider(self) -> bool:
+        """Whether ``stop()`` also closes the provider; false for a sandbox on a provider shared with others."""
+        return self._owns_provider
+
+    @property
+    def started(self) -> bool:
+        """Whether the sandbox is started or connected and not yet stopped, so its operations can be called."""
+        return self._handle is not None and not self._stopped
+
+    def checkpoint_exec_polling(self) -> AbstractContextManager[None]:
+        """Poll this sandbox's running commands for completion often while a harness in it stops for a checkpoint.
+
+        A no-op scope on providers without the capability. It changes how soon a command's end is seen, not
+        process signals, command deadlines or what a checkpoint waits for.
+        """
+        handle = self._require_handle()
+        if isinstance(self._provider, SupportsSandboxCheckpointPolling):
+            return self._provider.checkpoint_exec_polling(handle)
+        return nullcontext()
+
+    def parked_exec_polling(self) -> AbstractContextManager[None]:
+        """Hold completion checks of this sandbox's commands while a harness in it is paused for a checkpoint.
+
+        A provider that polls command status stops asking a sandbox that a snapshot may leave unresponsive, and
+        asks again once the scope exits; other providers use a no-op scope. The scope does not extend a command's
+        time limit: one whose limit runs out inside it fails then. Do not wait inside the scope for a command of
+        this sandbox.
+        """
+        handle = self._require_handle()
+        if isinstance(self._provider, SupportsSandboxParkedPolling):
+            return self._provider.parked_exec_polling(handle)
+        return nullcontext()
+
     async def start(
         self,
         spec: SandboxSpec | None = None,
         *,
+        snapshot_id: str | None = None,
         span_attributes: Mapping[str, Any] | None = None,
     ) -> "AsyncSandbox":
+        """Create the sandbox from ``spec``, or with ``snapshot_id`` from that snapshot in place of the image."""
         if self._closed:
             raise RuntimeError("Sandbox has been stopped")
         if self._handle is not None and not self._stopped:
@@ -511,8 +621,16 @@ class AsyncSandbox:
         if requested_spec.sidecars and not isinstance(self._provider, SupportsSandboxSidecars):
             provider_name = getattr(self._provider, "name", type(self._provider).__name__)
             raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support sidecars")
+        if snapshot_id is not None and not isinstance(self._provider, SupportsSandboxSnapshot):
+            provider_name = getattr(self._provider, "name", type(self._provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support snapshots")
 
-        if is_span_group_enabled(GymSpanGroup.SANDBOX):
+        async def create() -> SandboxHandle:
+            if snapshot_id is None:
+                return await self._provider.create(requested_spec)
+            return await self._provider.create_from_snapshot(snapshot_id, requested_spec)
+
+        if is_span_group_or_metrics_active(GymSpanGroup.SANDBOX):
             provider_name = self._telemetry_provider_name()
             started = time.perf_counter()
             self._resource_attributes = {
@@ -526,14 +644,14 @@ class AsyncSandbox:
                 "gym.sandbox.start",
                 **{**self._resource_attributes, **requested_attributes(requested_spec)},
             ) as span:
-                handle = await self._provider.create(requested_spec)
+                handle = await create()
                 if span is not None:
                     safe_set_span_attributes(span, {"nemo.gym.sandbox.id": _sandbox_id(handle)})
             record_sandbox_startup((time.perf_counter() - started) * 1000.0, provider=provider_name)
             record_sandbox_active(1, provider=provider_name)
             self._counted_active = True
         else:
-            handle = await self._provider.create(requested_spec)
+            handle = await create()
         self._handle = handle
         self._created_at, self._closed_at, self._cleanup_errors = time.monotonic(), None, []
         self._spec = requested_spec
@@ -553,8 +671,11 @@ class AsyncSandbox:
                     tmp_path = Path(tmp_dir)
                     for index, (target_path, contents) in enumerate(requested_spec.files.items()):
                         source_path = tmp_path / f"file-{index}"
-                        source_path.write_text(contents, encoding="utf-8")
-                        await self._provider.upload_file(handle, source_path, target_path)
+                        if isinstance(contents, bytes):
+                            source_path.write_bytes(contents)
+                        else:
+                            source_path.write_text(contents, encoding="utf-8")
+                        await self.upload(source_path, target_path)
         except BaseException:
             await self.stop()
             raise
@@ -597,7 +718,7 @@ class AsyncSandbox:
         must redirect stdout and stderr. Per-command ``env`` and ``user``
         overrides apply to the service-preserving execution too.
         """
-        if not is_span_group_enabled(GymSpanGroup.SANDBOX):
+        if not is_span_group_or_metrics_active(GymSpanGroup.SANDBOX):
             return await self._exec_uninstrumented(
                 command,
                 cwd=cwd,
@@ -682,6 +803,11 @@ class AsyncSandbox:
         """The user an exec runs as when it names none: ``SandboxSpec.user``, else the provider's own default."""
         return self._spec.user if self._spec is not None else None
 
+    @property
+    def default_workdir(self) -> str | None:
+        """The directory an exec runs in when it names none: ``SandboxSpec.workdir``, else the provider's own."""
+        return self._spec.workdir if self._spec is not None else None
+
     def set_default_user(self, user: str | int | None) -> None:
         """Change the default exec user of a running sandbox.
 
@@ -700,10 +826,25 @@ class AsyncSandbox:
         self._spec = replace(self._spec, workdir=workdir) if self._spec is not None else SandboxSpec(workdir=workdir)
 
     async def upload(self, local_path: Path | str, remote_path: str) -> None:
-        await self._provider.upload_file(self._require_handle(), Path(local_path), remote_path)
+        handle, local_path = self._require_handle(), Path(local_path)
+        await self._transfer("upload", lambda: self._provider.upload_file(handle, local_path, remote_path), local_path)
 
     async def download(self, remote_path: str, local_path: Path | str) -> None:
-        await self._provider.download_file(self._require_handle(), remote_path, Path(local_path))
+        handle, local_path = self._require_handle(), Path(local_path)
+        await self._transfer(
+            "download", lambda: self._provider.download_file(handle, remote_path, local_path), local_path
+        )
+
+    async def _transfer(
+        self, direction: SandboxTransferDirection, transfer: Callable[[], Awaitable[None]], local_path: Path
+    ) -> None:
+        await _instrumented_transfer(
+            direction,
+            transfer,
+            local_path=local_path,
+            provider=self._telemetry_provider_name(),
+            span_attributes={"nemo.gym.sandbox.id": _sandbox_id(self._handle), **self._resource_attributes},
+        )
 
     def sidecar(self, name: str) -> "AsyncSandboxSidecar":
         """Return a sidecar container declared in ``SandboxSpec.sidecars``, to run commands in and read files from."""
@@ -765,6 +906,21 @@ class AsyncSandbox:
             name = getattr(provider, "name", type(provider).__name__)
             raise NotImplementedError(f"Sandbox provider {name!r} does not support pause/resume")
         await provider.resume(handle)
+
+    async def snapshot(self, *, name: str | None = None) -> str:
+        """Start a snapshot of this sandbox and return its id at once; the sandbox keeps running.
+
+        The snapshot may not be usable yet: the provider's ``wait_snapshot_ready`` returns once it can create
+        sandboxes, and ``start(snapshot_id=...)`` creates one from it. ``name`` is stored with the snapshot, which
+        the provider's ``list_snapshots`` finds it by. Raises ``NotImplementedError`` on a provider without
+        snapshots.
+        """
+        handle = self._require_handle()
+        provider = self._provider
+        if not isinstance(provider, SupportsSandboxSnapshot):
+            provider_name = getattr(provider, "name", type(provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support snapshots")
+        return await provider.snapshot(handle, name=name)
 
     async def stop(self) -> None:
         if self._closed:

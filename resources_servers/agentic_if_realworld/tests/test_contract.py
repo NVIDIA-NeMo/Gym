@@ -11,10 +11,12 @@ from resources_servers.agentic_if_realworld.benchmark.core import (
     PHASES,
     ROOT,
     Dataset,
+    bounded_schema,
     digest,
     frozen_policy_bytes,
     indexed,
     judge,
+    provider_schema,
     read,
     summarize,
     write,
@@ -482,6 +484,163 @@ def test_sse_replay_terminal_and_native_rejection(tmp_path):
     path.write_text(event({"tool_calls": [{"name": "forbidden"}]}, "tool_calls"))
     with pytest.raises(ValueError, match="Native"):
         replay_sse(path)
+
+
+@pytest.mark.parametrize(
+    "finish_reason,metadata,complete",
+    [
+        ("repetition", {}, False),
+        ("stop", {"native_finish_reason": "repetition"}, False),
+        ("stop", {"stop_reason": "repetition_detected"}, False),
+        ("stop", {"stop_reason": 0}, True),
+        ("stop", {"stop_reason": 11}, True),
+        ("stop", {"stop_reason": "stop_sequence"}, True),
+        ("stop", {"native_finish_reason": "provider_stop"}, True),
+    ],
+)
+@pytest.mark.parametrize("consumer", ["policy", "judge"])
+def test_completion_checks_reject_only_known_repetition_metadata(
+    dataset, tmp_path, finish_reason, metadata, complete, consumer
+):
+    from nemo_gym.core import NeMoGymChatCompletion
+    from resources_servers.agentic_if_realworld.benchmark.scoring import _checked_result
+    from resources_servers.agentic_if_realworld.benchmark.transport import verified_response
+
+    p = payload(dataset)
+    expected_review = review(p)
+    raw_response = {
+        "id": "synthetic-judge-response",
+        "created": 0,
+        "model": "synthetic-judge",
+        "object": "chat.completion",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": json.dumps(expected_review)},
+                "finish_reason": finish_reason,
+                **metadata,
+            }
+        ],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 5, "total_tokens": 8},
+    }
+    normalized = NeMoGymChatCompletion.model_validate(raw_response)
+    [choice] = normalized.choices
+    assert choice.finish_reason == "stop"
+    if finish_reason == "repetition":
+        assert choice.native_finish_reason == "repetition"
+    for key, value in metadata.items():
+        assert getattr(choice, key) == value
+        assert type(getattr(choice, key)) is type(value)
+    response = normalized.model_dump(mode="json", exclude_unset=True)
+    path = tmp_path / "judge.http"
+    write(path, response)
+    receipt = {
+        "status": "generated",
+        "content_type": "application/json",
+        "response": response,
+        "raw_attempts": [{"path": str(path), "sha256": digest(path)}],
+    }
+    verified = verified_response(receipt)
+    schema = bounded_schema(provider_schema(read(ROOT / "policy/judge_output.schema.json")), p)
+    body = {"model": "synthetic-judge", "reasoning_effort": "medium"}
+    if complete and consumer == "policy":
+        assert delivered(verified) == {
+            "status": "complete",
+            "finish_reason": "stop",
+            "message": response["choices"][0]["message"],
+        }
+    elif complete:
+        checked_review, result = _checked_result(verified, p, schema, body)
+        assert checked_review == expected_review
+        assert result["item_verdict"] == "pass" and result["reward"] == 1.0
+        assert result["mask_sample"] is False
+        assert result["judge_response_id"] == response["id"]
+        assert result["judge_usage"] == response["usage"]
+    else:
+        reason = "Incomplete delivery" if consumer == "policy" else "Incomplete judge delivery"
+        with pytest.raises(ValueError, match=reason):
+            if consumer == "policy":
+                delivered(verified)
+            else:
+                _checked_result(verified, p, schema, body)
+
+
+@pytest.mark.parametrize("metadata", [{"native_finish_reason": "repetition"}, {"stop_reason": "repetition_detected"}])
+@pytest.mark.parametrize("cause_on_terminal", [True, False])
+def test_sse_repetition_evidence_survives_raw_binding(tmp_path, metadata, cause_on_terminal):
+    from resources_servers.agentic_if_realworld.benchmark.transport import replay_sse, verified_response
+
+    first = {"index": 0, "delta": {"content": "OK"}, "finish_reason": None}
+    terminal = {"index": 0, "delta": {"content": "."}, "finish_reason": "stop"}
+    (terminal if cause_on_terminal else first).update(metadata)
+    usage = {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+    chunks = [
+        {"choices": [first]},
+        {"choices": [terminal]},
+        {"choices": [], "usage": usage},
+    ]
+    raw = ("".join("data: " + json.dumps(chunk) + "\n\n" for chunk in chunks) + "data: [DONE]\n\n").encode()
+    path = tmp_path / "synthetic.http"
+    path.write_bytes(raw)
+    expected = {
+        "object": "chat.completion",
+        "choices": [
+            {"index": 0, "message": {"role": "assistant", "content": "OK."}, "finish_reason": "stop", **metadata}
+        ],
+        "usage": usage,
+    }
+    assert replay_sse(path) == expected
+    receipt = {
+        "status": "generated",
+        "content_type": "text/event-stream",
+        "response": expected,
+        "raw_attempts": [{"path": str(path), "sha256": digest(path)}],
+    }
+    assert verified_response(receipt) == expected
+    with pytest.raises(ValueError, match="Incomplete delivery"):
+        delivered(verified_response(receipt))
+    legacy = copy.deepcopy(receipt)
+    for key in metadata:
+        legacy["response"]["choices"][0].pop(key)
+    with pytest.raises(ValueError, match="Saved response differs from raw delivery"):
+        verified_response(legacy)
+    assert path.read_bytes() == raw
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"stop_reason": 0},
+        {"stop_reason": 11},
+        {"stop_reason": "stop_sequence"},
+        {"native_finish_reason": "provider_stop"},
+        {"unrelated": "value"},
+    ],
+)
+def test_sse_ordinary_metadata_preserves_legacy_receipt_shape(tmp_path, metadata):
+    from resources_servers.agentic_if_realworld.benchmark.transport import replay_sse, verified_response
+
+    terminal = {"delta": {"content": "OK."}, "finish_reason": "stop", **metadata}
+    raw = ("data: " + json.dumps({"choices": [terminal]}) + "\n\ndata: [DONE]\n\n").encode()
+    path = tmp_path / "legacy.http"
+    path.write_bytes(raw)
+    legacy = {
+        "object": "chat.completion",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "OK."}, "finish_reason": "stop"}],
+    }
+    assert replay_sse(path) == legacy
+    receipt = {
+        "status": "generated",
+        "content_type": "text/event-stream",
+        "response": legacy,
+        "raw_attempts": [{"path": str(path), "sha256": digest(path)}],
+    }
+    assert delivered(verified_response(receipt)) == {
+        "status": "complete",
+        "finish_reason": "stop",
+        "message": legacy["choices"][0]["message"],
+    }
+    assert path.read_bytes() == raw
 
 
 @pytest.mark.parametrize(

@@ -18,9 +18,9 @@ def test_sampling_defaults() -> None:
     params = row["responses_create_params"]
     assert params["temperature"] == 1.0
     assert params["top_p"] == 0.95
-    assert params["max_output_tokens"] == 16384
+    assert params["max_output_tokens"] == 32768
     config = OmegaConf.load(Path(__file__).parents[1] / "configs/genrm_eval.yaml")
-    assert dict(config.responses_create_params) == {"temperature": 1.0, "top_p": 0.95}
+    assert dict(config.responses_create_params) == {"temperature": 1.0, "top_p": 0.95, "max_output_tokens": 32768}
 
 
 @pytest.mark.parametrize("valid", [True, False])

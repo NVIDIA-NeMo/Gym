@@ -8,11 +8,15 @@ Skills are reusable units of operational knowledge an agent can load at runtime,
 
 NeMo Gym treats skills as an **environment-level variable you can sweep**, the same way it treats prompts. You point a run at a directory of skills, the agent loads them with its own native mechanism, and each rollout result is tagged so you can compare variants. NeMo Gym does not interpret or activate skills — it sets up the skill environment and measures the outcome.
 
+<Note>
+Task folders don't yet support run-level skills: rollout collection refuses `+skills.path` for their rows. A task folder can bring its own skills, as described below.
+</Note>
+
 ## Skills are a run-level knob, not a dataset field
 
 Skills are specified on `gym eval run` and applied to a **fixed, skill-agnostic dataset** at rollout time. The dataset stays a description of tasks, so the same dataset is reusable across skill variants and across agents.
 
-The exception is a [Harbor task](/main/data/harbor-tasks) that brings its own skills: it declares `skills_dir` and ships `environment/skills/`, and the `harbor` environment server places them in the task's sandbox, where a harness that declares `supports_task_tool_context` points its model at them. Those skills are part of the task, not a run-level variant.
+The exception is a [Harbor task](/main/data/task-folders/harbor-tasks) that brings its own skills: it declares `skills_dir` in `[environment]` and ships `environment/skills/`. At seed, the `harbor` environment server uploads that folder to `skills_dir` unless the image already has skills there. Only a harness that declares `supports_task_tool_context` takes such a task, and it points its model at the skills. Those skills are part of the task, not a run-level variant.
 
 ## Usage
 
