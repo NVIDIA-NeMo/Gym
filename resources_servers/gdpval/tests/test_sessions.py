@@ -242,7 +242,7 @@ def test_tasks_without_submitted_files_record_how_they_ended(server, root, tmp_p
     assert sorted(p.name for p in task_dir.iterdir()) == ["finish_params.json", "reference_files"]
 
 
-def test_an_agent_that_ran_out_of_wall_time_is_a_masked_timeout_and_persists_nothing(
+def test_an_agent_that_ran_out_of_wall_time_is_a_scored_zero_and_persists_nothing(
     server, root, tmp_path, stopped, references
 ):
     client = TestClient(server.setup_webserver())
@@ -253,8 +253,11 @@ def test_an_agent_that_ran_out_of_wall_time_is_a_masked_timeout_and_persists_not
 
     verified = _verify(client, response_metadata={"stop_reason": "wall_time"})
 
-    assert verified["_ng_failure_class"] == "agent_timeout"
-    assert (verified["failure_kind"], verified["mask_sample"], verified["reward"]) == ("agent_timeout", True, 0.0)
+    # The model's own result: a zero that stays in the denominator, typed with model attribution. No outcome action,
+    # so a timeout whose window held a server-side fault is still run again by recovery.
+    assert "_ng_failure_class" not in verified
+    assert (verified["failure_kind"], verified["mask_sample"], verified["reward"]) == ("agent_timeout", False, 0.0)
+    assert verified["failure_outcome_attribution"] == "model"
     assert "_ng_failure_terminal" not in verified
     assert not (tmp_path / "persist").exists(), "the partial work is not collected or judged"
     assert _close(client, seed).status_code == 200
@@ -434,16 +437,27 @@ def test_a_refused_seed_does_not_hand_out_the_cookie_of_the_live_session(server,
     assert _verify(intruder)["failure_kind"] == SESSION_LOST
 
 
-def test_a_seed_whose_rollout_id_names_no_rollout_index_is_rejected(server, root, tmp_path):
-    seed = _seed(tmp_path).model_copy(update={"episode_id": EpisodeId(rollout_id="explicit")})
+def test_sessions_with_rollout_ids_another_orchestrator_assigned_keep_their_files_apart(server, root, tmp_path):
+    """Rollouts named per trial attempt: concurrent samples of one task must not share a directory."""
+    app = server.setup_webserver()
+    first, second = TestClient(app), TestClient(app)
+    first_id, second_id = "trial-trial_01aaa-attempt-0", "trial-trial_01bbb-attempt-0"
+    for client, session_id, rollout_id in ((first, "first", first_id), (second, "second", second_id)):
+        seed = _seed(tmp_path, session_id=session_id).model_copy(
+            update={"episode_id": EpisodeId(rollout_id=rollout_id)}
+        )
+        assert _post_seed(client, seed).status_code == 200
+    (root / "a.md").write_text("a")
+    (root / "b.md").write_text("b")
+    first.post("/finish", json={"reason": "first", "paths": ["a.md"]})
+    second.post("/finish", json={"reason": "second", "paths": ["b.md"]})
 
-    refused = _post_seed(TestClient(server.setup_webserver()), seed)
+    first_dir, second_dir = (Path(_verify(client)["deliverables_dir"]) for client in (first, second))
 
-    # 422, not a retried 500: a retry sends the same rollout_id.
-    assert refused.status_code == 422
-    assert "is not '<task_index>-<rollout_index>' with two integers" in refused.json()["detail"]
-
-    assert not root.exists()
+    assert (first_dir.name, second_dir.name) == (f"repeat_id_{first_id}", f"repeat_id_{second_id}")
+    assert first_dir.parent == second_dir.parent == tmp_path / "persist" / "task_task-1"
+    assert "a.md" in _files(first_dir) and "b.md" not in _files(first_dir)
+    assert "b.md" in _files(second_dir) and "a.md" not in _files(second_dir)
 
 
 def test_a_second_live_session_for_the_same_task_and_repeat_is_refused_until_the_first_closes(
