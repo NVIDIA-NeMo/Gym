@@ -693,6 +693,53 @@ class TestRunFailureIsolation:
         assert result.failure_kind == "vcqa_agent:artifact_unavailable"
         assert (result.failure_outcome_action, result.failure_outcome_attribution) == ("retry", "evaluation")
 
+    @pytest.mark.parametrize(
+        "failure_class,action",
+        [("evaluation", "retry"), ("evaluation", "fail"), ("model", "retry"), ("model", "fail")],
+    )
+    async def test_the_saved_decision_follows_the_configured_policy(
+        self, monkeypatch: pytest.MonkeyPatch, failure_class: str, action: str
+    ) -> None:
+        from fastapi import Request
+
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+        from responses_api_agents.vcqa_agent.app import VcqaAgentRunRequest
+
+        async def boom(**kwargs):  # type: ignore[no-untyped-def]
+            raise RuntimeError("download failed")
+
+        monkeypatch.setattr("responses_api_agents.vcqa_agent.app.materialize_working_tree", boom)
+        kind = "vcqa_agent:artifact_unavailable"
+        agent = VcqaAgent(
+            config=_make_config(
+                outcome_policy={
+                    "classification": {"by_stage": {"agent": {"by_failure_kind": {kind: failure_class}}}},
+                    "by_stage": {"agent": {"default_action": action}},
+                }
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        body = VcqaAgentRunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[{"role": "user", "content": "anything"}]
+            ),
+            verifier_metadata={
+                "task_id": "isolation-1",
+                "dataset_kind": "fileset",
+                "artifact_key": "missing.tar.gz",
+                "rubric": {"judge": [{"category": "must_have", "description": "X"}]},
+            },
+        )
+        request = MagicMock(spec=Request)
+        request.cookies = {}
+
+        result = await agent.run(request=request, response=MagicMock(), body=body)
+
+        # The observed kind and the originating stage do not depend on the action or its attribution.
+        assert result.failure_kind == kind and result.mask_sample is True
+        assert (result.failure_outcome_action, result.failure_outcome_attribution) == (action, failure_class)
+        assert result.model_extra["_ng_failure_stage"] == "agent"
+
 
 ########################################
 # Dispatcher synchronous bits

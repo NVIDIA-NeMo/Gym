@@ -25,16 +25,17 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, ClassVar, Literal
 
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
 from nemo_gym.client import SESSION_ID_KEY, get_response_json
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
-    FailureClass,
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NgFailureEvent,
-    OutcomeAction,
+    StageOutcomePolicyConfig,
+    applied_outcome_fields,
+    environment_fault_policy,
     failure_kinds,
 )
 from nemo_gym.metrics import MASK_SAMPLE_FIELD
@@ -92,6 +93,10 @@ from resources_servers.agentic_turn_simulation.workspace import Workspace
 LOG = logging.getLogger(__name__)
 
 FAILURE_KIND_PREFIX = "agentic_turn_simulation"  # the namespace of this server's failure kinds
+# Faults of the episode itself (the simulator is part of it, and the wall-clock cap is its serving speed): the shared
+# outcome policy decides what recovery does with a row that holds one. Other masked outcomes carry no decision.
+TIME_CAP_KIND = f"{FAILURE_KIND_PREFIX}:time_cap"
+SIMULATOR_FAILED_KIND = f"{FAILURE_KIND_PREFIX}:simulator_failed"
 # The output items of a policy turn that are scored: its reasoning is never shown to the judge.
 SCORED_ITEM_TYPES = ("message", "function_call", "function_call_output")
 # A reply cut off by its output budget is retried with the budget doubled, starting from the params' max_tokens
@@ -144,6 +149,20 @@ class AgenticTurnSimulationResourcesServerConfig(BaseResourcesServerConfig):
     # Agent stop reasons that mask the rollout. The default masks the wall-clock cap, which tracks serving speed. A
     # context overflow before the first step (the row does not fit the policy's context) is masked whatever this lists.
     masked_stop_reasons: list[str] = Field(default_factory=lambda: ["time_cap"])
+    # The decision saved with a row masked for a time_cap or a failed simulator. By default both kinds are classified as
+    # the evaluation's and that class is retried; a deployment can reclassify a kind or select fail for a class.
+    outcome_policy: StageOutcomePolicyConfig = Field(
+        default_factory=lambda: environment_fault_policy("agent", (TIME_CAP_KIND, SIMULATOR_FAILED_KIND))
+    )
+
+    @field_validator("outcome_policy", mode="before")
+    @classmethod
+    def keep_untouched_default_rules(cls, value: object) -> object:
+        """A partial override changes only the rules it names; the others keep this server's defaults."""
+        return StageOutcomePolicyConfig.overlay(
+            environment_fault_policy("agent", (TIME_CAP_KIND, SIMULATOR_FAILED_KIND)), value
+        )
+
     # Agent stop reasons that leave the turn unfinished by the policy's own doing: scored 0 as code_gate
     # "unfinished_turn", without a judge, which passes many cut-off turns (it credits the progress made before the cut).
     # empty_output (a final reply with neither a message nor a call) counts only when the reply is the policy's: one
@@ -323,18 +342,8 @@ def _row_system_prompt(body: AgenticTurnSimulationRunRequest, prefix: list[dict[
     return "\n\n".join(parts + ([text] if text else []))
 
 
-def _masked(failure_kind: str, reason: str, *, retry: bool = False) -> dict[str, Any]:
-    """A masked outcome. With ``retry`` the environment owns a fault of the episode itself (the simulator is part of
-    it, and the wall-clock cap is its serving speed), so the row records the agent stage: its partial answer is not
-    kept and recovery runs the rollout again."""
-    masked = {MASK_SAMPLE_FIELD: True, "failure_kind": failure_kind, "failure_reason": reason}
-    if retry:
-        masked.update(
-            failure_outcome_action=OutcomeAction.RETRY,
-            failure_outcome_attribution=FailureClass.EVALUATION,
-            _ng_failure_stage="agent",
-        )
-    return masked
+def _masked(failure_kind: str, reason: str) -> dict[str, Any]:
+    return {MASK_SAMPLE_FIELD: True, "failure_kind": failure_kind, "failure_reason": reason}
 
 
 def _grow_max_tokens(params: dict[str, Any], default: int, cap: int) -> None:
@@ -656,6 +665,10 @@ class AgenticTurnSimulationResourcesServer(SimpleResourcesServer):
             turn = _policy_output(body)
         return harness.scored_turn(turn)
 
+    def _decision(self, failure_kind: str) -> dict[str, Any]:
+        """The saved outcome decision of an episode fault: the originating stage is the agent's, whatever the action."""
+        return applied_outcome_fields(failure_kind=failure_kind, stage="agent", config=self.config.outcome_policy)
+
     def _mask_reason(
         self,
         body: AgenticTurnSimulationVerifyRequest,
@@ -677,12 +690,9 @@ class AgenticTurnSimulationResourcesServer(SimpleResourcesServer):
                 "the conversation history does not fit the policy's context (overflow before the first step)",
             )
         if stop_reason in self.config.masked_stop_reasons:
-            # The wall-clock cap tracks serving speed, so a time_cap is retried; other cut-offs stay masked.
-            return _masked(
-                f"{FAILURE_KIND_PREFIX}:{stop_reason}",
-                f"the turn was cut off ({stop_reason})",
-                retry=stop_reason == "time_cap",
-            )
+            masked = _masked(f"{FAILURE_KIND_PREFIX}:{stop_reason}", f"the turn was cut off ({stop_reason})")
+            # The wall-clock cap tracks serving speed: the policy decides what recovery does with it.
+            return masked | self._decision(TIME_CAP_KIND) if masked["failure_kind"] == TIME_CAP_KIND else masked
         for item in items:
             if item.get("type") == "function_call_output":
                 text = str(item.get("output") or "")
@@ -692,7 +702,7 @@ class AgenticTurnSimulationResourcesServer(SimpleResourcesServer):
             else:
                 continue
             if holds_simulator_failure(text):
-                return _masked(f"{FAILURE_KIND_PREFIX}:simulator_failed", text[:300], retry=True)
+                return _masked(SIMULATOR_FAILED_KIND, text[:300]) | self._decision(SIMULATOR_FAILED_KIND)
         return None
 
     def _response_fields(

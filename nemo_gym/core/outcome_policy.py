@@ -5,7 +5,7 @@
 
 from collections.abc import Mapping
 from enum import StrEnum
-from typing import TYPE_CHECKING, Annotated, ClassVar
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
@@ -263,3 +263,33 @@ def choose_stage_outcome(
         ),
         attribution=classification,
     )
+
+
+def environment_fault_policy(stage: FailureStage, failure_kinds: tuple[str, ...]) -> StageOutcomePolicyConfig:
+    """A boundary's defaults for faults of the environment itself that it names (its own ``<server>:<kind>`` kinds).
+
+    The kinds are classified as the evaluation's, and the stage's default action is ``retry``. Both are
+    configuration: a deployment can classify a kind differently or select ``fail`` as the stage's default.
+    """
+    return StageOutcomePolicyConfig(
+        classification={
+            "by_stage": {stage: {"by_failure_kind": dict.fromkeys(failure_kinds, FailureClass.EVALUATION)}}
+        },
+        by_stage={stage: {"default_action": OutcomeAction.RETRY}},
+    )
+
+
+def applied_outcome_fields(
+    *, failure_kind: str, stage: FailureStage, config: StageOutcomePolicyConfig
+) -> dict[str, Any]:
+    """The decision the shared policy takes for an observed failure, as the fields a row saves it in.
+
+    The action, its attribution and the originating stage are saved together; the observed failure kind stays the
+    caller's own field, independent of the action.
+    """
+    decision = choose_stage_outcome(failure_kind=failure_kind, http_status=None, stage=stage, config=config)
+    return {
+        "failure_outcome_action": decision.action,
+        "failure_outcome_attribution": decision.attribution,
+        "_ng_failure_stage": stage,
+    }

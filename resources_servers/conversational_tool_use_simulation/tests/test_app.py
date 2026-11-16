@@ -65,6 +65,7 @@ def make_server(
     enable_llm_judge: bool = False,
     enforce_transfer_ground_truth: bool = False,
     fallback_first_user_message: bool = True,
+    **overrides,
 ) -> ConversationalToolUseSimulationServer:
     config = ConversationalToolUseSimulationConfig(
         host="0.0.0.0",
@@ -76,6 +77,7 @@ def make_server(
         enforce_transfer_ground_truth=enforce_transfer_ground_truth,
         fallback_first_user_message=fallback_first_user_message,
         judge_model_server={"type": "responses_api_models", "name": "judge_model"} if enable_llm_judge else None,
+        **overrides,
     )
     return ConversationalToolUseSimulationServer(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -1021,6 +1023,45 @@ async def test_user_generation_error_records_invalid_reason_when_fallback_disabl
     assert (verified.failure_outcome_action, verified.failure_outcome_attribution) == ("retry", "evaluation")
     assert verified.model_extra["_ng_failure_stage"] == "agent"
     assert "user simulator call failed: model server returned no text" in verified.failure_reason
+
+
+@pytest.mark.parametrize(
+    "failure_class,action", [("evaluation", "retry"), ("evaluation", "fail"), ("model", "retry"), ("model", "fail")]
+)
+async def test_the_saved_decision_for_a_failed_simulator_follows_the_configured_policy(
+    monkeypatch, failure_class: str, action: str
+) -> None:
+    kind = "conversational_tool_use:simulator_call_failed"
+    server = make_server(
+        fallback_first_user_message=False,
+        outcome_policy={
+            "classification": {"by_stage": {"agent": {"by_failure_kind": {kind: failure_class}}}},
+            "by_stage": {"agent": {"default_action": action}},
+        },
+    )
+    request = RequestStub()
+    await server.seed_session(
+        request,
+        ConversationalToolUseSeedSessionRequest(
+            domain_name="subscription support",
+            profile="general",
+            policy="policy",
+            customer_scenario={"reason_for_contact": "I need help."},
+        ),
+    )
+
+    async def raise_generation_error(state):
+        raise RuntimeError("model server returned no text")
+
+    monkeypatch.setattr(server, "_generate_user_message", raise_generation_error)
+    await server.next_user_message(request)
+
+    verified = await server.verify(request, make_verify_request())
+
+    # The observed kind and the originating stage do not depend on the action or its attribution.
+    assert verified.failure_kind == kind and verified.mask_sample is True
+    assert (verified.failure_outcome_action, verified.failure_outcome_attribution) == (action, failure_class)
+    assert verified.model_extra["_ng_failure_stage"] == "agent"
 
 
 async def test_tool_generation_error_records_invalid_reason(monkeypatch) -> None:

@@ -25,17 +25,18 @@ import jsonschema.validators
 from aiohttp import ClientConnectionError, ClientResponseError
 from fastapi import FastAPI, HTTPException, Request
 from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from nemo_gym.client import SESSION_ID_KEY, get_response_json, raise_for_status, rollout_path_prefix
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     JUDGE_FAILED,
-    FailureClass,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    OutcomeAction,
+    StageOutcomePolicyConfig,
+    applied_outcome_fields,
+    environment_fault_policy,
 )
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -121,6 +122,18 @@ def _default_responses_create_params() -> NeMoGymResponseCreateParamsNonStreamin
 
 
 class ConversationalToolUseSimulationConfig(BaseResourcesServerConfig):
+    # The decision saved with a row whose user or tool simulator call failed. By default the kind is classified as the
+    # evaluation's and that class is retried; a deployment can reclassify the kind or select fail for a class.
+    outcome_policy: StageOutcomePolicyConfig = Field(
+        default_factory=lambda: environment_fault_policy("agent", (SIMULATOR_CALL_FAILED,))
+    )
+
+    @field_validator("outcome_policy", mode="before")
+    @classmethod
+    def keep_untouched_default_rules(cls, value: object) -> object:
+        """A partial override changes only the rules it names; the others keep this server's defaults."""
+        return StageOutcomePolicyConfig.overlay(environment_fault_policy("agent", (SIMULATOR_CALL_FAILED,)), value)
+
     simulator_model_server: Optional[ModelServerRef] = None
     user_model_server: Optional[ModelServerRef] = None
     tool_simulator_model_server: Optional[ModelServerRef] = None
@@ -1414,12 +1427,10 @@ Return type in JSON Schema format: {return_type}
         if failure_kind is not None:
             response_payload.update(failure_kind=failure_kind, failure_reason=failure_reason)
         if failure_kind == SIMULATOR_CALL_FAILED:
-            # The user or tool simulator call failed during the episode, not the policy: the conversation is unusable,
-            # so the row records the agent stage and recovery runs the rollout again.
+            # The user or tool simulator call failed during the episode, not the policy: the shared policy decides
+            # what recovery does with the unusable conversation.
             response_payload.update(
-                failure_outcome_action=OutcomeAction.RETRY,
-                failure_outcome_attribution=FailureClass.EVALUATION,
-                _ng_failure_stage="agent",
+                applied_outcome_fields(failure_kind=failure_kind, stage="agent", config=self.config.outcome_policy)
             )
         verified_response = ConversationalToolUseVerifyResponse.model_validate(response_payload)
         self.session_id_to_state.pop(session_id, None)

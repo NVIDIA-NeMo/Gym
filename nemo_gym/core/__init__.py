@@ -108,8 +108,10 @@ if TYPE_CHECKING:
         OutcomePolicyConfig,
         StageOutcomePolicyConfig,
         StagePolicyConfig,
+        applied_outcome_fields,
         choose_action,
         choose_stage_outcome,
+        environment_fault_policy,
     )
     from nemo_gym.core.responses_api_types import (
         CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
@@ -207,6 +209,8 @@ _PUBLIC_API = {
     "StageOutcomePolicyConfig": "outcome_policy",
     "StagePolicyConfig": "outcome_policy",
     "choose_stage_outcome": "outcome_policy",
+    "applied_outcome_fields": "outcome_policy",
+    "environment_fault_policy": "outcome_policy",
     "HARNESS_TERMINATION_UNCONFIRMED": "failure_kinds",
     "JUDGE_FAILED": "failure_kinds",
     "JUDGE_UNPARSEABLE": "failure_kinds",
