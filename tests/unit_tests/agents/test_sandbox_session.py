@@ -7,7 +7,7 @@ import json
 import shutil
 import subprocess
 import sys
-from time import monotonic
+from time import monotonic, sleep
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -770,9 +770,11 @@ async def test_failed_expire_request_can_be_retried(session):
     await session.close(timeout=1)
 
 
-async def test_expire_is_bounded_when_the_marker_cannot_be_written(session):
+@pytest.mark.parametrize("loop_pause", [0, 1.1])
+async def test_expire_is_bounded_when_the_marker_cannot_be_written(session, monkeypatch, loop_pause):
     launched = asyncio.Event()
     finish = asyncio.Event()
+    cancelled = asyncio.Event()
 
     async def exec_(command, **_):
         if "--expire-file" in command:
@@ -783,16 +785,30 @@ async def test_expire_is_bounded_when_the_marker_cannot_be_written(session):
     async def upload(source, target):
         if target == EXPIRE_MARKER and upload.stall:
             # A transport that never answers, or a provider queue the call cannot leave.
-            await asyncio.Future()
+            try:
+                await asyncio.Future()
+            finally:
+                cancelled.set()
 
     upload.stall = True
     session.sandbox.exec.side_effect = exec_
     session.sandbox.upload.side_effect = upload
     async with _launched(session, launched) as activation:
-        started = asyncio.get_running_loop().time()
+        timeout_calls = []
+        real_timeout = asyncio.timeout
+
+        def observed_timeout(delay):
+            timeout_calls.append(delay)
+            return real_timeout(delay)
+
+        monkeypatch.setattr(asyncio, "timeout", observed_timeout)
+        if loop_pause:
+            asyncio.get_running_loop().call_later(0.1, sleep, loop_pause)
         with pytest.raises(RuntimeError, match="Could not request test expiry within 0.2 s"):
-            await session.expire(timeout=0.2, reason="budget")
-        assert asyncio.get_running_loop().time() - started < 1
+            await asyncio.wait_for(session.expire(timeout=0.2, reason="budget"), 5)
+        # Check the real timeout and cancellation, without assuming how quickly
+        # a busy runner schedules the timeout callback or resumes this task.
+        assert 0.2 in timeout_calls and cancelled.is_set()
         assert session.expire_reason is None
         upload.stall = False
         assert await session.expire(timeout=1, reason="operator") is True
