@@ -26,9 +26,10 @@ from typing import ClassVar
 import pytest
 
 import nemo_gym.orchestration.submit as submit_module
+from nemo_gym.core.failure_kinds import DRIVER_NODE_LOCAL_RESTORE_FAILED
 from nemo_gym.orchestration.api import BenchmarkRunConfig, NodeLocalConfig, SlurmComputeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
-from nemo_gym.orchestration.executors.node_local import NODE_LOCAL_DIR_ENV, WATCH_CHECK
+from nemo_gym.orchestration.executors.node_local import _RESTORE_SCRIPT, NODE_LOCAL_DIR_ENV, WATCH_CHECK
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord
@@ -173,11 +174,11 @@ def test_the_host_dir_is_unique_to_the_slurm_job_and_archives_land_in_the_job_di
 
 def test_the_dir_is_set_up_before_the_driver_and_archived_after_it():
     script = _script(_config(True))
-    restore = script.index('"$SLURM_JOB_ID" 1 || exit $?\n')
+    restore = script.index('"$SLURM_JOB_ID" 1 "" || exit $?\n')
     driver = script.index(_driver_line(script))
     # The dir goes only once the driver step has ended: exports may read it until then.
     after = script.index(
-        '\n_gym_run_driver\n_gym_nl_rc=$?\n_gym_nl_archive\n_gym_nl_cleanup\ntrap - TERM\n(exit "$_gym_nl_rc")'
+        '\n_gym_run_driver\n_gym_nl_rc=$?\n_gym_nl_archive\n_gym_nl_cleanup\ntrap - EXIT\ntrap - TERM\n(exit "$_gym_nl_rc")'
     )
     assert restore < driver < after
 
@@ -185,7 +186,7 @@ def test_the_dir_is_set_up_before_the_driver_and_archived_after_it():
 def test_restore_can_be_turned_off():
     script = _script(_config({"restore": False}))
     assert (
-        '"$_gym_nl_dir" "$_gym_nl_archives" /jobs/20261116_run/b/.gym_job_chain "$SLURM_JOB_ID" 0 || exit $?\n'
+        '"$_gym_nl_dir" "$_gym_nl_archives" /jobs/20261116_run/b/.gym_job_chain "$SLURM_JOB_ID" 0 "" || exit $?\n'
         in script
     )
 
@@ -429,18 +430,51 @@ def _truncated_archive(path: Path) -> None:
     path.write_bytes(path.read_bytes()[: path.stat().st_size // 2])
 
 
-def test_an_archive_that_does_not_extract_stops_the_job_before_the_driver(tmp_path):
+def test_an_archive_that_does_not_extract_stops_the_job_before_the_services(tmp_path):
     archives = tmp_path / "run" / "b" / "node-local"
     _write_archive(archives / "9.0.tar.gz", {"ev/0.json": "row0\n"})
     _truncated_archive(archives / "10.0.tar.gz")
 
-    returncode = _finish(_start_job(tmp_path, driver=": > driver-ran"))
+    returncode = _finish(_start_job(tmp_path, driver=": > driver-ran", service=": > service-ran; exec sleep 600"))
 
     assert returncode == 1
     assert f"ERROR: cannot extract {archives / '10.0.tar.gz'}" in (tmp_path / "job.out").read_text()
+    assert not (tmp_path / "run" / "b" / "service-ran").exists()
     assert not (tmp_path / "run" / "b" / "driver-ran").exists()
     assert not (tmp_path / "host" / "gym-node-local-11").exists()
     assert _archive_names(tmp_path) == ["10.0.tar.gz", "9.0.tar.gz"]
+
+
+def test_a_failed_restore_leaves_its_failure_kind_for_the_chain(tmp_path):
+    # The batch shell passes the failure file of a resumable job; the next segment's prologue stops on the kind.
+    archives = tmp_path / "node-local"
+    _truncated_archive(archives / "10.0.tar.gz")
+    failure = tmp_path / ".gym_driver_failure.11"
+    args = [str(tmp_path / "dir"), str(archives), str(tmp_path / ".gym_job_chain"), "11", "1", str(failure)]
+
+    result = subprocess.run(["bash", "-c", _RESTORE_SCRIPT, "_", *args], capture_output=True, text=True)
+
+    assert result.returncode == 1
+    assert failure.read_text() == f"{DRIVER_NODE_LOCAL_RESTORE_FAILED}\n"
+    assert not (tmp_path / "dir").exists()
+
+
+def test_a_resumable_job_names_its_failure_file_to_the_restore():
+    config = _config(True)
+    config.driver.benchmarks["b"].resumable = True
+    assert '"$SLURM_JOB_ID" 1 /jobs/20261116_run/b/.gym_driver_failure."$SLURM_JOB_ID" || exit $?' in _script(config)
+    assert '"$SLURM_JOB_ID" 1 "" || exit $?' in _script(_config(True))
+
+
+def test_a_service_that_fails_its_health_check_leaves_no_node_local_dir(tmp_path):
+    _write_archive(tmp_path / "run" / "b" / "node-local" / "10.0.tar.gz", {"ev/0.json": "row0\n"})
+
+    returncode = _finish(_start_job(tmp_path, driver=": > driver-ran", service="exit 3", fakes={"curl": "exit 7"}))
+
+    assert returncode == 1
+    assert "died during startup" in (tmp_path / "job.out").read_text()
+    assert not (tmp_path / "host" / "gym-node-local-11").exists()
+    assert not (tmp_path / "host" / "gym-node-local-11.stamp").exists()
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root lists a directory whatever its mode")

@@ -439,6 +439,12 @@ _DRIVER_FAILURE_STOPS = {
         "run's inputs and configuration; the chain does not retry it; start a fresh run or set "
         "allow_unsafe_resume=true"
     ),
+    "driver_node_local_restore_failed": (
+        "Previous job 100 ended FAILED: driver_node_local_restore_failed: the run's node-local archives in node-local/ did "
+        "not restore, and saved rows may name files in them; the chain does not retry it; repair or remove the "
+        "archive the job log names, then continue with gym eval resubmit --recover, or submit again with "
+        "node_local.restore false"
+    ),
 }
 
 

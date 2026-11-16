@@ -16,9 +16,9 @@
 """The driver's node-local directory, archived into the job dir once per Slurm job (`node_local`).
 
 Files that many small writes produce, such as per-rollout evidence, stay on the driver node's own disk while the
-driver runs. The batch script creates `<base_dir>/gym-node-local-$SLURM_JOB_ID` on the driver's node, optionally
-extracts every earlier archive of the run into it, and mounts it into the driver container at a path that is the same
-for every job of the run, so absolute paths the run saves stay valid in its later jobs. When the driver step ends, the
+driver runs. Before the services start, the batch script creates `<base_dir>/gym-node-local-$SLURM_JOB_ID` on the
+driver's node and optionally extracts every earlier archive of the run into it; the driver container mounts it at a
+path that is the same for every job of the run, so absolute paths the run saves stay valid in its later jobs. When the driver step ends, the
 files the job added or changed are written to `<job dir>/node-local/<SLURM_JOB_ID>.<SLURM_RESTART_COUNT>.tar.gz` (one
 file, renamed into place once complete) and the directory is removed. With exports, the archive is written as soon as
 the evaluation has succeeded instead, and the exports wait for it, so an exporter of the job dir finds it. Each archive
@@ -28,6 +28,7 @@ holds one job attempt's files, so none is ever removed, and a restore extracts t
 import shlex
 from pathlib import Path
 
+from nemo_gym.core.failure_kinds import DRIVER_NODE_LOCAL_RESTORE_FAILED
 from nemo_gym.orchestration.api import NodeLocalConfig
 from nemo_gym.orchestration.executors.resume_script import JOB_CHAIN_NAME
 from nemo_gym.orchestration.executors.script_templates import NODE_LOCAL_ARCHIVE_DONE_MARKER_ENV
@@ -44,15 +45,20 @@ ARCHIVES_DIRNAME = "node-local"
 # Inside the driver container: one path per run and benchmark, the same in every job of the run.
 _CONTAINER_ROOT = "/tmp/gym-node-local"
 
-# Run on the driver's node as `bash -c SCRIPT _ DIR ARCHIVES CHAIN JOB_ID RESTORE`. Archives are named
+# Run on the driver's node as `bash -c SCRIPT _ DIR ARCHIVES CHAIN JOB_ID RESTORE FAILURE_FILE`. Archives are named
 # `<job id>.<restart count>.tar.gz`: a requeued attempt keeps its job id. `DIR.stamp` marks the end of the restore.
-_RESTORE_SCRIPT = """\
+_RESTORE_SCRIPT = (
+    """\
 set -f
 IFS=$'\\n'
-dir=$1 archives=$2 chain=$3 job=$4 restore=$5
+dir=$1 archives=$2 chain=$3 job=$4 restore=$5 failure=$6
 # Saved rows may name files in any archive of the run: a job that cannot restore them all does not start the driver.
 fail() {
     echo "ERROR: $1; the driver does not start, since saved rows may name files in the run's node-local archives."
+    # The chain's next segment stops on this kind and names the way on.
+    [ -z "$failure" ] || echo """
+    + DRIVER_NODE_LOCAL_RESTORE_FAILED
+    + """ > "$failure"
     rm -rf -- "$dir"
     exit 1
 }
@@ -88,6 +94,7 @@ fi
 # Extraction set the ctime of every restored file before this: the archive step takes what changes after it.
 touch -- "$dir.stamp" || { rm -rf -- "$dir"; echo "ERROR: cannot create $dir.stamp"; exit 1; }
 """
+)
 
 # Run on the driver's node as `bash -c SCRIPT _ DIR ARCHIVES NAME TIMEOUT_SECONDS`.
 _ARCHIVE_SCRIPT = """\
@@ -127,7 +134,7 @@ fi
 _CLEANUP_SCRIPT = 'rm -rf -- "$1" "$1.stamp" "$1.list"'
 
 _SETUP_TEMPLATE = """\
-# --- Node-local dir, archived into the job dir when the driver step ends ---
+# --- Node-local dir: restored before the services start, archived into the job dir when the driver step ends ---
 _gym_nl_dir={host_dir}
 _gym_nl_archives={archives}
 _gym_nl_done=""
@@ -145,7 +152,9 @@ _gym_nl_watch() {{
         _gym_nl_archive
     fi
 }}
-_gym_nl_run {restore_script} "$_gym_nl_dir" "$_gym_nl_archives" {chain} "$SLURM_JOB_ID" {restore} || exit $?"""
+_gym_nl_run {restore_script} "$_gym_nl_dir" "$_gym_nl_archives" {chain} "$SLURM_JOB_ID" {restore} {failure} || exit $?
+# Until the driver step has ended: a service that fails its health check ends the job first.
+trap _gym_nl_cleanup EXIT"""
 
 # Only where the batch shell runs on the driver's node: a step can no longer start once the job is ending.
 _TERM_TRAP = """\
@@ -156,6 +165,7 @@ _gym_nl_on_term() {
         _gym_nl_archive
     fi
     _gym_nl_cleanup
+    trap - EXIT
     exit 143
 }
 trap _gym_nl_on_term TERM"""
@@ -190,11 +200,19 @@ def archive_wait_seconds(config: NodeLocalConfig) -> int:
     return config.archive_timeout_seconds + ARCHIVE_WAIT_MARGIN_SECONDS
 
 
-def render_setup(config: NodeLocalConfig, remote_bench_dir: Path, driver_node_flags: str, *, exports: bool) -> str:
-    """Batch-script lines that run before the driver: create (and restore) the dir and define the archive step.
+def render_setup(
+    config: NodeLocalConfig,
+    remote_bench_dir: Path,
+    driver_node_flags: str,
+    *,
+    exports: bool,
+    failure_file: str | None = None,
+) -> str:
+    """Batch-script lines that run before the services: create (and restore) the dir and define the archive step.
 
     `driver_node_flags` are the driver step's own `srun` node flags; empty when the batch shell runs on its node.
     With `exports`, every archive step (also a failed one) then creates the marker the exports wait for.
+    `failure_file`, a shell word, is where a failed restore leaves its failure kind for the chain's next segment.
     """
     on_driver_node = f"srun --overlap{driver_node_flags} " if driver_node_flags else ""
     blocks = [
@@ -207,6 +225,7 @@ def render_setup(config: NodeLocalConfig, remote_bench_dir: Path, driver_node_fl
             restore_script=shlex.quote(_RESTORE_SCRIPT),
             chain=shlex.quote(str(remote_bench_dir / JOB_CHAIN_NAME)),
             restore=int(config.restore),
+            failure=failure_file or '""',
             create_marker=f"\n    : > {_archive_done_marker(remote_bench_dir)}" if exports else "",
             cleanup_script=shlex.quote(_CLEANUP_SCRIPT),
         )
@@ -232,6 +251,7 @@ def render_after_driver(remote_bench_dir: Path, driver_node_flags: str, *, expor
             "_gym_nl_rc=$?",
             "_gym_nl_archive",
             "_gym_nl_cleanup",
+            "trap - EXIT",
             *([f"rm -f -- {_archive_done_marker(remote_bench_dir)}"] if exports else []),
             *([] if driver_node_flags else ["trap - TERM"]),
             '(exit "$_gym_nl_rc")',

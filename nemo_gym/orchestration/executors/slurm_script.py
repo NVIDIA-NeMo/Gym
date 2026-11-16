@@ -1293,11 +1293,8 @@ def build_sbatch_script(
     prepare_command = ""
     driver_env_prefix = _resolve_env(driver_env) if driver_env else ""
     # Where this allocation's driver leaves the kind of a failure the next segment would repeat (see resume_script).
-    failure_file = (
-        f'{DRIVER_FAILURE_ENV}={shlex.quote(str(remote_bench_dir / DRIVER_FAILURE_NAME))}."$SLURM_JOB_ID" '
-        if resume
-        else ""
-    )
+    failure_path = f'{shlex.quote(str(remote_bench_dir / DRIVER_FAILURE_NAME))}."$SLURM_JOB_ID"' if resume else None
+    failure_file = f"{DRIVER_FAILURE_ENV}={failure_path} " if failure_path else ""
     driver_node_flags = (
         f' --nodelist="${{gym_nodes[{driver_node}]}}" --nodes=1 --ntasks=1' if driver_node is not None else ""
     )
@@ -1369,16 +1366,17 @@ def build_sbatch_script(
         + _render_watched_driver(driver_srun, watched, node_local_script.WATCH_CHECK if node_local else "")
     )
     if node_local:
-        driver_command = (
-            node_local_script.render_setup(
-                node_local, remote_bench_dir, node_local_flags, exports=export_tail is not None
-            )
-            + "\n"
-            + driver_command
-            + "\n"
-            + node_local_script.render_after_driver(
-                remote_bench_dir, node_local_flags, exports=export_tail is not None
-            )
+        # Before the services: a run whose archives do not restore stops without a model start-up.
+        node_local_setup = node_local_script.render_setup(
+            node_local,
+            remote_bench_dir,
+            node_local_flags,
+            exports=export_tail is not None,
+            failure_file=failure_path,
+        )
+        service_commands = f"{node_local_setup}\n\n{service_commands}"
+        driver_command += "\n" + node_local_script.render_after_driver(
+            remote_bench_dir, node_local_flags, exports=export_tail is not None
         )
     if resume:
         # A job that finished the run cancels the follow-up and sentinel it queued; its status stays the driver's.

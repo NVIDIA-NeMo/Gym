@@ -69,6 +69,7 @@ from nemo_gym.core.failure_kinds import (
     COLLECTION_DISPATCH_FAILED,
     COLLECTION_RESUME_REFUSED,
     DRIVER_INSTALL_FAILED,
+    DRIVER_NODE_LOCAL_RESTORE_FAILED,
     EMPTY_ANSWER,
     ENVIRONMENT_PREPARE_FAILED,
     ENVIRONMENT_PROTOCOL_VIOLATION,
@@ -6517,6 +6518,11 @@ _TYPED_REMEDIES: dict[str, tuple[str, tuple[str, ...]]] = {
         ("--server-spinup-timeout-seconds N --spinup-timeout-reason TEXT",),
     ),
     PROVIDER_QUOTA_EXHAUSTED: ("wait until the grading provider's quota resets, then run", ()),
+    DRIVER_NODE_LOCAL_RESTORE_FAILED: (
+        "repair or remove the node-local archive the stopped job's log names (in node-local/ of the benchmark dir), "
+        "then run",
+        (),
+    ),
 }
 # The typed stops a fresh restart repeats until their fix is made.
 _RESTART_FIXES = (PROVIDER_CREDENTIALS_REJECTED, DRIVER_INSTALL_FAILED, ENVIRONMENT_PREPARE_FAILED)

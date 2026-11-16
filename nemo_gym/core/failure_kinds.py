@@ -184,6 +184,9 @@ DRIVER_INSTALL_FAILED = "driver_install_failed"
 ENVIRONMENT_PREPARE_FAILED = "environment_prepare_failed"
 # Collection refused to resume saved rollouts whose input and configuration identity does not verify.
 COLLECTION_RESUME_REFUSED = "collection_resume_refused"
+# A job with a node-local directory could not list or extract the run's earlier archives of it, so its driver did not
+# start: saved rows may name files in them.
+DRIVER_NODE_LOCAL_RESTORE_FAILED = "driver_node_local_restore_failed"
 # A rollout was in flight when its allocation ended (a walltime cut, a preemption, a node failure or a driver that
 # ended) for a second or later time. The first such end re-runs for free; each later one spends an attempt. The
 # allocation's limits are the evaluation's setup, not the model's outcome.
@@ -257,6 +260,7 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         DRIVER_INSTALL_FAILED,
         ENVIRONMENT_PREPARE_FAILED,
         COLLECTION_RESUME_REFUSED,
+        DRIVER_NODE_LOCAL_RESTORE_FAILED,
         ROLLOUT_ALLOCATION_ENDED,
         AGENT_ROUTE_FAILED,
         HARNESS_TERMINATION_UNCONFIRMED,
