@@ -62,7 +62,8 @@ disables remote export for that attempt without changing the saved requested con
 The collector is the first `srun --overlap` step of the sbatch script and must answer its health
 check before the services start. By default it runs as a host process from `binary`; the upstream
 collector image is distroless and cannot start under enroot, so use `container` only with an image
-that has a shell.
+that has a shell. The step copies `binary` into a node-local `/tmp/gym-otel-<slurm job id>.*` directory and runs
+the copy, so nothing executes from shared storage.
 
 Gym's own telemetry needs `driver.gym_install`: the `telemetry` extra is installed with that checkout, and a
 container's preinstalled Gym is left alone. The submit fails when `gym_telemetry` is on without it; set
@@ -75,8 +76,8 @@ Gym's Lens instrumentation on and points it at the collector (`NEMO_GYM_OTEL_ENA
 agent, model and resources servers of a rollout. An explicit value in `driver.env` wins.
 
 After the driver exits, the script waits one scrape interval so the final counters are collected,
-signals the collector process (not its `srun`), waits for a clean shutdown, and exits with the
-driver's return code.
+signals the collector process (not its `srun`) on its node, waits for a clean shutdown, and exits with the
+driver's return code. Once the collector stops, its step appends the node-local jsonl to the job directory.
 
 With `vllm_traces: true`, each vLLM service whose API server runs on the collector's node is started
 with `--otlp-traces-endpoint http://localhost:4318/v1/traces`, `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf`
@@ -109,8 +110,9 @@ and `service.name.override` to the producer's display name: each Gym server keep
 defaults), and the node scrapes carry `dcgm` and `node`.
 
 Telemetry is always written to `<job dir>/otel/{metrics,traces,logs}.jsonl` while the collector is enabled, so a run can be
-inspected without backend access. The rendered collector configuration is at
-`<job dir>/otel/collector.yaml`; `gym eval submit --dry-run` prints it without submitting.
+inspected without backend access. The collector writes them node-local and its step appends them to the job directory
+when it stops, once per Slurm job, so a resumed run's segments follow one another in the same files. The rendered
+collector configuration is at `<job dir>/otel/collector.yaml`; `gym eval submit --dry-run` prints it without submitting.
 
 ## The token
 

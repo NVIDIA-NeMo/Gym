@@ -95,6 +95,7 @@ from nemo_gym.orchestration.executors.resume_script import (
 )
 from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint
 from nemo_gym.orchestration.executors.slurm_script import (
+    COLLECTOR_LOCAL_DIR_MARKER,
     _resolve_env,
     _with_default_capture_dir,
     build_sbatch_script,
@@ -2314,10 +2315,16 @@ class SlurmExecutor(BaseExecutor):
             # collector config, inside the lock and after refusing any active job in its dir.
             collector_update = []
             if otel_active(config):
-                collector_yaml = render_collector_config(config, benchmark, job_dir)
                 collector_path = shlex.quote(str(collector_config_path(job_dir)))
+
+                def write_collector_config(node_local: bool) -> str:
+                    collector_yaml = render_collector_config(config, benchmark, job_dir, node_local=node_local)
+                    return f"printf %s {shlex.quote(collector_yaml)} > {collector_path} || fail 'cannot update collector config'"
+
+                # An older job.sh never copies node-local jsonl into the job dir, so its collector writes there.
                 collector_update = [
-                    f"printf %s {shlex.quote(collector_yaml)} > {collector_path} || fail 'cannot update collector config'"
+                    f"if grep -qF -- {shlex.quote(COLLECTOR_LOCAL_DIR_MARKER)} job.sh; "
+                    f"then {write_collector_config(True)}; else {write_collector_config(False)}; fi"
                 ]
             snapshot_check = []
             reconciled = keep_budget and accounting_reconciled and accounted_walltime_s is not None

@@ -2863,6 +2863,13 @@ def test_the_collector_is_probed_beside_a_non_zero_driver_node(tmp_path):
     assert "Waiting for otel_collector at http://${gym_nodes[1]}:4319" in script
 
 
+def test_the_collector_is_stopped_on_its_own_node_beside_a_non_zero_driver_node(tmp_path):
+    # pkill sees only the node it runs on, and the batch script runs on node 0.
+    stop = next(line for line in _driver_on_aux(tmp_path, {}).splitlines() if "pkill -TERM" in line)
+    assert stop.startswith('srun --overlap --nodelist="${gym_nodes[1]}" --nodes=1 --ntasks=1 pkill -TERM ')
+    assert stop.endswith(" || true")
+
+
 def test_services_on_node_0_are_probed_locally(tmp_path):
     script = _render(tmp_path, {"policy": _vllm(8000, "gpu", tensor_parallel_size=4), "ray": _RAY_WITH_PROBE})
     assert "Waiting for ray at http://localhost:8011" in script
@@ -3266,11 +3273,11 @@ def test_a_service_named_driver_is_watched_apart_from_the_driver(tmp_path):
 
 def test_one_task_exiting_ends_its_service_step_and_the_driver_step_is_unchanged(tmp_path):
     # A multi-task service (a vllm_pd tier, a Ray worker pool) must not outlive one of its tasks, whatever the cluster's
-    # KillOnBadExit and WaitTime defaults; the driver and OTel collector steps keep Slurm's defaults.
+    # KillOnBadExit and WaitTime defaults; the driver and OTel collector steps (its stop included) keep Slurm's defaults.
     script = _driver_on_aux(tmp_path, {"ray": _RAY_WITH_PROBE})
     steps = [line for line in script.splitlines() if "srun --overlap" in line]
     driver_steps = [line for line in steps if "logs/driver-" in line]
-    collector_steps = [line for line in steps if "logs/otel_collector-" in line]
+    collector_steps = [line for line in steps if "logs/otel_collector-" in line or " pkill -TERM " in line]
     service_steps = [line for line in steps if line not in driver_steps and line not in collector_steps]
 
     assert service_steps and driver_steps
