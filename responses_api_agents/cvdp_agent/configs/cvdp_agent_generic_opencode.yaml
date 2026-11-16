@@ -1,3 +1,6 @@
+# Deprecated legacy relay path: cvdp_agent runs OpenCode in a sandbox of its own behind legacy_agent.
+# Use resources_servers/cvdp/configs/cvdp_agentic_opencode.yaml, where the cvdp resources server lends the task
+# sandbox to opencode_agent through an agent session. This config stays for existing runs.
 cvdp_agent_generic_opencode:
   responses_api_agents:
     cvdp_agent:

@@ -49,6 +49,12 @@ dataset. Config: `[configs/cvdp_agent.yaml](configs/cvdp_agent.yaml)`.
 
 ## 2. `simple_agent: false` — agentic, any harness
 
+> **Deprecated.** Use `resources_servers/cvdp/configs/cvdp_agentic_{hermes,opencode,claude_code}.yaml`
+> instead: the cvdp resources server lends the task sandbox to `hermes_agent`, `opencode_agent` or
+> `claude_code_agent` through an agent session and grades what they wrote, with no deps scripts. See
+> "Agentic tasks through agent sessions" in `resources_servers/cvdp/README.md`. The configs below
+> keep working for existing runs.
+
 The agentic flavor. The coding harness is **configuration, not code**: you name a Gym agent
 in the YAML and it gets booted inside the sandbox to do the work. Proven to grade real RTL
 through the unchanged CVDP verifier.

@@ -16,6 +16,7 @@
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -291,7 +292,7 @@ class TestCVDPServerVerify:
     @pytest.mark.asyncio
     async def test_verify_empty_output_returns_zero_reward(self):
         body_dict = _make_body(output_text="")
-        result = await self.server.verify(_make_request(body_dict))
+        result = await self.server.verify(_NO_SESSION, _make_request(body_dict))
         assert result.reward == 0.0
         assert result.container_exit_code is None
 
@@ -304,7 +305,7 @@ class TestCVDPServerVerify:
             new_callable=AsyncMock,
             return_value=(1, "FAILED", []),
         ):
-            result = await self.server.verify(_make_request(body_dict))
+            result = await self.server.verify(_NO_SESSION, _make_request(body_dict))
         assert result.reward == 0.0
         assert result.extracted_rtl is not None
         assert result.parse_failed is False
@@ -318,7 +319,7 @@ class TestCVDPServerVerify:
             new_callable=AsyncMock,
             return_value=(0, "", []),
         ):
-            result = await self.server.verify(_make_request(body_dict))
+            result = await self.server.verify(_NO_SESSION, _make_request(body_dict))
         assert result.reward == 1.0
         assert result.container_exit_code == 0
         assert result.extracted_rtl is not None
@@ -332,7 +333,7 @@ class TestCVDPServerVerify:
             new_callable=AsyncMock,
             return_value=(1, "FAILED: assertion error", [{"service": "direct", "exit_code": 1, "stderr": "FAILED"}]),
         ):
-            result = await self.server.verify(_make_request(body_dict))
+            result = await self.server.verify(_NO_SESSION, _make_request(body_dict))
         assert result.reward == 0.0
         assert result.container_exit_code == 1
 
@@ -345,7 +346,7 @@ class TestCVDPServerVerify:
             new_callable=AsyncMock,
             return_value=(-1, "apptainer exec timed out after 30s", []),
         ):
-            result = await self.server.verify(_make_request(body_dict))
+            result = await self.server.verify(_NO_SESSION, _make_request(body_dict))
         assert result.reward == 0.0
         assert result.container_exit_code == -1
 
@@ -356,7 +357,7 @@ class TestCVDPServerVerify:
             output_text=f"```systemverilog\n{SAMPLE_RTL}\n```",
             harness_files=harness_no_compose,
         )
-        result = await self.server.verify(_make_request(body_dict))
+        result = await self.server.verify(_NO_SESSION, _make_request(body_dict))
         assert result.reward == 0.0
 
     @pytest.mark.asyncio
@@ -377,7 +378,7 @@ class TestCVDPServerVerify:
             new_callable=AsyncMock,
             return_value=(0, "", []),
         ):
-            result = await self.server.verify(_make_request(body_dict))
+            result = await self.server.verify(_NO_SESSION, _make_request(body_dict))
         assert result.reward == 1.0
         assert "rtl/a.sv" in result.extracted_rtl
         assert "rtl/b.sv" in result.extracted_rtl
@@ -470,7 +471,7 @@ class TestCVDPServerVerifySubjective:
     async def test_identical_answer_gets_high_reward(self):
         ref = "Testing circular shifts with shift_bits equal to DATA_WIDTH checks correctness."
         body_dict = _make_subjective_body(output_text=ref, subjective_reference=ref)
-        result = await self.server.verify(_make_request(body_dict))
+        result = await self.server.verify(_NO_SESSION, _make_request(body_dict))
         assert result.reward == pytest.approx(1.0)
         assert result.bleu_score == pytest.approx(1.0)
         assert result.rouge_score == pytest.approx(1.0)
@@ -478,13 +479,13 @@ class TestCVDPServerVerifySubjective:
     @pytest.mark.asyncio
     async def test_empty_output_returns_zero(self):
         body_dict = _make_subjective_body(output_text="", subjective_reference="some reference")
-        result = await self.server.verify(_make_request(body_dict))
+        result = await self.server.verify(_NO_SESSION, _make_request(body_dict))
         assert result.reward == 0.0
 
     @pytest.mark.asyncio
     async def test_no_reference_returns_zero(self):
         body_dict = _make_subjective_body(output_text="some answer", subjective_reference="")
-        result = await self.server.verify(_make_request(body_dict))
+        result = await self.server.verify(_NO_SESSION, _make_request(body_dict))
         assert result.reward == 0.0
 
     @pytest.mark.asyncio
@@ -492,7 +493,7 @@ class TestCVDPServerVerifySubjective:
         ref = "The barrel shifter rotates bits in a circular fashion using multiplexers."
         answer = "The barrel shifter rotates bits using a series of multiplexers for shifting."
         body_dict = _make_subjective_body(output_text=answer, subjective_reference=ref)
-        result = await self.server.verify(_make_request(body_dict))
+        result = await self.server.verify(_NO_SESSION, _make_request(body_dict))
         assert 0.0 < result.reward < 1.0
         assert result.bleu_score is not None
         assert result.rouge_score is not None
@@ -502,14 +503,14 @@ class TestCVDPServerVerifySubjective:
         ref = "The barrel shifter rotates bits in a circular fashion using multiplexers."
         answer = "Quantum computing leverages entanglement for parallel processing."
         body_dict = _make_subjective_body(output_text=answer, subjective_reference=ref)
-        result = await self.server.verify(_make_request(body_dict))
+        result = await self.server.verify(_NO_SESSION, _make_request(body_dict))
         assert result.reward < 0.3
 
     @pytest.mark.asyncio
     async def test_category_6_uses_subjective_path(self):
         ref = "module foo implements a decoder."
         body_dict = _make_subjective_body(output_text=ref, category="cid006", subjective_reference=ref)
-        result = await self.server.verify(_make_request(body_dict))
+        result = await self.server.verify(_NO_SESSION, _make_request(body_dict))
         assert result.reward == pytest.approx(1.0)
         assert result.bleu_score is not None
 
@@ -517,7 +518,7 @@ class TestCVDPServerVerifySubjective:
     async def test_category_8_uses_subjective_path(self):
         ref = "The testbench checks reset behavior."
         body_dict = _make_subjective_body(output_text=ref, category="cid008", subjective_reference=ref)
-        result = await self.server.verify(_make_request(body_dict))
+        result = await self.server.verify(_NO_SESSION, _make_request(body_dict))
         assert result.reward == pytest.approx(1.0)
 
     @pytest.mark.asyncio
@@ -531,7 +532,7 @@ class TestCVDPServerVerifySubjective:
             new_callable=AsyncMock,
             return_value=(0, "", []),
         ):
-            result = await self.server.verify(_make_request(body_dict))
+            result = await self.server.verify(_NO_SESSION, _make_request(body_dict))
         assert result.reward == 1.0
         assert result.bleu_score is None  # Not a subjective category
 
@@ -568,6 +569,10 @@ class TestApptainerHarness:
 # ---------------------------------------------------------------------------
 
 
+# The HTTP request of a verify sent without a resources session, as cvdp_agent sends it.
+_NO_SESSION = SimpleNamespace(session={})
+
+
 def _make_request(body_dict: dict):
     """Build a CVDPVerifyRequest from a raw dict."""
     from resources_servers.cvdp.app import CVDPVerifyRequest
@@ -597,7 +602,7 @@ class TestVerifyConsumesRtlFiles:
             return (0, "", [])
 
         with patch.object(self.server._harness, "run", side_effect=fake_harness):
-            result = await self.server.verify(_make_request(body_dict))
+            result = await self.server.verify(_NO_SESSION, _make_request(body_dict))
 
         assert result.reward == 1.0
         assert result.extracted_rtl == {"rtl/foo.sv": "module from_disk;\nendmodule"}
@@ -608,7 +613,7 @@ class TestVerifyConsumesRtlFiles:
         body_dict = _make_body(output_text=f"```systemverilog\n{SAMPLE_RTL}\n```")
         # No rtl_files key -> text parsing path.
         with patch.object(self.server._harness, "run", new_callable=AsyncMock, return_value=(0, "", [])):
-            result = await self.server.verify(_make_request(body_dict))
+            result = await self.server.verify(_NO_SESSION, _make_request(body_dict))
         assert result.reward == 1.0
         assert "module foo" in result.extracted_rtl["rtl/foo.sv"]
 
