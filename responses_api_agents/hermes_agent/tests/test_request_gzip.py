@@ -75,9 +75,13 @@ def installed_hooks(monkeypatch):
     monkeypatch.setattr(openai.OpenAI, "__init__", openai.OpenAI.__init__)
     monkeypatch.setattr(openai.AsyncOpenAI, "__init__", openai.AsyncOpenAI.__init__)
     install_request_gzip("http://gym.test/rollouts/episode/v1")
+    install_request_gzip("http://gym.test/rollouts/episode/ng-sampling/null/v1")
 
 
-def test_sync_openai_client_sends_gzip_to_the_model_endpoint(installed_hooks):
+@pytest.mark.parametrize(
+    "base_url", ["http://gym.test/rollouts/episode/v1", "http://gym.test/rollouts/episode/ng-sampling/null/v1"]
+)
+def test_sync_openai_client_sends_gzip_to_the_model_endpoint(installed_hooks, base_url):
     observed = []
 
     def respond(request):
@@ -86,7 +90,7 @@ def test_sync_openai_client_sends_gzip_to_the_model_endpoint(installed_hooks):
 
     with openai.OpenAI(
         api_key="unused-unit-test-key",
-        base_url="http://gym.test/rollouts/episode/v1",
+        base_url=base_url,
         http_client=httpx.Client(transport=httpx.MockTransport(respond)),
         max_retries=0,
     ) as client:
@@ -98,7 +102,10 @@ def test_sync_openai_client_sends_gzip_to_the_model_endpoint(installed_hooks):
     assert json.loads(gzip.decompress(observed[0].content)) == {"model": "unit-test-model", "input": "hello " * 1024}
 
 
-async def test_async_openai_client_sends_gzip_to_the_model_endpoint(installed_hooks):
+@pytest.mark.parametrize(
+    "base_url", ["http://gym.test/rollouts/episode/v1", "http://gym.test/rollouts/episode/ng-sampling/null/v1"]
+)
+async def test_async_openai_client_sends_gzip_to_the_model_endpoint(installed_hooks, base_url):
     observed = []
 
     async def respond(request):
@@ -107,7 +114,7 @@ async def test_async_openai_client_sends_gzip_to_the_model_endpoint(installed_ho
 
     async with openai.AsyncOpenAI(
         api_key="unused-unit-test-key",
-        base_url="http://gym.test/rollouts/episode/v1",
+        base_url=base_url,
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
         max_retries=0,
     ) as client:
