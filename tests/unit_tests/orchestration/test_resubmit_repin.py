@@ -206,6 +206,31 @@ def test_a_queued_repin_of_a_pre_node_local_run_moves_its_collector_files_node_l
     assert kept_collector.read_text() == old_collector
 
 
+@pytest.mark.parametrize("queued", [False, True], ids=["refused", "queued"])
+def test_a_repin_of_a_run_without_a_collector_config_writes_one_only_if_queued(
+    tmp_path, slurm_bin, launcher_at, queued
+):
+    # OTel is on in the saved config but the job dir has no collector config yet: a refusal must leave none behind.
+    from nemo_gym.orchestration.submit import recover
+
+    launcher_at(NEW)
+    job_dir = _repinnable_run(tmp_path, otel=True)
+    collector = collector_config_path(job_dir)
+    collector.unlink()
+    if not queued:
+        (slurm_bin / "sbatch").write_text("#!/bin/bash\necho 'sbatch: error: Batch job submission failed'; exit 1\n")
+    out = recover(*_handle(job_dir), repin=NEW, repin_reason="reason")
+
+    if queued:
+        assert out.dispatched == "resubmit", out.decision.reason
+        exporters = yaml.safe_load(collector.read_text())["exporters"]
+        assert exporters["file/traces"]["path"] == "${env:GYM_OTEL_LOCAL_DIR}/traces.jsonl"
+    else:
+        assert out.scheduler_refusal["job_dir_restored"] is True
+        assert not collector.exists()
+    assert not list(collector.parent.glob("collector.yaml.pre-*"))
+
+
 def test_the_resubmit_help_lists_repin_and_a_repin_needs_recover(capsys):
     parser = build_parser()
     with pytest.raises(SystemExit):
