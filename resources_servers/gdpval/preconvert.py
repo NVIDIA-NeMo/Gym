@@ -582,8 +582,10 @@ def convert_to_pdf(
             shutil.rmtree(retry_profile_dir, ignore_errors=True)
 
 
-def find_convertible_files(root_dir: str | os.PathLike) -> list[tuple[Path, Path | None]]:
+def find_convertible_files(root_dir: str | os.PathLike, *, recursive: bool = True) -> list[tuple[Path, Path | None]]:
     """Office files needing conversion, as ``(source, explicit_destination)``.
+
+    With ``recursive=False`` only the files directly in *root_dir* are considered, as a judge section reads them.
 
     ``Report.docx`` and ``Report.pptx`` both target ``Report.pdf`` and race for
     it, leaving a PDF that looks like a valid render of both. Same-stem files
@@ -611,6 +613,8 @@ def find_convertible_files(root_dir: str | os.PathLike) -> list[tuple[Path, Path
                 files.append((path, sidecar_pdf(path)))
             else:
                 files.append((path, None))
+        if not recursive:
+            break
     return sorted(files, key=lambda pair: pair[0])
 
 
