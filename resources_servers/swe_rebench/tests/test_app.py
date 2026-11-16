@@ -18,10 +18,15 @@ These cover the parts that decide whether a task counts as resolved. The sandbox
 itself is exercised by the golden-patch run, which needs a live OpenSandbox endpoint.
 """
 
+import asyncio
+import json
+import os
 import re
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -353,6 +358,54 @@ class TestVerifyResponseShape:
             )
 
 
+class TestParserLoadOffTheEventLoop:
+    """The first parser load runs git and may wait minutes on another worker's clone lock.
+
+    On the event loop, that wait would stall every other session the server is handling.
+    """
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_parser_is_resolved_on_a_worker_thread_and_still_masks_the_row(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        from nemo_gym.client import SESSION_ID_KEY
+        from nemo_gym.core import VERIFIER_ERROR
+        from nemo_gym.server_utils import ServerClient
+        from resources_servers.swe_rebench import app
+
+        ran_on_event_loop: list[bool] = []
+
+        def resolve(name: str, cache_dir: Path):
+            try:
+                asyncio.get_running_loop()
+                ran_on_event_loop.append(True)
+            except RuntimeError:
+                ran_on_event_loop.append(False)
+            raise KeyError(f"unknown SWE-rebench log parser {name!r}")
+
+        monkeypatch.setattr(app, "resolve_parser", resolve)
+        server = app.SWERebenchResourcesServer(
+            config=app.SWERebenchResourcesServerConfig(
+                host="0.0.0.0",
+                port=8080,
+                entrypoint="",
+                name="swe_rebench",
+                sandbox_provider="docker",
+                sandbox_config={},
+                is_verifying_golden_patch=True,
+                log_parser_cache_dir=str(tmp_path),
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        body = app.SWERebenchVerifyRequest.model_validate(TestVerifyResponseShape._body())
+        response = await server._verify(SimpleNamespace(session={SESSION_ID_KEY: "session"}), body)
+
+        assert ran_on_event_loop == [False]
+        assert response.mask_sample is True
+        assert response.failure_kind == VERIFIER_ERROR
+        assert "unknown SWE-rebench log parser 'parse_log_js_4'" in response.failure_reason
+
+
 class TestSandboxCpuCap:
     """Build tools size their worker pools from the HOST core count, not the cgroup quota, so
     without these caps a 4-CPU sandbox on a 96-core node runs ~96 compilers and CFS-throttles.
@@ -596,7 +649,7 @@ class TestLogParserPin:
 
     @staticmethod
     def _fake_git(calls: list, fail_on: str | None = None):
-        def run(args, cwd=None, check=False, capture_output=False):
+        def run(args, cwd=None, **kwargs):
             command = args[1]
             calls.append(args)
             if command == fail_on:
@@ -689,3 +742,133 @@ class TestLogParserPin:
         with pytest.raises(RuntimeError, match=f"git {step} .* failed: fatal: remote error: not our ref"):
             log_parsers._clone_locked(destination)
         assert list(tmp_path.iterdir()) == [], f"no clone, staging tree, or lock may survive a failed {step}"
+
+
+class TestParserCloneLock:
+    """A worker killed while it holds the clone lock must not block every later worker until someone removes the lock."""
+
+    @staticmethod
+    def _paths(tmp_path: Path) -> tuple[Path, Path]:
+        from resources_servers.swe_rebench import log_parsers
+
+        destination = tmp_path / log_parsers._repo_dir_name()
+        return destination, tmp_path / f".{destination.name}.clone.lockdir"
+
+    @staticmethod
+    def _hold(lock_path: Path, **owner: object) -> None:
+        lock_path.mkdir()
+        (lock_path / "owner.json").write_text(json.dumps(owner))
+
+    @staticmethod
+    def _dead_pid() -> int:
+        child = subprocess.Popen(["true"])
+        child.wait()
+        return child.pid
+
+    def _clone(self, monkeypatch, destination: Path, calls: list) -> None:
+        from resources_servers.swe_rebench import log_parsers
+
+        monkeypatch.setattr(log_parsers.subprocess, "run", TestLogParserPin._fake_git(calls))
+        monkeypatch.setattr(log_parsers.time, "sleep", lambda seconds: None)
+        log_parsers._clone_locked(destination, timeout_s=0)
+
+    def test_a_lock_whose_holder_died_on_this_host_is_broken(self, monkeypatch, tmp_path) -> None:
+        from resources_servers.swe_rebench import log_parsers
+
+        destination, lock_path = self._paths(tmp_path)
+        self._hold(lock_path, **log_parsers._process_identity() | {"pid": self._dead_pid(), "started_at": time.time()})
+        calls: list = []
+        self._clone(monkeypatch, destination, calls)
+        assert [args[1] for args in calls] == ["init", "fetch", "checkout"]
+        assert [p.name for p in tmp_path.iterdir()] == [destination.name]
+
+    def test_a_lock_held_longer_than_any_live_holder_runs_is_broken(self, monkeypatch, tmp_path) -> None:
+        """Another host's pid cannot be checked, so only the lock's age shows that its holder is gone."""
+        from resources_servers.swe_rebench import log_parsers
+
+        destination, lock_path = self._paths(tmp_path)
+        started_at = time.time() - log_parsers._LOCK_STALE_AFTER_S - 1
+        self._hold(lock_path, host="another-node", pid_namespace="pid:[1]", pid=1, started_at=started_at)
+        calls: list = []
+        self._clone(monkeypatch, destination, calls)
+        assert [args[1] for args in calls] == ["init", "fetch", "checkout"]
+
+    def test_an_old_lock_without_an_owner_is_broken(self, monkeypatch, tmp_path) -> None:
+        """A worker killed before it wrote its owner, or a release before owners were recorded, leaves a bare lock."""
+        from resources_servers.swe_rebench import log_parsers
+
+        destination, lock_path = self._paths(tmp_path)
+        lock_path.mkdir()
+        old = time.time() - log_parsers._LOCK_STALE_AFTER_S - 1
+        os.utime(lock_path, (old, old))
+        calls: list = []
+        self._clone(monkeypatch, destination, calls)
+        assert [args[1] for args in calls] == ["init", "fetch", "checkout"]
+
+    @pytest.mark.parametrize("holder", ["this process", "another host"])
+    def test_a_lock_that_may_be_live_is_left_alone(self, monkeypatch, tmp_path, holder: str) -> None:
+        from resources_servers.swe_rebench import log_parsers
+
+        destination, lock_path = self._paths(tmp_path)
+        owner = (
+            log_parsers._process_identity()
+            if holder == "this process"
+            else {"host": "another-node", "pid_namespace": "pid:[1]", "pid": self._dead_pid()}
+        ) | {"started_at": time.time()}
+        self._hold(lock_path, **owner)
+        calls: list = []
+        with pytest.raises(TimeoutError, match=f"{re.escape(str(lock_path))}, held by .*'started_at'"):
+            self._clone(monkeypatch, destination, calls)
+        assert calls == []
+        assert json.loads((lock_path / "owner.json").read_text()) == owner
+
+    def test_the_holder_records_itself_and_leaves_a_lock_that_is_no_longer_its_own(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """If a waiter breaks the lock and another worker takes it, the first holder must not release the new lock."""
+        from resources_servers.swe_rebench import log_parsers
+
+        destination, lock_path = self._paths(tmp_path)
+        recorded: list = []
+        fake = TestLogParserPin._fake_git([])
+
+        def run(args, **kwargs):
+            fake(args, **kwargs)
+            if args[1] == "fetch":
+                recorded.append(json.loads((lock_path / "owner.json").read_text()))
+                (lock_path / "owner.json").write_text(json.dumps({"token": "another worker"}))
+
+        monkeypatch.setattr(log_parsers.subprocess, "run", run)
+        log_parsers._clone_locked(destination)
+        assert recorded[0]["pid"] == os.getpid()
+        assert recorded[0]["host"] == log_parsers._process_identity()["host"]
+        assert json.loads((lock_path / "owner.json").read_text()) == {"token": "another worker"}
+
+
+class TestParserGitCommand:
+    def test_git_never_prompts_and_a_hung_fetch_fails_with_a_bounded_wait(self, monkeypatch, tmp_path) -> None:
+        """A fetch stuck on a dead proxy or a credential prompt would otherwise hold the clone lock forever."""
+        from resources_servers.swe_rebench import log_parsers
+
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        prompt_setting = tmp_path / "prompt-setting"
+        git = bin_dir / "git"
+        git.write_text(
+            "#!/bin/sh\n"
+            f'printf "%s" "$GIT_TERMINAL_PROMPT" > {prompt_setting}\n'
+            'if [ "$1" = init ]; then mkdir -p "$3"; exit 0; fi\n'
+            'if [ "$1" = fetch ]; then exec sleep 10; fi\n'
+        )
+        git.chmod(0o755)
+        cache = tmp_path / "cache"
+        destination = cache / log_parsers._repo_dir_name()
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+        monkeypatch.setattr(log_parsers, "_GIT_TIMEOUT_S", 1.0)
+
+        started = time.monotonic()
+        with pytest.raises(TimeoutError, match="git fetch .* did not finish within 1s.*reach github.com"):
+            log_parsers._clone_locked(destination)
+        assert time.monotonic() - started < 5
+        assert prompt_setting.read_text() == "0"
+        assert list(cache.iterdir()) == [], "a timed-out fetch must leave no tree, staging tree, or lock behind"

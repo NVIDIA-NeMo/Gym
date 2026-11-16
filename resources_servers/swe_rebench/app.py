@@ -23,6 +23,7 @@ That is the dataset-health check: a row whose golden patch does not resolve is a
 scoring an agent against it is measuring noise.
 """
 
+import asyncio
 import sys
 from pathlib import Path
 from shlex import quote
@@ -383,8 +384,10 @@ class SWERebenchResourcesServer(SandboxSessionResourcesServer):
         # Resolve the parser before spending a sandbox on the run: an unknown parser name means
         # this row can never be graded, and finding that out after the tests have run wastes the
         # most expensive part.
+        # The first call fetches the parsers with git and may wait on another worker's clone lock.
+        # It runs on a worker thread so that wait does not stall every other session on this event loop.
         try:
-            parser = resolve_parser(inputs.log_parser, self._parser_cache_dir)
+            parser = await asyncio.to_thread(resolve_parser, inputs.log_parser, self._parser_cache_dir)
         except Exception as exc:
             # Spread the request: BaseVerifyResponse extends BaseVerifyRequest, so
             # responses_create_params and response are required and must be echoed back.

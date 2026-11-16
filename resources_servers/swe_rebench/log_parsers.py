@@ -27,11 +27,16 @@ than vendored because it is ~3.5k lines of third-party code whose only stable co
 from __future__ import annotations
 
 import importlib.util
+import json
+import logging
 import os
 import shutil
+import socket
 import subprocess
 import sys
+import threading
 import time
+import uuid
 from pathlib import Path
 from types import ModuleType
 from typing import Callable
@@ -46,18 +51,36 @@ UPSTREAM_COMMIT = "c71902a8cf8d2b725f63d51f199f4d3e56f68d2d"  # pragma: allowlis
 # Upstream has moved this file between releases; accept both layouts rather than pinning one.
 _PARSER_RELATIVE_PATHS = (Path("lib") / "agent" / "log_parsers.py", Path("agent") / "log_parsers.py")
 
+# Each git command is bounded, so a hung fetch fails the load instead of holding the clone lock forever.
+_GIT_TIMEOUT_S = 300.0
+_GIT_STEPS = 3
+# A live holder runs at most three bounded git commands, so a lock older than this belongs to a holder that is gone.
+# The margin covers cleanup and clock skew between hosts that share the cache directory.
+_LOCK_STALE_AFTER_S = _GIT_STEPS * _GIT_TIMEOUT_S + 60.0
+_LOCK_OWNER_FILE = "owner.json"
+
 _MODULE: ModuleType | None = None
+# Verification loads the parsers on worker threads, so two requests in one process can arrive here together.
+_LOAD_LOCK = threading.Lock()
+
+logger = logging.getLogger(__name__)
 
 
-def _clone_locked(destination: Path, timeout_s: float = 600.0) -> None:
+def _clone_locked(destination: Path, timeout_s: float | None = None) -> None:
     """Clone once across concurrent workers, using a mkdir lock.
 
     ``gym env start`` may bring several server workers up at once.
     An unsynchronised clone into a shared path would yield a half-written tree that imports with a confusing error.
     The tree is built in a private staging directory and published with one rename.
     A parser file under ``destination`` therefore always belongs to a complete checkout of ``UPSTREAM_COMMIT``.
-    A worker killed while it holds the lock leaves the lock behind, and later callers time out naming it.
+
+    The holder records its pid, host and start time in the lock directory.
+    A worker killed while it holds the lock leaves the lock behind.
+    Waiters break such a lock once its holder is known to be dead, or once it is older than any live holder can be.
+    The default wait outlasts that age, so a waiter always gets to break a lock left by a killed worker.
     """
+    if timeout_s is None:
+        timeout_s = _LOCK_STALE_AFTER_S + 60.0
     if _parser_path(destination) is not None:
         return
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -70,15 +93,21 @@ def _clone_locked(destination: Path, timeout_s: float = 600.0) -> None:
         except FileExistsError:
             if _parser_path(destination) is not None:
                 return
+            if _break_lock_if_stale(lock_path):
+                continue
             if waited > timeout_s:
                 raise TimeoutError(
-                    f"timed out after {timeout_s:.0f}s waiting for the SWE-rebench clone lock at {lock_path}. "
-                    "A worker killed while fetching leaves this lock behind; "
+                    f"timed out after {timeout_s:.0f}s waiting for the SWE-rebench clone lock at {lock_path}, "
+                    f"held by {_read_owner(lock_path) or 'an unrecorded owner'}. "
+                    f"A lock is broken automatically once its holder's process is gone "
+                    f"or it is older than {_LOCK_STALE_AFTER_S:.0f}s; "
                     "if no other worker is fetching, remove it and retry."
                 )
             time.sleep(2.0)
             waited += 2.0
+    owner = None
     try:
+        owner = _write_owner(lock_path)
         if _parser_path(destination) is not None:
             return
         shutil.rmtree(destination, ignore_errors=True)
@@ -95,7 +124,96 @@ def _clone_locked(destination: Path, timeout_s: float = 600.0) -> None:
         finally:
             shutil.rmtree(staging, ignore_errors=True)
     finally:
-        shutil.rmtree(lock_path, ignore_errors=True)
+        # A waiter may have broken this lock and another worker taken it, so remove it only while it is still ours.
+        if _read_owner(lock_path) == owner:
+            shutil.rmtree(lock_path, ignore_errors=True)
+
+
+def _process_identity() -> dict[str, str | int]:
+    """Identify this process well enough for another process to tell whether it is still running.
+
+    Containers on one node can share a hostname but not a pid namespace.
+    A pid is only checked when both the hostname and the pid namespace match.
+    """
+    try:
+        pid_namespace = os.readlink("/proc/self/ns/pid")
+    except OSError:
+        pid_namespace = ""
+    return {"host": socket.gethostname(), "pid_namespace": pid_namespace, "pid": os.getpid()}
+
+
+def _write_owner(lock_path: Path) -> dict[str, object]:
+    owner = {**_process_identity(), "started_at": time.time(), "token": uuid.uuid4().hex}
+    (lock_path / _LOCK_OWNER_FILE).write_text(json.dumps(owner))
+    return owner
+
+
+def _read_owner(lock_path: Path) -> dict[str, object] | None:
+    """Return the lock's recorded owner, or ``None`` before the holder writes it or after it is gone."""
+    try:
+        owner = json.loads((lock_path / _LOCK_OWNER_FILE).read_text())
+    except (OSError, ValueError):
+        return None
+    return owner if isinstance(owner, dict) else None
+
+
+def _pid_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _stale_reason(lock_path: Path, owner: dict[str, object] | None) -> str | None:
+    """Say why the lock at ``lock_path`` belongs to a holder that is gone, or return ``None`` if it may be live."""
+    identity = _process_identity()
+    if (
+        owner is not None
+        and identity["pid_namespace"]
+        and (owner.get("host"), owner.get("pid_namespace")) == (identity["host"], identity["pid_namespace"])
+        and isinstance(owner.get("pid"), int)
+        and not _pid_is_running(owner["pid"])
+    ):
+        return f"its holder, pid {owner['pid']} on {owner['host']}, is no longer running"
+    # A lock with no owner file was left by a worker killed right after taking it, or by an older release.
+    # The directory's own modification time then stands in for the start time.
+    try:
+        started_at = (
+            float(owner["started_at"])
+            if owner is not None and isinstance(owner.get("started_at"), (int, float))
+            else lock_path.stat().st_mtime
+        )
+    except OSError:
+        return None
+    age = time.time() - started_at
+    if age > _LOCK_STALE_AFTER_S:
+        return f"it was taken {age:.0f}s ago, longer than any live holder runs ({_LOCK_STALE_AFTER_S:.0f}s)"
+    return None
+
+
+def _break_lock_if_stale(lock_path: Path) -> bool:
+    """Remove the lock if its holder is gone, and return whether it was removed.
+
+    Two waiters can judge the same lock stale at once.
+    Each moves the lock aside with an atomic rename before deleting it, so only one of them removes it.
+    The owner is read again just before the rename.
+    This keeps a waiter that decided late from removing a lock that another waiter has since broken and retaken.
+    """
+    owner = _read_owner(lock_path)
+    reason = _stale_reason(lock_path, owner)
+    if reason is None or _read_owner(lock_path) != owner:
+        return False
+    graveyard = lock_path.with_name(f"{lock_path.name}.stale-{os.getpid()}-{uuid.uuid4().hex}")
+    try:
+        os.rename(lock_path, graveyard)
+    except OSError:
+        return False
+    shutil.rmtree(graveyard, ignore_errors=True)
+    logger.warning("Broke the SWE-rebench clone lock at %s because %s.", lock_path, reason)
+    return True
 
 
 def _git(*args: str, cwd: Path | None = None) -> None:
@@ -104,9 +222,26 @@ def _git(*args: str, cwd: Path | None = None) -> None:
     ``verify()`` reports ``str(exc)`` as the failure reason.
     ``CalledProcessError`` leaves stderr out of that string.
     Without stderr, a masked row would not say whether the fetch hit an unknown commit, a DNS failure, or a proxy error.
+
+    Git must never wait on a person.
+    Credential prompts are turned off, stdin is closed, and each command is killed after ``_GIT_TIMEOUT_S``.
     """
     try:
-        subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+        subprocess.run(
+            ["git", *args],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            timeout=_GIT_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError(
+            f"git {args[0]} of {UPSTREAM_REPO} at {UPSTREAM_COMMIT} did not finish within {_GIT_TIMEOUT_S:.0f}s. "
+            "Check that this host can reach github.com, directly or through HTTPS_PROXY, "
+            "or fill the parser cache (log_parser_cache_dir) from a host that can."
+        ) from exc
     except subprocess.CalledProcessError as exc:
         stderr = exc.stderr.decode(errors="replace").strip() if exc.stderr else ""
         raise RuntimeError(f"git {args[0]} of {UPSTREAM_REPO} at {UPSTREAM_COMMIT} failed: {stderr}") from exc
@@ -126,7 +261,15 @@ def _parser_path(repo_dir: Path) -> Path | None:
 
 
 def load_parsers(cache_dir: Path) -> ModuleType:
-    """Import upstream's ``log_parsers`` module, cloning it on first use."""
+    """Import upstream's ``log_parsers`` module, cloning it on first use.
+
+    This blocks on git and on the clone lock, so async callers must run it on a worker thread.
+    """
+    with _LOAD_LOCK:
+        return _load_parsers_locked(cache_dir)
+
+
+def _load_parsers_locked(cache_dir: Path) -> ModuleType:
     global _MODULE
     if _MODULE is not None:
         return _MODULE
