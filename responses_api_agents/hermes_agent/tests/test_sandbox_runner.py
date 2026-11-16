@@ -744,6 +744,63 @@ def test_compression_auxiliary_uses_episode_model_route(tmp_path, restore_proces
     assert config["auxiliary"]["compression"]["model"] == "policy_model"
 
 
+@pytest.mark.parametrize("image_only", [False, True])
+@pytest.mark.parametrize(
+    "detail,sent_detail", [("auto", "auto"), ("low", "low"), ("high", "high"), ("original", "high")]
+)
+def test_prompt_images_reach_pinned_hermes_model_requests(
+    tmp_path, restore_process_globals, image_only, detail, sent_detail
+) -> None:
+    """Exercise the installed Hermes loop, not a mock of its multimodal input handling."""
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+
+    image_uri = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII="
+    )
+    content = [
+        {"type": "input_text", "text": "before"},
+        {"type": "input_image", "image_url": image_uri, "detail": detail},
+        {"type": "input_text", "text": "after"},
+    ]
+    if image_only:
+        content = [content[1]]
+    adapter = HermesAgent(
+        config=HermesAgentConfig(
+            host="127.0.0.1",
+            port=0,
+            name="hermes",
+            entrypoint="app.py",
+            model_server={"type": "responses_api_models", "name": "model"},
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    body = adapter._validate_request(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[
+                {"role": "user", "content": content},
+                {"role": "assistant", "content": "prior answer"},
+                {"role": "user", "content": content},
+            ]
+        )
+    )
+    with _ModelServer([_completion({"content": "done"})]) as server:
+        # Hermes marks a response at its iteration ceiling incomplete, even with a final answer.
+        output = _run(_payload(server.base_url, max_turns=4, **adapter._conversation_params(body)), tmp_path)
+    expected = [
+        {"type": "text", "text": "before"},
+        {"type": "image_url", "image_url": {"url": image_uri, "detail": sent_detail}},
+        {"type": "text", "text": "after"},
+    ]
+    if image_only:
+        expected = [expected[1]]
+    assert output["result"]["completed"], output["result"]
+    assert len(server.requests) == 1
+    user_messages = [message for message in server.requests[0]["messages"] if message["role"] == "user"]
+    assert [message["content"] for message in user_messages] == [expected, expected]
+    assert any(message["content"] == "prior answer" for message in server.requests[0]["messages"])
+
+
 def test_compression_auxiliary_uses_its_own_route_when_the_payload_has_one(tmp_path, restore_process_globals):
     """The agent gives compression a URL that keeps its own sampling; the runner points Hermes at it."""
     import yaml

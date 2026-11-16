@@ -247,6 +247,9 @@ resources_servers/cvdp/data/gym_cvdp_nonagentic_code_generation_no_commercial.js
 # Node.js that codex_agent/setup_codex.py installs for local Codex and the launcher tests
 responses_api_agents/codex_agent/.codex_node/
 
+# Pinned OpenCode 2 releases that opencode_agent/setup_opencode.py downloads for local calls
+responses_api_agents/opencode_agent/.opencode_runtime/
+
 # Generated Terminal-Bench 4 dataset
 /benchmarks/terminal_bench_4/data/
 
