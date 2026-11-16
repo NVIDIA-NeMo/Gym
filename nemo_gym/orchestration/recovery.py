@@ -3252,6 +3252,16 @@ def _cut_judge_reply(call: Mapping[str, Any]) -> bool:
     )
 
 
+# What a failed judge request that the verifier retried has to look like to count as a recovered grading attempt.
+_HTTP_ERROR_STATUS_MIN = 400
+_HTTP_ERROR_STATUS_MAX = 599
+_FAILED_OPERATION_OUTCOME = "failed"
+_COMPLETED_GRADE_OUTCOME = "completed"
+_MODEL_BOUNDARY = "model"
+_MODEL_REQUEST_OPERATION = "model_request"
+_MODEL_REQUEST_ERROR_KIND = "model_request_error"
+
+
 def _observed_trial_operations(
     decision: RecoveryDecision,
     collected: CollectedEvidence | None,
@@ -3368,26 +3378,21 @@ def _observed_trial_operations(
     def exactly_one_attempt(operation, status):
         """The operation failed after one HTTP attempt, or after one terminal transport failure and no response.
 
-        The producer counts a transport failure inside the same retry-loop entry, so one recorded event is the whole
+        The client counts a transport failure inside the same retry-loop entry, so one recorded event is the whole
         operation. Any further attempt would be unrecorded.
         """
+        if operation.get("outcome") != _FAILED_OPERATION_OUTCOME:
+            return False
         http_attempts, transport_failures = operation.get("http_attempts"), operation.get("transport_failures")
-        return (
-            operation.get("outcome") == "failed"
-            and type(http_attempts) is int
-            and http_attempts == 1
-            and type(transport_failures) is int
-            and transport_failures == int(status is None)
-        )
+        if type(http_attempts) is not int or type(transport_failures) is not int:
+            return False
+        return http_attempts == 1 and transport_failures == int(status is None)
 
     def ids_not_used(op_id, attempt_id):
         """The operation and attempt ids are set and no other call in the run already claimed them."""
-        return (
-            nonempty(op_id)
-            and nonempty(attempt_id)
-            and op_id not in populations[2]
-            and attempt_id not in populations[4]
-        )
+        if not nonempty(op_id) or not nonempty(attempt_id):
+            return False
+        return op_id not in populations[2] and attempt_id not in populations[4]
 
     def event_matches_operation(operation, report, key, event):
         """The operation, the report and the event name the same failure, and that event was not counted before."""
@@ -3399,27 +3404,26 @@ def _observed_trial_operations(
             return False
         return event.get("operation_id") == operation.get("operation_id")
 
+    def is_http_error_status(status):
+        """The status is an integer HTTP error status (client or server error)."""
+        return type(status) is int and _HTTP_ERROR_STATUS_MIN <= status <= _HTTP_ERROR_STATUS_MAX
+
     def is_model_request_error(event, status):
         """The event is a failed model request with no cause, and its HTTP status (if any) is an error status."""
-        return (
-            event.get("boundary") == "model"
-            and event.get("operation") == "model_request"
-            and event.get("failure_kind") == "model_request_error"
-            and event.get("cause_id") is None
-            and (status is None or (type(status) is int and 400 <= status <= 599))
+        is_model_request = (
+            event.get("boundary") == _MODEL_BOUNDARY
+            and event.get("operation") == _MODEL_REQUEST_OPERATION
+            and event.get("failure_kind") == _MODEL_REQUEST_ERROR_KIND
         )
+        return is_model_request and event.get("cause_id") is None and (status is None or is_http_error_status(status))
 
     def failed_judge_attempt(call, judge_ref, final_started):
         """Decide whether a failed judge request that the verifier retried counts as a recovered grading attempt.
 
-        The judge verifier sent a request to the judge model, it failed, and the verifier sent it again. The grade
-        rests on the completed reply (that call started at ``final_started``); the earlier failed request is a call
-        the verifier owns but the grade does not depend on. It is recorded as one failed operation with one event.
-
-        The failed request counts only when it is wholly recorded: it went to the judge model, it is a single
-        failed operation with a single event (one HTTP attempt, or one transport failure), the event says the same
-        thing as the operation, none of the ids was already used elsewhere in the run, and it started before the
-        completed reply. If any retry or id could be hiding outside the record, we cannot vouch for it.
+        The verifier sent a request to the judge model, it failed, and the verifier sent it again; the grade rests on
+        the later completed reply (started at ``final_started``). The failed request counts only when it is wholly
+        recorded: one failed operation with one event, to the judge model, started before the completed reply, and
+        sharing no id with another call in the run. Anything less could hide a retry we cannot vouch for.
 
         Returns ``(event_id, event, operation_id, attempt_id)`` for a counted attempt, otherwise None.
         """
@@ -3438,8 +3442,11 @@ def _observed_trial_operations(
         return key, event, op_id, attempt_id
 
     def recovered_judge_attempt(call, judge_calls):
-        """A retried call must be a failed attempt before one of the completed judge calls; timestamps are
-        inspected only here, so a grading without retries needs none."""
+        """Find the recovered attempt this retried call is, by trying each completed judge call as its successor.
+
+        Only a completed call with a usable start time can order a retry. Timestamps are read here and nowhere
+        else, so a grading without retries needs none. Returns what ``failed_judge_attempt`` returns, or None.
+        """
         for judge in judge_calls:
             started = judge.get("started_at")
             if type(started) not in (int, float) or not math.isfinite(started):
@@ -3463,17 +3470,23 @@ def _observed_trial_operations(
             attempts.append((hit[0], *found))
         return attempts
 
+    def is_already_registered(failed, key, op_id, attempt_id):
+        """The failed call, its operation, its attempt or its event was already registered in this run."""
+        return (
+            failed["model_call_id"] in populations[0]
+            or op_id in populations[2]
+            or attempt_id in populations[4]
+            or key in recovered_events
+        )
+
     def register_failed_attempts(failed_attempts, grade, cut_reply):
-        """Register each recovered attempt once in the run's populations and count it, or False on a repeated id."""
+        """Register each recovered attempt once in the run's populations and count it, or False on a repeated id.
+
+        The evidence must not contradict itself about one call, operation, attempt or event, so each attempt is
+        checked against the completed dependencies and the failed calls registered before it.
+        """
         for failed, key, event, op_id, attempt_id in failed_attempts:
-            # The evidence must not contradict itself about one call, operation, attempt or event, so check against
-            # the dependencies and the failed calls registered so far.
-            if (
-                failed["model_call_id"] in populations[0]
-                or op_id in populations[2]
-                or attempt_id in populations[4]
-                or key in recovered_events
-            ):
+            if is_already_registered(failed, key, op_id, attempt_id):
                 return False
             populations[0].add(failed["model_call_id"])
             populations[2].add(op_id)
@@ -3481,7 +3494,7 @@ def _observed_trial_operations(
             recovered_events[key] = event
             recovered["observed_grading_attempt_errors"] += 1
             recovered["observed_grading_failed_operations"] += 1
-            if grade["outcome"] == "completed" and not cut_reply:
+            if grade["outcome"] == _COMPLETED_GRADE_OUTCOME and not cut_reply:
                 recovered["judge_recovered_attempts"] += 1
                 recovered["judge_recovered_operations"] += 1
         return True
