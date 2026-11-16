@@ -89,9 +89,18 @@ server's handling of exit 75, and `gym dataset validate agentic_vbench` (the ora
 protocol `nvinference-hybrid`) scored Assembly 18/18, Sequencing 28/28 and Repair 18/18 at 1.0 and Repurpose 36/36
 at 0.202 with no masked rows: 11 Repurpose verifiers hit the 1800 s budget in the judge's own transcription of long
 clips (the published runs gave the verifier 3x), and 8 scored 0 on rubric penalties of the upstream reference edits.
-Not recorded yet: a full-set `opencode_agent` run with `image_input` on (scored and masked counts per family by
-`failure_kind`, Repurpose `verifier_seconds` against the budget, the largest `repurpose.mp4` the Gemini judge
-inlined, transcripts and verifier logs read by hand), and one injected-outage smoke (a bad Hub route on a Repurpose
-task, a blocked download on a Repair task) showing `harbor:verifier_unavailable` with its reason. Until then, treat `allowed_agents`
-as the harness under validation, not as a baselined one. `opencode_agent` saves text-only trajectories, so a run with
-`image_input` evaluates normally but its transcripts carry no frames.
+Recorded on the branch head: the injected-outage smoke (`gym dataset validate --sandbox docker` with the overlay on
+a copy of the entry whose verifiers point at hosts that do not resolve: a Repurpose task with a bad Hub route and a
+Repair task with a blocked materials download both came back masked as `harbor:verifier_unavailable`, with the reason
+in the row; the dataset.toml review thread has the details), and a full-set `opencode_agent` run with `image_input` on
+against `gcp/google/eccn-gemini-4-argon` (Gemini 4 on the NVIDIA Inference Hub through `inference_provider`), the task
+images prebuilt on a rootless Podman backend, 12 concurrent episodes, 3 h 55 min: Assembly 17 scored, mean 0.875;
+Repair 16, 0.401; Sequencing 27, 0.647; Repurpose 34, 0.437; no masked row (every verifier returned; Repurpose
+verified in its separate sandbox in 154 s median, 301 s max, against the 1800 s budget); equal-family mean of the
+scored rows 0.590, which is not the benchmark score because six rows (one Assembly, two Repair, one Sequencing, two
+Repurpose) were dropped: the agent server answered 502 `OpenCode exited with code 1` after 8 to 110 tool calls, with
+an empty last assistant message and no stderr in the error, and Gym kept the rows out of the score rather than scoring
+them 0. The run kept no server log (the harness's `export_dir` was unset), so the cause is open; set `export_dir` to
+keep OpenCode's event log for such rows. Treat these numbers as the harness's first baseline, not a baselined
+result. `opencode_agent` saves text-only trajectories, so a run with `image_input` evaluates normally but its
+transcripts carry no frames.
