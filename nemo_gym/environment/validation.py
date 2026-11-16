@@ -8,6 +8,7 @@ import ast
 import json
 import logging
 import os
+import re
 import tempfile
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -210,7 +211,39 @@ class _ConfigWiring:
     harbor_target: str | None = None
 
 
-class _ServerLookupParser(GlobalConfigDictParser):
+class _StaticWiringParser(GlobalConfigDictParser):
+    """Inspect wiring without deployment credentials or images; runtime parsing stays strict."""
+
+    def _recursively_swap_keys(self, global_config_dict: DictConfig) -> None:
+        # Static checks never start these services. Substitute only known deployment leaves,
+        # before key swapping can turn a broken copy/inherit reference into '???'.
+        placeholders = (
+            (("*", "responses_api_agents", "*", "sandbox_config", "image"), "static-validation-image"),
+            (("*", "responses_api_models", "openai_model", "openai_base_url"), "https://judge.invalid/v1"),
+            (("*", "responses_api_models", "openai_model", "openai_api_key"), "static-validation"),
+            (("*", "opensandbox", "connection", "domain"), "sandbox.invalid"),
+            (("*", "opensandbox", "connection", "api_key"), "static-validation"),
+        )
+        raw = OmegaConf.to_container(global_config_dict, resolve=False)
+
+        def fill(node: object, pattern: tuple[str, ...], path: tuple[str, ...], value: str) -> None:
+            if not pattern:
+                if node == "???" or (isinstance(node, str) and re.fullmatch(r"\$\{oc\.env:[^{}]+\}", node)):
+                    OmegaConf.update(global_config_dict, ".".join(path), value)
+                return
+            if not isinstance(node, dict):
+                return
+            head, *tail = pattern
+            for key in node if head == "*" else (head,):
+                if key in node:
+                    fill(node[key], tuple(tail), (*path, key), value)
+
+        for pattern, value in placeholders:
+            fill(raw, pattern, (), value)
+        super()._recursively_swap_keys(global_config_dict)
+
+
+class _ServerLookupParser(_StaticWiringParser):
     """Reject partially valid server configs before the parser prints its almost-server banner.
 
     Catalog lookup remains strict even with ``error_on_almost_servers: false``: its caller falls back to raw names
@@ -235,7 +268,7 @@ def _resolve_config_wiring(
     from nemo_gym.data.tasks.harbor.prepare import AGENT_OVERRIDES, HARBOR_TARGET_KEY, harbor_benchmark
 
     config_paths = [str(config_path.resolve())]
-    parser = parser or GlobalConfigDictParser()
+    parser = parser or _StaticWiringParser()
     with _with_component_root(config_path), tempfile.TemporaryDirectory() as scratch:
         try:
             benchmark = harbor_benchmark(config_path)

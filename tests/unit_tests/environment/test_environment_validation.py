@@ -32,7 +32,9 @@ from nemo_gym.environment.validation import (
     "name",
     [
         "terminal_bench_4/miniswe",
+        "terminal_bench_4/miniswe_legacy_agent",
         "terminal_bench_science/miniswe",
+        "terminal_bench_science/miniswe_legacy_agent",
         "terminal_bench_science/codex",
         "deepsearchqa",
         "widesearch",

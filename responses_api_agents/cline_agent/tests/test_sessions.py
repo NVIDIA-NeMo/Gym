@@ -1105,6 +1105,18 @@ def test_observations_time_tools_and_mark_failed_and_unfinished_calls():
             (37432, 13152, 9, None),
             "reasoning_token_usage_unavailable",
         ),
+        # Cline counts a call that reported no cache reads as 0 in its aggregate; the per-call event leaves it out.
+        (
+            [
+                {"type": "agent_event", "event": {"type": "usage", "inputTokens": 900}},
+                {"type": "agent_event", "event": {"type": "usage", "inputTokens": 900, "cacheReadTokens": 800}},
+                run_result(
+                    "completed", aggregateUsage={"inputTokens": 1800, "cacheReadTokens": 800, "outputTokens": 9}
+                ),
+            ],
+            (1800, None, 9, None),
+            "reasoning_token_usage_unavailable",
+        ),
         # A run the deadline stopped has only running totals, which can lag answered calls: usage stays unknown.
         (
             [
