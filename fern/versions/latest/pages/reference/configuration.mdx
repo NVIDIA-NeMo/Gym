@@ -30,6 +30,34 @@ On multi-node deployments, the `swe_agents` server embeds these paths in command
 
 Servers that pre-staged setup trees next to the package (the layout before `cache_dir` existed, for example baked container images) keep using those trees **only while `cache_dir` is left at its default** — explicitly configuring `cache_dir` opts out, and removing the pre-staged trees migrates a default-config deployment. Contents accumulate across runs; both directories are safe to delete when no run is active.
 
+### Files Written at Runtime
+
+A server runs with its own source folder as its working directory. A relative path, or one built from `Path.cwd()`, therefore writes into the Gym checkout, which is on a shared filesystem on clusters. Every file a server or agent writes while it runs belongs to one of four kinds, and each kind has one place. The helpers are in `nemo_gym/core/runtime_files.py`.
+
+| Kind | Example | Where it goes | When it is removed |
+|------|---------|---------------|--------------------|
+| Scratch | a per-request workspace, harness logs that are read and discarded | `scratch_dir` / `async_scratch_dir`: the node's `TMPDIR`, or `shared_scratch_dir` when another process or node reads it | when the request or session ends |
+| Debug output | verification logs, screenshots, trajectories, failure artifacts | `debug_artifact_dir`: off unless `debug_artifacts_dir` or the server's own setting names a folder | never; whoever turns it on owns the folder |
+| Cache | tool installs, cloned repositories | `cache_dir` | by hand, when no run is active |
+| Run output | results that a later run reads back to resume | `<results_dir>/<server name>/` | by hand |
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `debug_artifacts_dir` | `null` (off) | Turns on debug output for every server. Each server writes under `<debug_artifacts_dir>/<server name>/`. A server's own setting, such as `verification_log_dir`, overrides it for that server. |
+| `shared_scratch_dir` | `<results_dir>/scratch` | Root for scratch folders that another process or node reads by path during a request. Must be on storage every node of the run sees. |
+
+Both keys are normalized to absolute paths at parse time, like `results_dir` and `cache_dir`.
+
+Debug output is laid out so that rollouts and agent instances never share a folder:
+
+```
+<root>/<kind>/<capture key>/<agent instance>/<UTC time>-[<label>-]<random>/
+```
+
+`<root>` is the server's own setting or `<debug_artifacts_dir>/<server name>`. `<kind>` names what is written, such as `verification`. The capture key and agent instance come from the request; outside a rollout they are `no-rollout` and `unnamed`. The random part keeps repeated writes within one rollout, and runs that reuse task and rollout indices, apart.
+
+The `runtime-write-paths` pre-commit hook fails on new calls to `Path.cwd()` or `os.getcwd()` in server code, and on settings or parameters ending in `_dir` or `_root` whose default is a relative path. A path that is only read can be marked with a `# runtime-path: read` comment.
+
 ### Server Virtual Environments
 
 `gym env start` sets up one uv virtual environment per server and starts the server with that environment's own interpreter (`<venv>/bin/python`), then logs which venv each server runs from. A venv that was copied or moved after it was built still runs its own interpreter, but its `bin/activate` still puts the original location first on `PATH`, so commands a server runs by name (such as `python` or `uv`) are looked up there first. Rebuild a moved venv, or create it with `uv venv --relocatable`, if its servers start such subprocesses.

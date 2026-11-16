@@ -137,6 +137,10 @@ UV_LOCK_TIMEOUT_KEY_NAME = "uv_lock_timeout_seconds"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
 RESULTS_DIR_KEY_NAME = "results_dir"
 CACHE_DIR_KEY_NAME = "cache_dir"
+# Root for debug output (verification logs, screenshots, trajectories, failure artifacts). Null turns it off.
+DEBUG_ARTIFACTS_DIR_KEY_NAME = "debug_artifacts_dir"
+# Root for scratch folders that another process or node reads during the request. Defaults under `results_dir`.
+SHARED_SCRATCH_DIR_KEY_NAME = "shared_scratch_dir"
 INHERIT_FROM_KEY_NAME = "_inherit_from"
 COPY_KEY_NAME = "_copy"
 DELETE_KEY_KEY_NAME = "_delete_key"
@@ -200,6 +204,8 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     UV_VENV_DIR_KEY_NAME,
     RESULTS_DIR_KEY_NAME,
     CACHE_DIR_KEY_NAME,
+    DEBUG_ARTIFACTS_DIR_KEY_NAME,
+    SHARED_SCRATCH_DIR_KEY_NAME,
     INHERIT_FROM_KEY_NAME,
     COPY_KEY_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
@@ -2083,6 +2089,20 @@ Set the keys individually, in a config or as overrides, e.g.:
                 (CACHE_DIR_KEY_NAME, CACHE_DIR),
             ):
                 dir_value = global_config_dict.setdefault(dir_key_name, str(dir_default))
+                if not isinstance(dir_value, str) or not dir_value:
+                    raise ConfigError(f"{dir_key_name} must be a non-empty path string, got {dir_value!r}.")
+                global_config_dict[dir_key_name] = str(Path(dir_value).expanduser().resolve())
+
+            # Runtime file roots; see nemo_gym/core/runtime_files.py.
+            # Debug output stays off unless a root is set.
+            # Shared scratch must be on storage every node of the run sees, as `results_dir` already is.
+            global_config_dict.setdefault(
+                SHARED_SCRATCH_DIR_KEY_NAME, str(Path(global_config_dict[RESULTS_DIR_KEY_NAME]) / "scratch")
+            )
+            for dir_key_name, nullable in ((DEBUG_ARTIFACTS_DIR_KEY_NAME, True), (SHARED_SCRATCH_DIR_KEY_NAME, False)):
+                dir_value = global_config_dict.setdefault(dir_key_name, None)
+                if dir_value is None and nullable:
+                    continue
                 if not isinstance(dir_value, str) or not dir_value:
                     raise ConfigError(f"{dir_key_name} must be a non-empty path string, got {dir_value!r}.")
                 global_config_dict[dir_key_name] = str(Path(dir_value).expanduser().resolve())

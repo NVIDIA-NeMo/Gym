@@ -160,6 +160,7 @@ For guidance on how to build environments, see `fern/versions/latest/pages/envir
 - **Hydra YAML for configuration** — pass configuration through Gym's Hydra config system so it's composable and reproducible across runs.
 - **Graceful error handling** — environments must handle tool failures and bad model outputs with meaningful error responses, not crash the server.
 - **Async endpoints** — the `/run` endpoint must be async. Use `asyncio.Semaphore` for concurrency control if shelling out to external processes.
+- **Never write into the source checkout** — a server runs with its own source folder as the working directory, so a relative path or `Path.cwd()` writes into the checkout, which is on a shared filesystem on clusters. Use `nemo_gym/core/runtime_files.py`: `scratch_dir` / `async_scratch_dir` for files needed only during a request or session, `debug_artifact_dir` for debug output (off unless `debug_artifacts_dir` is set), the global `cache_dir` for caches, and `<results_dir>/<server name>/` for run output. The `runtime-write-paths` pre-commit hook enforces this.
 - **Test skip guards** — tests should skip gracefully if external tools aren't installed (e.g. `pytest.mark.skipif(shutil.which("tool") is None, ...)`).
 
 ## Communication & Async Patterns

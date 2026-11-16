@@ -1,0 +1,73 @@
+# Sites that resolve a path against the server's working directory, which is its source folder.
+# They predate scripts/check_runtime_write_paths.py. Each line is "<file> <rule> <scope>".
+# Some are reads: mark those with a "# runtime-path: read" comment and remove them here.
+# Writes move to nemo_gym/core/runtime_files.py.
+# The check fails on a line that no longer matches any code, so this list only shrinks. Do not add to it.
+
+environment_servers/swe_together/app.py relative-default SWETConfig.artifact_root
+nemo_gym/__init__.py cwd <module>
+nemo_gym/__init__.py cwd component_search_roots
+nemo_gym/environment/scaffold.py cwd _resolve_root
+nemo_gym/eval/comparison/runner.py cwd resolve_output_dir
+nemo_gym/eval/rollout_compare/command.py cwd run_compare
+nemo_gym/server_runtime/supervisor/h2_ping_sidecar/launcher.py cwd resolve_binary
+nemo_gym/web/browser_instance_pool.py relative-default LocalBrowserInstancePoolProvider.__init__.log_dir
+nemo_gym/web/resource_config.py relative-default WebResourcesServerConfig.artifact_dir
+nemo_gym/web/visual_browser.py relative-default VisualBrowserDriverConfig.artifact_dir
+resources_servers/bird_sql/app.py relative-default BirdSqlResourcesServerConfig.bird_sql_dir
+resources_servers/bird_sql/app.py relative-default BirdSqlResourcesServerConfig.spark_warehouse_dir
+resources_servers/deepswe/app.py relative-default DeepSWEResourcesServerConfig.logs_dir
+resources_servers/deepswe_external1/app.py relative-default DeepsweExternal1ResourcesServerConfig.logs_dir
+resources_servers/finance_sec_search/app.py cwd FinanceAgentResourcesServer.model_post_init
+resources_servers/frontierscience_judge/app.py cwd _resolve_prompt_path
+resources_servers/gdp_pdf/sandbox_app.py relative-default GdpPdfSandboxConfig.documents_base_dir
+resources_servers/image_tools/base.py cwd ImageToolsGymToolLogic.__init__
+resources_servers/osworld/config.py relative-default OSWorldResourcesServerConfig.cache_dir
+resources_servers/osworld/config.py relative-default OSWorldResourcesServerConfig.state_dir
+resources_servers/scicodepile/scp_runner.py cwd _make_module_namespace
+resources_servers/scicodepile/scp_runner.py cwd _working_directory
+resources_servers/sec_local_index/cache.py cwd ToolCache.__init__
+resources_servers/spider2_lite/app.py relative-default Spider2LiteResourcesServerConfig.spider2_lite_dir
+resources_servers/terminal_bench_4/app.py relative-default TerminalBench4Config.artifacts_dir
+resources_servers/vision2code/app.py relative-default Vision2CodeConfig.artifact_dir
+resources_servers/webarena_browser/config.py relative-default WebArenaBrowserResourcesServerConfig.artifact_dir
+responses_api_agents/cline_agent/app.py cwd ClineAgent._repo_dir
+responses_api_agents/cline_agent/app.py cwd ClineAgent._workspace_root
+responses_api_agents/cline_agent/app.py relative-default ClineAgentConfig.workspace_root
+responses_api_agents/collab_intel_agent/app.py relative-default CollabIntelAgentConfig.data_root
+responses_api_agents/harbor_agent/app.py cwd HarborAgent._get_results_output_dir
+responses_api_agents/harbor_agent/app.py relative-default HarborAgentConfig.harbor_jobs_dir
+responses_api_agents/hermes_sandboxed_agent/app.py relative-default HermesSandboxedAgentConfig.results_dir
+responses_api_agents/hermes_sandboxed_agent/runner.py cwd run
+responses_api_agents/image_tools_agent/app.py relative-default ImageToolsAgentConfig.crop_dir
+responses_api_agents/kilocode_agent/app.py cwd KiloCodeAgent._repo_dir
+responses_api_agents/kilocode_agent/app.py cwd KiloCodeAgent._workspace_root
+responses_api_agents/kilocode_agent/app.py relative-default KiloCodeAgentConfig.workspace_root
+responses_api_agents/mini_swe_agent/app.py cwd MiniSWEAgent.run
+responses_api_agents/mini_swe_agent_2/app.py cwd MiniSWEAgent.run
+responses_api_agents/miniswe_sandboxed_agent/app.py relative-default MiniSWESandboxedConfig.artifacts_dir
+responses_api_agents/nooa_agent/bench_agent_adapter.py cwd invoke_bench_agent
+responses_api_agents/openclaw_agent/app.py cwd OpenClawAgent._workspace_root
+responses_api_agents/openclaw_agent/app.py relative-default OpenClawAgentConfig.workspace_root
+responses_api_agents/opencode_agent/app.py cwd OpenCodeAgent._repo_dir
+responses_api_agents/opencode_agent/app.py cwd OpenCodeAgent._workspace_root
+responses_api_agents/opencode_agent/app.py relative-default OpenCodeAgentConfig.workspace_root
+responses_api_agents/osworld_agent/app.py relative-default OSWorldAgentConfig.cache_dir
+responses_api_agents/osworld_agent/client.py relative-default run_osworld_task.cache_dir
+responses_api_agents/pi_agent/app.py cwd PiAgent._workspace_root
+responses_api_agents/pi_agent/app.py relative-default PiAgentConfig.workspace_root
+responses_api_agents/pi_sandboxed_agent/app.py relative-default PiSandboxedAgentConfig.artifacts_dir
+responses_api_agents/pool_agent/app.py relative-default PoolAgentConfig.failure_artifacts_dir
+responses_api_agents/prime_agent/app.py cwd PrimeAgent._kernel_venv
+responses_api_agents/prime_agent/app.py cwd PrimeAgent._workspace_root
+responses_api_agents/prime_agent/app.py relative-default PrimeAgentConfig.workspace_root
+responses_api_agents/rna_design_agent/rds/llm.py relative-default find_api_key.search_dir
+responses_api_agents/saas_bench_agent/app.py relative-default SaasBenchConfig.tasks_dir
+responses_api_agents/saas_bench_agent/benchmark/saas_bench/loader.py cwd build_prompt
+responses_api_agents/saas_bench_agent/benchmark/saas_bench/opencode/browser.py cwd BrowserTools.resolve_input
+responses_api_agents/saas_bench_agent/benchmark/saas_bench/opencode/core.py relative-default inventory.tasks_dir
+responses_api_agents/simple_strands_agent/app.py cwd SimpleStrandsAgent._workspace
+responses_api_agents/simple_strands_agent/app.py relative-default SimpleStrandsAgentConfig.workspace_root
+responses_api_agents/terminus_2_agent/app.py cwd Terminus2Agent._logs_dir
+responses_api_agents/terminus_2_agent/app.py relative-default Terminus2AgentConfig.logs_root
+responses_api_models/local_vllm_model/server_config.py cwd LocalVLLMModelConfig.model_post_init
