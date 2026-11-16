@@ -22,8 +22,8 @@ dependencies = [
     "hf-transfer==0.1.9",
     "uvicorn==0.40.0",
     "vllm==0.11.0; sys_platform == 'darwin'",
-    "vllm==0.29.0; sys_platform != 'darwin'",
-    "flashinfer-python==0.6.18; sys_platform != 'darwin'",
+    "vllm==0.33.0; sys_platform != 'darwin'",
+    "flashinfer-python==0.7.2.post1; sys_platform != 'darwin'",
 ]
 
 [build-system]
@@ -41,7 +41,7 @@ override-dependencies = [
     "opencv-python-headless; sys_platform == 'never'",
     "pynvvideocodec; sys_platform == 'never'",
     "torchcodec; sys_platform == 'never'",
-    "torchvision; sys_platform == 'never'",
+    "torchvision==0.29.0; sys_platform != 'darwin'",
     "torchaudio; sys_platform == 'never'",
     "pycountry; sys_platform == 'never'",
     "gprof2dot; sys_platform == 'never'",

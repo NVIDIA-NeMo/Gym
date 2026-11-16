@@ -163,7 +163,8 @@
       "prometheus-fastapi-instrumentator>=8.0.2"
     ],
     "override-dependencies": [
-      "pathspec"
+      "pathspec",
+      "torchvision==0.29.0; sys_platform != 'darwin'"
     ]
   },
   "responses_api_models/local_vllm_model": {
@@ -171,7 +172,8 @@
       "prometheus-fastapi-instrumentator>=8.0.2"
     ],
     "override-dependencies": [
-      "pathspec"
+      "pathspec",
+      "torchvision==0.29.0; sys_platform != 'darwin'"
     ]
   },
   "responses_api_models/switchyard_model": {
