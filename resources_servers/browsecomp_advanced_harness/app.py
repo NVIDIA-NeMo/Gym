@@ -77,7 +77,11 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
 from nemo_gym.verification import JUDGE_FAILURES, JudgeError, call_judge, is_judge_failure
-from resources_servers.browsecomp_advanced_harness.judge_prompt import JUDGE_PROMPT_TEMPLATE
+from resources_servers.browsecomp_advanced_harness.judge_prompt import (
+    JUDGE_EXTRACTED_ANSWER_RE,
+    JUDGE_PROMPT_TEMPLATE,
+    JUDGE_VERDICT_RE,
+)
 from resources_servers.browsecomp_advanced_harness.rollout_context import (
     format_phase_totals,
     peek_phase_totals,
@@ -2320,15 +2324,16 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         """Parse grading output. Returns (is_correct, extracted, parsed_ok).
 
         Uses the LAST 'correct: yes/no' match to avoid picking up template
-        echoes or reasoning inside <think> blocks.
+        echoes or reasoning inside <think> blocks. Markdown emphasis around the
+        label or value (`**correct:** yes`) is accepted; see JUDGE_VERDICT_RE.
         """
-        matches = list(re.finditer(r"correct:\s*(yes|no)\b", text, re.IGNORECASE))
+        matches = list(JUDGE_VERDICT_RE.finditer(text))
         if not matches:
             return False, "", False
 
         is_correct = matches[-1].group(1).lower() == "yes"
 
-        ans_matches = list(re.finditer(r"extracted_final_answer:\s*(.+?)(?:\n|$)", text))
+        ans_matches = list(JUDGE_EXTRACTED_ANSWER_RE.finditer(text))
         extracted = ans_matches[-1].group(1).strip() if ans_matches else ""
 
         if extracted and "The final exact answer extracted from the [response]" in extracted:

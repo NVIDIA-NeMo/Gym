@@ -14,7 +14,7 @@
 # limitations under the License.
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -79,6 +79,88 @@ class TestParseJudgeVerdict:
     def test_case_insensitive(self):
         is_correct, _, parsed_ok = parse_judge_verdict("Correct: YES")
         assert (is_correct, parsed_ok) == (True, True)
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("**extracted_final_answer:** Paris\n**correct:** yes", (True, "Paris", True)),
+            ("**extracted_final_answer:** Paris\n**correct:** no", (False, "Paris", True)),
+            ("**extracted_final_answer**: Paris\n**correct**: yes", (True, "Paris", True)),
+            ("extracted_final_answer: **Paris**\ncorrect: **yes**", (True, "Paris", True)),
+            ("*extracted_final_answer:* Paris\n*correct:* yes", (True, "Paris", True)),
+            ("extracted_final_answer: Paris\n- **Correct:** No", (False, "Paris", True)),
+            # The reply shape the hosted claude-sonnet-4-5 judge returned in the 2026-11-13 QA regression.
+            (
+                "**extracted_final_answer:** China\n\n**reasoning:** R3 applies -- 'China' is the common short "
+                "form of 'People's Republic of China'.\n\n**correct:** yes\n\n**confidence:** 100",
+                (True, "China", True),
+            ),
+        ],
+    )
+    def test_markdown_emphasis_parses(self, text, expected):
+        assert parse_judge_verdict(text) == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # The label must be the `correct` field itself.
+            "**extracted_final_answer:** yes",
+            "incorrect: yes",
+            "**incorrect:** yes",
+            "[correct_answer]: yes",
+            # The value must be exactly yes or no.
+            "**correct:** maybe",
+            "correct: **yesterday**",
+        ],
+    )
+    def test_near_misses_are_unparsed(self, text):
+        assert parse_judge_verdict(text) == (False, "", False)
+
+    def test_plain_think_echo_does_not_outrank_a_later_bold_verdict(self):
+        text = (
+            "<think>the rubric says correct: yes when they match; these differ</think>\n"
+            "**extracted_final_answer:** Lyon\n**correct:** no"
+        )
+        assert parse_judge_verdict(text) == (False, "Lyon", True)
+
+    def test_bold_template_echo_is_unparsed(self):
+        text = (
+            "**extracted_final_answer**: The final exact answer extracted from the [response]. "
+            "Put the extracted answer as 'None'...\n**correct**: yes"
+        )
+        assert parse_judge_verdict(text) == (False, "", False)
+
+
+class TestJudgeAnswerMarkdownVerdict:
+    async def test_bold_verdict_scores_on_the_first_attempt(self, monkeypatch):
+        """A `**correct:** yes` reply grades the answer 1.0 on attempt 1 instead of exhausting the retries."""
+        server = SearchResourcesServer(
+            config=SearchResourcesServerConfig(
+                host="0.0.0.0",
+                port=0,
+                entrypoint="app.py",
+                name="opencode_search",
+                sandbox_provider="opensandbox",
+                sandbox_config={},
+                sandbox_image="image",
+                judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
+                judge_retry_delay_seconds=0.0,
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        reply = "**extracted_final_answer:** China\n\n**reasoning:** R3 applies.\n\n**correct:** yes\n\n**confidence:** 100"
+        call_judge = AsyncMock(return_value=(None, reply))
+        monkeypatch.setattr(server, "_call_judge", call_judge)
+
+        result = await server._judge_answer(
+            "What country has Beijing as its capital?", "People's Republic of China", "China"
+        )
+
+        assert result["reward"] == 1.0
+        assert result["judge_parsed"] is True
+        assert result["judge_attempts"] == 1
+        assert result["extracted_final_answer"] == "China"
+        assert call_judge.await_count == 1
 
 
 class TestLastAssistantText:
