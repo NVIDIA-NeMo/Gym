@@ -59,6 +59,42 @@ This legacy `/run` path is deprecated and will be removed after the Environment 
 Both paths of `miniswe_sandboxed_agent` are superseded by `mini_swe_agent` agent sessions. For Harbor task folders without `[agent].user`, switch to `--agent mini_swe_agent/mini_swe_agent_sandboxed` with the same model and sandbox options. Existing configurations remain available, and no adapter removal date is set. Tasks with `[agent].user` must keep the older adapter because the replacement refuses a task user. Legacy `/run` benchmark presets must keep their current adapter until their environment-server migration; changing only the agent name is insufficient. Terminal-Bench-Science's `terminal_bench_science/miniswe` preset has migrated to `mini_swe_agent` on the Harbor environment server, and its `/run` preset remains as `terminal_bench_science/miniswe_legacy_agent`. Migration does not establish new benchmark qualification or guarantee identical scores.
 </Warning>
 
+### Gzip model requests
+
+Codex, Hermes, Pi, and OpenCode 1 sandbox sessions can gzip model requests to
+reduce traffic from the sandbox to the NeMo Gym Model Server. Compression is
+lossless and disabled by default. Local execution, including the agent's legacy
+`/run` path, rejects enabled gzip. OpenCode 2 does not support this option.
+
+Enable `gzip_requests_enabled` on both the harness and its receiving Model Server.
+For an existing sandbox experiment importing the Hermes and vLLM configurations,
+add these overrides; keep its model endpoint and sandbox settings:
+
+```yaml
+policy_model:
+  responses_api_models:
+    vllm_model:
+      gzip_requests_enabled: true
+
+hermes_agent:
+  responses_api_agents:
+    hermes_agent:
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      gzip_requests_enabled: true
+```
+
+Startup validation requires each compressing harness to reference a decoding-enabled
+NeMo Gym model, and each decoding-enabled model to have at least one connected
+compressing harness. The receiver still accepts uncompressed requests, so other
+harnesses can share it without enabling compression.
+
+The harness uses gzip level 1 for serialized request bodies of at least 4 KiB.
+Smaller bodies, already encoded requests, and bodies that do not shrink are sent
+unchanged. The Model Server decompresses requests before model handling; model
+inputs and response streaming retain their existing behavior.
+
 ### Kilo MCP and sandbox ownership
 
 Kilo's session adapter accepts remote MCP grants from Resources. Set the Environment Server's `resources_tool_transports: [mcp]` to expose Resources tools through MCP. Grant URLs and headers must be reachable and valid from the task sandbox. Required direct HTTP grants are still rejected; this does not make a recipe configured with `[direct_http]` compatible with Kilo.
