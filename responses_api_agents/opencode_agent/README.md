@@ -256,7 +256,9 @@ benchmark whose Resources server serves its tools over direct HTTP does not pair
 ## Task-container settings
 
 These sandbox-session settings are off by default. They run OpenCode the way a harness started in
-the task container runs it, for benchmarks that grade such a harness. Local calls ignore them.
+the task container runs it, for benchmarks that grade such a harness. Local calls ignore them. OpenCode 2
+sessions refuse `reasoning_effort`, `interleaved_reasoning_field`, `output_token_policy`,
+`declare_model_limits` and `argv_prompt_quoting`, which set OpenCode 1's provider configuration and launch.
 
 - `reasoning_effort`: sent as chat `reasoning_effort` on every request (the model's `reasoningEffort`
   option), e.g. `max`.
@@ -530,7 +532,8 @@ handled in `opencode2/`:
 - **Installation.** The installer downloads the same release asset names and checks each download against the
   release's SHA-256 (`OPENCODE_RELEASE_SHA256` in `runtime.py`); a 2.x version without pinned digests needs
   `sandbox_executable_path`. OpenCode 2 prints `opencode v2.2.7` for `--version`. It installs no plugin
-  dependencies, so `sandbox_plugin_dependencies_path` is refused. ripgrep is found as in OpenCode 1.
+  dependencies, so `sandbox_plugin_dependencies_path` is refused. ripgrep is found as in OpenCode 1. The
+  OpenCode 1 provider and launch settings of [Task-container settings](#task-container-settings) are refused too.
 - **Processes.** Every command runs with `--standalone`: without it, OpenCode 2 joins (or, for `session export`
   and `session import`, starts) a background OpenCode service with that service's configuration. Each run's
   private server exits with the CLI.

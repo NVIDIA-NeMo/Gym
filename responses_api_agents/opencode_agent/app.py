@@ -1133,6 +1133,22 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 raise AgentSeedRejectedError(
                     "OpenCode 2 installs no plugin dependencies; unset sandbox_plugin_dependencies_path and _sha256"
                 )
+            # These shape OpenCode 1's provider configuration and launch; the OpenCode 2 session has no equivalent.
+            opencode1_only = [
+                name
+                for name, value in (
+                    ("reasoning_effort", self.config.reasoning_effort is not None),
+                    ("interleaved_reasoning_field", self.config.interleaved_reasoning_field != "reasoning_content"),
+                    ("output_token_policy", self.config.output_token_policy != "fixed"),
+                    ("declare_model_limits", not self.config.declare_model_limits),
+                    ("argv_prompt_quoting", self.config.argv_prompt_quoting),
+                )
+                if value
+            ]
+            if opencode1_only:
+                raise AgentSeedRejectedError(
+                    f"{', '.join(opencode1_only)} apply only to OpenCode 1; unset them for OpenCode 2"
+                )
             if (
                 self.config.opencode_version not in OPENCODE_RELEASE_SHA256
                 and self.config.sandbox_executable_path is None
@@ -2027,6 +2043,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 "OPENCODE_CONFIG_CONTENT": _serialize_replacement_config(config) if replace else json.dumps(config),
                 **opencode2_config.ISOLATION,
             },
+            "raise_oom_score_adj": self.config.raise_oom_score_adj,
         }
         if self.config.session_project_config:
             del payload["env"]["OPENCODE_DISABLE_PROJECT_CONFIG"]
