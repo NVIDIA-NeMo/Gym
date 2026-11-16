@@ -76,6 +76,8 @@ class DeepCADResourcesServerConfig(BaseResourcesServerConfig):
                 raise ValueError("Mixed IoU requires rescale alignment and B-rep backend")
             if any(self.reward_weights.model_dump().values()):
                 raise ValueError("Mixed IoU replaces geometry reward_weights; set them to zero")
+        elif not any(self.reward_weights.model_dump().values()):
+            raise ValueError("Geometry scoring requires at least one positive reward weight")
         return self
 
 
@@ -147,20 +149,19 @@ class DeepCADResourcesServer(SimpleResourcesServer):
 
     def setup_webserver(self) -> FastAPI:
         # Validate deployment-specific native libraries before admitting rollouts.
-        if self.config.geometry_library_dirs:
-            for directory in self.config.geometry_library_dirs:
-                if not directory or not Path(directory).is_dir():
-                    raise RuntimeError(f"CAD native library directory is missing: {directory!r}")
-            worker = "mixed_iou" if self.config.verification_metric == "mixed_iou" else "geometry"
-            probe = subprocess.run(
-                [sys.executable, "-c", f"import resources_servers.deepcad.{worker}"],
-                env=self._geometry_worker_env(),
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            if probe.returncode:
-                raise RuntimeError(f"CAD geometry runtime preflight failed: {probe.stderr[-2000:]}")
+        for directory in self.config.geometry_library_dirs:
+            if not directory or not Path(directory).is_dir():
+                raise RuntimeError(f"CAD native library directory is missing: {directory!r}")
+        worker = "mixed_iou" if self.config.verification_metric == "mixed_iou" else "geometry"
+        probe = subprocess.run(
+            [sys.executable, "-c", f"import resources_servers.deepcad.{worker}"],
+            env=self._geometry_worker_env(),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if probe.returncode:
+            raise RuntimeError(f"CAD geometry runtime preflight failed: {probe.stderr[-2000:]}")
         return super().setup_webserver()
 
     async def verify(self, body: DeepCADVerifyRequest) -> DeepCADVerifyResponse:
@@ -172,7 +173,7 @@ class DeepCADResourcesServer(SimpleResourcesServer):
         else:
             try:
                 compile(code, "model.py", "exec")
-            except SyntaxError as exc:
+            except (SyntaxError, RecursionError, MemoryError) as exc:
                 result = {"reward": 0.0, "failure_kind": "deepcad:syntax", "failure_reason": str(exc)}
             else:
                 async with self._semaphore:
