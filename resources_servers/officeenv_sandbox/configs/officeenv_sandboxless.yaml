@@ -28,10 +28,10 @@ officeenv_sandbox_simple_agent:
 # officeenv_environment_server inherits the instance of the server type it runs. So this copy takes that instance,
 # then officeenv_environment_server's own settings for it, with the references pointing at the copies above.
 officeenv_sandbox_environment_server:
-  _copy: single_agent_turn
+  _copy: single_agent_turn_legacy
   environment_servers:
-    single_agent_turn:
-      _copy: officeenv_environment_server.environment_servers.single_agent_turn
+    single_agent_turn_legacy:
+      _copy: officeenv_environment_server.environment_servers.single_agent_turn_legacy
       resources_server:
         name: officeenv_sandboxless_resources_server
       agent_server:
