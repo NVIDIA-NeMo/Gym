@@ -52,6 +52,7 @@ from nemo_gym.agents.agent_outcome import (
 from nemo_gym.artifacts.run_artifacts import ACCEPTED_STAGE_OMISSION, accepted_stage_omission
 from nemo_gym.core.failure_kinds import (
     AGENT_TIMEOUT_INFRASTRUCTURE,
+    ENVIRONMENT_PROTOCOL_VIOLATION,
     JUDGE_FAILED,
     JUDGE_SKIPPED,
     JUDGE_UNPARSEABLE,
@@ -654,10 +655,7 @@ def decide_recovery(
                     "no rerun in the Store, so nobody owns them"
                 )
             if reserved:
-                parts.append(
-                    f"{reserved} reservation(s) have no saved outcome and the allocation that made them is not known "
-                    "to have ended, so whether they ran is unknown"
-                )
+                parts.append(f"{reserved} reservation(s) have no saved outcome and {_RESERVATIONS_UNKNOWN}")
             return decision(
                 RecoveryAction.STOP,
                 "; ".join(parts)
@@ -707,6 +705,18 @@ def decide_recovery(
                     "; nothing can be graded before then. After the reset continue with gym eval resubmit --recover "
                     "(re-judges the saved answers, no model calls)",
                 )
+            violations = [
+                item
+                for item in evidence
+                if item.state == IdentityState.TERMINAL and item.failure_kind == ENVIRONMENT_PROTOCOL_VIOLATION
+            ]
+            if len(violations) == counts[IdentityState.TERMINAL]:
+                return decision(
+                    RecoveryAction.STOP,
+                    f"{len(violations)} rollout(s) got a reply the collector cannot use "
+                    f"({ENVIRONMENT_PROTOCOL_VIOLATION}); this is a producer bug, retrying cannot help. "
+                    "Fix the server or the benchmark pairing, then `gym eval submit` again",
+                )
             return decision(
                 RecoveryAction.STOP,
                 f"{counts[IdentityState.TERMINAL]} terminal unscored failure(s) need an "
@@ -715,7 +725,7 @@ def decide_recovery(
         if counts.get(IdentityState.EXHAUSTED):
             return decision(
                 RecoveryAction.STOP,
-                f"{counts[IdentityState.EXHAUSTED]} identity(ies) used every attempt since the last resubmit, so a "
+                f"{counts[IdentityState.EXHAUSTED]} identity(ies) {_ATTEMPTS_USED_TOKEN}, so a "
                 "resume would run nothing; the run is not complete; "
                 + _EXTEND_RETRIES_SCOPE.format(
                     cap="/".join(
@@ -725,13 +735,16 @@ def decide_recovery(
                         )
                     )
                 )
-                + f"; {EXTEND_ATTEMPTS_HINT}",
+                + f"; {EXTEND_ATTEMPTS_HINT}"
+                # More attempts alone would stop again on the chain's budget, so name every blocker now.
+                + _chain_blockers_note(budget),
             )
         if counts.get(IdentityState.MASKED):
             return decision(
                 RecoveryAction.STOP,
-                f"{counts[IdentityState.MASKED]} completed result(s) are masked and not measured: they are kept and a "
-                f"resume would run nothing; the run is not complete; {populations}",
+                f"{counts[IdentityState.MASKED]} {_MASKED_STOP_TOKEN}: they are kept and a resume would run nothing; "
+                f"the run is not complete; {populations}"
+                + (_chain_blockers_note(budget) if masked_without_artifact else ""),
             )
         if counts.get(IdentityState.SKIPPED):
             reasons = sorted({item.reason for item in evidence if item.state == IdentityState.SKIPPED and item.reason})
@@ -765,9 +778,15 @@ def decide_recovery(
             RecoveryAction.STOP,
             f"{_INFRA_BUDGET_USED_PREFIX} ({budget.infra_retries_used} of {budget.max_infra_retries})"
             + (
-                f", and the stored walltime budget is used ({budget.walltime_used_s:g} of {budget.max_walltime_s:g} s"
+                f", and {_WALLTIME_USED_TOKEN} ({budget.walltime_used_s:g} of {budget.max_walltime_s:g} s"
                 "; less than a minute is left): raise both in one call"
                 if walltime_spent
+                else ""
+            )
+            # A raised retry cap would stop next on the walltime nobody can read, so name it now.
+            + (
+                f", and {UNKNOWN_WALLTIME_REASON}: raise the retries and give an explicit budget in one call"
+                if budget.walltime_capped and budget.walltime_used_s is None
                 else ""
             ),
         )
@@ -777,7 +796,7 @@ def decide_recovery(
         if budget.walltime_used_s >= budget.max_walltime_s:
             return decision(
                 RecoveryAction.STOP,
-                f"the stored walltime budget is used ({budget.walltime_used_s:g} of {budget.max_walltime_s:g} s)",
+                f"{_WALLTIME_USED_TOKEN} ({budget.walltime_used_s:g} of {budget.max_walltime_s:g} s)",
             )
     return decision(
         RecoveryAction.RESUBMIT,
@@ -793,10 +812,49 @@ def decide_recovery(
 
 
 _INFRA_BUDGET_USED_PREFIX = "the stored infra-retry budget is used"
+
+
+_RESERVATIONS_UNKNOWN = "the allocation that made them is not known to have ended, so whether they ran is unknown"
+
+
+_ATTEMPTS_USED_TOKEN = "used every attempt since the last resubmit"
+
+
+_WALLTIME_USED_TOKEN = "the stored walltime budget is used"
+
+
+# A refused or stopped recovery records none of the extensions it asked for, so the next one must ask again.
+_NOT_RECORDED_TOKEN = "asked in this call is not recorded, as nothing was queued: ask it again in the same call"
 _EXTEND_RETRIES_SCOPE = (
     "--extend-retries raises infra retries only; it does not raise the per-identity attempt cap "
     "(max_rollout_attempts={cap})"
 )
+
+
+_CHAIN_BLOCKERS_LEAD = "; a resume of them would also stop, as "
+
+
+_MASKED_STOP_TOKEN = "completed result(s) are masked and not measured"
+
+
+def _chain_blockers_note(budget: RecoveryBudget) -> str:
+    """For a stop on the identities' own states (exhausted, masked): what in the chain's budget would stop the resume
+    an extension or a rerun allows, as the stop texts name it, so one call can lift every blocker; else ""."""
+    blockers = []
+    if budget.max_infra_retries is None or budget.infra_retries_used is None:
+        blockers.append(UNKNOWN_BUDGET_REASON)
+    elif budget.infra_retries_used >= budget.max_infra_retries:
+        blockers.append(f"{_INFRA_BUDGET_USED_PREFIX} ({budget.infra_retries_used} of {budget.max_infra_retries})")
+    if budget.walltime_capped and budget.max_walltime_s is not None:
+        if budget.walltime_used_s is None:
+            if UNKNOWN_BUDGET_REASON not in blockers:
+                blockers.append(UNKNOWN_WALLTIME_REASON)
+        # A chain stops once less than a minute of its walltime remains.
+        elif budget.max_walltime_s - budget.walltime_used_s < 60:
+            blockers.append(f"{_WALLTIME_USED_TOKEN} ({budget.walltime_used_s:g} of {budget.max_walltime_s:g} s)")
+    if not blockers:
+        return ""
+    return f"{_CHAIN_BLOCKERS_LEAD}{' and '.join(blockers)}: lift every blocker in one call"
 
 
 def omission_summary(evidence: Iterable[IdentityEvidence]) -> str:

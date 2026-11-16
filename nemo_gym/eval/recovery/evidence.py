@@ -29,6 +29,8 @@ from pydantic import BaseModel, Field
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.core.failure_kinds import (
+    DRIVER_INSTALL_FAILED,
+    ENVIRONMENT_PROTOCOL_VIOLATION,
     JUDGE_SKIPPED,
     PROVIDER_CREDENTIALS_REJECTED,
     PROVIDER_QUOTA_EXHAUSTED,
@@ -39,6 +41,7 @@ from nemo_gym.eval.recovery.markers import (
     ACCOUNTING_UNKNOWN_PREFIX,
     CANCELLED_FOLLOWUP_MARKER,
     FOLLOW_UP_SUBMISSION_REFUSED,
+    GUARDED_DRIVER_FAILURE_KINDS,
     PROVISIONAL_MARKER_PREFIX,
 )
 
@@ -75,6 +78,15 @@ COLLECT_SCRIPT = (
     + "\n"
     + "PROVIDER_CREDENTIALS_REJECTED = "
     + repr(PROVIDER_CREDENTIALS_REJECTED)
+    + "\n"
+    + "GUARDED_DRIVER_FAILURE_KINDS = "
+    + repr(GUARDED_DRIVER_FAILURE_KINDS)
+    + "\n"
+    + "DRIVER_INSTALL_FAILED = "
+    + repr(DRIVER_INSTALL_FAILED)
+    + "\n"
+    + "ENVIRONMENT_PROTOCOL_VIOLATION = "
+    + repr(ENVIRONMENT_PROTOCOL_VIOLATION)
     + "\n"
     + "JUDGE_SKIPPED = "
     + repr(JUDGE_SKIPPED)
@@ -147,6 +159,17 @@ def model_call_facts(r):
                                        for event in (events.values() if isinstance(events, dict) else ()) if isinstance(event, dict)],
                     "started_at": finite(item.get("started_at")), "duration_ms": finite(item.get("latency_total_ms", item.get("duration_ms")))})
     return out
+def repetition_stop(call):
+    # Whether the provider stopped the call's generation for repetition (vLLM's repetition detection): a `repetition`
+    # finish reason or a `repetition_detected` stop reason, recorded on the call or kept on its saved response.
+    response = call.get("response") if isinstance(call.get("response"), dict) else {}
+    meta = call.get("response_metadata") if isinstance(call.get("response_metadata"), dict) else {}
+    choices = response.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    finish = (meta.get("finish_reason"), response.get("native_finish_reason"), response.get("finish_reason"),
+              choice.get("native_finish_reason"), choice.get("finish_reason"))
+    stop = (response.get("native_stop_reason"), response.get("stop_reason"), choice.get("stop_reason"))
+    return "repetition" in finish or "repetition_detected" in stop
 def trial_metadata(value):
     if not isinstance(value, dict):
         return None
@@ -333,6 +356,8 @@ def grading_facts(r):
         "judge_error": isinstance(r.get("judge_evaluations"), list) and any(
             isinstance(item, dict) and item.get("verdict_label") == "JUDGE_ERROR" for item in r["judge_evaluations"]),
         "judge_unparsed": isinstance(r.get("judge_evaluations"), list) and judge_unparsed(r["judge_evaluations"]),
+        "judge_error_message": isinstance(r.get("judge_error"), str) and bool(r["judge_error"].strip()),
+        "invalid_judge_response": r.get("invalid_judge_response") is True,
         "games_unjudged": games_unjudged(r.get("games")),
         "rubric": rubric(r),
         "library_reward": finite(r.get("library_reward")),
@@ -430,6 +455,266 @@ def trial_items(value, key, fields):
 changed_while_reading = set()
 # Artifacts that exist but cannot be read, relative to the job dir: recorded as unknown, never a crash.
 unreadable = set()
+# A line longer than BIG_LINE bytes is read in chunks and parsed with the long strings of its bulky top-level values
+# elided (``Pruner``), so a read holds what the collector keeps of a row, not the row: ``ng_trajectory`` repeats each
+# model call's whole request, so one row grows with the square of its conversation and reaches gigabytes.
+BIG_LINE = 16 << 20
+CHUNK = 4 << 20
+PRUNED_KEYS = (b"ng_trajectory", b"ng_agent_observations")
+# A string is elided only when it is longer than this and is not one the collector reads (KEPT_PATHS).
+ELIDE_ABOVE = 1024
+# Elided text is checked as JSON in pieces of about this size.
+VALIDATE = 1 << 20
+# A string the collector reads is never elided; one above this size is no identity or status, so the row fails loudly.
+KEPT_MAX = 1 << 20
+# A key is read up to this many bytes: a name the collector reads is at most 21 characters, 126 bytes with every one
+# escaped, so a longer key matches none of them.
+KEY_MAX = 256
+# The places in a pruned value whose string the collector projects (identities, statuses, kinds, names), as the keys
+# from the row down to the string, list levels left out. A string anywhere else is uninterpreted payload (request
+# input, tool output, conversation, even under a field that shares a name with one of these) and is elided when long.
+def kept_paths():
+    paths = set()
+
+    def add(prefix, names):
+        paths.update(tuple(part.encode() for part in prefix.split() + [name]) for name in names.split())
+
+    add("ng_trajectory", "task_id rollout_id")
+    ref = "type name"
+    for group, fields in (
+        ("invocations", "invocation_id status in_session verification_skipped error_type parent_invocation_id stop_reason"),
+        ("verifier_invocations", "invocation_id status failure_kind"),
+        ("turns", "invocation_id task_id rollout_id turn_no step_count"),
+        ("tool_calls", "invocation_id tool_call_id tool_name status error_type"),
+    ):
+        add("ng_trajectory " + group, fields)
+        if group != "tool_calls":
+            add("ng_trajectory " + group + " model_calls", "model_call_id response_id")
+            add("ng_trajectory " + group + " model_calls model_ref", ref)
+    add("ng_trajectory verifier_invocations grading_operations", "operation_id kind outcome result_binding_sha256")
+    for field in ("model_call_id", "response_id"):
+        add("ng_trajectory verifier_invocations grading_operations dependencies", field)
+    add("ng_trajectory verifier_invocations grading_operations dependencies model_ref", ref)
+    add("ng_trajectory verifier_invocations grading_record", "verifier score verdict result_binding_sha256")
+    add("ng_trajectory verifier_invocations sandbox_observations",
+        "role provider sandbox_id outcome exit_code teardown_confirmed error_type")
+    add("ng_trajectory gaps", "code")
+    add("ng_trajectory model_calls", "model_call_id started_at status_code upstream_status_code error_category")
+    add("ng_trajectory model_calls response output", "type role status call_id name")
+    add("ng_trajectory model_calls request input", "type call_id")
+    for call in ("model_calls", "model_calls response_metadata"):
+        base = "ng_trajectory " + call
+        add(base, "response_id status_code response_status error_category upstream_status_code local_response_reason "
+                  "dialect finish_reason")
+        add(base + " model_ref", ref)
+        add(base + " output_budget_refit", "requested_max_tokens window applied_max_tokens")
+        add(base + " model_operations", "operation_id outcome final_attempt_id failure_id http_attempts "
+                                        "transport_failures retry_wait_s request_elapsed_ms")
+        add(base + " failure_report", "failure_id omitted")
+        add(base + " failure_report events *", "event_id boundary operation operation_id attempt_id cause_id "
+                                               "failure_kind http_status stage")
+    return frozenset(paths)
+
+
+KEPT_PATHS = kept_paths()
+STRUCTURE = re.compile(rb'["{}\[\],:]')
+NESTED = re.compile(rb'["{}\[\]]')
+HEX = frozenset(b"0123456789abcdefABCDEF")
+def unescaped(key):
+    # A key as the parsed row names it, so that "invocation_id" written with escapes is the same key. One that is not
+    # a valid string (the row fails when it is parsed) or is cut at KEY_MAX matches no path.
+    if b"\\" not in key:
+        return key
+    try:
+        return json.loads(b'"' + key + b'"').encode()
+    except ValueError:
+        return b"\0"
+class Pruner:
+    # Copies one JSON object in chunks, replacing each long string inside a PRUNED_KEYS value that the collector does
+    # not read with "<elided N bytes>". Only top-level keys are matched; any other value is copied byte for byte. An
+    # elided string is still checked as a JSON string, in pieces: a row is invalid exactly when it is invalid whole.
+    def __init__(self):
+        self.out, self.in_string, self.escape = [], False, False
+        self.expect_key, self.key, self.last_key, self.target = False, None, None, False
+        self.kinds, self.keys = [], []
+        self.mode, self.buffer, self.size, self.carry = None, None, 0, b""
+        self.invalid = False
+    def body(self, data):
+        if self.mode == "elide":
+            self.size += len(data)
+            if self.buffer is not None:
+                self.buffer += data
+                if self.size > ELIDE_ABOVE:
+                    self.carry, self.buffer = self.buffer, None
+            else:
+                self.carry += data
+            if self.buffer is None and len(self.carry) >= VALIDATE:
+                self.check(False)
+        else:
+            if self.mode == "keep":
+                self.size += len(data)
+                if self.size > KEPT_MAX:
+                    self.invalid = True
+            if self.key is not None and len(self.key) < KEY_MAX:
+                self.key += data
+    def check(self, final):
+        # Checks the text gathered so far, up to the last complete escape and UTF-8 character unless it is the end.
+        data = self.carry
+        cut = len(data)
+        if not final:
+            if (cut - len(data.rstrip(b"\\"))) % 2:
+                cut -= 1
+            else:
+                for width in range(2, 6):
+                    tail = data[cut - width:] if cut >= width else b""
+                    if tail[:2] == b"\\u" and all(byte in HEX for byte in tail[2:]):
+                        head = data[: cut - width + 1]
+                        if (len(head) - len(head.rstrip(b"\\"))) % 2:
+                            cut -= width
+                            break
+            for back in range(1, min(3, cut) + 1):
+                lead = data[cut - back]
+                if lead < 0x80:
+                    break
+                if lead >= 0xC0:
+                    if back < (2 if lead < 0xE0 else 3 if lead < 0xF0 else 4):
+                        cut -= back
+                    break
+        piece, self.carry = data[:cut], data[cut:]
+        if self.invalid or not piece:
+            return
+        try:
+            json.loads('"' + piece.decode("utf-8", "surrogatepass") + '"')
+        except ValueError:
+            self.invalid = True
+    def kept(self):
+        # Whether the string that starts here sits where the collector reads it.
+        path = [key for key, kind in zip(self.keys, self.kinds) if kind == b"{"]
+        if any(key is None for key in path):
+            return True
+        for index in range(2, len(path)):
+            if path[index - 1] == b"events" and path[index - 2] == b"failure_report":
+                path[index] = b"*"
+        return tuple(path) in KEPT_PATHS
+    def open_string(self, depth):
+        # How the string that starts here is handled: a top-level key is captured, a string the collector reads is
+        # copied, any other string inside a pruned value is elided when long.
+        self.mode = None
+        if self.expect_key and (depth == 1 or self.target):
+            self.key = bytearray()
+        if self.target:
+            key = None if self.expect_key else self.keys[-1]
+            self.size = 0
+            if self.expect_key or key is None or self.kept():
+                self.mode = "keep"
+            else:
+                self.mode, self.buffer, self.carry = "elide", b"", b""
+        self.expect_key = False
+    def feed(self, chunk):
+        pos, size, copy = 0, len(chunk), None if self.mode == "elide" else 0
+        while pos < size:
+            if self.in_string:
+                if self.escape:
+                    self.escape = False
+                    self.body(chunk[pos:pos + 1])
+                    pos += 1
+                    continue
+                # The closing quote is the first one not preceded by an odd run of backslashes. Found with find and a
+                # count back over the run, so a string full of escapes costs no state beyond the chunk.
+                end = chunk.find(b'"', pos)
+                while end != -1:
+                    start = end
+                    while start > pos and chunk[start - 1] == 0x5C:
+                        start -= 1
+                    if (end - start) % 2 == 0:
+                        break
+                    end = chunk.find(b'"', end + 1)
+                if end == -1:
+                    start = size
+                    while start > pos and chunk[start - 1] == 0x5C:
+                        start -= 1
+                    self.escape = (size - start) % 2 == 1
+                    self.body(chunk[pos:size])
+                    break
+                self.body(chunk[pos:end])
+                pos = end
+                pos += 1
+                self.in_string = False
+                if self.mode == "elide":
+                    if self.buffer is not None:
+                        self.out.append(b'"' + self.buffer + b'"')
+                    else:
+                        self.check(True)
+                        self.out.append(b'"<elided %d bytes>"' % self.size)
+                    self.buffer, self.mode, copy = None, None, pos
+                elif self.key is not None:
+                    self.last_key, self.key = unescaped(bytes(self.key)), None
+                    self.keys[-1] = self.last_key
+                self.mode = None
+                continue
+            found = (STRUCTURE if self.target or len(self.keys) <= 1 else NESTED).search(chunk, pos)
+            if found is None:
+                break
+            char, start, pos = found.group(), found.start(), found.end()
+            if char == b'"':
+                self.in_string = True
+                self.open_string(len(self.keys))
+                if self.mode == "elide":
+                    if copy is not None:
+                        self.out.append(chunk[copy:start])
+                    copy = None
+            elif char in (b"{", b"["):
+                self.keys.append(None if char == b"{" else (self.keys[-1] if self.keys else None))
+                self.kinds.append(char)
+                self.expect_key = char == b"{"
+            elif char in (b"}", b"]"):
+                # An extra closer in a corrupt row has nothing to close: the parse of the row rejects it.
+                if self.keys:
+                    self.keys.pop()
+                    self.kinds.pop()
+                self.target = self.target and bool(self.keys)
+            elif char == b":":
+                if len(self.keys) == 1 and self.last_key is not None:
+                    self.target = self.last_key in PRUNED_KEYS
+            elif char == b",":
+                if len(self.keys) == 1:
+                    self.target = False
+                self.expect_key = self.kinds[-1] == b"{"
+        if copy is not None:
+            self.out.append(chunk[copy:])
+    def result(self, newline):
+        # An invalid string makes the whole row invalid; its newline decides, as for a whole row, whether it is a
+        # malformed record or a truncated last one.
+        if self.invalid:
+            return b"}" + (b"\n" if newline else b"")
+        data, self.out = b"".join(self.out), []
+        # A newline that ended an unfinished elided string is not in the copied text: keep it, so that a malformed
+        # record is not mistaken for a truncated last line.
+        return data + b"\n" if newline and not data.endswith(b"\n") else data
+def lines(fh, digest):
+    # Each line with its number; a line longer than BIG_LINE comes back pruned. Every byte read goes into the digest.
+    number = 0
+    while True:
+        line = fh.readline(BIG_LINE + 1)
+        if not line:
+            return
+        digest.update(line)
+        if len(line) > BIG_LINE and not line.endswith(b"\n"):
+            pruner = Pruner()
+            pruner.feed(line)
+            last = line
+            while not line.endswith(b"\n"):
+                line = fh.readline(CHUNK)
+                if not line:
+                    break
+                last = line
+                digest.update(line)
+                pruner.feed(line)
+            line = pruner.result(last.endswith(b"\n"))
+            # The rebuilt row is the only copy that stays alive while it is parsed.
+            del pruner
+        yield number, line
+        number += 1
 def rows(name, skip=0):
     p = os.path.join(a, name)
     if not os.path.exists(p):
@@ -444,8 +729,7 @@ def rows(name, skip=0):
         unreadable.add(os.path.relpath(p, d))
         return None
     with source as fh:
-        for i, line in enumerate(fh):
-            read.update(line)
+        for i, line in lines(fh, read):
             if i < skip or not line.strip():
                 continue
             try:
@@ -574,7 +858,7 @@ def rows(name, skip=0):
                                     if isinstance(item, dict) else None for item in trajectory.get("invocations")] if isinstance(trajectory.get("invocations"), list) else None,
                     "verifier_invocations": [({k: item.get(k) for k in ("invocation_id", "status", "failure_kind")} | {"model_calls": trial_refs(item.get("model_calls")), "grading_operations": trial_grading(item.get("grading_operations")), "grading_record": {k: item["grading_record"].get(k) for k in ("verifier", "score", "verdict", "result_binding_sha256")} if isinstance(item.get("grading_record"), dict) else None, "sandbox_observations": [{k: fact.get(k) for k in ("role", "provider", "sandbox_id", "outcome", "exit_code", "teardown_confirmed", "error_type")} if isinstance(fact, dict) else None for fact in item["sandbox_observations"]] if isinstance(item.get("sandbox_observations"), list) else item.get("sandbox_observations")})
                                             if isinstance(item, dict) else None for item in trajectory.get("verifier_invocations")] if isinstance(trajectory.get("verifier_invocations"), list) else None,
-                    "model_calls": [{"model_call_id": item.get("model_call_id"), "started_at": finite(item.get("started_at")), "response_metadata": trial_metadata(item.get("response_metadata")),
+                    "model_calls": [{"model_call_id": item.get("model_call_id"), "started_at": finite(item.get("started_at")), "response_metadata": trial_metadata(item.get("response_metadata")), "repetition_stop": repetition_stop(item),
                                      "output_items": trial_items(item.get("response"), "output", ("type", "role", "status", "call_id", "name")),
                                      "input_items": trial_items(item.get("request"), "input", ("type", "call_id"))}
                                     if isinstance(item, dict) else None for item in trajectory.get("model_calls")] if isinstance(trajectory.get("model_calls"), list) else None,
@@ -845,6 +1129,21 @@ try:
         coverage_scored = [report["scored"], report["expected"]]
 except (OSError, ValueError, AttributeError):
     pass
+task_selection = None
+try:
+    # The subset a run selected by task id (task_ids or task_ids_fpath): its source, counts and digest, not the ids.
+    selection = json.load(open(os.path.join(a, "rollouts_task_selection.json")))
+    if (isinstance(selection.get("source"), str) and isinstance(selection.get("task_ids_sha256"), str)
+            and all(type(selection.get(k)) is int and selection[k] >= 0 for k in ("tasks", "rows"))):
+        task_selection = {"source": selection["source"][:512], "tasks": selection["tasks"], "rows": selection["rows"],
+                          "task_ids_sha256": selection["task_ids_sha256"][:64]}
+    else:
+        task_selection = {"source": None, "tasks": None, "rows": None, "task_ids_sha256": None}
+except FileNotFoundError:
+    pass
+except (OSError, ValueError, AttributeError):
+    # A selection record that cannot be read still says the run was a subset.
+    task_selection = {"source": None, "tasks": None, "rows": None, "task_ids_sha256": None}
 collected = {"materialized": rows("rollouts_materialized_inputs.jsonl"), "results": rows("rollouts.jsonl"),
                   "failures": rows("rollouts_failures.jsonl") or [], "resubmit_offset": offset, "infra_retries_used": num(".gym_infra_retries")[0],
                   "infra_retries_state": "unknown" if unknown_accounting else num(".gym_infra_retries")[1],
@@ -853,7 +1152,7 @@ collected = {"materialized": rows("rollouts_materialized_inputs.jsonl"), "result
                   "chain_incomplete": os.path.exists(os.path.join(d, ".gym_chain_incomplete")),
                   "quality": quality, "score": score, "mlflow": mlflow, "managed_store": any(managed_store),
                   "coverage_allocation_id": coverage_allocation_id, "coverage_scored": coverage_scored,
-                  "benchmark_metric_coverage": benchmark_metric_coverage}
+                  "benchmark_metric_coverage": benchmark_metric_coverage, "task_selection": task_selection}
 # One closing snapshot: every source hash above is the opening one, so a change during collection shows up here.
 closing_snapshot = {name: sha256(os.path.join(a, name)) for name in source_files}
 if quality is not None and (source_snapshot != closing_snapshot or changed_while_reading):
@@ -918,8 +1217,9 @@ def resume_drift_keys():
 collected["resume_drift_keys"] = resume_drift_keys()
 def chain_continuation_note():
     # A continuation's provisional line, left when it ended before queuing its follow-up, or a sentinel's line for a
-    # follow-up cancelled before it started, or the guard's stop on rejected sandbox credentials or on a follow-up
-    # submission the scheduler refused (see resume_script).
+    # follow-up cancelled before it started, or the guard's stop on a typed driver failure (rejected credentials, a
+    # server start-up timeout, a failed install or preparation, a refused resume, ...) or on a follow-up submission the
+    # scheduler refused (see resume_script): the typed stop carries the remedy the next recovery needs first.
     try:
         text = open(os.path.join(d, ".gym_chain_incomplete")).read(2000)
     except OSError:
@@ -928,10 +1228,16 @@ def chain_continuation_note():
     named = (
         line.startswith(PROVISIONAL_MARKER_PREFIX)
         or CANCELLED_FOLLOWUP_MARKER in line
-        or PROVIDER_CREDENTIALS_REJECTED in line
-        or PROVIDER_QUOTA_EXHAUSTED in line
+        or any(kind in line for kind in GUARDED_DRIVER_FAILURE_KINDS)
         or line.startswith(FOLLOW_UP_SUBMISSION_REFUSED)
     )
+    if named and DRIVER_INSTALL_FAILED + ": " in line:
+        # The install's own error text is the one free-form excerpt the guard copies from the driver log, and an installer
+        # can print a credentialed URL: keep the typed failure and the log reference, and leave the excerpt in the
+        # private driver log on the run host.
+        head, _, rest = line.partition(DRIVER_INSTALL_FAILED + ": ")
+        _, sep, tail = rest.rpartition("; the chain does not retry it")
+        line = head + DRIVER_INSTALL_FAILED + ": (error text omitted)" + (sep + tail if sep else "")
     return line[:500] if named else None
 collected["chain_continuation_note"] = chain_continuation_note()
 collected["unreadable_files"] = sorted(unreadable)
@@ -1079,6 +1385,9 @@ class CollectedEvidence(BaseModel):
     # The aggregate's own (metric_coverage/trials, metric_coverage/expected, metric_coverage/name or None): the trials
     # the benchmark's headline metric covered, as the benchmark declares them.
     benchmark_metric_coverage: tuple[int, int, str | None] | None = None
+    # rollouts_task_selection.json: the subset the run selected by task id (source, tasks, rows, task_ids_sha256; a
+    # field is None when the record was unreadable), or None when the run took every task of its input.
+    task_selection: dict[str, Any] | None = None
     # Why the chain's accounting is unknown (the marker's reason or an unobserved claim), and the counter files' own
     # states (absent, ok, malformed) when the sources were stable.
     accounting_unknown_reason: str | None = None

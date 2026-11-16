@@ -154,6 +154,41 @@ def test_existing_v1_record_without_native_metadata_keeps_all_reference_ids():
     assert project_trajectory_v1(raw) == raw
 
 
+@pytest.mark.parametrize("pairs", [[("A", "B"), ("B", "C")], [("A", "B"), ("B", "A")]])
+async def test_default_enrichment_projects_then_replays_without_changing_primary_output(pairs):
+    from nemo_gym.rollouts.rollout_collection import enrich_run_result
+
+    raw = evidence(pairs)
+    result = {
+        "response": {"output": [{"type": "function_call", "call_id": "A"}]},
+        "ng_agent_observations": {
+            "schema_version": "2.0",
+            "source": "test",
+            "records": [*raw["invocations"], *raw["tool_calls"]],
+        },
+    }
+    primary = deepcopy(result["response"])
+    expected = [native for _, native in pairs]
+    for _ in range(3):
+        await enrich_run_result(
+            {"task_id": "task", "_ng_rollout_id": "capture"}, result, capture_dirs=[], observability_enabled=True
+        )
+        record = TrajectoryRecord.model_validate(result["ng_trajectory"])
+        assert record.schema_version == "1.0"
+        assert [tool.tool_call_id for tool in record.tool_calls] == expected
+        assert [
+            item["call_id"] for item in result["ng_trajectory"]["invocations"][0]["conversation"]
+        ] == expected + expected
+        assert [
+            r["tool_call_id"] for r in result["ng_agent_observations"]["records"] if r["kind"] == "tool_call"
+        ] == expected
+        assert result["response"] == primary
+        assert not any(
+            g.code in {"trajectory_projection_failed", "producer_trajectory_invalid", "agent_observations_invalid"}
+            for g in record.gaps
+        )
+
+
 @pytest.mark.parametrize("kind", ["missing_native", "conflicting_native"])
 def test_projection_does_not_attribute_ambiguous_source_to_one_native_id(kind):
     raw = evidence([("A", "native")])
@@ -181,6 +216,155 @@ def test_projection_rewrites_chat_turn_references_without_rewriting_message_ids(
         "tool_calls": [{"id": "native", "function": {"arguments": '{"call_id":"A"}'}}],
     }
     assert projected["turns"][0]["question"] == [{"role": "tool", "tool_call_id": "native", "content": "A"}]
+
+
+@pytest.mark.parametrize("include_payloads", [True, False])
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "complete",
+        "bundle_tool_only",
+        "trajectory_tool_only",
+        "bundle_collision",
+        "trajectory_collision",
+        "unproven_turn",
+    ],
+)
+async def test_public_v1_projection_coordinates_all_retained_envelopes(include_payloads, shape):
+    from nemo_gym.rollouts.rollout_collection import enrich_run_result
+
+    result = {
+        "ng_agent_observations": {
+            "schema_version": "2.0",
+            "source": "test",
+            "records": [
+                {
+                    "kind": "agent_invocation",
+                    "invocation_id": "root",
+                    "model_calls": [{"model_call_id": "model"}],
+                    "conversation": [
+                        {
+                            "type": "function_call",
+                            "id": "normalized",
+                            "call_id": "normalized",
+                            "name": "bash",
+                            "arguments": "{}",
+                        }
+                    ],
+                },
+                {
+                    "kind": "tool_call",
+                    "invocation_id": "root",
+                    "tool_call_id": "normalized",
+                    "native_tool_call_id": "native",
+                    "span_id": "span",
+                    "model_call_id": "model",
+                    "timings": [
+                        {
+                            "boundary": "lifecycle",
+                            "timing_source": "test",
+                            "duration_ms": 5,
+                            "duration_source": "reported",
+                        }
+                    ],
+                },
+            ],
+        },
+        "ng_model_call_capture": {
+            "calls": [
+                {
+                    "model_call_id": "model",
+                    "started_at": 1,
+                    "response": {
+                        "choices": [
+                            {
+                                "message": {
+                                    "role": "assistant",
+                                    "tool_calls": [
+                                        {
+                                            "id": "native",
+                                            "type": "function",
+                                            "function": {"name": "bash", "arguments": "{}"},
+                                        }
+                                    ],
+                                }
+                            }
+                        ]
+                    },
+                }
+            ]
+        },
+    }
+    row = {"task_id": "task", "_ng_rollout_id": "capture"}
+    await enrich_run_result(
+        row,
+        result,
+        capture_dirs=[],
+        observability_enabled=True,
+        include_payloads=include_payloads,
+        trajectory_schema_version="2.0",
+    )
+    assert len(result["ng_trajectory"]["turns"]) == 1
+    records = result["ng_agent_observations"]["records"]
+    if shape == "bundle_tool_only":
+        result["ng_agent_observations"]["records"] = [r for r in records if r["kind"] == "tool_call"]
+    elif shape == "trajectory_tool_only":
+        result["ng_agent_observations"]["records"] = [r for r in records if r["kind"] != "tool_call"]
+    elif shape == "unproven_turn":
+        result["ng_trajectory"]["turns"][0]["model_calls"] = []
+    elif shape.endswith("collision"):
+        invocation = (records if shape == "bundle_collision" else result["ng_trajectory"]["invocations"])[0]
+        invocation["conversation"].append({"type": "message", "id": "native", "role": "assistant", "content": []})
+    if not include_payloads:
+        # Omitted capture content is absent from generated turns, so there is no
+        # captured call ID there that would require additional rewrite evidence.
+        assert result["ng_trajectory"]["turns"][0]["answer"] is None
+    expected = (
+        "native"
+        if not shape.endswith("collision") and (not include_payloads or shape != "unproven_turn")
+        else "normalized"
+    )
+    for _ in range(3):
+        await enrich_run_result(
+            row, result, capture_dirs=[], observability_enabled=True, include_payloads=include_payloads
+        )
+        record = TrajectoryRecord.model_validate(result["ng_trajectory"])
+        assert [tool.tool_call_id for tool in record.tool_calls] == [expected]
+        assert record.tool_calls[0].duration_ms == 5
+        bundle = result["ng_agent_observations"]
+        assert all(r["tool_call_id"] == expected for r in bundle["records"] if r["kind"] == "tool_call")
+        assert all(
+            item["call_id"] == expected
+            for r in bundle["records"]
+            if r["kind"] == "agent_invocation"
+            for item in r["conversation"]
+            if item.get("type") == "function_call"
+        )
+        assert not any(
+            g.code in {"producer_trajectory_invalid", "trajectory_projection_failed", "agent_observations_invalid"}
+            for g in record.gaps
+        )
+        assert any(g.code == "tool_native_identity_unrepresentable" for g in record.gaps) == (expected == "normalized")
+
+
+async def test_public_projection_keeps_valid_trajectory_when_companion_is_malformed():
+    from nemo_gym.rollouts.rollout_collection import enrich_run_result
+
+    raw = evidence([("normalized", "native")])
+    raw["gaps"] = []
+    result = {
+        "ng_trajectory": project_trajectory_v1(raw, restore_native_ids=False),
+        "ng_agent_observations": {"records": "not a list"},
+    }
+    malformed = deepcopy(result["ng_agent_observations"])
+    for _ in range(3):
+        await enrich_run_result(
+            {"task_id": "task", "_ng_rollout_id": "capture"}, result, capture_dirs=[], observability_enabled=True
+        )
+        record = TrajectoryRecord.model_validate(result["ng_trajectory"])
+        assert [t.tool_call_id for t in record.tool_calls] == ["normalized"]
+        assert "agent_observations_invalid" in {gap.code for gap in record.gaps}
+        assert result["ng_agent_observations"] == malformed
 
 
 @pytest.mark.parametrize("explicit_defaults", [False, True])

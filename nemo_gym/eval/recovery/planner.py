@@ -21,6 +21,8 @@ and starts nothing.
 """
 
 import math
+import re
+from collections.abc import Mapping
 from typing import Any
 
 from nemo_gym._moved_paths import moved_names_getattr
@@ -36,7 +38,10 @@ from nemo_gym.eval.recovery.decision import (
     FRESH_RESTART_REASON,
     LIVE_JOB_STATES,
     OPERATOR_CONTINUATION,
+    RERUN_MASKED_FLAGS,
     UNKNOWN_BUDGET_HINT,
+    UNKNOWN_BUDGET_REASON,
+    UNKNOWN_WALLTIME_REASON,
     IdentityEvidence,
     IdentityState,
     RecoveryAction,
@@ -52,13 +57,23 @@ from nemo_gym.eval.recovery.evidence import (
     CollectedEvidence,
     _identity,
 )
-from nemo_gym.eval.recovery.markers import ACCUMULATED_WALLTIME_NAME, RETRY_EXTENSION_NAME, RETRY_FILE_NAME
+from nemo_gym.eval.recovery.markers import (
+    ACCUMULATED_WALLTIME_NAME,
+    GUARDED_DRIVER_FAILURE_KINDS,
+    RETRY_EXTENSION_NAME,
+    RETRY_FILE_NAME,
+)
 from nemo_gym.eval.recovery.policy import (
     OutcomePolicySource,
     RecoveryOutcomePolicyConfig,
 )
 from nemo_gym.eval.recovery.rows import (
+    _ATTEMPTS_USED_TOKEN,
+    _CHAIN_BLOCKERS_LEAD,
     _INFRA_BUDGET_USED_PREFIX,
+    _MASKED_STOP_TOKEN,
+    _NOT_RECORDED_TOKEN,
+    _WALLTIME_USED_TOKEN,
     _live_reason,
     decide_recovery,
 )
@@ -98,16 +113,24 @@ def _operator_continuation(
     changed.
     """
 
-    def stop(why: str) -> RecoveryDecision:
-        return stopped.model_copy(update={"reason": f"{stopped.reason}; {why}"})
+    def stop(why: str, guard: str) -> RecoveryDecision:
+        return stopped.model_copy(update={"reason": f"{stopped.reason}; {why}", "continuation_refused": guard})
 
     if collected.accounting_unknown_reason in (UNOBSERVED_CLAIM_REASON, UNREADABLE_CLAIM_REASON):
-        return stop("a follow-up claim names no job, so an operator continuation cannot rule out a queued follow-up")
+        return stop(
+            "a follow-up claim names no job, so an operator continuation cannot rule out a queued follow-up",
+            "claim_unidentified",
+        )
     states = collected.counter_states
     if states is None:
-        return stop("the chain's accounting files changed while they were read, so an operator continuation waits")
+        return stop(
+            "the chain's accounting files changed while they were read, so an operator continuation waits",
+            "counters_changed",
+        )
     if configured_retries is None:
-        return stop("the run configures no infra-retry cap, so an operator continuation has no budget to fill")
+        return stop(
+            "the run configures no infra-retry cap, so an operator continuation has no budget to fill", "no_retry_cap"
+        )
     unknown: list[str] = []
     writes: dict[str, dict[str, Any]] = {}
     if collected.infra_retry_extension_state in ("absent", "ok"):
@@ -190,6 +213,67 @@ def resume_drift_note(keys: list[str] | None) -> str | None:
     return f"resumed across operational drift: {listed}"
 
 
+# The delivery reason of an export that did not upload the rollouts (``upload_rollouts: false``): unverified by
+# configuration, which no export changes.
+MLFLOW_ROLLOUTS_NOT_UPLOADED = "records that the rollouts were not uploaded"
+
+
+_CHAIN_STOP_KIND = re.compile(r"^(?:Previous job \S+ ended [^:]*: )?(?P<kind>[a-z_]+): ")
+
+
+_EXPLICIT_BUDGET = "--max-walltime HH:MM:SS --walltime-reason TEXT"
+
+
+_REPIN_IN_THE_SAME_RESUBMIT = "(--repin COMMIT --repin-reason TEXT) in the same resubmit"
+
+
+def _continuation_options(decision: RecoveryDecision) -> list[str]:
+    """The options of the one ``gym eval resubmit --recover`` call that continues a run this STOP blocks, else [].
+
+    The stop's own cause decides: a spent budget (attempts, infra retries, walltime), unknown chain accounting (an
+    explicit budget fills it), masked results without an artifact (an approved rerun), or an extension the run's
+    pinned Gym cannot apply (a repin in the same call). What in the chain would stop next (``_chain_blockers_note``)
+    counts only once that cause has a continuation, and the note on masked results without an artifact, which any
+    stop carries, is no cause of its own. Every option a blocker needs is named, with each one the stopped call asked
+    for and did not record, so following the advice never drops one."""
+    reason = decision.reason
+    notes = re.split(r"; |\n", reason)
+
+    def asked(flag: str) -> bool:
+        return any(note.startswith(f"{flag} ") and note.endswith(_NOT_RECORDED_TOKEN) for note in notes)
+
+    rerun_flag = RERUN_MASKED_FLAGS.split()[0]
+    # A refused extension or rerun continues only with a repin in the same call; refused for any other reason, it
+    # cannot continue the run at all, and the refusal itself says what to do.
+    refused = re.match(rf"(--extend-attempts \d+|{rerun_flag}) is refused: ", reason)
+    repin = _REPIN_IN_THE_SAME_RESUBMIT in reason
+    if refused and not repin:
+        return []
+    cause, _, blockers = reason.split("\n")[0].partition(_CHAIN_BLOCKERS_LEAD)
+    rerun = (
+        (_MASKED_STOP_TOKEN in cause and bool(decision.masked_without_artifact))
+        or bool(refused and refused[1] == rerun_flag)
+        or asked(rerun_flag)
+    )
+    attempts = _ATTEMPTS_USED_TOKEN in cause or bool(refused and refused[1].startswith("--extend-attempts"))
+    stops = cause + (blockers if attempts or rerun else "")
+    budget_unknown = decision.accounting_unknown == "budget" or UNKNOWN_BUDGET_REASON in stops
+    unknown = budget_unknown or decision.accounting_unknown is not None or UNKNOWN_WALLTIME_REASON in stops
+    retries = _INFRA_BUDGET_USED_PREFIX in stops
+    walltime = _WALLTIME_USED_TOKEN in stops or unknown
+    if not (attempts or retries or walltime or rerun or repin):
+        return []
+    options = {
+        "--extend-attempts N": attempts or asked("--extend-attempts"),
+        "--extend-retries N": retries or asked("--extend-retries"),
+        f"{RERUN_MASKED_FLAGS} TEXT": rerun,
+        _EXPLICIT_BUDGET: walltime or asked("--max-walltime"),
+        "[--extend-retries N]": budget_unknown and not (retries or asked("--extend-retries")),
+        "--repin COMMIT --repin-reason TEXT": repin,
+    }
+    return [option for option, needed in options.items() if needed]
+
+
 def decide_from_collected(collected: CollectedEvidence, **options: Any) -> RecoveryDecision:
     """``_decide_from_collected``, with the reason naming any operational drift the run's latest resume crossed (see
     ``resume_drift_note``) and a continuation that ended before it queued its follow-up, so an inspection, a recovery
@@ -202,14 +286,46 @@ def decide_from_collected(collected: CollectedEvidence, **options: Any) -> Recov
     decision = _decide_from_collected(collected, **options).model_copy(
         update={"outcome_policy": {"source": OutcomePolicySource(source).value, **policy.model_dump(mode="json")}}
     )
+    if unrecorded := _unrecorded_notes(decision, options):
+        # Beside the stop they belong to, before any hint line that ends the reason.
+        first, *rest = decision.reason.split("\n", 1)
+        decision = decision.model_copy(update={"reason": "\n".join(["; ".join([first, *unrecorded]), *rest])})
     notes = [resume_drift_note(collected.resume_drift_keys)]
     blocked = failed_judge_jobs_blocking(collected.judge_jobs, collected.judge_job_acknowledgements)
     if blocked is not None and decision.action == RecoveryAction.REVERIFY:
         notes.append(failed_judge_jobs_stop(blocked, "the run's reverification directory"))
     if collected.chain_continuation_note:
         notes.append(f"the chain recorded: {collected.chain_continuation_note}")
+        # The guard's line names the typed kind first, after the previous job's end ("Previous job <id> ended
+        # <state>: <kind>: ..."; resume_script's *_REASON texts).
+        typed = _CHAIN_STOP_KIND.match(collected.chain_continuation_note)
+        if typed and typed["kind"] in GUARDED_DRIVER_FAILURE_KINDS:
+            decision = decision.model_copy(update={"chain_stop_kind": typed["kind"]})
     notes = [note for note in notes if note]
     return decision if not notes else decision.model_copy(update={"reason": "; ".join([decision.reason, *notes])})
+
+
+def _unrecorded_notes(decision: RecoveryDecision, options: Mapping[str, Any]) -> list[str]:
+    """A stop that a budget, unknown accounting or a refused extension blocks records none of the options this call
+    asked for (nothing is queued): one note per option the reason does not already name, so the next advice keeps
+    it and one call can carry them all."""
+    if decision.action != RecoveryAction.STOP or decision.operator_continuation is not None:
+        return []
+    if not _continuation_options(decision):
+        return []
+    reason, budget = decision.reason, options.get("operator_budget")
+    asked = (
+        (f"--extend-attempts {options.get('extend_attempts')}", _ATTEMPTS_USED_TOKEN, options.get("extend_attempts")),
+        (
+            f"--extend-retries {options.get('extend_retries')}",
+            _INFRA_BUDGET_USED_PREFIX,
+            options.get("extend_retries"),
+        ),
+        (f"--max-walltime {getattr(budget, 'max_walltime', '')}", _WALLTIME_USED_TOKEN, budget),
+        # A rerun this call planned and did not queue.
+        (RERUN_MASKED_FLAGS.split()[0], _NOT_RECORDED_TOKEN, bool(decision.rerun_masked)),
+    )
+    return [f"{flag} {_NOT_RECORDED_TOKEN}" for flag, named, value in asked if value and named not in reason]
 
 
 # The saved rows a decision reads; one that exists but cannot be read stops it.
@@ -362,10 +478,13 @@ def _decide_from_collected(
     )
     decision = decide_recovery(**inputs, budget=budget)
     if rerun_refused:
+        # The stop it would have lifted stays named, so the advice keeps every option the next call needs.
         return decision.model_copy(
             update={
                 "action": RecoveryAction.STOP,
-                "reason": f"--rerun-masked-without-artifact is refused: {rerun_refused}",
+                "reason": f"--rerun-masked-without-artifact is refused: {rerun_refused}; {decision.reason}",
+                "refused_option": RERUN_MASKED_FLAGS.split()[0],
+                "refused_over": decision.action,
             }
         )
     if decision.rerun_masked and decision.action == RecoveryAction.RESUBMIT:
@@ -379,7 +498,9 @@ def _decide_from_collected(
         return decision.model_copy(
             update={
                 "action": RecoveryAction.STOP,
-                "reason": f"--extend-attempts {extend_attempts} is refused: {attempts_refused}",
+                "reason": f"--extend-attempts {extend_attempts} is refused: {attempts_refused}; {decision.reason}",
+                "refused_option": "--extend-attempts",
+                "refused_over": decision.action,
             }
         )
     saved = _saved_attempt_cap(collected)
@@ -402,6 +523,8 @@ def _decide_from_collected(
                     f"admitted re-judgment outcome unknown for {collected.unresolved_rejudgments}: "
                     "the scheduler query failed, so the pass that admitted them may still run"
                 ),
+                # The scheduler's answer comes first; the run's accounting state stays for the continuation after.
+                "continuation_refused": "scheduler_unreachable",
             }
         )
     if collected.results is None and not decision.scheduler_live:
@@ -409,6 +532,8 @@ def _decide_from_collected(
             update={
                 "action": RecoveryAction.STOP,
                 "reason": "the results file is absent; collection cannot safely resume its saved history",
+                # No budget continues a run without its results file, so unknown accounting is not this stop's cause.
+                "accounting_unknown": None,
             }
         )
     unknown = decision.action == RecoveryAction.STOP and decision.accounting_unknown is not None
@@ -425,13 +550,18 @@ def _decide_from_collected(
                 update={
                     "action": RecoveryAction.STOP,
                     "reason": f"{decision.reason}; {why}" if decision.action == RecoveryAction.STOP else why,
+                    "continuation_refused": "scheduler_unreachable",
                 }
             )
         if decision.scheduler_live and accounting_unknown:
             job = f"continuation {live_job_name}" if live_job_name else "a job of this run"
             why = f"the chain accounting is unknown and {job} is still pending or running"
             return decision.model_copy(
-                update={"action": RecoveryAction.STOP, "reason": f"{why}, so an operator continuation is refused"}
+                update={
+                    "action": RecoveryAction.STOP,
+                    "reason": f"{why}, so an operator continuation is refused",
+                    "continuation_refused": "job_live",
+                }
             )
         if unknown:
             return _operator_continuation(
@@ -442,6 +572,26 @@ def _decide_from_collected(
                 configured_retries=configured,
                 max_walltime_s=max_walltime_s,
                 extend_retries=extend_retries,
+            )
+    if unknown and operator_budget is None and live_job is False:
+        # What an explicit budget alone would do: refused by a guard, or stopped on a budget it cannot fill. The
+        # advice then names the guard to clear first, or every option the continuation needs in one call.
+        alone = _operator_continuation(
+            decision,
+            collected,
+            inputs,
+            OperatorBudget(max_walltime="HH:MM:SS", reason="inspection", retries=extend_retries or 1, user="-"),
+            configured_retries=configured,
+            max_walltime_s=max_walltime_s,
+            extend_retries=extend_retries,
+        )
+        if alone.continuation_refused is not None:
+            decision = alone
+            unknown = False
+        elif alone.action == RecoveryAction.STOP:
+            still = alone.reason.split(f"; {OPERATOR_CONTINUATION} by")[0]
+            decision = decision.model_copy(
+                update={"reason": f"{decision.reason}; an explicit budget alone would still stop: {still}"}
             )
     # The cap note explains an infra-cap decision (a resubmit, or the stored budget is used); a stop for the
     # identities' own states (exhausted, terminal, masked) does not depend on it.

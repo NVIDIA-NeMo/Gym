@@ -44,7 +44,6 @@ from util import (
     validate_answer_judgment,
 )
 
-from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymChatCompletion,
@@ -59,7 +58,10 @@ from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
+    observe_llm_judge_grading,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import call_judge, record_parsed_judge_verdict
 
 
 logger = logging.getLogger(__name__)
@@ -203,6 +205,15 @@ class BBQTwoJudgeResourcesServer(SimpleResourcesServer):
                 empty_policy_response=True,
             )
 
+        return await observe_llm_judge_grading(lambda: self._grade(body, expected, policy_prompt, policy_response))
+
+    async def _grade(
+        self,
+        body: BBQVerifyRequest,
+        expected: ExpectedValues,
+        policy_prompt: str,
+        policy_response: str,
+    ) -> BBQVerifyResponse:
         answer_template = self._template("answer_check")
         explanation_template = self._template("explanation_quality_check")
         answer_prompt = render_template(
@@ -371,6 +382,7 @@ class BBQTwoJudgeResourcesServer(SimpleResourcesServer):
             )
             judgment = parse_answer_judgment(raw_output)
             validate_answer_judgment(judgment, expected)
+            record_parsed_judge_verdict()
             return request, response, raw_output, judgment
 
         attempt_count, (request, response, raw_output, judgment) = await self._attempt_with_retry(
@@ -400,6 +412,7 @@ class BBQTwoJudgeResourcesServer(SimpleResourcesServer):
             )
             judgment = parse_explanation_judgment(raw_output)
             explanation_reward(judgment)
+            record_parsed_judge_verdict()
             return request, response, raw_output, judgment
 
         attempt_count, (request, response, raw_output, judgment) = await self._attempt_with_retry(
@@ -476,14 +489,14 @@ class BBQTwoJudgeResourcesServer(SimpleResourcesServer):
 
         try:
             async with asyncio.timeout(self.config.judge_timeout_seconds):
-                http_response = await self.server_client.post(
+                return await call_judge(
+                    self.server_client,
                     server_name=self.config.judge_model_server.name,
                     url_path="/v1/chat/completions",
                     json=params,
+                    response_model=NeMoGymChatCompletion,
+                    max_attempts=1,
                 )
-                await raise_for_status(http_response)
-                payload = await get_response_json(http_response)
-                return NeMoGymChatCompletion.model_validate(payload)
         except JudgeCallError:
             raise
         except Exception as exc:
@@ -492,3 +505,6 @@ class BBQTwoJudgeResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     BBQTwoJudgeResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = BBQTwoJudgeResourcesServer.run_webserver()  # noqa: F401

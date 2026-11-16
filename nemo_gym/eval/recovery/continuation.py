@@ -23,6 +23,7 @@ from nemo_gym.eval.recovery.decision import (
     ALLOCATION_ENDED_STATES,
     IdentityState,
     RecoveryAction,
+    RecoveryDecision,
 )
 from nemo_gym.eval.recovery.evidence import (
     COLLECT_SCRIPT,
@@ -267,8 +268,10 @@ def allocation_cut_from_accounting(rows: list[tuple[str, str, int, int]], alloca
     Only the first incarnation (no restarts) runs work: the prologue stops a requeued one before any. A state that is
     absent, ambiguous or not terminal is not an ending.
     """
+    later = any(job_id == allocation_id and restarts > 0 for job_id, _, _, restarts in rows)
+    ended = ALLOCATION_ENDED_STATES | {"REQUEUED"} if later else ALLOCATION_ENDED_STATES
     states = {state for job_id, state, _, restarts in rows if job_id == allocation_id and restarts == 0}
-    return allocation_id is not None and len(states) == 1 and states <= ALLOCATION_ENDED_STATES
+    return allocation_id is not None and len(states) == 1 and states <= ended
 
 
 def _store_writer_ended(collected: CollectedEvidence, previous_job_id: str) -> bool:
@@ -307,9 +310,12 @@ def accounted_requeued_chain_walltime(
     }
     if not job_chain or len(set(job_chain)) != len(job_chain) or {row[0] for row in rows} != set(job_chain):
         return None
+    last = {job_id: max(row[3] for row in rows if row[0] == job_id) for job_id in job_chain}
     restarts: dict[str, list[int]] = {}
     for job_id, state, _, restart in rows:
-        if state not in terminal:
+        # A REQUEUED incarnation that a later one followed has ended (its Start and End are recorded, so its elapsed
+        # time is known); the last incarnation still REQUEUED waits to run again and stays unknown.
+        if state not in terminal and not (state == "REQUEUED" and restart < last[job_id]):
             return None
         restarts.setdefault(job_id, []).append(restart)
     if any(sorted(numbers) != list(range(len(numbers))) for numbers in restarts.values()):
@@ -416,3 +422,21 @@ def accounted_chain_walltime(
     if stored_walltime_s is not None and stored_walltime_s not in accepted:
         return None
     return float(total)
+
+
+def unsettled_chain_note(decision: RecoveryDecision) -> str:
+    """The chain stopped before the run settled: how many rollouts are unsettled, by state, so the stop reads
+    as an incomplete run and never as a finished one. Unsettled is wider than the coverage report's ``open`` (the
+    count in the chain's own stop line): it also holds final failures that were not counted as zero."""
+    settled = (IdentityState.SCORED, IdentityState.MODEL_FINAL, IdentityState.OMITTED)
+    unsettled = decision.expected - sum(decision.counts.get(state, 0) for state in settled)
+    by_state = ", ".join(
+        f"{count} {state}"
+        for state, count in sorted(decision.counts.items())
+        if count and state not in {s.value for s in settled}
+    )
+    return (
+        f"the job chain stopped with {unsettled} of {decision.expected} rollouts unsettled"
+        + (f" ({by_state})" if by_state else "")
+        + "; final failures are included, the stop line's open count leaves them out (.gym_chain_incomplete)"
+    )

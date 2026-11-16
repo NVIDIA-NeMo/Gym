@@ -93,16 +93,19 @@ def test_task_env_prefixes_configured_gym_model_servers():
         model_server=ModelServerRef(type="responses_api_models", name="policy"),
         judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
     )
-    with patch.object(
-        PinchBenchAgent,
-        "resolve_model_base_url",
-        side_effect=lambda _self, name, rollout_id: f"http://{name}/ng-rollout/{rollout_id}/v1",
-        autospec=True,
-    ):
+    resolved = []
+
+    def resolve(_self, name, rollout_id, *, trained=True):
+        resolved.append((name, trained))
+        return f"http://{name}/ng-rollout/{rollout_id}/v1"
+
+    with patch.object(PinchBenchAgent, "resolve_model_base_url", side_effect=resolve, autospec=True):
         env = agent._task_env("task_x", "7-2")
 
     assert env["MODEL_BASE_URL"] == "http://policy/ng-rollout/7-2/v1"
     assert env["JUDGE_BASE_URL"] == "http://judge/ng-rollout/7-2/v1"
+    # The judge is not the agent a training framework trains, so it keeps its own sampling.
+    assert resolved == [("policy", True), ("judge", False)]
 
 
 def test_build_spec_from_config(tmp_path):

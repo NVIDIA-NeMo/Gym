@@ -16,6 +16,7 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.models.base_responses_api_model import _orjson_dispatch_response
+from nemo_gym.models.model_call_capture import note_finish_reason
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.app import VLLMModel
 
@@ -47,7 +48,9 @@ def _validate_context_compaction_params(body: Dict[str, Any]) -> VLLMContextComp
 class VLLMModelWithCompaction(VLLMModel):
     """Dedicated vLLM adapter for context-compacted generation."""
 
-    non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset({("POST", "/tokenize")})
+    non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = VLLMModel.non_generating_model_routes | {
+        ("POST", "/tokenize")
+    }
     _TOKENIZE_CHAT_FIELDS = (*VLLMModel._TOKENIZE_CHAT_FIELDS, "required_prefix_token_ids")
 
     def model_post_init(self, context):
@@ -143,6 +146,7 @@ class VLLMModelWithCompaction(VLLMModel):
         standard_body, chat_params = self._context_compaction_chat_params(body)
         standard_body.model = self.config.model
         chat_completion_response = await self.chat_completions(request, chat_params)
+        note_finish_reason(request, chat_completion_response.choices[0].finish_reason)
         return self._converter.chat_completion_to_response(
             responses_create_params=standard_body,
             chat_completion=chat_completion_response,

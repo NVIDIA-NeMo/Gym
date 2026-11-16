@@ -24,6 +24,16 @@ import logging
 import os
 from pathlib import Path
 
+from nemo_gym.core.failure_kinds import (
+    COLLECTION_RESUME_REFUSED,
+    DRIVER_INSTALL_FAILED,
+    ENVIRONMENT_PREPARE_FAILED,
+    ENVIRONMENT_PROTOCOL_VIOLATION,
+    PROVIDER_CREDENTIALS_REJECTED,
+    PROVIDER_QUOTA_EXHAUSTED,
+    SERVER_SPINUP_TIMEOUT,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +66,17 @@ RETRY_EXTENSION_NAME = ".gym_infra_retry_extension"
 # The driver step's environment names the file, <job dir>/.gym_driver_failure.<allocation>, where a driver failure
 # that the next segment would repeat leaves its registered kind (see the guard in executors/slurm/resume_script.py).
 DRIVER_FAILURE_ENV = "GYM_DRIVER_FAILURE_FILE"
+# The driver failure kinds the next segment's prologue turns into its own stop and remedy (its guard). A segment whose
+# driver exits 76 with one of them keeps its follow-up for that stop; the guard handles each (see the prologue's case).
+GUARDED_DRIVER_FAILURE_KINDS = (
+    SERVER_SPINUP_TIMEOUT,
+    DRIVER_INSTALL_FAILED,
+    COLLECTION_RESUME_REFUSED,
+    PROVIDER_CREDENTIALS_REJECTED,
+    ENVIRONMENT_PREPARE_FAILED,
+    PROVIDER_QUOTA_EXHAUSTED,
+    ENVIRONMENT_PROTOCOL_VIOLATION,
+)
 
 
 def record_failure_kind(error: BaseException) -> None:

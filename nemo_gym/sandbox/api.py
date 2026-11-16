@@ -16,6 +16,8 @@
 
 import asyncio
 import inspect
+import os
+import stat
 import tempfile
 import threading
 import time
@@ -58,10 +60,14 @@ from nemo_gym.sandbox.resource_telemetry import (
 )
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
 from nemo_gym.telemetry.gym_metrics import (
+    SandboxTransferDirection,
+    SandboxTransferOutcome,
     record_sandbox_active,
     record_sandbox_exec_duration,
     record_sandbox_startup,
+    record_sandbox_transfer,
 )
+from nemo_gym.telemetry.setup import is_metrics_exporter_active, is_span_group_or_metrics_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
@@ -402,6 +408,65 @@ def _sandbox_id(handle: Any) -> str | None:
     return getattr(handle, "sandbox_id", None)
 
 
+def _file_size(path: Path) -> int | None:
+    """The size of a regular file, or None when it cannot be read, so telemetry never fails a transfer.
+
+    One ``stat`` call: on a shared filesystem such as Lustre, each one is a metadata server round trip.
+    """
+    try:
+        result = os.stat(path)
+    except OSError:
+        return None
+    return result.st_size if stat.S_ISREG(result.st_mode) else None
+
+
+async def _instrumented_transfer(
+    direction: SandboxTransferDirection,
+    transfer: Callable[[], Awaitable[None]],
+    *,
+    local_path: Path,
+    provider: str,
+    span_attributes: Mapping[str, Any],
+) -> None:
+    """Run one file transfer with a span, a duration sample and a byte count when spans or metrics are on.
+
+    ``local_path`` is the host side of the transfer.
+    Its size is read once after the transfer succeeds, and only when a recording span or a metrics exporter uses it.
+    Paths are deliberately not recorded.
+    A path can name task content, the same way an exec command can.
+    """
+    if not is_span_group_or_metrics_active(GymSpanGroup.SANDBOX):
+        await transfer()
+        return
+    started = time.perf_counter()
+    outcome: SandboxTransferOutcome = "error"
+    size_bytes: int | None = None
+    try:
+        with managed_span(
+            GymSpanGroup.SANDBOX,
+            f"gym.sandbox.{direction}",
+            **{"nemo.gym.sandbox.provider": provider, **default_span_attributes(), **span_attributes},
+        ) as span:
+            await transfer()
+            recording = span is not None and span.is_recording()
+            if recording or is_metrics_exporter_active():
+                size_bytes = _file_size(local_path)
+            if recording and size_bytes is not None:
+                safe_set_span_attributes(span, {"nemo.gym.sandbox.transfer.size_bytes": size_bytes})
+        outcome = "ok"
+    except asyncio.CancelledError:
+        outcome = "cancelled"
+        raise
+    finally:
+        record_sandbox_transfer(
+            (time.perf_counter() - started) * 1000.0,
+            provider=provider,
+            direction=direction,
+            outcome=outcome,
+            size_bytes=size_bytes if outcome == "ok" else None,
+        )
+
+
 def _missing_keywords(method: Callable[..., Any], keywords: Mapping[str, Any]) -> list[str]:
     """The names in ``keywords`` that ``method`` does not take, none when it takes them all or ``**kwargs``."""
     try:
@@ -512,7 +577,7 @@ class AsyncSandbox:
             provider_name = getattr(self._provider, "name", type(self._provider).__name__)
             raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support sidecars")
 
-        if is_span_group_enabled(GymSpanGroup.SANDBOX):
+        if is_span_group_or_metrics_active(GymSpanGroup.SANDBOX):
             provider_name = self._telemetry_provider_name()
             started = time.perf_counter()
             self._resource_attributes = {
@@ -553,8 +618,11 @@ class AsyncSandbox:
                     tmp_path = Path(tmp_dir)
                     for index, (target_path, contents) in enumerate(requested_spec.files.items()):
                         source_path = tmp_path / f"file-{index}"
-                        source_path.write_text(contents, encoding="utf-8")
-                        await self._provider.upload_file(handle, source_path, target_path)
+                        if isinstance(contents, bytes):
+                            source_path.write_bytes(contents)
+                        else:
+                            source_path.write_text(contents, encoding="utf-8")
+                        await self.upload(source_path, target_path)
         except BaseException:
             await self.stop()
             raise
@@ -597,7 +665,7 @@ class AsyncSandbox:
         must redirect stdout and stderr. Per-command ``env`` and ``user``
         overrides apply to the service-preserving execution too.
         """
-        if not is_span_group_enabled(GymSpanGroup.SANDBOX):
+        if not is_span_group_or_metrics_active(GymSpanGroup.SANDBOX):
             return await self._exec_uninstrumented(
                 command,
                 cwd=cwd,
@@ -700,10 +768,25 @@ class AsyncSandbox:
         self._spec = replace(self._spec, workdir=workdir) if self._spec is not None else SandboxSpec(workdir=workdir)
 
     async def upload(self, local_path: Path | str, remote_path: str) -> None:
-        await self._provider.upload_file(self._require_handle(), Path(local_path), remote_path)
+        handle, local_path = self._require_handle(), Path(local_path)
+        await self._transfer("upload", lambda: self._provider.upload_file(handle, local_path, remote_path), local_path)
 
     async def download(self, remote_path: str, local_path: Path | str) -> None:
-        await self._provider.download_file(self._require_handle(), remote_path, Path(local_path))
+        handle, local_path = self._require_handle(), Path(local_path)
+        await self._transfer(
+            "download", lambda: self._provider.download_file(handle, remote_path, local_path), local_path
+        )
+
+    async def _transfer(
+        self, direction: SandboxTransferDirection, transfer: Callable[[], Awaitable[None]], local_path: Path
+    ) -> None:
+        await _instrumented_transfer(
+            direction,
+            transfer,
+            local_path=local_path,
+            provider=self._telemetry_provider_name(),
+            span_attributes={"nemo.gym.sandbox.id": _sandbox_id(self._handle), **self._resource_attributes},
+        )
 
     def sidecar(self, name: str) -> "AsyncSandboxSidecar":
         """Return a sidecar container declared in ``SandboxSpec.sidecars``, to run commands in and read files from."""

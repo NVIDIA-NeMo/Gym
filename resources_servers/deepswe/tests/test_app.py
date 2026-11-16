@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
 import resources_servers.deepswe.app as app_module
@@ -16,16 +17,23 @@ from nemo_gym.core import (
     PROVIDER_OOM_KILLED,
     SESSION_LOST,
     VERIFIER_ERROR,
+    EpisodeId,
     FailureBoundary,
     FailureClass,
     NgFailureEvent,
     OutcomeAction,
     RequestFailureLog,
     SandboxFailureDetails,
+    TaskId,
     failure_kinds,
     failure_report_for,
 )
 from nemo_gym.sandbox import SandboxResources
+from nemo_gym.server_runtime import (
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+    check_resources_session_contract,
+)
 from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
 from resources_servers.deepswe.app import (
     DeepSWEResourcesServer,
@@ -1669,3 +1677,192 @@ async def test_verifier_uses_shared_class_override_for_actions_and_saved_result(
     assert restored.mask_sample is True and restored.evaluation_completed is False
     assert response.failure_report == restored.failure_report
     assert all(log.report.events[error.event_id].failure_kind == "provider_unavailable" for error in errors[:attempts])
+
+
+def _environment_seed(
+    session_id: str = "resources-session-1", task: str = "example-task"
+) -> ResourcesSeedSessionRequest:
+    """The seed single_agent_turn_legacy sends for a prepared DeepSWE row."""
+    row = _request()
+    return ResourcesSeedSessionRequest(
+        resources_session_id=session_id,
+        episode_id=EpisodeId(rollout_id="rollout-1"),
+        task_id=TaskId(taskset="deepswe_opencode_resources_server", task_id=task),
+        task_data={key: row[key] for key in ("task_id", "image", "verifier_metadata")} | {"split": "test"},
+    )
+
+
+def _environment_verify_body(seed: ResourcesSeedSessionRequest) -> dict:
+    """The flat verify body single_agent_turn_legacy sends with the seed's session cookie."""
+    return seed.task_data | {key: _request()[key] for key in ("responses_create_params", "response")}
+
+
+def _close_body(seed: ResourcesSeedSessionRequest) -> dict:
+    return ResourcesCloseSessionRequest(
+        resources_session_id=seed.resources_session_id, episode_id=seed.episode_id
+    ).model_dump(mode="json")
+
+
+def _session_server(
+    task_assets: Path, monkeypatch: MonkeyPatch, *, golden: bool = False
+) -> tuple[DeepSWEResourcesServer, list[AsyncMock], AsyncMock]:
+    """A server whose sandboxes are fakes, registered with their session as the real start does."""
+    server = DeepSWEResourcesServer(
+        config=_config(task_assets, golden=golden), server_client=MagicMock(spec=ServerClient)
+    )
+    sandboxes: list[AsyncMock] = []
+
+    async def create_sandbox(task, *, phase: str, session_id: str | None = None) -> AsyncMock:
+        sandbox = AsyncMock()
+        sandbox.serialize.return_value = {"sandbox_id": f"{phase}-sandbox-{len(sandboxes) + 1}", "workdir": "/app"}
+        sandboxes.append(sandbox)
+        if session_id is not None:
+            server._session_id_to_sandbox[session_id] = sandbox
+        return sandbox
+
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(side_effect=create_sandbox))
+    collect_model_patch = AsyncMock(return_value=b"agent patch\n")
+    monkeypatch.setattr(server, "_collect_model_patch", collect_model_patch)
+    monkeypatch.setattr(
+        server, "_run_verifier", AsyncMock(return_value=VerifierResult(evaluation_completed=True, reward=1.0))
+    )
+    return server, sandboxes, collect_model_patch
+
+
+def test_environment_session_follows_the_resources_session_contract(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server, sandboxes, _ = _session_server(task_assets, monkeypatch)
+    seed = _environment_seed()
+
+    check_resources_session_contract(
+        server.setup_webserver(),
+        seed,
+        keeps_state=True,
+        holds_state=lambda session_id: session_id in server._session_id_to_sandbox,
+        verify_body=_environment_verify_body(seed),
+    )
+
+    # The repeated seed lent the same sandbox, and close stopped it once.
+    assert server._create_sandbox.await_args_list[0].kwargs == {
+        "phase": "agent",
+        "session_id": seed.resources_session_id,
+    }
+    sandboxes[0].stop.assert_awaited_once()
+    assert seed.resources_session_id not in server._episode_agent_sandboxes
+
+
+def test_environment_session_lends_the_agent_sandbox_and_verify_grades_its_capture(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server, sandboxes, collect_model_patch = _session_server(task_assets, monkeypatch)
+    seed = _environment_seed()
+    verify_body = _environment_verify_body(seed)
+
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        seeded = client.post("/seed_session", json=seed.model_dump(mode="json"))
+        assert seeded.status_code == 200, seeded.text
+        assert seeded.json()["sandbox_access"] == {
+            "connection": {
+                "kind": "direct",
+                "provider_config_ref": "test",
+                "descriptor": {"sandbox_id": "agent-sandbox-1", "workdir": "/app"},
+            },
+            "workdir": "/app",
+        }
+        # The agent may operate the sandbox but not destroy it: verify still collects the patch from it.
+        sandboxes[0].serialize.assert_any_await(scope="operate")
+        sandboxes[0].stop.assert_not_awaited()
+
+        verified = client.post("/verify", json=verify_body)
+        assert verified.status_code == 200, verified.text
+        assert verified.json()["reward"] == 1.0
+        assert verified.json()["model_patch"] == "agent patch\n"
+        assert verified.json()["sandbox_handle"] == "agent-sandbox-1"
+        assert collect_model_patch.await_args.args[0] is sandboxes[0]
+        sandboxes[0].stop.assert_awaited_once()
+
+        # An identical retry replays the verdict instead of grading an empty patch.
+        repeated = client.post("/verify", json=verify_body)
+        assert repeated.status_code == 200, repeated.text
+        assert repeated.json() == verified.json()
+        assert len(sandboxes) == 2 and collect_model_patch.await_count == 1
+
+        # A sandbox that verify consumed cannot be lent again.
+        assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 409
+        assert client.post("/close_session", json=_close_body(seed)).status_code == 200
+        assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 409
+        lost = client.post("/verify", json=verify_body)
+        assert lost.status_code == 200, lost.text
+        assert lost.json()["mask_sample"] is True and lost.json()["failure_kind"] == SESSION_LOST
+
+    sandboxes[0].stop.assert_awaited_once()
+    assert server._session_id_to_sandbox == {} and server._episode_agent_sandboxes == {}
+
+
+def test_failed_stop_after_capture_is_retried_with_the_captured_patch(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server, sandboxes, collect_model_patch = _session_server(task_assets, monkeypatch)
+    seed = _environment_seed()
+    verify_body = _environment_verify_body(seed)
+
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 200
+        sandboxes[0].stop.side_effect = [RuntimeError("provider unavailable"), None]
+
+        assert client.post("/verify", json=verify_body).status_code == 500
+        assert server._session_id_to_sandbox[seed.resources_session_id] is sandboxes[0]
+
+        retried = client.post("/verify", json=verify_body)
+        assert retried.status_code == 200, retried.text
+        assert retried.json()["reward"] == 1.0
+        assert retried.json()["model_patch"] == "agent patch\n"
+        assert retried.json()["sandbox_handle"] == "agent-sandbox-1"
+
+    collect_model_patch.assert_awaited_once()
+    assert sandboxes[0].stop.await_count == 2
+
+
+def test_failed_close_keeps_the_agent_sandbox_for_a_retry(task_assets: Path, monkeypatch: MonkeyPatch) -> None:
+    server, sandboxes, _ = _session_server(task_assets, monkeypatch)
+    seed = _environment_seed()
+
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 200
+        sandboxes[0].stop.side_effect = [RuntimeError("provider unavailable"), None]
+
+        assert client.post("/close_session", json=_close_body(seed)).status_code == 500
+        assert server._session_id_to_sandbox[seed.resources_session_id] is sandboxes[0]
+        assert client.post("/close_session", json=_close_body(seed)).status_code == 200
+        assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 409
+
+    assert sandboxes[0].stop.await_count == 2
+    assert server._session_id_to_sandbox == {}
+
+
+def test_an_episode_session_that_is_never_closed_is_stopped_at_shutdown(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    server, sandboxes, _ = _session_server(task_assets, monkeypatch)
+
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=_environment_seed().model_dump(mode="json")).status_code == 200
+        sandboxes[0].stop.assert_not_awaited()
+
+    sandboxes[0].stop.assert_awaited_once()
+    assert server._session_id_to_sandbox == {}
+
+
+@pytest.mark.parametrize("golden", [False, True])
+def test_environment_seed_that_names_another_task_or_runs_in_golden_mode_is_rejected(
+    task_assets: Path, monkeypatch: MonkeyPatch, golden: bool
+) -> None:
+    server, _, _ = _session_server(task_assets, monkeypatch, golden=golden)
+    seed = _environment_seed() if golden else _environment_seed(task="other-task")
+
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        response = client.post("/seed_session", json=seed.model_dump(mode="json"))
+
+    assert response.status_code == 422, response.text
+    server._create_sandbox.assert_not_awaited()

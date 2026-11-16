@@ -40,6 +40,8 @@ OSWORLD_UNSUPPORTED_VM_PROVIDER_DEPENDENCIES = {
     "azure-mgmt-network",
     "volcengine-python-sdk",
 }
+# Declared by OSWorld but never imported; paddlepaddle has no aarch64 Linux wheel.
+OSWORLD_UNUSED_PADDLE_DEPENDENCIES = {"paddleocr", "paddlepaddle"}
 
 
 def _uv_config() -> dict:
@@ -77,11 +79,15 @@ def test_osworld_agent_uv_config_mirrors_project_resolver_policy() -> None:
     server_exclusions = set(server_config["exclude-dependencies"])
     assert project_exclusions <= server_exclusions
     assert server_exclusions == (
-        set(public_project["tool"]["uv"]["exclude-dependencies"]) | OSWORLD_UNSUPPORTED_VM_PROVIDER_DEPENDENCIES
+        set(public_project["tool"]["uv"]["exclude-dependencies"])
+        | OSWORLD_UNSUPPORTED_VM_PROVIDER_DEPENDENCIES
+        | OSWORLD_UNUSED_PADDLE_DEPENDENCIES
     )
     # OSWorld's ag2 dependency also advertises an optional AGP client, which is
     # excluded from this runtime alongside unsupported cloud VM providers.
-    assert server_exclusions - project_exclusions == OSWORLD_UNSUPPORTED_VM_PROVIDER_DEPENDENCIES | {"agp-client"}
+    assert server_exclusions - project_exclusions == (
+        OSWORLD_UNSUPPORTED_VM_PROVIDER_DEPENDENCIES | OSWORLD_UNUSED_PADDLE_DEPENDENCIES | {"agp-client"}
+    )
     required_version = SpecifierSet(server_config["required-version"])
     assert Version("0.13.3") not in required_version
     assert Version("0.13.4") in required_version

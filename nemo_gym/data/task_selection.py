@@ -11,6 +11,7 @@ from pydantic import JsonValue
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.core.episode_types import TaskId, is_materialized_task_row
 from nemo_gym.data.task_materialization import TASK_ID_FIELDS
+from nemo_gym.utils.task_ids import task_ids_digest  # noqa: F401  (re-exported: the selection's digest)
 
 
 def row_task_id(row: Mapping[str, JsonValue]) -> str | None:
@@ -37,6 +38,20 @@ def select_tasks(rows: Sequence[Mapping[str, JsonValue]], task_ids: Sequence[str
     _require_task_ids_in_input(task_ids, first_row_of_task)
     _require_repeated_rows_to_be_identical(rows, first_row_of_task, set(task_ids))
     return sorted(first_row_of_task[task_id] for task_id in set(task_ids))
+
+
+def select_task_rows(rows: Sequence[Mapping[str, JsonValue]], task_ids: Sequence[str]) -> list[int]:
+    """Indices of every row of the selected tasks, in input order, chosen like ``select_tasks``.
+
+    Unlike ``select_tasks``, each selected task keeps every copy the input holds: a prepared benchmark writes its own
+    repeat count as copies of each row, and a run of part of the benchmark keeps that count. Rows are selected only
+    by an id stored in the row, never by position, and an id the input does not hold is an error.
+    """
+    _require_task_id_in_every_row(rows)
+    _require_task_ids_in_input(task_ids, _first_row_of_each_task(rows))
+    selected = set(task_ids)
+    _require_repeated_rows_to_be_identical(rows, _first_row_of_each_task(rows), selected)
+    return [index for index, row in enumerate(rows) if row_task_id(row) in selected]
 
 
 def _require_task_id_in_every_row(rows: Sequence[Mapping[str, JsonValue]]) -> None:

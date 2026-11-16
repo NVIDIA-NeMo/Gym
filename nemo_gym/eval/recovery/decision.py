@@ -14,6 +14,7 @@
 # limitations under the License.
 """The recovery decision: identity states, run-level actions, and the decision and outcome records."""
 
+import re
 from collections.abc import Mapping, Sequence
 from enum import StrEnum
 from typing import Any, Literal
@@ -179,6 +180,15 @@ def failed_judge_jobs_blocking(
     return ids
 
 
+# What ``failed_judge_jobs_stop`` says, read back by the operator verdict: the jobs, where to read them, and whether
+# they can be acknowledged.
+_FAILED_JUDGE_JOBS = re.compile(
+    rf"the last {JUDGE_JOB_FAILURE_BOUND} judge-only job\(s\) \((?P<ids>.*?)\) ended without settling a saved answer; "
+    r"read their receipts and logs under (?P<where>.*?) before another is queued(?P<unacknowledgeable>; a job without "
+    r"an id cannot be acknowledged)?"
+)
+
+
 def failed_judge_jobs_stop(ids: Sequence[str | None], where: str) -> str:
     """The stop text of ``failed_judge_jobs_blocking``: the jobs, where to read them, and the explicit way on."""
     named = ", ".join(str(job_id or "(id unknown)") for job_id in ids)
@@ -204,6 +214,8 @@ class RecoveryOutcome(BaseModel):
     # The acceptance gate task entry (status, expected/scored samples, score, errors, warnings); None without evidence.
     # Its status is RUNNING, PLANNED, RESUMING, FAILED, UNVERIFIED or SUCCESS (``gate_task_summary``).
     gate_task: dict[str, Any] | None = None
+    # The one verdict an operator acts on (``operator_verdict``): state, reason and action; set by the CLI.
+    operator_verdict: dict[str, str] | None = None
     # What was known about MLflow: the local files, and the server status only as the caller observed it.
     mlflow: dict[str, Any] | None = None
     # The re-verification part of a RESUBMIT that names ``reverify_first``: what runs it and when.
@@ -270,6 +282,45 @@ class RecoveryDecision(BaseModel):
     # Which chain accounting is unknown when this STOP is the unknown-budget or unknown-walltime stop: "budget" or
     # "walltime". The reason is display text that later notes extend; an operator continuation keys on this field.
     accounting_unknown: Literal["budget", "walltime"] | None = Field(default=None, exclude=True)
+    # The guard that refuses (or, for an inspection, would refuse) an operator continuation of unknown accounting:
+    # the scheduler did not answer, a job of the run is pending or running, a follow-up claim names no job, the
+    # accounting files changed while read, or the run configures no infra-retry cap. The operator verdict keys on it.
+    continuation_refused: (
+        Literal["scheduler_unreachable", "job_live", "claim_unidentified", "counters_changed", "no_retry_cap"] | None
+    ) = Field(default=None, exclude=True)
+    # The options of the call this plan was made for, spelled as `gym eval resubmit --recover` takes them (reasons as
+    # TEXT), so the operator verdict's command repeats them.
+    requested: list[str] = Field(default_factory=list, exclude=True)
+    # The run's `gym eval resubmit` positionals (job id and benchmark, shell-quoted) for the call this plan was made
+    # for, so every command the operator verdict prints is complete; placeholders when no call named them.
+    target: str = Field(default="GYM_JOB_ID BENCHMARK", exclude=True)
+    # The typed driver failure the chain's incomplete marker opens with (one of GUARDED_DRIVER_FAILURE_KINDS) when the
+    # chain stopped on one: the next recovery needs its remedy first, or the resumed segment stops the same way.
+    chain_stop_kind: str | None = Field(default=None, exclude=True)
+    # Why a judge-only job was not queued, as the dispatch classified it: ``cpu_partition_unknown`` (no CPU partition
+    # is named), ``cpu_placement`` (the scheduler refused the CPU partition or QOS), ``served_placement`` (it refused the
+    # saved node pool of a run that serves its judge, which no recovery option changes), ``unsupported_profile`` (the
+    # saved config has no judge execution profile, decided locally before any scheduler call), ``refused`` (the
+    # scheduler refused it for a definite reason that is not placement, such as an invalid time limit), ``concurrent``
+    # (the dispatch found another recovery's lock or a job of the run on the scheduler: it waits) or ``other`` (the
+    # scheduler did not answer, or whether the job was queued is not known). The operator verdict offers the judge
+    # placement options only for the first two.
+    judge_refusal: (
+        Literal[
+            "cpu_partition_unknown",
+            "cpu_placement",
+            "served_placement",
+            "unsupported_profile",
+            "refused",
+            "concurrent",
+            "other",
+        ]
+        | None
+    ) = Field(default=None, exclude=True)
+    # An option this call asked for that the run cannot take (``--extend-attempts`` or the masked rerun), and the
+    # action the plan would take without it: a RESUBMIT or REVERIFY continues once the option is dropped.
+    refused_option: str | None = Field(default=None, exclude=True)
+    refused_over: RecoveryAction | None = Field(default=None, exclude=True)
     # The OPERATOR-CONTINUATION record a RESUBMIT under an operator budget carries: who, why, the budget, the unknown
     # fields, the counter values it fills with their previous states, and its epoch. The resubmit journals it.
     operator_continuation: dict[str, Any] | None = None

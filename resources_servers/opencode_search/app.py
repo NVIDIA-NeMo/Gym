@@ -48,6 +48,9 @@ from nemo_gym.config import (
     get_global_config_dict,
 )
 from nemo_gym.core import (
+    AGENT_LIMIT,
+    AGENT_TIMEOUT,
+    MODEL_CONTEXT_LIMIT,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -70,6 +73,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JudgeError, call_judge
 
 # The grader the apptainer comparators were scored with. NOT the longer
@@ -189,6 +193,7 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     # Abort the run after this many rollouts in a row fail to grade. Guards the silent-starvation
     # mode where a dead judge masks every sample and the run burns its wall producing nothing.
     # Counted per ROLLOUT, not per attempt, so one transient burst cannot trip it. 0 disables.
+    # With num_workers > 1, each worker counts the rollouts it graded, so each worker aborts on its own.
     judge_max_consecutive_failures: int = 25
     # Budget covers reasoning + final message combined. 2048 makes reasoning judges burn the
     # whole budget thinking, emitting no final message, which reads as an unparseable verdict.
@@ -235,6 +240,14 @@ class SearchVerifyRequest(SearchRunRequest, BaseVerifyRequest):
 # eval_timed_out/agent_timed_out arm). Like the other two it is RECORDED, not excluded from
 # the mean -- see aggregate_metrics.
 MASKED_TERMINAL_REASONS = frozenset({"max_iteration", "context_window", "agent_timed_out"})
+
+# The diagnostics each masked terminal reason reports on the verify response. They describe the
+# ending only; they do not change the reward or the mask.
+MASKED_TERMINAL_FAILURES = {
+    "max_iteration": (AGENT_LIMIT, "The agent reached its maximum number of iterations"),
+    "context_window": (MODEL_CONTEXT_LIMIT, "The conversation exceeded the model's context window"),
+    "agent_timed_out": (AGENT_TIMEOUT, "The agent ran past its time limit"),
+}
 
 
 class SearchVerifyResponse(BaseVerifyResponse):
@@ -463,6 +476,8 @@ class SearchResourcesServer(SimpleResourcesServer):
         return self._exa_cache
 
     async def _exa_cache_stats(self) -> Dict[str, Any]:
+        # With num_workers > 1, each worker keeps its own index and stats, so this reports the worker that answers.
+        # A worker's index also misses entries other workers stored since it started, which costs an Exa call.
         return dict(self._cache.stats)
 
     async def _exa_proxy(self, request: Request) -> Response:
@@ -574,7 +589,9 @@ class SearchResourcesServer(SimpleResourcesServer):
         await self._release_sandbox(request.session[SESSION_ID_KEY])
 
         # Forwarded by the agent from the turn-budget plugin's stderr line; "" on a normal ending.
-        masked = getattr(body, "opencode_terminal_reason", "") in MASKED_TERMINAL_REASONS
+        terminal_reason = getattr(body, "opencode_terminal_reason", "")
+        masked = terminal_reason in MASKED_TERMINAL_REASONS
+        failure_kind, failure_reason = MASKED_TERMINAL_FAILURES.get(terminal_reason, (None, None))
 
         final_text = _last_assistant_text(body.response)
         if not final_text.strip():
@@ -589,6 +606,8 @@ class SearchResourcesServer(SimpleResourcesServer):
                 judge_attempts=0,
                 judge_time_taken=0.0,
                 mask_sample=masked,
+                failure_kind=failure_kind,
+                failure_reason=failure_reason,
             )
 
         result = await self._judge_answer(
@@ -606,8 +625,13 @@ class SearchResourcesServer(SimpleResourcesServer):
             judge_attempts=result["judge_attempts"],
             judge_time_taken=result["judge_time_taken"],
             mask_sample=masked,
+            failure_kind=failure_kind,
+            failure_reason=failure_reason,
         )
 
 
 if __name__ == "__main__":
     SearchResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SearchResourcesServer.run_webserver()  # noqa: F401

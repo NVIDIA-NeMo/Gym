@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""What runs inside every Gym server: the resources and environment server bases, request handling, sessions, and partial-rollout checkpoints. Also the supervisor that starts the servers of a run and the venvs they run in."""
+"""What runs inside every Gym server: the resources and environment server bases, request handling, sessions, and partial-rollout checkpoints."""
 
 # Public API
 from typing import TYPE_CHECKING
@@ -49,10 +49,16 @@ if TYPE_CHECKING:
     from nemo_gym.server_runtime._checkpoint.steps import (
         CHECKPOINT_CLOSE_FOLLOWS_HEADER,
         StepType,
+        seed_rebinds_tool_accesses,
         seed_restarts,
         seed_verify_step_type,
     )
     from nemo_gym.server_runtime._checkpoint.store import write_participant_state
+    from nemo_gym.server_runtime.agent_context import (
+        AGENT_CONTEXT_KEY_NAME,
+        AgentContext,
+        AgentContextArtifact,
+    )
     from nemo_gym.server_runtime.base_environment_server import (
         BaseEnvironmentServer,
         BaseEnvironmentServerConfig,
@@ -83,10 +89,12 @@ if TYPE_CHECKING:
         ResourcesSessionFences,
         ResourcesSessionLocks,
         ResourcesSessionLostError,
+        ResourcesVerification,
         ResourcesVerifyRequest,
         ReverifyMode,
         SimpleResourcesServer,
         lost_session_verification,
+        reject_partial_typed_seed,
     )
     from nemo_gym.server_runtime.base_server import (
         SimpleServer,
@@ -102,10 +110,12 @@ if TYPE_CHECKING:
         maybe_auto_expose,
     )
     from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled
+    from nemo_gym.server_runtime.request_handling.model_sampling import ModelSamplingMiddleware
     from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
     from nemo_gym.server_runtime.request_handling.session_routing import SESSION_OWNER_HEADER, install_session_routing
-    from nemo_gym.server_runtime.server_venv import get_venv_path, run_command, setup_env_command
+    from nemo_gym.server_runtime.sandbox_lending import LentSandboxes
     from nemo_gym.server_runtime.single_agent_turn_types import (
+        SingleAgentTurnAgentContext,
         SingleAgentTurnFailure,
         SingleAgentTurnRequest,
         SingleAgentTurnResponse,
@@ -130,14 +140,14 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
-    "get_venv_path": "server_venv",
-    "run_command": "server_venv",
-    "setup_env_command": "server_venv",
     "async_rollout_prefix_hook": "base_server",
     "rollout_prefix_hook": "base_server",
     "with_rollout_prefix": "base_server",
+    "AGENT_CONTEXT_KEY_NAME": "agent_context",
     "Activation": "_checkpoint.agent",
     "ActivationOutOfOrderError": "_checkpoint.agent",
+    "AgentContext": "agent_context",
+    "AgentContextArtifact": "agent_context",
     "AgentSessionParticipant": "_checkpoint.agent",
     "AgentSessionRecord": "_checkpoint.agent",
     "BaseEnvironmentServer": "base_environment_server",
@@ -164,7 +174,9 @@ _PUBLIC_API = {
     "LegacyRun": "_checkpoint.agent",
     "MCPStreamableHTTPConnection": "tool_access",
     "MCPTool": "mcp_auto_exposure",
+    "LentSandboxes": "sandbox_lending",
     "MCPToolAccess": "tool_access",
+    "ModelSamplingMiddleware": "request_handling.model_sampling",
     "NEMO_GYM_MCP_METADATA_KEY": "base_resources_server",
     "NEMO_GYM_MCP_SESSION_TOKEN_HEADER": "base_resources_server",
     "ParticipantControlPlane": "_checkpoint.control",
@@ -178,6 +190,7 @@ _PUBLIC_API = {
     "ResourcesSessionFences": "base_resources_server",
     "ResourcesSessionLocks": "base_resources_server",
     "ResourcesSessionLostError": "base_resources_server",
+    "ResourcesVerification": "base_resources_server",
     "ResourcesVerifyRequest": "base_resources_server",
     "RestoreRequest": "_checkpoint.control",
     "RestoredAgentSession": "_checkpoint.agent",
@@ -187,6 +200,7 @@ _PUBLIC_API = {
     "SESSION_OWNER_HEADER": "request_handling.session_routing",
     "SimpleResourcesServer": "base_resources_server",
     "SimpleServer": "base_server",
+    "SingleAgentTurnAgentContext": "single_agent_turn_types",
     "SingleAgentTurnFailure": "single_agent_turn_types",
     "SingleAgentTurnRequest": "single_agent_turn_types",
     "SingleAgentTurnResponse": "single_agent_turn_types",
@@ -209,11 +223,13 @@ _PUBLIC_API = {
     "lost_session_verification": "base_resources_server",
     "maybe_auto_expose": "mcp_auto_exposure",
     "next_attempt": "_checkpoint.control",
+    "reject_partial_typed_seed": "base_resources_server",
     "observe_llm_judge_grading": "verifier_observability",
     "observe_programmatic_grading": "verifier_observability",
     "observe_verifier": "verifier_observability",
     "observe_verifier_sandbox": "verifier_observability",
     "require_rollout": "_checkpoint.agent",
+    "seed_rebinds_tool_accesses": "_checkpoint.steps",
     "seed_restarts": "_checkpoint.steps",
     "seed_verify_step_type": "_checkpoint.steps",
     "task_digest": "_checkpoint.environment",

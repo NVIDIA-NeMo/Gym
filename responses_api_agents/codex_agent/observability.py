@@ -32,7 +32,7 @@ from nemo_gym.trajectory import (
 
 # Compaction format compatibility: tested with Codex 0.144.4.
 # This covers native compacted records and summary wrappers here, plus request
-# metadata and completed SSE responses in sandbox_transport.py; revalidate them together.
+# metadata and completed SSE responses in sandbox_launcher.mjs; revalidate them together.
 # Source: https://github.com/openai/codex/tree/rust-v0.144.4/codex-rs/core/src
 # (compact.rs and responses_metadata.rs).
 # The prefix below wraps the persisted summary. Strip it only after a structured
@@ -49,6 +49,16 @@ _COMPACTION_PREFIX = (
 _ITEM = TypeAdapter(NeMoGymResponseInputItem)
 LOG = logging.getLogger(__name__)
 TESTED_CODEX_VERSION = "0.144.4"
+# Codex writes U+2028 and similar unescaped inside JSON strings, so str.splitlines() would cut a record in two.
+_LINE_END = re.compile(r"\r\n|\n|\r")
+
+
+def _jsonl_lines(text: str) -> list[str]:
+    """Split session records as the sandbox snapshot does: only \\n, \\r\\n and \\r end a line."""
+    lines = _LINE_END.split(text)
+    if lines[-1] == "":
+        lines.pop()
+    return lines
 
 
 def _token_usage(payload: dict) -> NeMoGymResponseUsage | None:
@@ -80,7 +90,7 @@ def parse_codex_usage(transcript: str | None) -> NeMoGymResponseUsage | None:
     These totals already include cached input and reasoning output. As in the CLI
     parser, zero detail counters cannot distinguish absent provider measurements.
     """
-    for line in reversed((transcript or "").splitlines()):
+    for line in reversed(_jsonl_lines(transcript or "")):
         usage_record = False
         try:
             event = json.loads(line)
@@ -104,7 +114,9 @@ def read_codex_observations(
     """Use native call IDs; never join CLI display item IDs to calls by ordering."""
     files = sorted(home.glob("sessions/**/*.jsonl"))
     return parse_codex_observations(
-        "\n".join(line for path in files for line in path.read_text(errors="replace").splitlines()) if files else None,
+        "\n".join(line for path in files for line in _jsonl_lines(path.read_text(errors="replace")))
+        if files
+        else None,
         invocation_id,
         returncode=returncode,
         timed_out=timed_out,
@@ -130,7 +142,7 @@ def parse_codex_observations(
     # A record that could not be read may have been a tool call, unless it is a native event (token usage, a patch
     # outcome): then the tool history read is not complete, and its timing is unknown.
     tool_history_complete = True
-    for line in (transcript or "").splitlines():
+    for line in _jsonl_lines(transcript or ""):
         native_event = False
         try:
             event = json.loads(line)

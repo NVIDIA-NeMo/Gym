@@ -47,6 +47,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     BaseVerifyResponse,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 OPENSANDBOX_PROVIDER_NAME = "opensandbox"
@@ -937,3 +938,6 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     MiniSWEAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = MiniSWEAgent.run_webserver()  # noqa: F401
