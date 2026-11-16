@@ -291,6 +291,25 @@ class TestEpisode:
         assert "sb-1" not in response.text and "sandbox" not in payload["result"]
         assert sandbox.stopped
 
+    @pytest.mark.parametrize("context", [None, {}, {"agent": {"values": {"tag": "figure"}}}])
+    @pytest.mark.parametrize("nested", [False, True], ids=["flat", "task_data"])
+    def test_run_rejects_unsupported_agent_context_before_setup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, context: object, nested: bool
+    ) -> None:
+        server, task, sandbox, created = make_server(tmp_path, monkeypatch)
+        body = episode(task).model_dump(mode="json")
+        task_input = body["task"]["task_input"]
+        target = task_input["task_data"] if nested else task_input
+        target["agent_context"] = context
+
+        with TestClient(server.setup_webserver()) as client:
+            response = client.post("/run", json=body)
+
+        assert response.status_code == 422, response.text
+        assert "agent_context" in response.text
+        assert created == [] and sandbox.execs == []
+        assert server.server_client.calls == []
+
     async def test_a_flat_single_turn_row_runs_as_the_canonical_one(self, tmp_path, monkeypatch):
         """Review (CI bot, round 34): a single-turn `/run` request with the task fields beside
         `responses_create_params` (the flat shape `SingleAgentTurnTaskInput` accepted before `HarborTaskInput`
@@ -499,6 +518,26 @@ class TestEpisode:
         assert spec.metadata["harbor_task"] == "hello"
         assert spec.metadata["nemo_gym_environment_server"] == "harbor_environment_server"
         assert spec.user is None  # no USER in the Dockerfile and no [agent].user: the image's own default
+
+    def test_tb4_overlay_leaves_the_shared_s3_bucket_out_of_agent_and_verifier(self, tmp_path, monkeypatch):
+        """The Terminal-Bench 4 deployment overlay opts every sandbox out of the cell's shared /mnt/s3-data bucket."""
+        root = Path(__file__).resolve().parents[3]
+        merged = OmegaConf.to_container(
+            OmegaConf.merge(
+                OmegaConf.load(root / "nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml"),
+                OmegaConf.load(root / "environments/harbor/terminal_bench_4/harbor_sandbox.yaml"),
+            ),
+            resolve=False,
+        )
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+        monkeypatch.setattr("environment_servers.harbor.sandboxes.get_global_config_dict", lambda: merged)
+        verifier_environment = HarborEnvironment(docker_image="org/verifier:1")
+        for spec in (
+            server._sandbox_spec(task, "/app"),
+            server._sandbox_spec(task, None, environment=verifier_environment, role="verifier"),
+        ):
+            assert spec.metadata["nemo.nvidia.com/s3-hostpath"] == "false"
+            assert spec.metadata["sandbox-api"] == "opensandbox-sdk"
 
     def test_sandbox_spec_user_is_the_dockerfile_user_for_the_task_image_only(self, tmp_path, monkeypatch):
         server, task, _, _ = make_server(tmp_path, monkeypatch, dockerfile="FROM ubuntu:24.04\nUSER agent\n")

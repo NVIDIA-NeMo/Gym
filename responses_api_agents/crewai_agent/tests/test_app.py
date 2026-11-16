@@ -26,6 +26,7 @@ from nemo_gym.agents import (
     AgentSeedSessionRequest,
     SandboxPythonRuntime,
 )
+from nemo_gym.agents.utils.supervisor_client import EXPIRE_REQUEST_FILE
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
@@ -374,20 +375,37 @@ async def test_an_activation_runs_once_and_a_retry_gets_the_same_response(lent_s
 
 
 @linux_only
-async def test_a_crew_that_runs_out_of_time_answers_incomplete(lent_sandbox, runtime, monkeypatch):
+async def test_a_crew_that_runs_out_of_time_answers_incomplete(
+    lent_sandbox: tuple[AsyncSandbox, SandboxAccess], runtime: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _, access = lent_sandbox
     workdir = Path(access.workdir)
     model = _model(
         monkeypatch, completion(None, ("shell", {"command": "echo partial > partial.txt"}), id="chatcmpl-1"), None
     )
+    agent, request = _agent(timeout=60), _request()
     started = time.monotonic()
     try:
-        response, close = await _episode(_agent(timeout=5), access)
+        await agent.seed_agent_session(request, _seed(sandbox_access=access))
+        activation = asyncio.create_task(agent.responses(request, _body()))
+        try:
+            # Imports and crew startup must not consume the deadline before there is work to preserve.
+            assert await asyncio.to_thread(model.blocked.wait, 30), "the crew never reached its second model call"
+            assert (workdir / "partial.txt").read_text() == "partial\n"
+            assert not activation.done()
+            state = agent._require_agent_session(agent._agent_session_id_from_request(request))
+            # Exercise the supervisor's deadline path without marking a rollout stop or closing the session.
+            Path(state.session.session_dir, EXPIRE_REQUEST_FILE).touch()
+            response = await asyncio.wait_for(activation, 30)
+        finally:
+            close = await asyncio.wait_for(agent.close_agent_session(request, _close_body()), 30)
+            await asyncio.gather(activation, return_exceptions=True)
     finally:
         model.close()
 
     assert time.monotonic() - started < 60
     assert (response.status, response.metadata["crewai_stop_reason"]) == ("incomplete", "timeout")
+    assert ROLLOUT_STOP_METADATA_KEY not in response.metadata
     assert (workdir / "partial.txt").read_text() == "partial\n"
     # The second model call never returned, so the run's usage is unknown.
     assert response.usage is None
@@ -396,12 +414,26 @@ async def test_a_crew_that_runs_out_of_time_answers_incomplete(lent_sandbox, run
 
 
 @linux_only
-async def test_close_stops_a_running_crew_and_kills_its_command(lent_sandbox, runtime, monkeypatch):
+async def test_close_stops_a_running_crew_and_kills_its_command(
+    lent_sandbox: tuple[AsyncSandbox, SandboxAccess], runtime: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     owner, access = lent_sandbox
     workdir = Path(access.workdir)
     model = _model(
         monkeypatch,
-        completion(None, ("shell", {"command": "touch started.txt; sleep 5; touch late.txt"}), id="chatcmpl-1"),
+        completion(
+            None,
+            (
+                "shell",
+                {
+                    "command": (
+                        "echo $$ > command.pid; touch started.txt; "
+                        "while [ ! -e release.txt ]; do sleep 0.1; done; touch late.txt"
+                    )
+                },
+            ),
+            id="chatcmpl-1",
+        ),
     )
     agent, request = _agent(), _request()
     try:
@@ -423,7 +455,16 @@ async def test_close_stops_a_running_crew_and_kills_its_command(lent_sandbox, ru
     # The stopped runner reports its partial run, which can end the activation before close cancels it.
     if not isinstance(ending, asyncio.CancelledError):
         assert ending.status == "incomplete"
-    await asyncio.sleep(6)
+    assert close.cleanup_confirmed
+    # The command cannot finish naturally while a loaded runner delivers the stop request.
+    pid = int((workdir / "command.pid").read_text())
+    try:
+        process_state = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()[0]
+    except FileNotFoundError:
+        process_state = None
+    # An unreaped zombie has exited and cannot write after close.
+    assert process_state in {None, "Z", "X"}
+    (workdir / "release.txt").touch()
     assert not (workdir / "late.txt").exists()
     # The crew made no model call after close.
     assert len(model.requests) == 1

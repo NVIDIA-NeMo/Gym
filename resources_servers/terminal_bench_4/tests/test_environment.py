@@ -670,3 +670,13 @@ async def test_protein_submission_resolves_its_assay_url_without_hosts(tmp_path,
     assert "user" not in services["submission"]
     assert services["submission"]["environment"] == {"ASSAY_STATUS": "http://assay:8080/status"}
     assert services["submission"]["x-sandbox"] == {"hosts": [], "resolve_environment": ["ASSAY_STATUS"]}
+
+
+@pytest.mark.parametrize("verifier", [False, True])
+def test_tb4_profile_leaves_the_shared_s3_bucket_out(tmp_path, monkeypatch, verifier):
+    resources = yaml.safe_load((REPOSITORY / "benchmarks" / "terminal_bench_4" / "resources.yaml").read_text())
+    metadata = resources["terminal_bench_4"]["resources_servers"]["terminal_bench_4"]["environment"][
+        "sandbox_metadata"
+    ]
+    env, *_ = make_environment(tmp_path, monkeypatch, verifier=verifier, config={"sandbox_metadata": metadata})
+    assert env.build_spec().metadata["nemo.nvidia.com/s3-hostpath"] == "false"
