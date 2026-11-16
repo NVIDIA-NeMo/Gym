@@ -598,9 +598,11 @@ async def test_failed_verifier_stop_preserves_verdict_and_close_retries() -> Non
     assert server._verifier_sandboxes["resources-session"] is verifier
     assert await server.verify(_request(), body) == result
     server._grade.assert_awaited_once()
+    assert server.keeps_session_state("resources-session")
     await server.close_resources_session(_request(), ResourcesCloseSessionRequest.model_validate(_close()))
     assert verifier.stop.await_count == 2
     assert not server._verifier_sandboxes
+    assert not server.keeps_session_state("resources-session")
 
 
 @pytest.mark.asyncio
@@ -687,11 +689,14 @@ async def test_failed_seed_with_failed_cleanup_is_still_closed_after_its_lifetim
     server = _server()
     leaked = await _seed_whose_cleanup_fails(server, stop_results=[RuntimeError("provider unavailable"), None])
     assert server._session_id_to_sandbox["resources-session"] is leaked
+    # With several workers, routing keeps the session on this worker so the retry reaches the sandbox.
+    assert server.keeps_session_state("resources-session")
 
     clock[0] += sandbox_sessions.DEFAULT_SESSION_LIFETIME_S + 1
     await server._close_abandoned_task_sessions(clock[0])
     assert leaked.stop.await_count == 2, "the lifetime sweep must retry the leaked sandbox of a failed seed"
     assert "resources-session" not in server._session_id_to_sandbox
+    assert not server.keeps_session_state("resources-session")
 
 
 @pytest.mark.asyncio

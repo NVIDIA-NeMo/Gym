@@ -63,7 +63,9 @@ Ownership ends once its session's last record on the owner is gone:
   which is its fence or failed seed, ``session_close_retry_window_seconds`` after it was written;
 - a resources session's ownership lasts while the session is open,
   from a successful seed until its close or ``/verify``,
-  and expires ``session_close_retry_window_seconds`` after the last request for it otherwise.
+  and expires ``session_close_retry_window_seconds`` after the last request for it otherwise,
+  or later while the server still keeps state for it that a close or retire must reach this worker to release
+  (``SimpleResourcesServer.keeps_session_state``).
   A ``/verify`` that says a close follows, as an environment server's does, leaves the session open for that close.
 
 An agent worker also owns ``/rollouts/<rollout id>`` from the start of a session's seed until the session closes,
@@ -446,9 +448,14 @@ class ResourcesSessionLifetimes:
       The caller's retried or cleanup close reaches the owner within that window.
       A delayed seed after a close reaches it too, where the server refuses it while the session is fenced.
     - A failed seed or close of an open session leaves it open.
+    - When that time passes, ``keeps_session_state`` is asked whether the server still keeps state for the session,
+      such as a sandbox whose teardown after a failed seed also failed. If it does, ownership lasts another window,
+      so the close that retries the teardown still reaches this worker. If the check raises, ownership is released.
 
     So ownership outlives the session's last request by at most the close retry window,
-    except for a session never closed, which keeps its owner as long as the server keeps the session.
+    except for a session never closed or whose state remains, which keeps its owner as long as the server keeps it.
+    A release by a request starts a new window; a release outside one, such as shutdown or the server's own expiry,
+    is noticed at the next check, so ownership then ends within a window and one sweep interval of the release.
     """
 
     def __init__(
@@ -459,12 +466,16 @@ class ResourcesSessionLifetimes:
         ends: tuple[str, ...],
         close_follows_header: Optional[str] = None,
         session_release_pending: Optional[Callable[[str], bool]] = None,
+        keeps_session_state: Optional[Callable[[str], bool]] = None,
     ) -> None:
         self.close_retry_window_seconds = close_retry_window_seconds
         self._starts = _paths(starts)
         self._ends = _paths(ends)
         self._close_follows = close_follows_header.lower().encode("latin-1") if close_follows_header else None
         self._session_release_pending = session_release_pending
+        self._keeps_session_state = keeps_session_state
+        # The traceback of a failing state check is logged once, not once per session per window.
+        self._logged_keeps_state_error = False
         # Each session's ownership lasts until this time, infinite while it is open.
         self._until: dict[str, float] = {}
         # One entry per session with a finite time, earliest first, so the heap never outgrows ``_until``.
@@ -540,12 +551,31 @@ class ResourcesSessionLifetimes:
                 # Opened again since: an end queues it again.
                 self._queued.discard(session_id)
             elif until <= now:
-                del self._until[session_id]
                 self._queued.discard(session_id)
-                expired.append(session_id)
+                if self._keeps_state(session_id):
+                    # Its close may come later than the window, so keep the state reachable and ask again.
+                    self._expire_after_window(session_id)
+                else:
+                    del self._until[session_id]
+                    expired.append(session_id)
             else:
                 heapq.heappush(self._expiries, (until, session_id))
         return expired
+
+    def _keeps_state(self, session_id: str) -> bool:
+        if self._keeps_session_state is None:
+            return False
+        try:
+            return self._keeps_session_state(session_id)
+        except Exception:
+            # Release as before the hook existed: a hook that always raises must not keep every session owned.
+            LOG.warning(
+                "Releasing resources session %s: could not tell whether the server still keeps its state",
+                session_id,
+                exc_info=not self._logged_keeps_state_error,
+            )
+            self._logged_keeps_state_error = True
+            return False
 
     def __len__(self) -> int:
         return len(self._until.keys() | self._retained)
@@ -976,6 +1006,7 @@ def install_session_routing(
     session_ends: tuple[str, ...] = (),
     close_follows_header: Optional[str] = None,
     session_release_pending: Optional[Callable[[str], bool]] = None,
+    keeps_session_state: Optional[Callable[[str], bool]] = None,
     backlog: int = DEFAULT_UVICORN_BACKLOG,
 ) -> Optional[str]:
     """Route this worker's requests by session ID, and serve forwarded requests on a private socket.
@@ -987,7 +1018,8 @@ def install_session_routing(
     Pass the agent for an agent server, whose own records decide how long it owns its sessions,
     or the close retry window and the session start and end routes for a resources server
     (see ``ResourcesSessionLifetimes``). Its optional ``session_release_pending`` callback keeps ownership
-    while a successful score has left cleanup to retry.
+    while a successful score has left cleanup to retry, and ``keeps_session_state`` keeps it while the server
+    still keeps state for a session whose window has passed.
     """
     route_by = dict(
         kind=kind,
@@ -1015,6 +1047,7 @@ def install_session_routing(
             ends=(kind.close_path, *session_ends),
             close_follows_header=close_follows_header,
             session_release_pending=session_release_pending,
+            keeps_session_state=keeps_session_state,
         )
         app.state.nemo_gym_resources_session_lifetimes = resources_lifetimes
         lifetimes = resources_lifetimes

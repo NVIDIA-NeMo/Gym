@@ -640,11 +640,14 @@ async def test_failed_seed_cleanup_is_bounded_and_keeps_the_sandbox_for_close(se
         await asyncio.wait_for(server.seed_session(SimpleNamespace(session={}), seed()), timeout=5)
     assert monotonic() - started < 2
     assert server._session_id_to_sandbox["attempt"] is sandbox
+    # With several workers, routing keeps the session on this worker for the close that retries the stop.
+    assert server.keeps_session_state("attempt")
     release.set()
     await server.close_resources_session(close())
     # A stop that failed is started again; a slow one is waited for again, not started twice.
     assert sandbox.stop.await_count == (2 if stop_failure == "error" else 1)
     assert "attempt" in server._fences and not server._session_id_to_sandbox
+    assert not server.keeps_session_state("attempt")
 
 
 async def test_failed_stop_after_capture_leaves_the_sandbox_to_close(server, grading):
@@ -872,10 +875,12 @@ async def test_failed_verifier_stop_is_retried_at_close(server, grading, sandbox
     assert (await server.verify(request, verify_body())).reward == 1.0
     task_sandbox, verifier = sandboxes
     assert server._session_id_to_verifier_sandboxes == {"attempt": [verifier]}
+    assert server.keeps_session_state("attempt")
     await server.close_resources_session(close())
 
     assert verifier.stop.await_count == 2
     assert not server._session_id_to_verifier_sandboxes and "attempt" in server._fences
+    assert not server.keeps_session_state("attempt")
 
 
 async def test_shutdown_retries_a_verifier_stop_that_failed(server, grading, sandboxes):

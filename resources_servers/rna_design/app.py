@@ -261,6 +261,10 @@ class RnaDesignResourcesServer(SimpleResourcesServer):
             self.workers[session_id] = worker
         return RnaDesignSeedSessionResponse(resources_session_id=str(session_id))
 
+    def keeps_session_state(self, session_id: str) -> bool:
+        # Includes a tool worker whose close failed, which a later close retries.
+        return session_id in self.workers
+
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
         """Release a rollout's tool worker, named by its seed reply's resources_session_id, as a harness does when it
         gives up on the rollout. Closing a session that is gone or was never seeded succeeds."""

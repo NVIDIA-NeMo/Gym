@@ -280,6 +280,10 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
             ),
         )
 
+    def keeps_session_state(self, session_id: str) -> bool:
+        # Includes a sandbox whose stop failed after a failed seed or verify, which a later close retries.
+        return session_id in self._session_id_to_sandbox or session_id in self._verifier_sandboxes
+
     async def close_resources_session(
         self, request: Request, body: ResourcesCloseSessionRequest
     ) -> ResourcesCloseSessionResponse:

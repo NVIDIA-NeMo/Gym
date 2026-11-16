@@ -355,6 +355,10 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         app.router.lifespan_context = lifespan
         return app
 
+    def keeps_session_state(self, session_id: str) -> bool:
+        # Includes a sandbox whose stop failed after a failed seed or close, which a later close retries.
+        return session_id in self._session_id_to_sandbox
+
     async def close_resources_session(
         self,
         request: Request,

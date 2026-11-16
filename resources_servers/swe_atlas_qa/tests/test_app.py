@@ -664,11 +664,14 @@ async def test_verify_delete_failure_allows_explicit_close_retry(server, body) -
     assert provider.mock_calls == calls
     assert provider.create.await_count == 1
     provider.upload_file.assert_not_awaited()
+    # With several workers, routing keeps the session on this worker for the close that retries the delete.
+    assert server.keeps_session_state("session")
     close = ResourcesCloseSessionRequest(resources_session_id="session", episode_id={"rollout_id": "test"})
     for _ in range(2):
         assert (await server.close_resources_session(_request(), close)).resources_session_id == "session"
     assert provider.close.await_args_list == [call(handle), call(handle)]
     assert not server._sessions and not server._sandboxes and not server._cleanup_pending
+    assert not server.keeps_session_state("session")
 
 
 @pytest.mark.parametrize("phase", ["seed", "collect", "judge"])

@@ -212,6 +212,8 @@ async def test_failed_start_and_release_cannot_return_access_on_reseed(server, s
     with pytest.raises(RuntimeError, match="release failure"):
         await server.seed_session(http_request(), body)
     assert body.resources_session_id in server._sessions
+    keeps_state = server.owned_session_routing()["keeps_session_state"]
+    assert keeps_state(body.resources_session_id)  # Routing keeps the owner for the close that retries the stop.
     with pytest.raises(RuntimeError, match="not ready"):
         await server.seed_session(http_request(), body)
     sandbox.serialize.assert_not_awaited()
@@ -220,13 +222,14 @@ async def test_failed_start_and_release_cannot_return_access_on_reseed(server, s
     close = ResourcesCloseSessionRequest(resources_session_id=body.resources_session_id, episode_id=body.episode_id)
     await server.close_resources_session(http_request(), close)
     assert not server._sessions and sandbox.stop.await_count == 2
+    assert not keeps_state(body.resources_session_id)
     with pytest.raises(ValueError, match="already closed"):
         await server.seed_session(http_request(), body)
 
 
 def test_normal_http_resource_session_contract(server, sandbox):
     check_resources_session_contract(
-        server.setup_webserver(), seed_body(), keeps_state=True, holds_state=server._sessions.__contains__
+        server.setup_webserver(), seed_body(), keeps_state=True, holds_state=server.keeps_session_state
     )
     assert sandbox.start.await_count == 2
     assert sandbox.stop.await_count == 2

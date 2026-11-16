@@ -143,10 +143,12 @@ def test_a_failed_workspace_removal_fails_the_close_and_a_retry_releases_it(
     assert workspace.exists()
     assert "resources-session" in server._session_workspaces
     assert server._fences.get("resources-session") is None
+    assert server.keeps_session_state("resources-session")
 
     monkeypatch.setattr(harness_app, "_remove_workspace", remove_workspace)
     assert client.post("/close_session", json=_close()).status_code == 200
     assert not workspace.exists()
+    assert not server.keeps_session_state("resources-session")
     assert server._fences.get("resources-session") == _EPISODE
 
 

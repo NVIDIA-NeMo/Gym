@@ -213,6 +213,10 @@ class OfficeQAResourcesServer(SimpleResourcesServer):
                 await session.sandbox.stop()
             self._sessions.pop(session_id)
 
+    def keeps_session_state(self, session_id: str) -> bool:
+        # Includes a sandbox whose stop failed after a failed seed, which a later close retries.
+        return session_id in self._sessions
+
     async def close_resources_session(
         self, request: Request, body: ResourcesCloseSessionRequest
     ) -> ResourcesCloseSessionResponse:

@@ -367,6 +367,10 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             # Keep ownership when stop fails so close can retry.
             self._session_id_to_sandbox.pop(session_id, None)
 
+    def keeps_session_state(self, session_id: str) -> bool:
+        # Includes a sandbox whose stop failed after a failed seed, which a later close retries.
+        return session_id in self._session_id_to_sandbox
+
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
         """Mark the session as closing, stop the owned sandbox, and fence the session for the close retry window.
 

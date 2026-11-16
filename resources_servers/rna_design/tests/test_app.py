@@ -405,6 +405,25 @@ def test_a_session_that_never_reached_verify_is_closed_by_the_next(tmp_path: Pat
         _verify(client)
 
 
+def test_a_failed_close_keeps_the_worker_for_a_retried_close(tmp_path: Path) -> None:
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from nemo_gym.server_runtime import ResourcesCloseSessionRequest
+
+    server = _server(tmp_path)
+    worker = MagicMock(close=AsyncMock(side_effect=[RuntimeError("worker did not exit"), None]))
+    server.workers["s"] = worker
+    close = ResourcesCloseSessionRequest(resources_session_id="s", episode_id={"rollout_id": "r"})
+
+    with pytest.raises(RuntimeError, match="did not exit"):
+        asyncio.run(server.close_resources_session(close))
+    # With several workers, routing keeps the session on this worker for the close that retries.
+    assert server.workers == {"s": worker} and server.keeps_session_state("s")
+    asyncio.run(server.close_resources_session(close))
+    assert server.workers == {} and not server.keeps_session_state("s")
+
+
 def test_a_worker_that_fails_to_open_leaves_nothing_running(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import tempfile
 

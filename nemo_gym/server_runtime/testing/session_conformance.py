@@ -45,6 +45,7 @@ def check_resources_session_contract(
     The check also seeds a second session and drops its cookie, as when the seed's reply is lost, then closes it
     without a cookie, as the Environment Server does. That close must succeed. With ``holds_state``, a callable that
     reports whether the server holds state for a ``resources_session_id``, both closes must release that state.
+    A server that overrides ``SimpleResourcesServer.keeps_session_state`` passes it here.
 
     With ``verify_body`` (requires ``keeps_state``), a ``/verify`` sent with the closed session's cookie must
     return a masked sample whose ``failure_kind`` is ``session_lost`` or ``session_expired``, not a reward of 0.

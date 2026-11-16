@@ -394,6 +394,13 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
             self._fences.fence(session_id, episode.request.episode_id)
         self._episodes.pop(session_id, None)
 
+    def keeps_session_state(self, session_id: str) -> bool:
+        # Includes an episode whose release failed after a failed seed (see _abandon), which a later close retries.
+        # An episode without a task backend session holds nothing to release, such as one whose seed was cancelled
+        # while it waited for the episode lock.
+        episode = self._episodes.get(session_id)
+        return episode is not None and episode.task is not None
+
     # ----------------------------------------------------------------------------------------------------- close
 
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:

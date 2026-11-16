@@ -666,6 +666,11 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
         self._session_id_to_sandbox[session_id] = sandbox
         return ScaleSWESeedSessionResponse(sandbox_handle=str(sandbox._handle.sandbox_id))
 
+    def keeps_session_state(self, session_id: str) -> bool:
+        # Includes a task or verifier sandbox whose stop failed, which a later close retries. Not _resources_sessions:
+        # a close cancelled while waiting for the session lock leaves a record there with nothing to release.
+        return session_id in self._session_id_to_sandbox or session_id in self._session_id_to_verifier_sandboxes
+
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
         """Stop an episode session's sandbox and fence the session for the close retry window.
 

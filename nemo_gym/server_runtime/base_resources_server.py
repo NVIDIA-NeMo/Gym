@@ -157,6 +157,7 @@ class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
         description=(
             "With several workers, how long a session stays with the worker that created it "
             "after its last request, once it is closed, verified or failed to seed; "
+            "longer while the server still keeps state for it (SimpleResourcesServer.keeps_session_state); "
             "cover the caller's retry horizon and the server's own close fences. "
             "Servers that fence closed sessions with ResourcesSessionFences keep each fence this long, "
             "with any number of workers."
@@ -640,6 +641,8 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
+        if iscoroutinefunction(cls.keeps_session_state):
+            raise TypeError(f"{cls.__name__}.keeps_session_state must be synchronous")
         hooks = ("has_session_state", "initialize_session_state", "release_session_state")
         implemented = [name for name in hooks if getattr(cls, name) is not getattr(SimpleResourcesServer, name)]
         if not implemented:
@@ -727,6 +730,19 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         A successful score does not end checkpoint or worker ownership while its cleanup is pending.
         """
         return session_id in self._pending_verifications
+
+    def keeps_session_state(self, session_id: str) -> bool:
+        """Whether this worker keeps state for the session that a later close or retire must reach it to release.
+
+        With several workers, a worker keeps ownership of a session while this is true, past the close retry window,
+        so a close that retries a failed teardown still reaches the worker that holds the resources.
+        The base counts live state and what a failed initialization's release left.
+        A server that keeps sessions in its own map, such as one that overrides ``seed_session``,
+        overrides this to report the entries that hold resources, such as sandboxes. Leave out records that hold
+        nothing to release, which would keep ownership for no reason. Keep it synchronous and cheap: the ownership
+        sweep calls it. The same callable serves as ``holds_state`` for ``check_resources_session_contract``.
+        """
+        return session_id in self._initializing_sessions or self.has_session_state(session_id)
 
     def session_identity(self, session_id: str) -> tuple[EpisodeId, TaskId] | None:
         """Return active, partially initialized, or retained verification ownership for this ID."""
@@ -871,6 +887,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             "session_ends": ("/verify",),
             "close_follows_header": CHECKPOINT_CLOSE_FOLLOWS_HEADER,
             "session_release_pending": self.session_release_pending,
+            "keeps_session_state": self.keeps_session_state,
         }
 
     def setup_webserver(self) -> FastAPI:

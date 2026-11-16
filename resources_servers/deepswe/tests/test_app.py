@@ -1739,7 +1739,7 @@ def test_environment_session_follows_the_resources_session_contract(
         server.setup_webserver(),
         seed,
         keeps_state=True,
-        holds_state=lambda session_id: session_id in server._session_id_to_sandbox,
+        holds_state=server.keeps_session_state,
         verify_body=_environment_verify_body(seed),
     )
 

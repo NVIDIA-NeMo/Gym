@@ -553,9 +553,12 @@ async def test_setup_failure_retains_failed_cleanup_for_retry(sandboxed, monkeyp
         await server.seed_session(_request(), ResourcesSeedSessionRequest.model_validate(_seed()))
     assert "resources-session" in server._shell_sessions
     assert "resources-session" in server._session_workspaces
+    # With several workers, routing keeps the session on this worker for the close that retries the stop.
+    assert server.keeps_session_state("resources-session")
     await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close()))
     assert containers[0].stop.await_count == 2
     assert not server._shell_sessions and not server._session_workspaces
+    assert not server.keeps_session_state("resources-session")
 
 
 @pytest.mark.asyncio
