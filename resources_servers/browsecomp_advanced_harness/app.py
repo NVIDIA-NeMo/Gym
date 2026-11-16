@@ -24,6 +24,7 @@ from asyncio import sleep
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from time import monotonic, time
 from typing import Any, ClassVar, Dict, List, Optional
@@ -63,6 +64,7 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    MCPTool,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedRejectedError,
@@ -85,6 +87,7 @@ from resources_servers.browsecomp_advanced_harness.sandbox import (
     shell_source_files,
 )
 from resources_servers.browsecomp_advanced_harness.shell_output import format_shell_output
+from resources_servers.browsecomp_advanced_harness.tool_definitions import INLINE_TOOLS, WORKSPACE_TOOLS
 
 
 LOG = logging.getLogger(__name__)
@@ -1158,6 +1161,29 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         app.router.lifespan_context = lifespan_wrapper
 
         return app
+
+    def mcp_tools(self, harvested: list[MCPTool], catchall: Any | None) -> list[MCPTool]:
+        """Offer the tools a row gives ``browsecomp_agent``, with the same descriptions and parameters.
+
+        Used with ``expose_tools_over_mcp: true``. The request models also take fields the model is not offered,
+        such as ``max_total_length``, so their schemas are not advertised. Without a workspace, ``bash_command`` has
+        no pages to read and is not offered.
+        """
+        definitions = WORKSPACE_TOOLS if self.config.workspace == "per_session" else INLINE_TOOLS
+        by_name = {definition["name"]: definition for definition in definitions}
+        return [
+            replace(
+                tool,
+                tool=tool.tool.model_copy(
+                    update={
+                        "description": by_name[tool.name]["description"],
+                        "inputSchema": by_name[tool.name]["parameters"],
+                    }
+                ),
+            )
+            for tool in harvested
+            if tool.name in by_name
+        ]
 
     async def seed_session(
         self, request: Request, body: ResourcesSeedSessionRequest | BaseSeedSessionRequest

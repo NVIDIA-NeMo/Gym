@@ -27,6 +27,8 @@ from pathlib import Path
 
 import pandas
 
+from resources_servers.browsecomp_advanced_harness.tool_definitions import WORKSPACE_TOOLS as TOOLS
+
 
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
@@ -69,106 +71,6 @@ WORKSPACE_SYSTEM_ADDENDUM = (
     "and `cat manifest.tsv` show everything you've already retrieved."
 )
 
-TOOLS = [
-    {
-        "type": "function",
-        "name": "search",
-        "description": (
-            "Web Search API, works like Google Search. "
-            "All queries will be searched in parallel. "
-            "If you want to search with multiple keywords, "
-            "put them in a single query. "
-            "Each result's full raw content is saved to "
-            "pages/<idx>_search_<slug>_rN.txt under the current workspace; "
-            "the tool response returns the per-result title, URL, snippet, "
-            "and [Saved to] path. Use bash_command to read the saved files."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "queries": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": ("Search queries. All queries are executed in parallel."),
-                }
-            },
-            "required": ["queries"],
-        },
-        "strict": False,
-    },
-    {
-        "type": "function",
-        "name": "browse",
-        "description": (
-            "Visit specific webpage(s) and save their full text content "
-            "to local files. Use this to fetch the complete content of "
-            "web pages found during search. Each page is written to "
-            "pages/<idx>_browse_<slug>.txt under the current workspace; "
-            "the tool response returns the per-URL title, [Saved to] "
-            "path, byte count, and a short preview. Use bash_command "
-            "to read the full content."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "urls": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "URL(s) of webpage(s) to visit.",
-                },
-                "goal": {
-                    "type": "string",
-                    "description": ("What specific information you are looking for."),
-                },
-            },
-            "required": ["urls"],
-        },
-        "strict": False,
-    },
-    {
-        "type": "function",
-        "name": "bash_command",
-        "description": (
-            "Run a shell command in the current sample's workspace and "
-            "return stdout/stderr (truncated to ~12 KB head+tail).\n\n"
-            "cwd layout (pinned per sample; do not navigate outside):\n"
-            "  pages/<idx:04d>_<kind>_<slug>[_rN].txt    one file per search result or browsed page\n"
-            "  manifest.tsv                              page_id<TAB>kind<TAB>source<TAB>title<TAB>bytes\n\n"
-            "Useful recipes:\n"
-            "  ls pages/ | wc -l                              # how many pages saved so far\n"
-            "  ls pages/ | head                                # glance at filenames (slugged from query/URL)\n"
-            '  grep -l "<phrase>" pages/*.txt | head           # which files mention X\n'
-            '  grep -m 5 -B 2 -A 4 "<phrase>" pages/0042_*     # context around hits in one file\n'
-            "  head -c 2000 pages/0042_*                       # peek at start of a file\n"
-            "  sed -n '100,200p' pages/0042_*                  # specific line range\n"
-            "  cut -f3 manifest.tsv | sort -u                  # all queries / URLs you've tried\n\n"
-            "Each call is one-shot (cwd resets between calls). Chain with "
-            "`;` or `&&` inside one keystrokes string.\n\n"
-            "Read-only allow-list: only inspection commands are permitted "
-            "(ls cat grep head tail sed cut sort uniq wc tr nl strings file find "
-            "diff echo printf cd), composed with pipes / for-loops / conditionals. "
-            "Anything else — destructive, network, interpreter, install, or "
-            "redirection-to-file (rm, mv, curl, python, pip, `>`, …) — is blocked "
-            "and returns `[blocked: …]`."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "keystrokes": {
-                    "type": "string",
-                    "description": "Shell command to run.",
-                },
-                "duration": {
-                    "type": "number",
-                    "description": "Max seconds to wait (1-60, default 10).",
-                },
-            },
-            "required": ["keystrokes", "duration"],
-        },
-        "strict": False,
-    },
-]
-
 BROWSECOMP_CSV_URL = "https://openaipublic.blob.core.windows.net/simple-evals/browse_comp_test_set.csv"
 
 # By default prepare() writes a reproducible 400-sample subset; set BROWSECOMP_RUN_FULL=1 for the full 1266.
@@ -202,7 +104,8 @@ def decrypt(ciphertext_b64: str, password: str) -> str:
     return decrypted.decode()
 
 
-def map_browsecomp_sample_to_rl_sample(row: dict) -> dict:
+def map_browsecomp_sample_to_rl_sample(row: dict, tools: list[dict] | None = TOOLS) -> dict:
+    """One benchmark row. ``tools=None`` leaves the tool list out, for harnesses that take the tools over MCP."""
     problem = decrypt(row["problem"], row["canary"])
     answer = decrypt(row["answer"], row["canary"])
 
@@ -213,15 +116,18 @@ def map_browsecomp_sample_to_rl_sample(row: dict) -> dict:
         {"role": "user", "content": problem + QUERY_SUFFIX},
     ]
 
+    responses_create_params = {"input": messages}
+    if tools is not None:
+        responses_create_params["tools"] = tools
     return {
-        "responses_create_params": {"input": messages, "tools": TOOLS},
+        "responses_create_params": responses_create_params,
         "ground_truth": answer,
         "question": problem,
     }
 
 
-def prepare() -> Path:
-    """Download and prepare AIME 2025 data. Returns the output file path."""
+def write_benchmark(output_fpath: Path, tools: list[dict] | None) -> Path:
+    """Download BrowseComp and write its rows to ``output_fpath``. Returns the output file path."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     print(f"Downloading BrowseComp dataset from {BROWSECOMP_CSV_URL} ...")
@@ -234,14 +140,19 @@ def prepare() -> Path:
     print(f"BrowseComp: writing {mode} ({len(df)} rows)")
 
     count = 0
-    with open(OUTPUT_FPATH, "w") as f:
+    with open(output_fpath, "w") as f:
         for _, row in df.iterrows():
-            sample = map_browsecomp_sample_to_rl_sample(row.to_dict())
+            sample = map_browsecomp_sample_to_rl_sample(row.to_dict(), tools)
             f.write(json.dumps(sample) + "\n")
             count += 1
 
-    print(f"Wrote {count} problems to {OUTPUT_FPATH}")
-    return OUTPUT_FPATH
+    print(f"Wrote {count} problems to {output_fpath}")
+    return output_fpath
+
+
+def prepare() -> Path:
+    """Download and prepare the BrowseComp rows for browsecomp_agent. Returns the output file path."""
+    return write_benchmark(OUTPUT_FPATH, tools=TOOLS)
 
 
 if __name__ == "__main__":

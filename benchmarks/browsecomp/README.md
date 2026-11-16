@@ -56,3 +56,41 @@ The sandbox checks that it can connect to the model, tool and token-count endpoi
 So an error that the previous recipe scored 0 now leaves the scored set instead of counting as a wrong answer. Check the failure rows and the coverage file alongside the accuracy.
 
 The [BrowseComp adapter README](../../responses_api_agents/browsecomp_agent/README.md) documents Evaluation capability, explicit evidence gaps, sandbox ownership and unsupported controls. For a hosted model without `/tokenize`, set `save_model_call_using_vllm_tokenize_endpoint: false` explicitly. The research agent and read-only shell each run in an independently owned sandbox; the Resources Server keeps search credentials and verification on the host.
+
+## Run another harness
+
+`opencode.yaml` runs [OpenCode](../../responses_api_agents/opencode_agent/README.md) (`opencode_agent`, OpenCode
+1.17.11) in place of `browsecomp_agent`, with the same Resources Server, judge, tasks and prompts as `config.yaml`:
+
+```bash
+gym eval prepare --benchmark browsecomp/opencode
+gym eval run \
+    --model-type vllm_model \
+    --benchmark browsecomp/opencode \
+    --split benchmark \
+    --output results/browsecomp_opencode.jsonl \
+    --model-url <vllm_base_url> \
+    --model-api-key <vllm_api_key> \
+    --model <served_model_name>
+```
+
+- The rows come from `data/browsecomp_benchmark_harness_neutral.jsonl`, written by `prepare_harness_neutral.py`: the
+  rows `prepare.py` writes, without the tool list. OpenCode and the other session harnesses reject a tool list in the
+  request.
+- OpenCode reaches `search`, `browse` and `bash_command` over MCP: the Resources Server sets
+  `expose_tools_over_mcp: true` and the Environment Server sets `resources_tool_transports: [mcp]`. The Resources
+  Server advertises the descriptions and parameters the rows give `browsecomp_agent`
+  (`resources_servers/browsecomp_advanced_harness/tool_definitions.py`). The model sees them as
+  `browsecomp_benchmark_resources_server_<tool>`. The search keys stay on the Resources Server, and `bash_command`
+  still runs in the Resources Server's read-only shell sandbox, where the saved pages are.
+- OpenCode runs in a sandbox it creates from `python:3.13-slim` and installs its pinned runtime there at the start of
+  each episode, from GitHub. Its permission rules deny every tool but the BrowseComp ones: its own shell and file tools
+  would run in its sandbox, which holds none of the saved pages, and its web tools would skip the domain exclusions.
+  With Docker the sandbox keeps the default network; with a provider that has network policies, such as OpenSandbox,
+  set `network_access: model_and_tools` on the agent.
+- OpenCode's own system prompt comes first, and the row's system prompt is added to it as instructions.
+  `browsecomp_agent`'s context resets, progress board and step nudges do not apply: OpenCode compacts its context
+  20,000 tokens below `context_window`. The run is bounded by `timeout` (3,600 seconds, `browsecomp_agent`'s activation
+  cap), not by a step count.
+- The harness and its system prompt differ from `browsecomp_agent`, so the two scores are not the same measurement.
+- Change a harness setting with `++browsecomp_opencode_agent.responses_api_agents.opencode_agent.<key>=<value>`.

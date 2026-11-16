@@ -18,11 +18,19 @@ By default prepare() writes a reproducible 400-sample subset (seed 42); BROWSECO
 keeps the full 1266. These exercise the pure _select_samples helper without downloading the CSV.
 """
 
+import base64
 import random
 
 import pandas
 
-from benchmarks.browsecomp.prepare import BROWSECOMP_SUBSET_N, BROWSECOMP_SUBSET_SEED, _select_samples
+from benchmarks.browsecomp.prepare import (
+    BROWSECOMP_SUBSET_N,
+    BROWSECOMP_SUBSET_SEED,
+    _select_samples,
+    derive_key,
+    map_browsecomp_sample_to_rl_sample,
+)
+from resources_servers.browsecomp_advanced_harness.tool_definitions import WORKSPACE_TOOLS
 
 
 def _df(n: int = 1266) -> pandas.DataFrame:
@@ -55,3 +63,26 @@ def test_subset_is_strict_subset_no_dupes():
     rows = set(out["row"])
     assert rows.issubset(set(range(1266)))
     assert len(rows) == 400  # no fabricated or duplicated rows
+
+
+def _encrypted_row(problem: str, answer: str, canary: str = "canary") -> dict:
+    def encrypt(text: str) -> str:
+        data = text.encode()
+        return base64.b64encode(bytes(a ^ b for a, b in zip(data, derive_key(canary, len(data))))).decode()
+
+    return {"problem": encrypt(problem), "answer": encrypt(answer), "canary": canary}
+
+
+def test_rows_carry_the_workspace_tools_by_default():
+    sample = map_browsecomp_sample_to_rl_sample(_encrypted_row("Who?", "Ada"))
+    assert sample["responses_create_params"]["tools"] == WORKSPACE_TOOLS
+    assert (sample["question"], sample["ground_truth"]) == ("Who?", "Ada")
+
+
+def test_harness_neutral_rows_keep_the_prompt_without_tools():
+    row = _encrypted_row("Who?", "Ada")
+    with_tools = map_browsecomp_sample_to_rl_sample(row)
+    without_tools = map_browsecomp_sample_to_rl_sample(row, tools=None)
+    assert "tools" not in without_tools["responses_create_params"]
+    assert without_tools["responses_create_params"]["input"] == with_tools["responses_create_params"]["input"]
+    assert (without_tools["question"], without_tools["ground_truth"]) == ("Who?", "Ada")
