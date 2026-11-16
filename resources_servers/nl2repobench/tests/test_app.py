@@ -280,7 +280,7 @@ async def test_verify_workspace_collection_failure_short_circuits(task_assets: P
     agent_sandbox.stop.assert_awaited_once()
 
 
-def test_collect_command_excludes_precede_positional_args() -> None:
+def test_collect_command_excludes_precede_positional_args(tmp_path) -> None:
     # GNU tar requires --exclude flags to precede positional args (-C DIR .);
     # once an --exclude follows them it's rejected (exit code 2) or silently
     # ignored, depending on tar version. Caught via a real (non-mocked) tar
@@ -292,11 +292,10 @@ def test_collect_command_excludes_precede_positional_args() -> None:
     assert exclude_idx < positional_idx
 
     result = subprocess.run(
-        "cd /tmp && rm -rf nl2repobench_tar_test && mkdir -p nl2repobench_tar_test/workspace/.git "
-        "nl2repobench_tar_test/workspace/src && echo x > nl2repobench_tar_test/workspace/src/a.py "
-        "&& echo y > nl2repobench_tar_test/workspace/.git/HEAD && "
-        + command.replace("/tmp/workspace.tar.gz", "/tmp/nl2repobench_tar_test/workspace.tar.gz").replace(
-            "-C /workspace", "-C /tmp/nl2repobench_tar_test/workspace"
+        f"mkdir -p {tmp_path}/workspace/.git {tmp_path}/workspace/src && echo x > {tmp_path}/workspace/src/a.py "
+        f"&& echo y > {tmp_path}/workspace/.git/HEAD && "
+        + command.replace("/tmp/workspace.tar.gz", f"{tmp_path}/workspace.tar.gz").replace(
+            "-C /workspace", f"-C {tmp_path}/workspace"
         ),
         shell=True,
         capture_output=True,
@@ -304,7 +303,7 @@ def test_collect_command_excludes_precede_positional_args() -> None:
     )
     assert result.returncode == 0, result.stderr
     listing = subprocess.run(
-        "tar tzf /tmp/nl2repobench_tar_test/workspace.tar.gz",
+        f"tar tzf {tmp_path}/workspace.tar.gz",
         shell=True,
         capture_output=True,
         text=True,

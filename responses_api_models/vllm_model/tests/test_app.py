@@ -15,6 +15,7 @@
 import asyncio
 import json
 import logging
+import os
 from typing import Any, Union
 from unittest.mock import AsyncMock, MagicMock
 
@@ -5456,6 +5457,7 @@ class TestEndpointFile:
 
     def test_publish_rebinds_clients_and_clears_sessions(self, tmp_path) -> None:
         (tmp_path / "endpoint.txt").write_text("http://new-host:8712/v1\n")
+        os.utime(tmp_path / "endpoint.txt", (1, 1))  # distinct mtimes: back-to-back writes can share one
         server = self._make_server(tmp_path, endpoint_check_interval_s=3600.0)
         server._session_id_to_client["session-on-old-host"] = server._clients[0]
 
@@ -5471,6 +5473,7 @@ class TestEndpointFile:
         # Within endpoint_check_interval_s the filesystem is left alone, so a
         # fresh publish is only seen once the window is over.
         (tmp_path / "endpoint.txt").write_text("http://newer-host:8712/v1\n")
+        os.utime(tmp_path / "endpoint.txt", (2, 2))
         server._maybe_rebind_endpoint()
         assert server.config.base_url == ["http://new-host:8712/v1"]
         server._endpoint_last_check_at = None  # window over: the next call re-checks
@@ -5489,12 +5492,14 @@ class TestEndpointFile:
         assert server.config.base_url == ["http://placeholder:8712/v1"]
         now = 1100.0
         endpoint_file.write_text("")  # empty is as unpublished as missing: no clock reset
+        os.utime(endpoint_file, (1, 1))  # distinct mtimes: coarse fs timestamps can collide on back-to-back writes
         server._maybe_rebind_endpoint()
         now = 1301.0  # past the grace COUNTED FROM 1000, proving the empty write reset nothing
         with raises(RuntimeError, match="no longer published"):
             server._maybe_rebind_endpoint()
 
         endpoint_file.write_text("http://placeholder:8712/v1\n")  # republish on the SAME host
+        os.utime(endpoint_file, (2, 2))
         now = 1301.5  # within the check window: the publish is not seen yet, the raise stays loud
         with raises(RuntimeError, match="no longer published"):
             server._maybe_rebind_endpoint()
