@@ -131,13 +131,25 @@ class ModelCallCaptureConfig(BaseModel):
         return self
 
 
+# Runs from older releases claimed each call with its own `<rollout id>.<call token>.capture.pending` file.
 _PENDING_SUFFIX = ".capture.pending"
+_CLAIMS_SUFFIX = ".capture.claims"
+# `_record` writes `model_call_id` first, so a landed call's id is read without parsing its payloads.
+_LANDED_ID_PREFIX = b'{"model_call_id":"'
 
 
-def _pending_token(model_call_id: str) -> str:
-    """A filename-safe, dot-free token; the dot is the separator `has_pending` globs on."""
-    token = "".join(char if (char.isascii() and (char.isalnum() or char in "_-")) else "_" for char in model_call_id)
-    return token or "unknown"
+def _landed_call_id(line: bytes) -> Optional[str]:
+    if line.startswith(_LANDED_ID_PREFIX):
+        end = line.find(b'"', len(_LANDED_ID_PREFIX))
+        raw = line[len(_LANDED_ID_PREFIX) : end]
+        if end > 0 and b"\\" not in raw:
+            return raw.decode("utf-8", errors="replace")
+    try:
+        exchange = orjson.loads(line)
+    except orjson.JSONDecodeError:
+        return None
+    call_id = exchange.get("model_call_id") if isinstance(exchange, dict) else None
+    return call_id if isinstance(call_id, str) else None
 
 
 def _validate_rollout_id(rollout_id: str) -> str:
@@ -170,34 +182,81 @@ class CaptureStore:
     def is_incomplete(self, rollout_id: str) -> bool:
         return self.incomplete_path_for(rollout_id).exists()
 
-    def pending_path_for(self, rollout_id: str, model_call_id: str) -> Path:
-        return self._root / f"{_validate_rollout_id(rollout_id)}.{_pending_token(model_call_id)}{_PENDING_SUFFIX}"
+    def claims_path_for(self, rollout_id: str) -> Path:
+        return self._root / f"{_validate_rollout_id(rollout_id)}{_CLAIMS_SUFFIX}"
+
+    def _append_claim_line(self, rollout_id: str, entry: dict[str, str]) -> None:
+        # No fsync: readers on other nodes see the line without one, and a crash that loses it ends the call too.
+        with self.claims_path_for(rollout_id).open("ab") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                handle.write(orjson.dumps(entry, option=orjson.OPT_APPEND_NEWLINE))
+                handle.flush()
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def mark_pending(self, rollout_id: str, model_call_id: str) -> None:
-        """Claim a write before it is queued, so a reader can tell 'not yet' from 'never'."""
+        """Claim a write before it is queued, so a reader can tell 'not yet' from 'never'.
+
+        The claim resolves when the call's exchange lands, or through ``clear_pending`` when it never will.
+        """
         try:
-            self.pending_path_for(rollout_id, model_call_id).touch(exist_ok=True)
+            self._append_claim_line(rollout_id, {"claim": model_call_id})
         except OSError:
             logger.warning("Could not mark model-call capture pending for rollout %s.", rollout_id, exc_info=True)
 
     def clear_pending(self, rollout_id: str, model_call_id: str) -> None:
+        """Resolve a claim whose exchange will not land."""
         try:
-            self.pending_path_for(rollout_id, model_call_id).unlink(missing_ok=True)
+            self._append_claim_line(rollout_id, {"release": model_call_id})
         except OSError:
             logger.warning("Could not clear model-call capture pending for rollout %s.", rollout_id, exc_info=True)
 
-    def has_pending(self, rollout_id: str) -> bool:
-        """True while any claimed write for this rollout has not finished.
+    def _unreleased_claims(self, rollout_id: str) -> set[str]:
+        try:
+            with self.claims_path_for(rollout_id).open("rb") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+                try:
+                    lines = handle.read().splitlines()
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except FileNotFoundError:
+            return set()
+        claimed: set[str] = set()
+        released: set[str] = set()
+        for line in lines:
+            try:
+                entry = orjson.loads(line)
+            except orjson.JSONDecodeError:
+                continue  # A torn claim was never forwarded; a torn release leaves its claim outstanding.
+            if isinstance(entry, dict) and isinstance(entry.get("claim"), str):
+                claimed.add(entry["claim"])
+            elif isinstance(entry, dict) and isinstance(entry.get("release"), str):
+                released.add(entry["release"])
+        return claimed - released
 
-        The literal dot after the rollout id keeps `1-0` from matching `1-0-retry1`.
-        """
-        pattern = f"{_validate_rollout_id(rollout_id)}.*{_PENDING_SUFFIX}"
-        return any(self._root.glob(pattern))
+    def has_pending(self, rollout_id: str) -> bool:
+        """True while a claimed call of this rollout has neither landed nor been released."""
+        outstanding = self._unreleased_claims(rollout_id)
+        if not outstanding:
+            return False
+        try:
+            handle = self.path_for(rollout_id).open("rb")
+        except FileNotFoundError:
+            return True
+        with handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+            try:
+                for line in handle:
+                    outstanding.discard(_landed_call_id(line))
+                    if not outstanding:
+                        return False
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return True
 
     def clear_all_pending(self, rollout_id: str) -> None:
-        pattern = f"{_validate_rollout_id(rollout_id)}.*{_PENDING_SUFFIX}"
-        for marker in self._root.glob(pattern):
-            marker.unlink(missing_ok=True)
+        self.claims_path_for(rollout_id).unlink(missing_ok=True)
 
     def record(self, rollout_id: str, exchange: dict[str, Any]) -> None:
         """Append one exchange and fsync (durable across a killed box).
@@ -712,6 +771,11 @@ def _record(
             store.mark_incomplete(rollout_id)
         except Exception:
             logger.warning("Could not mark rollout %s capture as incomplete.", rollout_id, exc_info=True)
+        try:
+            # The row will not land, so release its claim rather than leave readers to the drain timeout.
+            store.clear_pending(rollout_id, model_call_id)
+        except Exception:
+            logger.warning("Could not release the capture claim for rollout %s.", rollout_id, exc_info=True)
 
 
 async def _fail_uncommitted_external_call(context: CaptureContext | None) -> None:
@@ -1052,9 +1116,10 @@ class _CaptureMiddleware:
             upstream_body = bytes(state["body"]) or exception_body
             error_category = _classify_status(upstream_status) if isinstance(upstream_status, int) else None
             error_category = error_category or _classify_exception(exc)
-            # Offload the blocking write+fsync so it never stalls the event loop.
+            # Offload the blocking write+fsync so it never stalls the event loop. Shielded: a write
+            # cancelled before it starts would leave this call's claim outstanding until the drain timeout.
             try:
-                await asyncio.to_thread(
+                write = asyncio.to_thread(
                     _record,
                     self._store,
                     dialect,
@@ -1076,10 +1141,10 @@ class _CaptureMiddleware:
                     execution=request_state.get("nemo_gym_model_execution"),
                     failure=exc,
                 )
+                await asyncio.shield(write)
             except Exception:
                 logger.warning("Model-call capture finalization failed.", exc_info=True)
             finally:
-                self._store.clear_pending(rollout_id, model_call_id)
                 await _fail_uncommitted_external_call(capture_context)
                 await _flush_deferred_response()
             raise
@@ -1132,29 +1197,27 @@ class _CaptureMiddleware:
                 if body_bytes and (streaming or response_body is None)
                 else None
             )
-            try:
-                _record(
-                    store,
-                    dialect,
-                    model_server_name,
-                    request_bytes,
-                    verifier_invocation_id=verifier_invocation_id,
-                    client_session_id=client_session_id,
-                    client_assistant_message_id=client_assistant_message_id,
-                    rollout_id=rollout_id,
-                    model_call_id=model_call_id,
-                    started_at=started_at,
-                    completed_at=completed_at,
-                    response_body=response_body,
-                    status_code=status,
-                    error_category=error_category,
-                    latency_ms=latency_ms,
-                    ttft_ms=ttft_ms,
-                    response_raw=response_raw,
-                    execution=request_state.get("nemo_gym_model_execution"),
-                )
-            finally:
-                store.clear_pending(rollout_id, model_call_id)
+            # The landed row resolves this call's claim.
+            _record(
+                store,
+                dialect,
+                model_server_name,
+                request_bytes,
+                verifier_invocation_id=verifier_invocation_id,
+                client_session_id=client_session_id,
+                client_assistant_message_id=client_assistant_message_id,
+                rollout_id=rollout_id,
+                model_call_id=model_call_id,
+                started_at=started_at,
+                completed_at=completed_at,
+                response_body=response_body,
+                status_code=status,
+                error_category=error_category,
+                latency_ms=latency_ms,
+                ttft_ms=ttft_ms,
+                response_raw=response_raw,
+                execution=request_state.get("nemo_gym_model_execution"),
+            )
 
         try:
             # Shielded: cancellation here strands the queued write and the row is

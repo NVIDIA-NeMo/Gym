@@ -583,7 +583,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             CaptureStore ModelExecutionOutcome _CLIENT_SESSION_HEADER _CaptureMiddleware _OBSERVED_PATHS
             _PENDING_SUFFIX _TERMINAL_SSE_LINES _classify_exception _classify_status
             _consume_terminal_sse_event _exception_http_details _fail_uncommitted_external_call
-            _headers_content_type _parse_sse_events _pending_token _preserve_capture_prefix_on_redirect
+            _headers_content_type _parse_sse_events _preserve_capture_prefix_on_redirect
             _reconstruct_anthropic_sse _reconstruct_chat_sse _reconstruct_responses_sse
             _reconstruct_streamed_response _record _unique_request_header _validate_rollout_id
             make_capture_store start_model_execution

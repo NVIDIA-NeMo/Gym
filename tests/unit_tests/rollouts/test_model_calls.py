@@ -311,3 +311,127 @@ def test_clear_captures_for_rollouts_drops_stale_pending_claims(tmp_path):
     clear_model_call_captures_for_rollouts([{"_ng_task_index": 5, "_ng_rollout_index": 0}], [tmp_path])
 
     assert store.has_pending("5-0") is False
+
+
+@pytest.mark.asyncio
+async def test_a_claim_resolves_when_its_row_lands_without_a_release(tmp_path):
+    import asyncio
+
+    from nemo_gym.rollouts.model_calls import await_model_call_capture_quiescence
+
+    store = CaptureStore(tmp_path)
+    store.record("6-0", {**_capture_exchange("responses", "A", {}, {"id": "resp-A"}), "model_call_id": "call-1"})
+    store.mark_pending("6-0", "call-2")
+
+    async def late_write():
+        await asyncio.sleep(0.1)
+        store.record("6-0", {**_capture_exchange("responses", "B", {}, {"id": "resp-B"}), "model_call_id": "call-2"})
+
+    task = asyncio.create_task(late_write())
+    assert store.has_pending("6-0") is True
+
+    assert await await_model_call_capture_quiescence("6-0", [tmp_path]) is True
+    await task
+    assert [exchange["model_call_id"] for exchange in store.read("6-0")] == ["call-1", "call-2"]
+
+
+def test_has_pending_reads_landed_ids_from_any_line_shape(tmp_path):
+    store = CaptureStore(tmp_path)
+    store.mark_pending("7-0", "spaced")
+    store.mark_pending("7-0", "torn")
+    with store.path_for("7-0").open("wb") as handle:
+        # Not written by `_record`, so the id is parsed rather than read from the line's head.
+        handle.write(b'{"dialect": "chat", "model_call_id": "spaced"}\n\n[1]\n')
+        handle.write(b'{"dialect": "chat", "model_call_id": "torn"')
+    assert store.has_pending("7-0") is True
+
+    store.clear_pending("7-0", "torn")
+    assert store.has_pending("7-0") is False
+
+
+def test_a_torn_claims_line_is_skipped(tmp_path):
+    store = CaptureStore(tmp_path)
+    store.claims_path_for("8-0").write_bytes(b'{"claim":"call-1"}\n{"cla\n[]\n')
+
+    assert store.has_pending("8-0") is True
+    store.record("8-0", {"model_call_id": "call-1"})
+    assert store.has_pending("8-0") is False
+
+
+def test_merge_drops_the_claims_file_only_when_nothing_is_outstanding(tmp_path):
+    from nemo_gym.rollouts.model_calls import merge_model_call_capture_into_record
+
+    store = CaptureStore(tmp_path)
+    store.mark_pending("9-0", "call-1")
+    store.record("9-0", {**_capture_exchange("responses", "A", {}, {"id": "resp-A"}), "model_call_id": "call-1"})
+    store.mark_pending("9-1", "call-2")
+
+    landed = merge_model_call_capture_into_record({"_ng_task_index": 9, "_ng_rollout_index": 0}, [tmp_path])
+    stranded = merge_model_call_capture_into_record({"_ng_task_index": 9, "_ng_rollout_index": 1}, [tmp_path])
+
+    assert "gaps" not in landed["ng_model_call_capture"]
+    assert not store.claims_path_for("9-0").exists()
+    # A stranded claim stays on disk, so a later reader still sees the write that never landed.
+    assert "model_call_capture_pending" in [gap["code"] for gap in stranded["ng_model_call_capture"]["gaps"]]
+    assert store.claims_path_for("9-1").exists()
+
+
+@pytest.mark.asyncio
+async def test_capture_reads_never_list_the_capture_dir(tmp_path, monkeypatch):
+    import os
+    from pathlib import Path
+
+    from nemo_gym.rollouts.model_calls import (
+        await_model_call_capture_quiescence,
+        clear_model_call_captures_for_rollouts,
+        merge_model_call_capture_into_record,
+    )
+
+    store = CaptureStore(tmp_path)
+    store.mark_pending("10-0", "call-1")
+    store.record("10-0", {**_capture_exchange("responses", "A", {}, {"id": "resp-A"}), "model_call_id": "call-1"})
+
+    def listed(*_args, **_kwargs):
+        raise AssertionError("listed the capture dir")
+
+    for owner, name in ((Path, "glob"), (Path, "iterdir"), (os, "listdir"), (os, "scandir")):
+        monkeypatch.setattr(owner, name, listed)
+    record = {"_ng_task_index": 10, "_ng_rollout_index": 0}
+
+    assert await await_model_call_capture_quiescence("10-0", [tmp_path]) is True
+    merge_model_call_capture_into_record(record, [tmp_path])
+    clear_model_call_captures_for_rollouts([record], [tmp_path])
+
+    assert len(record["ng_model_call_capture"]["calls"]) == 1
+    assert not store.path_for("10-0").exists()
+
+
+@pytest.mark.asyncio
+async def test_an_older_run_dir_reads_without_waiting_on_its_marker_files(tmp_path):
+    from nemo_gym.rollouts.model_calls import await_model_call_capture_quiescence, merge_model_call_capture_into_record
+
+    # Older releases left a stranded `<rollout id>.<call token>.capture.pending` marker per claimed call.
+    store = CaptureStore(tmp_path)
+    store.record("11-0", _capture_exchange("responses", "A", {}, {"id": "resp-A"}))
+    (tmp_path / "11-0.c0ffee.capture.pending").touch()
+
+    assert await await_model_call_capture_quiescence("11-0", [tmp_path], timeout_s=0.05) is True
+    record = merge_model_call_capture_into_record({"_ng_task_index": 11, "_ng_rollout_index": 0}, [tmp_path])
+
+    assert len(record["ng_model_call_capture"]["calls"]) == 1
+    assert "gaps" not in record["ng_model_call_capture"]
+
+
+@pytest.mark.asyncio
+async def test_await_quiescence_backs_off_while_a_claim_is_outstanding(tmp_path, monkeypatch):
+    from nemo_gym.rollouts.model_calls import await_model_call_capture_quiescence
+
+    store = CaptureStore(tmp_path)
+    store.mark_pending("12-0", "call-1")
+    polls = []
+    has_pending = CaptureStore.has_pending
+    monkeypatch.setattr(CaptureStore, "has_pending", lambda self, rid: polls.append(rid) or has_pending(self, rid))
+
+    assert await await_model_call_capture_quiescence("12-0", [tmp_path], timeout_s=0.5, poll_s=0.01) is False
+    # A fixed 10 ms poll would read the claims about 50 times.
+    assert len(polls) <= 10

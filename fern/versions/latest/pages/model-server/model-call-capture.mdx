@@ -262,7 +262,9 @@ remain attached and `gaps` includes `trajectory_projection_failed`. LabBench row
 
 A capture write started by a cancelled call runs detached, so a rollout's outstanding writes are
 waited for before its record is snapshotted. If one has not landed by the drain timeout, `gaps`
-includes `model_call_capture_pending`.
+includes `model_call_capture_pending`. The model server claims each call in
+`<rollout_id>.capture.claims` before forwarding it; a claim resolves when its record lands, and the
+file is removed once the rollout's record is snapshotted with nothing outstanding.
 
 The attachment is additive: it does not replace or rewrite the existing response, reward,
 `NeMoGymResponse`, token-id, or log-prob fields. Aggregate-metrics requests exclude it, and W&B

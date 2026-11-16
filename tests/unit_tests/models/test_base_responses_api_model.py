@@ -909,6 +909,7 @@ def test_record_swallows_store_failure_and_marks_capture_incomplete(tmp_path, mo
     from nemo_gym.models.model_call_capture import _record
 
     store = CaptureStore(tmp_path)
+    store.mark_pending("r", "call-1")
     monkeypatch.setattr(store, "record", MagicMock(side_effect=RuntimeError("disk full")))
 
     # Best-effort: a failing store must not raise out of _record.
@@ -927,6 +928,43 @@ def test_record_swallows_store_failure_and_marks_capture_incomplete(tmp_path, mo
         latency_ms=1.0,
     )
     assert store.is_incomplete("r")
+    # The row will never land, so its claim is released instead of holding readers to the drain timeout.
+    assert store.has_pending("r") is False
+
+
+def test_record_logs_a_claim_it_cannot_release(tmp_path, monkeypatch, caplog):
+    from nemo_gym.models.model_call_capture import _record
+
+    store = CaptureStore(tmp_path)
+    monkeypatch.setattr(store, "record", MagicMock(side_effect=RuntimeError("disk full")))
+    monkeypatch.setattr(store, "clear_pending", MagicMock(side_effect=ValueError("bad id")))
+
+    _record(
+        store,
+        "chat",
+        "srv",
+        b"{}",
+        rollout_id="r",
+        model_call_id="call-1",
+        started_at=100.0,
+        completed_at=100.01,
+        response_body={},
+        status_code=200,
+        error_category=None,
+        latency_ms=1.0,
+    )
+    assert "Could not release the capture claim" in caplog.text
+
+
+def test_capture_claim_write_failures_are_logged_not_raised(tmp_path, caplog):
+    store = CaptureStore(tmp_path)
+    store.claims_path_for("r").mkdir()
+
+    store.mark_pending("r", "call-1")
+    store.clear_pending("r", "call-1")
+
+    assert "Could not mark model-call capture pending" in caplog.text
+    assert "Could not clear model-call capture pending" in caplog.text
 
 
 def test_record_falls_back_to_raw_when_request_parser_raises(tmp_path, monkeypatch):
@@ -1785,7 +1823,7 @@ def test_capture_store_pending_claims_are_scoped_to_one_rollout(tmp_path):
 
     store.mark_pending("1-0-retry1", "call-1")
 
-    # The dot after the rollout id keeps a prefix from matching a longer id.
+    # Claims live in the rollout's own file, so a prefix of its id sees none.
     assert store.has_pending("1-0-retry1") is True
     assert store.has_pending("1-0") is False
 
@@ -1793,13 +1831,16 @@ def test_capture_store_pending_claims_are_scoped_to_one_rollout(tmp_path):
     assert store.has_pending("1-0-retry1") is False
 
 
-def test_capture_store_pending_token_survives_an_unsafe_model_call_id(tmp_path):
+def test_capture_store_claim_survives_an_unsafe_model_call_id(tmp_path):
     store = CaptureStore(tmp_path)
 
-    store.mark_pending("1-0", "a/b c.d")
-
+    # The quote is escaped in both files, so the landed id is read by parsing the line.
+    store.mark_pending("1-0", 'a/b "c".d')
     assert store.has_pending("1-0") is True
-    assert store.pending_path_for("1-0", "a/b c.d").name == "1-0.a_b_c_d.capture.pending"
+
+    store.record("1-0", {"model_call_id": 'a/b "c".d'})
+    assert store.has_pending("1-0") is False
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["1-0.capture.claims", "1-0.capture.jsonl"]
 
 
 def test_capture_claim_is_visible_while_the_call_is_still_in_flight(tmp_path):
@@ -1858,6 +1899,11 @@ def test_capture_claim_is_visible_while_the_call_is_still_in_flight(tmp_path):
         assert await await_model_call_capture_quiescence("r-inflight", [tmp_path], timeout_s=5.0) is True
         assert store.has_pending("r-inflight") is False
         assert len(store.read("r-inflight")) == 1
+        # One claims file per rollout, appended to; no per-call marker is created or deleted.
+        assert sorted(path.name for path in tmp_path.iterdir()) == [
+            "r-inflight.capture.claims",
+            "r-inflight.capture.jsonl",
+        ]
 
     asyncio.run(run())
 

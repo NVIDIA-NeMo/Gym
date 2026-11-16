@@ -7,6 +7,7 @@ import pytest
 
 from environment_servers.swe_together.judge_evidence import aggregate_judge_evidence, collect_judge_evidence
 from nemo_gym.agents import AgentCloseSessionResponse
+from nemo_gym.models import CaptureStore
 from nemo_gym.rollouts.harness_capabilities import inspect_record
 from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
 from nemo_gym.trajectory import AgentObservationBundle, ModelCallRef, TrajectoryRecord
@@ -266,6 +267,22 @@ async def test_missing_close_retains_captured_calls_and_original_failure(tmp_pat
     assert all(verification[key] == value for key, value in original.items())
     provenance = verification["judge_evidence_provenance"]
     assert provenance["judge_session_id"] is None and provenance["receipt_artifact"] is None
+
+
+async def test_drained_judge_capture_drops_its_claims_file(tmp_path):
+    store = CaptureStore(tmp_path)
+    store.mark_pending("child", "first")
+    store.record("child", exchange("first", "first"))
+    verification = {"judge_capture_episode": "child", "judge_close": receipt("first").model_dump(mode="json")}
+
+    result = await collect_judge_evidence(
+        parent(), verification, {"observability_enabled": True, "model_call_capture_dir": str(tmp_path)}, tmp_path
+    )
+
+    assert [call.model_call_id for call in result.model_calls] == ["first"]
+    assert "judge_capture_incomplete" not in {gap.code for gap in result.gaps}
+    assert not store.claims_path_for("child").exists()
+    assert store.path_for("child").exists()
 
 
 @pytest.mark.parametrize("placement", ["middle", "last", "only"])
