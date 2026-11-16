@@ -235,7 +235,7 @@ class SWEBenchProResourcesServerConfig(BaseResourcesServerConfig):
     evaluation_timeout: int | None = None
     # A verdict-less run is retried on a new sandbox; see `inconclusive_reason`.
     inconclusive_verification_retries: int = 2
-    # None keeps verification logs off. To keep them, name a node-local folder such as one under /tmp.
+    # None keeps verification logs off. To keep them, give an absolute node-local path such as one under /tmp.
     verification_log_dir: Path | None = None
     # Ceiling on ONE verification attempt, covering sandbox creation as well as
     # the verification run. `evaluation_timeout` bounds only the test command
