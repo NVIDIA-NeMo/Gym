@@ -723,7 +723,7 @@ def main() -> None:
             shape = cq.importers.importStep(str(reference)).val()
             if not shape.isValid() or not shape.Solids() or shape.Volume() <= 0:
                 raise ValueError(f"Invalid reference: {reference}")
-            name = f"{len(rows):06d}.step"
+            name = record["task_id"].replace("/", "_") + ".step"
             cq.exporters.export(shape, str(args.reference_root / name))
             images = {key: args.manifest.parent / value for key, value in record["images"].items()}
             if (
