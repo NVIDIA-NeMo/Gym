@@ -42,7 +42,7 @@ agentic_mme:
       sandbox_model_server:
         type: responses_api_models
         name: policy_model
-      image_root: ${oc.env:AGENTIC_MME_IMAGE_ROOT,benchmarks/agentic_mme/data/images}  # runtime-path: read
+      image_root: ${oc.env:AGENTIC_MME_IMAGE_ROOT,benchmarks/agentic_mme/data/images}
       sandbox_config:
         image: ${oc.env:AGENTIC_MME_SANDBOX_IMAGE,null}
         # Without a TTL the OpenSandbox SDK expires a sandbox 10 minutes after creation. The resources session

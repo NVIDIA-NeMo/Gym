@@ -80,8 +80,6 @@ Debug files are laid out so that rollouts and agent instances never share a fold
 
 A capture folder is deleted only by a consumer that has already taken what it needs from it: NeMo RL reads the capture rows into training during the run and resumes from its own checkpoints, so it deletes the capture folders it chose at shutdown. An evaluation run keeps capture as run output, because it can be the only copy of the request and response bodies.
 
-The `runtime-write-paths` pre-commit hook fails on new calls to `Path.cwd()` or `os.getcwd()` in server code, on settings or parameters ending in `_dir` or `_root` whose default is a relative path, and on keys ending in `_dir` or `_root` in server, benchmark and environment YAML configs whose value is a relative path. For a YAML value with an `${oc.env:...}` or `${oc.select:...}` interpolation, the check reads the fallback, so `${oc.env:MY_DIR,results/x}` is flagged and `${oc.env:MY_DIR,null}` is not. A path that is only read can be marked with a `# runtime-path: read` comment on its line.
-
 ### Server Virtual Environments
 
 `gym env start` sets up one uv virtual environment per server and starts the server with that environment's own interpreter (`<venv>/bin/python`), then logs which venv each server runs from. A venv that was copied or moved after it was built still runs its own interpreter, but its `bin/activate` still puts the original location first on `PATH`, so commands a server runs by name (such as `python` or `uv`) are looked up there first. Rebuild a moved venv, or create it with `uv venv --relocatable`, if its servers start such subprocesses.
