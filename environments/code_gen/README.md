@@ -17,14 +17,19 @@ The dataset is in preparation and the example data can be found in `data/example
 - All test cases must pass for a solution to receive a reward of 1.0
 - Failed test cases result in a reward of 0.0 with detailed error information
 
-### Test execution (for now)
-We use the LiveCodeBench execution code.
+### Test execution
+Each verification runs the LiveCodeBench grading harness in a remote sandbox, so the server needs a sandbox
+provider and the verifier image. Build and push the image, and choose a provider, as described in
+[resources_servers/code_gen/README.md](../../resources_servers/code_gen/README.md); then set
+`CODE_GEN_SANDBOX_IMAGE` and pass the provider's config.
 
 ### Example of rollouts and usage
 Create an `env.yaml` file in the Gym root directory to specify the model endpoint and credentials. See [documentation](https://docs.nvidia.com/nemo/gym/reference/configuration#local-configuration-envyaml) for details.
 ```bash
-# Running the server
-gym env start --environment code_gen --model-type openai_model
+# Running the server (OpenSandbox shown; use your provider's config)
+export CODE_GEN_SANDBOX_IMAGE=<registry>/code-gen-verifier:<tag>
+gym env start --environment code_gen --model-type openai_model \
+    --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
 # Collect rollouts from example problems
 gym eval run --no-serve --agent code_gen_simple_agent \

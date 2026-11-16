@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import sys
+from pathlib import Path
 from typing import Generator
 from unittest.mock import MagicMock
 
@@ -27,6 +28,7 @@ from app import (
 )
 from fastapi.testclient import TestClient
 from lcb_integration.testing_util import MockStdinWithBuffer
+from omegaconf import OmegaConf
 from pydantic import ValidationError
 
 from nemo_gym.client import ServerClient
@@ -497,3 +499,24 @@ class TestTestingUtil:
         assert iter(mock_stdin) is mock_stdin
         assert next(mock_stdin) == "first\n"
         assert list(mock_stdin) == ["second\n"]
+
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+class TestShippedConfigs:
+    """Every shipped config that starts the code_gen server must pass its config validation."""
+
+    @pytest.mark.parametrize(
+        "config_path",
+        ["environments/code_gen/config.yaml", "resources_servers/code_gen/configs/code_gen.yaml"],
+    )
+    def test_server_block_validates_with_a_sandbox_image(self, config_path: str, monkeypatch) -> None:
+        monkeypatch.setenv("CODE_GEN_SANDBOX_IMAGE", "code-gen-verifier:test")
+        loaded = OmegaConf.load(REPO_ROOT / config_path)
+        block = OmegaConf.to_container(loaded.code_gen.resources_servers.code_gen, resolve=True)
+
+        config = CompCodingResourcesServerConfig(host="127.0.0.1", port=12345, name="code_gen", **block)
+
+        assert config.sandbox_provider == "sandbox"
+        assert config.sandbox_config.image == "code-gen-verifier:test"
