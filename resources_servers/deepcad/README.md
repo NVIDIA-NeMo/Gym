@@ -45,9 +45,16 @@ must fit `voxel_resolution`. `reference_cache_root` can cache reference geometry
 preparation; use node-local storage for active caches on clusters.
 
 `operation_bonus.enabled` optionally rewards recall of reference CadQuery
-operations. It traces only the generated program in the execution sandbox and
-adds at most `max_fraction` times the geometry reward. Failed or masked samples
-receive no bonus. Task metadata supplies `reference_operations`.
+operation names found by static analysis of the submitted source in the verifier.
+It adds at most `max_fraction` times the geometry reward. Failed or masked samples
+receive no bonus. Task metadata supplies `reference_operations`; the response
+reports `source_operations` instead of the previous `executed_operations` field.
+The verifier does not read `operations.json` or execute source to extract names.
+Comments and strings are ignored, and repeated operation names count once.
+This initial heuristic can count dead code and unrelated methods with matching
+names, and can miss dynamic calls. It does not prove execution or contribution
+to the final geometry. The bonus remains disabled by default; scores with it
+enabled are not directly comparable to the previous runtime-trace version.
 
 Invalid generated code or geometry earns zero. Missing/invalid references,
 scorer failures, and sandbox infrastructure failures set `mask_sample: true`.

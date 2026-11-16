@@ -1,12 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
-
 import pytest
 
 from resources_servers.deepcad.operations import (
-    OperationTrace,
     add_operation_hint,
     extract_operation_candidates,
     operation_bonus,
@@ -26,35 +23,17 @@ result = finish(.2).faces(">Z").workplane().hole(1)
     assert extract_operation_candidates(code) == {"box": 1, "fillet": 1, "hole": 1}
 
 
-def test_trace_real_cadquery_excludes_dead_code_fake_methods_and_internal_calls():
-    cq = pytest.importorskip("cadquery")
+def test_static_candidates_do_not_execute_code_and_include_dead_or_unrelated_calls():
     code = """
-import cadquery as cq
-class Fake:
-    def sweep(self): return self
-Fake().sweep()
+raise RuntimeError("Source must never execute in the verifier")
 if False:
-    cq.Workplane("XY").sphere(3)
-def make_part():
-    part = cq.Workplane("XY").box(4,4,4)
-    return part.edges().fillet(.2)
-result = make_part()
+    part.loft()
+class Fake:
+    def shell(self): pass
+Fake().shell()
+getattr(part, "sweep")()
 """
-    previous = sys.getprofile()
-    with OperationTrace(cq) as trace:
-        namespace = {"__name__": "__main__"}
-        exec(compile(code, "model.py", "exec"), namespace)
-    assert trace.executed == {"box", "fillet"}
-    assert namespace["result"].val().isValid()
-    assert sys.getprofile() is previous
-
-
-def test_trace_does_not_supply_cq_and_restores_on_error():
-    cq = pytest.importorskip("cadquery")
-    previous = sys.getprofile()
-    with pytest.raises(NameError), OperationTrace(cq):
-        exec(compile("result = cq.Workplane('XY').box(1,1,1)", "model.py", "exec"), {})
-    assert sys.getprofile() is previous
+    assert extract_operation_candidates(code) == {"loft": 1, "shell": 1}
 
 
 def test_bonus_is_distinct_and_normalized_per_reference():

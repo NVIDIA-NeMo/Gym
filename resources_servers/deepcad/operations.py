@@ -1,17 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Construction-operation inventory, execution evidence, and bounded reward shaping.
+"""Static construction-operation inventory and bounded reward shaping.
 
-No CadQuery import occurs here. Static candidates are inventory hints, not proof of
-execution. Only the sandbox's runtime trace is used to reward model operations.
+No generated code executes here. Candidates describe source syntax, not executed
+CadQuery calls or their contribution to the final geometry.
 """
 
 import ast
 import hashlib
 import math
-import sys
 from collections import Counter
-from types import FrameType, ModuleType
 
 
 # Modeling operations, not selectors, imports, exporters, or workplane navigation.
@@ -30,7 +28,8 @@ def extract_operation_candidates(code: str) -> dict[str, int]:
     """Count syntactic call sites; callers must retain the static-evidence label.
 
     Comments and string literals do not count. Imported/bound method aliases are
-    recognized. Dynamic getattr and helper-library internals require runtime tracing.
+    recognized. Dynamic getattr and helper-library internals are not recognized.
+    Dead code and unrelated methods with supported names can count.
     """
     tree = ast.parse(code)
     aliases = {}
@@ -60,51 +59,10 @@ def extract_operation_candidates(code: str) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
-class OperationTrace:
-    """Record successful CadQuery calls made directly by generated Python code.
-
-    The profile hook identifies actual CadQuery function code objects, preventing
-    unrelated methods named 'fillet' from counting. It excludes internal helper
-    calls and CAD exports. Repeated calls collapse to one rewarded operation.
-    """
-
-    def __init__(self, cadquery: ModuleType, filename: str = "model.py") -> None:
-        self.filename = filename
-        self.executed: set[str] = set()
-        self._functions = {}
-        self._previous = None
-        for class_name in ("Workplane", "Sketch", "Shape", "Solid", "Face", "Wire", "Edge"):
-            owner = getattr(cadquery, class_name, None)
-            if owner is None:
-                continue
-            for name in OPERATION_NAMES:
-                method = getattr(owner, name, None)
-                function = getattr(method, "__func__", method)
-                code = getattr(function, "__code__", None)
-                if code is not None:
-                    self._functions[code] = name
-
-    def _profile(self, frame: FrameType, event: str, result: object) -> None:
-        if event != "return" or result is None:
-            return
-        name = self._functions.get(frame.f_code)
-        caller = frame.f_back
-        if name and caller is not None and caller.f_code.co_filename == self.filename:
-            self.executed.add(name)
-
-    def __enter__(self) -> "OperationTrace":
-        self._previous = sys.getprofile()
-        sys.setprofile(self._profile)
-        return self
-
-    def __exit__(self, *_args: object) -> None:
-        sys.setprofile(self._previous)
-
-
 def operation_bonus(
     base_reward: float,
     reference: list[str],
-    executed: list[str],
+    candidates: list[str],
     *,
     max_fraction: float = 0.10,
 ) -> tuple[float, list[str]]:
@@ -114,7 +72,7 @@ def operation_bonus(
     if not 0 <= max_fraction <= 0.2:
         raise ValueError("Require 0 <= max_fraction <= 0.2")
     reference_operations = set(reference) & OPERATION_NAMES
-    matched = sorted(reference_operations & set(executed))
+    matched = sorted(reference_operations & set(candidates))
     coverage = len(matched) / len(reference_operations) if reference_operations else 0.0
     return max(0.0, base_reward) * max_fraction * coverage, matched
 

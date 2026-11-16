@@ -25,7 +25,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
 )
 from resources_servers.deepcad.mixed_iou_config import MixedIoUConfig
-from resources_servers.deepcad.operations import OPERATION_NAMES, operation_bonus
+from resources_servers.deepcad.operations import OPERATION_NAMES, extract_operation_candidates, operation_bonus
 from resources_servers.deepcad.task_data import TaskData
 
 
@@ -84,7 +84,7 @@ class DeepCADVerifyRequest(BaseVerifyRequest):
 
 
 class DeepCADVerifyResponse(BaseMultiRewardVerifyResponse):
-    executed_operations: list[str] = Field(default_factory=list)
+    source_operations: list[str] = Field(default_factory=list)
     matched_operations: list[str] = Field(default_factory=list)
     operation_bonus: float = 0.0
     verification_metric: Literal["geometry", "mixed_iou"] = "geometry"
@@ -216,10 +216,18 @@ class DeepCADResourcesServer(SimpleResourcesServer):
                 result["raw_metrics"][name] = float(value) if value is not None else None
         if self.config.operation_bonus.enabled:
             settings = self.config.operation_bonus
+            # Analyze the verifier's source copy, never a model-writable trace or file.
+            source_operations = []
+            if not result.get("failure_kind") and not result.get("mask_sample"):
+                try:
+                    source_operations = sorted(extract_operation_candidates(code))
+                except (SyntaxError, RecursionError, MemoryError):
+                    LOGGER.warning("Could not parse source for CAD operation bonus", exc_info=True)
+            result["source_operations"] = source_operations
             bonus, matched = operation_bonus(
                 float(result["reward"]),
                 body.verifier_metadata.reference_operations,
-                result.get("executed_operations", []),
+                source_operations,
                 max_fraction=settings.max_fraction,
             )
             if result.get("failure_kind") or result.get("mask_sample"):
@@ -270,11 +278,6 @@ class DeepCADResourcesServer(SimpleResourcesServer):
                 files={
                     "/sandbox/model.py": code,
                     "/sandbox/runner.py": (HERE / "runner.py").read_text(),
-                    **(
-                        {"/sandbox/operations.py": (HERE / "operations.py").read_text()}
-                        if self.config.operation_bonus.enabled
-                        else {}
-                    ),
                 },
             )
             with tempfile.TemporaryDirectory(prefix="deepcad-verify-") as directory:
@@ -285,10 +288,9 @@ class DeepCADResourcesServer(SimpleResourcesServer):
                     probe = await sandbox.exec(f"{python} -c 'import cadquery'", timeout_s=30)
                     if probe.return_code or probe.error_type:
                         raise RuntimeError("Sandbox image cannot import CadQuery")
-                    trace_flag = " --trace-operations" if self.config.operation_bonus.enabled else ""
                     preload_flag = " --preload-cq" if self.config.preload_cq else ""
                     execution = await sandbox.exec(
-                        f"{python} /sandbox/runner.py{trace_flag}{preload_flag} > /sandbox/run.log 2>&1",
+                        f"{python} /sandbox/runner.py{preload_flag} > /sandbox/run.log 2>&1",
                         timeout_s=self.config.execution_timeout_s,
                     )
                     if execution.error_type and execution.error_type != "timeout":
@@ -313,19 +315,7 @@ class DeepCADResourcesServer(SimpleResourcesServer):
                             "failure_reason": "Missing or oversized STEP artifact",
                         }
                     await sandbox.download("/sandbox/prediction.step", prediction)
-                    executed_operations = []
-                    if self.config.operation_bonus.enabled:
-                        trace_result = await sandbox.exec("head -c 16384 /sandbox/operations.json", timeout_s=10)
-                        if trace_result.return_code or trace_result.error_type:
-                            raise RuntimeError("Missing sandbox operation trace")
-                        executed_operations = json.loads(trace_result.stdout)
-                        if not isinstance(executed_operations, list) or any(
-                            not isinstance(name, str) or name not in OPERATION_NAMES for name in executed_operations
-                        ):
-                            raise ValueError("Malformed sandbox operation trace")
                 scored = await self._score(prediction, reference, view_mode=view_mode, artifact_dir=None)
-                if self.config.operation_bonus.enabled:
-                    scored["executed_operations"] = executed_operations
                 return scored
         except Exception as exc:
             LOGGER.exception("DeepCAD infrastructure failure")
