@@ -108,5 +108,15 @@ recovery and the verifier-only multiplier.
 rubric judge scores the generated reference edit itself below 1; `gym dataset validate` exits non-zero for them,
 as it does for any reference solution below 1). Verification ran separately for the repurpose tasks and in the
 agent's sandbox for the rest, with the task images prebuilt on a rootless Podman backend and the generated tasks'
-shared base image present on it. Not recorded yet: a training-shaped rollout with token capture on against a vLLM
-policy; it will be added here before the entry is used for a reported run.
+shared base image present on it.
+
+A training-shaped `gym eval run` of the same eight tasks with `harbor_train.yaml` against a standalone vLLM 0.26 server
+(the curriculum run's start checkpoint, TP4, `--return-tokens-as-token-ids`, `return_token_id_information: true`):
+every OpenCode model call was captured with its prompt and generation token ids (18 to 100 calls per episode), and
+every row was masked, because Gym's local `fingerprint` lineage could not chain the calls (`parent_digest_mismatch`
+on most of them, no terminal attribution): the next prompt OpenCode sends is the chat template's rendering of the
+parsed tool calls and reasoning, not the tokens the model generated, so no prompt starts with its parent's tokens.
+Keeping history reasoning in the template (`chat_template_kwargs.truncate_history_thinking=false`) did not change
+that. This is the case Gym's capture docs route to framework-owned reconstruction (`token_id_capture.parent_resolution:
+source_history` with the training framework's external staging), which NeMo RL uses; the standalone run therefore
+shows the records, not a training batch. The NeMo RL smoke below is the training-side evidence.
