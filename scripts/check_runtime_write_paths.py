@@ -36,6 +36,7 @@ Usage: python scripts/check_runtime_write_paths.py [--root DIR] [--allowlist FIL
 
 import argparse
 import ast
+import os
 import re
 import sys
 import warnings
@@ -70,6 +71,15 @@ def _is_excluded(relative: str) -> bool:
         # Dataset preparation runs once, by hand, not inside a server.
         or name.startswith(("prepare_", "create_", "generate_", "download_", "convert_"))
     )
+
+
+def _files(root: Path, directory: str, suffix: str) -> list[Path]:
+    """Files under ``root / directory`` with ``suffix``, never descending into hidden folders such as ``.venv``."""
+    found = []
+    for current, folders, files in os.walk(root / directory):
+        folders[:] = sorted(name for name in folders if not name.startswith("."))
+        found.extend(Path(current, name) for name in sorted(files) if name.endswith(suffix))
+    return found
 
 
 def _is_relative_path_literal(node: ast.expr | None) -> bool:
@@ -145,9 +155,9 @@ def scan(root: Path) -> list[tuple[str, int, str, str]]:
     """Return ``(file, line, rule, scope)`` for every finding under ``root``."""
     findings = []
     for directory in SCANNED_DIRS:
-        for path in sorted((root / directory).rglob("*.py")):
+        for path in _files(root, directory, ".py"):
             relative = path.relative_to(root).as_posix()
-            if _is_excluded(relative) or "/.venv/" in f"/{relative}" or "/." in f"/{relative}":
+            if _is_excluded(relative):
                 continue
             source = path.read_text(encoding="utf-8")
             try:
@@ -210,9 +220,9 @@ def scan_yaml(root: Path) -> list[tuple[str, int, str, str]]:
     """Return ``(file, line, rule, scope)`` for every relative folder setting in the YAML configs under ``root``."""
     findings = []
     for directory in SCANNED_YAML_DIRS:
-        for path in sorted((root / directory).rglob("*.yaml")):
+        for path in _files(root, directory, ".yaml"):
             relative = path.relative_to(root).as_posix()
-            if _is_excluded(relative) or "/." in f"/{relative}":
+            if _is_excluded(relative):
                 continue
             source = path.read_text(encoding="utf-8")
             try:
