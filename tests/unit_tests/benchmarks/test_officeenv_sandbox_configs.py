@@ -4,6 +4,7 @@
 instances after itself, so several compose in one run without overriding each other. Resolving them needs no
 OfficeEnv, which the server's own tests do."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -21,8 +22,8 @@ MODEL = "responses_api_models/vllm_model/configs/vllm_model_for_training.yaml"
 DOCKER = "nemo_gym/sandbox/providers/docker/configs/docker.yaml"
 SHARED = "officeenv_sandbox_resources_server"
 # Each harness config by the harness its instances are named after: the agent type it inherits, how the harness names
-# MCP tools where it runs on a copy of the shared resources server of its own (None: on the shared one), and how its
-# episodes reach their tools (Pi's over MCP; the others' rows are commands)
+# MCP tools on its server (None: as the episodes' server does), and how its episodes reach their tools (Pi's over MCP;
+# the others' rows are commands)
 HARNESSES = {
     "pi": ("officeenv_sandbox.yaml", "pi_agent", "company_", ["mcp"]),
     "codex": ("officeenv_sandbox_codex.yaml", "codex_agent", "mcp__company__", []),
@@ -75,7 +76,13 @@ def harness_config(harness: str) -> str:
 
 
 def resources_server_of(harness: str) -> str:
-    return SHARED if HARNESSES[harness][2] is None else f"officeenv_sandbox_{harness}_resources_server"
+    return f"officeenv_sandbox_{harness}_resources_server"
+
+
+def check_no_shared_server(started: list[str], resolved: dict) -> None:
+    """Each harness's server inherits the episodes' server, which then neither starts idle nor is named anywhere."""
+    assert SHARED not in started and SHARED not in resolved
+    assert f'"{SHARED}"' not in json.dumps(resolved)
 
 
 def check_harness(resolved: dict, harness: str) -> None:
@@ -104,9 +111,9 @@ def test_each_harness_config_names_its_instances_after_its_harness(harness: str)
     started, _, resolved = resolve(harness_config(harness), DOCKER)
 
     check_harness(resolved, harness)
-    own = [f"officeenv_sandbox_{harness}_resources_server"] if HARNESSES[harness][2] else []
-    instances = [f"officeenv_sandbox_{harness}_agent", f"officeenv_sandbox_{harness}_environment_server"]
-    assert sorted(started) == sorted(["policy_model", SHARED, *own, *instances])
+    instances = [f"officeenv_sandbox_{harness}_{kind}" for kind in ("resources_server", "agent", "environment_server")]
+    assert sorted(started) == sorted(["policy_model", *instances])
+    check_no_shared_server(started, resolved)
     assert not GENERIC & set(resolved) and "oe" not in resolved
 
 
@@ -123,10 +130,11 @@ def test_the_harness_configs_compose_in_one_run_without_overriding_each_other() 
         for harness in HARNESSES
     }
     assert caps == {"pi": 8, "codex": 32, "opencode": 8, "openclaw": 32, "miniswe": None, "terminus_2": None}
-    copies = [f"officeenv_sandbox_{harness}_resources_server" for harness in ("pi", "codex", "opencode")]
+    servers = [resources_server_of(harness) for harness in HARNESSES]
     agents = [f"officeenv_sandbox_{harness}_agent" for harness in HARNESSES]
     environments = [f"officeenv_sandbox_{harness}_environment_server" for harness in HARNESSES]
-    assert sorted(started) == sorted(["policy_model", SHARED, *copies, *agents, *environments])
+    assert sorted(started) == sorted(["policy_model", *servers, *agents, *environments])
+    check_no_shared_server(started, resolved)  # no idle episodes' server beside the six harnesses'
     assert not GENERIC & set(resolved)
     # A row that names a harness's agent reaches that harness's environment server, the one that fronts it
     servers_by_agent = _environment_servers_by_agent(config)
@@ -134,30 +142,44 @@ def test_the_harness_configs_compose_in_one_run_without_overriding_each_other() 
     assert routes == dict(zip(agents, environments))
 
 
-def test_a_setting_of_the_shared_server_reaches_each_harness_copy() -> None:
-    # A copy takes the shared server as the merged config has it, the command line's settings included, so one setting
-    # reaches the server of every harness in the run, and each copy keeps its own.
+def test_a_setting_of_the_episodes_server_reaches_each_harness_server() -> None:
+    # Each harness's server inherits the episodes' server as the merged config has it, the command line's settings
+    # included, so one setting reaches the server of every harness in the run, and each keeps its own.
     shared = {"host": "10.1.2.3", "sandbox_config": {"image": "officeenv-sandbox:documents"}}
     paths = [harness_config("pi"), harness_config("codex"), harness_config("miniswe"), DOCKER]
-    _, _, resolved = resolve(*paths, **{SHARED: {"resources_servers": {"officeenv_sandbox": shared}}})
+    started, _, resolved = resolve(*paths, **{SHARED: {"resources_servers": {"officeenv_sandbox": shared}}})
 
+    check_no_shared_server(started, resolved)
     for harness in ("pi", "codex", "miniswe"):
         check_harness(resolved, harness)
         server = resolved[resources_server_of(harness)]["resources_servers"]["officeenv_sandbox"]
         assert server["host"] == "10.1.2.3" and server["sandbox_config"]["image"] == "officeenv-sandbox:documents"
 
 
-def test_the_opensandbox_config_reaches_the_copy_of_a_harness_composed_before_it(monkeypatch) -> None:
+@pytest.mark.parametrize("harnesses", [(), ("codex",), ("miniswe", "terminus_2")], ids=["alone", "codex", "two"])
+def test_the_opensandbox_config_reaches_each_harness_server(monkeypatch, harnesses: tuple[str, ...]) -> None:
     # Listed after the other harness configs, as its README section says: the first of them pulls in the episodes'
-    # config, which Gym merges once, with that config's includes, so it does not reset the OpenSandbox settings.
+    # config, which Gym merges once, there, so it does not reset the OpenSandbox settings that come after it.
     monkeypatch.setenv("OPENSANDBOX_DOMAIN", "sandbox.invalid")
     monkeypatch.setenv("OPENSANDBOX_API_KEY", "unused")  # pragma: allowlist secret
-    _, _, resolved = resolve(harness_config("codex"), f"{CONFIGS}/officeenv_opensandbox.yaml")
+    paths = [*(harness_config(harness) for harness in harnesses), f"{CONFIGS}/officeenv_opensandbox.yaml"]
+    started, _, resolved = resolve(*paths)
 
-    for harness in ("pi", "codex"):
+    check_no_shared_server(started, resolved)
+    for harness in ("pi", *harnesses):
         check_harness(resolved, harness)
         sandbox = resolved[resources_server_of(harness)]["resources_servers"]["officeenv_sandbox"]["sandbox_config"]
         assert sandbox["image"].startswith("python:3.12-bookworm@sha256:") and sandbox["resources"]["cpu"] == 2
+
+
+def test_the_episodes_config_runs_its_server_on_its_own() -> None:
+    # Composed with no harness config, the episodes' server starts under its own name, for a config that binds a
+    # harness to it.
+    started, _, resolved = resolve(f"{CONFIGS}/officeenv_sandbox_episodes.yaml", DOCKER)
+
+    assert sorted(started) == sorted(["policy_model", SHARED])
+    server = resolved[SHARED]["resources_servers"]["officeenv_sandbox"]
+    assert server["mcp_server_name"] == "company" and server["sandbox_config"]["image"] == "officeenv-sandbox:pilot"
 
 
 def without(settings: dict, *keys: str) -> dict:

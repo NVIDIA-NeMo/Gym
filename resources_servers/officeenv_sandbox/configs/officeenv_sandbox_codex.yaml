@@ -17,10 +17,10 @@ config_paths:
   - responses_api_agents/codex_agent/configs/codex_agent.yaml
   - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
 
-# The episodes' server as Codex uses it: a copy that names the MCP tools as Codex lists them, as
+# The episodes' server under Codex's own name, naming the MCP tools as Codex lists them, as
 # configs/officeenv_sandbox.yaml explains for Pi.
 officeenv_sandbox_codex_resources_server:
-  _copy: officeenv_sandbox_resources_server
+  _inherit_from: officeenv_sandbox_resources_server
   resources_servers:
     officeenv_sandbox:
       verified: false

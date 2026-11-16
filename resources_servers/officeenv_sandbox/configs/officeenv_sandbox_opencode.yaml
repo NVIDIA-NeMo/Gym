@@ -8,10 +8,10 @@ config_paths:
   - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
   - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
 
-# The episodes' server as OpenCode uses it: a copy that names the MCP tools as OpenCode lists them, as
+# The episodes' server under OpenCode's own name, naming the MCP tools as OpenCode lists them, as
 # configs/officeenv_sandbox.yaml explains for Pi.
 officeenv_sandbox_opencode_resources_server:
-  _copy: officeenv_sandbox_resources_server
+  _inherit_from: officeenv_sandbox_resources_server
   resources_servers:
     officeenv_sandbox:
       verified: false

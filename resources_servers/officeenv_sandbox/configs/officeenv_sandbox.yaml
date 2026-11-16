@@ -2,7 +2,7 @@
 # sandbox (a container from sandbox/Dockerfile), reaches OfficeEnv's tools over MCP, and moves file content over the
 # episode's file API (README.md in the workspace). Compose with a sandbox provider and a model server; the sandbox
 # must reach both this resources server and the model server, so bind them to an address the containers can reach
-# (a setting of the episodes' server, which Pi's copy of it takes):
+# (a setting of the episodes' server, which Pi's server inherits):
 #
 #   gym env start \
 #     --config resources_servers/officeenv_sandbox/configs/officeenv_sandbox.yaml \
@@ -22,11 +22,12 @@ config_paths:
   - responses_api_agents/pi_agent/configs/pi_agent.yaml
   - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
 
-# The episodes' server as Pi uses it: a copy (the episodes' server stays for the harnesses composed beside this one)
-# that names the MCP tools as Pi lists them. Its domain and description repeat the episodes' server's: Gym's README
-# table reads them from this file's first mapping.
+# The episodes' server under Pi's own name, naming the MCP tools as Pi lists them. It inherits the episodes' server as
+# the merged config has it, as each harness config composed beside this one does under its own name, so no episodes'
+# server is left idle. Its domain and description repeat the episodes' server's: Gym's README table reads them from
+# this file's first mapping.
 officeenv_sandbox_pi_resources_server:
-  _copy: officeenv_sandbox_resources_server
+  _inherit_from: officeenv_sandbox_resources_server
   resources_servers:
     officeenv_sandbox:
       domain: agent

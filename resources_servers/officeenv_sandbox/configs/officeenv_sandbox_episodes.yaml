@@ -6,9 +6,10 @@
 #
 # The instances a harness config adds are named after the harness (officeenv_sandbox_<harness>_agent, which inherits
 # Gym's instance of the harness, and officeenv_sandbox_<harness>_environment_server), so several harness configs
-# compose in one run. A harness that names the MCP tools its own way (Pi, Codex, OpenCode) runs on a copy of this
-# server, officeenv_sandbox_<harness>_resources_server; the others run on this one. A copy takes the settings this
-# server has in the merged config, those of a later config and of the command line included.
+# compose in one run. Each harness also runs on this server under its own name,
+# officeenv_sandbox_<harness>_resources_server, which inherits it (`_inherit_from`) with the settings it has in the
+# merged config, those of a later config and of the command line included. This server then starts only under those
+# names; it starts under its own when no harness config is composed.
 
 # When Gym's run command stops its servers (a job's end, Ctrl-C), it kills the ones still running this long after
 # signalling them (1 s by default). This server stops the sandboxes it lent, all at once, within it less a 2 s margin
