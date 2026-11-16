@@ -18,7 +18,7 @@ import pytest
 from nemo_gym.data.tasks.harbor import entries as entries_module
 from nemo_gym.data.tasks.harbor import hub as hub_module
 from nemo_gym.data.tasks.harbor import prepare as harbor_cli
-from nemo_gym.data.tasks.harbor.dataset_config import GymDatasetConfig, read_dataset_config
+from nemo_gym.data.tasks.harbor.dataset_config import GymDatasetConfig, GymTaskOverride, read_dataset_config
 from nemo_gym.data.tasks.harbor.digest import content_hash
 from nemo_gym.data.tasks.harbor.entries import (
     LAYER_RECORD_FILE,
@@ -124,7 +124,7 @@ class TestSourceKey:
         assert read_dataset_config(folder).is_empty
 
     def test_committed_entries_declare_their_sources(self):
-        """The two committed entries pin the datasets their READMEs describe, and nothing else in their tables."""
+        """The two committed entries pin the datasets their READMEs describe; TB4 also carries one task override."""
         from nemo_gym import PARENT_DIR
 
         tb4 = read_dataset_config(PARENT_DIR / "environments" / "harbor" / "terminal_bench_4")
@@ -134,8 +134,44 @@ class TestSourceKey:
             "harbor:terminal-bench/terminal-bench-2-1@sha256:"
             "7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a"  # pragma: allowlist secret
         )
-        for config in (tb4, tb21):
-            assert config.model_copy(update={"source": None}).is_empty
+        assert tb21.model_copy(update={"source": None}).is_empty
+        # The test sharding the legacy TB4 benchmark's server sets for this task, in the agent's sandbox and the
+        # separate verifier's, and nothing else.
+        assert tb4.model_copy(update={"source": None, "tasks": {}}).is_empty
+        assert tb4.tasks == {
+            "nextjs-performance": GymTaskOverride(
+                environment={"env": {"CIRCLE_NODE_TOTAL": "3"}},
+                verifier={"environment": {"env": {"CIRCLE_NODE_TOTAL": "3"}}},
+            ),
+        }
+
+    def test_the_terminal_bench_science_entry_pins_its_digest_and_overrides_only_verifiers(self):
+        """The entry runs the packages the resources server's preset pins and changes only verifier settings: three
+        timeouts, the agent's CPUs and memory for verifiers that declare none, and each verifier's network
+        restriction on `[verifier]`, where the loader applies it to the separate verifier's sandbox."""
+        from nemo_gym import PARENT_DIR
+
+        config = read_dataset_config(PARENT_DIR / "environments" / "harbor" / "terminal_bench_science")
+        manifest = json.loads((PARENT_DIR / "benchmarks" / "terminal_bench_science" / "manifest.json").read_text())
+        assert config.source == f"harbor:{manifest['dataset']}@{manifest['ref']}"
+        assert (config.effective_type, config.license) == ("benchmark", "Apache 2.0")
+        assert all(not task.environment and not task.artifacts for task in config.tasks.values())
+        timeouts = {
+            name: task.verifier["timeout_sec"] for name, task in config.tasks.items() if "timeout_sec" in task.verifier
+        }
+        assert timeouts == {
+            "finite-free-stam": 1800.0,
+            "gen-turan-paths": 1800.0,
+            "certified-sparse-regression": 7200.0,
+        }
+        for task in config.tasks.values():
+            assert set(task.verifier) <= {"timeout_sec", "network_mode", "environment"}
+            assert set(task.verifier.get("environment", {})) <= {"cpus", "memory_mb", "network_mode"}
+        moved = [name for name, task in config.tasks.items() if task.verifier.get("network_mode") == "no-network"]
+        assert len(moved) == len(manifest["tasks"]) == 70
+        assert all(config.tasks[name].verifier["environment"]["network_mode"] == "public" for name in moved)
+        sized = [task for task in config.tasks.values() if {"cpus", "memory_mb"} <= set(task.verifier["environment"])]
+        assert len(sized) == 58
 
 
 class TestEntryLookup:

@@ -127,10 +127,21 @@ context-management controls, not generation budgets.
 
 ## Requests, results, and lifecycle
 
-Input is a string or one text user message, optionally preceded by a system/developer message.
+Input is a string or one user message with text and base64 data-URI `input_image` parts, optionally preceded by a text system/developer message.
 Configured `system_prompt`, request `instructions`, and that preceding message become Codex
-developer instructions in that order. Unsupported conversation/multimodal input, required
+developer instructions in that order. Unsupported conversation input, other media, required
 direct HTTP tools, provider overrides, and extra host config are rejected before activation.
+
+The adapter stages prompt images at `/tmp/nemo-gym-media/<sha256>.<ext>` and passes each occurrence with
+`codex exec --image`. Codex shows these paths beside the images; content-based names keep them stable across
+rollouts of a task. Staged files remain in borrowed sandboxes after close. Codex 0.144.4 puts images in their
+supplied order before all prompt text, uses `detail: high` regardless of the requested detail, and resizes images
+over 2048 px on a side or 2,500 tiles of 32 px. For example, a 2400x2400 PNG becomes 1600x1600. GIF is re-encoded
+as PNG. These native processing limits cannot be disabled. Image-only prompts are supported in sessions;
+local execution rejects images with HTTP 422. Exported conversations retain images as data URIs. When the native
+transcript shows fewer images than supplied, completed and output-limit runs fail with HTTP 502 instead of
+scoring an answer made without all prompt images. Wall-time limits and reported model failures keep their
+existing outcomes.
 
 Request `max_output_tokens`, `temperature`, `top_p`, reasoning controls, and unsupported tool
 policies are rejected rather than ignored. Codex cannot enforce these request-level controls

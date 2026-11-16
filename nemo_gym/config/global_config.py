@@ -56,6 +56,7 @@ from nemo_gym.config.config_types import (
     ConfigMissingValuesError,
     ConfigPathNotFoundError,
     HeadServerConfigMalformedError,
+    InheritCycleError,
     InheritPathNotFoundError,
     MalformedConfigPathsError,
     NoServerInstancesError,
@@ -231,12 +232,14 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "cline_agent",
         "codex_agent",
         "copilot_agent",
+        "crewai_agent",
         "droid_agent",
         "goose_agent",
         "harbor_oracle_agent",
         "hermes_agent",
         "langgraph_agent",
         "kilocode_agent",
+        "langchain_deepagents_agent",
         "kimi_code_agent",
         "mini_swe_agent",
         "miniswe_sandboxed_agent",
@@ -246,15 +249,17 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "openhands_agent",
         "pi_agent",
         "pool_agent",
+        "prime_agent",
         "simple_agent",
         "simple_strands_agent",
         "stirrup_agent",
+        "terminus_2_agent",
         "terminus_2_sandboxed_agent",
     }
 )
 # Session agents whose swap-source template (`resources_server.name: ???`) runs on the host through /run.
 # Their sessions need an explicitly bound sandbox template, so a swap keeps the legacy_agent relay.
-HOST_RUN_SWAP_AGENT_TYPES = frozenset({"simple_strands_agent"})
+HOST_RUN_SWAP_AGENT_TYPES = frozenset({"prime_agent", "simple_strands_agent"})
 # An environment server type that drives its agent through agent sessions, and keeps the agent's /run as a
 # fallback through a legacy_agent relay.
 SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE = "single_agent_turn_legacy"
@@ -1030,7 +1035,10 @@ Duplicate config paths:
                 for reference in environment_server_agent_refs(server):
                     if reference.get("name") in renames:
                         reference["name"] = renames[reference["name"]]
-                        if agent_type == "langgraph_agent" and server_type == SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE:
+                        if (
+                            agent_type in {"langgraph_agent", "langchain_deepagents_agent"}
+                            and server_type == SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE
+                        ):
                             # These graphs only call models; the environment still owns verification,
                             # but must not grant resource tools the selected agent cannot consume.
                             server["resources_tool_transports"] = []
@@ -1461,13 +1469,20 @@ For example, on the command line:
                         )
 
     def _recursively_swap_keys_helper(
-        self, dict_config: DictConfig, original_dict_config: DictConfig, frozen_dict_config: DictConfig
+        self,
+        dict_config: DictConfig,
+        original_dict_config: DictConfig,
+        frozen_dict_config: DictConfig,
+        inherit_chain: tuple[str, ...] = (),
     ) -> None:
         # items_ex(resolve=False) yields raw values: directive strings like "${inherit_from:...}"
         # come back unresolved (so the swap detection below still matches), and a missing ('???')
         # leaf is returned as-is instead of raising MissingMandatoryValue mid-swap. Any genuinely
         # unset values are reported together by raise_on_missing_values, which runs after this pass.
         for k, v in list(dict_config.items_ex(resolve=False)):
+            if k not in dict_config:
+                # An earlier sibling's `_inherit_from` moved this entry; resolving it again would re-add it.
+                continue
             is_delete_property = isinstance(v, DictConfig) and DELETE_KEY_KEY_NAME in v
 
             if is_delete_property:
@@ -1482,7 +1497,7 @@ For example, on the command line:
                 keys_to_delete -= existing_keys
 
             if isinstance(v, (DictConfig, dict)):
-                self._recursively_swap_keys_helper(v, original_dict_config, frozen_dict_config)
+                self._recursively_swap_keys_helper(v, original_dict_config, frozen_dict_config, inherit_chain)
             elif isinstance(v, (ListConfig, list)):
                 # Iterate without resolving so a missing ('???') element doesn't raise mid-swap (it's
                 # a scalar, so it's skipped here and reported later by raise_on_missing_values).
@@ -1491,7 +1506,9 @@ For example, on the command line:
                         continue
                     inner_v = v[i]
                     if isinstance(inner_v, (DictConfig, dict)):
-                        self._recursively_swap_keys_helper(inner_v, original_dict_config, frozen_dict_config)
+                        self._recursively_swap_keys_helper(
+                            inner_v, original_dict_config, frozen_dict_config, inherit_chain
+                        )
 
             # e.g. ${inherit_from:grpo.num_prompts_per_step}
             is_swap_str = isinstance(v, str) and v.startswith("${inherit_from:")
@@ -1534,17 +1551,42 @@ For example, on the command line:
                 dict_config[k] = "???"
                 continue
 
+            # The source is read from the frozen copy, so its own directives are still raw. In a chain
+            # (target -> source -> base) the source's `_inherit_from` would otherwise reach the target
+            # unresolved, so resolve a copy of the source first.
+            if isinstance(swapped_value, DictConfig):
+                swapped_value = self._resolve_swap_source(
+                    swapped_value, path_to_swap, original_dict_config, frozen_dict_config, inherit_chain
+                )
+
             if is_swap_property or is_copy_property:
                 swapped_value = OmegaConf.merge(swapped_value, v)
 
             dict_config[k] = swapped_value
 
-            # TODO We may want to recurse again after swap since we are not guaranteed to traverse the swapped-from value before hitting this swap.
-
             if is_delete_property:
                 # Enforce that every key-to-delete exists
                 for key in keys_to_delete:
                     dict_config[k].pop(key)
+
+    def _resolve_swap_source(
+        self,
+        source: DictConfig,
+        path: List[str],
+        original_dict_config: DictConfig,
+        frozen_dict_config: DictConfig,
+        inherit_chain: tuple[str, ...],
+    ) -> DictConfig:
+        """Return ``source`` with its own swap, copy and delete directives applied, leaving the frozen copy intact."""
+        source_path = ".".join(path)
+        if source_path in inherit_chain:
+            cycle = " -> ".join((*inherit_chain, source_path))
+            raise InheritCycleError(f"Config inheritance forms a cycle: {cycle}")
+        holder = DictConfig({path[-1]: deepcopy(source)})
+        self._recursively_swap_keys_helper(
+            holder, original_dict_config, frozen_dict_config, (*inherit_chain, source_path)
+        )
+        return holder[path[-1]]
 
     def _recursive_index_dict_using_path(self, dict_config: DictConfig, path: List[str]) -> "DictConfig | object":
         for k in path:

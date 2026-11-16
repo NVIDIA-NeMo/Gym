@@ -369,6 +369,7 @@ def _setup_single(test_config: TestConfig, global_config_dict: DictConfig) -> Po
     return run_command(command, resolved_dir, project_root=resolved_dir.parent.parent)
 
 
+@exit_cleanly_on_config_error
 def test():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     test_config = TestConfig.model_validate(global_config_dict)
@@ -480,6 +481,7 @@ Server venv setup failed {_format_pct(len(setup_failed), len(dir_paths))}:{_disp
         exit(1)
 
 
+@exit_cleanly_on_config_error
 def test_all():  # pragma: no cover
     global_config_dict = get_global_config_dict()
     test_all_config = TestAllConfig.model_validate(global_config_dict)
@@ -1200,12 +1202,20 @@ def _inspect_environment(
         domain=entry.domain or parsed["domain"],
         description=description,
         details=details,
-        usage=(
-            f"gym env start --resources-server {entry.resources_server_selector} --model-type vllm_model"
-            if entry.resources_server_selector
-            else f"gym env start --{entry.kind} {name} --model-type vllm_model"
-        ),
+        usage=_inspect_usage(name, entry),
     )
+
+
+def _inspect_usage(name: str, entry: EnvironmentCatalogEntry) -> str:
+    """The example command an inspected entry shows: a Harbor-backed one runs through `gym eval run`, which composes
+    its Harbor environment server; `gym env start` does not."""
+    if entry.harbor_target and entry.kind == "benchmark":
+        return f"gym eval run --benchmark {name} --sandbox <provider> --model-type vllm_model"
+    if entry.harbor_target:
+        return f"gym eval run {entry.harbor_target} --agent <harness> --sandbox <provider> --model-type vllm_model"
+    if entry.resources_server_selector:
+        return f"gym env start --resources-server {entry.resources_server_selector} --model-type vllm_model"
+    return f"gym env start --{entry.kind} {name} --model-type vllm_model"
 
 
 def _entry_servers(

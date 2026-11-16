@@ -37,6 +37,7 @@ from nemo_gym.config.config_types import (
     ConfigMissingValuesError,
     ConfigPathNotFoundError,
     HeadServerConfigMalformedError,
+    InheritCycleError,
     MalformedConfigPathsError,
     NoServerInstancesError,
     ServerRefNotFoundError,
@@ -1239,6 +1240,43 @@ contested: second_inner
         parser._recursively_swap_keys(config)
         with raises(ConfigMissingValuesError):
             parser.raise_on_missing_values(config)
+
+    @mark.parametrize("target_first", [False, True])
+    def test_inherit_chain_resolves_every_link(self, target_first: bool) -> None:
+        # target -> profile -> base: the target gets the base's fields, then the profile's overrides,
+        # then its own. Both moved sources are gone, whichever order the entries are listed in.
+        entries = {
+            "base": {"server": {"entrypoint": "app.py", "mode": "embedded"}, "extra": 1},
+            "profile": {"_inherit_from": "base", "_delete_key": "extra", "server": {"mode": "sandboxed"}},
+            "target": {"_inherit_from": "profile", "server": {"datasets": ["rows.jsonl"]}},
+        }
+        order = ["target", "profile", "base"] if target_first else ["base", "profile", "target"]
+        config = DictConfig({name: entries[name] for name in order})
+
+        GlobalConfigDictParser()._recursively_swap_keys(config)
+
+        assert OmegaConf.to_container(config) == {
+            "target": {"server": {"entrypoint": "app.py", "mode": "sandboxed", "datasets": ["rows.jsonl"]}}
+        }
+
+    def test_copy_of_an_inheriting_source_keeps_the_source(self) -> None:
+        config = DictConfig(
+            {
+                "base": {"a": 1},
+                "profile": {"_inherit_from": "base", "b": 2},
+                "clone": {"_copy": "profile", "c": 3},
+            }
+        )
+
+        GlobalConfigDictParser()._recursively_swap_keys(config)
+
+        assert OmegaConf.to_container(config) == {"profile": {"a": 1, "b": 2}, "clone": {"a": 1, "b": 2, "c": 3}}
+
+    def test_inherit_cycle_is_reported(self) -> None:
+        config = DictConfig({"first": {"_inherit_from": "second"}, "second": {"_inherit_from": "first"}})
+
+        with raises(InheritCycleError, match="second -> first -> second"):
+            GlobalConfigDictParser()._recursively_swap_keys(config)
 
     def test_missing_value_in_list_is_reported_not_crash(self) -> None:
         # A '???' as a list element (or inside a dict nested in a list) must not crash the swap; it is
@@ -2620,8 +2658,13 @@ class TestConfigLoadErrors:
 
         assert missing_path in str(error.value)
 
-    @mark.parametrize("resources_server", ["reasoning_gym", "tavily_search"])
-    def test_langchain_deepagents_configs_have_environment_servers(self, resources_server: str) -> None:
+    @mark.parametrize(
+        ("resources_server", "resources_instance"),
+        [("reasoning_gym", "reasoning_gym"), ("tavily_search", "tavily_search_resources_server")],
+    )
+    def test_langchain_deepagents_configs_have_environment_servers(
+        self, resources_server: str, resources_instance: str
+    ) -> None:
         agent_name = f"{resources_server}_langchain_deepagents_agent_model_server"
         config_path = (
             Path(__file__).resolve().parents[3]
@@ -2651,9 +2694,13 @@ class TestConfigLoadErrors:
             )
         )
 
-        environment = resolved[f"{agent_name}_environment_server"]["environment_servers"]["legacy_agent"]
+        environment = resolved[f"{agent_name}_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
         assert environment["entrypoint"] == "app.py"
         assert environment["agent_server"] == {"type": "responses_api_agents", "name": agent_name}
+        # single_agent_turn_legacy requires the Resources Server it seeds and verifies against.
+        assert environment["resources_server"] == {"type": "resources_servers", "name": resources_instance}
+        # The deepagents graph runs only its own tools, so the session sends it no grant.
+        assert environment["resources_tool_transports"] == []
 
     def test_multi_agent_environment_server_satisfies_agent_routing(self) -> None:
         parser = GlobalConfigDictParser()
@@ -3529,9 +3576,22 @@ class TestComposeUnboundAgent:
         assert relay["num_workers"] == 4
         assert relay["uvicorn_reuse_port"] is True
 
-    @mark.parametrize("harness_type", ["hermes_agent", "opencode_agent", "pool_agent"])
-    def test_swap_to_agent_with_sessions_keeps_single_agent_turn_legacy(self, harness_type: str) -> None:
+    @mark.parametrize(
+        ("harness_type", "transports"),
+        [
+            ("hermes_agent", ["mcp"]),
+            ("opencode_agent", ["mcp"]),
+            ("pool_agent", ["mcp"]),
+            ("langchain_deepagents_agent", ["direct_http"]),
+        ],
+    )
+    def test_swap_to_agent_with_sessions_keeps_single_agent_turn_legacy(
+        self, harness_type: str, transports: list[str]
+    ) -> None:
         config = self._session_environment_config(harness_type)
+        config["gpqa_mcqa_environment_server"]["environment_servers"]["single_agent_turn_legacy"][
+            "resources_tool_transports"
+        ] = transports
         server_before = OmegaConf.to_container(
             config["gpqa_mcqa_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
         )
@@ -3541,15 +3601,19 @@ class TestComposeUnboundAgent:
         servers = config["gpqa_mcqa_environment_server"]["environment_servers"]
         assert list(servers) == ["single_agent_turn_legacy"]
         server_before["agent_server"]["name"] = f"gpqa_mcqa_{harness_type}"
+        if harness_type == "langchain_deepagents_agent":
+            server_before["resources_tool_transports"] = []
         assert OmegaConf.to_container(servers["single_agent_turn_legacy"]) == server_before
 
     def test_agent_session_agent_types_match_the_agent_apps(self) -> None:
-        """Every agent app that seeds agent sessions is listed, and nothing else is."""
+        """Every agent app that implements session seeding is listed, and nothing else is."""
         agents_root = Path(nemo_gym.config.global_config.__file__).parents[2] / "responses_api_agents"
+        # SimpleAgent subclasses can customize seeding through _new_session_state while inheriting the endpoint.
+        seed_hooks = ("def _seed_agent_session_state(", "def _new_session_state(")
         implementing = {
             app.parent.name
             for app in agents_root.glob("*/app.py")
-            if "def _seed_agent_session_state(" in app.read_text(encoding="utf-8")
+            if any(hook in app.read_text(encoding="utf-8") for hook in seed_hooks)
         }
 
         assert implementing == AGENT_SESSION_AGENT_TYPES
