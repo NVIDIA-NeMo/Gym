@@ -946,3 +946,18 @@ async def test_golden_patch_mode_refuses_episode_seeds(server):
 
     assert error.value.status_code == 422
     server._create_sandbox.assert_not_awaited()
+
+
+@pytest.mark.parametrize("configured", [False, True])
+async def test_verification_logs_are_written_only_under_the_configured_folder(server, grading, tmp_path, configured):
+    if configured:
+        server.config.verification_log_dir = tmp_path
+    request = SimpleNamespace(session={})
+    await server.seed_session(request, seed())
+    await server.verify(request, verify_body())
+    log_dir = grading.run.await_args.kwargs["log_dir"]
+    if configured:
+        assert log_dir.is_relative_to(tmp_path) and log_dir.name == "attempt-1"
+    else:
+        # Without a folder, nothing is written; the server's own source folder is never the default.
+        assert log_dir is None

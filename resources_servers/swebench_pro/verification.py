@@ -397,15 +397,23 @@ def grade_output(output: dict[str, Any], sample: dict[str, Any]) -> bool:
 async def run_verification(
     sandbox: AsyncSandbox,
     inputs: VerificationInputs,
-    log_dir: Path,
+    log_dir: Path | None,
     timeout_s: int | None,
 ) -> VerificationResult:
-    """Apply one patch, execute Pro's task scripts, and grade their JSON output."""
+    """Apply one patch, execute Pro's task scripts, and grade their JSON output.
+
+    With a ``log_dir`` the run's inputs and outputs are also saved there; without one nothing is written.
+    """
     sample = asdict(inputs)
     files, entry_script = assemble_workspace_files(inputs.instance_id, None, inputs.patch, sample)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    (log_dir / "patch.diff").write_text(files["patch.diff"], encoding="utf-8")
-    (log_dir / "eval.sh").write_text(entry_script, encoding="utf-8")
+
+    def save(name: str, contents: str) -> None:
+        if log_dir is not None:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            (log_dir / name).write_text(contents, encoding="utf-8")
+
+    save("patch.diff", files["patch.diff"])
+    save("eval.sh", entry_script)
 
     await sandbox.exec(f"chmod +x {shlex.quote(RUN_SCRIPT_PATH)} {shlex.quote(ENTRY_SCRIPT_PATH)}")
     execution = None
@@ -433,7 +441,7 @@ async def run_verification(
             contents = result.stdout or ""
         except Exception as exc:
             contents = f"Failed to read {remote_path}: {exc}\n"
-        (log_dir / local_name).write_text(contents, encoding="utf-8")
+        save(local_name, contents)
         return contents
 
     test_stdout = await capture(STDOUT_PATH, "test_stdout.log")
@@ -442,12 +450,8 @@ async def run_verification(
     patch_status = await capture(f"{WORKSPACE_DIR}/patch_apply_status", "patch_apply_status")
     output_text = await capture(OUTPUT_PATH, "output.json")
     patch_applied = patch_status.strip() == "0"
-    (log_dir / "execution_stdout.log").write_text(
-        (execution.stdout if execution is not None else "") or "", encoding="utf-8"
-    )
-    (log_dir / "execution_stderr.log").write_text(
-        (execution.stderr if execution is not None else "") or "", encoding="utf-8"
-    )
+    save("execution_stdout.log", (execution.stdout if execution is not None else "") or "")
+    save("execution_stderr.log", (execution.stderr if execution is not None else "") or "")
 
     if timed_out:
         try:

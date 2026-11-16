@@ -11,6 +11,8 @@ scale_swe_resources_server:
       domain: coding
       verified: false
 
+      # Verification logs are off. To keep them, name a node-local folder such as one under /tmp.
+      verification_log_dir: null
       # Pure Python, no compilation: pytest runs against a handful of named files, not a full
       # suite build. Sized well under the SWE-rebench compiled-language shape.
       evaluation_timeout: 1200

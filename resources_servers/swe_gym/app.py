@@ -83,6 +83,7 @@ from resources_servers.swebench.patch_capture import (
     prepare_git_for_commits,
 )
 from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
+from resources_servers.swebench.verification_logs import verification_log_path
 
 
 # The image's default PATH points at the conda *base* interpreter (Python 3.11 without the repo's
@@ -105,6 +106,8 @@ class SWEGymResourcesServerConfig(BaseResourcesServerConfig):
     # A verdict-less run is retried on a fresh sandbox: an image pull or a flaky provider start
     # is not evidence about the patch.
     inconclusive_verification_retries: int = 1
+    # None keeps verification logs off. To keep them, name a node-local folder such as one under /tmp.
+    verification_log_dir: Path | None = None
     apply_anti_cheating: bool = True
     sandbox_provider: str
     sandbox_config: dict[str, Any]
@@ -384,7 +387,7 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
             )
 
         inputs = self._inputs(body, patch)
-        log_dir = Path(__file__).parent / "logs" / body.instance_id
+        log_dir = verification_log_path(self.config.verification_log_dir, body.instance_id)
         files = verification_files(inputs)
         attempts = 1 + max(self.config.inconclusive_verification_retries, 0)
         start_time_taken = 0.0
@@ -398,7 +401,10 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
                 start_time_taken = time() - started
                 verification_started = time()
                 result = await run_verification(
-                    sandbox=sandbox, inputs=inputs, timeout_s=self.config.evaluation_timeout, log_dir=log_dir
+                    sandbox=sandbox,
+                    inputs=inputs,
+                    timeout_s=self.config.evaluation_timeout,
+                    log_dir=log_dir / f"attempt-{attempt}" if log_dir is not None else None,
                 )
                 verification_time_taken = time() - verification_started
             except asyncio.CancelledError:

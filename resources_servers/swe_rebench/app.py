@@ -29,8 +29,6 @@ from shlex import quote
 from time import time
 from traceback import format_exc
 from typing import Any
-from urllib.parse import quote as url_quote
-from uuid import uuid4
 
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict
@@ -84,6 +82,7 @@ from resources_servers.swebench.swe_agents_container_setup import (
     apply_swe_agents_container_setup,
     swe_agents_container_files,
 )
+from resources_servers.swebench.verification_logs import verification_log_path
 
 
 # Gradle only auto-loads init scripts from $GRADLE_USER_HOME/init.d, so the mirror script
@@ -390,11 +389,7 @@ class SWERebenchResourcesServer(SandboxSessionResourcesServer):
         patch = capture.patch
 
         inputs = self._inputs(body, patch)
-        log_dir = (
-            self.config.verification_log_dir / f"instance-{url_quote(body.instance_id, safe='')}" / uuid4().hex
-            if self.config.verification_log_dir is not None
-            else None
-        )
+        log_dir = verification_log_path(self.config.verification_log_dir, body.instance_id)
 
         # Resolve the parser before spending a sandbox on the run: an unknown parser name means
         # this row can never be graded, and finding that out after the tests have run wastes the

@@ -14,8 +14,10 @@
 # limitations under the License.
 """Episode sessions and the agent-run seed, through the server's HTTP routes with a fake sandbox."""
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
@@ -144,3 +146,21 @@ def test_agent_run_seed_still_returns_the_sandbox_handle(monkeypatch: MonkeyPatc
 def test_session_conformance(monkeypatch: MonkeyPatch) -> None:
     server, _ = _server(monkeypatch)
     check_resources_session_contract(server.setup_webserver(), _seed("conformance-session"), keeps_state=True)
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_verification_logs_are_written_only_under_the_configured_folder(
+    monkeypatch: MonkeyPatch, tmp_path: Path, configured: bool
+) -> None:
+    server, _ = _server(monkeypatch)
+    if configured:
+        server.config.verification_log_dir = tmp_path
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=_seed().model_dump(mode="json")).status_code == 200
+        assert client.post("/verify", json=_VERIFY).status_code == 200
+    log_dir = swe_gym_app.run_verification.await_args.kwargs["log_dir"]
+    if configured:
+        assert log_dir.is_relative_to(tmp_path) and log_dir.name == "attempt-1"
+    else:
+        # Without a folder, nothing is written; the server's own source folder is never the default.
+        assert log_dir is None

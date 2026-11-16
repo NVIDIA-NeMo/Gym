@@ -96,6 +96,7 @@ from resources_servers.swebench.patch_capture import (
     capture_model_patch,
     prepare_git_for_commits,
 )
+from resources_servers.swebench.verification_logs import verification_log_path
 
 
 LOG = logging.getLogger(__name__)
@@ -113,6 +114,8 @@ class ScaleSWEResourcesServerConfig(BaseResourcesServerConfig, AgentNetworkConfi
     # A verdict-less run is retried on a fresh sandbox: an image pull or a flaky provider start
     # is not evidence about the patch.
     inconclusive_verification_retries: int = 1
+    # None keeps verification logs off. To keep them, name a node-local folder such as one under /tmp.
+    verification_log_dir: Path | None = None
     apply_anti_cheating: bool = True
     sandbox_stop_timeout_seconds: float = Field(
         default=120,
@@ -771,7 +774,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
         patch = capture.patch
 
         inputs = self._inputs(body, patch)
-        log_dir = Path(__file__).parent / "logs" / body.instance_id
+        log_dir = verification_log_path(self.config.verification_log_dir, body.instance_id)
 
         files = verification_files(inputs)
         attempts = 1 + max(self.config.inconclusive_verification_retries, 0)
@@ -809,7 +812,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
                     sandbox=sandbox,
                     inputs=inputs,
                     timeout_s=self.config.evaluation_timeout,
-                    log_dir=log_dir,
+                    log_dir=log_dir / f"attempt-{attempt}" if log_dir is not None else None,
                 )
                 verification_time_taken = time() - verification_started
                 if resources_session and (reason := infrastructure_failure(result)) is not None:

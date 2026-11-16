@@ -19,7 +19,7 @@ import subprocess
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -164,6 +164,27 @@ async def test_run_verification_returns_resolved_result(tmp_path) -> None:
     assert result.patch_applied
     assert result.test_output == "STDOUT:\ntest stdout\n\nSTDERR:\ntest stderr"
     assert json.loads((tmp_path / "output.json").read_text()) == output
+
+
+@pytest.mark.asyncio
+async def test_run_verification_without_a_log_folder_grades_and_writes_nothing() -> None:
+    output = {"tests": [{"name": "test_new", "status": "PASSED"}, {"name": "test_old", "status": "PASSED"}]}
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(
+            side_effect=[
+                SimpleNamespace(return_code=0, stdout="", stderr=""),
+                SimpleNamespace(return_code=0, stdout="run", stderr=""),
+                SimpleNamespace(return_code=0, stdout="test stdout", stderr=""),
+                SimpleNamespace(return_code=0, stdout="test stderr", stderr=""),
+                SimpleNamespace(return_code=0, stdout="0\n", stderr=""),
+                SimpleNamespace(return_code=0, stdout=json.dumps(output), stderr=""),
+            ]
+        )
+    )
+    with patch.object(Path, "write_text", side_effect=AssertionError("wrote a verification log")):
+        result = await run_verification(sandbox, make_inputs(), None, timeout_s=30)
+
+    assert result.completed and result.resolved and result.patch_applied
 
 
 @pytest.mark.asyncio

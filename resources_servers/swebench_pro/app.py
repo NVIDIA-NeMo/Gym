@@ -76,6 +76,7 @@ from nemo_gym.server_runtime import (
     lost_session_verification,
 )
 from nemo_gym.utils import explicit_causes, is_nemo_gym_fastapi_entrypoint
+from resources_servers.swebench.verification_logs import verification_log_path
 from resources_servers.swebench_pro.image_cache import digest_hex, verify_local_image
 from resources_servers.swebench_pro.verification import (
     DEFAULT_ENVIRONMENT_REPAIRS,
@@ -234,6 +235,8 @@ class SWEBenchProResourcesServerConfig(BaseResourcesServerConfig):
     evaluation_timeout: int | None = None
     # A verdict-less run is retried on a new sandbox; see `inconclusive_reason`.
     inconclusive_verification_retries: int = 2
+    # None keeps verification logs off. To keep them, name a node-local folder such as one under /tmp.
+    verification_log_dir: Path | None = None
     # Ceiling on ONE verification attempt, covering sandbox creation as well as
     # the verification run. `evaluation_timeout` bounds only the test command
     # inside the sandbox, so creation is otherwise unbounded here. 1200s is
@@ -319,6 +322,7 @@ class SWEBenchProVerifyResponse(BaseVerifyResponse):
     test_results: dict[str, Any] | None
     test_output: str
     error: str | None
+    # Empty unless verification_log_dir is set.
     log_dir: str
     # Lifecycle facts of the sandbox that produced this grade; the agent attaches it as a verifier SandboxObservation.
     verifier_sandbox_observation: dict[str, Any] | None = None
@@ -684,7 +688,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             f"/workspace/{relative_path}": contents for relative_path, contents in workspace_files.items()
         }
 
-        run_log_dir = Path(__file__).parent / "logs" / "run_evaluation" / session_id / body.instance_id
+        run_log_dir = verification_log_path(self.config.verification_log_dir, body.instance_id)
         eval_sandbox_start_time_taken = 0.0
         patch_verification_time_taken = 0.0
         attempts = 1 + max(self.config.inconclusive_verification_retries, 0)
@@ -703,7 +707,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                     result = await run_verification(
                         sandbox=eval_sandbox,
                         inputs=inputs,
-                        log_dir=run_log_dir,
+                        log_dir=run_log_dir / f"attempt-{attempt}" if run_log_dir is not None else None,
                         timeout_s=self.config.evaluation_timeout,
                     )
                     patch_verification_time_taken = time() - verification_start
@@ -795,7 +799,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             "test_results": result.test_results,
             "test_output": result.test_output,
             "error": extraction_error or result.error or reason,
-            "log_dir": str(run_log_dir),
+            "log_dir": str(run_log_dir) if run_log_dir is not None else "",
             # Older observation schemas forbid unknown fields; the plural field retains the full facts.
             "verifier_sandbox_observation": {
                 key: value

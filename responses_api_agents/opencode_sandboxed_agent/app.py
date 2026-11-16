@@ -24,7 +24,8 @@ import sqlite3
 import sys
 import tempfile
 from asyncio import Semaphore
-from contextlib import nullcontext
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from functools import cache
 from pathlib import Path
@@ -573,6 +574,7 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     output_token_policy: Literal["fixed", "remaining_context"] = "fixed"
     network_access: Literal["inherit", "model_only", "model_and_tools"] = "inherit"
     tool_servers: List[ResourcesServerRef] = Field(default_factory=list)
+    # Keeps each session's OpenCode export here. None uses a temporary folder, removed after the run.
     artifacts_dir: Optional[str] = None
     opencode_model_call_timeout: Optional[int] = None
 
@@ -650,6 +652,22 @@ def _extract_opencode_session_id(session_list_stdout: str) -> str:
     if not isinstance(session_id, str) or not session_id:
         raise ValueError("The newest OpenCode session does not have a valid ID")
     return session_id
+
+
+@contextmanager
+def _opencode_results_dir(artifacts_dir: Optional[str], session_id: str) -> Iterator[Path]:
+    """Yield the folder for one session's OpenCode export and database snapshot.
+
+    With ``artifacts_dir`` the folder is ``<artifacts_dir>/<session_id>`` and is kept.
+    Without it the folder is a new temporary one, removed on exit, so nothing is written next to this module.
+    """
+    if artifacts_dir:
+        results_dir = Path(artifacts_dir) / session_id
+        results_dir.mkdir(parents=True, exist_ok=True)
+        yield results_dir
+    else:
+        with TemporaryDirectory(prefix="opencode-results-") as tmp:
+            yield Path(tmp)
 
 
 def _read_opencode_child_messages(db_path: Path, root_session_id: str) -> list[dict[str, Any]]:
@@ -1547,184 +1565,181 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # to the git repo, and resources servers extract the model patch with `git add -N . && git
         # diff`, which would sweep this transcript into the patch.
         export_remote_fpath = f"/tmp/opencode_{export_fname}"
-        results_root = (
-            Path(self.config.artifacts_dir) if self.config.artifacts_dir else Path(__file__).parent / "results"
-        )
-        results_dir = results_root / request.session[SESSION_ID_KEY]
-        results_dir.mkdir(parents=True, exist_ok=True)
-        results_local_fpath = results_dir / export_fname
-        # A previous attempt's transcript must never stand in for this run's export.
-        results_local_fpath.unlink(missing_ok=True)
-        session_env = {"XDG_DATA_HOME": remote_data_home} if remote_data_home is not None else None
-        try:
-            session_list_result = await sandbox.exec(
-                command='export PATH="$HOME/.opencode/bin:$PATH" && opencode session list --format json',
-                env=session_env,
-                timeout_s=self.config.sandbox_timeout,
-            )
-        except NgFailureEvent:
-            raise
-        except Exception as exc:
-            raise NgFailureEvent(
-                boundary="harness",
-                failure_kind=AGENT_ROUTE_FAILED,
-                operation="opencode.session_list",
-                failure_reason="Failed to list OpenCode sessions",
-            ) from exc
-        if session_list_result.return_code != 0 or session_list_result.error_type is not None:
-            raise NgFailureEvent(
-                boundary="harness",
-                failure_kind=AGENT_ROUTE_FAILED,
-                operation="opencode.session_list",
-                failure_reason=command_failure_reason("Failed to list OpenCode sessions", session_list_result),
-            )
-        try:
-            session_id = _extract_opencode_session_id(session_list_result.stdout or "")
-        except (ValueError, TypeError) as exc:
-            raise NgFailureEvent(
-                boundary="harness",
-                failure_kind=AGENT_ROUTE_FAILED,
-                operation="opencode.session_list",
-                failure_reason=str(exc),
-            ) from exc
-        try:
-            export_result = await sandbox.exec(
-                command=(
-                    'export PATH="$HOME/.opencode/bin:$PATH" '
-                    f"&& opencode export {quote(session_id)} > {quote(export_remote_fpath)}"
-                ),
-                env=session_env,
-                timeout_s=self.config.sandbox_timeout,
-            )
-        except NgFailureEvent:
-            raise
-        except Exception as exc:
-            raise NgFailureEvent(
-                boundary="harness",
-                failure_kind=AGENT_ROUTE_FAILED,
-                operation="opencode.export",
-                failure_reason=f"Failed to export OpenCode session {session_id}",
-            ) from exc
-        if export_result.return_code != 0 or export_result.error_type is not None:
-            raise NgFailureEvent(
-                boundary="harness",
-                failure_kind=AGENT_ROUTE_FAILED,
-                operation="opencode.export",
-                failure_reason=command_failure_reason(
-                    f"Failed to export OpenCode session {session_id}", export_result
-                ),
-            )
-        if self.config.debug:
-            print("Export stdout:\n", export_result.stdout, file=sys.stderr)
-            print("Export stderr:\n", export_result.stderr, file=sys.stderr)
-
-        if self.config.debug:
-            print(f"Downloading results from {export_remote_fpath} to {results_local_fpath}", file=sys.stderr)
-        try:
-            await sandbox.download(export_remote_fpath, results_local_fpath)
-        except NgFailureEvent:
-            raise
-        except Exception as exc:
+        # Without artifacts_dir the export and snapshot go to a temporary folder, removed once they are parsed.
+        with _opencode_results_dir(self.config.artifacts_dir, request.session[SESSION_ID_KEY]) as results_dir:
+            results_local_fpath = results_dir / export_fname
+            # A previous attempt's transcript must never stand in for this run's export.
             results_local_fpath.unlink(missing_ok=True)
-            raise NgFailureEvent(
-                boundary="harness",
-                failure_kind=AGENT_ROUTE_FAILED,
-                operation="opencode.download",
-                failure_reason=f"Failed to download OpenCode export to {results_local_fpath}",
-            ) from exc
-        if not results_local_fpath.is_file():
-            raise NgFailureEvent(
-                boundary="harness",
-                failure_kind=AGENT_ROUTE_FAILED,
-                operation="opencode.download",
-                failure_reason=f"OpenCode export was not downloaded to {results_local_fpath}",
-            )
-        try:
-            opencode_export = json.loads(results_local_fpath.read_text())
-        except (OSError, ValueError) as exc:
-            raise NgFailureEvent(
-                boundary="harness",
-                failure_kind=AGENT_ROUTE_FAILED,
-                operation="opencode.capture",
-                failure_reason=f"Failed to read OpenCode export from {results_local_fpath}",
-            ) from exc
-        if (
-            not isinstance(opencode_export, dict)
-            or not isinstance(opencode_export.get("messages"), list)
-            or not opencode_export["messages"]
-            or not any(
-                isinstance(message, dict)
-                and isinstance(message.get("info"), dict)
-                and message["info"].get("role") == "assistant"
-                for message in opencode_export["messages"]
-            )
-        ):
-            raise NgFailureEvent(
-                boundary="harness",
-                failure_kind=AGENT_ROUTE_FAILED,
-                operation="opencode.capture",
-                failure_reason=f"OpenCode export at {results_local_fpath} had no assistant messages or was invalid",
-            )
-
-        observations = None
-        trajectory = (
-            TrajectoryRecord(task_id="", rollout_id=observation_invocation_id) if collect_observations else None
-        )
-        child_usages = []
-        # Usage includes descendants even when detailed observation collection is disabled.
-        if collect_observations or session_id is not None:
-            snapshot_remote_fpath = (
-                f"{remote_data_home}/opencode/nemo-gym-observations.db"
-                if remote_data_home is not None
-                else f"/tmp/nemo-gym-observations-{uuid4().hex}.db"
-            )
-            observations_local_fpath = results_dir / "opencode.db"
-            observations_local_fpath.unlink(missing_ok=True)
+            session_env = {"XDG_DATA_HOME": remote_data_home} if remote_data_home is not None else None
             try:
-                # OpenCode selects its own database and supplies SQLite even in images without Python.
-                # VACUUM INTO includes committed WAL data in one consistent, standalone snapshot.
-                snapshot_sql = "VACUUM INTO '" + snapshot_remote_fpath.replace("'", "''") + "'"
-                snapshot_result = await sandbox.exec(
-                    command=f'export PATH="$HOME/.opencode/bin:$PATH" && opencode db {quote(snapshot_sql)}',
+                session_list_result = await sandbox.exec(
+                    command='export PATH="$HOME/.opencode/bin:$PATH" && opencode session list --format json',
                     env=session_env,
                     timeout_s=self.config.sandbox_timeout,
                 )
-                if snapshot_result.return_code != 0 or snapshot_result.error_type is not None:
-                    raise RuntimeError(f"OpenCode database snapshot failed: {snapshot_result.stderr}")
-                await sandbox.download(snapshot_remote_fpath, observations_local_fpath)
-                if session_id is not None:
-                    child_messages = await asyncio.to_thread(
-                        _read_opencode_child_messages, observations_local_fpath, session_id
-                    )
-                    child_usages = self._opencode_export_to_usages({"messages": child_messages})
-                if collect_observations:
-                    observations = parse_opencode_observations(
-                        observations_local_fpath,
-                        observation_invocation_id,
-                        trajectory,
-                        model_ref=self.config.model_server,
-                    )
-            except Exception as error:
-                if isinstance(error, NgFailureEvent):
-                    if error.boundary != "sandbox" or error.failure_kind != PROVIDER_IO_TIMEOUT:
-                        raise
-                    # This optional snapshot supplements an already validated primary export.
-                    observe_failure(error)
-                print("Failed to capture OpenCode session usage or observations", format_exc(), file=sys.stderr)
-                if collect_observations:
-                    trajectory.gaps.append(ObservationGap(code="turns_unavailable"))
-                    observations = AgentObservationBundle(
-                        source="opencode",
-                        records=[AgentInvocation(invocation_id=observation_invocation_id)],
-                        gaps=[
-                            ObservationGap(code="agent_artifact_unavailable"),
-                            ObservationGap(code="agent_transcript_unavailable"),
-                            ObservationGap(code="model_call_ownership_unavailable"),
-                            ObservationGap(code="observation_capture_failed"),
-                        ],
-                    )
-            finally:
+            except NgFailureEvent:
+                raise
+            except Exception as exc:
+                raise NgFailureEvent(
+                    boundary="harness",
+                    failure_kind=AGENT_ROUTE_FAILED,
+                    operation="opencode.session_list",
+                    failure_reason="Failed to list OpenCode sessions",
+                ) from exc
+            if session_list_result.return_code != 0 or session_list_result.error_type is not None:
+                raise NgFailureEvent(
+                    boundary="harness",
+                    failure_kind=AGENT_ROUTE_FAILED,
+                    operation="opencode.session_list",
+                    failure_reason=command_failure_reason("Failed to list OpenCode sessions", session_list_result),
+                )
+            try:
+                session_id = _extract_opencode_session_id(session_list_result.stdout or "")
+            except (ValueError, TypeError) as exc:
+                raise NgFailureEvent(
+                    boundary="harness",
+                    failure_kind=AGENT_ROUTE_FAILED,
+                    operation="opencode.session_list",
+                    failure_reason=str(exc),
+                ) from exc
+            try:
+                export_result = await sandbox.exec(
+                    command=(
+                        'export PATH="$HOME/.opencode/bin:$PATH" '
+                        f"&& opencode export {quote(session_id)} > {quote(export_remote_fpath)}"
+                    ),
+                    env=session_env,
+                    timeout_s=self.config.sandbox_timeout,
+                )
+            except NgFailureEvent:
+                raise
+            except Exception as exc:
+                raise NgFailureEvent(
+                    boundary="harness",
+                    failure_kind=AGENT_ROUTE_FAILED,
+                    operation="opencode.export",
+                    failure_reason=f"Failed to export OpenCode session {session_id}",
+                ) from exc
+            if export_result.return_code != 0 or export_result.error_type is not None:
+                raise NgFailureEvent(
+                    boundary="harness",
+                    failure_kind=AGENT_ROUTE_FAILED,
+                    operation="opencode.export",
+                    failure_reason=command_failure_reason(
+                        f"Failed to export OpenCode session {session_id}", export_result
+                    ),
+                )
+            if self.config.debug:
+                print("Export stdout:\n", export_result.stdout, file=sys.stderr)
+                print("Export stderr:\n", export_result.stderr, file=sys.stderr)
+
+            if self.config.debug:
+                print(f"Downloading results from {export_remote_fpath} to {results_local_fpath}", file=sys.stderr)
+            try:
+                await sandbox.download(export_remote_fpath, results_local_fpath)
+            except NgFailureEvent:
+                raise
+            except Exception as exc:
+                results_local_fpath.unlink(missing_ok=True)
+                raise NgFailureEvent(
+                    boundary="harness",
+                    failure_kind=AGENT_ROUTE_FAILED,
+                    operation="opencode.download",
+                    failure_reason=f"Failed to download OpenCode export to {results_local_fpath}",
+                ) from exc
+            if not results_local_fpath.is_file():
+                raise NgFailureEvent(
+                    boundary="harness",
+                    failure_kind=AGENT_ROUTE_FAILED,
+                    operation="opencode.download",
+                    failure_reason=f"OpenCode export was not downloaded to {results_local_fpath}",
+                )
+            try:
+                opencode_export = json.loads(results_local_fpath.read_text())
+            except (OSError, ValueError) as exc:
+                raise NgFailureEvent(
+                    boundary="harness",
+                    failure_kind=AGENT_ROUTE_FAILED,
+                    operation="opencode.capture",
+                    failure_reason=f"Failed to read OpenCode export from {results_local_fpath}",
+                ) from exc
+            if (
+                not isinstance(opencode_export, dict)
+                or not isinstance(opencode_export.get("messages"), list)
+                or not opencode_export["messages"]
+                or not any(
+                    isinstance(message, dict)
+                    and isinstance(message.get("info"), dict)
+                    and message["info"].get("role") == "assistant"
+                    for message in opencode_export["messages"]
+                )
+            ):
+                raise NgFailureEvent(
+                    boundary="harness",
+                    failure_kind=AGENT_ROUTE_FAILED,
+                    operation="opencode.capture",
+                    failure_reason=f"OpenCode export at {results_local_fpath} had no assistant messages or was invalid",
+                )
+
+            observations = None
+            trajectory = (
+                TrajectoryRecord(task_id="", rollout_id=observation_invocation_id) if collect_observations else None
+            )
+            child_usages = []
+            # Usage includes descendants even when detailed observation collection is disabled.
+            if collect_observations or session_id is not None:
+                snapshot_remote_fpath = (
+                    f"{remote_data_home}/opencode/nemo-gym-observations.db"
+                    if remote_data_home is not None
+                    else f"/tmp/nemo-gym-observations-{uuid4().hex}.db"
+                )
+                observations_local_fpath = results_dir / "opencode.db"
                 observations_local_fpath.unlink(missing_ok=True)
+                try:
+                    # OpenCode selects its own database and supplies SQLite even in images without Python.
+                    # VACUUM INTO includes committed WAL data in one consistent, standalone snapshot.
+                    snapshot_sql = "VACUUM INTO '" + snapshot_remote_fpath.replace("'", "''") + "'"
+                    snapshot_result = await sandbox.exec(
+                        command=f'export PATH="$HOME/.opencode/bin:$PATH" && opencode db {quote(snapshot_sql)}',
+                        env=session_env,
+                        timeout_s=self.config.sandbox_timeout,
+                    )
+                    if snapshot_result.return_code != 0 or snapshot_result.error_type is not None:
+                        raise RuntimeError(f"OpenCode database snapshot failed: {snapshot_result.stderr}")
+                    await sandbox.download(snapshot_remote_fpath, observations_local_fpath)
+                    if session_id is not None:
+                        child_messages = await asyncio.to_thread(
+                            _read_opencode_child_messages, observations_local_fpath, session_id
+                        )
+                        child_usages = self._opencode_export_to_usages({"messages": child_messages})
+                    if collect_observations:
+                        observations = parse_opencode_observations(
+                            observations_local_fpath,
+                            observation_invocation_id,
+                            trajectory,
+                            model_ref=self.config.model_server,
+                        )
+                except Exception as error:
+                    if isinstance(error, NgFailureEvent):
+                        if error.boundary != "sandbox" or error.failure_kind != PROVIDER_IO_TIMEOUT:
+                            raise
+                        # This optional snapshot supplements an already validated primary export.
+                        observe_failure(error)
+                    print("Failed to capture OpenCode session usage or observations", format_exc(), file=sys.stderr)
+                    if collect_observations:
+                        trajectory.gaps.append(ObservationGap(code="turns_unavailable"))
+                        observations = AgentObservationBundle(
+                            source="opencode",
+                            records=[AgentInvocation(invocation_id=observation_invocation_id)],
+                            gaps=[
+                                ObservationGap(code="agent_artifact_unavailable"),
+                                ObservationGap(code="agent_transcript_unavailable"),
+                                ObservationGap(code="model_call_ownership_unavailable"),
+                                ObservationGap(code="observation_capture_failed"),
+                            ],
+                        )
+                finally:
+                    observations_local_fpath.unlink(missing_ok=True)
 
         output = []
         usage = None
@@ -1828,7 +1843,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             or length_limited,
             "opencode_exit_code": getattr(result, "return_code", None),
             "opencode_error_type": run_error_type or getattr(result, "error_type", None),
-            "opencode_results_fpath": str(results_local_fpath),
+            # Empty without artifacts_dir: the temporary export is already gone.
+            "opencode_results_fpath": str(results_local_fpath) if self.config.artifacts_dir else "",
             "opencode_run_stdout": result_stdout,
             "opencode_run_stderr": result_stderr,
             "opencode_export_found": opencode_export_found,
