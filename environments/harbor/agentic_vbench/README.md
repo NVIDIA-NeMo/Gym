@@ -84,12 +84,14 @@ equivalently, over the complete 100-task set, average `reward_i x 25 / size_of_f
 leaderboard score from the rows. A subset is not the benchmark score, and a masked row is not a 0.
 
 The entry's checks so far: the prepare script writes all 100 tasks, every `task.toml` loads with Gym's Harbor
-schema, and the unit tests cover the three adjustments, the Hub judge's failure handling against a local socket
-server, and the server's handling of exit 75. Not recorded yet, and owed before review continues:
-`gym dataset validate agentic_vbench` (the oracle run of every `solution/`, rewards per family), a full-set
-`opencode_agent` run with `image_input` on (scored and masked counts per family by `failure_kind`, Repurpose
-`verifier_seconds` against the 1800 s budget, the largest `repurpose.mp4` the Gemini judge inlined, transcripts and
-verifier logs read by hand), and one injected-outage smoke (a bad Hub route on a Repurpose task, a blocked download
-on a Repair task) showing `harbor:verifier_unavailable` in `rollouts.jsonl`. Until then, treat `allowed_agents` as
-the harness under validation, not as a baselined one. `opencode_agent` saves text-only trajectories, so a run with
+schema, the unit tests cover the adjustments, the Hub judge's failure handling against a local socket server and the
+server's handling of exit 75, and `gym dataset validate agentic_vbench` (the oracle run of every `solution/`, judge
+protocol `nvinference-hybrid`) scored Assembly 18/18, Sequencing 28/28 and Repair 18/18 at 1.0 and Repurpose 36/36
+at 0.202 with no masked rows: 11 Repurpose verifiers hit the 1800 s budget in the judge's own transcription of long
+clips (the published runs gave the verifier 3x), and 8 scored 0 on rubric penalties of the upstream reference edits.
+Not recorded yet: a full-set `opencode_agent` run with `image_input` on (scored and masked counts per family by
+`failure_kind`, Repurpose `verifier_seconds` against the budget, the largest `repurpose.mp4` the Gemini judge
+inlined, transcripts and verifier logs read by hand), and one injected-outage smoke (a bad Hub route on a Repurpose
+task, a blocked download on a Repair task) showing `harbor:verifier_unavailable` with its reason. Until then, treat `allowed_agents`
+as the harness under validation, not as a baselined one. `opencode_agent` saves text-only trajectories, so a run with
 `image_input` evaluates normally but its transcripts carry no frames.
