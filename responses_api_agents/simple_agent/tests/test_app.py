@@ -78,6 +78,7 @@ from nemo_gym.core import (
 from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_runtime import (
+    END_ACTIVATION_HEADER,
     TOOL_CALL_ID_HEADER,
     TOOL_ERROR_HEADER,
     AgentContext,
@@ -447,6 +448,85 @@ class TestApp:
             assert observations["source"] == "simple_agent"
         else:
             assert observations is None
+
+    async def test_a_tool_reply_that_ends_the_activation_skips_the_next_model_call(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        """The response's other tool calls still run, and the activation returns without calling the model again."""
+        config = SimpleAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="simple",
+            model_server=ModelServerRef(type="responses_api_models", name="model"),
+            max_steps=10,
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {}
+        server = SimpleAgent(config=config, server_client=server_client)
+        calls = [
+            {
+                "id": f"fc-{name}",
+                "call_id": f"call-{name}",
+                "name": name,
+                "arguments": "{}",
+                "type": "function_call",
+                "status": "completed",
+            }
+            for name in ("submit_sql", "ask_user")
+        ]
+        server_client.post = AsyncMock(
+            return_value=_mock_response(
+                {
+                    "id": "resp-submit",
+                    "status": "completed",
+                    "created_at": 1.0,
+                    "model": "model",
+                    "object": "response",
+                    "parallel_tool_calls": True,
+                    "tool_choice": "auto",
+                    "tools": [],
+                    "output": calls,
+                }
+            )
+        )
+        replies = {
+            "submit_sql": _mock_response(content='"graded"', headers={END_ACTIVATION_HEADER: "true"}),
+            "ask_user": _mock_response(content='"SQL submitted. Awaiting result."'),
+        }
+        direct_request = AsyncMock(side_effect=lambda **kwargs: replies[kwargs["url"].rsplit("/", 1)[-1]])
+        monkeypatch.setattr("responses_api_agents.simple_agent.app.http_request", direct_request)
+
+        client = TestClient(server.setup_webserver())
+        seed = client.post(
+            "/v1/agent_sessions",
+            json=AgentSeedSessionRequest(
+                agent_session_id="agent-session",
+                episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+                task_id=TaskId(taskset="example", task_id="0"),
+                tool_accesses=[
+                    DirectHTTPToolAccess(name="env.direct_http", required=True, base_url="http://env:8000")
+                ],
+            ).model_dump(mode="json"),
+        )
+        assert seed.status_code == 200
+
+        result = client.post("/v1/responses", json={"input": [{"role": "user", "content": "the question"}]})
+
+        assert result.status_code == 200
+        assert server_client.post.await_count == 1
+        assert [call.kwargs["url"] for call in direct_request.await_args_list] == [
+            "http://env:8000/submit_sql",
+            "http://env:8000/ask_user",
+        ]
+        body = result.json()
+        assert body["status"] == "completed"
+        assert [(item["type"], item["call_id"]) for item in body["output"]] == [
+            ("function_call", "call-submit_sql"),
+            ("function_call", "call-ask_user"),
+            ("function_call_output", "call-submit_sql"),
+            ("function_call_output", "call-ask_user"),
+        ]
 
     async def test_agent_session_returns_observations_from_every_activation(self) -> None:
         server, server_client = _make_agent(True)
