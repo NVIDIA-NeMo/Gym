@@ -52,7 +52,7 @@ The helper copies the files and makes the PDFs read-only. Publish the copied `do
 
 ## Sandbox setup
 
-Build the sandbox image from the repository root with the OfficeQA [Containerfile](../officeqa/Containerfile) followed by [Containerfile.opencode](../officeqa/Containerfile.opencode). This environment needs OpenCode 1.17.11 and a root image user for document staging:
+Build the sandbox image from the repository root with the OfficeQA [Containerfile](../officeqa/Containerfile), [Containerfile.opencode](../officeqa/Containerfile.opencode), and the PDF Analyst QA [Containerfile](Containerfile). This environment needs OpenCode 1.17.11 and a root image user for document staging:
 
 ```bash
 docker build -f resources_servers/officeqa/Containerfile -t officeqa-tools .
@@ -60,10 +60,15 @@ docker build -f resources_servers/officeqa/Containerfile.opencode \
   --build-arg DOCUMENT_TOOLS_IMAGE=officeqa-tools \
   --build-arg OPENCODE_VERSION=1.17.11 \
   --build-arg SANDBOX_USER=root \
+  -t pdf-analyst-qa-opencode-base .
+docker build -f resources_servers/pdf_analyst_qa/Containerfile \
+  --build-arg OPENCODE_IMAGE=pdf-analyst-qa-opencode-base \
   -t pdf-analyst-qa-opencode .
 ```
 
-The build prints the SHA-256 of `/opt/cli/opencode`. Set `PDF_ANALYST_QA_DOCUMENT_IMAGE` to this image and `PDF_ANALYST_QA_OPENCODE_SHA256` to that SHA-256, along with the OpenSandbox provider credentials. Rebuild the image and update both variables when changing the OpenCode version.
+The final build prints the SHA-256 of `/opt/cli/opencode` and `/opt/cli/opencode-1.17.11-plugin-dependencies.tar.gz`. Set `PDF_ANALYST_QA_DOCUMENT_IMAGE` to the final image, `PDF_ANALYST_QA_OPENCODE_SHA256` to the binary checksum, and `PDF_ANALYST_QA_OPENCODE_PLUGIN_SHA256` to the archive checksum, along with the OpenSandbox provider credentials. Build for the deployment architecture and use the checksums from that image; the archive includes platform-specific optional dependencies. Rebuild and update these values when changing the runtime.
+
+The archive uses the pinned dependency set in Gym's visual-coding image. The harness verifies it and unpacks it into each session's private OpenCode configuration directory before launch, avoiding an npm install in the network-restricted sandbox.
 
 OpenCode 1.17.11 supports the request `temperature` and `top_p` fields supplied by NeMo RL. Set NeMo RL's `max_new_tokens` to at least 8192, the environment's configured per-call `max_output_tokens`; smaller request limits are rejected by the harness.
 
@@ -79,7 +84,9 @@ Add `--node-cache-host-path` if using a worker cache.
 
 ## Verification
 
-Answers receive 1 when the answer value is correct and the requested format is satisfied, including units and citations. Other measured answers receive 0. The response reports value correctness as `semantic_correct` and format compliance as `format_compliant`. Infrastructure and verifier failures have `evaluation_completed=false` and `mask_sample=true`.
+Answers receive 1 when the answer value is correct and the requested format is satisfied, including units and citations. Other measured answers receive 0. The response reports value correctness as `semantic_correct` and format compliance as `format_compliant`. Failures that cannot be scored have `evaluation_completed=false` and `mask_sample=true`.
+
+Classified agent failures that Gym's default outcome policy sends to verification receive an unmasked reward of 0. These include invalid agent output, agent limits, provider out-of-memory termination, and model request rejection with HTTP 400, 413, or 422. Other failed responses remain masked, including failures with missing or malformed outcome metadata. Scored failures count in accuracy and retain their reported failure kind.
 
 Decimal-place instructions specify numerical rounding, rather than a fixed number of printed digits. Numerically equivalent answers may add or omit trailing fractional zeros: `1.6` and `1.60` are equivalent, as are `23` and `23.0`. This does not introduce a numerical tolerance: `1.604` does not match a reference value of `1.60`.
 

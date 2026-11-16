@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic import ValidationError
 
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.sandbox import SandboxExecResult
@@ -181,14 +182,40 @@ async def test_numeric_precision_policy_determines_reward(server, monkeypatch, i
 
 
 @pytest.mark.asyncio
-async def test_failed_agent_response_is_not_a_scored_policy_example(server):
+@pytest.mark.parametrize(
+    "outcome,scored",
+    [
+        ({"failure_kind": "model_request_error", "status_code": 400}, True),
+        ({"failure_kind": "model_request_error", "status_code": 413}, True),
+        ({"failure_kind": "model_request_error", "status_code": 422}, True),
+        ({"failure_kind": "agent_invalid_output"}, True),
+        ({"failure_kind": "agent_limit"}, True),
+        ({"failure_kind": "provider_oom_killed"}, True),
+        ({"failure_kind": "model_request_error", "status_code": 503}, False),
+        ({"failure_kind": "model_request_error", "status_code": 401}, False),
+        ({"failure_kind": "unknown"}, False),
+        ({"failure_kind": "model_request_error"}, False),
+        (None, False),
+        ("not json", False),
+    ],
+)
+async def test_failed_agent_response_scores_only_failures_gym_verifies(server, outcome, scored):
     resource, _ = server
     req = request()
     await resource.seed_session(req, seed())
     body = verify_body("23")
     body.response.status = "failed"
+    if outcome is not None:
+        body.response.metadata = {
+            AGENT_OUTCOME_METADATA_KEY: outcome if isinstance(outcome, str) else json.dumps(outcome)
+        }
     result = await resource.verify(req, body)
-    assert (result.reward, result.evaluation_completed, result.mask_sample) == (0.0, False, True)
+    assert (result.reward, result.evaluation_completed, result.mask_sample) == (0.0, scored, not scored)
+    assert result.failure_kind == (outcome["failure_kind"] if scored else "pdf_analyst_qa:agent_response_failed")
+    assert result.semantic_correct is None and result.format_compliant is None
+    metrics = resource.compute_metrics([[{"reward": 1.0, "evaluation_completed": True}, result.model_dump()]])
+    assert metrics["pdf_analyst_qa/scored_rollouts"] == (2 if scored else 1)
+    assert metrics["pdf_analyst_qa/accuracy"] == (0.5 if scored else 1.0)
 
 
 @pytest.mark.asyncio

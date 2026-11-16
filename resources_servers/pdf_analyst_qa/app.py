@@ -16,7 +16,14 @@ from typing import ClassVar
 from fastapi import FastAPI, Request
 from pydantic import ConfigDict, Field, JsonValue, PrivateAttr, ValidationError, field_validator
 
-from nemo_gym.agents import restricted_network_policy, sandbox_server_url
+from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AgentOutcome,
+    OutcomeAction,
+    agent_outcome_policy,
+    restricted_network_policy,
+    sandbox_server_url,
+)
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import SESSION_LOST, VERIFIER_ERROR
@@ -386,7 +393,16 @@ class PdfAnalystQaResourcesServer(SimpleResourcesServer):
                 ):
                     failure = VERIFIER_ERROR
                 elif body.response.status == "failed" or body.response.error is not None:
-                    failure = "pdf_analyst_qa:agent_response_failed"
+                    outcome = (body.response.metadata or {}).get(AGENT_OUTCOME_METADATA_KEY)
+                    if (
+                        body.response.status == "failed"
+                        and outcome is not None
+                        and agent_outcome_policy(body.response) == OutcomeAction.VERIFY
+                    ):
+                        failure = AgentOutcome.model_validate_json(outcome).failure_kind
+                        completed = True
+                    else:
+                        failure = "pdf_analyst_qa:agent_response_failed"
                 else:
                     try:
                         if answer and body.response.status != "incomplete" and not body.response.incomplete_details:

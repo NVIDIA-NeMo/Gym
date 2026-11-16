@@ -9,6 +9,7 @@ absolute_ip_server_types:
 - responses_api_models
 pdf_analyst_qa_document_image: ${oc.env:PDF_ANALYST_QA_DOCUMENT_IMAGE,null}
 pdf_analyst_qa_opencode_binary_sha256: ${oc.env:PDF_ANALYST_QA_OPENCODE_SHA256,null}
+pdf_analyst_qa_opencode_plugin_sha256: ${oc.env:PDF_ANALYST_QA_OPENCODE_PLUGIN_SHA256,null}
 pdf_analyst_qa_dataset_root: ???
 pdf_analyst_qa_document_prefix: ???
 pdf_analyst_qa_node_cache_host_path: null
@@ -39,6 +40,8 @@ pdf_analyst_qa_agent:
       opencode_version: 1.17.11
       sandbox_executable_path: /opt/cli/opencode
       sandbox_executable_sha256: ${pdf_analyst_qa_opencode_binary_sha256}
+      sandbox_plugin_dependencies_path: /opt/cli/opencode-1.17.11-plugin-dependencies.tar.gz
+      sandbox_plugin_dependencies_sha256: ${pdf_analyst_qa_opencode_plugin_sha256}
       image_input: true
       context_window: 262144
       max_output_tokens: 8192

@@ -71,13 +71,22 @@ def test_bundled_dataset_yaml_matches_catalog(monkeypatch, deployment_configured
     if deployment_configured:
         monkeypatch.setenv("PDF_ANALYST_QA_DOCUMENT_IMAGE", "example@sha256:" + "a" * 64)
         monkeypatch.setenv("PDF_ANALYST_QA_OPENCODE_SHA256", "b" * 64)
+        monkeypatch.setenv("PDF_ANALYST_QA_OPENCODE_PLUGIN_SHA256", "c" * 64)
     else:
         monkeypatch.delenv("PDF_ANALYST_QA_DOCUMENT_IMAGE", raising=False)
         monkeypatch.delenv("PDF_ANALYST_QA_OPENCODE_SHA256", raising=False)
+        monkeypatch.delenv("PDF_ANALYST_QA_OPENCODE_PLUGIN_SHA256", raising=False)
     monkeypatch.setenv("OPENSANDBOX_DOMAIN", "sandbox.example")
     monkeypatch.setenv("OPENSANDBOX_API_KEY", "fixture-key")
     report = validate_environment("environments/pdf_analyst_qa/manifest.yaml")
     assert [(item.name, item.rows) for item in report.datasets] == [("example", 1)]
+    settings = OmegaConf.load("environments/pdf_analyst_qa/config.yaml")
+    agent = settings.pdf_analyst_qa_agent.responses_api_agents.opencode_agent
+    assert (
+        agent.sandbox_plugin_dependencies_path
+        == f"/opt/cli/opencode-{agent.opencode_version}-plugin-dependencies.tar.gz"
+    )
+    assert agent.sandbox_plugin_dependencies_sha256 == ("c" * 64 if deployment_configured else None)
 
 
 def test_configured_opencode_accepts_training_request_sampling():
