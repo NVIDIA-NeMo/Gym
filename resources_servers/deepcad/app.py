@@ -256,6 +256,7 @@ class DeepCADResourcesServer(SimpleResourcesServer):
             provider = resolve_provider_config(self.config.sandbox_provider, self.server_client.global_config_dict)
             spec = SandboxSpec(
                 image=self.config.sandbox_image,
+                ttl_s=self.config.execution_timeout_s + 300,
                 workdir="/sandbox",
                 env={
                     # Enroot can inherit the launcher's environment, including serialized Gym config.
