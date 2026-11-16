@@ -591,12 +591,17 @@ class TestRunnerExitPath:
     def test_orphans_are_killed_with_the_process_group(self, tmp_path):
         """Anything the task spawned must die before the parent deletes its CWD."""
         pidfile = tmp_path / "grandchild.pid"
-        child = f"import os, sys, time\nopen({str(pidfile)!r}, 'w').write(str(os.getpid()))\ntime.sleep(120)\n"
+        child = (
+            "import os, time\n"
+            f"with open({str(pidfile)!r}, 'w') as output:\n    output.write(str(os.getpid()))\n"
+            "print('ready', flush=True)\n"
+            "time.sleep(120)\n"
+        )
         code = (
-            "import subprocess, sys, time\n"
+            "import subprocess, sys\n"
             "def add(a, b):\n"
-            f"    subprocess.Popen([sys.executable, '-c', {child!r}])\n"
-            "    time.sleep(1)\n"
+            f"    child = subprocess.Popen([sys.executable, '-c', {child!r}], stdout=subprocess.PIPE, text=True)\n"
+            "    assert child.stdout.readline() == 'ready\\n'\n"
             "    return a + b\n"
         )
         result, _ = self._verdict(code)

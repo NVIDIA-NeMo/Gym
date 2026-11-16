@@ -25,8 +25,9 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NgFailureEvent,
 )
-from nemo_gym.verification import JudgeError
+from nemo_gym.verification import is_judge_failure
 from resources_servers.arena_judge.app import (
     ArenaJudgeConfig,
     ArenaJudgeServer,
@@ -309,7 +310,7 @@ class TestArenaJudgeServer:
         server_mock.post = AsyncMock(side_effect=RuntimeError("judge timeout"))
         server = ArenaJudgeServer(config=config, server_client=server_mock)
 
-        with pytest.raises(JudgeError):
+        with pytest.raises(NgFailureEvent) as failure:
             await server.verify(
                 ArenaJudgeVerifyRequest(
                     responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
@@ -319,6 +320,7 @@ class TestArenaJudgeServer:
                     category="hard_prompt",
                 )
             )
+        assert is_judge_failure(failure.value)
 
     @pytest.mark.asyncio
     async def test_unknown_category_falls_back_to_default(self, config: ArenaJudgeConfig) -> None:

@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - resources_servers/terminal_bench_2_1/configs/terminal_bench_2_1.yaml
+
+benchmark:
+  _inherit_from: terminal_bench_2_1_resources_server
+  resources_servers:
+    terminal_bench_2_1:
+      verified: false
+      allowed_agents:
+        - opencode_sandboxed_agent
+        - terminus_2_sandboxed_agent
+        - pi_agent
+        - codex_agent
+        - opencode_agent
+        - openclaw_agent
+        - nooa_agent
+      sandbox_config:
+        # Leave 600s after the run's 30,000s episode deadline for bounded cleanup.
+        # Each verifier command retains the Resources server's 1,800s timeout.
+        ttl_s: 30600
+      datasets:
+        - name: terminal_bench_2_1
+          type: benchmark
+          taskset: terminal-bench-2.1
+          jsonl_fpath: benchmarks/terminal_bench_2_1/data/benchmark.jsonl
+          prepare_script: benchmarks/terminal_bench_2_1/prepare.py
+          num_repeats: 1

@@ -27,7 +27,6 @@ import logging
 import math
 from dataclasses import dataclass
 from time import time
-from typing import Any
 from uuid import uuid4
 
 from fastapi import Body, HTTPException, Request
@@ -35,7 +34,7 @@ from pydantic import Field
 
 from environment_servers.harbor.session import SOLUTION_DIR
 from environment_servers.harbor.verifier import TIMEOUT_WRAPPER_GUARD
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
     AgentSessionState,
@@ -61,7 +60,7 @@ from nemo_gym.sandbox import (
     exec_as_root,
     resolve_provider_config,
 )
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 LOGGER = logging.getLogger(__name__)
@@ -77,7 +76,7 @@ ANSWER_FILE = f"{SOLUTION_DIR}/answer.md"
 ANSWER_READ_COMMAND = f"base64 {ANSWER_FILE}"
 # How the oracle leaves the answer in the working directory: a copy of the file inside the sandbox, run as the task
 # user in the session's working directory, so the file is the answer byte for byte whatever its size. The published
-# solve.sh writes the same file with `printf` (`nemo_gym.tasks.harbor.publish.answer_write_command`), which is fine
+# solve.sh writes the same file with `printf` (`nemo_gym.data.tasks.harbor.publish.answer_write_command`), which is fine
 # in a script bash reads from a file; an exec's command, though, is one argument to the provider's shell (the Docker
 # provider runs `docker exec ... sh -c <command>`), and Linux caps a single argument at MAX_ARG_STRLEN (128 KiB on
 # 4 KiB pages), so a command carrying a long answer fails with E2BIG before anything is written.
@@ -131,11 +130,6 @@ class OracleAgent(SimpleResponsesAPIAgent):
         """
         return True
 
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("Process-local oracle sessions require num_workers=1")
-
     # -- sessions --------------------------------------------------------------------------
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> OracleSession:
@@ -176,7 +170,7 @@ class OracleAgent(SimpleResponsesAPIAgent):
     def _session_for(self, request: Request) -> OracleSession:
         session_id = self._agent_session_id_from_request(request)
         if session_id is None:
-            raise HTTPException(404, "Unknown oracle agent session; seed it first")
+            raise HTTPException(404, "No seeded oracle agent session for this request")
         state = self._require_agent_session(session_id)
         if not isinstance(state, OracleSession):
             raise TypeError("Expected an oracle agent session state")
@@ -351,18 +345,19 @@ class OracleAgent(SimpleResponsesAPIAgent):
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
+            # The oracle applies the reference solution without calling a model, so every count is a known zero.
             usage=NeMoGymResponseUsage(
                 input_tokens=0,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),  # known-zero
                 output_tokens=0,
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
                 total_tokens=0,
             ),
         )
 
-    async def run(self, body: BaseRunRequest = Body()) -> BaseVerifyResponse:
-        raise HTTPException(501, "The oracle agent runs only through an environment server, not the legacy /run route")
-
 
 if __name__ == "__main__":
     OracleAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = OracleAgent.run_webserver()  # noqa: F401

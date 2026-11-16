@@ -23,29 +23,36 @@ import shlex
 import shutil
 import signal
 from asyncio import Semaphore
+from collections.abc import Mapping
 from pathlib import Path
 from time import perf_counter, time
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
 from openai.types.responses import ResponseError
 from pydantic import ConfigDict, Field, JsonValue, PrivateAttr
 
-from nemo_gym.agent_utils.sandbox_session import HARNESS_COMMAND_NOT_STARTED, HARNESS_RUNNER_FAILED, SandboxSession
-from nemo_gym.agent_utils.supervisor_client import CleanupReceipt
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
+    AGENT_TIMEOUT_METADATA_KEY,
+    HARNESS_COMMAND_NOT_STARTED,
+    HARNESS_RUNNER_FAILED,
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    CleanupReceipt,
+    SandboxSession,
     SimpleResponsesAPIAgent,
+    resolve_agent_timeout,
 )
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -67,7 +74,14 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, MCPToolAccess
-from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, SandboxObservation
+from nemo_gym.trajectory import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ContextCompactionObservation,
+    ObservationGap,
+    SandboxObservation,
+)
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.kilocode_agent.observability import read_kilo_observations
 from responses_api_agents.kilocode_agent.sandbox import KiloArtifacts, KiloSandboxSession
 from responses_api_agents.kilocode_agent.setup_kilocode import ensure_kilo
@@ -86,7 +100,7 @@ def _think_message(index: int, text: str) -> NeMoGymResponseOutputMessage:
     )
 
 
-def parse_kilo_events(stdout: str) -> tuple[list[Any], dict[str, int]]:
+def parse_kilo_events(stdout: str) -> tuple[list[Any], dict[str, int | None]]:
     """Convert ``kilo run --format json`` stdout into (output_items, usage).
 
     Kilo (an OpenCode fork) emits one JSON object per line for each root-session
@@ -101,6 +115,8 @@ def parse_kilo_events(stdout: str) -> tuple[list[Any], dict[str, int]]:
     output_items: list[Any] = []
     input_tokens = 0
     output_tokens = 0
+    cached_tokens: Optional[int] = None
+    cache_measured = True
     buffered_think: Optional[str] = None
     # kilo's `--format json` writer emits every message.part.updated event twice with the same part
     # id (persists with KILO_NO_DAEMON=1, so it is the writer, not a daemon double-subscription). The
@@ -135,6 +151,13 @@ def parse_kilo_events(stdout: str) -> tuple[list[Any], dict[str, int]]:
             tokens = part.get("tokens") or {}
             cache = tokens.get("cache") or {}
             input_tokens += int(tokens.get("input") or 0) + int(cache.get("read") or 0)
+            # Kilo stores zero for a cache read the backend did not report, so only a positive count is a
+            # measurement. One unmeasured step makes the sum unknown.
+            cache_read = cache.get("read")
+            if type(cache_read) is not int or cache_read <= 0:
+                cache_measured = False
+            elif cache_measured:
+                cached_tokens = (cached_tokens or 0) + cache_read
             step_output = int(tokens.get("output") or 0)
             output_tokens += step_output
             # Stopping on "length" with nothing generated is what an over-window request looks like by
@@ -194,7 +217,11 @@ def parse_kilo_events(stdout: str) -> tuple[list[Any], dict[str, int]]:
     if buffered_think:
         output_items.append(_think_message(len(output_items), f"<think>\n{buffered_think}\n</think>"))
 
-    return output_items, {"input_tokens": input_tokens, "output_tokens": output_tokens}
+    return output_items, {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cached_tokens": cached_tokens if cache_measured else None,
+    }
 
 
 def _scan_run_events(stdout: str) -> tuple[Any, bool]:
@@ -325,11 +352,11 @@ class KiloCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # keeps whatever it declares. They are config fields rather than `kilo_config` keys because the
     # config merge is struct-mode, so a config using `_inherit_from` cannot add keys under `models`.
     #
-    # `context_window` is what kilo measures a session against. It only drives auto-compaction when
-    # `kilo_config` also sets `compaction.threshold_percent`; 0 disables that accounting entirely.
+    # `context_window` drives usage-based compaction. Setting `kilo_config.compaction.threshold_percent`
+    # also enables Kilo's outgoing-request preflight check, before contacting the model server.
     context_window: int = 32768
-    # `max_output_tokens` is the per-request output budget; kilo asks the model server for
-    # min(this, its own OUTPUT_TOKEN_MAX of 32000), so values above 32000 have no effect.
+    # Set Kilo's output ceiling as well as its model metadata so its default 32000 cap does not
+    # silently truncate a larger configured per-request output budget.
     #
     # Setting it too high fails silently, which is why the default is conservative. Kilo's system
     # prompt and tool definitions run to ~10k tokens, and vLLM rejects prompt + max_tokens >
@@ -375,10 +402,20 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
 
     Kilo runs its own tools internally; we parse its JSON event stream into Gym format and use the
     resources server to verify. Kilo's model calls go through ``model_server`` when one is set — see
-    that field. Eval-only either way: token IDs and logprobs are not wired up.
+    that field, under the rollout's prefix, so ``token_id_capture`` applies to them.
     """
 
+    def classify_outcome(self, native_result: Mapping[str, object]) -> AgentOutcome:
+        """Preserve the HTTP status carried by the pinned CLI's APIError event."""
+        data = native_result.get("data")
+        status = data.get("statusCode") if isinstance(data, dict) else None
+        if native_result.get("name") == "APIError" and type(status) is int and 400 <= status <= 599:
+            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+        return AgentOutcome(failure_kind="unknown")
+
     config: KiloCodeAgentConfig
+    # Sandbox sessions run the CLI inside the sandbox, which calls the model server from there.
+    calls_model_from_sandbox: ClassVar[bool] = True
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
     _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
@@ -552,6 +589,8 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         else:
             observations = artifacts.observations.model_copy(deep=True)
         for record in observations.records:
+            if isinstance(record, ContextCompactionObservation):
+                record.source_model_ref = self.config.model_server
             if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
                 if outcome == "failed" or record.status == "failed":
                     record.status = "failed"
@@ -670,6 +709,8 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         if api_key:
             env["OPENAI_API_KEY"] = api_key
         env.update({k: v for k, v in self.config.env.items() if v})
+        if self.config.model_server:
+            env["KILO_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] = str(self.config.max_output_tokens)
         return env
 
     def _build_command(self, project_dir: Path, prompt: str) -> list[str]:
@@ -790,6 +831,9 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
             "instructions",
             "model",
         }
+        # A task row carries its own budget; the activation applies it, so it is the only metadata accepted.
+        if "metadata" in unsupported and set(body.metadata) <= {AGENT_TIMEOUT_METADATA_KEY}:
+            unsupported.discard("metadata")
         if unsupported:
             raise HTTPException(422, "Unsupported Kilo sandbox request fields: " + ", ".join(sorted(unsupported)))
         if isinstance(body.input, str):
@@ -840,6 +884,10 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         response = self._build_response(
             body, output_items, usage, self.config.model, incomplete=timed_out or length_stop
         )
+        if isinstance(error, dict) and self.classify_outcome(error).failure_kind == MODEL_REQUEST_ERROR:
+            response.status = "failed"
+            response.error = ResponseError(code="server_error", message=problem[:2000])
+            response = self.report_outcome(response, error)
         return response, problem
 
     async def _sandbox_response(
@@ -862,15 +910,17 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         # --pure only skips plugins named in kilo.json; here that would skip the task-environment plugin.
         command.remove("--pure")
         config = self._sandbox_config(state, rollout_id=rollout_id)
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         async with self.sem:
             state.started_at = perf_counter()
             artifacts = await state.session.execute(
                 stage_activation=lambda: state.stage_activation(
                     command=command,
                     config=json.dumps(config),
+                    output_token_max=self.config.max_output_tokens if self.config.model_server else None,
                 ),
                 collect=state.collect_artifacts,
-                timeout=self.config.timeout,
+                timeout=timeout,
                 close_timeout=self.config.session_close_timeout_seconds,
             )
         response, problem = self._response_from_events(
@@ -881,9 +931,24 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
             diagnostics=artifacts.log_tail or artifacts.stderr[-4096:],
         )
         if problem is not None:
-            # Agent sessions must not hand a failed run to the verifier, where it would score as a zero.
-            raise RuntimeError(state.redact_diagnostics(problem))
+            cleanup = state.session.cleanup
+            if not (
+                "ng_agent_outcome" in (response.metadata or {})
+                and cleanup
+                and cleanup["cleanup_confirmed"]
+                and not cleanup["timed_out"]
+                and not cleanup["error"]
+                and cleanup["return_code"] in (0, 1)
+                and artifacts.exit_code in (0, 1)
+                and artifacts.task_environment_ready
+                and artifacts.required_mcp_ready
+            ):
+                raise RuntimeError(state.redact_diagnostics(problem))
+            # Kilo exits 1 for a terminal APIError. Preserve that model response so
+            # the Environment Server can apply its failure/retry policy.
+            response.error = ResponseError(code="server_error", message=state.redact_diagnostics(problem)[:2000])
         response.metadata = {
+            **(response.metadata or {}),
             "harness_execution": "sandbox",
             **(
                 {"harness_hostname": artifacts.runner_hostname, "harness_pid": str(artifacts.runner_pid)}
@@ -891,6 +956,7 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
                 else {}
             ),
             "kilo_version": str(self.config.kilo_version),
+            AGENT_TIMEOUT_METADATA_KEY: str(timeout),
         }
         if artifacts.usage is not None:
             response.usage = artifacts.usage.model_copy(deep=True)
@@ -963,6 +1029,8 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
                 gaps=[ObservationGap(code="agent_artifact_unavailable")],
             )
         for record in observations.records:
+            if isinstance(record, ContextCompactionObservation):
+                record.source_model_ref = self.config.model_server
             if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
                 if problem is not None:
                     record.status = "failed"
@@ -1012,7 +1080,7 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
             usage=NeMoGymResponseUsage(
                 input_tokens=input_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=usage.get("cached_tokens")),
                 output_tokens=output_tokens,
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
                 total_tokens=input_tokens + output_tokens,
@@ -1079,3 +1147,6 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     KiloCodeAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = KiloCodeAgent.run_webserver()  # noqa: F401

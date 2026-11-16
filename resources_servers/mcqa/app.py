@@ -27,7 +27,9 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
+    observe_programmatic_grading,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 class MCQAResourcesServerConfig(BaseResourcesServerConfig):
@@ -73,6 +75,8 @@ class MCQAVerifyRequest(MCQARunRequest, BaseVerifyRequest):
 class MCQAVerifyResponse(BaseVerifyResponse):
     expected_answer: str
     extracted_answer: Optional[str]
+    # Every verify path grades the row (an unparsed answer scores 0), so none is incomplete: gym-p0/v1 TE-6.
+    evaluation_completed: bool = True
 
 
 class MCQADualVerifyResponse(MCQAVerifyResponse, BaseMultiRewardVerifyResponse):
@@ -438,6 +442,9 @@ class MCQAResourcesServer(SimpleResourcesServer):
         return key
 
     async def verify(self, body: MCQAVerifyRequest) -> MCQADualVerifyResponse | MCQAVerifyResponse:
+        return observe_programmatic_grading(lambda: self._programmatic_score(body))
+
+    def _programmatic_score(self, body: MCQAVerifyRequest) -> MCQADualVerifyResponse | MCQAVerifyResponse:
         # Pull options/expected_answer from dataset-style metadata if available
         options, expected_answer = _extract_options_and_expected(body)
         gold = (expected_answer or "").strip().upper()
@@ -618,3 +625,6 @@ def extract_boxed_and_normalized_answers(
 
 if __name__ == "__main__":
     MCQAResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = MCQAResourcesServer.run_webserver()  # noqa: F401

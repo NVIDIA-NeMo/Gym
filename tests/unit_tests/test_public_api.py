@@ -74,6 +74,97 @@ EXPECTED_EAGER_EXPORTS = {
     "__version__",
 }
 
+_POSITIONAL = inspect.Parameter.POSITIONAL_OR_KEYWORD
+_KEYWORD = inspect.Parameter.KEYWORD_ONLY
+_REQUIRED = inspect.Parameter.empty
+
+# nemo_gym.environment.in_process: plan a benchmark in one call, then run single tasks against running servers.
+# The API is experimental and may change without a deprecation period. This list makes a change deliberate:
+# update it in the same change.
+EXPECTED_IN_PROCESS_TASK_SIGNATURES = {
+    "plan_benchmark": [
+        ("benchmark", _POSITIONAL, _REQUIRED),
+        ("task_ids", _KEYWORD, None),
+        ("overrides", _KEYWORD, None),
+        ("work_dir", _KEYWORD, None),
+    ],
+    "TaskRunner.__init__": [
+        ("self", _POSITIONAL, _REQUIRED),
+        ("rows", _POSITIONAL, _REQUIRED),
+        ("registry_server", _KEYWORD, _REQUIRED),
+    ],
+    "TaskRunner.run_task": [
+        ("self", _POSITIONAL, _REQUIRED),
+        ("task_id", _POSITIONAL, _REQUIRED),
+        ("rollout_id", _KEYWORD, None),
+    ],
+    "TaskRunner.task_ids": [("self", _POSITIONAL, _REQUIRED)],
+    "serve_benchmark": [
+        ("benchmark", _POSITIONAL, _REQUIRED),
+        ("model_type", _KEYWORD, "openai_model"),
+        ("overrides", _KEYWORD, None),
+        ("registry_port", _KEYWORD, None),
+    ],
+    "PlannedBenchmark.task_ids": [("self", _POSITIONAL, _REQUIRED)],
+    "PlannedBenchmark.task_digests": [("self", _POSITIONAL, _REQUIRED)],
+    "PlannedBenchmark.to_json": [("self", _POSITIONAL, _REQUIRED)],
+    "PlannedBenchmark.from_json": [("text", _POSITIONAL, _REQUIRED)],
+}
+
+# The fields of the result types. The API is experimental, so a change is allowed; update this list in the same change.
+EXPECTED_IN_PROCESS_RESULT_FIELDS = {
+    "PlannedBenchmark": ["plan", "rows"],
+    "RolloutOutcome": ["reward", "failure", "masked", "prompt", "output", "raw"],
+    "TaskFailure": [
+        "kind",
+        "source",
+        "delivery",
+        "stage",
+        "terminal",
+        "reason",
+        "http_status",
+        "exception_type",
+    ],
+}
+
+
+@pytest.mark.parametrize("qualified_name", sorted(EXPECTED_IN_PROCESS_TASK_SIGNATURES))
+def test_in_process_task_api_keeps_its_signature(qualified_name: str):
+    from nemo_gym.environment import in_process
+
+    target = in_process
+    for part in qualified_name.split("."):
+        target = getattr(target, part)
+    parameters = inspect.signature(target).parameters.values()
+    actual = [(parameter.name, parameter.kind, parameter.default) for parameter in parameters]
+    assert actual == EXPECTED_IN_PROCESS_TASK_SIGNATURES[qualified_name]
+
+
+@pytest.mark.parametrize("type_name", sorted(EXPECTED_IN_PROCESS_RESULT_FIELDS))
+def test_in_process_result_types_keep_their_fields(type_name: str):
+    import dataclasses
+
+    from nemo_gym.environment import in_process
+
+    fields = [field.name for field in dataclasses.fields(getattr(in_process, type_name))]
+    assert fields == EXPECTED_IN_PROCESS_RESULT_FIELDS[type_name]
+
+
+def test_everything_an_external_caller_needs_is_exported_from_the_environment_package():
+    import nemo_gym.environment as environment
+
+    for name in (
+        "plan_benchmark",
+        "serve_benchmark",
+        "TaskRunner",
+        "PlannedBenchmark",
+        "RolloutOutcome",
+        "TaskFailure",
+        "EvalPlan",
+    ):
+        assert name in environment.__all__
+        assert getattr(environment, name) is not None
+
 
 def test_public_api_contract_is_explicit():
     assert set(_LAZY_EXPORTS) == EXPECTED_LAZY_EXPORTS

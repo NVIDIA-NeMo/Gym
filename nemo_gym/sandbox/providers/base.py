@@ -15,11 +15,17 @@
 """Provider-facing sandbox protocol."""
 
 from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlsplit
+
+from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED, FailureStage
+from nemo_gym.core.failure_records import FailureBoundary, SandboxFailureDetails
+from nemo_gym.core.typed_exceptions import NgFailureEvent, sdk_error_details
+from nemo_gym.utils.exception_inspection import error_to_http_status
 
 
 # How long a provider may spend finding and deleting the sandbox a timed-out create left behind (one list
@@ -69,14 +75,26 @@ class SandboxEndpoint:
 
 
 @dataclass(frozen=True)
-class SandboxResources:
-    """Provider-neutral resource request."""
+class SandboxResourceAmounts:
+    """Provider-neutral quantities: CPU cores, MiB, GiB and GPU count.
+
+    Missing values are unspecified/unknown, never zero. Fractional memory and disk
+    preserve observed allocations; gpu_type is a selector rather than an amount.
+    """
 
     cpu: float | None = None
-    memory_mib: int | None = None
-    disk_gib: int | None = None
+    memory_mib: float | None = None
+    disk_gib: float | None = None
     gpu: int | None = None
     gpu_type: str | None = None
+
+
+@dataclass(frozen=True)
+class SandboxResources(SandboxResourceAmounts):
+    """Provider-neutral creation request, retaining integer memory/disk inputs."""
+
+    memory_mib: int | None = None
+    disk_gib: int | None = None
 
     @classmethod
     def from_mapping(cls, resources: Mapping[str, Any] | None) -> "SandboxResources":
@@ -155,7 +173,9 @@ class SandboxSpec:
     ready_timeout_s: int | float | None = None
     workdir: str | None = None
     env: dict[str, str] = field(default_factory=dict)
-    files: dict[str, str] = field(default_factory=dict)
+    # Uploaded at startup, keyed by remote path.
+    # A str is written as UTF-8 text and bytes are written unchanged, so binary files such as images fit too.
+    files: dict[str, str | bytes] = field(default_factory=dict)
     metadata: dict[str, str] = field(default_factory=dict)
     resources: SandboxResources | Mapping[str, Any] = field(default_factory=SandboxResources)
     entrypoint: list[str] | None = None
@@ -224,6 +244,10 @@ class SandboxExecResult:
     command. Providers may use a non-process sentinel with ``error_type`` set
     when the sandbox runtime reports an execution failure without a process
     exit code.
+
+    ``error_type="user_switch_unavailable"`` means the provider confirmed that
+    credential switching prevented process launch. Helpers that allow the image's
+    default user can choose that branch without reporting a failure event.
     """
 
     stdout: str | None
@@ -262,12 +286,83 @@ class SandboxPtyError(RuntimeError):
     """Raised when a PTY session fails outside normal process exit."""
 
 
+def sandbox_credentials_rejected(
+    error: BaseException,
+    *,
+    operation: str,
+    details: SandboxFailureDetails | None = None,
+    stage: FailureStage | None = None,
+    sdk_message: str | None = None,
+) -> NgFailureEvent | None:
+    """A sandbox-boundary failure for an observed HTTP 401/403, caused by ``error``; else ``None``.
+
+    The kind comes from the status only, never from the error's text. ``sdk_message`` is the diagnostic
+    the caller selected for the provider's SDK (see ``sdk_error_details``).
+    """
+    status = error_to_http_status(error)
+    if status not in (401, 403):
+        return None
+    rejected = NgFailureEvent(
+        boundary=FailureBoundary.SANDBOX,
+        failure_kind=PROVIDER_CREDENTIALS_REJECTED,
+        details=details,
+        failure_reason=f"Sandbox provider refused the credentials (HTTP {status})",
+        operation=operation,
+        stage=stage,
+        http_status=status,
+        foreign_error=sdk_error_details(error, message=sdk_message),
+    )
+    rejected.__cause__ = error
+    return rejected
+
+
 class SandboxCreateError(RuntimeError):
     """Raised when a provider cannot create a sandbox."""
 
 
 class SandboxCreateVerificationError(SandboxCreateError):
     """Raised when a newly-created sandbox fails provider readiness checks."""
+
+
+class SandboxSnapshotError(RuntimeError):
+    """Raised when a provider cannot complete an operation on a snapshot; ``snapshot_id`` names it when known.
+
+    The base of every snapshot error, so ``except SandboxSnapshotError`` handles any snapshot failure.
+    """
+
+    def __init__(self, message: str, *, snapshot_id: str | None = None) -> None:
+        super().__init__(message)
+        self.snapshot_id = snapshot_id
+
+
+class SandboxSnapshotNotFoundError(SandboxSnapshotError, LookupError):
+    """Raised when a provider has no snapshot with the requested id.
+
+    The snapshot may be deleted, or not yet visible on every replica of a snapshot store that is not fully shared.
+    """
+
+
+class SandboxSnapshotFailedError(SandboxSnapshotError):
+    """Raised when a snapshot failed on the provider or did not become ready in time; it cannot create sandboxes."""
+
+
+class SandboxSnapshotInUseError(SandboxSnapshotError):
+    """Raised when a provider refuses to delete a snapshot because something still uses it."""
+
+
+@dataclass(frozen=True)
+class SandboxSnapshotInfo:
+    """One snapshot in a provider's listing.
+
+    ``name`` is the name the snapshot was taken with, and ``None`` only for one taken without a name. ``state`` is
+    the provider's own lifecycle word, lowercased, and ``sandbox_id`` the sandbox the snapshot was taken from;
+    either is ``None`` when the provider does not report it.
+    """
+
+    snapshot_id: str
+    name: str | None
+    state: str | None = None
+    sandbox_id: str | None = None
 
 
 class SandboxProvider(Protocol):
@@ -279,9 +374,10 @@ class SandboxProvider(Protocol):
         """Create a ready sandbox and return a provider-neutral handle.
 
         Providers must return only after the sandbox is healthy enough to run
-        commands and transfer files. If the sandbox cannot become ready before
-        the configured timeout, providers should raise ``SandboxCreateError``
-        or a provider-specific subclass.
+        commands and transfer files. New and migrated providers must report allocation
+        and readiness failures as ``NgFailureEvent`` with ``boundary="sandbox"`` and a registered kind.
+        Providers awaiting migration still expose creation exceptions; see the
+        sandbox documentation's required provider migrations.
         """
         ...
 
@@ -491,6 +587,74 @@ class SupportsSandboxPauseResume(Protocol):
 
 
 @runtime_checkable
+class SupportsSandboxSnapshot(Protocol):
+    """Optional provider capability to snapshot a running sandbox into a durable, independent copy.
+
+    A snapshot is a restore point: ``create_from_snapshot`` builds a new sandbox from it, however the source sandbox
+    changed or ended since. Deleting the source sandbox leaves the snapshot; only ``delete_snapshot`` removes it.
+
+    A provider must keep the name a snapshot is taken with and return it from ``list_snapshots``. A caller finds
+    its snapshots again by name: a sandbox checkpointer lists them by a name prefix to delete the ones it has no
+    other record of, and those are never deleted on a provider that drops the name, with no error to show for it.
+    """
+
+    async def snapshot(self, handle: SandboxHandle, *, name: str | None = None) -> str:
+        """Start a snapshot of the sandbox and return its id at once; it may not be usable yet.
+
+        ``name``, when given, is stored with the snapshot and is the name ``list_snapshots`` matches and returns.
+        """
+        ...
+
+    async def wait_snapshot_ready(self, snapshot_id: str) -> None:
+        """Return once the snapshot can create sandboxes.
+
+        Raises ``SandboxSnapshotFailedError`` when the snapshot failed or is not ready in time, and
+        ``SandboxSnapshotNotFoundError`` when the provider has no snapshot ``snapshot_id``.
+        """
+        ...
+
+    async def delete_snapshot(self, snapshot_id: str) -> None:
+        """Delete a snapshot; a snapshot the provider confirms is already gone is not an error.
+
+        Raises ``SandboxSnapshotInUseError`` when the provider refuses because something still uses the snapshot,
+        and ``SandboxSnapshotError`` when the delete fails otherwise.
+        """
+        ...
+
+    async def list_snapshots(self, prefix: str) -> list[SandboxSnapshotInfo]:
+        """Every snapshot whose name starts with ``prefix``, each with the name it was taken with.
+
+        Raises ``SandboxSnapshotError`` if the listing fails; never returns a partial listing.
+        """
+        ...
+
+    async def create_from_snapshot(self, snapshot_id: str, spec: SandboxSpec) -> SandboxHandle:
+        """Create a sandbox from a snapshot in place of ``spec``'s image, with the rest of ``spec``.
+
+        Raises ``SandboxSnapshotNotFoundError`` when the provider has no snapshot ``snapshot_id``.
+        """
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxCheckpointPolling(Protocol):
+    """Optional scoped speed-up of command completion checks while a harness is stopped for a checkpoint."""
+
+    def checkpoint_exec_polling(self, handle: SandboxHandle) -> AbstractContextManager[None]:
+        """Wake pending command polls of the sandbox and poll them often until the scope exits."""
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxParkedPolling(Protocol):
+    """Optional scoped hold of command completion checks while a harness in the sandbox is paused for a checkpoint."""
+
+    def parked_exec_polling(self, handle: SandboxHandle) -> AbstractContextManager[None]:
+        """Hold pending command polls of the sandbox without asking it, and ask again once the scope exits."""
+        ...
+
+
+@runtime_checkable
 class SandboxPtySession(Protocol):
     """One live interactive terminal. Async context manager; exit closes it."""
 
@@ -508,8 +672,9 @@ class SandboxPtySession(Protocol):
     async def read(self, *, timeout_s: float | None = None) -> bytes:
         """Return the next output chunk (all terminal output in PTY mode;
         stdout only in pipe mode). ``b""`` means the process exited and the
-        stream is drained. Raises ``TimeoutError`` on timeout and
-        ``SandboxPtyError`` if the session died without exiting.
+        stream is drained. Raises ``TimeoutError`` when this wait expires;
+        that alone does not mean the command failed. Report session death as
+        ``NgFailureEvent``; providers awaiting migration use ``SandboxPtyError``.
         """
         ...
 
@@ -543,7 +708,11 @@ class SandboxPtySession(Protocol):
         ...
 
     async def wait_exit(self, *, timeout_s: float | None = None) -> int:
-        """Block until the process exits and return its exit code."""
+        """Block until the process exits and return its exit code.
+
+        Raises ``TimeoutError`` when this wait expires; that alone does not mean
+        the command failed. Session failures follow the same contract as ``read``.
+        """
         ...
 
     async def run_detached(self, command: str, *, poll_interval_s: float = 15.0) -> tuple[bytes, int | None]:

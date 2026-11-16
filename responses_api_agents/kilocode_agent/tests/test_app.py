@@ -141,7 +141,7 @@ class TestParseKiloEvents:
     def test_empty_stream(self) -> None:
         items, usage = parse_kilo_events("")
         assert items == []
-        assert usage == {"input_tokens": 0, "output_tokens": 0}
+        assert usage == {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None}
 
     def test_malformed_lines_skipped(self) -> None:
         stream = "not json\n" + _events(_text_event("answer is 4")) + "\n{ broken"
@@ -185,6 +185,24 @@ class TestParseKiloEvents:
         _, usage = parse_kilo_events(stream)
         assert usage["input_tokens"] == 105
         assert usage["output_tokens"] == 20
+        assert usage["cached_tokens"] == 5
+
+    @pytest.mark.parametrize(
+        ("cache_reads", "expected"),
+        [([5, 7], 12), ([5, 0], None), ([5, None], None), ([0], None)],
+    )
+    def test_step_finish_cached_tokens_sum_only_measured_cache_reads(self, cache_reads, expected) -> None:
+        stream = _events(
+            *(
+                _step_finish_event(
+                    {"input": 10, "output": 1, "cache": {} if read is None else {"read": read}}, pid=f"prt_{i}"
+                )
+                for i, read in enumerate(cache_reads)
+            )
+        )
+        _, usage = parse_kilo_events(stream)
+        # Kilo stores zero for a cache read the backend did not report, so zero is not a measurement.
+        assert usage["cached_tokens"] == expected
 
     def test_empty_length_stop_warns(self, caplog) -> None:
         # The signature of an output budget that does not fit the model server's context window.
@@ -236,7 +254,7 @@ class TestParseKiloEvents:
             "NeMoGymFunctionCallOutput",
             "NeMoGymResponseOutputMessage",
         ]
-        assert usage == {"input_tokens": 105, "output_tokens": 20}
+        assert usage == {"input_tokens": 105, "output_tokens": 20, "cached_tokens": 5}
 
 
 class TestDeepMerge:
@@ -247,6 +265,14 @@ class TestDeepMerge:
 
 
 class TestEnv:
+    def test_model_output_budget_overrides_inherited_cli_cap(self, monkeypatch) -> None:
+        monkeypatch.setenv("KILO_EXPERIMENTAL_OUTPUT_TOKEN_MAX", "1")
+        agent = _make_agent(
+            max_output_tokens=65536,
+            model_server={"type": "responses_api_models", "name": "policy_model"},
+        )
+        assert agent._env("/tmp/data", "/tmp/config")["KILO_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] == "65536"
+
     def test_env_passthrough_and_isolation(self) -> None:
         agent = _make_agent(openai_api_key="k", openai_base_url="https://x/v1", env={"FOO": "bar", "EMPTY": ""})
         env = agent._env("/tmp/data", "/tmp/config")
@@ -483,6 +509,16 @@ class TestLocalRunOutcome:
     def test_cli_error_event_fails(self, tmp_path) -> None:
         stdout = _events({"type": "error", "error": {"name": "APIError"}})
         self._assert_failed(self._respond(tmp_path, _fake_kilo(tmp_path, stdout=stdout)), "execution error")
+
+    def test_model_http_error_preserves_status(self, tmp_path) -> None:
+        error = {"name": "APIError", "data": {"message": "controlled model failure", "statusCode": 400}}
+        stdout = _events({"type": "error", "error": error})
+        response = self._respond(tmp_path, _fake_kilo(tmp_path, stdout=stdout, exit_code=1))
+        self._assert_failed(response, "controlled model failure")
+        assert json.loads(response.metadata["ng_agent_outcome"]) == {
+            "failure_kind": "model_request_error",
+            "status_code": 400,
+        }
 
     def test_rollout_calls_carry_observations_with_the_run_outcome(self, tmp_path) -> None:
         stdout = _events({"type": "error", "error": {"name": "APIError"}})

@@ -13,11 +13,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.agent_utils.supervisor_client import DEFAULT_CLEANUP_TIMEOUT
+from nemo_gym.agents import DEFAULT_CLEANUP_TIMEOUT
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
-from nemo_gym.utils.server_process import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
+from nemo_gym.utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 from responses_api_agents.hermes_sandboxed_agent import app
 from responses_api_agents.hermes_sandboxed_agent.app import (
     MAX_OUTPUT_BYTES,
@@ -148,6 +148,9 @@ def test_trajectory_contains_actual_reasoning_tools_and_usage():
     assert response.usage.total_tokens == 120
     assert response.usage.input_tokens_details.cached_tokens == 10
     assert response.status == "completed"
+    del result["usage"]["cached_tokens"]
+    unknown = trajectory_response(result, NeMoGymResponseCreateParamsNonStreaming(input="problem"), "real-model")
+    assert unknown.usage.input_tokens_details.cached_tokens is None
 
 
 @pytest.mark.parametrize(

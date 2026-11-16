@@ -30,7 +30,7 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
 )
-from nemo_gym.rollout_collection import _attach_trajectory_record
+from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 from nemo_gym.trajectory import TrajectoryRecord
 from responses_api_agents.simple_agent_with_compaction.app import (
     _CONTEXT_COMPACTION_ROLLOUT_ID_COOKIE,
@@ -1182,7 +1182,7 @@ class TestApp:
         actual_usage_dict = actual_responses_dict["usage"]
         expected_usage_dict = {
             "input_tokens": 101,
-            "input_tokens_details": {"cached_tokens": 0},
+            "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": None},
             "output_tokens": 202,
             "output_tokens_details": {"reasoning_tokens": 0},
             "total_tokens": 303,

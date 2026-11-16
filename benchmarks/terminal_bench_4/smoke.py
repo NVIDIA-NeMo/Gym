@@ -23,11 +23,9 @@ from dotenv import dotenv_values
 from omegaconf import OmegaConf
 
 from nemo_gym.client import GlobalAIOHTTPAsyncClientConfig, ServerClient, http_client
-from nemo_gym.config import global_config
-from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
-from nemo_gym.rollout_collection import _attach_trajectory_record
-from nemo_gym.rollout_health import run_health_checks
-from nemo_gym.server_utils import BaseServerConfig
+from nemo_gym.config import BaseServerConfig, global_config
+from nemo_gym.rollouts import merge_model_call_capture_into_record, run_health_checks
+from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 from resources_servers.terminal_bench_4.app import TerminalBench4Config, TerminalBench4ResourcesServer
 from responses_api_agents.miniswe_sandboxed_agent.app import MiniSWESandboxedAgent, MiniSWESandboxedConfig
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
@@ -113,7 +111,8 @@ async def main(args):
     config.tb4_agent_artifacts_dir = str(args.output / "agent")
     config.tb4_max_steps = args.steps
     agent_name = "terminal_bench_4_" + args.harness
-    profile = OmegaConf.load(root / f"{args.harness}.yaml")
+    # The legacy /run preset: this runner exercises the TB4 resources server's own sessions.
+    profile = OmegaConf.load(root / f"{args.harness}_legacy_agent.yaml")
     del profile["config_paths"]
     config = OmegaConf.merge(config, profile)
     ports = {name: free_port() for name in ["terminal_bench_4", agent_name, "policy_model"]}

@@ -107,6 +107,10 @@ The reference directory must be laid out as
 `<reference_deliverables_dir>/task_<task_id>/` with `finish_params.json` and
 the deliverable files (the same layout the Stirrup agent persists).
 
+A reference directory can also be an `s3://bucket/prefix` URI with that layout. `/verify` then downloads only the
+task it judges, skipping `history.json` and `history.pkl`, into `reference_cache_dir` (default: a directory under
+the temp dir), using the server's AWS credentials.
+
 ## Run multi-stage adaptive ELO (Best Practice - AA v2 Benchmark Method)
 
 Multi-stage ELO estimates the eval model's rating in a sequence of *stages*
@@ -196,6 +200,11 @@ finite. Until then the next stage is not planned:
 - If no row is left to retry (the rest are terminal or out of attempts), the run
   writes its rollouts and then fails, without aggregate metrics. That needs a
   `partial_completion` policy or a data fix, not a resume.
+
+An agent timeout (`agent_timeout`) that kept the agent's answer is the model's
+result: it is never run again, in process or on `--resume`, and it holds no
+battle. In a stage without `partial_completion`, one such row therefore leaves
+the stage short of evidence with nothing to retry, and the run fails as above.
 
 Single-stage runs and the final stage are not held open this way: the run
 reports whatever final-stage rows succeeded and withholds the headline
@@ -287,9 +296,9 @@ comparison mode.
 
 To collect deliverables without judging them, for example for a reference set,
 set `++gdpval_resources_server.resources_servers.gdpval.judge_deliverables=false`.
-`/verify` still persists each deliverable, then returns `reward: 0.0` with
-`mask_sample: true`, so the rows stay in the output with their
-`deliverables_dir` and aggregation skips them.
+`/verify` still persists each deliverable, then returns `reward: 0.0`,
+`mask_sample: true`, and `failure_kind: gdpval:judging_disabled`. The rows stay
+in the output with their `deliverables_dir`, and aggregation skips them.
 
 ### Full run as a single stage
 
@@ -451,7 +460,8 @@ gym eval run \
   by changing `gdpval_pi` in the export above. A run into another run's directory replaces that run's files, and
   re-judging the earlier run then judges the later one's.
 - A Pi run that reaches its `timeout` while still working, before a successful `finish` or `abandon_task_finish`,
-  reports `stop_reason: wall_time`, as Stirrup does, so GDPVal masks it as `agent_timeout` and `--resume` reruns it.
+  reports `stop_reason: wall_time`, as Stirrup does, so GDPVal masks it as `agent_timeout`; the answer it kept is the
+  model's result, so `--resume` does not rerun it.
   A run that reaches its `timeout` after such a call, or after a last reply that ended the run without a tool call, is
   judged as usual. Pi has no turn limit like Stirrup's `agent_max_turns`, so a Pi run that keeps
   calling tools without submitting runs until its `timeout` and stays out of the score, where Stirrup would stop and

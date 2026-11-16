@@ -46,6 +46,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Any, Awaitable, Callable, TypeVar
 
+from nemo_gym.sandbox.attribution import AttributionConfig
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
     SandboxEndpoint,
@@ -184,9 +185,12 @@ class E2BCreateConfig:
     # image references are not themselves valid aliases (registry refs contain
     # '/' and ':', which E2B rejects).
     template_map: dict[str, str] = field(default_factory=dict)
-    # Sandbox lifetime in seconds; E2B kills the sandbox when it elapses.
+    # Sandbox timeout in seconds; the lifecycle policy selects pause or kill.
     # ``SandboxSpec.ttl_s`` overrides it per sandbox.
     timeout_s: float | None = 3600.0
+    # True pauses/resumes; False kills at timeout; None sends no lifecycle. E2B 2.42+ then leaves
+    # the choice to the server, and AgentENV pauses without resume and never evicts the sandbox.
+    auto_resume: bool | None = field(default=False, kw_only=True)
     allow_internet_access: bool = True
     secure: bool = True
     # Outbound traffic rules, passed as the SDK's ``network`` option:
@@ -225,6 +229,8 @@ class E2BCreateConfig:
                     raise ValueError(f"create.network.{key} must be a list of strings")
         if self.custom_extension_params is not None and not isinstance(self.custom_extension_params, Mapping):
             raise TypeError("create.custom_extension_params must be a mapping")
+        if self.auto_resume is not None and not isinstance(self.auto_resume, bool):
+            raise ValueError("create.auto_resume must be a boolean or None")
 
 
 @dataclass(frozen=True)
@@ -281,11 +287,13 @@ class E2BProvider:
         create: E2BCreateConfig | Mapping[str, Any] | None = None,
         exec: E2BExecConfig | Mapping[str, Any] | None = None,
         operations: E2BOperationConfig | Mapping[str, Any] | None = None,
+        attribution: AttributionConfig | Mapping[str, Any] | None = None,
     ) -> None:
         self._connection = _config_from_mapping(E2BConnectionConfig, connection)
         self._create = _config_from_mapping(E2BCreateConfig, create)
         self._exec = _config_from_mapping(E2BExecConfig, exec)
         self._operations = _config_from_mapping(E2BOperationConfig, operations)
+        self._attribution = _config_from_mapping(AttributionConfig, attribution)
         self._warned_resource_specs: set[str] = set()
 
     # ---------------------------------------------------------------- helpers
@@ -304,13 +312,7 @@ class E2BProvider:
         return params
 
     def _request_params(self) -> dict[str, Any]:
-        """Per-request options for calls on an existing sandbox object.
-
-        ``commands.run``, ``files.*`` and ``is_running`` take ``request_timeout``
-        only -- the sandbox already carries the connection config, and handing
-        them the full ``ApiParams`` raises ``TypeError: unexpected keyword
-        argument 'api_key'``.
-        """
+        """Return the request timeout; data-plane methods reject connection parameters."""
         if self._connection.request_timeout_s is None:
             return {}
         return {"request_timeout": self._connection.request_timeout_s}
@@ -460,6 +462,11 @@ class E2BProvider:
             "secure": self._create.secure,
             **self._api_params(),
         }
+        if self._create.auto_resume is not None:
+            kwargs["lifecycle"] = {
+                "on_timeout": "pause" if self._create.auto_resume else "kill",
+                "auto_resume": self._create.auto_resume,
+            }
         if spec.ready_timeout_s is not None:
             # E2B retains this on the returned sandbox connection. Subsequent
             # provider calls explicitly reapply connection.request_timeout_s
@@ -467,8 +474,11 @@ class E2BProvider:
             kwargs["request_timeout"] = float(spec.ready_timeout_s)
         if spec.env:
             kwargs["envs"] = {str(k): str(v) for k, v in spec.env.items()}
-        if spec.metadata:
-            kwargs["metadata"] = {str(k): str(v) for k, v in spec.metadata.items()}
+        # Job attribution (team / user / workload / run) makes every sandbox findable through the list API's
+        # metadata filter. Explicit spec keys win over it.
+        metadata = {**self._attribution.metadata(), **spec.metadata}
+        if metadata:
+            kwargs["metadata"] = {str(k): str(v) for k, v in metadata.items()}
         if self._create.network:
             kwargs["network"] = {key: list(rules) for key, rules in self._create.network.items()}
 
@@ -505,6 +515,10 @@ class E2BProvider:
         }
         if "network" in kwargs:
             body["network"] = {_NETWORK_API_KEYS[key]: rules for key, rules in kwargs["network"].items()}
+        if "lifecycle" in kwargs:
+            # The SDK's wire form of the lifecycle, so both create paths time out alike.
+            body["autoPause"] = kwargs["lifecycle"]["auto_resume"]
+            body["autoResume"] = {"enabled": kwargs["lifecycle"]["auto_resume"]}
         client = e2b.api.client_async.get_api_client(config).get_async_httpx_client()
         response = await client.post("/sandboxes", json=body)
         if response.status_code >= 300:
@@ -599,6 +613,31 @@ class E2BProvider:
         headers["E2b-Sandbox-Port"] = str(port)
         return SandboxEndpoint(endpoint=base_url, headers=headers)
 
+    async def pause(self, handle: SandboxHandle) -> None:
+        """Pause the sandbox through the E2B SDK without replaying failed requests."""
+        if await self._sandbox(handle).pause(**self._request_params()) is False:
+            # The SDK maps every 409 to False. AgentENV sends 409 during a snapshot or fork, which status
+            # reports as paused although the VM then runs again, so no 409 counts as paused.
+            raise RuntimeError(
+                f"e2b sandbox {handle.sandbox_id!r} refused pause with 409 Conflict (already paused or busy); "
+                "check status()"
+            )
+
+    async def resume(self, handle: SandboxHandle) -> None:
+        """Resume the sandbox and replace its SDK handle only after success."""
+        sandbox = self._sandbox(handle)
+        e2b = _require_e2b_sdk()
+        params = self._api_params()
+        # Keep the request timeout the SDK retained from create (ready_timeout_s).
+        params.setdefault("request_timeout", sandbox.connection_config.request_timeout)
+        # Resume restarts the sandbox lifetime, which is the SDK's 300 s default without a timeout.
+        timeout_s = self._create.timeout_s
+        handle.raw = await e2b.AsyncSandbox.connect(
+            handle.sandbox_id,
+            timeout=max(1, math.ceil(timeout_s)) if timeout_s is not None else None,
+            **params,
+        )
+
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         e2b = _require_e2b_sdk()
         sandbox = self._sandbox(handle)
@@ -608,12 +647,15 @@ class E2BProvider:
             if isinstance(exc, type)
         )
         try:
-            running = await sandbox.is_running(**self._request_params())
+            # Control-plane status avoids waking paused sandboxes with a health check.
+            info = await sandbox.get_info(**self._request_params())
         except not_found:
             return SandboxStatus.STOPPED
         except Exception:  # noqa: BLE001 - status must not raise for transient issues
             return SandboxStatus.UNKNOWN
-        return SandboxStatus.RUNNING if running else SandboxStatus.STOPPED
+        return {"running": SandboxStatus.RUNNING, "paused": SandboxStatus.PAUSED}.get(
+            info.state, SandboxStatus.UNKNOWN
+        )
 
     async def close(self, handle: SandboxHandle) -> None:
         e2b = _require_e2b_sdk()

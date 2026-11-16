@@ -13,9 +13,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi import HTTPException
 
-from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FAILED, SandboxSession
-from nemo_gym.agent_utils.supervisor_client import SUPERVISOR_FILE
-from nemo_gym.base_responses_api_agent import AgentSessionSetupError
+from nemo_gym.agents import HARNESS_RUNNER_FAILED, SUPERVISOR_FILE, AgentSessionSetupError, SandboxSession
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess

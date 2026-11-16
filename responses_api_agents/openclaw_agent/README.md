@@ -4,7 +4,12 @@ Runs OpenClaw CLI (`openclaw agent --local --json`).
 OpenClaw runs its own tools internally.
 Resources server is used for verifier.
 
-Minimal, meant to be extended, and currently eval-only. 
+Training token-ID capture is off by default. With `model_server`, model calls go to the Gym Model Server under
+the rollout's prefix. Run-level `token_id_capture.enabled: true` and either the agent's `token_id_capture: true`
+or run-level `token_id_capture.all_agents: true` route those calls through capture. Capture also needs a capture
+store and a model backend that returns token IDs (see
+[Training on External Agent Harnesses](https://docs.nvidia.com/nemo/gym/main/tutorials/training-tutorials/external-agent-harnesses)).
+No training capture run has validated this agent.
 
 ## Quick start
 
@@ -54,6 +59,8 @@ Session install/close timeouts default to 600/60 seconds.
 - `max_output_tokens`: most output tokens OpenClaw requests per call for a generated model entry; it
   requests less when its estimate of the input leaves less room in `context_window`. When unset,
   OpenClaw 2026.6.11 uses 8,192.
+- `image_input`: declare image support in sandbox sessions without prompt images (default `false`);
+  prompt images declare it automatically.
 - `workspace_root`: where per-request workspaces are created and deleted
 - `openclaw_agent_id`: passed to `--agent`
 - `thinking`: passed to `--thinking` (off, low, medium, high, ...)
@@ -214,7 +221,15 @@ Sandbox request support is deliberately explicit:
   without the original cookie; reusing its ID for different inputs is rejected. Close accepts the
   explicit ID and episode without a cookie, including after a lost seed response. Closing an
   unknown ID prevents a delayed seed from creating it. Filesystem paths use independent random IDs.
-- A text user prompt, optionally preceded by one system message. Text-part arrays are accepted.
+- One user prompt, optionally preceded by one system message. Text-part arrays are accepted. Sandbox sessions
+  also accept base64 data-URI `input_image` parts, with or without text; local execution rejects images with HTTP 422.
+  Each image occurrence gets a separate file under `<session>/home/.openclaw/media/`, removed on close, so repeated
+  images remain repeated. The adapter appends one `[Image: source: <path>]` line per file after the prompt text.
+  These session-specific paths remain visible to the model. Image order is preserved, but text/image interleaving
+  and the requested `detail` are not. For image-capable sessions, the adapter disables OpenClaw's configurable
+  1200 px resize. OpenClaw 2026.6.11 can still resize or re-encode large images in its native file-loading and
+  byte-limit processing. Exported conversations retain images as data URIs. Completed and output-limit replies
+  must retain every supplied image occurrence; wall-time limits keep their existing behavior.
   Configured `system_prompt`, request `instructions`, and the optional system message are joined
   and prepended to OpenClaw's user prompt. The harness retains its own system prompt.
 - The request `model`, when supplied, must match the configured model.
@@ -235,8 +250,14 @@ Sandbox request support is deliberately explicit:
   same configured-system, request-instructions, input-system order.
 
 Successful and limit-truncated Responses retain reasoning, tool calls/results, and final or partial text.
-Runtime, provider, and upstream model failures raise an error before verification, with transcript
-evidence and failed status retained in the observations returned by close.
+Sandbox sessions forward their invocation ID as `x-session-id`, separately from the rollout URL,
+so capture can attach rejected model attempts without a response ID to the correct invocation.
+
+A terminal assistant model error returns a failed response with its original message, partial
+output, usage, and `ng_agent_outcome`. HTTP errors retain their upstream status as
+`model_request_error`; unrecognized causes remain `unknown`. The environment decides whether
+to verify, retry, or fail using its outcome policy. Runtime, cancellation, and cleanup failures
+still raise errors, with transcript evidence retained by close.
 Usage sums observed assistant model calls, including cache reads/writes and failed final calls.
 Transcript rewrites retaining the same response ID and message count once; synthetic CLI summary
 messages carrying cumulative usage do not count again or override the model's terminal status.
@@ -246,8 +267,8 @@ Auxiliary model calls, such as compaction, are absent from the transcript. A cov
 reported because interrupted compaction need not leave an event. Totals therefore need not equal
 all backend calls. Missing per-call usage and
 unavailable reasoning-token details are also reported as observation gaps; the full branch history is retained.
-An explicit wall or model-output limit returns partial output as `incomplete`; upstream/model errors
-raise HTTP 502 even when a useful patch exists. Do not infer rollout success from reward alone. Close returns the captured observations,
+An explicit wall or model-output limit returns partial output as `incomplete`.
+Do not infer rollout success from reward alone. Close returns the captured observations,
 including salvaged transcript evidence after cancellation.
 
 The supervisor stops live harness-group processes. On timeout or close it also kills, within
@@ -266,17 +287,16 @@ Services must use task-owned files rather than the temporary agent session direc
 adapter-owned file removal, and disconnect before succeeding. Unknown launch outcomes and missing
 or negative termination evidence block verification. Missing evidence remains retryable;
 a final negative receipt permits borrowed connection release while the activation stays failed.
-Successful close receipts remain
-retryable for `session_close_retry_window_seconds` after cleanup (300 seconds by default); traffic
+A successful close fences the session, and a retried close gets the saved reply,
+for `session_close_retry_window_seconds` after cleanup (300 seconds by default); traffic
 and retries do not shorten or extend the window. Stale cookies continue to reject activations after
-receipt expiry and never enter the host CLI path.
+the fence expires and never enter the host CLI path.
 
-The shared `SimpleResponsesAPIAgent` lifecycle owns session identity, serialization, and close
-receipts. `session_lifetime_seconds` has been removed: the episode owner and provider TTL govern
+The shared `SimpleResponsesAPIAgent` lifecycle owns session identity, locks, and fences. `session_lifetime_seconds` has been removed: the episode owner and provider TTL govern
 abandoned-session recovery; there is no adapter timer cancelling active sessions. Setup failures
 whose cleanup fails retain cleanup-only state through `AgentSessionSetupError`.
 `timeout`, `model_timeout_seconds`, `sandbox_install_timeout_seconds`, and `session_close_timeout_seconds` must be positive
-and finite. The shared `session_close_retry_window_seconds` bounds close receipts and tombstones.
+and finite. The shared `session_close_retry_window_seconds` bounds fences and saved replies.
 
 Session state lives in the worker that seeded the session.
 With several agent workers, session routing sends each session's requests to the worker that seeded it.
@@ -284,7 +304,6 @@ Missing evidence or failed release
 retains the session for retry. Releasing a final failed activation does not make it gradable.
 Cached runtime files and preserved task services remain until Resources destroys the sandbox.
 
-This path is eval-only. Working inference does not establish training token-ID/logprob support.
 A tool-and-verifier smoke is required for the actual image/model configuration before review;
 unit tests alone do not establish runtime compatibility or benchmark accuracy. Process/memory/setup
 and close-latency overhead have not been benchmarked at scale.
@@ -296,3 +315,37 @@ It creates a sandbox, runs there, and destroys it on close; the default workdir 
 never triggers a replacement or host execution. With neither access nor a usable
 provider, setup fails. Verifiers that inspect task files must keep using a
 Resources-owned sandbox, since agent-owned sandboxes are gone before verification.
+
+`network_access: model_only` limits an agent-owned sandbox's egress to the model server's host;
+`model_and_tools` also allows the host of each MCP grant. Each allowed host is open on every port. The
+OpenSandbox policy is set when the sandbox is created, so a session that borrows a task sandbox rejects any value
+other than `inherit` (the default, the provider's network), and it cannot be combined with
+`sandbox_config.provider_options.network_policy`. Such a sandbox cannot download the runtime: set
+`sandbox_runtime_dir` to an absolute sandbox path that holds `node/` and `openclaw/` as the installer lays them out.
+Build it into the image with `bash install_openclaw_runtime.sh <dir> <openclaw_version>`; the image also needs `bash`,
+since the session prepare step would otherwise run `apk` or `apt-get`, which the policy blocks. Instead of installing,
+setup checks that the runtime's Node is 22.19.0 or newer, that the CLI runs, and that the package declares
+`openclaw_version` (an exact match), and refuses the seed with a 422 when any of these fails.
+
+Under `model_only`, a required MCP grant is refused at seed with a 422, since the policy would block its host; under
+`model_and_tools`, a grant at an address the sandbox cannot reach, such as loopback, refuses the seed. Under
+`model_only` an optional grant is still written to OpenClaw's configuration and its probe can wait up to 120 seconds
+before it is dropped. The policy is only as strong as the OpenSandbox server's egress mode: in `dns` mode only name
+resolution is filtered, so a hard-coded IP bypasses it; `dns+nft` also enforces it at the IP layer and is needed for
+full isolation. A borrowed sandbox relies on its owner's network policy.
+
+`configs/profiles/benchmark.yaml` is a swappable profile for benchmarks whose Resources server supplies no sandbox,
+such as HLE. It leaves `resources_server.name` unset (`???`), so Gym composes this agent onto the benchmark's own
+agent instance, and each session creates its own sandbox through the `sandbox` provider. That sandbox must reach the
+model server by address, so the profile sets `use_absolute_ip: true` and keeps the head server and the agent itself
+on `127.0.0.1`: the head server's config endpoint is unauthenticated, and an unseeded request to the agent runs the
+harness on the Gym host. The profile sets the sandbox's lifetime (`ttl_s`), which OpenSandbox otherwise ends after
+10 minutes. Supply the image in `sandbox_config.image`; set other `sandbox_config` keys under the profile's own
+instance name, `openclaw_agent.responses_api_agents.openclaw_agent.sandbox_config`.
+It sets `network_access: model_only`, so the sandbox reaches only the model server; a search preset
+overrides it with `model_and_tools`. A restricted sandbox cannot download OpenClaw, so supply
+`sandbox_runtime_dir`.
+
+HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: their judges serve no tools, so their
+Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
+benchmark whose Resources server serves its tools over direct HTTP does not pair with it.

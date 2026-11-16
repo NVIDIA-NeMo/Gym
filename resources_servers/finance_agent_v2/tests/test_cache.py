@@ -262,8 +262,29 @@ class TestCachedParseHtmlPage:
         url = "https://www.sec.gov/Archives/edgar/data/320193/000032019324000123/aapl-20240928.htm"
         path = tool._doc_path(url)
         assert path is not None
-        # sec_filings/<cik_padded>/<accession>/<filename>.txt
-        assert path.parts[-3:] == ("0000320193", "000032019324000123", "aapl-20240928.htm.txt")
+        assert path.relative_to(tmp_path).parts == (
+            "filings",
+            "0000320193",
+            "000032019324000123",
+            "aapl-20240928.htm.txt",
+        )
+
+    def test_sec_doc_paths_do_not_collide(self, tmp_path):
+        tool = CachedParseHtmlPage(ToolCache(tmp_path))
+        base = "https://www.sec.gov/Archives/edgar/data/320193/000032019324000123"
+        paths = {
+            tool._doc_path(f"{base}/exhibits/ex-21.htm"),
+            tool._doc_path(f"{base}/exhibits_ex-21.htm"),
+            tool._doc_path(f"{base}/AAPL%20Report.HTM"),
+            tool._doc_path(f"{base}/AAPL_20Report.HTM"),
+        }
+        assert None not in paths
+        assert len(paths) == 4
+        assert all(p.parent == tmp_path / "filings" / "0000320193" / "000032019324000123" for p in paths)
+
+    def test_sec_accession_directory_is_not_cached(self, tmp_path):
+        tool = CachedParseHtmlPage(ToolCache(tmp_path))
+        assert tool._doc_path("https://www.sec.gov/Archives/edgar/data/320193/000032019324000123/") is None
 
     def test_non_sec_url_not_cached(self, tmp_path):
         cache = ToolCache(tmp_path)

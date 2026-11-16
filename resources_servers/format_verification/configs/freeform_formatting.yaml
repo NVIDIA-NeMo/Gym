@@ -33,6 +33,9 @@ freeform_formatting_environment_server:
   environment_servers:
     single_agent_turn_legacy:
       entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: freeform_formatting
       agent_server:
         type: responses_api_agents
         name: freeform_formatting_simple_agent

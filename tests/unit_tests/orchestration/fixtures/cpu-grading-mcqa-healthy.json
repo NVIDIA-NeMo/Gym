@@ -1,0 +1,391 @@
+{
+  "materialized": [
+    {
+      "_ng_task_index": 0,
+      "_ng_rollout_index": 0,
+      "_ng_collected_task_id": "0"
+    }
+  ],
+  "results": [
+    {
+      "_ng_task_index": 0,
+      "_ng_rollout_index": 0,
+      "_ng_attempt_index": 0,
+      "failure_kind": null,
+      "_line": 0,
+      "reward": 1.0,
+      "mask_sample": false,
+      "_ng_collected_grading_binding": "f44f187c06b829414b53c0a017cc03b6818a585c724a42bfa1f89a9c1dbeda44",
+      "response": {
+        "object": "response",
+        "id": "resp_scripted_1",
+        "status": "completed",
+        "output": [
+          {
+            "type": "message",
+            "role": "assistant",
+            "status": "completed"
+          }
+        ]
+      },
+      "ng_trial_observations": {
+        "task_id": "0",
+        "rollout_id": "0-0",
+        "invocations": [
+          {
+            "invocation_id": "root",
+            "status": "completed",
+            "in_session": false,
+            "verification_skipped": false,
+            "error_type": null,
+            "parent_invocation_id": null,
+            "stop_reason": null,
+            "model_calls": [
+              {
+                "model_call_id": null,
+                "response_id": "resp_scripted_1",
+                "model_ref": {
+                  "type": "responses_api_models",
+                  "name": "model"
+                }
+              }
+            ]
+          }
+        ],
+        "verifier_invocations": [
+          {
+            "invocation_id": "verify-a188f19c8d794e77bbae490042027a9c",
+            "status": "completed",
+            "failure_kind": null,
+            "model_calls": [],
+            "grading_operations": [
+              {
+                "operation_id": "grade-bbef44c2491649afb24ebd10d87ad6d8",
+                "kind": "programmatic_calculation",
+                "outcome": "completed",
+                "result_binding_sha256": "f44f187c06b829414b53c0a017cc03b6818a585c724a42bfa1f89a9c1dbeda44",
+                "dependencies": []
+              }
+            ]
+          }
+        ],
+        "model_calls": [
+          {
+            "model_call_id": "cc9b71700e2e47bcb280552c053e1ba9",
+            "response_metadata": {
+              "response_id": "resp_scripted_1",
+              "status_code": 200,
+              "response_status": "completed",
+              "error_category": null,
+              "model_ref": {
+                "type": "responses_api_models",
+                "name": "model"
+              },
+              "model_operations": [
+                {
+                  "operation_id": "db88801997f34c978b960e86a4abc542",
+                  "outcome": "completed",
+                  "final_attempt_id": "db88801997f34c978b960e86a4abc542-1",
+                  "failure_id": null,
+                  "http_attempts": 1,
+                  "transport_failures": 0
+                }
+              ],
+              "failure_report": {
+                "failure_id": null,
+                "omitted": false,
+                "events": {}
+              }
+            },
+            "output_items": [
+              {
+                "type": "message",
+                "role": "assistant",
+                "status": "completed"
+              }
+            ],
+            "input_items": [
+              {}
+            ]
+          }
+        ],
+        "turns": [
+          {
+            "invocation_id": "root",
+            "task_id": "0",
+            "rollout_id": "0-0",
+            "turn_no": 1,
+            "step_count": 0,
+            "model_calls": [
+              {
+                "model_call_id": null,
+                "response_id": "resp_scripted_1",
+                "model_ref": {
+                  "type": "responses_api_models",
+                  "name": "model"
+                }
+              }
+            ]
+          }
+        ],
+        "tool_calls": [],
+        "tool_call_count": 0,
+        "gaps": [
+          {
+            "code": "resolution_unavailable"
+          }
+        ]
+      },
+      "agent_ref": {
+        "name": "simple"
+      },
+      "_ng_environment_server": "simple_env",
+      "_ng_result_type": "legacy_agent"
+    }
+  ],
+  "failures": [],
+  "resubmit_offset": 0,
+  "infra_retries_used": null,
+  "infra_retries_state": "absent",
+  "walltime_used_s": null,
+  "walltime_state": "absent",
+  "job_chain": [],
+  "chain_incomplete": false,
+  "accounted_walltime_s": null,
+  "quality": {
+    "source_matches": true,
+    "rollouts": [
+      "rollouts.jsonl"
+    ],
+    "artifacts": {
+      "expected": 1,
+      "missing": 0,
+      "healthy": true,
+      "unhealthy_reasons": [],
+      "partial": null
+    },
+    "verdicts": {
+      "healthy": 1,
+      "unhealthy": 0,
+      "unobserved": 0
+    },
+    "issues": {
+      "check_execution_error": 0,
+      "record_unreadable": 0,
+      "rollout_duplicate_identity": 0,
+      "rollout_missing_agent_turns": 0,
+      "rollout_ended_on_failed_model_call": 0,
+      "agent_turn_hollow": 0,
+      "model_call_zero_completion_tokens": 0,
+      "model_call_missing_token_counts": 0,
+      "trajectory_capture_mismatch": 0,
+      "rollout_token_count_mismatch": 0,
+      "model_call_runaway_generation": 0,
+      "task_consistently_unhealthy": 0,
+      "task_no_successful_model_calls": 0,
+      "run_excessive_failures": 0
+    },
+    "coverage": {
+      "check_execution_error": {
+        "evaluated": 1,
+        "unobserved": 0,
+        "ignored": 0
+      },
+      "record_unreadable": {
+        "evaluated": 1,
+        "unobserved": 0,
+        "ignored": 0
+      },
+      "rollout_duplicate_identity": {
+        "evaluated": 1,
+        "unobserved": 0,
+        "ignored": 0
+      },
+      "rollout_missing_agent_turns": {
+        "evaluated": 1,
+        "unobserved": 0,
+        "ignored": 0
+      },
+      "rollout_ended_on_failed_model_call": {
+        "evaluated": 1,
+        "unobserved": 0,
+        "ignored": 0
+      },
+      "agent_turn_hollow": {
+        "evaluated": 1,
+        "unobserved": 0,
+        "ignored": 0
+      },
+      "model_call_zero_completion_tokens": {
+        "evaluated": 1,
+        "unobserved": 0,
+        "ignored": 0
+      },
+      "model_call_missing_token_counts": {
+        "evaluated": 1,
+        "unobserved": 0,
+        "ignored": 0
+      },
+      "trajectory_capture_mismatch": {
+        "evaluated": 1,
+        "unobserved": 0,
+        "ignored": 0
+      },
+      "rollout_token_count_mismatch": {
+        "evaluated": 1,
+        "unobserved": 0,
+        "ignored": 0
+      },
+      "model_call_runaway_generation": {
+        "evaluated": 1,
+        "unobserved": 0,
+        "ignored": 0
+      },
+      "task_consistently_unhealthy": {
+        "evaluated": 0,
+        "unobserved": 1,
+        "ignored": 0
+      },
+      "task_no_successful_model_calls": {
+        "evaluated": 1,
+        "unobserved": 0,
+        "ignored": 0
+      },
+      "run_excessive_failures": {
+        "evaluated": 0,
+        "unobserved": 1,
+        "ignored": 0
+      }
+    },
+    "ignored_checks": [],
+    "responses": {
+      "rollouts": 1,
+      "unknown": 0,
+      "selected": 1,
+      "faulted": 0,
+      "duplicated": 0
+    },
+    "provenance": {
+      "resolved_config": "read",
+      "route_failures_to_sidecar": null,
+      "servers": {
+        "mcqa": {
+          "kind": "resources_servers",
+          "implementation": "mcqa"
+        },
+        "simple": {
+          "kind": "responses_api_agents",
+          "implementation": "simple_agent",
+          "resources_server": "mcqa",
+          "skip_verification": null
+        },
+        "simple_env": {
+          "kind": "environment_servers",
+          "implementation": "legacy_agent"
+        }
+      },
+      "mlflow": {
+        "configured": false
+      },
+      "rollout_artifact_digests": [
+        {
+          "rollouts_jsonl_fpath": "2410c79c6c087288631e86c41ff2a5ca6f81ec4825a9d454f8cd6a162520d754",
+          "failures_jsonl_fpath": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "materialized_inputs_jsonl_fpath": "44fb0011d6bfe16427a53a6c077fb0ef0d66a4251a33812af6920806f5c6e510",
+          "resolved_config_yaml_fpath": "272c68b1e6f03f6972325369f529c173c84666172595cdc78141a4c7f72a0433"
+        }
+      ]
+    },
+    "observed_upstream_recovery": null,
+    "observed_runtime": {
+      "invocation_observations": 1,
+      "in_session": {
+        "true": 0,
+        "false": 1,
+        "absent": 0
+      },
+      "verification_skipped": {
+        "true": 0,
+        "false": 1,
+        "absent": 0
+      },
+      "row_elapsed_s": {
+        "sum_observed": 0.08273044100496918,
+        "absent": 0
+      }
+    },
+    "observed_request_effort": {
+      "http_attempts": {
+        "sum_observed": 1,
+        "operations_observed": 1,
+        "operations_unknown": 0
+      },
+      "transport_failures": {
+        "sum_observed": 0,
+        "operations_observed": 1,
+        "operations_unknown": 0
+      },
+      "retry_wait_s": {
+        "sum_observed": 0.0,
+        "operations_observed": 1,
+        "operations_unknown": 0
+      },
+      "request_elapsed_ms": {
+        "sum_observed": 1.0545689146965742,
+        "operations_observed": 1,
+        "operations_unknown": 0
+      }
+    },
+    "ended_on_failed_model_call": 0,
+    "verification_skipped": {
+      "true": 0,
+      "false": 0,
+      "absent": 1
+    },
+    "context_window_exceeded": {
+      "true": 0,
+      "false": 0,
+      "absent": 1
+    }
+  },
+  "score": null,
+  "mlflow": {
+    "live_run_id": null,
+    "receipt": null
+  },
+  "managed_store": true,
+  "source_digests": {
+    "rollouts.jsonl": "2410c79c6c087288631e86c41ff2a5ca6f81ec4825a9d454f8cd6a162520d754",
+    "rollouts_resolved_config.yaml": "272c68b1e6f03f6972325369f529c173c84666172595cdc78141a4c7f72a0433",
+    "rollouts_aggregate_metrics.json": "7d6c1b7403a48a608691e508c93c5852762b276c4872249b37cbbefe3f1c3f8b",
+    "rollouts_failures.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rollouts_materialized_inputs.jsonl": "44fb0011d6bfe16427a53a6c077fb0ef0d66a4251a33812af6920806f5c6e510",
+    "quality_summary.json": "cbdf0d83a136b5d4f3cc76e85bbed1216f94834cc96ab1eac2b0377bb49d8f9d",
+    "rollouts_manifest.json": "ce274bc1c05e53c7b081182b64b9eea3931fdc157a2efca5aa77b22b04caf8c1",
+    "rollouts_attempts.jsonl": null,
+    "rollouts_resubmit_offset": null,
+    "rollouts_coverage.json": "c0178609550f41866bbbb229f6bf560dfc7c1b83c53dd06a17c92c11b45de487",
+    "../.gym_infra_retries": null,
+    "../.gym_accumulated_walltime": null,
+    "../.gym_job_chain": null
+  },
+  "source_job_identity": [
+    "/synthetic/job",
+    64513,
+    30320896
+  ],
+  "managed_selection": [
+    {
+      "identity": [
+        0,
+        0
+      ],
+      "attempts": 0,
+      "max_attempts": 3,
+      "pending": false,
+      "reserved": true
+    }
+  ],
+  "managed_reader_error": null,
+  "checkpoint_enabled": false
+}

@@ -4,8 +4,7 @@ import json
 
 import pytest
 
-from nemo_gym.sandbox import AsyncSandbox, SandboxCreateError, SandboxSpec
-from nemo_gym.sandbox.providers.registry import list_providers
+from nemo_gym.sandbox import AsyncSandbox, SandboxCreateError, SandboxSpec, list_providers
 from resources_servers.critpt_custom_grader.tests.support import (
     MISSING_FILE,
     VALUE,

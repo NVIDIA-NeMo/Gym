@@ -17,7 +17,7 @@ from environment_servers.swe_together.coverage import (
     parse_json,
 )
 from environment_servers.swe_together.model_client import AuxiliaryModel
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,

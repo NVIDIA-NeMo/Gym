@@ -31,7 +31,7 @@ import pytest
 from checkpoint_deployment import Deployment, GymHTTP, weather_episode
 from test_checkpoint_e2e import deploy, gym_http_client, wait_until  # noqa: F401
 
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime._checkpoint import coordination
 from nemo_gym.server_runtime._checkpoint.coordination import CoordinationError
 from nemo_gym.server_runtime._checkpoint.store import read_participant_state

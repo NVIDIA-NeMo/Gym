@@ -14,8 +14,7 @@ import pytest
 from aiohttp import web
 from fastapi import Request
 
-from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_SCRIPT, shell_assignments
-from nemo_gym.agent_utils.supervisor_client import SUPERVISOR_SCRIPT
+from nemo_gym.agents import HARNESS_RUNNER_SCRIPT, SUPERVISOR_SCRIPT, shell_assignments
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.openclaw_agent.tests.test_sandbox import seed, setup, staged  # noqa: F401
 

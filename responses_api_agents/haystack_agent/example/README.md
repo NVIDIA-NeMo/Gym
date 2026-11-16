@@ -25,11 +25,11 @@ project-management, and analytics tools in addition to these local tools.
 
 ## Setup
 
-Install the Haystack Agent requirements and the optional Tavily integration:
+Install the Haystack Agent and its locked optional Tavily integration:
 
 ```bash
 cd responses_api_agents/haystack_agent
-uv pip install -r requirements.txt tavily-haystack
+uv sync --locked --extra example-tools
 export TAVILY_API_KEY=<your-key>
 ```
 
@@ -42,7 +42,7 @@ the usual Gym settings, including `policy_base_url`, `policy_api_key`, and
 From `responses_api_agents/haystack_agent`, run:
 
 ```bash
-uv run python example/build_pipeline.py
+uv run --locked --extra example-tools python example/build_pipeline.py
 ```
 
 This overwrites `example/example_pipeline_with_tools.yaml`. Regenerate it after
@@ -53,7 +53,11 @@ changing the Agent or either local tool.
 Set `pipeline_yaml` in a Gym configuration. Paths are relative to
 `responses_api_agents/haystack_agent`.
 
+Select the same extra when Gym syncs the agent environment at startup:
+
 ```yaml
+component_extras:
+  responses_api_agents/haystack_agent: [example-tools]
 responses_api_agents:
   haystack_agent:
     resources_server:
