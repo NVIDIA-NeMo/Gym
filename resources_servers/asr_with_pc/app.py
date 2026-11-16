@@ -15,8 +15,8 @@
 """ASR-with-PC resources server: deterministic WER scoring for audio benchmarks.
 
 Generic across the audio-WER benchmark suite (LibriSpeech-PC, asr-leaderboard,
-numb3rs, MUSAN, etc.). Dispatches per row on ``task_type`` so the server can
-score whichever WER variant a benchmark needs:
+numb3rs, MUSAN, FLEURS, etc.). Dispatches per row on ``task_type`` so the
+server can score whichever WER variant a benchmark needs:
 
   * ``ASR-PC`` (default): full WER + WER_C + WER_PC + PER.
   * ``ASR``: standard WER only (Whisper-normalized, lowercased, no
@@ -28,25 +28,55 @@ score whichever WER variant a benchmark needs:
     per-reference WER against each entry in the request's
     ``reference_fields`` (used by Numb3rs for dual ``text_tn`` /
     ``text_itn`` references).
+  * ``OpenASR``: Hugging Face Open ASR Leaderboard English protocol. Rows that
+    carry ``parent_id`` / ``chunk_index`` are chunks of one session and are
+    merged into a single hypothesis at aggregation time.
+  * ``Multilingual-ASR``: language-aware WER, or CER with ``use_cer``. Reads
+    ``language`` (required), ``use_cer``, ``remove_diacritics``,
+    ``normalize_compound``, ``merge_compounds`` and ``cer_whitespace_mode``
+    from the request.
+
+The first four are unchanged from the original server. ``OpenASR`` and
+``Multilingual-ASR`` report additive edit counts (``*_errors`` / ``*_ref_words``)
+so ``compute_metrics`` yields corpus-level rates, plus per-profile / subset /
+language breakdowns, instead of averaging utterance error rates.
 
 ``task_type`` defaults to the server-level config value but may be
 overridden per row via the verify request body's ``task_type`` field.
 """
 
+import asyncio
 import re
-from typing import Any, Dict, List, Literal, Optional
+from functools import partial
+from pathlib import Path
+from typing import Any, Callable, ClassVar, Dict, List, Literal, Optional
+from unittest.mock import MagicMock
 
+import jiwer
 import numpy as np
 from pydantic import ConfigDict
+from whisper_normalizer.english import EnglishTextNormalizer
 
-from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.client import ServerClient
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.metrics import compute_aggregate_metrics, compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import VerifierFixture
+from resources_servers.asr_with_pc.numb3rs_normalizer import normalize_numb3rs_text
+from resources_servers.asr_with_pc.speech_metrics import (
+    _wer_counts,
+    cleanup_generation_loops,
+    evaluate_multilingual_asr,
+    evaluate_open_asr,
+    normalize_whitespace,
+)
 
 
 # Hallucination detection: chars/min above this rate signal repetition/hallucination.
@@ -58,10 +88,6 @@ HALLUCINATION_CHAR_RATE_THRESHOLD = 1500.0
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def normalize_whitespace(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
-
-
 def split_tokens(text: str) -> List[str]:
     return re.findall(r"\w+|[^\w\s]", text)
 
@@ -70,12 +96,13 @@ def extract_punctuation(text: str) -> List[str]:
     return [c for c in text if not c.isalnum() and not c.isspace()]
 
 
+_ENGLISH_NORMALIZER = EnglishTextNormalizer()
+
+
 def preprocess_asr_text(text: str) -> str:
     """Whisper text normalizer + lowercase + whitespace collapse."""
-    from whisper_normalizer.english import EnglishTextNormalizer
-
     text = text.lower()
-    text = EnglishTextNormalizer()(text)
+    text = _ENGLISH_NORMALIZER(text)
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -126,8 +153,6 @@ def evaluate_asr_pc(reference: str, hypothesis: str) -> Dict[str, Any]:
     resource server keeps those on the verify response so corpus-level
     aggregation can re-run jiwer over the whole corpus.
     """
-    import jiwer
-
     ref_pc = normalize_whitespace(reference)
     hyp_pc = normalize_whitespace(hypothesis)
     ref_pc_tok = " ".join(split_tokens(ref_pc))
@@ -157,16 +182,23 @@ def evaluate_asr_pc(reference: str, hypothesis: str) -> Dict[str, Any]:
     }
 
 
-def evaluate_asr(reference: str, hypothesis: str) -> Dict[str, Any]:
-    """Standard ASR WER (Whisper-normalized) — no PC scoring.
+def row_normalizer(row: Dict[str, Any]) -> Callable[[str], str]:
+    """The text normalizer a row asks for: Whisper's by default, or the category-based Numb3rs one."""
+    if row.get("normalization") == "numb3rs":
+        return partial(normalize_numb3rs_text, category=row["category"])
+    return preprocess_asr_text
+
+
+def evaluate_asr(
+    reference: str, hypothesis: str, normalize: Callable[[str], str] = preprocess_asr_text
+) -> Dict[str, Any]:
+    """Standard ASR WER (Whisper-normalized unless ``normalize`` is given) — no PC scoring.
 
     Used by benchmarks that only score standard WER (e.g. asr-leaderboard).
     Empty references are dropped (HF Open ASR Leaderboard convention).
     """
-    import jiwer
-
-    ref = preprocess_asr_text(reference)
-    hyp = preprocess_asr_text(hypothesis)
+    ref = normalize(reference)
+    hyp = normalize(hypothesis)
     if not ref:
         return {
             "wer": None,
@@ -176,12 +208,14 @@ def evaluate_asr(reference: str, hypothesis: str) -> Dict[str, Any]:
         }
     if not hyp:
         hyp = "empty"
-    wer = jiwer.wer(ref, hyp)
+    # Word-error counts let compute_metrics report corpus WER per profile and subset.
+    counts = _wer_counts(ref, hyp)
     return {
-        "wer": wer,
-        "is_correct": wer < 0.5,
+        "wer": counts["wer"],
+        "is_correct": counts["wer"] < 0.5,
         "text": ref,
         "pred_text": hyp,
+        **{key: value for key, value in counts.items() if key != "wer"},
     }
 
 
@@ -224,10 +258,20 @@ def _suffix_for_reference_field(field_name: str) -> str:
 # Pydantic schemas
 # ──────────────────────────────────────────────────────────────────────────────
 
-_TASK_TYPES = Literal["ASR-PC", "ASR", "Hallucination", "ASR_LEADERBOARD"]
+_TASK_TYPES = Literal[
+    "ASR-PC",
+    "ASR",
+    "OpenASR",
+    "Multilingual-ASR",
+    "Hallucination",
+    "ASR_LEADERBOARD",
+]
 
 
 class ASRWithPCConfig(BaseResourcesServerConfig):
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
+    # Opt-in: collapse runaway repetition in the hypothesis before scoring (the model card applies it to transcripts).
+    cleanup_generation_loops: bool = False
     # Default scoring task type; can be overridden per-row via task_type on the
     # request.
     task_type: _TASK_TYPES = "ASR-PC"
@@ -244,6 +288,20 @@ class ASRWithPCVerifyRequest(BaseVerifyRequest):
     task_type: Optional[_TASK_TYPES] = None
     audio_duration: Optional[float] = None
     reference_fields: Optional[List[str]] = None
+    # ASR_LEADERBOARD: "numb3rs" scores with the category-based Numb3rs normalizer (needs a ``category`` field).
+    normalization: Optional[Literal["numb3rs"]] = None
+    benchmark_profile: Optional[str] = None
+    # OpenASR: chunks of one session share ``parent_id`` and are ordered by ``chunk_index``.
+    parent_id: Optional[str] = None
+    chunk_index: Optional[int] = None
+    # Multilingual-ASR. ``None`` selects the default: diacritics removed, compounds
+    # normalized unless the language is English, compounds not merged.
+    language: Optional[str] = None
+    use_cer: bool = False
+    remove_diacritics: Optional[bool] = None
+    normalize_compound: Optional[bool] = None
+    merge_compounds: Optional[bool] = None
+    cer_whitespace_mode: str = "keep"
 
 
 class ASRWithPCVerifyResponse(BaseVerifyResponse):
@@ -253,11 +311,22 @@ class ASRWithPCVerifyResponse(BaseVerifyResponse):
 
     text: str = ""
     pred_text: str = ""
-    wer: float = 0.0
-    wer_c: float = 0.0
-    wer_pc: float = 0.0
-    per: float = 0.0
-    is_correct: bool = False
+    # Hypothesis after the optional loop guardrail, before any normalization.
+    raw_pred_text: str = ""
+    # ``None`` marks an empty reference (the row is excluded from corpus rates).
+    wer: Optional[float] = 0.0
+    wer_c: Optional[float] = 0.0
+    wer_pc: Optional[float] = 0.0
+    per: Optional[float] = 0.0
+    is_correct: Optional[bool] = False
+    # Additive edit counts of the edit-count task types (OpenASR, Multilingual-ASR); ``cer_*`` follows the same
+    # pattern.
+    wer_errors: Optional[int] = None
+    wer_ref_words: Optional[int] = None
+    wer_substitutions: Optional[int] = None
+    wer_insertions: Optional[int] = None
+    wer_deletions: Optional[int] = None
+    cer: Optional[float] = None
     # Normalized strings retained for corpus-level aggregation in compute_metrics().
     ref_pc_tok: str = ""
     hyp_pc_tok: str = ""
@@ -307,6 +376,11 @@ def _empty_score_record(
     }
 
 
+# The PC variants do not apply to the edit-count task types: leaving them unset keeps
+# them out of the per-sample means and corpus aggregates.
+_PC_NOT_APPLICABLE = {"wer_c": None, "wer_pc": None, "per": None}
+
+
 def _asr_to_response_scores(asr: Dict[str, Any]) -> Dict[str, Any]:
     """Adapt ``evaluate_asr``'s output to the canonical response score dict.
 
@@ -319,7 +393,7 @@ def _asr_to_response_scores(asr: Dict[str, Any]) -> Dict[str, Any]:
         text=asr["text"],
         pred_text=asr["pred_text"],
         wer=asr["wer"] or 0.0,
-    )
+    ) | {key: value for key, value in asr.items() if key.startswith("wer_")}
 
 
 class ASRWithPCResourcesServer(SimpleResourcesServer):
@@ -327,6 +401,8 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
 
     async def verify(self, body: ASRWithPCVerifyRequest) -> ASRWithPCVerifyResponse:
         hypothesis = _extract_assistant_text(body.response).strip()
+        if self.config.cleanup_generation_loops:
+            hypothesis = cleanup_generation_loops(hypothesis)
         reference = (body.expected_answer or "").strip()
 
         # Per-row override beats the server-level default.
@@ -341,17 +417,40 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
             scores = evaluate_asr_pc(reference, hypothesis)
         elif task_type == "ASR":
             scores = _asr_to_response_scores(evaluate_asr(reference, hypothesis))
+        elif task_type == "OpenASR":
+            scores = {**_PC_NOT_APPLICABLE, **evaluate_open_asr(reference, hypothesis)}
+        elif task_type == "Multilingual-ASR":
+            if not body.language:
+                raise ValueError("Multilingual-ASR rows require a language")
+            scores = {
+                **_PC_NOT_APPLICABLE,
+                **evaluate_multilingual_asr(
+                    reference,
+                    hypothesis,
+                    language=body.language,
+                    use_cer=body.use_cer,
+                    remove_diacritics=body.remove_diacritics is not False,
+                    normalize_compound=(
+                        body.language.split("_", 1)[0] != "en"
+                        if body.normalize_compound is None
+                        else body.normalize_compound
+                    ),
+                    merge_compounds=bool(body.merge_compounds),
+                    cer_whitespace_mode=body.cer_whitespace_mode,
+                ),
+            }
         elif task_type == "ASR_LEADERBOARD":
-            scores = _asr_to_response_scores(evaluate_asr(reference, hypothesis))
             request_fields = body.model_dump()
+            normalize = row_normalizer(request_fields)
+            scores = _asr_to_response_scores(evaluate_asr(reference, hypothesis, normalize))
             for ref_field in body.reference_fields or []:
                 if ref_field not in request_fields:
                     raise ValueError(f"ASR_LEADERBOARD: reference_fields entry {ref_field!r} not found on request")
-                ref_metrics = evaluate_asr(request_fields[ref_field] or "", hypothesis)
+                ref_metrics = evaluate_asr(request_fields[ref_field] or "", hypothesis, normalize)
                 suffix = _suffix_for_reference_field(ref_field)
                 extra_fields[f"wer_{suffix}"] = ref_metrics["wer"]
                 extra_fields[f"is_correct_{suffix}"] = ref_metrics["is_correct"]
-        elif task_type == "Hallucination":
+        else:  # "Hallucination"; the Literal type rejects any other value.
             hall = evaluate_hallucination(reference, hypothesis, body.audio_duration)
             scores = _empty_score_record(
                 is_correct=bool(hall["is_correct"]),
@@ -360,26 +459,16 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
             )
             extra_fields["hallucination_rate"] = hall["hallucination_rate"]
             extra_fields["char_rate"] = hall["char_rate"]
-        else:
-            raise ValueError(
-                f"Unsupported task_type: {task_type!r}. Use one of: ASR-PC, ASR, Hallucination, ASR_LEADERBOARD."
-            )
 
+        # Score fields missing from the evaluator keep the empty-record defaults.
+        scores = {**_empty_score_record(), **scores, **extra_fields}
         return ASRWithPCVerifyResponse(
-            **body.model_dump(),
-            reward=1.0 if scores["is_correct"] else 0.0,
-            text=scores["text"],
-            pred_text=scores["pred_text"],
-            wer=scores["wer"],
-            wer_c=scores["wer_c"],
-            wer_pc=scores["wer_pc"],
-            per=scores["per"],
-            is_correct=scores["is_correct"],
-            ref_pc_tok=scores["ref_pc_tok"],
-            hyp_pc_tok=scores["hyp_pc_tok"],
-            ref_c=scores["ref_c"],
-            hyp_c=scores["hyp_c"],
-            **extra_fields,
+            **{
+                **body.model_dump(),
+                **scores,
+                "reward": 1.0 if scores["is_correct"] else 0.0,
+                "raw_pred_text": hypothesis,
+            }
         )
 
     # ──────────────────────────────────────────────────────────────────────
@@ -396,88 +485,170 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
         """
         pred = (r.get("pred_text") or "").strip()
         scores = {
-            "accuracy": float(r.get("is_correct", False)),
-            "per": float(r.get("per", 0.0)),
+            "accuracy": float(bool(r.get("is_correct", False))),
             "no_answer": 0.0 if pred else 1.0,
         }
+        if r.get("per") is not None:
+            scores["per"] = float(r["per"])
         if r.get("hallucination_rate") is not None:
             scores["hallucination_rate"] = float(r["hallucination_rate"])
         return scores
 
-    def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
-        """Per-rollout pass@k + WER aggregation.
+    @staticmethod
+    def _merge_open_asr_chunks(tasks: List[List[Dict[str, Any]]]) -> List[List[Dict[str, Any]]]:
+        """Collapse chunked Open ASR rows to one parent-session task.
 
-        The headline standard ``wer`` is **corpus-level** via
-        ``jiwer.wer(refs, hyps)`` over the whole eval set; ``wer_c`` /
-        ``wer_pc`` / ``per`` are **mean-of-per-sample**. Per-reference
-        ``wer_<suffix>`` (ASR_LEADERBOARD) is computed corpus-level over
-        the per-row ``text_<suffix>`` references.
+        Earnings22-AA references are session transcripts while inference runs
+        on VAD chunks. Concatenating raw hypotheses in ``chunk_index`` order
+        before normalization mirrors the leaderboard protocol.
         """
-        import jiwer
+        regular_tasks: List[List[Dict[str, Any]]] = []
+        grouped: Dict[tuple[str, str], List[List[Dict[str, Any]]]] = {}
+        for rollouts in tasks:
+            if not rollouts or rollouts[0].get("parent_id") is None:
+                regular_tasks.append(rollouts)
+                continue
+            parent_ids = {str(rollout.get("parent_id")) for rollout in rollouts}
+            chunk_indices = {int(rollout.get("chunk_index")) for rollout in rollouts}
+            subsets = {str(rollout.get("subset_for_metrics", "_all_")) for rollout in rollouts}
+            if len(parent_ids) != 1 or len(chunk_indices) != 1 or len(subsets) != 1:
+                raise ValueError("Open ASR repeats for one chunk must share parent_id, chunk_index, and subset")
+            grouped.setdefault((subsets.pop(), parent_ids.pop()), []).append(rollouts)
 
+        for (subset, parent_id), chunk_tasks in sorted(grouped.items()):
+            chunk_tasks.sort(key=lambda task: int(task[0]["chunk_index"]))
+            repeat_counts = {len(task) for task in chunk_tasks}
+            if len(repeat_counts) != 1:
+                raise ValueError(f"Inconsistent repeat counts across Open ASR chunks for {parent_id}")
+            merged_rollouts: List[Dict[str, Any]] = []
+            for attempt in range(repeat_counts.pop()):
+                chunks = [task[attempt] for task in chunk_tasks]
+                references = {str(chunk.get("expected_answer") or "").strip() for chunk in chunks}
+                if len(references) != 1:
+                    raise ValueError(f"Inconsistent parent references across Open ASR chunks for {parent_id}")
+                hypothesis = " ".join(
+                    str(chunk.get("raw_pred_text") or chunk.get("pred_text") or "").strip()
+                    for chunk in chunks
+                    if str(chunk.get("raw_pred_text") or chunk.get("pred_text") or "").strip()
+                )
+                merged = dict(chunks[0])
+                scores = evaluate_open_asr(references.pop(), hypothesis)
+                merged.update(scores)
+                merged.update(
+                    parent_id=parent_id,
+                    sample_id=parent_id,
+                    subset_for_metrics=subset,
+                    raw_pred_text=hypothesis,
+                    reward=1.0 if scores["is_correct"] else 0.0,
+                )
+                merged_rollouts.append(merged)
+            regular_tasks.append(merged_rollouts)
+        return regular_tasks
+
+    @staticmethod
+    def _corpus_rate(rows: List[Dict[str, Any]], prefix: str) -> Optional[float]:
+        errors = sum(int(row.get(f"{prefix}_errors") or 0) for row in rows)
+        references = sum(int(row.get(f"{prefix}_ref_words") or 0) for row in rows)
+        return None if references == 0 else 100.0 * errors / references
+
+    def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
+        """Corpus-level rates (percent) at every k, plus per-profile/subset/language breakdowns.
+
+        Rows with ``*_errors`` / ``*_ref_words`` counts (the edit-count task types) contribute to
+        ``corpus_wer`` / ``cer`` by pooling edits; rows of the four original task types fall back to
+        ``jiwer.wer`` over the normalized ``text`` / ``pred_text``. ``wer_c`` / ``wer_pc`` /
+        ``per`` / ``hallucination_rate`` are means over samples, and ``wer_<suffix>`` (one per
+        ``reference_fields`` entry) is corpus-level over that reference.
+        """
+        tasks = self._merge_open_asr_chunks(tasks)
         metrics, _, _, max_k = compute_pass_majority_metrics(
             tasks,
             score_fn=self._score_fn,
             answer_key=None,  # ASR has no extracted-answer notion
         )
-
         if not tasks:
             return metrics
-
-        # ASR_LEADERBOARD per-reference suffixes (e.g. {"tn", "itn"}).
-        ref_suffixes: List[str] = sorted(
-            {
-                key[len("wer_") :]
-                for rollouts in tasks
-                for r in rollouts
-                for key in r
-                if key.startswith("wer_") and key not in ("wer_c", "wer_pc")
-            }
-        )
-
         for k in range(1, max_k + 1):
-            refs_std: List[str] = []
-            hyps_std: List[str] = []
-            wer_c_scores: List[float] = []
-            wer_pc_scores: List[float] = []
-            per_scores: List[float] = []
-            ref_corpus: Dict[str, List[str]] = {s: [] for s in ref_suffixes}
-            hyp_corpus: Dict[str, List[str]] = {s: [] for s in ref_suffixes}
+            selected = [rollout for rollouts in tasks for rollout in rollouts[:k]]
+            wer_rows = [row for row in selected if row.get("wer_ref_words") is not None]
+            cer_rows = [row for row in selected if row.get("cer_ref_words") is not None]
 
-            for rollouts in tasks:
-                for r in rollouts[:k]:
-                    refs_std.append(r.get("text", ""))
-                    hyps_std.append(r.get("pred_text", ""))
-                    if r.get("wer_c") is not None:
-                        wer_c_scores.append(float(r["wer_c"]))
-                    if r.get("wer_pc") is not None:
-                        wer_pc_scores.append(float(r["wer_pc"]))
-                    if r.get("per") is not None:
-                        per_scores.append(float(r["per"]))
-                    for suffix in ref_suffixes:
-                        ref_val = r.get(f"text_{suffix}")
-                        if not ref_val:
-                            continue
-                        ref_norm = preprocess_asr_text(ref_val)
-                        if not ref_norm:
-                            continue
-                        hyp_norm = preprocess_asr_text(r.get("pred_text") or "") or "empty"
-                        ref_corpus[suffix].append(ref_norm)
-                        hyp_corpus[suffix].append(hyp_norm)
+            corpus_wer = self._corpus_rate(wer_rows, "wer")
+            if corpus_wer is not None:
+                metrics[f"corpus_wer@k={k}"] = corpus_wer
+            else:
+                fallback_rows = [row for row in selected if row.get("text")]
+                if fallback_rows:
+                    metrics[f"corpus_wer@k={k}"] = 100.0 * jiwer.wer(
+                        [row["text"] for row in fallback_rows],
+                        [row.get("pred_text") or "" for row in fallback_rows],
+                    )
 
-            if not refs_std:
-                continue
+            cer_rate = self._corpus_rate(cer_rows, "cer")
+            if cer_rate is not None:
+                metrics[f"cer@k={k}"] = cer_rate
 
-            metrics[f"corpus_wer@k={k}"] = 100.0 * jiwer.wer(refs_std, hyps_std)
-            if wer_c_scores:
-                metrics[f"wer_c@k={k}"] = 100.0 * sum(wer_c_scores) / len(wer_c_scores)
-            if wer_pc_scores:
-                metrics[f"wer_pc@k={k}"] = 100.0 * sum(wer_pc_scores) / len(wer_pc_scores)
-            if per_scores:
-                metrics[f"per@k={k}"] = 100.0 * sum(per_scores) / len(per_scores)
-            for suffix in ref_suffixes:
-                if ref_corpus[suffix]:
-                    metrics[f"wer_{suffix}@k={k}"] = 100.0 * jiwer.wer(ref_corpus[suffix], hyp_corpus[suffix])
+            for field in ("wer_c", "wer_pc", "per", "hallucination_rate"):
+                values = [float(row[field]) for row in selected if row.get(field) is not None]
+                if values:
+                    metrics[f"{field}@k={k}"] = 100.0 * sum(values) / len(values)
+
+            for group_field in ("benchmark_profile", "subset_for_metrics", "language"):
+                group_names = sorted({str(row[group_field]) for row in selected if row.get(group_field)})
+                for group_name in group_names:
+                    group_rows = [row for row in selected if str(row.get(group_field)) == group_name]
+                    for prefix in ("wer", "cer"):
+                        rate = self._corpus_rate(group_rows, prefix)
+                        if rate is not None:
+                            metrics[f"{prefix}::{group_name}@k={k}"] = rate
+
+            # The multilingual Open ASR leaderboard first averages corpus WER
+            # across datasets within each language, then averages the five
+            # language scores. This intentionally differs from pooling word
+            # errors across every row in a language or across the profile.
+            multilingual_rows = [
+                row for row in selected if row.get("benchmark_profile") == "asr-leaderboard-multilingual"
+            ]
+            language_wers = []
+            for language in sorted({str(row.get("language")) for row in multilingual_rows if row.get("language")}):
+                language_rows = [row for row in multilingual_rows if str(row.get("language")) == language]
+                dataset_wers = []
+                for subset in sorted(
+                    {str(row.get("subset_for_metrics")) for row in language_rows if row.get("subset_for_metrics")}
+                ):
+                    rate = self._corpus_rate(
+                        [row for row in language_rows if str(row.get("subset_for_metrics")) == subset],
+                        "wer",
+                    )
+                    if rate is not None:
+                        dataset_wers.append(rate)
+                if dataset_wers:
+                    language_wer = sum(dataset_wers) / len(dataset_wers)
+                    metrics[f"wer::{language}@k={k}"] = language_wer
+                    language_wers.append(language_wer)
+            if language_wers:
+                multilingual_macro_wer = sum(language_wers) / len(language_wers)
+                metrics[f"multilingual_macro_wer@k={k}"] = multilingual_macro_wer
+                if len(multilingual_rows) == len(selected):
+                    metrics[f"corpus_wer@k={k}"] = multilingual_macro_wer
+
+            reference_fields = sorted(
+                {field for row in selected for field in (row.get("reference_fields") or []) if row.get(field)}
+            )
+            for field in reference_fields:
+                pairs = [
+                    (
+                        row_normalizer(row)(row[field]),
+                        row_normalizer(row)(row.get("pred_text") or "") or "empty",
+                    )
+                    for row in selected
+                    if row.get(field)
+                ]
+                pairs = [(ref, hyp) for ref, hyp in pairs if ref]
+                if pairs:
+                    metrics[f"wer_{_suffix_for_reference_field(field)}@k={k}"] = 100.0 * jiwer.wer(
+                        [ref for ref, _ in pairs], [hyp for _, hyp in pairs]
+                    )
 
         return metrics
 
@@ -492,18 +663,31 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
         key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]"))
         key.update(highest_k_metrics(agent_metrics, "pass@{k}"))
 
+        # ``*_macro`` is the mean per-sample error rate in percentage points;
+        # Gym persists the fractional means.
+        for metric_name in ("wer", "cer"):
+            source_name = f"mean/{metric_name}"
+            if source_name in agent_metrics:
+                key[f"{metric_name}_macro"] = 100.0 * float(agent_metrics[source_name])
+
         # WER aggregates at the highest k: `wer` is corpus-level, `wer_c` /
         # `wer_pc` / `per` are mean-of-per-sample. Exposed under headline names.
         max_k = 0
         for k_str_key in agent_metrics:
-            if k_str_key.startswith("corpus_wer@k="):
-                max_k = max(max_k, int(k_str_key.split("=")[1]))
+            if "@k=" not in k_str_key:
+                continue
+            try:
+                max_k = max(max_k, int(k_str_key.rsplit("@k=", 1)[1]))
+            except ValueError:
+                continue
         if max_k:
             for src_key, dst_key in (
                 (f"corpus_wer@k={max_k}", "wer"),
                 (f"wer_c@k={max_k}", "wer_c"),
                 (f"wer_pc@k={max_k}", "wer_pc"),
                 (f"per@k={max_k}", "per"),
+                (f"cer@k={max_k}", "cer"),
+                (f"multilingual_macro_wer@k={max_k}", "multilingual_macro_wer"),
             ):
                 if src_key in agent_metrics:
                     key[dst_key] = agent_metrics[src_key]
@@ -517,7 +701,36 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
                     continue
                 key[f"wer_{suffix}"] = agent_metrics[k_str_key]
 
+            for metric_name, value in agent_metrics.items():
+                if "::" not in metric_name or not metric_name.endswith(f"@k={max_k}"):
+                    continue
+                key[metric_name[: -len(f"@k={max_k}")]] = value
+
         return key
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
+        """Aggregate in a worker thread: corpus WER over a long-form benchmark keeps the event loop busy for minutes."""
+        return await asyncio.to_thread(
+            compute_aggregate_metrics,
+            body.verify_responses,
+            compute_metrics_fn=self.compute_metrics,
+            get_key_metrics_fn=self.get_key_metrics,
+            compute_repeat_metrics_fn=self.compute_repeat_metrics,
+        )
+
+
+def _fixture_server() -> ASRWithPCResourcesServer:
+    return ASRWithPCResourcesServer(
+        config=ASRWithPCConfig(name="asr_with_pc", host="127.0.0.1", port=8080, entrypoint="app.py", task_type="ASR"),
+        server_client=MagicMock(spec=ServerClient),
+    )
+
+
+VERIFIER_FIXTURE = VerifierFixture(
+    server_factory=_fixture_server,
+    request_model=ASRWithPCVerifyRequest,
+    cases_path=Path(__file__).parent / "tests" / "verifier_cases.jsonl",
+)
 
 
 if __name__ == "__main__":
