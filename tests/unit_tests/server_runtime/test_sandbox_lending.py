@@ -577,19 +577,55 @@ async def test_a_lend_cancelled_while_its_sandbox_is_created_stops_it_once_the_c
     assert "resources session session: its seed was cancelled while it started" in caplog.text
 
 
+def _lending_records(caplog) -> list[logging.LogRecord]:
+    return [record for record in caplog.records if record.name == sandbox_lending.__name__]
+
+
 async def test_a_start_that_hangs_ends_at_the_start_time_limit_and_lends_nothing(
-    workdir, monkeypatch, stopped
+    workdir, monkeypatch, stopped, caplog
 ) -> None:
-    lender = LentSandboxes("sandbox", SandboxConfig(), image=None, workdir=str(workdir), start_timeout_s=0.05)
+    config = SandboxConfig(metadata={"team": "gym"})
+    lender = LentSandboxes("sandbox", config, image="task-image", workdir=str(workdir), start_timeout_s=0.05)
 
     async def create(self: LocalProvider, spec):
         await asyncio.Event().wait()  # a provider's create that never returns
 
     monkeypatch.setattr(LocalProvider, "create", create)
-    with pytest.raises(TimeoutError):
+    with caplog.at_level(logging.ERROR, logger=sandbox_lending.__name__), pytest.raises(TimeoutError):
         await lender.lend("session", TASK)
 
     assert len(stopped) == 1 and lender.get("session") is None
+    # The create was cut before the provider returned the sandbox's id, so the stop cannot reach what it created: the
+    # log names the session and the task, and what a reaper finds the sandbox by.
+    (cut,) = _lending_records(caplog)
+    message = cut.getMessage()
+    assert cut.levelno == logging.ERROR
+    assert f"resources session session (task {TASK.task_id} of taskset lending:test)" in message
+    assert "within start_timeout_s (0.05 s)" in message and "the local provider's create was cut" in message
+    assert f"by image task-image and labels {{'team': 'gym', 'task_id': '{'t' * 63}'}}" in message
+
+
+async def test_a_start_cut_after_its_create_returned_stops_the_sandbox_it_knows(workdir, monkeypatch, caplog) -> None:
+    # The provider returned the sandbox's id before the limit cut the start, so the stop reaches the sandbox, and no
+    # reaper is asked for.
+    lender = LentSandboxes("sandbox", SandboxConfig(), image=None, workdir=str(workdir), start_timeout_s=0.05)
+    closed: list[object] = []
+    real_close = LocalProvider.close
+
+    async def upload_file(self: LocalProvider, handle, source_path, target_path) -> None:
+        await asyncio.Event().wait()  # a file delivery that never ends
+
+    async def close(self: LocalProvider, handle) -> None:
+        await real_close(self, handle)
+        closed.append(handle)
+
+    monkeypatch.setattr(LocalProvider, "upload_file", upload_file)
+    monkeypatch.setattr(LocalProvider, "close", close)
+    with caplog.at_level(logging.ERROR, logger=sandbox_lending.__name__), pytest.raises(TimeoutError):
+        await lender.lend("session", TASK, files={str(workdir / "0.png"): b"png"})
+
+    assert len(closed) == 1 and lender.get("session") is None
+    assert _lending_records(caplog) == []
 
 
 async def test_release_all_waits_for_a_lend_still_starting_and_lends_nothing_after(workdir, monkeypatch) -> None:
