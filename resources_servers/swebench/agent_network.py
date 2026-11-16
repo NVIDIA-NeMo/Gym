@@ -27,8 +27,8 @@ from typing import Any
 
 from pydantic import BaseModel, model_validator
 
-from nemo_gym.client.server_client import get_server_url
-from nemo_gym.config.config_types import ModelServerRef
+from nemo_gym.client import get_server_url
+from nemo_gym.config import ModelServerRef
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_runtime import ResourcesSeedRejectedError
 from nemo_gym.utils.network_policy import restricted_network_policy

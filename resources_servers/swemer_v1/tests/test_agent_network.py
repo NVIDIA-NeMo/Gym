@@ -20,8 +20,8 @@ from pydantic import ValidationError
 
 import resources_servers.swebench.agent_network as agent_network
 import resources_servers.swemer_v1.app as app
-from nemo_gym.client.server_client import ServerClient
-from nemo_gym.config.config_types import ModelServerRef
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
 
 
 # The sandbox created for a session is the agent's; the evaluation sandbox is created for a verifier session.

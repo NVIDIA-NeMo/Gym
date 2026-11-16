@@ -20,8 +20,8 @@ from pydantic import ValidationError
 
 import resources_servers.scale_swe.app as app
 import resources_servers.swebench.agent_network as agent_network
-from nemo_gym.client.server_client import ServerClient
-from nemo_gym.config.config_types import ModelServerRef
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
 
 
 # Seeding creates the agent's sandbox with for_agent=True; verify creates the evaluation sandbox without it.
