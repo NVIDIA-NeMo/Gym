@@ -8,8 +8,13 @@ solid to `result`.
 
 ## Setup
 
-Install `resources_servers/deepcad/requirements.txt` in the resources-server
-environment. Build the execution image from the repository root:
+Install the locked resources-server dependencies from the repository root:
+
+```bash
+uv sync --locked --project resources_servers/deepcad
+```
+
+Build the execution image from the repository root:
 
 ```bash
 docker build -t deepcad-cadquery:2.8.0 resources_servers/deepcad
