@@ -593,16 +593,16 @@ class TestApp:
     async def test_a_session_whose_steps_a_caller_drives_keeps_one_invocation_as_the_agents_own_loop(
         self, monkeypatch: MonkeyPatch, steps: int, limit: int, last_status: str
     ) -> None:
-        """With AGENT_EPISODE_STEP_LIMIT_HEADER the caller owns the episode's step limit: each one-step activation
-        extends the episode's invocation instead of recording an incomplete run of its own, and only a step at the
-        caller's limit stops the episode short, as the agent's own max_steps would."""
+        """With AGENT_EPISODE_STEP_LIMIT_HEADER the caller owns the episode's step limit: each activation is one step,
+        whatever max_steps says (unset here), and extends the episode's invocation instead of recording an incomplete
+        run of its own, and only a step at the caller's limit stops the episode short, as the agent's own max_steps
+        would."""
         config = SimpleAgentConfig(
             host="0.0.0.0",
             port=8080,
             entrypoint="",
             name="simple",
             model_server=ModelServerRef(type="responses_api_models", name="model"),
-            max_steps=1,
         )
         server_client = MagicMock(spec=ServerClient)
         server_client.global_config_dict = {"observability_enabled": True}
@@ -651,7 +651,7 @@ class TestApp:
             result = client.post(
                 "/ng-rollout/rollout/v1/responses",
                 json={"input": conversation},
-                headers={AGENT_EPISODE_STEP_LIMIT_HEADER: str(limit)},
+                headers={AGENT_ACTIVATION_HEADER: str(step), AGENT_EPISODE_STEP_LIMIT_HEADER: str(limit)},
             )
             assert result.status_code == 200
             # The caller sends the whole conversation with each step.
