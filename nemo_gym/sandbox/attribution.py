@@ -187,7 +187,7 @@ def sanitize_label_value(value: object) -> str:
 
 @dataclass(frozen=True)
 class AttributionConfig:
-    """Job attribution merged into every sandbox's metadata (Kubernetes labels on the sandbox).
+    """Job attribution merged into every sandbox's metadata (Kubernetes labels on OpenSandbox and OpenShell).
 
     Providers that propagate sandbox metadata as Kubernetes labels make attribution queryable at the
     cluster level (e.g. ``kubectl get pods -l nemo-gym.nvidia.com/team=my-team``). ``key_prefix``

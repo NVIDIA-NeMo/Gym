@@ -44,13 +44,15 @@ reports a run as complete while an identity is terminal, missing or unknown.
 import hashlib
 import math
 import os
+import re
+import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from nemo_gym.agents.agent_outcome import (
     AGENT_OUTCOME_METADATA_KEY,
@@ -65,34 +67,48 @@ from nemo_gym.config.secret_utils import mask_url_passwords
 from nemo_gym.core.failure_kinds import (
     AGENT_TIMEOUT_INFRASTRUCTURE,
     COLLECTION_DISPATCH_FAILED,
+    COLLECTION_RESUME_REFUSED,
+    DRIVER_INSTALL_FAILED,
     EMPTY_ANSWER,
+    ENVIRONMENT_PREPARE_FAILED,
+    ENVIRONMENT_PROTOCOL_VIOLATION,
     EPISODE_FAILED,
+    GRADING_WITHOUT_VERDICT,
     HARBOR_FAILED,
     HARNESS_TERMINATION_UNCONFIRMED,
     INFRASTRUCTURE_ERROR,
     INVALID_OUTPUT_BUDGET,
     INVALID_REQUEST_PARAMETER,
     JUDGE_FAILED,
+    JUDGE_FAILURE_KINDS,
+    JUDGE_SKIPPED,
     JUDGE_UNPARSEABLE,
     MALFORMED_ANSWER,
     MODEL_CONTEXT_LIMIT,
-    MODEL_FAULT_KINDS,
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
-    MODEL_SERVER_ERROR,
     MODEL_TRANSPORT_ERROR,
-    NON_POLICY_MODEL_REJECTION,
+    PROVIDER_CREDENTIALS_REJECTED,
+    PROVIDER_QUOTA_EXHAUSTED,
     ROLLOUT_ALLOCATION_ENDED,
-    SERVER_FAULT_KINDS,
+    SERVER_SPINUP_TIMEOUT,
     SERVER_START_FAILED,
     TRUNCATED_ANSWER,
     VERIFIER_ERROR,
+    FailureClass,
+    FailureClassificationConfig,
+    FailureStage,
+    classify_failure,
     is_namespaced,
     is_registered,
-    is_server_status,
+    is_server_failure,
+    quota_reset_text,
+    quota_reset_unix,
+    reporting_failure_kind,
 )
-from nemo_gym.core.failure_records import FailureBoundary
+from nemo_gym.core.failure_records import FailureBoundary, FailureEvent
 from nemo_gym.core.failure_transport import FailureReportRow
+from nemo_gym.core.outcome_policy import OutcomeAction, is_policy_counted_zero
 from nemo_gym.orchestration.collect_evidence import (
     COLLECT_SCRIPT,
     EPISODE_DEADLINE_REASON,  # noqa: F401
@@ -106,10 +122,13 @@ from nemo_gym.orchestration.executors.resume_script import (
     ACCOUNTED_WALLTIME_PREFIX,
     CHAIN_ACCOUNTING_ENV,
     CONTINUATION_REASON_PREFIX,
+    GUARDED_DRIVER_FAILURE_KINDS,
     PROVISIONAL_MARKER_PREFIX,
     REQUEUE_RECONCILE_STATE,
     REQUEUE_UNKNOWN_REASON,
 )
+from nemo_gym.rollouts.rollout_recovery import applied_failure_class as _applied_class
+from nemo_gym.rollouts.rollout_recovery import failure_stage as _policy_stage
 from nemo_gym.utils.path_utils import RERUN_MASKED_JOURNAL_NAME
 
 
@@ -177,6 +196,8 @@ class IdentityState(StrEnum):
     MISSING = "missing"
     MASKED = "masked"
     OMITTED = "omitted"
+    # Verification skipped by configuration: complete, never re-judged or rerun, and unverified by construction.
+    SKIPPED = "skipped"
     UNKNOWN = "unknown"
 
 
@@ -331,7 +352,8 @@ ACKNOWLEDGE_JUDGE_JOBS_FLAGS = "--acknowledge-failed-judge-jobs --acknowledge-re
 
 
 def _judge_job_unsettled(entry: Mapping[str, Any]) -> bool:
-    return entry.get("state") == "failed" or (entry.get("state") == "completed" and not entry.get("settled"))
+    # A failed job that settled a saved answer before it failed made progress, as a completed one does.
+    return entry.get("state") in ("failed", "completed") and not entry.get("settled")
 
 
 def failed_judge_jobs_blocking(
@@ -352,6 +374,15 @@ def failed_judge_jobs_blocking(
     ):
         return None
     return ids
+
+
+# What ``failed_judge_jobs_stop`` says, read back by the operator verdict: the jobs, where to read them, and whether
+# they can be acknowledged.
+_FAILED_JUDGE_JOBS = re.compile(
+    rf"the last {JUDGE_JOB_FAILURE_BOUND} judge-only job\(s\) \((?P<ids>.*?)\) ended without settling a saved answer; "
+    r"read their receipts and logs under (?P<where>.*?) before another is queued(?P<unacknowledgeable>; a job without "
+    r"an id cannot be acknowledged)?"
+)
 
 
 def failed_judge_jobs_stop(ids: Sequence[str | None], where: str) -> str:
@@ -421,6 +452,8 @@ class RecoveryOutcome(BaseModel):
     # The acceptance gate task entry (status, expected/scored samples, score, errors, warnings); None without evidence.
     # Its status is RUNNING, PLANNED, RESUMING, FAILED, UNVERIFIED or SUCCESS (``gate_task_summary``).
     gate_task: dict[str, Any] | None = None
+    # The one verdict an operator acts on (``operator_verdict``): state, reason and action; set by the CLI.
+    operator_verdict: dict[str, str] | None = None
     # What was known about MLflow: the local files, and the server status only as the caller observed it.
     mlflow: dict[str, Any] | None = None
     # The re-verification part of a RESUBMIT that names ``reverify_first``: what runs it and when.
@@ -453,6 +486,7 @@ class IdentityEvidence(BaseModel):
     failure_kind: str | None = None
     # The HTTP status the selected failure recorded, when it recorded one.
     http_status: int | None = None
+    stage: FailureStage | None = None
     failure_id: str | None = None
     attempts: int = 0
     max_attempts: int | None = None
@@ -483,6 +517,48 @@ class RecoveryDecision(BaseModel):
     evidence: list[IdentityEvidence]
     duplicate_results: list[Identity] = Field(default_factory=list)
     scheduler_live: bool = False
+    # Which chain accounting is unknown when this STOP is the unknown-budget or unknown-walltime stop: "budget" or
+    # "walltime". The reason is display text that later notes extend; an operator continuation keys on this field.
+    accounting_unknown: Literal["budget", "walltime"] | None = Field(default=None, exclude=True)
+    # The guard that refuses (or, for an inspection, would refuse) an operator continuation of unknown accounting:
+    # the scheduler did not answer, a job of the run is pending or running, a follow-up claim names no job, the
+    # accounting files changed while read, or the run configures no infra-retry cap. The operator verdict keys on it.
+    continuation_refused: (
+        Literal["scheduler_unreachable", "job_live", "claim_unidentified", "counters_changed", "no_retry_cap"] | None
+    ) = Field(default=None, exclude=True)
+    # The options of the call this plan was made for, spelled as `gym eval resubmit --recover` takes them (reasons as
+    # TEXT), so the operator verdict's command repeats them.
+    requested: list[str] = Field(default_factory=list, exclude=True)
+    # The run's `gym eval resubmit` positionals (job id and benchmark, shell-quoted) for the call this plan was made
+    # for, so every command the operator verdict prints is complete; placeholders when no call named them.
+    target: str = Field(default="GYM_JOB_ID BENCHMARK", exclude=True)
+    # The typed driver failure the chain's incomplete marker opens with (one of GUARDED_DRIVER_FAILURE_KINDS) when the
+    # chain stopped on one: the next recovery needs its remedy first, or the resumed segment stops the same way.
+    chain_stop_kind: str | None = Field(default=None, exclude=True)
+    # Why a judge-only job was not queued, as the dispatch classified it: ``cpu_partition_unknown`` (no CPU partition
+    # is named), ``cpu_placement`` (the scheduler refused the CPU partition or QOS), ``served_placement`` (it refused the
+    # saved node pool of a run that serves its judge, which no recovery option changes), ``unsupported_profile`` (the
+    # saved config has no judge execution profile, decided locally before any scheduler call), ``refused`` (the
+    # scheduler refused it for a definite reason that is not placement, such as an invalid time limit), ``concurrent``
+    # (the dispatch found another recovery's lock or a job of the run on the scheduler: it waits) or ``other`` (the
+    # scheduler did not answer, or whether the job was queued is not known). The operator verdict offers the judge
+    # placement options only for the first two.
+    judge_refusal: (
+        Literal[
+            "cpu_partition_unknown",
+            "cpu_placement",
+            "served_placement",
+            "unsupported_profile",
+            "refused",
+            "concurrent",
+            "other",
+        ]
+        | None
+    ) = Field(default=None, exclude=True)
+    # An option this call asked for that the run cannot take (``--extend-attempts`` or the masked rerun), and the
+    # action the plan would take without it: a RESUBMIT or REVERIFY continues once the option is dropped.
+    refused_option: str | None = Field(default=None, exclude=True)
+    refused_over: RecoveryAction | None = Field(default=None, exclude=True)
     # The OPERATOR-CONTINUATION record a RESUBMIT under an operator budget carries: who, why, the budget, the unknown
     # fields, the counter values it fills with their previous states, and its epoch. The resubmit journals it.
     operator_continuation: dict[str, Any] | None = None
@@ -501,8 +577,13 @@ class RecoveryDecision(BaseModel):
 
     @property
     def complete(self) -> bool:
-        settled = (IdentityState.SCORED, IdentityState.MODEL_FINAL, IdentityState.OMITTED)
+        settled = (IdentityState.SCORED, IdentityState.MODEL_FINAL, IdentityState.OMITTED, IdentityState.SKIPPED)
         return sum(self.counts.get(state, 0) for state in settled) == self.expected
+
+    @property
+    def unverified(self) -> bool:
+        """Whether results of the run were deliberately not verified (``judge_skipped``), so it is UNVERIFIED."""
+        return bool(self.counts.get(IdentityState.SKIPPED))
 
 
 def _identity(row: Mapping[str, Any]) -> Identity | None:
@@ -546,17 +627,9 @@ class RecoveryOutcomePolicyConfig(OutcomePolicyConfig):
         }
     )
     default_action: OutcomeAction = OutcomeAction.RETRY
+    classification: FailureClassificationConfig = Field(default_factory=FailureClassificationConfig)
 
-    @model_validator(mode="after")
-    def require_recovery_actions(self) -> "RecoveryOutcomePolicyConfig":
-        """Recovery cannot score an explicit zero, so ``count_as_zero`` is refused at configuration load."""
-        if OutcomeAction.COUNT_AS_ZERO in {
-            self.default_action,
-            *self.by_failure_kind.values(),
-            *self.by_status_code.values(),
-        }:
-            raise ValueError("recovery outcome policy does not support count_as_zero")
-        return self
+    supported_actions = frozenset({OutcomeAction.VERIFY, OutcomeAction.RETRY, OutcomeAction.FAIL})
 
 
 class OutcomePolicySource(StrEnum):
@@ -661,10 +734,20 @@ def _policy_evidence(row: Mapping[str, Any]) -> tuple[str | None, int | None]:
     return (kind if isinstance(kind, str) else None), status
 
 
+def _recovery_action(
+    row: Mapping[str, Any], kind: str, policy: RecoveryOutcomePolicyConfig, *, http_status: int | None
+) -> OutcomeAction:
+    """Apply recovery rules to shared classification without changing the selected evidence or budgets."""
+    classification = _applied_class(row)
+    if classification is None:
+        classification = classify_failure(
+            failure_kind=kind, stage=_policy_stage(row), http_status=http_status, config=policy.classification
+        )
+    return choose_action(failure_kind=kind, http_status=http_status, failure_class=classification, config=policy)
+
+
 def _sidecar_action(row: Mapping[str, Any], policy: "RecoveryOutcomePolicyConfig") -> OutcomeAction:
-    return choose_action(
-        failure_kind=_retry_kind(row) or "unknown", http_status=_policy_evidence(row)[1], config=policy
-    )
+    return _recovery_action(row, _retry_kind(row) or "unknown", policy, http_status=_policy_evidence(row)[1])
 
 
 # Compatibility with older metadata-only projections of a judge's saved answer.
@@ -685,13 +768,43 @@ def _saved_answer(row: Mapping[str, Any]) -> bool:
     return has_saved_generation({"response": answer, **stage})
 
 
+def _quota_reset_text(row: Mapping[str, Any]) -> str | None:
+    """The reset time a quota-stopped row names: the collected fact, else its reason (a live run's row)."""
+    collected = row.get("_ng_quota_resets_at")
+    return (
+        collected
+        if isinstance(collected, str)
+        else (quota_reset_text(row.get("failure_reason")) or quota_reset_text(row.get("_ng_failure_message")))
+    )
+
+
+def _quota_wait_reason(row: Mapping[str, Any]) -> str | None:
+    text = _quota_reset_text(row)
+    return f"resets at {text}" if text else None
+
+
+def _quota_reset_unix(row: Mapping[str, Any]) -> float | None:
+    return quota_reset_unix("resets at " + text) if (text := _quota_reset_text(row)) else None
+
+
+def _now() -> float:
+    return time.time()
+
+
 def _judge_state(row: Mapping[str, Any], policy: "RecoveryOutcomePolicyConfig") -> "IdentityState":
     """A judge failure's treatment: verify re-judges the saved answer only (none saved: stop), fail leaves it
     ungraded; any other action would run the policy again, so it stops."""
     if row.get(TERMINAL) is True:
         return IdentityState.TERMINAL
     kind, status = _policy_evidence(row)
-    action = choose_action(failure_kind=kind or JUDGE_FAILED, http_status=status, config=policy)
+    if kind in (PROVIDER_QUOTA_EXHAUSTED, PROVIDER_CREDENTIALS_REJECTED):
+        # The grading provider refused until the operator acts (its quota resets, its key is fixed). The saved answer
+        # is graded again, never regenerated; before a quota's named reset time nothing can be graded, so it stops.
+        if not _saved_answer(row):
+            return IdentityState.UNKNOWN
+        reset = _quota_reset_unix(row) if kind == PROVIDER_QUOTA_EXHAUSTED else None
+        return IdentityState.TERMINAL if reset is not None and _now() < reset else IdentityState.JUDGE_RECOVERABLE
+    action = _recovery_action(row, kind or JUDGE_FAILED, policy, http_status=status)
     if action == OutcomeAction.VERIFY:
         return IdentityState.JUDGE_RECOVERABLE if _saved_answer(row) else IdentityState.UNKNOWN
     return IdentityState.TERMINAL if action == OutcomeAction.FAIL else IdentityState.UNKNOWN
@@ -725,7 +838,9 @@ def _cause_chain(row: Mapping[str, Any]) -> list[tuple[str | None, ...]] | None:
     return chain or None
 
 
-def _replay_refusal(row: Mapping[str, Any]) -> str | None:
+def _replay_refusal(
+    row: Mapping[str, Any], *, classification: FailureClassificationConfig | None = None
+) -> str | None:
     """Why replay needs a saved-answer path or model-budget accounting unavailable to recovery; None when it does not."""
     from nemo_gym.rollouts.rollout_recovery import (
         has_recorded_grade,
@@ -736,7 +851,7 @@ def _replay_refusal(row: Mapping[str, Any]) -> str | None:
     )
 
     # An agent timeout whose window held a server-side fault kept no answer or grade of the model's: it runs again.
-    infrastructure = is_infrastructure_agent_timeout(row)
+    infrastructure = is_infrastructure_agent_timeout(row, classification=classification)
     if not infrastructure and (has_saved_generation(row) or _saved_answer(row) or keeps_partial_response(row)):
         return "the row kept an answer that a rerun would replace"
     if not infrastructure and has_recorded_grade(row):
@@ -760,9 +875,11 @@ def _replay_refusal(row: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _policy_replay_is_unsupported(row: Mapping[str, Any]) -> bool:
+def _policy_replay_is_unsupported(
+    row: Mapping[str, Any], *, classification: FailureClassificationConfig | None = None
+) -> bool:
     """Whether replay needs a saved-answer path or model-budget accounting unavailable to recovery."""
-    return _replay_refusal(row) is not None
+    return _replay_refusal(row, classification=classification) is not None
 
 
 def _retry_kind(row: Mapping[str, Any]) -> str | None:
@@ -948,7 +1065,11 @@ def decide_recovery(
                 )
                 continue
             judge = row.get(FAILURE_CLASS) == JUDGE_FAILED
-            if not judge and identity in managed and is_infrastructure_agent_timeout(row):
+            if (
+                not judge
+                and identity in managed
+                and is_infrastructure_agent_timeout(row, classification=policy.classification)
+            ):
                 # A graded agent timeout whose window held a server-side fault (Harbor's graded zero): the Store
                 # selects it as a failure and runs it again under the attempt cap. A run without a Store cannot
                 # reopen a saved result, so there it stays scored and the gate counts its fault evaluation-side.
@@ -968,7 +1089,35 @@ def decide_recovery(
                 continue
             reward = row.get("reward")
             graded = isinstance(reward, (int, float)) and not isinstance(reward, bool) and math.isfinite(reward)
-            if not judge and (row.get("mask_sample") is True or row.get("evaluation_completed") is False):
+            if not judge and row.get("mask_sample") is True and row.get("failure_kind") == JUDGE_SKIPPED:
+                # Verification was skipped by configuration: complete and never re-judged or rerun.
+                reason = row.get("_ng_skipped_reason")
+                evidence.append(
+                    IdentityEvidence(
+                        identity=identity,
+                        state=IdentityState.SKIPPED,
+                        failure_kind=JUDGE_SKIPPED,
+                        reason=reason if isinstance(reason, str) else None,
+                    )
+                )
+                continue
+            if (
+                not judge
+                and (row.get("mask_sample") is True or row.get("evaluation_completed") is False)
+                and not is_policy_counted_zero(row)
+            ):
+                if row.get("failure_outcome_action") == OutcomeAction.FAIL:
+                    # The owning boundary already ended this failure; recovery cannot grant a new retry budget.
+                    policy_stopped = True
+                    evidence.append(
+                        IdentityEvidence(
+                            identity=identity,
+                            state=IdentityState.TERMINAL,
+                            failure_kind=row.get("failure_kind"),
+                            events=_events(row),
+                        )
+                    )
+                    continue
                 if reverification_cause(row) is not None:
                     # Masked by a judge or verify-transport failure: its saved answer is graded again, never rerun.
                     saved_results.add(identity)
@@ -981,10 +1130,14 @@ def decide_recovery(
                         )
                     )
                     continue
-                infrastructure = masked_infrastructure_kind(row)
+                infrastructure = masked_infrastructure_kind(row, classification=policy.classification)
                 fact = managed.get(identity)
                 spent = fact.attempts if fact is not None else 0
-                kept = masked_without_artifact_kind(row) if infrastructure is None and fact is not None else None
+                kept = (
+                    masked_without_artifact_kind(row, classification=policy.classification)
+                    if infrastructure is None and fact is not None
+                    else None
+                )
                 if kept is not None:
                     if fact.rerun_approved:
                         infrastructure = kept  # the Store counts the approved row as a failed attempt
@@ -1005,7 +1158,7 @@ def decide_recovery(
                 if infrastructure is not None and fact is not None:
                     # Infrastructure masked it: the Store counts it as a failed attempt and runs it again, and the new
                     # attempt supersedes it. The policy decides it as it decides a failure of that kind.
-                    action = choose_action(failure_kind=infrastructure, http_status=None, config=policy)
+                    action = _recovery_action(row, infrastructure, policy, http_status=None)
                     if action == OutcomeAction.FAIL:
                         # The Store would still run it again, so a policy that fails it stops the run.
                         policy_stopped = True
@@ -1068,11 +1221,15 @@ def decide_recovery(
                 )
                 continue
             state = _judge_state(row, policy) if judge else IdentityState.SCORED
-            policy_stopped |= judge and state == IdentityState.TERMINAL
+            quota_wait = (
+                judge and state == IdentityState.TERMINAL and row.get("failure_kind") == PROVIDER_QUOTA_EXHAUSTED
+            )
+            policy_stopped |= judge and state == IdentityState.TERMINAL and not quota_wait
             evidence.append(
                 IdentityEvidence(
                     identity=identity,
                     state=state,
+                    reason=_quota_wait_reason(row) if quota_wait else None,
                     failure_kind=row.get("failure_kind") if judge else None,
                     failure_id=row.get(FAILURE_ID) if isinstance(row.get(FAILURE_ID), str) else None,
                     events=_events(row),
@@ -1100,7 +1257,7 @@ def decide_recovery(
             spent = fact.attempts if fact else 0
             cap = fact.max_attempts if fact else default_max_attempts
             state = IdentityState.UNKNOWN
-            if not _policy_replay_is_unsupported(last):
+            if not _policy_replay_is_unsupported(last, classification=policy.classification):
                 action = _sidecar_action(last, policy)
                 if action == OutcomeAction.FAIL or last.get(TERMINAL) is True:
                     policy_stopped = True
@@ -1113,7 +1270,9 @@ def decide_recovery(
                     state=state,
                     attempts=spent,
                     max_attempts=cap,
-                    reason=_replay_refusal(last) if state == IdentityState.UNKNOWN else None,
+                    reason=_replay_refusal(last, classification=policy.classification)
+                    if state == IdentityState.UNKNOWN
+                    else None,
                     failure_kind=last.get("failure_kind"),
                     failure_id=last.get(FAILURE_ID) if isinstance(last.get(FAILURE_ID), str) else None,
                     events=_events(last),
@@ -1160,11 +1319,13 @@ def decide_recovery(
             else (last.get(MAX_ATTEMPTS) if isinstance(last.get(MAX_ATTEMPTS), int) else default_max_attempts)
         )
         spent = fact.attempts if fact else len(rows)
+        quota_wait = False
         if last.get(FAILURE_CLASS) == JUDGE_FAILED:
             # A judge that failed is re-judged from the saved answer, never by running the policy again.
             state = _judge_state(last, policy)
-            policy_stopped |= state == IdentityState.TERMINAL
-        elif is_answered_agent_deadline(last):
+            quota_wait = state == IdentityState.TERMINAL and last.get("failure_kind") == PROVIDER_QUOTA_EXHAUSTED
+            policy_stopped |= state == IdentityState.TERMINAL and not quota_wait
+        elif is_answered_agent_deadline(last, classification=policy.classification):
             # The agent's own deadline ended it with an answer kept: the model's result, which no resume runs again.
             # Collection's metrics score it only when its producer marked it a counted zero.
             state = IdentityState.MODEL_FINAL
@@ -1199,7 +1360,7 @@ def decide_recovery(
                 reason = f"{reason}: {derived[2]}"
         elif derived is not None and derived[1]:
             # The policy's own request failed: the model's final result, unless a resume would run it again.
-            if last.get(TERMINAL) is True or _policy_replay_is_unsupported(last):
+            if last.get(TERMINAL) is True or _policy_replay_is_unsupported(last, classification=policy.classification):
                 state = IdentityState.MODEL_FINAL
             else:
                 state = IdentityState.UNKNOWN
@@ -1207,19 +1368,22 @@ def decide_recovery(
         elif last.get(TERMINAL) is True:
             state = IdentityState.TERMINAL
         elif (
-            action := choose_action(
-                failure_kind=kind or "unknown", http_status=_policy_evidence(last)[1], config=policy
-            )
+            action := _recovery_action(last, kind or "unknown", policy, http_status=_policy_evidence(last)[1])
         ) == OutcomeAction.FAIL:
             # Unrestricted resume would still retry this nonterminal saved row.
             policy_stopped = True
             state = IdentityState.TERMINAL
-        elif action == OutcomeAction.VERIFY or _policy_replay_is_unsupported(last):
+        elif action == OutcomeAction.VERIFY or _policy_replay_is_unsupported(
+            last, classification=policy.classification
+        ):
             # Only a judge failure has a supported saved-answer path. A failed verification can retain a finished
             # agent answer, so replay must not generate another. For collection-wrapped model failures, the sidecar projection
             # has no durable model-operation budget accounting: replay must not silently replenish that budget.
             state = IdentityState.UNKNOWN
-            reason = _replay_refusal(last) or "the policy verifies a failure that has no saved judge answer"
+            reason = (
+                _replay_refusal(last, classification=policy.classification)
+                or "the policy verifies a failure that has no saved judge answer"
+            )
         elif spent < cap:
             state = IdentityState.RETRYABLE
         else:
@@ -1229,13 +1393,16 @@ def decide_recovery(
                 identity=identity,
                 state=state,
                 # The kind its retry selects on stays agent_timeout; the counted kind names the server-side fault.
-                failure_kind=AGENT_TIMEOUT_INFRASTRUCTURE if is_infrastructure_agent_timeout(last) else kind,
+                failure_kind=AGENT_TIMEOUT_INFRASTRUCTURE
+                if is_infrastructure_agent_timeout(last, classification=policy.classification)
+                else kind,
                 http_status=_policy_evidence(last)[1],
+                stage=_policy_stage(last),
                 failure_id=last.get(FAILURE_ID) if isinstance(last.get(FAILURE_ID), str) else None,
                 attempts=spent,
                 max_attempts=cap,
                 events=_events(last),
-                reason=reason if state == IdentityState.UNKNOWN else None,
+                reason=reason if state == IdentityState.UNKNOWN else _quota_wait_reason(last) if quota_wait else None,
                 unscored=unscored,
             )
         )
@@ -1336,10 +1503,7 @@ def decide_recovery(
                     "no rerun in the Store, so nobody owns them"
                 )
             if reserved:
-                parts.append(
-                    f"{reserved} reservation(s) have no saved outcome and the allocation that made them is not known "
-                    "to have ended, so whether they ran is unknown"
-                )
+                parts.append(f"{reserved} reservation(s) have no saved outcome and {_RESERVATIONS_UNKNOWN}")
             return decision(
                 RecoveryAction.STOP,
                 "; ".join(parts)
@@ -1375,6 +1539,32 @@ def decide_recovery(
                 "re-judge the saved answers with `gym eval reverify --judge-failed-only`",
             )
         if counts.get(IdentityState.TERMINAL):
+            waiting = [
+                item
+                for item in evidence
+                if item.state == IdentityState.TERMINAL and item.failure_kind == PROVIDER_QUOTA_EXHAUSTED
+            ]
+            if len(waiting) == counts[IdentityState.TERMINAL]:
+                resets = sorted({text for item in waiting if (text := quota_reset_text(item.reason))})
+                return decision(
+                    RecoveryAction.STOP,
+                    f"{len(waiting)} saved answer(s) wait on the grading provider's quota "
+                    f"({PROVIDER_QUOTA_EXHAUSTED}), which {'resets at ' + resets[-1] if resets else 'has no known reset'}"
+                    "; nothing can be graded before then. After the reset continue with gym eval resubmit --recover "
+                    "(re-judges the saved answers, no model calls)",
+                )
+            violations = [
+                item
+                for item in evidence
+                if item.state == IdentityState.TERMINAL and item.failure_kind == ENVIRONMENT_PROTOCOL_VIOLATION
+            ]
+            if len(violations) == counts[IdentityState.TERMINAL]:
+                return decision(
+                    RecoveryAction.STOP,
+                    f"{len(violations)} rollout(s) got a reply the collector cannot use "
+                    f"({ENVIRONMENT_PROTOCOL_VIOLATION}); this is a producer bug, retrying cannot help. "
+                    "Fix the server or the benchmark pairing, then `gym eval submit` again",
+                )
             return decision(
                 RecoveryAction.STOP,
                 f"{counts[IdentityState.TERMINAL]} terminal unscored failure(s) need an "
@@ -1383,7 +1573,7 @@ def decide_recovery(
         if counts.get(IdentityState.EXHAUSTED):
             return decision(
                 RecoveryAction.STOP,
-                f"{counts[IdentityState.EXHAUSTED]} identity(ies) used every attempt since the last resubmit, so a "
+                f"{counts[IdentityState.EXHAUSTED]} identity(ies) {_ATTEMPTS_USED_TOKEN}, so a "
                 "resume would run nothing; the run is not complete; "
                 + _EXTEND_RETRIES_SCOPE.format(
                     cap="/".join(
@@ -1393,13 +1583,23 @@ def decide_recovery(
                         )
                     )
                 )
-                + f"; {EXTEND_ATTEMPTS_HINT}",
+                + f"; {EXTEND_ATTEMPTS_HINT}"
+                # More attempts alone would stop again on the chain's budget, so name every blocker now.
+                + _chain_blockers_note(budget),
             )
         if counts.get(IdentityState.MASKED):
             return decision(
                 RecoveryAction.STOP,
-                f"{counts[IdentityState.MASKED]} completed result(s) are masked and not measured: they are kept and a "
-                f"resume would run nothing; the run is not complete; {populations}",
+                f"{counts[IdentityState.MASKED]} {_MASKED_STOP_TOKEN}: they are kept and a resume would run nothing; "
+                f"the run is not complete; {populations}"
+                + (_chain_blockers_note(budget) if masked_without_artifact else ""),
+            )
+        if counts.get(IdentityState.SKIPPED):
+            reasons = sorted({item.reason for item in evidence if item.state == IdentityState.SKIPPED and item.reason})
+            return decision(
+                RecoveryAction.NOOP,
+                f"{counts[IdentityState.SKIPPED]} result(s) not graded by configuration ({JUDGE_SKIPPED}); "
+                f"nothing is re-judged or rerun{': ' + reasons[0] if reasons else ''}",
             )
         if counts.get(IdentityState.OMITTED):
             return decision(
@@ -1412,7 +1612,7 @@ def decide_recovery(
     # servers are up, and then runs the missing and retryable identities.
     reverify_first = sorted(by_state.get(IdentityState.JUDGE_RECOVERABLE.value, []))
     if budget.live_job is None or budget.max_infra_retries is None or budget.infra_retries_used is None:
-        return decision(RecoveryAction.STOP, UNKNOWN_BUDGET_REASON)
+        return decision(RecoveryAction.STOP, UNKNOWN_BUDGET_REASON, accounting_unknown="budget")
     segment = planned_missing_continuation and bool(managed_selection) and not counts.get(IdentityState.RETRYABLE)
     if not segment and budget.infra_retries_used >= budget.max_infra_retries:
         # A chain stops once less than a minute of its walltime remains, so name that budget too when it is spent.
@@ -1426,19 +1626,25 @@ def decide_recovery(
             RecoveryAction.STOP,
             f"{_INFRA_BUDGET_USED_PREFIX} ({budget.infra_retries_used} of {budget.max_infra_retries})"
             + (
-                f", and the stored walltime budget is used ({budget.walltime_used_s:g} of {budget.max_walltime_s:g} s"
+                f", and {_WALLTIME_USED_TOKEN} ({budget.walltime_used_s:g} of {budget.max_walltime_s:g} s"
                 "; less than a minute is left): raise both in one call"
                 if walltime_spent
+                else ""
+            )
+            # A raised retry cap would stop next on the walltime nobody can read, so name it now.
+            + (
+                f", and {UNKNOWN_WALLTIME_REASON}: raise the retries and give an explicit budget in one call"
+                if budget.walltime_capped and budget.walltime_used_s is None
                 else ""
             ),
         )
     if budget.walltime_capped:
         if budget.walltime_used_s is None or budget.max_walltime_s is None:
-            return decision(RecoveryAction.STOP, UNKNOWN_WALLTIME_REASON)
+            return decision(RecoveryAction.STOP, UNKNOWN_WALLTIME_REASON, accounting_unknown="walltime")
         if budget.walltime_used_s >= budget.max_walltime_s:
             return decision(
                 RecoveryAction.STOP,
-                f"the stored walltime budget is used ({budget.walltime_used_s:g} of {budget.max_walltime_s:g} s)",
+                f"{_WALLTIME_USED_TOKEN} ({budget.walltime_used_s:g} of {budget.max_walltime_s:g} s)",
             )
     return decision(
         RecoveryAction.RESUBMIT,
@@ -1454,10 +1660,40 @@ def decide_recovery(
 
 
 _INFRA_BUDGET_USED_PREFIX = "the stored infra-retry budget is used"
+_RESERVATIONS_UNKNOWN = "the allocation that made them is not known to have ended, so whether they ran is unknown"
+_ATTEMPTS_USED_TOKEN = "used every attempt since the last resubmit"
+_WALLTIME_USED_TOKEN = "the stored walltime budget is used"
+# A refused or stopped recovery records none of the extensions it asked for, so the next one must ask again.
+_NOT_RECORDED_TOKEN = "asked in this call is not recorded, as nothing was queued: ask it again in the same call"
+
 _EXTEND_RETRIES_SCOPE = (
     "--extend-retries raises infra retries only; it does not raise the per-identity attempt cap "
     "(max_rollout_attempts={cap})"
 )
+
+
+_CHAIN_BLOCKERS_LEAD = "; a resume of them would also stop, as "
+_MASKED_STOP_TOKEN = "completed result(s) are masked and not measured"
+
+
+def _chain_blockers_note(budget: RecoveryBudget) -> str:
+    """For a stop on the identities' own states (exhausted, masked): what in the chain's budget would stop the resume
+    an extension or a rerun allows, as the stop texts name it, so one call can lift every blocker; else ""."""
+    blockers = []
+    if budget.max_infra_retries is None or budget.infra_retries_used is None:
+        blockers.append(UNKNOWN_BUDGET_REASON)
+    elif budget.infra_retries_used >= budget.max_infra_retries:
+        blockers.append(f"{_INFRA_BUDGET_USED_PREFIX} ({budget.infra_retries_used} of {budget.max_infra_retries})")
+    if budget.walltime_capped and budget.max_walltime_s is not None:
+        if budget.walltime_used_s is None:
+            if UNKNOWN_BUDGET_REASON not in blockers:
+                blockers.append(UNKNOWN_WALLTIME_REASON)
+        # A chain stops once less than a minute of its walltime remains.
+        elif budget.max_walltime_s - budget.walltime_used_s < 60:
+            blockers.append(f"{_WALLTIME_USED_TOKEN} ({budget.walltime_used_s:g} of {budget.max_walltime_s:g} s)")
+    if not blockers:
+        return ""
+    return f"{_CHAIN_BLOCKERS_LEAD}{' and '.join(blockers)}: lift every blocker in one call"
 
 
 def omission_summary(evidence: Iterable[IdentityEvidence]) -> str:
@@ -1526,11 +1762,16 @@ class CollectedEvidence(BaseModel):
     unreadable_files: list[str] = Field(default_factory=list)
     # rollouts_coverage.json's allocation_id: the scheduler allocation that last opened the Store for writing.
     coverage_allocation_id: str | None = None
+    # True when rollouts_coverage.json has no allocation_id key: a worker older than that field wrote it.
+    coverage_writer_unrecorded: bool = False
     # rollouts_coverage.json's (scored, expected): the rollouts collection scored into the metrics, of those expected.
     coverage_scored: tuple[int, int] | None = None
     # The aggregate's own (metric_coverage/trials, metric_coverage/expected, metric_coverage/name or None): the trials
     # the benchmark's headline metric covered, as the benchmark declares them.
     benchmark_metric_coverage: tuple[int, int, str | None] | None = None
+    # rollouts_task_selection.json: the subset the run selected by task id (source, tasks, rows, task_ids_sha256; a
+    # field is None when the record was unreadable), or None when the run took every task of its input.
+    task_selection: dict[str, Any] | None = None
     # Why the chain's accounting is unknown (the marker's reason or an unobserved claim), and the counter files' own
     # states (absent, ok, malformed) when the sources were stable.
     accounting_unknown_reason: str | None = None
@@ -1822,16 +2063,24 @@ def _operator_continuation(
     changed.
     """
 
-    def stop(why: str) -> RecoveryDecision:
-        return stopped.model_copy(update={"reason": f"{stopped.reason}; {why}"})
+    def stop(why: str, guard: str) -> RecoveryDecision:
+        return stopped.model_copy(update={"reason": f"{stopped.reason}; {why}", "continuation_refused": guard})
 
     if collected.accounting_unknown_reason in (UNOBSERVED_CLAIM_REASON, UNREADABLE_CLAIM_REASON):
-        return stop("a follow-up claim names no job, so an operator continuation cannot rule out a queued follow-up")
+        return stop(
+            "a follow-up claim names no job, so an operator continuation cannot rule out a queued follow-up",
+            "claim_unidentified",
+        )
     states = collected.counter_states
     if states is None:
-        return stop("the chain's accounting files changed while they were read, so an operator continuation waits")
+        return stop(
+            "the chain's accounting files changed while they were read, so an operator continuation waits",
+            "counters_changed",
+        )
     if configured_retries is None:
-        return stop("the run configures no infra-retry cap, so an operator continuation has no budget to fill")
+        return stop(
+            "the run configures no infra-retry cap, so an operator continuation has no budget to fill", "no_retry_cap"
+        )
     unknown: list[str] = []
     writes: dict[str, dict[str, Any]] = {}
     if collected.infra_retry_extension_state in ("absent", "ok"):
@@ -1914,6 +2163,12 @@ def resume_drift_note(keys: list[str] | None) -> str | None:
     return f"resumed across operational drift: {listed}"
 
 
+# The delivery reason of an export that did not upload the rollouts (``upload_rollouts: false``): unverified by
+# configuration, which no export changes.
+MLFLOW_ROLLOUTS_NOT_UPLOADED = "records that the rollouts were not uploaded"
+_CHAIN_STOP_KIND = re.compile(r"^(?:Previous job \S+ ended [^:]*: )?(?P<kind>[a-z_]+): ")
+
+
 def decide_from_collected(collected: CollectedEvidence, **options: Any) -> RecoveryDecision:
     """``_decide_from_collected``, with the reason naming any operational drift the run's latest resume crossed (see
     ``resume_drift_note``) and a continuation that ended before it queued its follow-up, so an inspection, a recovery
@@ -1926,14 +2181,46 @@ def decide_from_collected(collected: CollectedEvidence, **options: Any) -> Recov
     decision = _decide_from_collected(collected, **options).model_copy(
         update={"outcome_policy": {"source": OutcomePolicySource(source).value, **policy.model_dump(mode="json")}}
     )
+    if unrecorded := _unrecorded_notes(decision, options):
+        # Beside the stop they belong to, before any hint line that ends the reason.
+        first, *rest = decision.reason.split("\n", 1)
+        decision = decision.model_copy(update={"reason": "\n".join(["; ".join([first, *unrecorded]), *rest])})
     notes = [resume_drift_note(collected.resume_drift_keys)]
     blocked = failed_judge_jobs_blocking(collected.judge_jobs, collected.judge_job_acknowledgements)
     if blocked is not None and decision.action == RecoveryAction.REVERIFY:
         notes.append(failed_judge_jobs_stop(blocked, "the run's reverification directory"))
     if collected.chain_continuation_note:
         notes.append(f"the chain recorded: {collected.chain_continuation_note}")
+        # The guard's line names the typed kind first, after the previous job's end ("Previous job <id> ended
+        # <state>: <kind>: ..."; resume_script's *_REASON texts).
+        typed = _CHAIN_STOP_KIND.match(collected.chain_continuation_note)
+        if typed and typed["kind"] in GUARDED_DRIVER_FAILURE_KINDS:
+            decision = decision.model_copy(update={"chain_stop_kind": typed["kind"]})
     notes = [note for note in notes if note]
     return decision if not notes else decision.model_copy(update={"reason": "; ".join([decision.reason, *notes])})
+
+
+def _unrecorded_notes(decision: RecoveryDecision, options: Mapping[str, Any]) -> list[str]:
+    """A stop that a budget, unknown accounting or a refused extension blocks records none of the options this call
+    asked for (nothing is queued): one note per option the reason does not already name, so the next advice keeps
+    it and one call can carry them all."""
+    if decision.action != RecoveryAction.STOP or decision.operator_continuation is not None:
+        return []
+    if not _continuation_options(decision):
+        return []
+    reason, budget = decision.reason, options.get("operator_budget")
+    asked = (
+        (f"--extend-attempts {options.get('extend_attempts')}", _ATTEMPTS_USED_TOKEN, options.get("extend_attempts")),
+        (
+            f"--extend-retries {options.get('extend_retries')}",
+            _INFRA_BUDGET_USED_PREFIX,
+            options.get("extend_retries"),
+        ),
+        (f"--max-walltime {getattr(budget, 'max_walltime', '')}", _WALLTIME_USED_TOKEN, budget),
+        # A rerun this call planned and did not queue.
+        (RERUN_MASKED_FLAGS.split()[0], _NOT_RECORDED_TOKEN, bool(decision.rerun_masked)),
+    )
+    return [f"{flag} {_NOT_RECORDED_TOKEN}" for flag, named, value in asked if value and named not in reason]
 
 
 # The saved rows a decision reads; one that exists but cannot be read stops it.
@@ -2086,10 +2373,13 @@ def _decide_from_collected(
     )
     decision = decide_recovery(**inputs, budget=budget)
     if rerun_refused:
+        # The stop it would have lifted stays named, so the advice keeps every option the next call needs.
         return decision.model_copy(
             update={
                 "action": RecoveryAction.STOP,
-                "reason": f"--rerun-masked-without-artifact is refused: {rerun_refused}",
+                "reason": f"--rerun-masked-without-artifact is refused: {rerun_refused}; {decision.reason}",
+                "refused_option": RERUN_MASKED_FLAGS.split()[0],
+                "refused_over": decision.action,
             }
         )
     if decision.rerun_masked and decision.action == RecoveryAction.RESUBMIT:
@@ -2103,7 +2393,9 @@ def _decide_from_collected(
         return decision.model_copy(
             update={
                 "action": RecoveryAction.STOP,
-                "reason": f"--extend-attempts {extend_attempts} is refused: {attempts_refused}",
+                "reason": f"--extend-attempts {extend_attempts} is refused: {attempts_refused}; {decision.reason}",
+                "refused_option": "--extend-attempts",
+                "refused_over": decision.action,
             }
         )
     saved = _saved_attempt_cap(collected)
@@ -2126,6 +2418,8 @@ def _decide_from_collected(
                     f"admitted re-judgment outcome unknown for {collected.unresolved_rejudgments}: "
                     "the scheduler query failed, so the pass that admitted them may still run"
                 ),
+                # The scheduler's answer comes first; the run's accounting state stays for the continuation after.
+                "continuation_refused": "scheduler_unreachable",
             }
         )
     if collected.results is None and not decision.scheduler_live:
@@ -2133,12 +2427,11 @@ def _decide_from_collected(
             update={
                 "action": RecoveryAction.STOP,
                 "reason": "the results file is absent; collection cannot safely resume its saved history",
+                # No budget continues a run without its results file, so unknown accounting is not this stop's cause.
+                "accounting_unknown": None,
             }
         )
-    unknown = decision.action == RecoveryAction.STOP and decision.reason in (
-        UNKNOWN_BUDGET_REASON,
-        UNKNOWN_WALLTIME_REASON,
-    )
+    unknown = decision.action == RecoveryAction.STOP and decision.accounting_unknown is not None
     if operator_budget is not None:
         # An operator continuation needs the scheduler's answer that no job of the run waits or runs.
         accounting_unknown = (
@@ -2152,13 +2445,18 @@ def _decide_from_collected(
                 update={
                     "action": RecoveryAction.STOP,
                     "reason": f"{decision.reason}; {why}" if decision.action == RecoveryAction.STOP else why,
+                    "continuation_refused": "scheduler_unreachable",
                 }
             )
         if decision.scheduler_live and accounting_unknown:
             job = f"continuation {live_job_name}" if live_job_name else "a job of this run"
             why = f"the chain accounting is unknown and {job} is still pending or running"
             return decision.model_copy(
-                update={"action": RecoveryAction.STOP, "reason": f"{why}, so an operator continuation is refused"}
+                update={
+                    "action": RecoveryAction.STOP,
+                    "reason": f"{why}, so an operator continuation is refused",
+                    "continuation_refused": "job_live",
+                }
             )
         if unknown:
             return _operator_continuation(
@@ -2169,6 +2467,26 @@ def _decide_from_collected(
                 configured_retries=configured,
                 max_walltime_s=max_walltime_s,
                 extend_retries=extend_retries,
+            )
+    if unknown and operator_budget is None and live_job is False:
+        # What an explicit budget alone would do: refused by a guard, or stopped on a budget it cannot fill. The
+        # advice then names the guard to clear first, or every option the continuation needs in one call.
+        alone = _operator_continuation(
+            decision,
+            collected,
+            inputs,
+            OperatorBudget(max_walltime="HH:MM:SS", reason="inspection", retries=extend_retries or 1, user="-"),
+            configured_retries=configured,
+            max_walltime_s=max_walltime_s,
+            extend_retries=extend_retries,
+        )
+        if alone.continuation_refused is not None:
+            decision = alone
+            unknown = False
+        elif alone.action == RecoveryAction.STOP:
+            still = alone.reason.split(f"; {OPERATOR_CONTINUATION} by")[0]
+            decision = decision.model_copy(
+                update={"reason": f"{decision.reason}; an explicit budget alone would still stop: {still}"}
             )
     # The cap note explains an infra-cap decision (a resubmit, or the stored budget is used); a stop for the
     # identities' own states (exhausted, terminal, masked) does not depend on it.
@@ -2350,7 +2668,7 @@ def _requeue_continuation(job: Path, max_retries: int, max_walltime_s: float | N
             max_infra_retries=max_retries,
             max_walltime_s=max_walltime_s,
             live_job=False,
-            allocation_cut=allocation_cut_from_accounting(rows, collected.coverage_allocation_id),
+            allocation_cut=store_writer_cut_from_accounting(rows, collected),
         )
         requeued = requeue_note(collected.job_chain, rows)
         print(CONTINUATION_REASON_PREFIX + decision.reason + (f"; {requeued}" if requeued else ""))
@@ -2418,8 +2736,23 @@ def allocation_cut_from_accounting(rows: list[tuple[str, str, int, int]], alloca
     Only the first incarnation (no restarts) runs work: the prologue stops a requeued one before any. A state that is
     absent, ambiguous or not terminal is not an ending.
     """
+    later = any(job_id == allocation_id and restarts > 0 for job_id, _, _, restarts in rows)
+    ended = ALLOCATION_ENDED_STATES | {"REQUEUED"} if later else ALLOCATION_ENDED_STATES
     states = {state for job_id, state, _, restarts in rows if job_id == allocation_id and restarts == 0}
-    return allocation_id is not None and len(states) == 1 and states <= ALLOCATION_ENDED_STATES
+    return allocation_id is not None and len(states) == 1 and states <= ended
+
+
+def store_writer_cut_from_accounting(rows: list[tuple[str, str, int, int]], collected: CollectedEvidence) -> bool:
+    """Whether the allocation that last wrote the Store has ended (``allocation_cut_from_accounting``).
+
+    A coverage report from a worker older than ``allocation_id`` names no writer, but its writer is in the job chain:
+    the prologue records each allocation there before the Store opens. Then every allocation of the chain must have
+    ended. A report that records no allocation (a writer outside Slurm) stays unknown.
+    """
+    if not collected.coverage_writer_unrecorded:
+        return allocation_cut_from_accounting(rows, collected.coverage_allocation_id)
+    chain = collected.job_chain
+    return bool(chain) and all(allocation_cut_from_accounting(rows, job_id) for job_id in chain)
 
 
 def _store_writer_ended(collected: CollectedEvidence, previous_job_id: str) -> bool:
@@ -2458,9 +2791,12 @@ def accounted_requeued_chain_walltime(
     }
     if not job_chain or len(set(job_chain)) != len(job_chain) or {row[0] for row in rows} != set(job_chain):
         return None
+    last = {job_id: max(row[3] for row in rows if row[0] == job_id) for job_id in job_chain}
     restarts: dict[str, list[int]] = {}
     for job_id, state, _, restart in rows:
-        if state not in terminal:
+        # A REQUEUED incarnation that a later one followed has ended (its Start and End are recorded, so its elapsed
+        # time is known); the last incarnation still REQUEUED waits to run again and stays unknown.
+        if state not in terminal and not (state == "REQUEUED" and restart < last[job_id]):
             return None
         restarts.setdefault(job_id, []).append(restart)
     if any(sorted(numbers) != list(range(len(numbers))) for numbers in restarts.values()):
@@ -2569,6 +2905,24 @@ def accounted_chain_walltime(
     return float(total)
 
 
+def unsettled_chain_note(decision: RecoveryDecision) -> str:
+    """The chain stopped before the run settled: how many rollouts are unsettled, by state, so the stop reads
+    as an incomplete run and never as a finished one. Unsettled is wider than the coverage report's ``open`` (the
+    count in the chain's own stop line): it also holds final failures that were not counted as zero."""
+    settled = (IdentityState.SCORED, IdentityState.MODEL_FINAL, IdentityState.OMITTED)
+    unsettled = decision.expected - sum(decision.counts.get(state, 0) for state in settled)
+    by_state = ", ".join(
+        f"{count} {state}"
+        for state, count in sorted(decision.counts.items())
+        if count and state not in {s.value for s in settled}
+    )
+    return (
+        f"the job chain stopped with {unsettled} of {decision.expected} rollouts unsettled"
+        + (f" ({by_state})" if by_state else "")
+        + "; final failures are included, the stop line's open count leaves them out (.gym_chain_incomplete)"
+    )
+
+
 def gate_task_summary(
     decision: RecoveryDecision,
     *,
@@ -2592,7 +2946,7 @@ def gate_task_summary(
     """
     errors: list[str] = []
     warnings: list[str] = []
-    unverified = summary_valid is None or health_passed is None
+    unverified = summary_valid is None or health_passed is None or decision.unverified
     states = decision.counts
     for state, label in (
         (IdentityState.JUDGE_RECOVERABLE, "judge failures awaiting re-judgment"),
@@ -2605,7 +2959,11 @@ def gate_task_summary(
     ):
         if states.get(state):
             errors.append(f"{states[state]} {label}: {decision.identities[state.value][:5]}")
-    if score is None or not math.isfinite(score):
+    if decision.unverified:
+        # Deliberately unverified: there is no score to read, and that is no failure.
+        score = None
+        warnings.append(decision.reason)
+    elif score is None or not math.isfinite(score):
         # An incomplete run has no score to read yet, whatever score options were passed: say that, not the options.
         settled = sum(
             states.get(state, 0) for state in (IdentityState.SCORED, IdentityState.MODEL_FINAL, IdentityState.OMITTED)
@@ -2892,7 +3250,7 @@ def mlflow_errors(
         errors.append(
             f"MLflow post-run export receipt of run {receipt.get('run_id')} "
             + (
-                "records that the rollouts were not uploaded"
+                MLFLOW_ROLLOUTS_NOT_UPLOADED
                 if scope is False
                 else "does not record whether the rollouts were uploaded"
             )
@@ -2938,7 +3296,7 @@ class GateCriteria(BaseModel):
     # request timed out after its upload) is the model's fault. True by default: the deployment serving the evaluated
     # model is part of what is evaluated, so its slowness is on the model's side, never the evaluation's. A
     # self-hosted evaluation that owns the serving deployment may set it to false, and the timeout then counts as a
-    # server fault (evaluation-side). Applied by the trial gate (``fault_class``).
+    # server fault (evaluation-side). Applied by the trial gate (``classify_failure``).
     policy_timeout_counts_as_model: bool = Field(default=True, strict=True)
 
     @field_validator("max_response_failure_fraction", "max_trial_failure_fraction", mode="before")
@@ -2953,7 +3311,7 @@ class GateCriteria(BaseModel):
             raise ValueError("expected a finite number in (0, 1]")
         return float(value)
 
-    def report(self) -> dict[str, Any]:
+    def report(self, *, classification: FailureClassificationConfig | None = None) -> dict[str, Any]:
         """The effective criterion and the accepted, unapplied fractions, as reported beside the gate results."""
         rule = "strictly below, before rounding"
         return {
@@ -2961,6 +3319,7 @@ class GateCriteria(BaseModel):
                 "max_failure_fraction": GATE_FAILURE_LIMIT,
                 "passes": rule,
                 "policy_timeout_counts_as_model": self.policy_timeout_counts_as_model,
+                "classification": (classification or FailureClassificationConfig()).model_dump(mode="json"),
             },
             "response": {"max_failure_fraction": self.max_response_failure_fraction, "applied": False},
             "trial": {"max_failure_fraction": self.max_trial_failure_fraction, "applied": False},
@@ -3083,10 +3442,19 @@ def _cut_judge_reply(call: Mapping[str, Any]) -> bool:
     )
 
 
+# What a failed judge request that the verifier retried has to look like to count as a recovered grading attempt.
+_HTTP_ERROR_STATUS_MIN = 400
+_HTTP_ERROR_STATUS_MAX = 599
+_FAILED_OPERATION_OUTCOME = "failed"
+_COMPLETED_GRADE_OUTCOME = "completed"
+_MODEL_REQUEST_OPERATION = "model_request"
+
+
 def _observed_trial_operations(
     decision: RecoveryDecision,
     collected: CollectedEvidence | None,
     *,
+    classification: FailureClassificationConfig | None = None,
     judge_recovery: dict[str, int] | None = None,
     grading_failures: list[str] | None = None,
     policy_recovery: dict[str, int] | None = None,
@@ -3120,6 +3488,7 @@ def _observed_trial_operations(
     inside one completed operation is recovered the same way (``policy_recovery`` receives its counts): each failed
     attempt is an event of that operation and of the row, and the answer is the final attempt's.
     """
+    classification = decision_classification(decision, classification)
     decision = _health_view(decision)
     from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
 
@@ -3177,6 +3546,146 @@ def _observed_trial_operations(
             and (ref.get("model_ref") is None or ref["model_ref"] == meta["model_ref"])
             and (ref.get("response_id") is None or ref["response_id"] == meta["response_id"])
         )
+
+    def one_recorded_failure(meta, judge_ref):
+        """The call is the judge model's and records exactly one operation with one event, nothing omitted."""
+        operations, report = meta["model_operations"], meta["failure_report"]
+        if meta.get("model_ref") != judge_ref:
+            return False
+        if not isinstance(operations, list) or len(operations) != 1:
+            return False
+        return isinstance(report["events"], dict) and len(report["events"]) == 1 and report["omitted"] is False
+
+    def new_call_before(call, final_started):
+        """The call id is not used yet and the call started before the completed reply grading rests on."""
+        if not nonempty(call["model_call_id"]) or call["model_call_id"] in populations[0]:
+            return False
+        started = call.get("started_at")
+        return isinstance(started, (int, float)) and started < final_started
+
+    def exactly_one_attempt(operation, status):
+        """The operation failed after one HTTP attempt, or after one terminal transport failure and no response.
+
+        The client counts a transport failure inside the same retry-loop entry, so one recorded event is the whole
+        operation. Any further attempt would be unrecorded.
+        """
+        if operation.get("outcome") != _FAILED_OPERATION_OUTCOME:
+            return False
+        http_attempts, transport_failures = operation.get("http_attempts"), operation.get("transport_failures")
+        if type(http_attempts) is not int or type(transport_failures) is not int:
+            return False
+        return http_attempts == 1 and transport_failures == int(status is None)
+
+    def ids_not_used(op_id, attempt_id):
+        """The operation and attempt ids are set and no other call in the run already claimed them."""
+        if not nonempty(op_id) or not nonempty(attempt_id):
+            return False
+        return op_id not in populations[2] and attempt_id not in populations[4]
+
+    def event_matches_operation(operation, report, key, event):
+        """The operation, the report and the event name the same failure, and that event was not counted before."""
+        if operation.get("failure_id") != key or report["failure_id"] != key:
+            return False
+        if not isinstance(event, dict) or key != event.get("event_id") or key in recovered_events:
+            return False
+        if event.get("attempt_id") != operation.get("final_attempt_id"):
+            return False
+        return event.get("operation_id") == operation.get("operation_id")
+
+    def is_http_error_status(status):
+        """The status is an integer HTTP error status (client or server error)."""
+        return type(status) is int and _HTTP_ERROR_STATUS_MIN <= status <= _HTTP_ERROR_STATUS_MAX
+
+    def is_model_request_error(event, status):
+        """The event is a failed model request with no cause, and its HTTP status (if any) is an error status."""
+        is_model_request = (
+            event.get("boundary") == FailureBoundary.MODEL
+            and event.get("operation") == _MODEL_REQUEST_OPERATION
+            and event.get("failure_kind") == MODEL_REQUEST_ERROR
+        )
+        return is_model_request and event.get("cause_id") is None and (status is None or is_http_error_status(status))
+
+    def failed_judge_attempt(call, judge_ref, final_started):
+        """Decide whether a failed judge request that the verifier retried counts as a recovered grading attempt.
+
+        The verifier sent a request to the judge model, it failed, and the verifier sent it again; the grade rests on
+        the later completed reply (started at ``final_started``). The failed request counts only when it is wholly
+        recorded: one failed operation with one event, to the judge model, started before the completed reply, and
+        sharing no id with another call in the run. Anything less could hide a retry we cannot vouch for.
+
+        Returns ``(event_id, event, operation_id, attempt_id)`` for a counted attempt, otherwise None.
+        """
+        meta = call["response_metadata"]
+        if not one_recorded_failure(meta, judge_ref) or not new_call_before(call, final_started):
+            return None
+        operation = meta["model_operations"][0]
+        report = meta["failure_report"]
+        ((key, event),) = report["events"].items()
+        op_id, attempt_id = operation.get("operation_id"), operation.get("final_attempt_id")
+        status = event.get("http_status") if isinstance(event, dict) else None
+        if not exactly_one_attempt(operation, status) or not ids_not_used(op_id, attempt_id):
+            return None
+        if not event_matches_operation(operation, report, key, event) or not is_model_request_error(event, status):
+            return None
+        return key, event, op_id, attempt_id
+
+    def recovered_judge_attempt(call, judge_calls):
+        """Find the recovered attempt this retried call is, by trying each completed judge call as its successor.
+
+        Only a completed call with a usable start time can order a retry. Timestamps are read here and nowhere
+        else, so a grading without retries needs none. Returns what ``failed_judge_attempt`` returns, or None.
+        """
+        for judge in judge_calls:
+            started = judge.get("started_at")
+            if type(started) not in (int, float) or not math.isfinite(started):
+                continue
+            found = failed_judge_attempt(call, judge["response_metadata"]["model_ref"], started)
+            if found is not None:
+                return found
+        return None
+
+    def retried_judge_attempts(retried, judge_calls, calls):
+        """Join each retried owned call to its captured call and its recovered attempt, or None if any cannot be."""
+        claimed, attempts = list(judge_calls), []
+        for ref in retried:
+            hit = [call for call in calls if matches(ref, call)]
+            if len(hit) != 1 or any(hit[0] is seen for seen in claimed):
+                return None
+            found = recovered_judge_attempt(hit[0], judge_calls)
+            if found is None:
+                return None
+            claimed.append(hit[0])
+            attempts.append((hit[0], *found))
+        return attempts
+
+    def is_already_registered(failed, key, op_id, attempt_id):
+        """The failed call, its operation, its attempt or its event was already registered in this run."""
+        return (
+            failed["model_call_id"] in populations[0]
+            or op_id in populations[2]
+            or attempt_id in populations[4]
+            or key in recovered_events
+        )
+
+    def register_failed_attempts(failed_attempts, grade, cut_reply):
+        """Register each recovered attempt once in the run's populations and count it, or False on a repeated id.
+
+        The evidence must not contradict itself about one call, operation, attempt or event, so each attempt is
+        checked against the completed dependencies and the failed calls registered before it.
+        """
+        for failed, key, event, op_id, attempt_id in failed_attempts:
+            if is_already_registered(failed, key, op_id, attempt_id):
+                return False
+            populations[0].add(failed["model_call_id"])
+            populations[2].add(op_id)
+            populations[4].add(attempt_id)
+            recovered_events[key] = event
+            recovered["observed_grading_attempt_errors"] += 1
+            recovered["observed_grading_failed_operations"] += 1
+            if grade["outcome"] == _COMPLETED_GRADE_OUTCOME and not cut_reply:
+                recovered["judge_recovered_attempts"] += 1
+                recovered["judge_recovered_operations"] += 1
+        return True
 
     def completed_once(call, *, judge=False, valid_grade=True, truncated=False):
         """One successful HTTP response with one completed physical attempt, ids unique in the run.
@@ -3521,18 +4030,14 @@ def _observed_trial_operations(
                 continue  # A counted grading fault (``_scored_fault``): its reward is no grade to observe.
             truncated = _incomplete_answer(row)
             prior_recovered_events = set(recovered_events)
-            agent = servers[row["agent_ref"]["name"]]
-            owner = _verification_owner(row["agent_ref"]["name"], agent)
+            owner = _verification_owner(row, servers)
+            if owner is None:
+                return False
             # An agent without a resources server grades its own rollouts (verifiers_agent); it has no resources
             # server to look up, and only its own grading record can observe such a trial (below).
-            resource = servers[owner] if owner == agent.get("resources_server") else None
-            environment = servers[row["_ng_environment_server"]]
+            resource = servers[owner] if servers[owner].get("kind") == "resources_servers" else None
             if (
-                agent.get("kind") != "responses_api_agents"
-                or (resource is not None and resource.get("kind") != "resources_servers")
-                or environment.get("kind") != "environment_servers"
-                or row.get("_ng_result_type") != environment.get("implementation")
-                or row.get(FAILURE_CLASS) is not None
+                row.get(FAILURE_CLASS) is not None
                 or row.get("failure_kind") is not None
                 or row.get(FAILURE_ID) is not None
                 or row.get("_ng_failure_events_omitted", False) is not False
@@ -3542,6 +4047,7 @@ def _observed_trial_operations(
             observed = row["ng_trial_observations"]
             verifiers, calls = observed["verifier_invocations"], observed.get("model_calls")
             judge_calls = None
+            failed_attempts = []
             single = verifiers[0] if isinstance(verifiers, list) and len(verifiers) == 1 else None
             graded = single.get("grading_operations") if isinstance(single, dict) else None
             # Without a grading operation, a saved grading artifact or the model's own failed answer records the
@@ -3582,9 +4088,16 @@ def _observed_trial_operations(
                     if sum(1 for item in owned if matches(item, hit[0])) != 1:
                         return False
                     judge_calls.append(hit[0])
-                if len(owned) != len(judge_calls):
+                # An owned call the grading does not depend on is a judge request the verifier retried: it counts
+                # as a recovered grading attempt when it failed and is wholly recorded, anything else is unknown.
+                retried = [item for item in owned if not any(matches(item, call) for call in judge_calls)]
+                if len(owned) - len(retried) != len(judge_calls):
                     return False
-                calls = [call for call in calls if not any(call is judge for judge in judge_calls)]
+                failed_attempts = retried_judge_attempts(retried, judge_calls, calls)
+                if failed_attempts is None:
+                    return False
+                claimed = [*judge_calls, *(failed[0] for failed in failed_attempts)]
+                calls = [call for call in calls if not any(call is seen for seen in claimed)]
             # Grading coverage: the trial's one verifier (none only beside an environment reward) and how it graded.
             if not isinstance(verifiers, list) or len(verifiers) != (
                 0 if not verifiers and (artifact == "environment_reward" or resource is None) else 1
@@ -3657,6 +4170,8 @@ def _observed_trial_operations(
                 )
             ):
                 return False
+            if not register_failed_attempts(failed_attempts, grade, cut_reply):
+                return False
             if cut_reply:
                 invalid_grades.append(_identity(row))
             if (
@@ -3699,7 +4214,7 @@ def _observed_trial_operations(
             # result at any reward: the verifier graded the state the model reached. That request's failure is
             # accounted for; one of an evaluation-side kind is not.
             ended = _ended_on_failed_request(row) if _reward(row) not in (None, 0) else None
-            if ended is not None and ended[0] in MODEL_FAULT_KINDS:
+            if ended is not None and _row_fault_class(row, ended[0], classification) == FailureClass.MODEL:
                 report = (ended[1].get("response_metadata") or {}).get("failure_report")
                 events = report.get("events") if isinstance(report, dict) else None
                 if isinstance(events, dict):
@@ -3853,7 +4368,12 @@ def _last_captured_call(calls: list) -> Any:
     return last
 
 
-def infrastructure_timeouts(decision: RecoveryDecision, collected: CollectedEvidence | None) -> set[Identity]:
+def infrastructure_timeouts(
+    decision: RecoveryDecision,
+    collected: CollectedEvidence | None,
+    *,
+    classification: FailureClassificationConfig | None = None,
+) -> set[Identity]:
     """Scored identities whose graded result is an agent timeout with a server-side fault in its window.
 
     A Harbor graded zero a run without a Store cannot reopen (``is_infrastructure_agent_timeout``): it stays in the
@@ -3865,14 +4385,21 @@ def infrastructure_timeouts(decision: RecoveryDecision, collected: CollectedEvid
     return {
         _identity(row)
         for row in ((collected.results or []) if collected is not None else [])
-        if _identity(row) in scored and is_infrastructure_agent_timeout(row)
+        if _identity(row) in scored
+        and is_infrastructure_agent_timeout(row, classification=decision_classification(decision, classification))
     }
 
 
-def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[Identity, str]:
-    """Scored identities whose rollout ended on a failed policy request and was scored zero, with the failure kind.
+def final_zero_trials(
+    decision: RecoveryDecision,
+    collected: CollectedEvidence | None,
+    *,
+    classification: FailureClassificationConfig | None = None,
+) -> dict[Identity, str]:
+    """Scored zeros with a saved policy decision or a failed final policy request, with their failure kinds.
 
-    The last policy call of the row's one invocation ends in a failed model operation whose failure event the call
+    A consistent saved counted-zero decision retains its own registered failure kind. Otherwise, the last
+    policy call of the row's one invocation ends in a failed model operation whose failure event the call
     recorded, and the row's reward is zero. Such a trial is settled as a failure under the benchmark protocol: it
     has no selectable response, and it is counted once, in the trial family. An agent that records no call of its own
     (it has no invocation, or its invocations reference none) ended on a failed request when its last captured call (``_last_captured_call``)
@@ -3883,22 +4410,28 @@ def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence |
     budget the window cannot hold. The policy's last call is its last captured one when its invocations reference
     none, since another model's capture may follow.
     """
+    classification = decision_classification(decision, classification)
     scored = set(decision.identities.get(IdentityState.SCORED.value, []))
     found: dict[Identity, str] = {}
-    infrastructure = infrastructure_timeouts(decision, collected)
+    infrastructure = infrastructure_timeouts(decision, collected, classification=classification)
     for row in (collected.results or []) if collected is not None else []:
         reward = row.get("reward")
         if _identity(row) not in scored or type(reward) not in (int, float) or reward != 0:
             continue
         if _identity(row) in infrastructure:
             continue  # Counted once, as its agent timeout's server-side fault.
-        ended = _ended_on_failed_request(row)
+        if (kind := _policy_zero_kind(row)) is not None:
+            found[_identity(row)] = kind
+            continue
+        ended = _ended_on_failed_request(row, classification=classification)
         if ended is not None:
             found[_identity(row)] = ended[0]
     return found
 
 
-def _ended_on_failed_request(row: Mapping[str, Any]) -> tuple[Any, Mapping[str, Any]] | None:
+def _ended_on_failed_request(
+    row: Mapping[str, Any], *, classification: FailureClassificationConfig | None = None
+) -> tuple[Any, Mapping[str, Any]] | None:
     """The failure kind of the request a row's rollout ended on, with that call, or None (``final_zero_trials``).
 
     The last policy call of the row's one invocation ended in a failed model operation whose failure event the call
@@ -3918,7 +4451,9 @@ def _ended_on_failed_request(row: Mapping[str, Any]) -> tuple[Any, Mapping[str, 
         last = _last_captured_call(observed["model_calls"])
         failed = _failed_request(last)
         if failed is not None:
-            return status_fault_kind(failed[0], failed[1], policy=_policy_call(row, last)), last
+            return status_fault_kind(
+                failed[0], failed[1], policy=_policy_call(row, last), classification=classification
+            ), last
         return None
     if not isinstance(invocations, list) or len(invocations) != 1 or not isinstance(invocations[0], dict):
         return None
@@ -3957,7 +4492,9 @@ def _ended_on_failed_request(row: Mapping[str, Any]) -> tuple[Any, Mapping[str, 
         and event.get("operation_id") == final.get("operation_id")
         and isinstance(event.get("failure_kind"), str)
     ):
-        return status_fault_kind(event["failure_kind"], event.get("http_status")), last[0]
+        return status_fault_kind(event["failure_kind"], event.get("http_status"), classification=classification), last[
+            0
+        ]
     return None
 
 
@@ -4287,14 +4824,18 @@ def _graded(row: Mapping[str, Any]) -> bool:
     )
 
 
-def _bound_grading(row: Mapping[str, Any]) -> bool:
+def _bound_grading(row: Mapping[str, Any], collected: CollectedEvidence) -> bool:
     """Whether the row is ``_graded`` and every grading operation binds its saved answer and score, as the gate
     requires (``_ng_collected_grading_binding``)."""
     observed = row.get("ng_trial_observations")
     binding = row.get("_ng_collected_grading_binding")
+    provenance = (collected.quality or {}).get("provenance")
+    servers = provenance.get("servers") if isinstance(provenance, dict) else None
     return (
         _graded(row)
         and _bound_answer(row)
+        and isinstance(servers, dict)
+        and _verification_owner(row, servers) is not None
         and all(
             item.get("result_binding_sha256") == binding
             for item in observed["verifier_invocations"][0]["grading_operations"]
@@ -4302,21 +4843,53 @@ def _bound_grading(row: Mapping[str, Any]) -> bool:
     )
 
 
-def _bound_artifact(row: Mapping[str, Any]) -> bool:
+def _bound_artifact(row: Mapping[str, Any], collected: CollectedEvidence) -> bool:
     """Whether a saved grading artifact or the model's own failed answer resolves the row, as the gate requires: an
-    artifact other than the model's failed answer must bind the saved answer and score."""
-    if grading_artifact(row) is not None and _bound_answer(row):
-        return True
-    return grading_artifact(row) is None and _model_failure(row)
+    artifact other than the model's failed answer must bind the saved answer and score to its verification owner."""
+    if grading_artifact(row) is None:
+        return _model_failure(row)
+    provenance = (collected.quality or {}).get("provenance")
+    servers = provenance.get("servers") if isinstance(provenance, dict) else None
+    return _bound_answer(row) and isinstance(servers, dict) and _verification_owner(row, servers) is not None
 
 
-def _verification_owner(agent_name: Any, agent: Mapping[str, Any]) -> Any:
-    """Who verifies an agent's rollouts: its resources server, or the agent itself when it names none.
+def _verification_owner(row: Mapping[str, Any], servers: Mapping[str, Any]) -> str | None:
+    """Resolve verification from saved routing bindings, including taskset results without ``agent_ref``.
 
-    An agent that runs its own rubric (verifiers_agent) has no resources server; its grading record names the agent.
+    The environment owns a session's verification. An agent reference on a compatibility result must agree with
+    a declared primary agent; without one, its explicit reference retains its existing attribution.
+    An agent that grades its own rollouts names itself when neither configuration binds a resources server.
     """
-    server = agent.get("resources_server")
-    return server if server is not None else agent_name
+    environment_name = row.get("_ng_environment_server")
+    environment = servers.get(environment_name) if isinstance(environment_name, str) else None
+    if (
+        not isinstance(environment, dict)
+        or environment.get("kind") != "environment_servers"
+        or environment.get("bindings_malformed", False) is not False
+        or row.get("_ng_result_type") != environment.get("implementation")
+    ):
+        return None
+    reference = row.get("agent_ref")
+    if reference is None:
+        agent_name = environment.get("agent_server")
+    elif isinstance(reference, dict):
+        agent_name = reference.get("name")
+        if environment.get("agent_server") is not None and agent_name != environment["agent_server"]:
+            return None
+    else:
+        return None
+    agent = servers.get(agent_name) if isinstance(agent_name, str) and agent_name else None
+    if not isinstance(agent, dict) or agent.get("kind") != "responses_api_agents":
+        return None
+    owner = environment.get("resources_server")
+    if owner is None:
+        if reference is None:
+            return None
+        owner = agent.get("resources_server")
+    if owner is None:
+        return agent_name
+    resource = servers.get(owner) if isinstance(owner, str) and owner else None
+    return owner if isinstance(resource, dict) and resource.get("kind") == "resources_servers" else None
 
 
 def _verifier_recorded(verifier: Any, row: Mapping[str, Any], resources_server: Any) -> bool:
@@ -4351,27 +4924,28 @@ def _recorded_by_verifier(row: Mapping[str, Any], collected: CollectedEvidence) 
     """Whether the row's one verifier invocation saved its own grading record for it (``_verifier_recorded``)."""
     provenance = (collected.quality or {}).get("provenance")
     servers = provenance.get("servers") if isinstance(provenance, dict) else None
-    agent_ref = row.get("agent_ref")
-    agent = servers.get(agent_ref.get("name")) if isinstance(servers, dict) and isinstance(agent_ref, dict) else None
+    owner = _verification_owner(row, servers) if isinstance(servers, dict) else None
     observed = row.get("ng_trial_observations")
     verifiers = observed.get("verifier_invocations") if isinstance(observed, dict) else None
     return (
-        isinstance(agent, dict)
+        owner is not None
         and isinstance(verifiers, list)
         and len(verifiers) == 1
-        and _verifier_recorded(verifiers[0], row, _verification_owner(agent_ref.get("name"), agent))
+        and _verifier_recorded(verifiers[0], row, owner)
     )
 
 
 def _verifying_servers(collected: CollectedEvidence) -> str:
-    """The resources servers the run's agents name, from the run provenance, for an unobserved-trial reason."""
+    """The resources servers the run binds, from its provenance, for an unobserved-trial reason."""
     provenance = (collected.quality or {}).get("provenance")
     servers = provenance.get("servers") if isinstance(provenance, dict) else None
     names = sorted(
         {
             str(fact["resources_server"])
             for fact in (servers.values() if isinstance(servers, dict) else ())
-            if isinstance(fact, dict) and fact.get("kind") == "responses_api_agents" and fact.get("resources_server")
+            if isinstance(fact, dict)
+            and fact.get("kind") in {"responses_api_agents", "environment_servers"}
+            and fact.get("resources_server")
         }
     )
     return ", ".join(names) if names else "a resources server the run provenance does not name"
@@ -4407,7 +4981,11 @@ def trial_population(decision: RecoveryDecision) -> int:
     return decision.expected - decision.counts.get(IdentityState.OMITTED, 0)
 
 
-def trial_counts(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[str, Any] | None:
+def trial_counts(
+    decision: RecoveryDecision,
+    collected: CollectedEvidence | None,
+    unobserved_identities: set[Identity] | None = None,
+) -> dict[str, Any] | None:
     """Acceptance's trial counts: observed healthy, unhealthy and unobserved, over the expected trials.
 
     A saved grading artifact or the model's own failed answer (``grading_artifact``, ``_model_failure``) resolves a
@@ -4416,7 +4994,8 @@ def trial_counts(decision: RecoveryDecision, collected: CollectedEvidence | None
     too and nothing is unobserved. Otherwise ``unobserved`` are the other scored trials whose verifier recorded
     neither completed grading operations bound to the saved row nor its own grading record: nothing resolved their
     grading, so they are unverified, never healthy. ``observed_healthy`` are the rest; ``verifier_recorded`` of them
-    are observed only through the verifier's grading record. None until the run is complete.
+    are observed only through the verifier's grading record. None until the run is complete. A caller that passes
+    ``unobserved_identities`` gets the identities counted as unobserved added to it.
     """
     decision = _health_view(decision)
     trials = trial_population(decision)
@@ -4442,13 +5021,22 @@ def trial_counts(decision: RecoveryDecision, collected: CollectedEvidence | None
     ]
     # The same per-trial evidence the gate validates: a grading bound to the saved row, the verifier's own record, or
     # a bound grading artifact. A mismatched or missing binding stays unobserved, never healthy.
-    recorded = sum(1 for row in rows if not _bound_grading(row) and _recorded_by_verifier(row, collected))
+    recorded = sum(1 for row in rows if not _bound_grading(row, collected) and _recorded_by_verifier(row, collected))
     artifacts = sum(
         1
         for row in rows
-        if not _bound_grading(row) and not _recorded_by_verifier(row, collected) and _bound_artifact(row)
+        if not _bound_grading(row, collected)
+        and not _recorded_by_verifier(row, collected)
+        and _bound_artifact(row, collected)
     )
-    unobserved = sum(1 for row in rows if not _bound_grading(row)) - recorded - artifacts
+    unbound = [row for row in rows if not _bound_grading(row, collected)]
+    unobserved = len(unbound) - recorded - artifacts
+    if unobserved_identities is not None:
+        unobserved_identities.update(
+            _identity(row)
+            for row in unbound
+            if not _recorded_by_verifier(row, collected) and not _bound_artifact(row, collected)
+        )
     counts: dict[str, Any] = {
         "observed_healthy": trials - unhealthy - unobserved,
         "unhealthy": unhealthy,
@@ -4487,45 +5075,27 @@ def _predates_operation_observations(decision: RecoveryDecision, collected: Coll
     return True
 
 
-# The trial gate's fault classes are the shared default (``MODEL_FAULT_KINDS``, ``SERVER_FAULT_KINDS`` in
-# ``nemo_gym.core.failure_kinds``), keyed on a failure's recorded HTTP status first (``status_fault_kind``) and on the
-# run's ``policy_timeout_counts_as_model`` setting (``fault_class``). The gate-derived classes are named there too.
-GRADING_WITHOUT_VERDICT = "grading_without_verdict"
-
-
-def status_fault_kind(kind: Any, http_status: Any, *, policy: bool = True) -> Any:
-    """A counted failure's kind for the trial gate's classes, keyed on the HTTP status the failure recorded.
-
-    A model-server reply with a 5xx status is the server's fault (``MODEL_SERVER_ERROR``) whatever the kind says. A
-    4xx rejection keeps its kind when the evaluated policy made the request (its context or request is the model's
-    own), and is ``NON_POLICY_MODEL_REJECTION`` (evaluation-side) for another model's request. Without a recorded
-    status the kind decides, as before.
-    """
-    if type(http_status) is not int:
-        return kind
-    if is_server_status(http_status):
-        return MODEL_SERVER_ERROR
-    if 400 <= http_status <= 499 and not policy:
-        return NON_POLICY_MODEL_REJECTION
-    return kind
+# Classification is shared with boundary policies; the gate only counts final trial outcomes.
+def status_fault_kind(
+    kind: Any, http_status: Any, *, policy: bool = True, classification: FailureClassificationConfig | None = None
+) -> Any:
+    """The shared reporting label for observed HTTP evidence; saved events remain unchanged."""
+    return reporting_failure_kind(kind, http_status, policy=policy, config=classification)
 
 
 UNVERIFIED_NOTE = "unverified: this withholds a pass and is no health failure"
 
 
-def fault_class(kind: Any, *, policy_timeout_counts_as_model: bool = True) -> str | None:
-    """A counted trial failure's class: ``model``, ``server``, or None for another evaluation-side kind.
-
-    A policy-model response timeout is the model's fault by default (``GateCriteria.policy_timeout_counts_as_model``)
-    and the server's when a run sets that to false.
-    """
-    if kind == MODEL_POLICY_RESPONSE_TIMEOUT and not policy_timeout_counts_as_model:
-        return "server"
-    if kind in MODEL_FAULT_KINDS:
-        return "model"
-    if kind in SERVER_FAULT_KINDS or (isinstance(kind, str) and kind.startswith("provider_")):
-        return "server"
-    return None
+def _health_classification(
+    classification: FailureClassificationConfig | None, *, policy_timeout_counts_as_model: bool
+) -> FailureClassificationConfig:
+    """Express the existing timeout switch as a shared classification override."""
+    config = classification or FailureClassificationConfig()
+    if policy_timeout_counts_as_model:
+        return config
+    return config.model_copy(
+        update={"by_failure_kind": config.by_failure_kind | {MODEL_POLICY_RESPONSE_TIMEOUT: FailureClass.EVALUATION}}
+    )
 
 
 def _incomplete_answer(row: Mapping[str, Any]) -> bool:
@@ -4578,7 +5148,13 @@ def _recorded_grade(row: Mapping[str, Any], collected: CollectedEvidence | None)
     record, or a saved grading artifact (``GRADING_ARTIFACTS``). The model's own failed answer is not one."""
     return (
         _graded(row)
-        or (collected is not None and _recorded_by_verifier(row, collected))
+        # A shared record also covers an early zero returned for an empty answer; unlike an explicit grading
+        # operation, its completion alone does not show that an incomplete, text-free answer was judged.
+        or (
+            collected is not None
+            and not (_incomplete_answer(row) and _empty_answer(row))
+            and _recorded_by_verifier(row, collected)
+        )
         or grading_artifact(row) is not None
     )
 
@@ -4600,18 +5176,35 @@ def _answer_fault(row: Mapping[str, Any], collected: CollectedEvidence | None) -
     return EMPTY_ANSWER if _empty_answer(row) else MALFORMED_ANSWER
 
 
-def _scored_kind(row: Mapping[str, Any]) -> str | None:
+def _policy_zero_kind(row: Mapping[str, Any]) -> str | None:
+    """A consistent applied zero keeps its own kind, without reinterpreting diagnostic requests."""
+    kind = row.get("failure_kind")
+    return kind if is_policy_counted_zero(row) and _known_kind(kind) else None
+
+
+def _scored_kind(row: Mapping[str, Any], *, classification: FailureClassificationConfig | None = None) -> str | None:
     """The registered failure kind a scored result row records as its own outcome, keyed on its recorded HTTP status
-    (``status_fault_kind``), or None. For example Harbor's graded ``agent_timeout`` is a scored main result."""
+    (``status_fault_kind``), or None. For example Harbor's graded ``agent_timeout`` is a scored main result.
+
+    A persisted outcome decision governs metric admission, independently of fault attribution and the existing
+    evaluation-health threshold. Counting a provider failure as zero does not make it a model fault or healthy.
+    """
+    if (kind := _policy_zero_kind(row)) is not None:
+        return kind
     kind, status = _policy_evidence(row)
-    return status_fault_kind(kind, status) if _known_kind(kind) else None
+    return status_fault_kind(kind, status, classification=classification) if _known_kind(kind) else None
 
 
-def _scored_fault(row: Mapping[str, Any], collected: CollectedEvidence | None) -> str | None:
+def _scored_fault(
+    row: Mapping[str, Any],
+    collected: CollectedEvidence | None,
+    *,
+    classification: FailureClassificationConfig | None = None,
+) -> str | None:
     """A scored row's one counted fault: its own recorded kind (``_scored_kind``), else its answer's
     (``_answer_fault``), else ``judge_unparseable`` when its saved judge evaluation recorded no verdict
     (``_unparsed_judge_verdict``)."""
-    fault = _scored_kind(row) or _answer_fault(row, collected)
+    fault = _scored_kind(row, classification=classification) or _answer_fault(row, collected)
     if fault is None and _judge_unparseable(row):
         return JUDGE_UNPARSEABLE
     return fault
@@ -4841,7 +5434,7 @@ def _row_recovered_attempts(row: Mapping[str, Any]) -> list[tuple[str, dict[str,
 def _unaccounted_failures(row: Mapping[str, Any], recovered: Mapping[str, Any]) -> bool:
     """Whether the row recorded a model failure that no recovery accounts for.
 
-    Every failure event the row saved or its captured calls reported must be a recovered attempt (``recovered``: the
+    Every model failure event the row saved or its captured calls reported must be a recovered attempt (``recovered``: the
     events the coverage join joined, with the row's own ``_row_recovered_attempts``), a saved copy must agree with its
     call's, and every failed model operation must be one whose failure such a recovery accounts for. A trial that
     ended on its failed request is counted separately (``final_zero_trials``) and is never asked this.
@@ -4855,6 +5448,20 @@ def _unaccounted_failures(row: Mapping[str, Any], recovered: Mapping[str, Any]) 
     if not isinstance(saved, dict) or (calls is not None and not isinstance(calls, list)):
         return True
     for event_id, event in saved.items():
+        if (
+            isinstance(event, dict)
+            and event.get("boundary") in FailureBoundary
+            and event["boundary"] != FailureBoundary.MODEL
+        ):
+            # The enclosing graded result completed. Non-model observations cannot join model attempts and
+            # do not contradict that outcome; a selected final failure is counted before this coverage check.
+            try:
+                observed = FailureEvent.model_validate(event)
+            except ValidationError:
+                return True
+            if observed.event_id != event_id:
+                return True
+            continue
         if (
             event_id not in joined
             or not isinstance(event, dict)
@@ -4918,68 +5525,141 @@ def _recovered_note(joined: Mapping[str, int]) -> str:
     )
 
 
-def trial_faults(decision: RecoveryDecision, collected: CollectedEvidence | None) -> Counter:
-    """The trial gate's counted failures by kind.
+def _row_fault_class(
+    row: Mapping[str, Any], fault: str, classification: FailureClassificationConfig | None
+) -> FailureClass:
+    if (applied := _applied_class(row)) is not None:
+        return applied
+    kind, status = _policy_evidence(row)
+    zero = _policy_zero_kind(row)
+    kind = zero or kind
+    # Only selected final evidence may provide stage/status; unrelated recovered events cannot classify a verdict.
+    if zero == fault or (
+        _known_kind(kind) and status_fault_kind(kind, status, classification=classification) == fault
+    ):
+        return classify_failure(failure_kind=kind, stage=_policy_stage(row), http_status=status, config=classification)
+    ended = _ended_on_failed_request(row, classification=classification)
+    if ended is not None and ended[0] == fault:
+        meta = ended[1].get("response_metadata") or {}
+        report, operations = meta.get("failure_report"), meta.get("model_operations")
+        events = report.get("events") if isinstance(report, Mapping) else None
+        last = operations[-1] if isinstance(operations, list) and operations else None
+        event = (
+            events.get(last.get("failure_id")) if isinstance(events, Mapping) and isinstance(last, Mapping) else None
+        )
+        if isinstance(event, Mapping):
+            stage = event.get("stage")
+            # A length refusal refines a generic or missing event kind. Otherwise keep the
+            # observed kind so stage rules still precede HTTP-derived reporting labels.
+            return classify_failure(
+                failure_kind=fault if _length_refusal_kind(meta) == fault else event.get("failure_kind"),
+                stage=cast(FailureStage, stage) if stage in get_args(FailureStage) else None,
+                http_status=event.get("http_status"),
+                policy=_policy_call(row, ended[1]),
+                config=classification,
+            )
+    return classify_failure(failure_kind=fault, config=classification)
 
-    Settled model failures (MODEL_FINAL), scored rows whose rollout ended on a failed policy request
-    (``final_zero_trials``), scored-zero incomplete answers the benchmark's rule scored without a recorded grade
-    (``_answer_fault``: truncated with a cutoff signal, otherwise empty or malformed), and scored rows whose saved
-    judge evaluation recorded no verdict (``judge_unparseable``) or that record their own failure kind, each counted
-    once (``_scored_fault``).
-    """
+
+def decision_classification(
+    decision: RecoveryDecision, explicit: FailureClassificationConfig | None = None
+) -> FailureClassificationConfig:
+    """The resolved recovery policy snapshot supplies the same mapping to all health readers."""
+    if explicit is not None:
+        return explicit
+    saved = decision.outcome_policy or {}
+    return FailureClassificationConfig.model_validate(saved.get("classification", {}))
+
+
+def trial_faults(
+    decision: RecoveryDecision,
+    collected: CollectedEvidence | None,
+    *,
+    attributions: Counter | None = None,
+    classification: FailureClassificationConfig | None = None,
+) -> Counter:
+    """Count final trial failures once; classify selected outcomes, never recovered observations."""
+    classification = decision_classification(decision, classification)
     decision = _health_view(decision)
-    final_zero = final_zero_trials(decision, collected)
-    infrastructure = infrastructure_timeouts(decision, collected)
-    kinds = Counter(
-        status_fault_kind(e.failure_kind, e.http_status)
-        for e in decision.evidence
-        if e.state == IdentityState.MODEL_FINAL
-    )
-    kinds.update(final_zero.values())
-    kinds[AGENT_TIMEOUT_INFRASTRUCTURE] += len(infrastructure)
+    final_zero = final_zero_trials(decision, collected, classification=classification)
+    infrastructure = infrastructure_timeouts(decision, collected, classification=classification)
+    kinds = Counter()
+    failures = {_identity(row): row for row in (collected.failures if collected else [])}
+    for evidence in decision.evidence:
+        if evidence.state != IdentityState.MODEL_FINAL:
+            continue
+        kind = status_fault_kind(evidence.failure_kind, evidence.http_status, classification=classification)
+        kinds[kind] += 1
+        if attributions is not None:
+            applied = _applied_class(failures.get(evidence.identity, {}))
+            selected = (
+                applied
+                if applied is not None
+                else classify_failure(
+                    failure_kind=evidence.failure_kind,
+                    stage=evidence.stage,
+                    http_status=evidence.http_status,
+                    config=classification,
+                )
+            )
+            attributions[kind, selected] += 1
     scored = set(decision.identities.get(IdentityState.SCORED.value, []))
-    kinds.update(
-        fault
-        for row in (collected.results or [] if collected is not None else [])
-        if _identity(row) in scored
-        and _identity(row) not in final_zero
-        and _identity(row) not in infrastructure
-        and (fault := _scored_fault(row, collected)) is not None
-    )
+    for row in collected.results or [] if collected is not None else []:
+        identity = _identity(row)
+        if identity not in scored:
+            continue
+        fault = (
+            AGENT_TIMEOUT_INFRASTRUCTURE
+            if identity in infrastructure
+            else final_zero.get(identity) or _scored_fault(row, collected, classification=classification)
+        )
+        if fault is None:
+            continue
+        kinds[fault] += 1
+        if attributions is not None:
+            attributions[fault, _row_fault_class(row, fault, classification)] += 1
     return +kinds
 
 
-def fault_report(kinds: Counter, trials: int, *, policy_timeout_counts_as_model: bool = True) -> dict[str, Any]:
-    """Model and evaluation-side fault counts, fractions and kinds over the trials; ``server`` counts server faults."""
+def fault_report(
+    kinds: Counter,
+    trials: int,
+    *,
+    policy_timeout_counts_as_model: bool = True,
+    attributions: Counter | None = None,
+    classification: FailureClassificationConfig | None = None,
+) -> dict[str, Any]:
+    """Report shared classes separately; server is only a subcategory of evaluation."""
+    config = _health_classification(classification, policy_timeout_counts_as_model=policy_timeout_counts_as_model)
 
-    def side(found: dict) -> dict[str, Any]:
+    def side(found: Counter) -> dict[str, Any]:
         count = sum(found.values())
         return {"count": count, "fraction": count / trials, "kinds": dict(sorted(found.items(), key=str))}
 
-    def class_of(kind):
-        return fault_class(kind, policy_timeout_counts_as_model=policy_timeout_counts_as_model)
-
-    model = {kind: n for kind, n in kinds.items() if class_of(kind) == "model"}
-    evaluation = {kind: n for kind, n in kinds.items() if class_of(kind) != "model"}
-    server = sum(n for kind, n in evaluation.items() if class_of(kind) == "server")
-    report = {"trials": trials, "evaluation": side(evaluation) | {"server": server}, "model": side(model)}
+    remaining = kinds.copy()
+    classes = {failure_class: Counter() for failure_class in FailureClass}
+    for (kind, attribution), count in (attributions or {}).items():
+        remaining[kind] -= count
+        classes[FailureClass(attribution)][kind] += count
+    for kind, count in remaining.items():
+        if count:
+            classes[classify_failure(failure_kind=kind, config=config)][kind] += count
+    evaluation = classes[FailureClass.EVALUATION]
+    server_kinds = {kind: n for kind, n in evaluation.items() if is_server_failure(kind, config=config)}
+    report = {
+        "trials": trials,
+        "evaluation": side(evaluation) | {"server": sum(server_kinds.values()), "server_kinds": server_kinds},
+        "model": side(classes[FailureClass.MODEL]),
+        "unknown": side(classes[FailureClass.UNKNOWN]),
+    }
     return report if policy_timeout_counts_as_model else report | {"policy_timeout_counts_as_model": False}
 
 
 def _fault_text(report: dict[str, Any], limit: float) -> str:
     """``evaluation-side faults: N of M (x%) is [not] below L (server S: kind n; kind n); model faults: ...``."""
     trials, evaluation, model = report["trials"], report["evaluation"], report["model"]
-    flag = report.get("policy_timeout_counts_as_model", True)
-    server = [
-        f"{kind} {n}"
-        for kind, n in evaluation["kinds"].items()
-        if fault_class(kind, policy_timeout_counts_as_model=flag) == "server"
-    ]
-    other = [
-        f"{kind} {n}"
-        for kind, n in evaluation["kinds"].items()
-        if fault_class(kind, policy_timeout_counts_as_model=flag) != "server"
-    ]
+    server = [f"{kind} {n}" for kind, n in evaluation["kinds"].items() if kind in evaluation["server_kinds"]]
+    other = [f"{kind} {n}" for kind, n in evaluation["kinds"].items() if kind not in evaluation["server_kinds"]]
     named = ([f"server {evaluation['server']}: {', '.join(server)}"] if server else []) + other
     below = "is below" if evaluation["fraction"] < limit else "is not below"
     return (
@@ -4996,10 +5676,15 @@ def trial_health(
     *,
     limit: float = GATE_FAILURE_LIMIT,
     policy_timeout_counts_as_model: bool = True,
+    classification: FailureClassificationConfig | None = None,
 ) -> tuple[bool | None, str]:
     """Evaluation health from the trial gate (``trial_verdict``): passed, failed or None, with its reason."""
     passed, reason, _ = trial_verdict(
-        decision, collected, limit=limit, policy_timeout_counts_as_model=policy_timeout_counts_as_model
+        decision,
+        collected,
+        limit=limit,
+        policy_timeout_counts_as_model=policy_timeout_counts_as_model,
+        classification=classification,
     )
     return passed, reason
 
@@ -5010,10 +5695,11 @@ def trial_verdict(
     *,
     limit: float = GATE_FAILURE_LIMIT,
     policy_timeout_counts_as_model: bool = True,
+    classification: FailureClassificationConfig | None = None,
 ) -> tuple[bool | None, str, dict[str, Any] | None]:
     """Evaluation health: evaluation-side trial faults over the expected trials, including repeats.
 
-    The counted failures are ``trial_faults``; a model fault (``fault_class``) is reported with its kind and never
+    The counted failures are ``trial_faults``; a model fault (``classify_failure``) is reported with its kind and never
     fails. Only the evaluation-side share is judged against the limit: at or above it the gate fails. Below it, it
     passes only with an exact count, when actual per-identity operation outcomes cover the observed model/tool and
     grading path of every trial that is not a recorded failure (``_observed_trial_operations``); an observed grading
@@ -5029,8 +5715,19 @@ def trial_verdict(
     trials = trial_population(decision)
     if not decision.complete or trials <= 0:
         return None, f"trial: not evaluated, the run is not complete ({dict(decision.counts)})", None
-    kinds = trial_faults(decision, collected)
-    report = fault_report(kinds, trials, policy_timeout_counts_as_model=policy_timeout_counts_as_model)
+    classification = _health_classification(
+        decision_classification(decision, classification),
+        policy_timeout_counts_as_model=policy_timeout_counts_as_model,
+    )
+    attributions = Counter()
+    kinds = trial_faults(decision, collected, attributions=attributions, classification=classification)
+    report = fault_report(
+        kinds,
+        trials,
+        policy_timeout_counts_as_model=policy_timeout_counts_as_model,
+        attributions=attributions,
+        classification=classification,
+    )
 
     def verdict(passed: bool | None, reason: str, *, exact: bool = False):
         state = {True: "PASS", False: "FAIL", None: "UNVERIFIED"}[passed]
@@ -5039,6 +5736,11 @@ def trial_verdict(
 
     if report["evaluation"]["fraction"] >= limit:
         return verdict(False, f"trial: {_fault_text(report, limit)}")
+    if report["unknown"]["count"]:
+        return verdict(
+            None,
+            f"trial: UNVERIFIED, {report['unknown']['count']} trial failure(s) have unknown classification; {UNVERIFIED_NOTE}",
+        )
     recovery = (collected.quality or {}).get("observed_upstream_recovery") if collected else None
     if recovery is not None and (
         not isinstance(recovery, dict)
@@ -5064,6 +5766,7 @@ def trial_verdict(
     covered = _observed_trial_operations(
         decision,
         collected,
+        classification=classification,
         judge_recovery=judge_recovery,
         grading_failures=invalid_grades,
         policy_recovery=policy_recovery,
@@ -5107,6 +5810,8 @@ def trial_verdict(
                 kinds + Counter({GRADING_WITHOUT_VERDICT: len(invalid_grades)}),
                 trials,
                 policy_timeout_counts_as_model=policy_timeout_counts_as_model,
+                attributions=attributions,
+                classification=classification,
             )
         retried = (
             f"{recovered_policy} failed policy attempt(s) were retried and completed in the same operation "
@@ -5207,6 +5912,7 @@ def trial_failure_cause(kind: Any) -> str:
         return "request"
     if kind.startswith(("agent_", "environment_", "harness_")) or kind in (
         HARBOR_FAILED,
+        GRADING_WITHOUT_VERDICT,
         INFRASTRUCTURE_ERROR,
         SERVER_START_FAILED,
     ):
@@ -5232,8 +5938,9 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
     population = trial_population(decision)
     if population <= 0:
         return None
-    final_zero = final_zero_trials(decision, collected)
-    infrastructure = infrastructure_timeouts(decision, collected)
+    classification = decision_classification(decision)
+    final_zero = final_zero_trials(decision, collected, classification=classification)
+    infrastructure = infrastructure_timeouts(decision, collected, classification=classification)
     scored = set(decision.identities.get(IdentityState.SCORED.value, []))
     responses: Counter = Counter()
     for row in (collected.results or []) if collected is not None else []:
@@ -5292,20 +5999,54 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
         "response_failures": family(responses, RESPONSE_FAILURE_CAUSES),
         "trial_failures": family(causes, TRIAL_FAILURE_CAUSES),
         "metric_coverage": metric_coverage(decision, collected),
-        "output_budget_refits": output_budget_refits(collected),
+        "output_budget_refits": output_budget_refits(decision, collected),
+        "repetition_stops": repetition_stops(decision, collected),
         "agent_adaptations": agent_adaptations(decision, collected),
     }
 
 
-def output_budget_refits(collected: CollectedEvidence | None) -> dict[str, int]:
-    """How many model calls in the saved results were sent again with an output budget lowered to fit the context
-    window (``output_budget_refit`` in a call's response metadata), and in how many result rows.
+def _deciding_rows(decision: RecoveryDecision, collected: CollectedEvidence | None) -> list[Mapping[str, Any]]:
+    """The saved result row that decides each scored trial: the last one saved for its identity, so an attempt a later
+    one superseded is not counted again."""
+    scored = set(decision.identities.get(IdentityState.SCORED.value, []))
+    latest: dict[Identity, Mapping[str, Any]] = {}
+    for row in (collected.results or []) if collected is not None else []:
+        if (identity := _identity(row)) in scored:
+            latest[identity] = row
+    return list(latest.values())
+
+
+def _verifier_owned(row: Mapping[str, Any], call: Mapping[str, Any]) -> bool:
+    """Whether one of the row's verifier invocations owns the captured call (a judge's call), matched by its call id,
+    else by its model and response id: a judge served by the policy's own server is still the judge."""
+    observed = row.get("ng_trial_observations")
+    verifiers = observed.get("verifier_invocations") if isinstance(observed, Mapping) else None
+    meta = call.get("response_metadata") if isinstance(call.get("response_metadata"), Mapping) else {}
+    for verifier in verifiers if isinstance(verifiers, list) else []:
+        owned = verifier.get("model_calls") if isinstance(verifier, Mapping) else None
+        for ref in owned if isinstance(owned, list) else []:
+            if not isinstance(ref, Mapping):
+                continue
+            if ref.get("model_call_id"):
+                if ref["model_call_id"] == call.get("model_call_id"):
+                    return True
+            elif ref.get("response_id") and (ref.get("response_id"), ref.get("model_ref")) == (
+                meta.get("response_id"),
+                meta.get("model_ref"),
+            ):
+                return True
+    return False
+
+
+def output_budget_refits(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[str, int]:
+    """How many model calls in the rows that decide the scored trials were sent again with an output budget lowered
+    to fit the context window (``output_budget_refit`` in a call's response metadata), and in how many of those rows.
 
     A count, never a failure: the call generated within the window it was served at. A reader flags a cell whose
     requests were budget-capped from it.
     """
     count = rows = 0
-    for row in (collected.results or []) if collected is not None else []:
+    for row in _deciding_rows(decision, collected):
         observed = row.get("ng_trial_observations")
         calls = observed.get("model_calls") if isinstance(observed, dict) else None
         refits = sum(
@@ -5316,6 +6057,31 @@ def output_budget_refits(collected: CollectedEvidence | None) -> dict[str, int]:
         )
         count += refits
         rows += refits > 0
+    return {"count": count, "rows": rows}
+
+
+def repetition_stops(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[str, int]:
+    """How many of the policy's model calls in the rows that decide the scored trials the provider stopped for
+    repetition, and in how many of those rows: a ``repetition`` finish reason or a ``repetition_detected`` stop reason
+    (vLLM's repetition detection), as the evidence collector flags each call.
+
+    The model's own ending, never a failure: the answer it produced is scored as it is and nothing is retried, so the
+    count only makes loops visible. A call a verifier owns (a judge's, also when it shares the policy's server) or
+    another model's call is not counted, nor is an attempt a later one superseded.
+    """
+    count = rows = 0
+    for row in _deciding_rows(decision, collected):
+        observed = row.get("ng_trial_observations")
+        calls = observed.get("model_calls") if isinstance(observed, dict) else None
+        stops = sum(
+            isinstance(call, dict)
+            and call.get("repetition_stop") is True
+            and _policy_call(row, call)
+            and not _verifier_owned(row, call)
+            for call in calls or []
+        )
+        count += stops
+        rows += stops > 0
     return {"count": count, "rows": rows}
 
 
@@ -5373,6 +6139,17 @@ def metric_coverage(decision: RecoveryDecision, collected: CollectedEvidence | N
     return {"trials": trials, "expected": expected, "source": "saved_rows"}
 
 
+def subset_note(selection: Mapping[str, Any]) -> str:
+    """The label of a run that selected its tasks by id: its score is the subset's, never the benchmark's."""
+    if selection.get("task_ids_sha256") is None:
+        return "subset run: the task selection record is unreadable; its score is a subset score, not the benchmark's"
+    return (
+        f"subset run: {selection['tasks']} tasks ({selection['rows']} rows) selected by task id from "
+        f"{selection['source']} (task_ids sha256 {selection['task_ids_sha256'][:12]}); its score is a subset score, "
+        "report it under the subset's name, never as the benchmark's"
+    )
+
+
 def health_verdict(evaluation: dict[str, Any] | None, facts: dict[str, Any] | None) -> str:
     """``evaluation health: PASS; response failures: 4.70% (truncated 41, empty 6 of 1000); trial failures: ...;
     metric over 1000 of 1000 trials``."""
@@ -5385,6 +6162,11 @@ def health_verdict(evaluation: dict[str, Any] | None, facts: dict[str, Any] | No
         text += f"; {name.replace('_', ' ')}: {found['rate']:.2%} ({named or 'none'} of {facts['expected']})"
     if facts["omitted"]:
         text += f"; {facts['omitted']} accepted stage omission(s) are not counted"
+    stops = facts.get("repetition_stops")
+    if stops and stops["count"]:
+        text += (
+            f"; repetition stops: {stops['count']} policy calls in {stops['rows']} trials (model, scored as answered)"
+        )
     coverage = facts.get("metric_coverage")
     if coverage is not None:
         text += f"; {coverage.get('name') or 'metric'} over {coverage['trials']} of {coverage['expected']} trials"
@@ -5437,6 +6219,31 @@ def health_check_facts(quality: Mapping[str, Any] | None) -> list[str]:
 
 
 MLFLOW_NOT_REQUIRED_NOTE = "no MLflow export by design (mlflow_tracking_required is false in the saved config)"
+
+
+def tracking_export_due(
+    decision: RecoveryDecision, collected: CollectedEvidence | None, tracking_required: bool
+) -> bool:
+    """Whether a complete run lacks the MLflow export receipt its saved config requires, so that
+    ``gym eval resubmit --recover`` exports it.
+
+    Only a run whose saved config configures MLflow (``provenance.mlflow.configured`` is true: tracking URI,
+    experiment and run name) and does not set ``mlflow_tracking_required`` to false, with no post-run receipt at all
+    and no live job, is exported. A run that configured no exporter, or whose provenance does not say, is never
+    exported, and a receipt, current or not, is never replaced.
+    """
+    if collected is None or not decision.complete or decision.scheduler_live or not tracking_required:
+        return False
+    provenance = (collected.quality or {}).get("provenance")
+    facts = provenance.get("mlflow") if isinstance(provenance, dict) else None
+    local = collected.mlflow
+    return (
+        isinstance(facts, dict)
+        and facts.get("configured") is True
+        and isinstance(local, dict)
+        and "receipt" in local
+        and local["receipt"] is None
+    )
 
 
 def mlflow_tracking_required(collected: CollectedEvidence | None) -> bool:
@@ -5504,22 +6311,35 @@ def gate_summary_from_collected(
     # operation evidence. Only recovered grading failures with complete joins are accepted. Model health and the raw
     # response faults are reported beside it and never fail the gate.
     trial_passed, trial_reason, evaluation = trial_verdict(
-        decision, collected, policy_timeout_counts_as_model=criteria.policy_timeout_counts_as_model
+        decision,
+        collected,
+        policy_timeout_counts_as_model=criteria.policy_timeout_counts_as_model,
+        classification=decision_classification(decision),
     )
+    cause = None
     if trial_passed is None and decision.complete:
+        # The warning names the cause in one sentence; the full reason and the trial boundary stay in the JSON.
+        cause = unverified_cause(decision, collected, evaluation, trial_reason)
         trial_reason = f"{trial_reason} ({trial_boundary(collected.quality)})"
+        if evaluation is not None:
+            evaluation = {**evaluation, "detail": trial_reason}
     task = gate_task_summary(
         decision,
         score=collected.score,
         summary_valid=summary_valid,
         summary_reasons=summary_reasons,
         health_passed=trial_passed,
-        health_reasons=[] if trial_passed else [trial_reason],
+        health_reasons=[] if trial_passed else [cause["reason"] if cause else trial_reason],
     )
-    task["criteria"] = criteria.report()
+    task["unverified_cause"] = cause
+    task["rollout_quality"] = rollout_quality_facts(collected.quality)
+    task["criteria"] = criteria.report(classification=decision_classification(decision))
+    task["task_selection"] = collected.task_selection
+    if collected.task_selection is not None:
+        task["warnings"] = [subset_note(collected.task_selection)] + task["warnings"]
     if collected.unreadable_files:
         # What an unreadable metric, summary or record holds is unknown: never a pass.
-        task["errors"].append(f"unreadable artifacts, read as unknown: {collected.unreadable_files[:20]}")
+        task["errors"].append(f"{UNREADABLE_ARTIFACTS_ERROR}: {collected.unreadable_files[:20]}")
         if task["status"] in ("SUCCESS", "UNVERIFIED"):
             task["status"] = "FAILED"
     task["trial_counts"] = trial_counts(decision, collected)
@@ -5535,7 +6355,7 @@ def gate_summary_from_collected(
     judged = {True: "within", False: "beyond", None: "not judged against"}[rollout_health]
     task["warnings"] = (
         task["warnings"]
-        + [f"per-rollout health {judged} the configured criterion: {rollout_reasons}"]
+        + [f"rollout quality {judged} the configured criterion: {rollout_reasons}"]
         + health_check_facts(collected.quality)
         + ([f"health gate within the bounded failure policy: {trial_reason}"] if trial_passed else [])
         + [task["health_verdict"]]
@@ -5546,7 +6366,7 @@ def gate_summary_from_collected(
     task["warnings"] = task["warnings"] + [judge_job_note(job) for job in collected.judge_jobs]
     extra: list[str] = []
     if collected.chain_incomplete and not decision.complete:
-        extra.append("the job chain stopped with rollouts missing (.gym_chain_incomplete)")
+        extra.append(unsettled_chain_note(decision))
     provenance = (collected.quality or {}).get("provenance")
     mlflow_facts = provenance.get("mlflow") if isinstance(provenance, dict) else None
     configured = mlflow_facts.get("configured") if isinstance(mlflow_facts, dict) else None
@@ -5582,6 +6402,9 @@ def gate_summary_from_collected(
         tracking_required=task["mlflow_tracking_required"],
         status_error=status_error,
     )
+    # Whether a recovery would export the results, by the executor's own predicate: the operator verdict offers the
+    # export command only then.
+    task["mlflow_export_due"] = tracking_export_due(decision, collected, task["mlflow_tracking_required"])
     if task["mlflow_delivery"]["state"] in ("pending", "unverified"):
         task["warnings"] = task["warnings"] + [
             f"MLflow delivery {task['mlflow_delivery']['state']}: {'; '.join(task['mlflow_delivery']['reasons'])}"
@@ -5591,6 +6414,781 @@ def gate_summary_from_collected(
         if task["status"] in ("SUCCESS", "UNVERIFIED"):
             task["status"] = "FAILED"
     return task
+
+
+def _rejudged_after_judge_failure(
+    decision: RecoveryDecision, collected: CollectedEvidence, only: set[Identity]
+) -> tuple[set[Identity], Counter]:
+    """The scored identities among ``only`` with a saved judge failure (their answer was judged again), and the HTTP
+    statuses of it."""
+    scored = set(decision.identities.get(IdentityState.SCORED.value, [])) & only
+    found: set[Identity] = set()
+    statuses: Counter = Counter()
+    for row in collected.failures or []:
+        kind, status = _policy_evidence(row)
+        identity = _identity(row)
+        if identity in scored and kind in JUDGE_FAILURE_KINDS:
+            if identity not in found and status is not None:
+                statuses[status] += 1
+            found.add(identity)
+    return found, statuses
+
+
+def unverified_cause(
+    decision: RecoveryDecision,
+    collected: CollectedEvidence,
+    evaluation: Mapping[str, Any] | None,
+    trial_reason: str,
+) -> dict[str, str]:
+    """What made a complete run's health UNVERIFIED, as ``{"kind", "reason"}``: one cause-first sentence with counts.
+
+    ``kind`` is ``judge_rejudged``, ``grading_unobserved``, ``unclassified_failures``, ``recovered_not_joined`` or
+    ``zero_rewards_unprovable``. The last has no cause beyond the missing proof, so the operator verdict treats it as
+    unknown. The full reason of the trial gate stays in ``evaluation_health.detail``.
+    """
+    trials = trial_population(_health_view(decision))
+    unobserved_ids: set[Identity] = set()
+    counts = trial_counts(decision, collected, unobserved_ids) or {}
+    # Judge history only explains rows whose grading is still unresolved (the unobserved ones); a recovered one is not
+    # the current cause, so on the lower-bound path, where nothing is unobserved, it never names the judge.
+    rejudged, statuses = _rejudged_after_judge_failure(decision, collected, unobserved_ids)
+    if rejudged and trial_reason.startswith("trial: UNOBSERVED"):
+        why = ", ".join(f"{status} from the judge model server" for status in sorted(statuses)) or "judge failed"
+        reason = f"{len(rejudged)} of {trials} rows were re-judged after a judge failure ({why})"
+        if unrecorded := counts.get("unobserved", 0):
+            reason += f"; {unrecorded} rows have no recorded grading"
+        return {"kind": "judge_rejudged", "reason": reason}
+    if trial_reason.startswith("trial: UNOBSERVED"):
+        return {
+            "kind": "grading_unobserved",
+            "reason": f"{counts.get('unobserved', 0)} of {trials} rows have no recorded grading (the verifier saved "
+            "no grading operation or record)",
+        }
+    if "have unknown classification" in trial_reason:
+        unknown = ((evaluation or {}).get("unknown") or {}).get("count")
+        return {
+            "kind": "unclassified_failures",
+            "reason": f"{unknown} of {trials} trial failures have an unknown cause",
+        }
+    if (
+        trial_reason.startswith("trial: UNVERIFIED, recovered attempts not joined")
+        or "counters are malformed" in trial_reason
+    ):
+        return {
+            "kind": "recovered_not_joined",
+            "reason": "recovered attempt errors cannot be tied to a completed call of a scored trial",
+        }
+    return {
+        "kind": "zero_rewards_unprovable",
+        "reason": f"failures recorded only as zero rewards cannot be ruled out over {trials} rows",
+    }
+
+
+def rollout_quality_facts(quality: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """The rollout-quality signals of ``quality_summary.json`` the operator verdict reads: verdict counts and the
+    nonzero issue counts. A signal, never a gate; None when the summary has neither."""
+    if not isinstance(quality, Mapping):
+        return None
+    verdicts, issues = quality.get("verdicts"), quality.get("issues")
+    verdicts = {k: v for k, v in verdicts.items() if type(v) is int} if isinstance(verdicts, dict) else None
+    issues = {k: v for k, v in issues.items() if type(v) is int and v} if isinstance(issues, dict) else None
+    # The producer flags one finding per failed model chain, so the issue total can exceed the rollouts it affects;
+    # the run's distinct count of rollouts that ended on a failed model call is the unit the verdict compares.
+    ended = quality.get("ended_on_failed_model_call")
+    facts: dict[str, Any] = {"verdicts": verdicts, "issues": issues}
+    if type(ended) is int:
+        facts["rollouts_ended_on_failed_model_call"] = ended
+    return facts if verdicts is not None or issues is not None else None
+
+
+UNREADABLE_ARTIFACTS_ERROR = "unreadable artifacts, read as unknown"
+_NO_KNOWN_COMMAND = "read the stop reason; no recovery command is known for it"
+# The fix each typed stop needs before the recovery, as Gym's own stop texts give it, and the options it adds to it.
+_TYPED_REMEDIES: dict[str, tuple[str, tuple[str, ...]]] = {
+    PROVIDER_CREDENTIALS_REJECTED: ("fix the credentials, then run", ()),
+    DRIVER_INSTALL_FAILED: (
+        "fix the driver install (the ref, the network or the image; logs/driver-<job id>.log has the installer's "
+        "output), then run",
+        (),
+    ),
+    ENVIRONMENT_PREPARE_FAILED: ("fix the benchmark's preparation, then run", ()),
+    SERVER_SPINUP_TIMEOUT: (
+        "raise the server start-up limit above the recorded one with",
+        ("--server-spinup-timeout-seconds N --spinup-timeout-reason TEXT",),
+    ),
+    PROVIDER_QUOTA_EXHAUSTED: ("wait until the grading provider's quota resets, then run", ()),
+}
+# The typed stops a fresh restart repeats until their fix is made.
+_RESTART_FIXES = (PROVIDER_CREDENTIALS_REJECTED, DRIVER_INSTALL_FAILED, ENVIRONMENT_PREPARE_FAILED)
+# The typed stops whose own text says a recovery cannot continue the saved run as it is.
+_UNSAFE_RESUME = ("--allow-unsafe-resume", "--unsafe-resume-reason TEXT")
+_PROTOCOL_VIOLATION_REMEDY = (
+    "fix the server or the benchmark pairing (a producer bug), then `gym eval submit` again, as the stop says; "
+    "a recovery would get the same replies"
+)
+# What a judge-only job the dispatch did not queue needs, by the cause it classified (``RecoveryDecision.judge_refusal``).
+_JUDGE_PLACEMENT_REMEDIES = {
+    "cpu_partition_unknown": (("--judge-partition PARTITION",), "name a CPU partition of the cluster"),
+    "cpu_placement": (
+        ("--judge-partition PARTITION", "--judge-qos QOS"),
+        "correct the partition or QOS the scheduler refused (a GPU QOS can require GPUs: QOSMinGRES)",
+    ),
+}
+# An UNVERIFIED cause no resubmit and no flag changes, and where it is fixed (benchmark-notes: "UNVERIFIED by
+# construction").
+_UNVERIFIED_PRODUCERS = {
+    "grading_unobserved": "the verifier's grading record",
+    "unclassified_failures": "the classification of those failures by their producer",
+    "recovered_not_joined": "the record of the recovered attempts by their producer",
+}
+# The options `gym eval resubmit --recover --inspect` refuses; an inspect command never repeats them.
+_RECOVER_ONLY_FLAGS = frozenset(
+    {
+        "--max-walltime",
+        "--allow-unsafe-resume",
+        "--server-spinup-timeout-seconds",
+        "--judge-partition",
+        "--judge-qos",
+    }
+)
+_OPEN_STATES = (
+    IdentityState.JUDGE_RECOVERABLE,
+    IdentityState.RETRYABLE,
+    IdentityState.MISSING,
+    IdentityState.EXHAUSTED,
+    IdentityState.TERMINAL,
+    IdentityState.MASKED,
+    IdentityState.UNKNOWN,
+)
+
+
+def _verdict(state: str, reason: str, action: str) -> dict[str, str]:
+    return {"state": state, "reason": reason, "action": action}
+
+
+_SHELL_QUOTED = re.compile(r"""'(?:[^']|'\\'')*'|"(?:[^"\\]|\\.)*\"""")
+
+
+def _flags(option: str) -> set[str]:
+    """The flags one option spells (``--max-walltime T --walltime-reason TEXT`` is two)."""
+    # What a shell quotes is a value (a JSON metric key can read `--x`), never an option.
+    unquoted = _SHELL_QUOTED.sub(" ", option)
+    return {word.lstrip("[") for word in unquoted.split() if word.lstrip("[").startswith("--")}
+
+
+def _command(
+    decision: RecoveryDecision,
+    *options: str,
+    remedy: Sequence[str] = (),
+    drop: Sequence[str] = (),
+    inspect: bool = False,
+) -> str:
+    """The one recovery command the operator verdict prints: `gym eval resubmit <job id> <benchmark> --recover`,
+    then every option the call asked for (``decision.requested``), then the typed remedy's options, then ``options``
+    (what the stop itself needs, such as a budget extension). An option is named once: ``options`` replaces the
+    call's own value, the call's own value replaces a remedy's placeholder, and ``drop`` names options the run
+    refused. ``inspect`` makes it the inspection, without the options an inspection refuses."""
+    named = set(drop).union(*map(_flags, options))
+    if "--repin" in named.union(*map(_flags, remedy)):
+        # The CLI refuses --no-auto-repin beside an explicit repin, which is the operator's own pin choice.
+        named.add("--no-auto-repin")
+    asked = [
+        option
+        for option in decision.requested
+        if not _flags(option) & named and not (inspect and _flags(option) & _RECOVER_ONLY_FLAGS)
+    ]
+    held = named.union(*map(_flags, asked))
+    fixes = [option for option in remedy if not _flags(option) & held]
+    words = ["gym eval resubmit", decision.target, "--recover", *(["--inspect"] if inspect else []), *asked, *fixes]
+    return "`" + " ".join([*words, *options]) + "`"
+
+
+def _choices(options: Sequence[str]) -> str:
+    """What in a printed command is the operator's to choose, and that its options go in one call."""
+    choices = [
+        name for name, flag in (("N", " N"), ("the walltime", "HH:MM:SS")) if any(flag in option for option in options)
+    ]
+    chosen = f"; {' and '.join(choices)} {'are' if len(choices) > 1 else 'is'} yours to choose" if choices else ""
+    commit = "; COMMIT is this launcher's full commit" if any("COMMIT" in option for option in options) else ""
+    together = "; every option named goes in the same call" if sum(not o.startswith("[") for o in options) > 1 else ""
+    return chosen + commit + together
+
+
+def _stop_kind(decision: RecoveryDecision, *, from_rows: bool = True) -> str | None:
+    """The typed failure with a known remedy the run stopped on: the chain guard's typed stop, else the one failure
+    kind every terminal identity of the decision records (Gym's own typed stop, such as the grading quota). Read from
+    typed fields only, never from the reason text. ``from_rows=False`` reads the chain guard's stop alone: the row
+    kind explains a STOP, and a decision that continues the saved run (RESUBMIT, REVERIFY) is not one."""
+    if decision.chain_stop_kind:
+        return decision.chain_stop_kind
+    if not from_rows:
+        return None
+    terminal = [item for item in decision.evidence if item.state == IdentityState.TERMINAL]
+    kinds = {item.failure_kind for item in terminal}
+    if terminal and len(terminal) == decision.counts.get(IdentityState.TERMINAL, 0) and len(kinds) == 1:
+        kind = kinds.pop()
+        return (
+            kind
+            if kind in _TYPED_REMEDIES or kind in (COLLECTION_RESUME_REFUSED, ENVIRONMENT_PROTOCOL_VIOLATION)
+            else None
+        )
+    return None
+
+
+def _continue_with(
+    decision: RecoveryDecision, *options: str, drop: Sequence[str] = (), kind_from_rows: bool = True
+) -> str:
+    """The recovery command that continues the run, after the typed stop's fix when it stopped on one, with what in
+    it is the operator's to choose. A typed stop whose own text says a recovery cannot continue (a refused resume,
+    a protocol violation) names that instead."""
+    kind = _stop_kind(decision, from_rows=kind_from_rows)
+    if kind == COLLECTION_RESUME_REFUSED:
+        unsafe = _command(decision, *options, *_UNSAFE_RESUME, drop=drop)
+        return (
+            "the saved rollouts do not verify against the run's inputs, so start a fresh run as the stop says; only "
+            f"to accept that exact difference, {unsafe}" + _choices([*options, *_UNSAFE_RESUME])
+        )
+    if kind == ENVIRONMENT_PROTOCOL_VIOLATION:
+        return _PROTOCOL_VIOLATION_REMEDY
+    fix, remedy = _TYPED_REMEDIES.get(kind or "", ("", ()))
+    if kind == PROVIDER_QUOTA_EXHAUSTED and (resets := quota_reset_text(decision.reason)):
+        fix = f"wait until {resets}, when the grading provider's quota resets, then run"
+    if remedy and all(_flags(option) & set().union(*map(_flags, decision.requested)) for option in remedy):
+        # The call already carries the fix (a raised start-up limit, say); the command repeats it.
+        fix = ""
+    command = _command(decision, *options, remedy=remedy, drop=drop)
+    return (f"{fix} {command}" if fix else command) + _choices([*(remedy if fix else ()), *options])
+
+
+def _flagged_everything(
+    gate_task: Mapping[str, Any], decision: RecoveryDecision, expected: int
+) -> tuple[str, str] | None:
+    """``(what, flagged)`` when rollout quality flags every rollout or every task, else None; ``flagged`` counts in
+    the unit of the check."""
+    quality = gate_task.get("rollout_quality") or {}
+    issues = quality.get("issues") or {}
+    tasks = len({identity[0] for identities in decision.identities.values() for identity in identities})
+    # Distinct rollouts, not findings: a rollout whose several model chains failed counts once. The distinct count is
+    # a statistic the producer keeps even for an ignored check, so the check must also hold an active finding.
+    check = "rollout_ended_on_failed_model_call"
+    if expected and quality.get("rollouts_ended_on_failed_model_call", 0) >= expected and issues.get(check, 0) > 0:
+        return "every rollout ended on a failed model call", f"{expected} of {expected} rollouts flagged {check}"
+    if tasks and issues.get("task_no_successful_model_calls", 0) >= tasks:
+        check = "task_no_successful_model_calls"
+        return "no task had a successful model call", f"{tasks} of {tasks} tasks flagged {check}"
+    return None
+
+
+_EXPLICIT_BUDGET = "--max-walltime HH:MM:SS --walltime-reason TEXT"
+_REPIN_IN_THE_SAME_RESUBMIT = "(--repin COMMIT --repin-reason TEXT) in the same resubmit"
+
+
+def _continuation_options(decision: RecoveryDecision) -> list[str]:
+    """The options of the one ``gym eval resubmit --recover`` call that continues a run this STOP blocks, else [].
+
+    The stop's own cause decides: a spent budget (attempts, infra retries, walltime), unknown chain accounting (an
+    explicit budget fills it), masked results without an artifact (an approved rerun), or an extension the run's
+    pinned Gym cannot apply (a repin in the same call). What in the chain would stop next (``_chain_blockers_note``)
+    counts only once that cause has a continuation, and the note on masked results without an artifact, which any
+    stop carries, is no cause of its own. Every option a blocker needs is named, with each one the stopped call asked
+    for and did not record, so following the advice never drops one."""
+    reason = decision.reason
+    notes = re.split(r"; |\n", reason)
+
+    def asked(flag: str) -> bool:
+        return any(note.startswith(f"{flag} ") and note.endswith(_NOT_RECORDED_TOKEN) for note in notes)
+
+    rerun_flag = RERUN_MASKED_FLAGS.split()[0]
+    # A refused extension or rerun continues only with a repin in the same call; refused for any other reason, it
+    # cannot continue the run at all, and the refusal itself says what to do.
+    refused = re.match(rf"(--extend-attempts \d+|{rerun_flag}) is refused: ", reason)
+    repin = _REPIN_IN_THE_SAME_RESUBMIT in reason
+    if refused and not repin:
+        return []
+    cause, _, blockers = reason.split("\n")[0].partition(_CHAIN_BLOCKERS_LEAD)
+    rerun = (
+        (_MASKED_STOP_TOKEN in cause and bool(decision.masked_without_artifact))
+        or bool(refused and refused[1] == rerun_flag)
+        or asked(rerun_flag)
+    )
+    attempts = _ATTEMPTS_USED_TOKEN in cause or bool(refused and refused[1].startswith("--extend-attempts"))
+    stops = cause + (blockers if attempts or rerun else "")
+    budget_unknown = decision.accounting_unknown == "budget" or UNKNOWN_BUDGET_REASON in stops
+    unknown = budget_unknown or decision.accounting_unknown is not None or UNKNOWN_WALLTIME_REASON in stops
+    retries = _INFRA_BUDGET_USED_PREFIX in stops
+    walltime = _WALLTIME_USED_TOKEN in stops or unknown
+    if not (attempts or retries or walltime or rerun or repin):
+        return []
+    options = {
+        "--extend-attempts N": attempts or asked("--extend-attempts"),
+        "--extend-retries N": retries or asked("--extend-retries"),
+        f"{RERUN_MASKED_FLAGS} TEXT": rerun,
+        _EXPLICIT_BUDGET: walltime or asked("--max-walltime"),
+        "[--extend-retries N]": budget_unknown and not (retries or asked("--extend-retries")),
+        "--repin COMMIT --repin-reason TEXT": repin,
+    }
+    return [option for option, needed in options.items() if needed]
+
+
+def _partial_rerun_note(decision: RecoveryDecision, options: list[str]) -> str:
+    """What a rerun in ``options`` leaves masked: it runs only the results without a gradeable artifact."""
+    others = decision.counts.get(IdentityState.MASKED, 0) - len(decision.masked_without_artifact)
+    if f"{RERUN_MASKED_FLAGS} TEXT" not in options or others <= 0:
+        return ""
+    return (
+        f"; the rerun covers only the masked results without a gradeable artifact: the other {others} masked "
+        "result(s) stay masked (kept, not measured), so the run stays incomplete"
+    )
+
+
+# Stops on evidence that cannot be read yet, and how to read it, instead of a fresh submit over the saved run.
+_UNKNOWN_EVIDENCE_STOPS = (
+    ("the scheduler query failed", "wait until the scheduler answers and inspect again"),
+    ("saved rows are unreadable", "make the saved rows readable again and inspect again"),
+    ("is unreadable", "make the file the reason names readable again and inspect again"),
+    ("changed while it was read", "inspect again once nothing writes the run's files"),
+    (
+        "authoritative Store reader is unavailable",
+        "inspect again once the run's Store reader can verify its artifacts",
+    ),
+    (
+        "the results file is absent",
+        "restore the results file if it was moved and inspect again; if it is lost, report that collection cannot "
+        "resume the run's saved history, as the stop says",
+    ),
+    # A judge-only job the evidence changed under, or whose snapshot was missing, was not queued.
+    ("collect the current evidence", "inspect again: the evidence changed after the recovery was planned"),
+    ("collect the evidence again", "inspect again to collect the evidence the judge-only job needs"),
+)
+# A recovery whose judge-only job or plan needs the launcher's revision, and the option that moves the run to it.
+_REPIN_STOPS = (
+    re.compile(r"--repin <this launcher's full commit> --repin-reason TEXT runs the judge-only job at it"),
+    re.compile(
+        r"the pin was kept \(--no-auto-repin\): recover with --repin (?P<commit>[0-9a-f]{40}) --repin-reason TEXT"
+    ),
+)
+# What clears each guard that refuses an operator continuation, before the continuation itself, and the state of
+# the run while it holds.
+_CONTINUATION_GUARDS = {
+    "scheduler_unreachable": (
+        "unknown",
+        "the scheduler did not answer, so a live or pending job of the run cannot be ruled out",
+        "wait until the scheduler answers and inspect again",
+    ),
+    "job_live": (
+        "unknown",
+        "a job of the run is pending or running while its chain accounting is unknown",
+        "wait for that job to end and inspect again",
+    ),
+    "claim_unidentified": (
+        "needs_action",
+        "a follow-up claim names no job, so a queued follow-up cannot be ruled out",
+        "reconcile the scheduler queue with the run's follow-up claims first (one names no job id)",
+    ),
+    "counters_changed": (
+        "unknown",
+        "the chain's accounting files changed while they were read",
+        "inspect again once no job of the run writes them",
+    ),
+}
+
+
+def _refusal_verdict(refusal: Mapping[str, Any]) -> dict[str, str]:
+    """The verdict of a resubmit the scheduler refused: no job is known to be queued, or it is unknown whether one is."""
+    text = refusal.get("scheduler_text") or "(no text)"
+    if refusal.get("job_dir_restored"):
+        return _verdict(
+            "needs_action",
+            f"the scheduler refused the resubmit: {text}; nothing was queued",
+            "correct what the scheduler text names before redispatching with every option of the refused call; the "
+            "same resubmit would be refused again",
+        )
+    return _verdict(
+        "needs_action",
+        f"the scheduler did not confirm the resubmit ({text}); whether a job was queued is unknown",
+        "reconcile the scheduler queue and the run's chain files first, then decide whether to redispatch with every "
+        "option of that call",
+    )
+
+
+def operator_verdict(
+    gate_task: Mapping[str, Any] | None,
+    decision: RecoveryDecision | None,
+    scheduler_refusal: Mapping[str, Any] | None = None,
+    walltime_plan: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
+    """The one verdict an operator acts on, derived from the gate and the decision only.
+
+    ``state`` is ``accept`` (gate SUCCESS, coverage complete, run health PASS, decision noop), ``needs_action`` (a
+    STOP, FAILED, incomplete coverage or failed run health) or ``unknown`` (UNVERIFIED, which no recovery changes: by
+    configuration, by a producer that records no grading, after a re-judgment whose grading was not recorded or
+    without a known cause; a live job; evidence missing or unreadable). ``reason`` is one sentence naming the
+    dominant cause with counts; ``action`` is the one thing to do. Every command it prints comes from ``_command``:
+    `gym eval resubmit <job id> <benchmark> --recover` with every option the call asked for, the typed stop's fix
+    and the options the stop needs. It never adds a fresh submit that Gym's own decision or stop text does not name,
+    and where Gym decided nothing is left to run it says what to report and check. An accepted run whose MLflow
+    delivery is not closed names the export, or that it is unverified by configuration. Rollout quality never changes
+    the state: an accepted run whose every rollout is flagged says so in its reason and points at the quality read. A
+    scheduler refusal of the resubmit and a walltime raise the partition cannot take (refused before any evidence is
+    read) are known dispatch failures: they need the operator's correction, never a plain recover-now or a reader
+    retry.
+    """
+    refused = (walltime_plan or {}).get("refused")
+    if gate_task is None and decision is not None and refused:
+        return _verdict(
+            "needs_action",
+            f"the walltime raise was refused before any evidence was read: {refused}",
+            "correct the walltime or the partition so the segment fits, then run the recovery again with its other "
+            "options",
+        )
+    if gate_task is None or decision is None:
+        return _verdict("unknown", "no evidence was collected", "inspect again once the reader runs")
+    status, errors = gate_task.get("status"), gate_task.get("errors") or []
+    counts = decision.counts
+    expected = gate_task.get("expected_samples") or decision.expected
+    if status in ("RUNNING", "RESUMING") or decision.scheduler_live:
+        return _verdict(
+            "unknown", "a job of the run is live, so the result is not final", "wait for it to end, then inspect again"
+        )
+    if scheduler_refusal:
+        return _refusal_verdict(scheduler_refusal)
+    if decision.action == RecoveryAction.UNKNOWN:
+        return _verdict("unknown", f"nothing was decided: {decision.reason}", "inspect again once the reader runs")
+    if decision.action in (RecoveryAction.REVERIFY, RecoveryAction.STOP) and (
+        blocked := _FAILED_JUDGE_JOBS.search(decision.reason)
+    ):
+        # The judge-only job is refused until the failed ones are read and, where they can be, acknowledged.
+        read = f"read their receipts and logs under {blocked['where']}"
+        return _verdict(
+            "needs_action",
+            f"the last {JUDGE_JOB_FAILURE_BOUND} judge-only jobs ({blocked['ids']}) ended without settling a saved "
+            "answer, so recovery queues no other until they are read and acknowledged",
+            f"{read}; a job without an id cannot be acknowledged, so no further judge-only job is allowed and no "
+            "recovery command is known"
+            if blocked["unacknowledgeable"]
+            else f"{read}, then {_command(decision, f'{ACKNOWLEDGE_JUDGE_JOBS_FLAGS} TEXT')} allows one more "
+            "judge-only job",
+        )
+    if unreadable := next((str(e) for e in errors if str(e).startswith(UNREADABLE_ARTIFACTS_ERROR)), None):
+        # What an unreadable artifact holds is unknown, whatever the decision read around it.
+        return _verdict("unknown", unreadable, "make those files readable again and inspect again")
+    open_text = ", ".join(f"{counts[s]} {s.value}" for s in _OPEN_STATES if counts.get(s))
+    if decision.action == RecoveryAction.FRESH_RESTART:
+        # Gym's own decision: no task inventory was saved, and its reason names the command.
+        named = re.search(r"--max-walltime is required: (gym eval resubmit \S+ \S+ --recover .*)$", decision.reason)
+        command = f"`{named[1]}`" if named else _command(decision, _EXPLICIT_BUDGET)
+        # A typed failure the restart would repeat (a failed install or preparation, rejected credentials) is fixed first.
+        kind = _stop_kind(decision)
+        fix = _TYPED_REMEDIES[kind][0].removesuffix(", then run") + ", then " if kind in _RESTART_FIXES else ""
+        return _verdict(
+            "needs_action",
+            f"the run saved no task inventory ({decision.reason.split('; --max-walltime is required')[0]})",
+            f"{fix}queue it again as a fresh run with a longer walltime (the walltime is yours to choose): {command}",
+        )
+    if decision.action in (RecoveryAction.RESUBMIT, RecoveryAction.REVERIFY):
+        settled = expected - sum(counts.get(s, 0) for s in _OPEN_STATES)
+        # A chain that stopped on a typed failure needs its remedy before the resume, or the resume stops the same way.
+        # The decision continues the saved run, so a terminal row's kind (it explains a STOP only) never turns the
+        # advice into a fresh submit; only the chain guard's own typed stop does.
+        action = _continue_with(decision, kind_from_rows=False)
+        return _verdict(
+            "needs_action",
+            f"{settled} of {expected} rollouts are settled; {open_text or 'recovery work'} remain",
+            action if _stop_kind(decision, from_rows=False) else f"{action} now",
+        )
+    if decision.action == RecoveryAction.STOP:
+        return _stop_verdict(decision, expected, open_text)
+    if status == "FAILED" or errors:
+        health = gate_task.get("evaluation_health") or {}
+        if health.get("status") == "FAIL":
+            faults = health.get("evaluation") or {}
+            kinds = ", ".join(f"{k} {v}" for k, v in (faults.get("kinds") or {}).items())
+            # Over the trials, not the expected samples: an accepted omission is no trial. Gym decided nothing is left
+            # to run: the faults are settled outcomes that no recovery reopens.
+            return _verdict(
+                "needs_action",
+                f"{faults.get('count')} of {health.get('trials', expected)} trials failed on the evaluation side ({kinds})",
+                "none: report the run as failing run health; no recovery reopens settled trials, so check the "
+                "evaluation-side faults evaluation_health names (their kinds and the services' logs)",
+            )
+        unread = [e for e in errors if str(e).startswith("score unavailable")]
+        if decision.complete and errors and len(unread) == len(errors):
+            return _verdict(
+                "unknown",
+                "no score was read",
+                f"inspect again naming the score: {_command(decision, '--score-agent NAME', '--score-key JSON', inspect=True)}",
+            )
+        # A known failure dominates an unread score listed before it.
+        known = next((str(e) for e in errors if not str(e).startswith("score unavailable")), None)
+        return _verdict(
+            "needs_action",
+            (known[:200] + ("; the score was not read either" if unread else ""))
+            if known
+            else (str(errors[0])[:200] if errors else "the gate failed"),
+            "read the error; no recovery command is known for it",
+        )
+    if not decision.complete or decision.action != RecoveryAction.NOOP:
+        return _verdict(
+            "needs_action",
+            f"coverage is incomplete: {open_text or 'rollouts are unsettled'}",
+            f"{_command(decision)} now",
+        )
+    delivery = _delivery_action(
+        decision, gate_task.get("mlflow_delivery") or {}, gate_task.get("mlflow_export_due") is True
+    )
+    if status == "UNVERIFIED":
+        cause = gate_task.get("unverified_cause")
+        export = f"; {delivery[1]}" if delivery else ""
+        if decision.unverified:
+            # Verification was configured off: the run is complete and unverified by design, nothing to do.
+            skipped = counts.get(IdentityState.SKIPPED, 0)
+            return _verdict(
+                "unknown",
+                f"unverified by configuration: {skipped} of {expected} rows were not verified (verification skipped "
+                "by configuration)",
+                "none: report the run as unverified by configuration" + export,
+            )
+        if cause and cause.get("kind") == "judge_rejudged":
+            # The re-judgment recorded no grading, so whether the re-judged rows were graded is not evidenced.
+            return _verdict(
+                "unknown",
+                f"unverified: {cause['reason']}",
+                "none: report the run as unverified: the rows were re-judged and no grading was recorded, so whether "
+                "they were graded is unknown; no recovery command records it" + export,
+            )
+        if cause and cause.get("kind") in _UNVERIFIED_PRODUCERS:
+            # UNVERIFIED by construction: a resubmit cannot change it, and no flag does.
+            return _verdict(
+                "unknown",
+                f"unverified: {cause['reason']}",
+                "none: report the run as unverified with this reason and do not present it as verified; a resubmit "
+                f"cannot change it, and no flag does: the fix is {_UNVERIFIED_PRODUCERS[cause['kind']]}, in Gym"
+                + export,
+            )
+        known = (cause or {}).get("reason") or "summary validity or run health is unknown"
+        return _verdict(
+            "unknown",
+            f"unverified without a known cause: {known}",
+            "none: report the run as unverified; no operator action is known" + export,
+        )
+    if status != "SUCCESS" or (gate_task.get("evaluation_health") or {}).get("status") != "PASS":
+        return _verdict("unknown", "the gate states no SUCCESS with run health PASS", "inspect again")
+    quality_facts = gate_task.get("rollout_quality") or {}
+    findings = (quality_facts.get("issues") or {}).get("rollout_ended_on_failed_model_call", 0)
+    if expected and findings >= expected and "rollouts_ended_on_failed_model_call" not in quality_facts:
+        # One finding per failed model chain can exceed the rollouts it affects, and this collector reports no distinct
+        # count: whether every rollout ended on a failed model call is unknown, and neither accepting nor rejecting
+        # the score would rest on evidence.
+        return _verdict(
+            "unknown",
+            f"unverified: the collector has no distinct affected-rollout count, and {findings} rollout_ended_on_failed_"
+            f"model_call findings could cover all {expected} rollouts or fewer",
+            "none: report the run as unverified and do not present it as verified; re-collect the evidence with a "
+            "current runtime, then inspect again" + (f"; {delivery[1]}" if delivery else ""),
+        )
+    if flagged := _flagged_everything(gate_task, decision, expected):
+        what, count = flagged
+        # The gate's status stays SUCCESS (rollout quality never changes it), but a score from rollouts that all ended
+        # on a failed model call or never had a successful model call most likely comes from a broken evaluation
+        # (serving or credentials), so it is not an acceptance. The delivery state is a fact beside it.
+        return _verdict(
+            "needs_action",
+            f"{what}, so the score most likely does not measure the model (a broken serving or credentials setup is "
+            "the usual cause)" + (f"; {delivery[0]}" if delivery else ""),
+            f"do not accept or report the score yet: check the served configuration and the model's credentials, "
+            f"and read rollout quality ({count})" + (f"; {delivery[1]}" if delivery else ""),
+        )
+    omitted = gate_task.get("omitted_samples") or 0
+    reason = (
+        f"{gate_task.get('scored_samples', 0)} of {expected} rollouts scored"
+        + (f", {omitted} omitted by an accepted stage" if omitted else "")
+        + ", run health PASS, nothing to recover"
+    )
+    if delivery:
+        return _verdict("accept", f"{reason}; {delivery[0]}", delivery[1])
+    return _verdict("accept", reason, "none")
+
+
+def _delivery_action(
+    decision: RecoveryDecision, delivery: Mapping[str, Any], export_due: bool = False
+) -> tuple[str, str] | None:
+    """``(what, action)`` for a complete run whose MLflow delivery is not closed: the results stand, and the delivery
+    is a fact beside them. Unverified by configuration (the export did not upload the rollouts) is reported, as no
+    export changes it."""
+    if delivery.get("state") not in ("pending", "unverified"):
+        return None
+    reasons = [str(r) for r in delivery.get("reasons") or []]
+    what = f"MLflow delivery {delivery['state']}: {'; '.join(reasons) or 'no reason recorded'}"
+    if any(MLFLOW_ROLLOUTS_NOT_UPLOADED in r for r in reasons):
+        return (
+            what,
+            "report the MLflow delivery as unverified by configuration (upload_rollouts: false); an export does not change it",
+        )
+    if any(r.startswith("no MLflow run evidence") for r in reasons):
+        if export_due:
+            return (
+                what,
+                f"export the results to MLflow: {_command(decision)} runs the export of a complete run without a receipt (no model calls)",
+            )
+        # A recovery exports only a run whose saved provenance says MLflow is configured; it would repeat as a no-op.
+        return (
+            what,
+            "report the MLflow delivery as not evidenced: the run's saved provenance does not say MLflow was configured "
+            "(provenance.mlflow.configured), so a recovery does not export it and its results stand without an export; "
+            "if MLflow was meant to be used, export them with the tracking tooling and inspect again with "
+            "--mlflow-run-id and --mlflow-status",
+        )
+    confirm = _command(decision, "--mlflow-run-id ID", "--mlflow-status STATUS", inspect=True)
+    return what, (
+        f"confirm the MLflow export: {confirm} with the run id and status you observed on the tracking server, or "
+        "repair the export the reason names"
+    )
+
+
+def _stop_verdict(decision: RecoveryDecision, expected: int, open_text: str) -> dict[str, str]:
+    """The verdict of a STOP: the continuation its own cause allows, after any guard and typed fix, else the most
+    specific known step, else no command."""
+    counts = decision.counts
+    stopped = f"recovery stopped with {open_text or 'no way to continue'}: {decision.reason.splitlines()[0][:160]}"
+    options = _continuation_options(decision)
+    kind = _stop_kind(decision)
+    # A spent budget is the cause of this stop when it names a continuation: a protocol row among the saved rows then
+    # explains nothing, and its remedy (a fresh submit) would discard the saved run the extension keeps.
+    from_rows = not (options and decision.chain_stop_kind is None and kind == ENVIRONMENT_PROTOCOL_VIOLATION)
+    if not from_rows:
+        kind = None
+    if kind == PROVIDER_QUOTA_EXHAUSTED and decision.chain_stop_kind is None:
+        # Gym's own quota stop: every terminal identity waits on the grading provider's quota.
+        waiting = counts.get(IdentityState.TERMINAL, 0)
+        return _verdict(
+            "needs_action",
+            f"{waiting} of {expected} saved answers wait on the grading provider quota",
+            _continue_with(decision, *options),
+        )
+    if kind in (COLLECTION_RESUME_REFUSED, ENVIRONMENT_PROTOCOL_VIOLATION):
+        # The typed stop's own text says a recovery cannot continue the saved run as it is.
+        return _verdict("needs_action", stopped, _continue_with(decision, *options))
+    if decision.continuation_refused == "no_retry_cap":
+        # No continuation exists: the explicit budget has no cap to fill, and Gym names no other way on.
+        return _verdict(
+            "needs_action",
+            f"{stopped}; the saved run cannot continue, as it configures no infra-retry cap",
+            "none: report it; an operator budget has no infra-retry cap to fill, so no recovery command is known",
+        )
+    if decision.continuation_refused is not None:
+        # A guard refuses the continuation: clear it first, and keep every option the continuation needs.
+        state, why, clear = _CONTINUATION_GUARDS[decision.continuation_refused]
+        return _verdict(
+            state,
+            f"an operator continuation is refused: {why}",
+            f"{clear}; the saved run then continues (completed work is kept): {_continue_with(decision, *options, kind_from_rows=from_rows)}"
+            + _partial_rerun_note(decision, options),
+        )
+    if options:
+        return _verdict(
+            "needs_action",
+            stopped,
+            "your decision: continue the saved run (completed work is kept): "
+            f"{_continue_with(decision, *options, kind_from_rows=from_rows)}"
+            + ("; it is refused while a job of the run is pending or running" if _EXPLICIT_BUDGET in options else "")
+            + _partial_rerun_note(decision, options),
+        )
+    if decision.refused_option and decision.refused_over in (RecoveryAction.RESUBMIT, RecoveryAction.REVERIFY):
+        # Only the refused option stops it: without it the plan continues the run.
+        return _verdict(
+            "needs_action",
+            stopped,
+            f"drop {decision.refused_option}, which this run cannot take; the saved run continues without it "
+            f"(completed work is kept): {_continue_with(decision, drop=(decision.refused_option,))}",
+        )
+    if repinned := next((match for stop in _REPIN_STOPS if (match := stop.search(decision.reason))), None):
+        # Only the launcher's revision runs this recovery: the repin moves the run there and keeps it.
+        commit = repinned.groupdict().get("commit") or "COMMIT"
+        return _verdict(
+            "needs_action",
+            stopped,
+            "your decision: continue the saved run (completed work is kept) at this launcher's revision: "
+            + _continue_with(decision, f"--repin {commit} --repin-reason TEXT"),
+        )
+    if unread := next((action for token, action in _UNKNOWN_EVIDENCE_STOPS if token in decision.reason), None):
+        # What the saved run holds is unknown for now: learn it before anything else.
+        return _verdict("unknown", stopped, f"{unread} (completed work is kept)")
+    if _RESERVATIONS_UNKNOWN in decision.reason and "nobody owns them" not in decision.reason:
+        # Whether they ran is unknown until the allocation is known to have ended; then a recovery resumes them.
+        return _verdict(
+            "needs_action",
+            stopped,
+            "confirm with the scheduler that the allocation that made the reservations has ended, then inspect "
+            "again: a recovery resumes them once that is known (completed work is kept)",
+        )
+    if decision.judge_refusal in _JUDGE_PLACEMENT_REMEDIES:
+        placement, fix = _JUDGE_PLACEMENT_REMEDIES[decision.judge_refusal]
+        return _verdict(
+            "needs_action",
+            stopped,
+            f"{fix}: {_command(decision, *placement)} queues the judge-only job (completed work is kept)",
+        )
+    if decision.judge_refusal == "served_placement":
+        # The judge runs on the run's own saved node pool; --judge-partition and --judge-qos name a CPU placement.
+        return _verdict(
+            "needs_action",
+            stopped,
+            "the scheduler refused the saved node pool this run serves its judge on, and no recovery option changes "
+            "it (--judge-partition and --judge-qos apply to a CPU judge only): read the scheduler's refusal in the "
+            "reason and have the pool's partition, QOS or account fixed on the cluster, then inspect again "
+            "(completed work is kept)",
+        )
+    if decision.judge_refusal == "unsupported_profile":
+        # Decided locally from the saved config: no scheduler call was made, so waiting for the scheduler changes nothing.
+        return _verdict(
+            "needs_action",
+            stopped,
+            "the saved run has no judge execution profile that a recovery can start, and no recovery option adds "
+            "one: read what the reason says would allow it (completed work is kept)",
+        )
+    if decision.judge_refusal == "refused":
+        # A definite refusal, not an outage: repeating the call without a change is refused the same way.
+        return _verdict(
+            "needs_action",
+            stopped,
+            "the judge-only job was refused for a definite reason that is not its placement (the reason has the "
+            "refusal): remove what it names, then inspect again; waiting for the scheduler does not change it "
+            "(completed work is kept)",
+        )
+    if decision.judge_refusal == "concurrent":
+        # The dispatch's own guard: another recovery or a job of the run is active. Its lock and job are protection and
+        # work in progress, not an obstacle to remove.
+        return _verdict(
+            "needs_action",
+            stopped,
+            "another recovery of this run or a job of it is active, so the judge-only job was not queued: wait until "
+            "it ends and inspect again; do not remove its lock or cancel its job (completed work is kept)",
+        )
+    if decision.judge_refusal == "other":
+        # The scheduler did not answer, or the job's acknowledgement is missing: its own diagnostic is in the reason.
+        return _verdict(
+            "needs_action",
+            stopped,
+            f"the judge-only job could not be confirmed queued, so it may exist (the reason has the diagnostic): "
+            f"wait until the scheduler answers and inspect again, then {_command(decision)} (completed work is kept)",
+        )
+    if kind in _TYPED_REMEDIES and decision.chain_stop_kind is None:
+        # Every terminal row is the typed failure: its fix, then the recovery its own text names. A chain's typed
+        # stop alone never names a recovery for a stop of another cause.
+        return _verdict("needs_action", stopped, _continue_with(decision))
+    # A stop no rule here knows: its reason is the only guide, and a fresh submit would discard the saved run.
+    return _verdict("needs_action", stopped, _NO_KNOWN_COMMAND)
+
+
+def with_operator_verdict(outcome: RecoveryOutcome) -> RecoveryOutcome:
+    """The outcome with ``operator_verdict`` set on it and, when there is a gate, inside ``gate_task``."""
+    verdict = operator_verdict(outcome.gate_task, outcome.decision, outcome.scheduler_refusal, outcome.walltime_plan)
+    gate_task = {**outcome.gate_task, "operator_verdict": verdict} if outcome.gate_task is not None else None
+    return outcome.model_copy(update={"gate_task": gate_task, "operator_verdict": verdict})
+
+
+def operator_verdict_line(verdict: Mapping[str, str]) -> str:
+    return f"operator verdict: {verdict['state']}: {verdict['reason']}; action: {verdict['action']}"
 
 
 def judge_job_note(job: Mapping[str, Any]) -> str:
@@ -5616,10 +7214,17 @@ def judge_job_note(job: Mapping[str, Any]) -> str:
         return note
     if state == "failed":
         if job.get("ended_at"):
-            return (
-                f"{name}{where} failed: {job.get('error') or 'no error recorded'}; the saved answers it was to grade "
-                "again stay as they were"
-            )
+            note = f"{name}{where} failed: {job.get('error') or 'no error recorded'}; "
+            settled, withdrawn = job.get("settled") or 0, job.get("withdrawn") or 0
+            if not settled and not withdrawn:
+                return note + "the saved answers it was to grade again stay as they were"
+            # A grade it settled before it failed stays, and is progress (``_judge_job_unsettled``).
+            note += f"before it failed it settled {settled} of {job.get('selected') or 0} selected saved answer(s)"
+            if settled:
+                note += ", which counts as progress"
+            if withdrawn:
+                note += f"{',' if settled else ''} and withdrew {withdrawn}, left as they were"
+            return note + "; the others stay as they were"
         return (
             f"{name}{where} ended {job.get('scheduler_state') or 'in an unknown state'} with no receipt; the saved "
             "answers it was to grade again stay as they were"
@@ -5689,10 +7294,60 @@ def _verify_transport_failure(row: Mapping[str, Any]) -> bool:
     )
 
 
+_FAILED_RESPONSE_STATUSES = frozenset({"failed", "incomplete", "cancelled"})
+_CUT_FINISH = frozenset({"length", "content_filter", "max_tokens", "max_output_tokens"})
+
+
+def _verifier_model_answered(row: Mapping[str, Any], verifiers: list[Any]) -> bool:
+    """Whether one model call of the row's verifiers completed with a 2xx and a usable response, read from the call
+    the row saved for each reference (by call id, else response id). A call the row does not hold has not answered."""
+    refs = [ref for verifier in verifiers for ref in verifier.get("model_calls") or [] if isinstance(ref, Mapping)]
+    trajectory = row.get("ng_trajectory")
+    calls = trajectory.get("model_calls") if isinstance(trajectory, Mapping) else None
+    if not refs or not isinstance(calls, list):
+        return False
+    by_id, by_response = {}, {}
+    for call in calls:
+        if isinstance(call, Mapping):
+            metadata = call.get("response_metadata")
+            by_id[call.get("model_call_id")] = call
+            if isinstance(metadata, Mapping):
+                by_response[metadata.get("response_id")] = call
+    for ref in refs:
+        call = by_id.get(ref.get("model_call_id")) or by_response.get(ref.get("response_id"))
+        metadata = call.get("response_metadata") if call is not None else None
+        if not isinstance(metadata, Mapping):
+            continue
+        code, status = metadata.get("status_code"), metadata.get("response_status")
+        answered = 200 <= code < 300 if type(code) is int else status == "completed"
+        # A chat reply carries no response status; a cut one says so in its finish reason.
+        if answered and status not in _FAILED_RESPONSE_STATUSES and metadata.get("finish_reason") not in _CUT_FINISH:
+            return True
+    return False
+
+
+def _judge_error_marker(row: Mapping[str, Any]) -> bool:
+    """Whether the row names a judge error the server wrote: a judge failure kind, a saved judge error (a label or a
+    top-level message) or an invalid judge response (top level or inside the rubric facts)."""
+    facts = _grading_facts(row)
+    rubric = facts.get("rubric")
+    return (
+        row.get("failure_kind") in JUDGE_FAILURE_KINDS
+        or facts.get("judge_error") is True
+        or facts.get("judge_error_message") is True
+        or facts.get("invalid_judge_response") is True
+        or (isinstance(rubric, Mapping) and rubric.get("invalid_judge_response") is True)
+    )
+
+
 def _grading_unrecorded(row: Mapping[str, Any]) -> bool:
     """Whether the row's verifier invocations were observed but recorded no grading: no grading operation, no
     verifier grading record, no saved grading artifact (``grading_artifact``) and no model-failure rule
-    (``_model_failure``). A row from a pin without verifier observations proves nothing and is not selected."""
+    (``_model_failure``). A row from a pin without verifier observations proves nothing and is not selected. Nor is
+    one whose verifier got an answer from a model (``_verifier_model_answered``) and wrote no judge-error marker
+    (``_judge_error_marker``): a judge the verifier does not observe (``observe_llm_judge_grading``) records no
+    grading however often it is asked again, and a grade it gave is never replaced. A row whose model calls all
+    failed, or that names a judge error, was not graded."""
     observed = row.get("ng_trial_observations")
     verifiers = observed.get("verifier_invocations") if isinstance(observed, Mapping) else None
     if not isinstance(verifiers, list) or not verifiers:
@@ -5701,6 +7356,8 @@ def _grading_unrecorded(row: Mapping[str, Any]) -> bool:
         not isinstance(verifier, Mapping) or verifier.get("grading_operations") or verifier.get("grading_record")
         for verifier in verifiers
     ):
+        return False
+    if _verifier_model_answered(row, verifiers) and not _judge_error_marker(row):
         return False
     return grading_artifact(row) is None and not _model_failure(row)
 
@@ -5750,7 +7407,9 @@ def reverification_cause(row: Mapping[str, Any]) -> str | None:
     return REVERIFY_UNGRADED if _grading_unrecorded(row) else None
 
 
-def masked_without_artifact_kind(row: Mapping[str, Any]) -> str | None:
+def masked_without_artifact_kind(
+    row: Mapping[str, Any], *, classification: FailureClassificationConfig | None = None
+) -> str | None:
     """The kind of a masked result that is never measured nor run again, though infrastructure left it unmeasured; else None.
 
     A masked result ``masked_infrastructure_kind`` rejects only because it kept a saved answer (so every other rule of
@@ -5762,7 +7421,7 @@ def masked_without_artifact_kind(row: Mapping[str, Any]) -> str | None:
     """
     from nemo_gym.rollouts.rollout_recovery import masked_kept_answer_kind
 
-    kind = masked_kept_answer_kind(row)
+    kind = masked_kept_answer_kind(row, classification=classification)
     return kind if kind is not None and reverification_cause(row) is None else None
 
 

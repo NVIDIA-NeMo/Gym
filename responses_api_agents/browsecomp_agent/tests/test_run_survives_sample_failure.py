@@ -52,6 +52,7 @@ from responses_api_agents.browsecomp_agent.app import (
 
 def _make_config(**kwargs) -> BrowsecompAgentConfig:
     defaults = dict(
+        allow_host_execution=True,
         host="0.0.0.0",
         port=8080,
         entrypoint="",

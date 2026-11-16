@@ -16,6 +16,7 @@
 
 import hashlib
 import json
+import logging
 import os
 import re
 from collections import Counter, defaultdict
@@ -24,7 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
-from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Sequence
 
 import orjson
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -34,6 +35,7 @@ from nemo_gym.config.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
+    ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -43,10 +45,30 @@ from nemo_gym.config.global_config import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 BATCH_STATUS_FNAME = "batch_status.json"
 BATCH_STATUS_WRITE_INTERVAL_SECONDS = 5.0
 _DATASET_DIGEST_DOMAIN = b"nemo-gym-batch-dataset-v1\0"
 _FAILURE_CLASS_KEY = "_ng_failure_class"
+# Mirrors of rollout_collection's status-row markers (that module imports this one): omitted rollouts, the failure
+# kind beside the class, and the rows that are the evaluated model's final result.
+_OMITTED_ROLLOUT_KEY = "_ng_omitted_rollout"
+_DISPATCH_DRAINED_KEY = "_ng_dispatch_drained"
+_FAILURE_KIND_KEY = "failure_kind"
+_MODEL_FINAL_KEY = "_ng_model_final"
+
+
+def _status_kind(row: Mapping[str, Any]) -> str:
+    """The kind a status row counts under: its failure kind, else its class."""
+    return row.get(_FAILURE_KIND_KEY) or row.get(_FAILURE_CLASS_KEY) or "unknown"
+
+
+def _counts(counter: Counter) -> Dict[str, int]:
+    return dict(sorted((key, count) for key, count in counter.items() if count))
+
+
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MISSING = object()
 
@@ -367,6 +389,34 @@ def _read_aggregate_entries(metrics_fpath: Optional[Path]) -> tuple[Dict[str, Di
     return entries, None
 
 
+def _environment_status_members(rows: Iterable[Mapping[str, Any]]) -> set[str]:
+    """Identify members whose saved rows consistently name their own environment."""
+    own_environment: Dict[str, bool] = {}
+    for row in rows:
+        agent_ref = row.get(AGENT_REF_KEY_NAME)
+        member = agent_ref.get("name") if isinstance(agent_ref, Mapping) else None
+        member = member or row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
+        if isinstance(member, str) and member:
+            own_environment[member] = own_environment.get(member, True) and (
+                row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME) == member
+            )
+    return {member for member, own_stamp in own_environment.items() if own_stamp}
+
+
+def _aggregate_entry_for_member(
+    entries: Mapping[str, Dict[str, Any]], member: str, *, environment_member: bool
+) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Join environment members by their stamp and agent members by their metric label."""
+    if environment_member:
+        matches = [entry for entry in entries.values() if entry.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME) == member]
+        if len(matches) > 1:
+            return None, "AmbiguousAggregateMetricsEntry"
+        entry = matches[0] if matches else None
+    else:
+        entry = entries.get(member)
+    return entry, None if entry is not None else "MissingAggregateMetricsEntry"
+
+
 def _safe_aggregation_error(error: Any) -> Dict[str, Any]:
     """Copy only non-secret diagnostics into batch_status.json."""
     if not isinstance(error, Mapping):
@@ -406,6 +456,7 @@ class BatchStatusTracker:
         self.manifest, self.manifest_sha256 = load_batch_manifest(manifest_fpath)
         self.observations = observe_materialized_rows(materialized_rows)
         validate_batch_manifest(self.manifest, self.observations)
+        self._environment_members = _environment_status_members(materialized_rows)
         self._expected_rollout_identities: set[tuple[str, int, int]] = {
             (row[AGENT_REF_KEY_NAME]["name"], row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
             for row in materialized_rows
@@ -464,21 +515,32 @@ class BatchStatusTracker:
 
         latest_failures = {}
         for position, failure in enumerate(failure_rows):
+            # A never-started row is no execution and changes nothing.
+            if failure.get(_OMITTED_ROLLOUT_KEY) and failure.get(_DISPATCH_DRAINED_KEY):
+                continue
             identity = self._validated_rollout_identity(failure, record_kind="failure", row_index=position)
             latest_failures[identity] = failure
 
         failures_by_agent: Dict[str, Counter] = defaultdict(Counter)
+        kinds_by_agent: Dict[str, Counter] = defaultdict(Counter)
+        model_final_by_agent: Dict[str, Counter] = defaultdict(Counter)
         for (agent_name, task_index, rollout_index), failure in latest_failures.items():
-            if (task_index, rollout_index) in completed_by_agent[agent_name]:
+            # An interrupted latest attempt hides the older failure, as the run health check reads it.
+            if (task_index, rollout_index) in completed_by_agent[agent_name] or failure.get(_OMITTED_ROLLOUT_KEY):
                 continue
             failures_by_agent[agent_name][failure.get(_FAILURE_CLASS_KEY) or "unknown"] += 1
+            kinds_by_agent[agent_name][_status_kind(failure)] += 1
+            if failure.get(_MODEL_FINAL_KEY):
+                model_final_by_agent[agent_name][_status_kind(failure)] += 1
 
         aggregate_entries, aggregate_artifact_error = _read_aggregate_entries(aggregate_metrics_fpath)
         members = {}
         for benchmark_slug, expected in sorted(self.manifest.members.items()):
             agent_name = expected.agent_name
             observed = self.observations[agent_name]
-            aggregate_entry = aggregate_entries.get(agent_name)
+            aggregate_entry, entry_error = _aggregate_entry_for_member(
+                aggregate_entries, agent_name, environment_member=agent_name in self._environment_members
+            )
             observed_metric_keys = sorted((aggregate_entry or {}).get("key_metrics") or {})
             aggregation_error = None
             if aggregation_deferred:
@@ -488,9 +550,9 @@ class BatchStatusTracker:
             elif aggregate_artifact_error is not None:
                 aggregation_status = "error"
                 aggregation_error = {"type": aggregate_artifact_error}
-            elif aggregate_entry is None:
+            elif entry_error is not None:
                 aggregation_status = "error"
-                aggregation_error = {"type": "MissingAggregateMetricsEntry"}
+                aggregation_error = {"type": entry_error}
             elif AGGREGATION_ERROR_KEY in aggregate_entry:
                 aggregation_status = "error"
                 aggregation_error = _safe_aggregation_error(aggregate_entry[AGGREGATION_ERROR_KEY])
@@ -516,6 +578,8 @@ class BatchStatusTracker:
                 "completed_rollout_count": completed_count,
                 "remaining_rollout_count": max(expected.expected_rollout_count - completed_count, 0),
                 "failures_by_class": dict(sorted(failures_by_agent[agent_name].items())),
+                "failures_by_kind": _counts(kinds_by_agent[agent_name]),
+                "model_final_by_kind": _counts(model_final_by_agent[agent_name]),
                 "repeat_policy": observed.repeat_policy.model_dump(),
                 "expected_metric_keys": sorted(expected.metric_keys),
                 "observed_metric_keys": observed_metric_keys,
@@ -555,3 +619,163 @@ class BatchStatusTracker:
         self._last_write = now
         self._last_progress_count = progress_count
         return True
+
+
+def disable_run_status(status_fpath: Path, error: Exception) -> None:
+    """Try once to replace unreliable run counts with a timestamped disabled state."""
+    reason = type(error).__name__
+    logger.warning("Run status disabled (%s).", reason)
+    try:
+        _atomic_write_json(
+            status_fpath,
+            {
+                "schema_version": "1",
+                "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "tracking": "disabled",
+                "reason": reason,
+                "members": {},
+            },
+        )
+    except Exception as write_error:
+        # Reporting must remain best-effort even when the status artifact is unwritable.
+        logger.debug("Could not save disabled run status (%s).", type(write_error).__name__)
+
+
+class RunStatusTracker(BatchStatusTracker):
+    """Track any materialized run without requiring an Eval Factory manifest."""
+
+    def __init__(
+        self,
+        status_fpath: Path,
+        materialized_rows: Iterable[Mapping[str, Any]],
+        *,
+        write_interval_seconds: Optional[float] = None,
+    ) -> None:
+        self.status_fpath = status_fpath
+        rows = list(materialized_rows)
+        self._expected_rollout_identities = {
+            (row[AGENT_REF_KEY_NAME]["name"], row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) for row in rows
+        }
+        self._environment_members = _environment_status_members(rows)
+        self.write_interval_seconds = (
+            BATCH_STATUS_WRITE_INTERVAL_SECONDS if write_interval_seconds is None else write_interval_seconds
+        )
+        self._last_write = 0.0
+        self._last_progress_count = 0
+        self.enabled = True
+        self._expected_by_agent = Counter(agent for agent, _, _ in self._expected_rollout_identities)
+        self._completed: set[tuple[str, int, int]] = set()
+        # The latest outstanding failure of each rollout: its class, its kind, and whether it is model-final.
+        self._failures: Dict[tuple[str, int, int], tuple[str, str, bool]] = {}
+        self._completed_by_agent: Counter[str] = Counter()
+        self._failures_by_agent: Dict[str, Counter] = defaultdict(Counter)
+        self._kinds_by_agent: Dict[str, Counter] = defaultdict(Counter)
+        self._model_final_by_agent: Dict[str, Counter] = defaultdict(Counter)
+        self._completed_cursor = 0
+        self._failure_cursor = 0
+
+    def _forget_failure(self, identity: tuple[str, int, int]) -> None:
+        previous = self._failures.pop(identity, None)
+        if previous is None:
+            return
+        failure_class, kind, model_final = previous
+        self._failures_by_agent[identity[0]][failure_class] -= 1
+        self._kinds_by_agent[identity[0]][kind] -= 1
+        if model_final:
+            self._model_final_by_agent[identity[0]][kind] -= 1
+
+    def build_status(
+        self,
+        completed_results: Sequence[Mapping[str, Any]],
+        failure_rows: Sequence[Mapping[str, Any]],
+        *,
+        aggregate_metrics_fpath: Optional[Path] = None,
+        aggregation_deferred: bool = False,
+    ) -> Dict[str, Any]:
+        """Count unique completions and the latest outstanding failure for each rollout, by class and by kind."""
+        if len(completed_results) < self._completed_cursor or len(failure_rows) < self._failure_cursor:
+            raise ConfigError("Run status progress must be append-only")
+        for position in range(self._completed_cursor, len(completed_results)):
+            identity = self._validated_rollout_identity(
+                completed_results[position], record_kind="completed result", row_index=position
+            )
+            if identity not in self._completed:
+                self._completed.add(identity)
+                self._completed_by_agent[identity[0]] += 1
+                self._forget_failure(identity)
+        for position in range(self._failure_cursor, len(failure_rows)):
+            row = failure_rows[position]
+            # A never-started row is no execution and changes nothing.
+            if row.get(_OMITTED_ROLLOUT_KEY) and row.get(_DISPATCH_DRAINED_KEY):
+                continue
+            identity = self._validated_rollout_identity(row, record_kind="failure", row_index=position)
+            if identity in self._completed:
+                continue
+            self._forget_failure(identity)
+            if row.get(_OMITTED_ROLLOUT_KEY):
+                # An interrupted attempt is the latest execution: it hides the older failure, as the run health check
+                # reads it, and is no failure itself.
+                continue
+            failure_class = row.get(_FAILURE_CLASS_KEY) or "unknown"
+            kind, model_final = _status_kind(row), bool(row.get(_MODEL_FINAL_KEY))
+            self._failures[identity] = (failure_class, kind, model_final)
+            self._failures_by_agent[identity[0]][failure_class] += 1
+            self._kinds_by_agent[identity[0]][kind] += 1
+            if model_final:
+                self._model_final_by_agent[identity[0]][kind] += 1
+        self._completed_cursor = len(completed_results)
+        self._failure_cursor = len(failure_rows)
+        aggregates, artifact_error = _read_aggregate_entries(aggregate_metrics_fpath)
+        members = {}
+        for agent, expected in sorted(self._expected_by_agent.items()):
+            entry, _ = _aggregate_entry_for_member(
+                aggregates, agent, environment_member=agent in self._environment_members
+            )
+            if aggregation_deferred:
+                aggregation_status = "deferred"
+            elif aggregate_metrics_fpath is None:
+                aggregation_status = "pending"
+            elif artifact_error or entry is None or AGGREGATION_ERROR_KEY in entry:
+                aggregation_status = "error"
+            else:
+                aggregation_status = "complete"
+            members[agent] = {
+                "expected_rollout_count": expected,
+                "completed_rollout_count": self._completed_by_agent[agent],
+                "remaining_rollout_count": expected - self._completed_by_agent[agent],
+                "failures_by_class": _counts(self._failures_by_agent[agent]),
+                "failures_by_kind": _counts(self._kinds_by_agent[agent]),
+                "model_final_by_kind": _counts(self._model_final_by_agent[agent]),
+                "aggregation_status": aggregation_status,
+            }
+        return {
+            "schema_version": "1",
+            "tracking": "enabled",
+            "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "members": members,
+        }
+
+    def write_status(
+        self,
+        completed_results: Sequence[Mapping[str, Any]],
+        failure_rows: Sequence[Mapping[str, Any]],
+        *,
+        aggregate_metrics_fpath: Optional[Path] = None,
+        aggregation_deferred: bool = False,
+        force: bool = False,
+    ) -> bool:
+        """Report progress best-effort; one mismatch or write error disables this tracker."""
+        if not self.enabled:
+            return False
+        try:
+            return super().write_status(
+                completed_results,
+                failure_rows,
+                aggregate_metrics_fpath=aggregate_metrics_fpath,
+                aggregation_deferred=aggregation_deferred,
+                force=force,
+            )
+        except Exception as error:
+            self.enabled = False
+            disable_run_status(self.status_fpath, error)
+            return False

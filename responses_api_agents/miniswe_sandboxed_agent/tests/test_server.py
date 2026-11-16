@@ -77,11 +77,12 @@ async def fixture(tmp_path, monkeypatch):
     server._loader.load = AsyncMock(return_value=task)
     envs, events, harnesses = [], [], []
 
-    def create(task, config, session_id, directory, verifier=False):
+    def create(task, config, session_id, directory, verifier=False, *, placement_group=None):
         name = "verifier" if verifier else "agent"
         env = SimpleNamespace(
             task=task,
             session_id=session_id,
+            placement_group=placement_group or session_id,
             closed=False,
             resources=[],
             cleanup_errors=[],
@@ -203,6 +204,7 @@ async def test_agent_owns_loop_and_replays_exact_result(fixture):
         "verifier_stop",
     ]
     assert all(env.closed for env in f.envs)
+    assert f.envs[0].placement_group == f.envs[1].placement_group
     f.server._loader.load.assert_awaited_once()
     f.server.server_client.post.assert_not_called()
     session = f.server._sessions[result.session_id]
@@ -1309,7 +1311,7 @@ async def test_real_harness_cleanup_failure_reaches_verify_and_recovery(
     body = f.body.model_copy(update={"capture_rollout_id": "rollout-1", "capture_model_calls": True})
     with rollout_context(f.agent.rollout_id_from_run(body)):
         result = await f.agent.run(f.request, body)
-    from tests.unit_tests.test_recovery_saved_generation import persist_producer_result
+    from tests.unit_tests.orchestration.test_recovery_saved_generation import persist_producer_result
 
     decision, store, projected = await persist_producer_result(
         tmp_path / "persisted", monkeypatch, result.model_dump(mode="json")
@@ -1338,6 +1340,157 @@ async def test_real_harness_cleanup_failure_reaches_verify_and_recovery(
     assert _policy_evidence(row) == (HARNESS_TERMINATION_UNCONFIRMED, None)
     # A serialized response retains the execution evidence even when no output was emitted.
     assert _policy_replay_is_unsupported(row)
+
+
+@pytest.mark.parametrize("evicted", [True, False], ids=["storage_eviction", "container_exit_143"])
+async def test_a_storage_eviction_found_by_process_cleanup_is_a_settled_zero_through_collection(
+    fixture, monkeypatch, tmp_path, evicted
+):
+    """The cleanup failure of a real run, through /run, /verify, collection, aggregation and recovery.
+
+    The sandbox's eviction for its own storage limit is a scored zero in the denominator, never retried. A container
+    exit 143 alone is no limit evidence: it stays the agent's infrastructure failure, unscored and not settled.
+    """
+    import subprocess
+    import sys
+    from copy import deepcopy
+
+    from nemo_gym.core import (
+        HARNESS_TERMINATION_UNCONFIRMED,
+        FailureBoundary,
+        FailureReportRow,
+        NgFailureEvent,
+        report_for_current_request,
+    )
+    from nemo_gym.orchestration.recovery import (
+        COLLECT_SCRIPT,
+        CollectedEvidence,
+        decide_from_collected,
+        select_managed_evidence,
+    )
+    from nemo_gym.rollouts import (
+        IncompleteEvaluationError,
+        RolloutCollectionConfig,
+        RolloutCollectionHelper,
+        RolloutStore,
+    )
+    from resources_servers.terminal_bench_4.tests.test_resource_limits import (
+        CONTAINER_EXIT_CLEANUP,
+        STORAGE_EVICTION_CLEANUP,
+    )
+    from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, failing_row, install_fake_server_client
+
+    f = fixture
+    detail = STORAGE_EVICTION_CLEANUP if evicted else CONTAINER_EXIT_CLEANUP
+    lost = RuntimeError(detail.removeprefix("Process cleanup failed: "))
+
+    def harness(**kwargs):
+        # What MiniSWEHarness.execute returns when self.close() raised ``lost`` after the run.
+        async def execute(budget):
+            failure = NgFailureEvent(
+                boundary=FailureBoundary.HARNESS,
+                failure_kind=HARNESS_TERMINATION_UNCONFIRMED,
+                failure_reason="mini-SWE harness termination was not confirmed",
+                operation="harness.terminate",
+            )
+            failure.__cause__ = lost
+            return (
+                module.empty_response(kwargs["params"], "model"),
+                HarnessOutcome(reason="infrastructure_error", detail=f"Process cleanup failed: {lost}"),
+                {"harness_version": "test", **FailureReportRow.fields(report_for_current_request(failure))},
+            )
+
+        return SimpleNamespace(**kwargs, setup=AsyncMock(), execute=AsyncMock(side_effect=execute))
+
+    monkeypatch.setattr(module, "MiniSWEHarness", harness)
+    f.body = f.body.model_copy(update={"client_session_id": "owner"})
+    await f.server.seed_session(f.request, f.body)
+    # The sandbox is gone: any further use of it reports the same loss.
+    f.envs[0].quiesce_agent.side_effect = lost
+    produced = (await f.agent.run(f.request, f.body)).model_dump(mode="json")
+    f.grade.assert_not_awaited()
+
+    job = tmp_path / "job"
+    (job / "artifacts").mkdir(parents=True)
+    source = job / "input.jsonl"
+    source.write_text("".join(json.dumps(failing_row(index)) + "\n" for index in (0, 1)))
+    output = job / "artifacts" / "rollouts.jsonl"
+    solved = {"reward": 1.0, "response": produced["response"], "evaluation_completed": True}
+    aggregated = []
+
+    async def post(*, url_path, json, **kwargs):
+        if url_path == "/aggregate_metrics":
+            aggregated.append([dict(row) for row in json.verify_responses])
+            metrics = await f.agent.aggregate_metrics(json)
+            return FakeResponse(200, metrics.model_dump(mode="json"))
+        assert url_path == "/run"
+        return FakeResponse(200, deepcopy(produced if json["_ng_task_index"] == 0 else solved))
+
+    client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    monkeypatch.setattr(
+        "nemo_gym.rollouts.rollout_collection.get_global_config_dict", lambda: client.global_config_dict
+    )
+    config = RolloutCollectionConfig(
+        input_jsonl_fpath=str(source),
+        output_jsonl_fpath=str(output),
+        route_failures_to_sidecar=True,
+        disable_health_check=True,
+        # As `gym eval submit` sets it: the strict completion gate that blocked the real run.
+        require_complete=True,
+    )
+    aggregate = output.with_name("rollouts_aggregate_metrics.json")
+    if evicted:
+        await RolloutCollectionHelper().run_from_config(config)
+    else:
+        with pytest.raises(IncompleteEvaluationError, match=r"1/2 samples completed") as rejected:
+            await RolloutCollectionHelper().run_from_config(config)
+        assert rejected.value.exit_code == 75 and "No tasks are eligible for retry" not in str(rejected.value)
+    store = RolloutStore.read(output)
+    raw = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", COLLECT_SCRIPT, str(job)], capture_output=True, text=True, check=True
+    )
+    collected = select_managed_evidence(CollectedEvidence.model_validate_json(raw.stdout), job)
+    decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+    evidence = {item.identity: item for item in decision.evidence}
+    scored = {row["_ng_task_index"]: row for row in store.selected("success")}
+    # The cleanup event the harness reported, as the agent's /run reply carries it.
+    (event_id,) = produced[FailureReportRow.EVENTS]
+    assert produced[FailureReportRow.EVENTS][event_id]["operation"] == "harness.terminate"
+    assert produced["termination"]["detail"] == detail
+
+    if not evicted:
+        # No limit evidence: the agent's infrastructure failure, routed to the failures sidecar, unscored, retried.
+        assert produced[FailureReportRow.FAILURE_ID] == event_id and produced["sandbox_resource_limit"] is None
+        (failure,) = store.failures()
+        assert failure["_ng_task_index"] == 0 and failure[FailureReportRow.FAILURE_ID] == event_id
+        assert failure["failure_kind"] == HARNESS_TERMINATION_UNCONFIRMED and "reward" not in failure
+        assert sorted(scored) == [1]
+        assert (store.coverage()["complete"], store.coverage()["retryable"]) == (False, 1)
+        assert (evidence[(0, 0)].state.value, evidence[(0, 0)].failure_kind) == (
+            "retryable",
+            HARNESS_TERMINATION_UNCONFIRMED,
+        )
+        assert decision.action.value == "resubmit" and decision.counts == {"retryable": 1, "scored": 1}
+        # The strict gate publishes no score for the incomplete run.
+        assert aggregated == [] and not aggregate.exists()
+        return
+
+    (metrics,) = json.loads(aggregate.read_text())
+    (aggregated_rows,) = aggregated
+
+    # The storage-limit death: a settled zero in the results, its cleanup event kept unselected beside the cause.
+    assert FailureReportRow.FAILURE_ID not in produced and produced["failure_kind"] is None
+    assert produced["sandbox_resource_limit"] == {"resource": "storage", "detail": detail}
+    assert store.failures() == [] and store.pending() == []
+    row = scored[0]
+    assert (row["reward"], row["evaluation_completed"], row.get("_ng_failure_class")) == (0.0, True, None)
+    assert FailureReportRow.FAILURE_ID not in row and list(row[FailureReportRow.EVENTS]) == [event_id]
+    assert (store.coverage()["complete"], store.coverage()["successful"]) == (True, 2)
+    assert (evidence[(0, 0)].state.value, evidence[(0, 0)].failure_id) == ("scored", None)
+    assert decision.action.value == "noop" and decision.counts == {"scored": 2}
+    # Both tasks are in the denominator: (0.0 + 1.0) / 2.
+    assert sorted((row["_ng_task_index"], row["reward"]) for row in aggregated_rows) == [(0, 0.0), (1, 1.0)]
+    assert metrics["key_metrics"]["mean/reward"] == 0.5
 
 
 @pytest.mark.parametrize("typed", [False, True])

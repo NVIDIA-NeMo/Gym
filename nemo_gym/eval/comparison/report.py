@@ -62,7 +62,8 @@ def _ci_footnote(confidence_level: float) -> str:
         f"`{MISSING}` means a point value or interval was unavailable: "
         "delta intervals require at least 2 finite repeat-level values on each side. "
         "Baseline/candidate CI = 95% t-interval of the per-repeat mean across repeats, read verbatim from "
-        "`ci_{low,high}_95_across_repeats/<metric>` in `*_aggregate_metrics.json`."
+        "`ci_{low,high}_95_across_repeats/<metric>` in `*_aggregate_metrics.json` for a single run, "
+        "or recomputed from all concatenated repeat observations for a pooled side."
     )
 
 
@@ -133,13 +134,13 @@ def _run_summary_table(result: ComparisonResult, comparison: AgentComparison) ->
         row("Run", f"`{result.baseline.label}`", [f"`{run.label}`" for run in runs]),
         row(
             "Rollouts",
-            f"`{result.baseline.rollouts_jsonl_fpath}`",
-            [f"`{run.rollouts_jsonl_fpath}`" for run in runs],
+            "See pooled sources" if result.baseline.sources else f"`{result.baseline.rollouts_jsonl_fpath}`",
+            ["See pooled sources" if run.sources else f"`{run.rollouts_jsonl_fpath}`" for run in runs],
         ),
         row(
             "Aggregate metrics",
-            f"`{result.baseline.aggregate_metrics_fpath}`",
-            [f"`{run.aggregate_metrics_fpath}`" for run in runs],
+            "See pooled sources" if result.baseline.sources else f"`{result.baseline.aggregate_metrics_fpath}`",
+            ["See pooled sources" if run.sources else f"`{run.aggregate_metrics_fpath}`" for run in runs],
         ),
         row(
             "Agent",
@@ -156,6 +157,33 @@ def _run_summary_table(result: ComparisonResult, comparison: AgentComparison) ->
     header = ["", "Baseline", *labels]
     alignments = ["---"] * len(header)
     return _table(header, alignments, rows)
+
+
+def _pooled_source_tables(result: ComparisonResult) -> List[str]:
+    lines: List[str] = []
+    for label, run in (("Baseline", result.baseline), *zip(_candidate_labels(result), result.candidates)):
+        if not run.sources:
+            continue
+        lines += ["", f"### {label} pooled sources", ""]
+        lines += _table(
+            ["Source", "Rollouts", "Aggregate metrics", "Agent: recorded repeat rows / scored repeats (tasks)"],
+            ["---:", "---", "---", "---"],
+            [
+                [
+                    str(index + 1),
+                    f"`{source.rollouts_jsonl_fpath}`",
+                    f"`{source.aggregate_metrics_fpath}`",
+                    ", ".join(
+                        f"`{name}`: {source.repeat_counts_by_agent.get(name, 'unknown')} "
+                        f"/ {source.scored_repeat_counts_by_agent.get(name, 'unknown')} "
+                        f"({source.task_counts_by_agent.get(name, 0)})"
+                        for name in source.selected_agents
+                    ),
+                ]
+                for index, source in enumerate(run.sources)
+            ],
+        )
+    return lines
 
 
 DELTA_HEADER = "Δ (cand − base)"
@@ -261,6 +289,9 @@ def _select_shown_flips(summary: FlipSummary) -> List:
 def render_markdown(result: ComparisonResult) -> str:
     candidate_labels = _candidate_labels(result)
     lines: List[str] = ["# gym eval compare", ""]
+    lines += _pooled_source_tables(result)
+    if result.baseline.sources or any(run.sources for run in result.candidates):
+        lines.append("")
 
     for comparison in result.comparisons:
         if len(result.comparisons) > 1:
@@ -281,7 +312,11 @@ def render_markdown(result: ComparisonResult) -> str:
         if key_rows:
             lines += _metric_table(key_rows, candidate_labels, confidence_level=result.confidence_level)
         else:
-            lines += ["No key metrics were recorded for this agent."]
+            lines += [
+                "No key metrics could be pooled for this agent; see Notes."
+                if result.baseline.sources or any(run.sources for run in result.candidates)
+                else "No key metrics were recorded for this agent."
+            ]
         lines += ["", _ci_footnote(result.confidence_level), ""]
 
         if other_rows:
@@ -338,6 +373,21 @@ def write_reports(result: ComparisonResult, output_dir: Path, report_format: str
     except OSError as e:
         raise ConfigError(f"Cannot write to --output-dir '{output_dir}': {e}") from e
 
+    inputs = {
+        path.resolve()
+        for run in (result.baseline, *result.candidates)
+        for source in (run.sources or [run])
+        for path in (source.rollouts_jsonl_fpath, source.aggregate_metrics_fpath)
+    }
+    destinations = []
+    if report_format in ("md", "both"):
+        destinations.append(output_dir / MARKDOWN_REPORT_NAME)
+    if report_format in ("json", "both"):
+        destinations.append(output_dir / JSON_REPORT_NAME)
+    for destination in destinations:
+        if destination.resolve() in inputs:
+            raise ConfigError(f"Report destination '{destination}' would overwrite a comparison input artifact.")
+
     written: List[Path] = []
     try:
         if report_format in ("md", "both"):
@@ -391,8 +441,12 @@ def render_key_metrics_tables(result: ComparisonResult) -> List["Table"]:
 def summary_lines(result: ComparisonResult, written: Sequence[Path]) -> Tuple[str, ...]:
     """The short stdout recap printed after the files are written."""
     lines = [
-        f"Baseline:  {result.baseline.aggregate_metrics_fpath}",
-        *(f"Candidate: {run.aggregate_metrics_fpath}" for run in result.candidates),
+        *(f"Baseline:  {source.aggregate_metrics_fpath}" for source in (result.baseline.sources or [result.baseline])),
+        *(
+            f"Candidate: {source.aggregate_metrics_fpath}"
+            for run in result.candidates
+            for source in (run.sources or [run])
+        ),
         f"Agents compared: {', '.join(sorted({c.baseline_agent for c in result.comparisons}))}",
     ]
     for comparison in result.comparisons:

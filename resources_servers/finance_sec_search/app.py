@@ -21,12 +21,10 @@ Caches ticker mappings and filing metadata locally to minimize SEC.gov calls.
 
 import asyncio
 import atexit
-import contextlib
 import json
 import logging
 import os
 import re
-import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -56,7 +54,10 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JUDGE_FAILURES, call_judge, is_judge_failure, reraise_judge_errors
+from resources_servers.sec_local_index.cache import atomic_write, make_shared_dirs
 from resources_servers.sec_local_index.edgar_search_service import EdgarSearchService
 from resources_servers.sec_local_index.html_text import html_to_text
 from resources_servers.sec_local_index.live_edgar_search import LiveEdgarSearch
@@ -409,6 +410,19 @@ class RateLimiter:
             await asyncio.sleep(max(sleep_time, 0.01))
 
 
+def per_worker_rate_limiter(requests_per_second: int, num_workers: int) -> RateLimiter:
+    """The rate limiter for one worker, so that all workers together stay within `requests_per_second`.
+
+    SEC.gov's limit applies to the whole server, but each uvicorn worker keeps its own limiter.
+    Each worker therefore gets an equal share of the limit, rounded down,
+    so in any one-second window the workers together admit at most `requests_per_second` requests.
+    The server refuses more workers than `requests_per_second`, where a share would be below one request.
+    """
+    if num_workers > requests_per_second:
+        raise ValueError(f"{num_workers} workers cannot share a limit of {requests_per_second} requests per second")
+    return RateLimiter(max_requests=requests_per_second // num_workers, window_seconds=1.0)
+
+
 # ============================================================================
 # Finance SEC Search Resource Server
 # ============================================================================
@@ -427,8 +441,22 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
 
     config: FinanceAgentResourcesServerConfig
 
+    def multiple_workers_unsupported_reason(self) -> Optional[str]:
+        num_workers = self.config.num_workers or 1
+        if num_workers <= self.config.requests_per_second:
+            return None
+        # Several workers are allowed up to requests_per_second, so the reason names that limit:
+        # the refusal's "needs num_workers=1" prefix alone would understate it.
+        return (
+            f"it runs with at most requests_per_second ({self.config.requests_per_second}) workers, not {num_workers}, "
+            "because with more, each worker's own rate limiter would admit a request at once, "
+            "so the workers together could exceed SEC.gov's limit"
+        )
+
     def model_post_init(self, context):
         """Initialize after Pydantic model creation."""
+        # Refuse an unsupported worker count before building the per-worker rate limiter.
+        refuse_unsupported_num_workers(self)
         if not self.config.cache_dir:
             default = Path.home() / ".cache" / "nemo_gym" / "finance_sec_search"
             logger.warning(
@@ -450,10 +478,10 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         # use_cache=False every request fetches live and no dirs are created.
         if self.config.use_cache:
             self._cache_dir.mkdir(parents=True, exist_ok=True)
-            self._filings_metadata_dir.mkdir(exist_ok=True)
-            self._filings_dir.mkdir(exist_ok=True)
+            make_shared_dirs(self._filings_metadata_dir)
+            make_shared_dirs(self._filings_dir)
 
-        self._rate_limiter = RateLimiter(max_requests=self.config.requests_per_second, window_seconds=1.0)
+        self._rate_limiter = per_worker_rate_limiter(self.config.requests_per_second, self.config.num_workers or 1)
 
         self._tickers: Dict[str, Dict[str, str]] = {}  # ticker -> {"cik": ..., "name": ...}
         self._filings_cache: Dict[str, Dict[str, Dict[str, Any]]] = {}  # cik -> {acc_nodash -> filing_meta}
@@ -712,8 +740,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                         data = resp.read().decode("utf-8")
                     raw = json.loads(data)
                     if self.config.use_cache:
-                        with open(self._tickers_file, "w") as f:
-                            json.dump(raw, f)
+                        self._atomic_write(self._tickers_file, json.dumps(raw))
                     break
                 except (urllib.error.URLError, json.JSONDecodeError, OSError) as e:
                     wait = 2**attempt
@@ -780,17 +807,25 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
 
     @staticmethod
     def _atomic_write(path: Path, content: str, encoding: str = "utf-8") -> None:
-        """Write content to path atomically via temp-file + rename."""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+        atomic_write(path, content, encoding)
+
+    @staticmethod
+    def _read_cache(path: Path) -> Optional[str]:
+        """Read a cache entry; an unreadable entry is a miss, not a tool failure."""
         try:
-            with os.fdopen(fd, "w", encoding=encoding) as f:
-                f.write(content)
-            os.replace(tmp, path)
-        except BaseException:
-            with contextlib.suppress(OSError):
-                os.unlink(tmp)
-            raise
+            return path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except OSError as e:
+            logger.warning("Ignoring unreadable cache entry %s: %s", path, e)
+            return None
+
+    def _write_cache(self, path: Path, content: str) -> None:
+        """Write a cache entry; a failed write leaves the result uncached rather than failing the tool."""
+        try:
+            self._atomic_write(path, content)
+        except OSError as e:
+            logger.warning("Could not cache %s: %s", path, e)
 
     @staticmethod
     def _parse_filings_columns(columns: Dict[str, Any], cik: str, ticker: str) -> Dict[str, Dict[str, Any]]:
@@ -833,9 +868,9 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                 return self._filings_cache[cik_padded]
 
             cache_path = self._get_company_cache_path(cik)
-            if self.config.use_cache and cache_path.exists():
-                with open(cache_path, "r") as f:
-                    filings = json.load(f)
+            cached = self._read_cache(cache_path) if self.config.use_cache else None
+            if cached is not None:
+                filings = json.loads(cached)
                 self._filings_cache[cik_padded] = filings
                 return filings
 
@@ -863,7 +898,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
                             logger.warning("Failed to parse supplementary file %s for CIK %s", filename, cik)
 
                 if filings and self.config.use_cache:
-                    self._atomic_write(cache_path, json.dumps(filings))
+                    self._write_cache(cache_path, json.dumps(filings))
                 self._filings_cache[cik_padded] = filings
                 return filings
             except (json.JSONDecodeError, KeyError):
@@ -990,15 +1025,12 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         (e.g. edgar_search sub-documents/exhibits) map to distinct cache files.
         Returns None if the URL doesn't match the expected SEC format.
         """
-        parts = self._parse_sec_url(url)
-        if not parts:
+        parsed = parse_sec_archives_url(url)
+        if parsed is None:
             return None
-        cik_padded = str(parts["cik"]).zfill(10)
-        acc_nodash = parts["accession_number"].replace("-", "")
-        # Flatten the document path into one safe filename; fall back to "index"
-        # when the URL stops at the accession directory (no document component).
-        safe_doc = re.sub(r"[^A-Za-z0-9._-]", "_", parts.get("document", "")) or "index"
-        return self._filings_dir / cik_padded / acc_nodash / f"{safe_doc}.txt"
+        # cache_filename never contains a bare "%", so this cannot clash with a document.
+        filename = parsed.cache_filename or "%index"
+        return self._filings_dir / parsed.padded_cik / parsed.accession / f"{filename}.txt"
 
     # ========================================================================
     # sec_filing_search Endpoint
@@ -1120,18 +1152,15 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         if file_path is None:
             raise ValueError(f"Invalid SEC URL format: {url}")
 
-        text_content = None
-        source = None
-        if self.config.use_cache and file_path.exists():
-            text_content = file_path.read_text(encoding="utf-8")
-            source = "cache"
+        text_content = self._read_cache(file_path) if self.config.use_cache else None
+        source = "cache" if text_content is not None else None
 
         if text_content is None:
             text_content = await self._lookup_dump(url)
             if text_content is not None:
                 source = "sec-corpus"
                 if self.config.use_cache:
-                    self._atomic_write(file_path, text_content)
+                    self._write_cache(file_path, text_content)
 
         if text_content is None:
             html_content = await self._fetch_with_retry(url)
@@ -1145,7 +1174,7 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
             )
             source = "live"
             if self.config.use_cache:
-                self._atomic_write(file_path, text_content)
+                self._write_cache(file_path, text_content)
 
         if not text_content:
             raise ValueError("Filing content was empty after parsing.")
@@ -1569,9 +1598,17 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         )
 
 
-if __name__ == "__main__":
+def _configure_logging() -> None:
     # Root stays at WARNING: at INFO the HTTP client logs a line per model call.
     logging.basicConfig(level=logging.WARNING)
     for _logger_name in (__name__, "resources_servers"):
         logging.getLogger(_logger_name).setLevel(os.environ.get("NEMO_GYM_LOG_LEVEL", "INFO").upper())
+
+
+if __name__ == "__main__":
+    _configure_logging()
     FinanceAgentResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    _configure_logging()
+    app = FinanceAgentResourcesServer.run_webserver()  # noqa: F401

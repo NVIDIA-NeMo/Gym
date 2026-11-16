@@ -82,13 +82,17 @@ def install_fake_server_client(monkeypatch: pytest.MonkeyPatch, post: AsyncMock)
     return server_client
 
 
-@pytest.mark.parametrize("field", ["default_action", "by_failure_kind", "by_status_code"])
+@pytest.mark.parametrize("field", ["default_action", "by_failure_kind", "by_status_code", "by_failure_class"])
 def test_boundary_rejects_unsupported_actions_at_load(field):
     def value(action):
         return (
             action
             if field == "default_action"
-            else {MODEL_POLICY_RESPONSE_TIMEOUT if field == "by_failure_kind" else 500: action}
+            else {
+                MODEL_POLICY_RESPONSE_TIMEOUT
+                if field == "by_failure_kind"
+                else ("model" if field == "by_failure_class" else 500): action
+            }
         )
 
     with pytest.raises(ValidationError, match="does not support verify"):
@@ -169,7 +173,9 @@ async def test_confirmed_timeout_policy_actions_keep_facts_and_collection_budget
         base_url=f"http://127.0.0.1:{port}",
         max_connection_retries=2,
         max_http_attempts=2,
-        request_timeout_seconds=0.04,
+        # The server never answers, so each attempt times out; the budget only has to cover connecting and
+        # finishing the upload that the failure records assert, which a busy runner can stretch.
+        request_timeout_seconds=0.5,
     )
     try:
         with RequestFailureLog.capture() as log:

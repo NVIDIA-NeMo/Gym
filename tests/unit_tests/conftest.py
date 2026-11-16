@@ -9,7 +9,7 @@ import pytest
 
 import nemo_gym.artifacts.exporters as exporters_module
 from nemo_gym.config.global_config import reset_global_config_dict
-from tests.unit_tests.harbor_registry_fakes import FakeRegistryClient
+from tests.unit_tests.data.tasks.harbor.harbor_registry_fakes import FakeRegistryClient
 
 
 def _use_fake_registry(monkeypatch: pytest.MonkeyPatch) -> type[FakeRegistryClient]:

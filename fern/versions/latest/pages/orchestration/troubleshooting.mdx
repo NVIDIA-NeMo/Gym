@@ -70,9 +70,9 @@ Multi-node data parallelism places an equal share of replicas on each node. Chan
 
 ### Policy settings given twice
 
-**Error:** `Benchmark '<name>' run config already sets ['policy_base_url', ...] but driver.policy_model is also set`
+**Error:** `Benchmark '<name>' run config already sets ['policy_base_url', ...] but driver.policy_model is also set (...)`
 
-Remove either those keys from `run` or `driver.policy_model`. Submit does not choose between them.
+`run` sets a policy key to a value other than the one `driver.policy_model` gives; the message names each key with both values (an API key is shown as `<redacted>`, and a URL without its password or query values). Remove either those keys from `run` or `driver.policy_model`. Submit does not choose between them. A key set to the same value is accepted.
 
 ### A custom command combined with run or resumable
 

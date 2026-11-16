@@ -132,7 +132,7 @@ async def test_failed_setup_cannot_be_retried_as_a_successful_seed(setup, stage:
 
 
 @pytest.mark.parametrize("grant", [False, True])
-async def test_close_returns_sandbox_evidence_cookies_and_replays_receipt(setup, grant: bool) -> None:
+async def test_close_returns_sandbox_evidence_cookies_and_replays_the_saved_reply(setup, grant: bool) -> None:
     instance, sandbox, _, _ = setup
     await instance.seed_agent_session(
         request(),

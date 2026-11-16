@@ -278,12 +278,12 @@ and is registered under the name `apptainer` in [`../registry.py`](../registry.p
 ### Running the tests
 
 The unit tests live in
-[`tests/unit_tests/test_apptainer_provider.py`](../../../../tests/unit_tests/test_apptainer_provider.py)
+[`tests/unit_tests/sandbox/test_apptainer_provider.py`](../../../../tests/unit_tests/sandbox/test_apptainer_provider.py)
 and run as part of the core library test suite — no `apptainer` binary required:
 
 ```bash
 uv venv && uv sync --extra dev      # one-time environment setup
-pytest tests/unit_tests/test_apptainer_provider.py -q
+pytest tests/unit_tests/sandbox/test_apptainer_provider.py -q
 ```
 
 Async tests need no decorator because the repo sets `asyncio_mode = "auto"` in
@@ -300,7 +300,7 @@ The suite mocks at the **subprocess boundary** so it is fully hermetic:
   canned `(return_code, stdout, stderr)`. Tests then assert the exact command line built
   for `create` / `exec` / `upload` / `download` / `status` / `close`.
 
-This mirrors how [`test_opensandbox_provider.py`](../../../../tests/unit_tests/test_opensandbox_provider.py)
+This mirrors how [`test_opensandbox_provider.py`](../../../../tests/unit_tests/sandbox/test_opensandbox_provider.py)
 works: that suite mocks at the **SDK boundary** instead — it calls
 `pytest.importorskip("tenacity")` to skip when the optional dependency is absent, then
 monkeypatches `_require_opensandbox_sdk` to hand back fake `Sandbox` classes, so no real

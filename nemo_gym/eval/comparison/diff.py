@@ -274,6 +274,16 @@ def build_flip_summary(baseline: LoadedRun, candidate: LoadedRun, *, candidate_i
     `_ng_task_index` alone -- which assumes both runs used the same dataset, split, limit and
     ordering.
     """
+    if baseline.flip_unavailable_reason or candidate.flip_unavailable_reason:
+        return FlipSummary(
+            candidate_index=candidate_index,
+            mode="unavailable",
+            reason="; ".join(
+                f"{label}: {run.flip_unavailable_reason}"
+                for label, run in (("baseline", baseline), ("candidate", candidate))
+                if run.flip_unavailable_reason
+            ),
+        )
     baseline_groups = _groups_by_task(baseline)
     candidate_groups = _groups_by_task(candidate)
     common = sorted(set(baseline_groups) & set(candidate_groups))
@@ -389,10 +399,16 @@ def compare_runs(
             "Runs collected with different --num-repeats produce different pass@k metric names."
         )
 
-    notes: List[str] = []
+    notes: List[str] = [f"Baseline: {note}" if baseline.pooled else note for note in baseline.notes]
+    for index, run in enumerate(candidates):
+        label = "Candidate" if len(candidates) == 1 else f"Candidate {index + 1}"
+        notes.extend(f"{label}: {note}" if run.pooled else note for note in run.notes)
     repeat_counts = [run.num_repeats for run in candidates]
-    if baseline.num_repeats is not None and any(
-        count is not None and count != baseline.num_repeats for count in repeat_counts
+    if (
+        not baseline.pooled
+        and not any(run.pooled for run in candidates)
+        and baseline.num_repeats is not None
+        and any(count is not None and count != baseline.num_repeats for count in repeat_counts)
     ):
         notes.append(
             f"Repeat counts differ (baseline {baseline.num_repeats}, "

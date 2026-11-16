@@ -23,11 +23,7 @@ RUNTIME = SandboxPythonRuntime(
     harness="stirrup",
     requirements=(STIRRUP_REQUIREMENT,),
     import_check="import stirrup",
-    overrides=tuple(
-        line
-        for line in Path(__file__).with_name("overrides.txt").read_text().splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    ),
+    overrides=(f"pillow=={importlib.metadata.version('Pillow')}",),
 )
 # Outside the working directory, so the model's files stay its own.
 RUNTIME_DIR = RUNTIME.directory

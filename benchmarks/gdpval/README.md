@@ -107,6 +107,10 @@ The reference directory must be laid out as
 `<reference_deliverables_dir>/task_<task_id>/` with `finish_params.json` and
 the deliverable files (the same layout the Stirrup agent persists).
 
+A reference directory can also be an `s3://bucket/prefix` URI with that layout. `/verify` then downloads only the
+task it judges, skipping `history.json` and `history.pkl`, into `reference_cache_dir` (default: a directory under
+the temp dir), using the server's AWS credentials.
+
 ## Run multi-stage adaptive ELO (Best Practice - AA v2 Benchmark Method)
 
 Multi-stage ELO estimates the eval model's rating in a sequence of *stages*
@@ -292,9 +296,9 @@ comparison mode.
 
 To collect deliverables without judging them, for example for a reference set,
 set `++gdpval_resources_server.resources_servers.gdpval.judge_deliverables=false`.
-`/verify` still persists each deliverable, then returns `reward: 0.0` with
-`mask_sample: true`, so the rows stay in the output with their
-`deliverables_dir` and aggregation skips them.
+`/verify` still persists each deliverable, then returns `reward: 0.0`,
+`mask_sample: true`, and `failure_kind: gdpval:judging_disabled`. The rows stay
+in the output with their `deliverables_dir`, and aggregation skips them.
 
 ### Full run as a single stage
 

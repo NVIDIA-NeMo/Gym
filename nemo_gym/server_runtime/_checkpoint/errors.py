@@ -48,7 +48,7 @@ class AdmissionClosedError(ControlError):
 
 
 class RetireIncompleteError(ControlError):
-    """A forget for a rollout whose retire has not finished freeing it: forgetting it would make it live again."""
+    """A forget for a rollout whose retire has not finished releasing it: forgetting it would make it live again."""
 
     code = "checkpoint_retire_incomplete"
 

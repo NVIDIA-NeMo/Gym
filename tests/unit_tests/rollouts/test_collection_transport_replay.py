@@ -19,7 +19,7 @@ from nemo_gym.config.config_types import BaseServerConfig
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
 from nemo_gym.rollouts.rollout_store import RolloutStore
-from tests.single_agent_turn_helpers import _environment_server, _request
+from tests.helpers.single_agent_turn import _environment_server, _request
 
 
 @pytest.mark.parametrize("routed", [False, True])

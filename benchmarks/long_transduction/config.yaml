@@ -16,7 +16,7 @@ long_transduction_agent:
         jsonl_fpath: benchmarks/long_transduction/data/long_transduction.jsonl
         prompt_config: benchmarks/prompts/generic/default.yaml
         prepare_script: benchmarks/long_transduction/prepare.py
-        prepare_dependencies: [tiktoken, wonderwords]
+        prepare_project: benchmarks/long_transduction
         license: Apache 2.0
 
 long_transduction_benchmark_environment_server:

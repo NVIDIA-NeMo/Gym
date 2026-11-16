@@ -36,6 +36,8 @@ from nemo_gym.core import (
 from nemo_gym.models import CaptureStore
 from nemo_gym.models.model_call_capture import _CaptureMiddleware
 from nemo_gym.rollouts import aggregate_model_call_metrics, read_model_call_records
+from nemo_gym.server_runtime import ModelSamplingMiddleware
+from nemo_gym.telemetry import MeteredSemaphore, concurrency
 from responses_api_models.openai_model import app as openai_model_module
 from responses_api_models.openai_model.app import (
     NeMoGymAsyncOpenAI,
@@ -100,6 +102,10 @@ class TestApp:
 
     async def test_sanity(self) -> None:
         self._setup_server()
+
+    async def test_session_key_headers_reach_the_upstream_client(self):
+        assert self._setup_server(session_key_headers=["X-Session"])._client.session_key_headers == ["X-Session"]
+        assert self._setup_server()._client.session_key_headers == []
 
     async def test_retry_configuration_is_scoped_to_model_server(self):
         judge = self._setup_server(max_http_attempts=5)
@@ -373,7 +379,9 @@ class TestApp:
         server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
         server._client.create_response = AsyncMock(return_value=_response_data())
         app = server.setup_webserver()
-        assert app.user_middleware[0].cls is _CaptureMiddleware
+        middleware_classes = [middleware.cls for middleware in app.user_middleware]
+        # Sampling values are applied before capture records the request.
+        assert middleware_classes.index(ModelSamplingMiddleware) < middleware_classes.index(_CaptureMiddleware)
         assert not issubclass(_CaptureMiddleware, BaseHTTPMiddleware)
         client = TestClient(app)
 
@@ -751,6 +759,7 @@ class TestApp:
             operation_called = True
             return "completed"
 
+        timeouts_before = sum(concurrency._ADMISSION_TIMEOUTS.values())
         try:
             with pytest.raises(TimeoutError, match="acquiring an upstream provider slot"):
                 await server._call_upstream(operation)
@@ -758,6 +767,34 @@ class TestApp:
             server._semaphore.release()
 
         assert operation_called is False
+        assert sum(concurrency._ADMISSION_TIMEOUTS.values()) - timeouts_before == 1, "the slot limit counts it once"
+
+    @pytest.mark.parametrize(
+        ("config", "expected"),
+        [
+            pytest.param({}, None, id="no limit reports no limit"),
+            pytest.param({"max_concurrent_requests": 4}, (4, None), id="limit without a pool timeout"),
+            pytest.param(
+                {"max_concurrent_requests": 4, "upstream_pool_timeout_seconds": 30.0},
+                (4, 30.0),
+                id="limit with a pool timeout",
+            ),
+        ],
+    )
+    def test_the_upstream_limit_reports_under_the_server_name(
+        self, config: dict, expected: tuple[int, float | None] | None
+    ) -> None:
+        server = self._setup_server(**config)
+
+        if expected is None:
+            assert not isinstance(server._semaphore, MeteredSemaphore)
+            return
+        assert (server._semaphore.limit, server._semaphore.admission_timeout_s) == expected
+        assert server._semaphore.attributes == {
+            "nemo.gym.concurrency.component": "model_server",
+            "nemo.gym.concurrency.limit_name": "upstream_requests",
+            "nemo.gym.server.name": "test_model_server",
+        }
 
     @pytest.mark.asyncio
     async def test_retry_backoff_releases_concurrency_slot(

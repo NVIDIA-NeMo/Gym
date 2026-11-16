@@ -248,6 +248,39 @@ def render_export_tail(bench_dir: Path, exports: list[tuple[str, list[str]]]) ->
     return "\n".join(lines)
 
 
+# `uv sync` errors on an extra the checkout does not define. A pin from before `ray` and `mlflow` became extras defines
+# neither, so each requested `--extra NAME` is kept only when the checkout's pyproject.toml declares NAME.
+_DECLARED_EXTRAS_FILTER = (
+    "import sys, tomllib\n"
+    'declared = set(tomllib.load(open("pyproject.toml", "rb")).get("project", {}).get("optional-dependencies", {}))\n'
+    "requested = sys.argv[2::2]\n"
+    'print(*(f"--extra {name}" for name in requested if name in declared))\n'
+    "for name in requested:\n"
+    "    if name not in declared:\n"
+    '        print(f"gym: the checkout defines no {name!r} extra, installing without it", file=sys.stderr)\n'
+)
+
+
+# A uv older than the checkout's `required-version` (a `>=X` lower bound in its pyproject.toml) is refused by `uv venv`
+# and `uv sync`, with an error that never reaches the reader's report. The requirement is only known after the
+# checkout, so a private copy of the caller's uv is checked then: one that is too old is replaced by a fresh private
+# install (the one used when no uv runs at all), and the read fails with both versions named only when that install
+# cannot meet the requirement either. Run inside the checkout, with the private uv first on PATH.
+_UV_VERSION_CHECK = (
+    "_gym_uv_old() { "
+    "_gym_uv_req=\"$(sed -n 's/^required-version *= *\"\\(>=\\)\\{0,1\\} *\\([0-9][0-9.]*\\).*/\\2/p' "
+    'pyproject.toml 2>/dev/null | head -n 1 || true)"; '
+    "_gym_uv_have=\"$(uv --version | awk '{print $2}')\"; "
+    '[ -n "$_gym_uv_req" ] && '
+    '[ "$(printf \'%s\\n%s\\n\' "$_gym_uv_req" "$_gym_uv_have" | sort -V | head -n 1)" != "$_gym_uv_req" ]; }; '
+    "if _gym_uv_old; then "
+    'curl -LsSf https://astral.sh/uv/install.sh | env UV_UNMANAGED_INSTALL="$GYM_SRC/uv-bin" sh || true; hash -r; '
+    "if _gym_uv_old; then "
+    'echo "gym: uv $_gym_uv_have is older than the $_gym_uv_req this Gym checkout requires '
+    "(required-version in pyproject.toml); update it with 'uv self update'\" >&2; exit 1; fi; fi"
+)
+
+
 def render_driver_entrypoint(
     repo: str | None,
     ref: str | None,
@@ -272,8 +305,8 @@ def render_driver_entrypoint(
     `extras` are optional-dependency groups installed with the checkout; the server
     venvs Gym builds copy their telemetry packages from this process, so the driver
     is where `telemetry` has to be installed for any server to have it. `ray` is
-    always added: `gym` needs Ray to start a server that declares `ray_enabled = True`,
-    and an extra the checkout does not define only makes uv warn.
+    always added: `gym` needs Ray to start a server that declares `ray_enabled = True`.
+    An extra the checkout does not define is dropped with a notice, since uv errors on it.
 
     `record_install_failure` writes `driver_install_failed` to the file named by `$GYM_DRIVER_FAILURE_FILE` when
     the install exits with a failure status (1 to 128; a signal is not an install failure), for the guard of the
@@ -298,7 +331,7 @@ def render_driver_entrypoint(
     record_failure = [f"trap {shlex.quote(on_exit)} EXIT"] if record_install_failure else []
     preamble: list[str] = []
     # Double quotes: the whole preamble ends up inside a single-quoted `bash -c` block.
-    install_target = f'".[{",".join((*extras, "ray"))}]"'
+    sync_extras = "".join(f" --extra {shlex.quote(extra)}" for extra in dict.fromkeys((*extras, "ray")))
 
     if repo and ref:
         # Clone to /tmp rather than the job directory: a checkout plus its .venv
@@ -352,9 +385,12 @@ def render_driver_entrypoint(
             # venv` instead reads requires-python from pyproject.toml and auto-downloads a
             # satisfying interpreter if the container's own Python doesn't qualify. Also never
             # EXTERNALLY-MANAGED (PEP 668), so no --break-system-packages override needed either.
+            *([_UV_VERSION_CHECK] if private_uv else []),
             "uv venv --seed .venv",
             "source .venv/bin/activate",
-            f"uv pip install -e {install_target}",
+            f'_gym_declared_extras() {{ python -c {shlex.quote(_DECLARED_EXTRAS_FILTER)} "$@"; }}',
+            f'_gym_sync_extras="$(_gym_declared_extras{sync_extras})"',
+            'UV_PROJECT_ENVIRONMENT="$VIRTUAL_ENV" uv sync --locked $_gym_sync_extras',
             *(["trap - EXIT"] if record_failure else []),
         ]
 

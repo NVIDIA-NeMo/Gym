@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[project]
+name = "gym-osworld-opt-in-runtime"
+version = "0.0.0"
+requires-python = ">=3.13.14,<3.14"
+dependencies = [
+    "numpy>=2.1,<2.5",
+    "cryptography~=46.0",
+    "opencv-python-headless~=4.10.0.84",
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+]
+
+[tool.uv]
+package = false
+# This layer shares the agent venv; retain the agent's existing Pillow contract.
+constraint-dependencies = ["pillow==12.3.0"]
+
+[tool.uv.workspace]
+members = []
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }

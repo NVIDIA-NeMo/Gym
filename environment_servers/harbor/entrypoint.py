@@ -210,7 +210,7 @@ class HarborEntrypointMixin:
         self,
         sandbox: AsyncSandbox,
         task: HarborTask,
-        user: str | None,
+        user: str | int | None,
         *,
         prepared_workdir: str | None = None,
         compose_managed: bool = False,
@@ -222,7 +222,7 @@ class HarborEntrypointMixin:
         Gym's providers start their own keepalive instead, so the same process is started here as a
         long-lived exec through a ``run.sh`` that records a started marker, the exit status and the
         output under :data:`ENTRYPOINT_DIR`, the way the Compose adapter starts a service. ``user`` is
-        the image's user by name (:meth:`_image_user_name`); ``compose_managed`` says the adapter started this
+        the image's user by name or numeric ID (:meth:`_image_user_name`); ``compose_managed`` says the adapter started this
         sandbox's service, entrypoint included, so nothing is started here (see :func:`entrypoint_to_run`).
         For a Dockerfile the loader resolved (not a
         built image, which holds its ``WorkingDir``) the entrypoint's working directory is created as
@@ -440,7 +440,7 @@ class HarborEntrypointMixin:
         task: HarborTask,
         entrypoint: EntrypointLaunch | None = None,
         *,
-        user: str | None = None,
+        user: str | int | None = None,
         workdir: str | None = None,
         task_check: bool = True,
         compose_managed: bool = False,
@@ -449,7 +449,8 @@ class HarborEntrypointMixin:
 
         That is Harbor's order: ``up --wait`` gates on the image HEALTHCHECK, then ``run_healthcheck()``
         runs the task's, before the agent user is set. Both run as the container's user (``user``, the
-        image's ``User`` by name; ``None`` is root): the daemon runs the image check in the image
+        image's ``User`` or the explicit Compose main user, by name or integer uid; ``None`` is root):
+        the daemon runs the image check in the image
         ``WorkingDir``, Harbor's exec runs the task check in the task workdir (``[environment].workdir`` is
         the ``cwd`` of its execs, harbor 0.22.0 ``environments/docker/docker.py`` 1104, never the
         container's directory). ``workdir`` is that directory, the one the seed prepared

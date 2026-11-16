@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The SWE adapter: it seeds an Environment Server session with the row's Scale-SWE sandbox for opencode_agent,
+"""The SWE adapter: it seeds an episode session with the row's Scale-SWE sandbox for opencode_agent,
 and grades the actor's visible trajectory against the system prompt the row's contract records."""
 
 import json

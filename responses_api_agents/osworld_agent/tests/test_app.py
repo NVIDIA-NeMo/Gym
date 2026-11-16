@@ -1428,7 +1428,8 @@ def test_empty_response_reports_runtime_admission() -> None:
     assert response.verifier_metadata["osworld_termination_reason"] == "rollout_error"
 
 
-def test_exact_trace_keeps_parser_retries_as_distinct_model_calls() -> None:
+@pytest.mark.parametrize("served_call_output", [False, True])
+def test_exact_trace_keeps_parser_retries_as_distinct_model_calls(served_call_output: bool) -> None:
     request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
     calls = []
     for attempt, token_id, accepted in ((1, 20, False), (2, 21, True)):
@@ -1461,7 +1462,7 @@ def test_exact_trace_keeps_parser_retries_as_distinct_model_calls() -> None:
         ],
     }
 
-    response = _build_response(request, result, "test-policy", 1.0, 0.9)
+    response = _build_response(request, result, "test-policy", 1.0, 0.9, served_call_output=served_call_output)
 
     assert len(response.response.output) == 2
     assert [item["accepted"] for item in response.response.completion_evidence or []] == [
@@ -2304,7 +2305,7 @@ def test_child_result_sums_usage_of_every_policy_response_gym_received() -> None
     )
     expected = {
         "input_tokens": 3700,
-        "input_tokens_details": {"cached_tokens": 1536},
+        "input_tokens_details": {"cached_tokens": 1536, "cache_write_tokens": None},
         "output_tokens": 118,
         "output_tokens_details": {"reasoning_tokens": 30},
         "total_tokens": 3818,
@@ -2568,11 +2569,12 @@ def test_a_crashed_worker_is_a_typed_infrastructure_failure_row() -> None:
 @pytest.mark.parametrize(
     "reason", ["proxy_configuration_error", "proxy_required_but_disabled", "task_configuration_error"]
 )
-def test_a_configuration_refusal_stays_a_masked_row_without_a_failure_kind(reason: str) -> None:
+def test_a_configuration_refusal_is_a_masked_row_typed_without_a_retry(reason: str) -> None:
     request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
     row = _empty_response(request, error=f"{reason}: see the task", termination_reason=reason).model_dump(mode="json")
     assert (row["mask_sample"], row["runtime_admission_reason"]) == (True, reason)
-    assert row.get("failure_kind") is None
+    assert row["failure_kind"] == "osworld_agent:configuration_error"
+    assert reason in row["failure_reason"]
     assert not {"_ng_failure_class", "_ng_failure_events", "_ng_failure_id"} & set(row)
 
 

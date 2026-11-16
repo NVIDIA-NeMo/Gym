@@ -28,7 +28,7 @@ job takes ``--judge-qos``, else the saved CPU pool's own QOS, else the QOS the r
 for that partition, else the partition's default.
 
 A run that serves its judge as a service of its own, on a node pool of its own beside the policy's (a vLLM judge its
-judge server reaches at ``${GYM_POOL_<POOL>_NODES}``), gets the served-judge profile: those services on their saved
+judge server reaches through ``GYM_POOL_*_NODES``), gets the served-judge profile: those services on their saved
 node pools, with their saved shape and partition, and no policy service, policy model or policy pool. It is a GPU job
 like the run, so it keeps the run's job-level QOS; ``--judge-partition`` and ``--judge-qos`` name a CPU placement and
 are not used (a launcher that passes them on every recovery would put the GPU pool on a CPU partition or QOS). A
@@ -39,6 +39,7 @@ Either way the walltime is the run's segment walltime bounded by the partition's
 known.
 """
 
+import re
 import shlex
 from dataclasses import dataclass
 from typing import Any
@@ -75,6 +76,8 @@ _ALLOCATION_SHAPE_DIRECTIVES = frozenset(
 # Job-level directives of the original allocation's size, which the kept node pools state for themselves; its QOS and
 # per-node GRES stay with the served-judge job, a GPU job on nodes of the same allocation's shape.
 _SERVED_SHAPE_DIRECTIVES = _ALLOCATION_SHAPE_DIRECTIVES - {"gres", "qos"}
+# What choose_judge_partition's refusal says when no CPU partition is named anywhere; the dispatch classifies on it.
+NO_CPU_PARTITION = "no CPU partition is known"
 _NO_PROFILE = "this submission has no existing CPU-only judge execution profile and none can be derived"
 _NO_SERVED_PROFILE = "this submission has no served-judge execution profile"
 
@@ -82,6 +85,11 @@ _NO_SERVED_PROFILE = "this submission has no served-judge execution profile"
 class JudgeProfileUnsupported(ValueError):
     """No judge execution profile can be derived from the submission: the message says why and what would allow
     one."""
+
+
+# The QOS source of a job that names no QOS. A named constant, so the reference docs show its name rather than a
+# quoted default the page generator cannot embed.
+PARTITION_DEFAULT_QOS = "the partition's default"
 
 
 @dataclass(frozen=True)
@@ -98,7 +106,7 @@ class JudgeExecutionProfile:
     compute: SlurmComputeConfig
     # The QOS the job asks for and where it came from; None takes the partition's default.
     qos: str | None = None
-    qos_source: str = "the partition's default"
+    qos_source: str = PARTITION_DEFAULT_QOS
     # CPU_PROFILE or SERVED_JUDGE_PROFILE, the node pools the job runs on and the saved services it starts.
     kind: str = CPU_PROFILE
     pools: tuple[str, ...] = (JUDGE_POOL_NAME,)
@@ -183,10 +191,52 @@ def choose_judge_partition(
     if reader:
         return reader, "the launcher's reader placement (NEMO_GYM_REMOTE_READER_SRUN)"
     raise JudgeProfileUnsupported(
-        f"{_NO_PROFILE}: no CPU partition is known (the saved compute declares no node pool with gpus_per_node 0, "
+        f"{_NO_PROFILE}: {NO_CPU_PARTITION} (the saved compute declares no node pool with gpus_per_node 0, "
         "the launcher's NEMO_GYM_REMOTE_READER_SRUN names no partition, and no --judge-partition was given); policy "
         "services are not restarted"
     )
+
+
+# The scheduler's refusals of a job's placement: its partition, QOS, account or GPU request. Anything else the
+# scheduler answers (a controller it cannot reach, a timeout) is not a placement problem.
+_PLACEMENT_REFUSAL = re.compile(r"partition|\bqos|gres|account|node configuration", re.IGNORECASE)
+
+
+# What a scheduler that did not answer says (an unreachable controller, a timeout, a failed query); waiting helps.
+_SCHEDULER_UNAVAILABLE = re.compile(
+    r"unable to contact|connection (?:refused|reset|timed out)|timed out|socket|slurm_load|"
+    r"temporarily unavailable|scheduler unknown|unable to send|network is unreachable|no route to host",
+    re.IGNORECASE,
+)
+
+
+# The dispatch script's own words when the scheduler refused the judge-only job's allocation (an sbatch that exited
+# nonzero); the text after it is the scheduler's.
+JUDGE_ALLOCATION_REFUSED = "judge allocation not admitted"
+# The dispatch script's own guards: a concurrent recovery holds the run's lock, or a job of the run (or a live
+# allocation of its chain) is still on the scheduler. Neither is a refusal of the judge-only job; waiting is the answer.
+_DISPATCH_CONCURRENCY = re.compile(
+    r"another recovery holds the lock|a job of this run is still pending or running|"
+    r"an original allocation is still live",
+    re.IGNORECASE,
+)
+
+
+def placement_refusal(diagnostic: str, served: bool) -> str:
+    """The ``RecoveryDecision.judge_refusal`` of a judge-only job the dispatch did not queue.
+
+    Only the scheduler's own refusal of the allocation (``JUDGE_ALLOCATION_REFUSED``) is a placement problem
+    (``cpu_placement``, or ``served_placement`` for a run that serves its judge on its own saved node pool) or a
+    definite refusal of another kind (``refused``); a scheduler that did not answer is ``other``. A dispatch guard that
+    found a concurrent recovery or job of the run is ``concurrent``, and anything else (an acknowledgement that is
+    missing or unknown, a failed staging or journaling step) stays ``other``: whether the job was queued is not known.
+    """
+    _, found, refusal = diagnostic.partition(JUDGE_ALLOCATION_REFUSED)
+    if not found:
+        return "concurrent" if _DISPATCH_CONCURRENCY.search(diagnostic) else "other"
+    if not _PLACEMENT_REFUSAL.search(refusal):
+        return "other" if _SCHEDULER_UNAVAILABLE.search(refusal) else "refused"
+    return "served_placement" if served else "cpu_placement"
 
 
 def _slurm_duration(seconds: int) -> str:
@@ -251,7 +301,7 @@ def judge_execution_profile(
         extra_args=dict(saved_pool.extra_args) if saved_pool is not None else {},
     )
     extra_args = {k: v for k, v in compute.extra_args.items() if k not in _ALLOCATION_SHAPE_DIRECTIVES}
-    qos_source = "the partition's default"
+    qos_source = PARTITION_DEFAULT_QOS
     if qos:
         qos_source = "--judge-qos"
         extra_args["qos"] = qos
@@ -335,7 +385,7 @@ def served_judge_profile(
     elif pool_qos:
         job_qos, qos_source = pool_qos, "the saved node pool's QOS"
     else:
-        job_qos, qos_source = None, "the partition's default"
+        job_qos, qos_source = None, PARTITION_DEFAULT_QOS
     judge_compute = compute.model_copy(update={"walltime": walltime, "node_pools": pools, "extra_args": extra_args})
     return JudgeExecutionProfile(
         partition=",".join(sorted({pool.partition for pool in pools.values()})),

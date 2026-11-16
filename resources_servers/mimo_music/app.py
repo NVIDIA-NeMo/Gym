@@ -23,6 +23,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.mimo_music.scorer.pipeline import extract_abc
 from resources_servers.mimo_music.setup_abc2midi import ensure_abc2midi
 
@@ -151,3 +152,6 @@ class MimoMusicResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     MimoMusicResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = MimoMusicResourcesServer.run_webserver()  # noqa: F401

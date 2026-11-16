@@ -361,8 +361,8 @@ async def test_resources_state_is_restored_with_the_episode(
         assert replacement.json()["reward"] == 1.0
     else:
         # The continued episode increments a fresh counter to 2 and verifies normally, with no reward.
-        # With several workers, nothing claims the old cookie's session,
-        # so the worker that serves its first request claims it, and the rest follow, as with one worker.
+        # With several workers, nobody owns the old cookie's session,
+        # so the worker that serves its first request becomes its owner, and the rest follow, as with one worker.
         assert replacement.status_code == 200, replacement.text
         assert replacement.json()["reward"] == 0.0
 
@@ -478,8 +478,8 @@ async def test_concurrent_sessions_across_workers_all_continue_after_a_crash(
         deployment.backend("/_ctl/step", {"calls": count})
         await wait_for_calls(deployment, 2 * count, timeout=60)
         replies = await checkpoint_replies(deployment, tmp_path / "ckpt", list(rows))
-        # Each worker holds the sessions it created, as its claims say.
-        holders = deployment.claims(session_kind)
+        # Each worker holds the sessions it created, as its owner files say.
+        holders = deployment.owner_files(session_kind)
         await crash_and_restore(deployment, tmp_path / "ckpt", list(rows), server_workers=workers_after)
         for run in runs:
             run.cancel()
@@ -491,7 +491,7 @@ async def test_concurrent_sessions_across_workers_all_continue_after_a_crash(
 
     rewards = [reward_of(result.json()) for result in results]
     assert replies[episode_owner]["episode_ids"] == sorted(rows)
-    # With one worker nothing is claimed; with several, the sessions come from every worker.
+    # With one worker nothing is owned; with several, the sessions come from every worker.
     assert len(holders) == (0 if workers_before == 1 else workers_before)
     assert len(session_records(tmp_path / "ckpt", session_kind)) == count
     assert rewards == [1.0] * count
@@ -864,7 +864,7 @@ async def test_a_retired_episode_stops_everywhere_and_leaves_nothing_behind(
         await wait_for_calls(deployment, 2)
         participants = await deployment.participants()
         # A retire whose deadline has passed only refuses the attempt: its resources session is marked,
-        # and counted as retired until a retire frees it, on whichever worker holds it.
+        # and counted as retired until a retire releases it, on whichever worker holds it.
         late_retire = await GymHTTP(deployment.url("resources"), timeout=10).post(
             "/ng-control/v1/checkpoint/retire",
             json={"checkpoint_id": "mark", "deadline_ts": time.time() - 1, "episode_ids": [{"rollout_id": "gone-1"}]},

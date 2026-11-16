@@ -36,6 +36,9 @@ sidecar and retries on resume.
 
 import asyncio
 import json
+import re
+import time
+from dataclasses import dataclass
 from traceback import print_exc
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -58,16 +61,21 @@ from nemo_gym.client import (
 )
 from nemo_gym.config import SKILLS_REF_KEY_NAME, AggregateMetrics, AggregateMetricsRequest, ResourcesServerRef
 from nemo_gym.core import (
+    FailureBoundary,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
+    NgFailureEvent,
     accumulate_response_usage,
+    observe_failure,
 )
 from nemo_gym.rollouts import NG_TERMINAL_KEY
+from nemo_gym.rollouts.health.timeouts import TimeoutEvent
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 REMOTE_AGENT_FAILURE_CLASS = "remote_agent_error"
@@ -89,20 +97,63 @@ _RESERVED_RESULT_KEYS = (
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
     NG_TERMINAL_KEY,
+    "timeouts",
 )
+
+# The kinds of the deadline failures this agent observes; namespaced, so no outcome policy keys on them.
+REQUEST_DEADLINE_KIND = "remote_agent:request_deadline"
+RUN_DEADLINE_KIND = "remote_agent:run_deadline"
+# The failure stage of each step of a run, for the active operation a deadline names.
+_STEP_STAGES = {"seed_session": "seed", "agent": "agent", "verify": "verification"}
 
 
 class RemoteAgentError(RuntimeError):
     """A rollout-level failure from the remote hop; retryable on resume."""
 
 
+class RemoteAgentDeadlineError(RemoteAgentError):
+    """The remote ``/v1/responses`` request outlived ``remote_responses_timeout_secs``; retryable on resume.
+
+    Like ``RemoteAgentTerminalError``, its NAME crosses the HTTP self-post: run() reads it from the 500 body to record
+    the deadline as typed evidence.
+    """
+
+
+@dataclass(frozen=True)
+class _Deadline:
+    """A limit of this agent that fired: which limit, its configured length, how long the step had run (None when
+    that is not known), the step that was active (``seed_session``, ``agent`` or ``verify``) and the error that ended
+    it."""
+
+    limit: str
+    configured_s: float
+    elapsed_s: float | None
+    operation: str
+    cause: BaseException | None = None
+
+
 class RemoteAgentTerminalError(RemoteAgentError):
     """A failure that will not fix itself on retry (e.g. an invalid response shape).
 
     run() reaches responses() over an HTTP self-post, so this class's NAME is the wire
-    contract: the exception middleware serializes it into the 500 body and run() matches
-    the name string to set the terminal routing flag.
+    contract: the exception middleware serializes it into the 500 body and run() reads
+    the name from it to set the terminal routing flag.
     """
+
+
+def _raised_class_name(body: str) -> Optional[str]:
+    """The class name of the exception the server's exception middleware serialized into a 500 body, or None.
+
+    The body is the JSON string ``repr(e)`` (or, when observations ride along, an object whose ``detail`` is that
+    string), so the raised class is the leading ``Name(``; a name merely mentioned in a message does not count."""
+    try:
+        decoded = json.loads(body)
+    except ValueError:
+        decoded = body
+    if isinstance(decoded, dict):
+        decoded = decoded.get("detail")
+    match = re.match(r"(\w+)\(", decoded) if isinstance(decoded, str) else None
+    return match.group(1) if match else None
 
 
 def normalize_remote_url(url: str) -> str:
@@ -296,11 +347,11 @@ class RemoteAgent(SimpleResponsesAPIAgent):
                 last_connect_error = e
                 if num_try < _REMOTE_MAX_TRIES:
                     await asyncio.sleep(_REMOTE_RETRY_SLEEP_SECS)
-            except asyncio.TimeoutError:
-                raise RemoteAgentError(
+            except asyncio.TimeoutError as e:
+                raise RemoteAgentDeadlineError(
                     f"remote /v1/responses timed out after {self.config.remote_responses_timeout_secs}s "
                     "(remote_responses_timeout_secs; raise it if agent calls legitimately run longer)"
-                ) from None
+                ) from e
             except Exception as e:
                 if is_global_aiohttp_client_request_debug_enabled():
                     print_exc()
@@ -319,7 +370,9 @@ class RemoteAgent(SimpleResponsesAPIAgent):
         except Exception as e:
             if is_global_aiohttp_client_request_debug_enabled():
                 print_exc()
-            raise RemoteAgentError(f"reading the response body failed: {type(e).__name__}: {e}") from e
+            # A timeout here is the same request deadline as one before the headers arrived.
+            error_class = RemoteAgentDeadlineError if isinstance(e, asyncio.TimeoutError) else RemoteAgentError
+            raise error_class(f"reading the response body failed: {type(e).__name__}: {e}") from e
         # response.ok is `status < 400`; reject 3xx explicitly (redirects are not followed).
         if not response.ok or response.status >= 300:
             if is_global_aiohttp_client_request_debug_enabled():
@@ -355,16 +408,26 @@ class RemoteAgent(SimpleResponsesAPIAgent):
 
     async def run(self, request: Request, body: RemoteAgentRunRequest = Body()) -> RemoteAgentVerifyResponse:
         record = self._sanitized_record(body)
+        # The step the run is in, so a whole-run deadline names the operation it cut.
+        active = {"operation": "seed_session"}
         async with self.sem:
+            started = time.monotonic()
             try:
                 return await asyncio.wait_for(
-                    self._run_once(request, body, record), timeout=self.config.run_timeout_secs
+                    self._run_once(request, body, record, active), timeout=self.config.run_timeout_secs
                 )
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as e:
                 return self._failure_response(
                     record,
                     f"/run exceeded run_timeout_secs={self.config.run_timeout_secs}s "
                     "(seed + agent/tool loop + verify)",
+                    deadline=_Deadline(
+                        limit="run_timeout_secs",
+                        configured_s=self.config.run_timeout_secs,
+                        elapsed_s=time.monotonic() - started,
+                        operation=active["operation"],
+                        cause=e,
+                    ),
                 )
             except Exception as e:  # noqa: BLE001 -- never 500; one task must not abort the whole collection
                 return self._failure_response(record, f"unexpected error: {type(e).__name__}: {e}")
@@ -376,7 +439,11 @@ class RemoteAgent(SimpleResponsesAPIAgent):
         return record
 
     async def _run_once(
-        self, request: Request, body: RemoteAgentRunRequest, record: Dict[str, Any]
+        self,
+        request: Request,
+        body: RemoteAgentRunRequest,
+        record: Dict[str, Any],
+        active: Optional[Dict[str, str]] = None,
     ) -> RemoteAgentVerifyResponse:
         # body and record are two views of the same row: `record` (sanitized dict, computed
         # before run()'s try so failure rows can be built in ANY error state) feeds the Gym
@@ -405,6 +472,8 @@ class RemoteAgent(SimpleResponsesAPIAgent):
                 record, f"/seed_session on the resources server failed: {type(e).__name__}: {e}"
             )
 
+        if active is not None:
+            active["operation"] = "agent"
         try:
             loop_response = await self.server_client.post(
                 server_name=self.config.name,
@@ -418,15 +487,33 @@ class RemoteAgent(SimpleResponsesAPIAgent):
         except Exception as e:
             content = getattr(e, "response_content", b"")
             text = content.decode(errors="replace") if isinstance(content, (bytes, bytearray)) else str(content)
-            # Terminal classification crosses the HTTP self-post boundary by exception NAME:
-            # the middleware serialized the raised RemoteAgentTerminalError into the 500 body.
-            terminal = "RemoteAgentTerminalError" in text
+            # Terminal and deadline classification cross the HTTP self-post boundary by exception NAME:
+            # the middleware serialized the raised error into the 500 body.
+            raised = _raised_class_name(text)
+            terminal = raised == RemoteAgentTerminalError.__name__
             detail = text or f"{type(e).__name__}: {e}"
-            return self._failure_response(record, f"agent loop failed: {detail[:500]}", terminal=terminal)
+            deadline = (
+                _Deadline(
+                    limit="remote_responses_timeout_secs",
+                    configured_s=self.config.remote_responses_timeout_secs,
+                    # The request that expired ran inside the self-post, after any earlier turns of the loop;
+                    # its own duration does not cross back, so it is left out rather than overstated.
+                    elapsed_s=None,
+                    operation="agent",
+                    cause=e,
+                )
+                if raised == RemoteAgentDeadlineError.__name__
+                else None
+            )
+            return self._failure_response(
+                record, f"agent loop failed: {detail[:500]}", terminal=terminal, deadline=deadline
+            )
 
         self._warn_on_response_quality(response_json)
 
         # Verify on the SAME session; the verify response (reward included) is /run's result.
+        if active is not None:
+            active["operation"] = "verify"
         try:
             verify_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
@@ -460,7 +547,7 @@ class RemoteAgent(SimpleResponsesAPIAgent):
             )
 
     def _failure_response(
-        self, record: Dict[str, Any], error: str, terminal: bool = False
+        self, record: Dict[str, Any], error: str, terminal: bool = False, deadline: Optional[_Deadline] = None
     ) -> RemoteAgentVerifyResponse:
         self._num_failures += 1
         n = self._num_failures
@@ -473,6 +560,30 @@ class RemoteAgent(SimpleResponsesAPIAgent):
         }
         if terminal:
             routing[NG_TERMINAL_KEY] = True
+        if deadline is not None:
+            # A limit fired: the failure names the limit and the active operation and keeps the error that ended it,
+            # beside the typed deadline the timeout reader counts. Observed, not selected, so routing is unchanged.
+            failure = NgFailureEvent(
+                boundary=FailureBoundary.AGENT,
+                failure_kind=REQUEST_DEADLINE_KIND
+                if deadline.limit == "remote_responses_timeout_secs"
+                else RUN_DEADLINE_KIND,
+                failure_reason=error,
+                operation=f"remote_agent.{deadline.operation}",
+                stage=_STEP_STAGES.get(deadline.operation),
+            )
+            failure.__cause__ = deadline.cause
+            observe_failure(failure)
+            routing["timeouts"] = [
+                TimeoutEvent(
+                    event_id=failure.event_id,
+                    limit=deadline.limit,
+                    enforcer=self.config.name or "remote_agent",
+                    evidence="internal",
+                    configured_s=deadline.configured_s,
+                    elapsed_s=deadline.elapsed_s,
+                ).model_dump(mode="json", exclude_none=True)
+            ]
         # Dict-merge with later keys winning: `record` is sanitized of reserved keys, but merge
         # order still guarantees fresh reward/response/routing even if a caller passes a raw dump.
         return RemoteAgentVerifyResponse.model_validate(
@@ -524,3 +635,6 @@ class RemoteAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     RemoteAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = RemoteAgent.run_webserver()  # noqa: F401

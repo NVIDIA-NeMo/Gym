@@ -97,6 +97,34 @@ def test_multiple_native_session_files_preserve_record_boundaries(tmp_path: Path
     assert not bundle.gaps
 
 
+@pytest.mark.parametrize("separator", ["\u0085", " ", " "])
+def test_unicode_line_separators_inside_records_keep_the_tool_output(tmp_path: Path, separator: str) -> None:
+    output = f"Chunk ID: abc\nProcess exited with code 0\nOutput:\nfirst{separator}second"
+    records = [
+        {"type": "function_call", "call_id": "call-1", "name": "exec_command", "arguments": '{"cmd":"cat f"}'},
+        {"type": "function_call_output", "call_id": "call-1", "output": output},
+    ]
+    # Codex leaves these characters unescaped; the sandbox snapshot joins its files with "\n".
+    transcript = "\n".join(
+        json.dumps(
+            {"type": "response_item", "timestamp": f"2026-10-05T10:00:0{index}Z", "payload": payload},
+            ensure_ascii=False,
+        )
+        for index, payload in enumerate(records)
+    )
+    folder = tmp_path / "sessions"
+    folder.mkdir()
+    (folder / "episode.jsonl").write_text(transcript + "\n", encoding="utf-8")
+    for bundle in (
+        parse_codex_observations(transcript, "invocation", returncode=0, timed_out=False),
+        read_codex_observations(tmp_path, "invocation", returncode=0, timed_out=False),
+    ):
+        invocation, tool = bundle.records
+        assert invocation.conversation[1].output == output
+        assert tool.status == "completed"
+        assert not bundle.gaps
+
+
 def test_native_usage_uses_latest_cumulative_total_without_adding_details() -> None:
     records = []
     for count in (20, 41):
@@ -336,3 +364,23 @@ def test_compaction_requires_native_event_and_unique_session_helper(damage):
         event = next(r for r in repeated.records if isinstance(r, ContextCompactionObservation))
         assert not event.model_calls and repeated.gaps
         assert not repeated.records[0].model_calls
+
+
+def test_native_prompt_images_are_preserved() -> None:
+    content = [
+        {"type": "input_text", "text": "image follows"},
+        {"type": "input_image", "image_url": "data:image/png;base64,image-bytes", "detail": "high"},
+    ]
+    transcript = json.dumps(
+        {
+            "type": "response_item",
+            "timestamp": "2026-11-10T12:00:00Z",
+            "payload": {"type": "message", "role": "user", "content": content},
+        }
+    )
+    bundle = parse_codex_observations(transcript, "images", returncode=0, timed_out=False)
+    observed = bundle.records[0].conversation[0].model_dump(mode="json")["content"]
+    assert observed[0]["text"] == "image follows"
+    assert observed[1]["image_url"] == content[1]["image_url"]
+    assert observed[1]["detail"] == "high"
+    assert not bundle.gaps

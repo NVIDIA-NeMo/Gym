@@ -204,7 +204,11 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
         activation_attempted = False
 
         async def release_runtime() -> None:
-            if state.runtime and state.sandbox is None and state.judge_sandbox is None:
+            if state.runtime:
+                # The sandboxes use the bundle, so it waits for them. At shutdown the sweep runs every cleanup at
+                # once, and a stop can still be running; a stop that fails keeps the bundle for a retry.
+                await judge_cleanup.close()
+                await candidate_cleanup.close()
                 await state.runtime.release(state.session_id)
 
         async def close_sandbox(role: str) -> None:
@@ -236,7 +240,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                 failure.episode_evidence.update(
                     agent_close=agent_close,
                     agent_observations=agent_close.agent_observations if agent_close else None,
-                    trajectory=request.trajectory_for_collection(agent_close.trajectory) if agent_close else None,
+                    trajectory=agent_close.trajectory if agent_close else None,
                     cleanup_receipts=state.cleanup_receipts,
                 )
                 wire_reply = self.failure_response(request, failure)
@@ -363,10 +367,15 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                 trajectory = await collect_judge_evidence(
                     trajectory, verification, self.server_client.global_config_dict, state.directory
                 )
-            await judge_cleanup.close()
-            await candidate_cleanup.close()
-            await runtime_cleanup.close()
-            await dependency_cleanup.close()
+            try:
+                await judge_cleanup.close()
+                await candidate_cleanup.close()
+                await runtime_cleanup.close()
+                await dependency_cleanup.close()
+            except Exception as error:
+                # The verdict is final. Final cleanup retries the open owners, and their expiry bounds any leak.
+                LOGGER.exception("SWE-Together cleanup failed after verification")
+                state.cleanup_receipts["post_verification_error"] = f"{type(error).__name__}: {error}"[:2000]
             response = SWETResponse(
                 episode_id=request.episode_id,
                 task_id=request.task.task_id,
@@ -376,7 +385,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                         "ng_activations": activations,
                         "ng_steps": steps,
                         "ng_agent_close": agent_close,
-                        "ng_trajectory": request.trajectory_for_collection(trajectory),
+                        "ng_trajectory": trajectory,
                         "ng_agent_observations": agent_close.agent_observations,
                         "cleanup_receipts": state.cleanup_receipts,
                         "artifact_directory": str(state.directory),
@@ -399,7 +408,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                     "activations": activations,
                     "agent_close": agent_close,
                     "agent_observations": agent_close.agent_observations if agent_close else None,
-                    "trajectory": request.trajectory_for_collection(agent_close.trajectory) if agent_close else None,
+                    "trajectory": agent_close.trajectory if agent_close else None,
                     "cleanup_receipts": state.cleanup_receipts,
                     "artifact_directory": str(state.directory),
                     "dependency_error": dependency,
@@ -416,7 +425,12 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
     def _activation_path(self, request: SWETRequest) -> str:
         block = self.server_client.global_config_dict.get(TOKEN_CAPTURE_BLOCK) or {}
         config = get_first_server_config_dict(self.server_client.global_config_dict, self.config.agent_server.name)
-        capture = bool(block.get("enabled")) and (block.get("all_agents") or config.get("token_id_capture"))
+        # A request whose rollout skips capture (a validation rollout) activates the agent without the tag.
+        capture = (
+            not request.skip_token_capture
+            and bool(block.get("enabled"))
+            and (block.get("all_agents") or config.get("token_id_capture"))
+        )
         segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if capture else ""
         return f"/ng-rollout/{request.episode_id.capture_key}{segment}/v1/responses"
 
@@ -460,8 +474,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                     env=proxy_env,
                     files=proxy_files,
                     provider_options=options,
-                    metadata=state.runtime.metadata()
-                    | dict(sandbox_config.get("metadata", {}))
+                    metadata=state.runtime.metadata(dict(sandbox_config.get("metadata", {})))
                     | {
                         "benchmark": "swe-together",
                         "task_id": state.task.task_id,
