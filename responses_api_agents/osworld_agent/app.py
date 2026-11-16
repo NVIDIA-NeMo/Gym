@@ -42,7 +42,7 @@ from nemo_gym.agents import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_first_server_config_dict
-from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME
+from nemo_gym.config.global_config import NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME
 from nemo_gym.core import (
     MODEL_CONTEXT_LIMIT,
     MODEL_POLICY_RESPONSE_TIMEOUT,
@@ -116,10 +116,6 @@ _MODEL_LOG_CONTEXT_HEADERS = {
     field: f"x-nemo-gym-log-{field.replace('_', '-')}" for field in _OSWORLD_LOG_CONTEXT_FIELDS
 }
 _ROLLOUT_CHILD_ENV_VARS = (
-    # The OpenSandbox aiohttp transport consults Gym's injected global config.
-    # Without these, a Ray child falls back to Hydra and tries to parse Ray's
-    # default_worker.py flags as Gym CLI overrides.
-    NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     "NEMO_GYM_RESPONSE_LOGGING",
     "OSWORLD_MODEL_IO_LOG",
@@ -1616,8 +1612,8 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
             future = None
             try:
                 # Child Ray tasks do not reliably inherit the NemoGym actor's
-                # runtime environment. Forward both Gym's injected service
-                # config and diagnostic paths explicitly.
+                # runtime environment. Forward the server instance name and
+                # diagnostic paths explicitly.
                 rollout_env = {name: os.environ[name] for name in _ROLLOUT_CHILD_ENV_VARS if os.environ.get(name)}
                 runtime_env: Dict[str, Any] = {"py_executable": sys.executable}
                 if rollout_env:

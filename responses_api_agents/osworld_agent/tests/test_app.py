@@ -1919,13 +1919,13 @@ class TestApp:
 
         runtime_env = mock_remote.options.call_args.kwargs["runtime_env"]
         expected_env = {
-            "NEMO_GYM_CONFIG_DICT": "global_aiohttp_connector_limit: 64",
             "NEMO_GYM_CONFIG_PATH": "osworld_nano_omni_agent",
             "OSWORLD_MODEL_IO_LOG": "/workspace/output/r6f/osworld-model-io.jsonl",
             "OSWORLD_TASK_ARTIFACT_ROOT": "/workspace/output/r6f/osworld-tasks",
             "OSWORLD_VM_EXEC_LOG": "/workspace/output/r6f/osworld-vm-exec.jsonl",
         }
         assert {name: runtime_env["env_vars"][name] for name in expected_env} == expected_env
+        assert "NEMO_GYM_CONFIG_DICT" not in runtime_env["env_vars"]
 
     @patch("responses_api_agents.osworld_agent.app.get_first_server_config_dict")
     @patch("responses_api_agents.osworld_agent.app._run_osworld_task_remote")
