@@ -30,6 +30,7 @@ from nemo_gym.client import request
 EXA_SEARCH_URL = "https://api.exa.ai/search"
 MAX_LENGTH = 20_000
 TIMEOUT = 60.0
+MAX_FETCH_BYTES = 10 * 1024 * 1024
 NUM_RESULTS = 5
 SNIPPET_CHARS = 2000
 KEY_ROTATION_RETRY_STATUSES = {401, 402, 403, 429}
@@ -154,7 +155,13 @@ class WebTools:
             )
             async with resp:
                 resp.raise_for_status()
-                body = html_to_text(await resp.text())
+                # Bounded and leniently decoded: a huge page or a non-UTF-8 body must not end the tool call.
+                raw = await resp.content.read(MAX_FETCH_BYTES)
+                try:
+                    text = raw.decode(resp.charset or "utf-8", errors="replace")
+                except LookupError:  # an unknown charset label
+                    text = raw.decode("utf-8", errors="replace")
+                body = html_to_text(text)
         except (ClientError, asyncio.TimeoutError) as exc:
             return f"<web_fetch><url>{escape(url)}</url><error>{escape(str(exc))}</error></web_fetch>"
         return f"<web_fetch><url>{escape(url)}</url><body>{truncate_msg(body)}</body></web_fetch>"

@@ -440,3 +440,185 @@ async def test_unavailable_office_runtime_masks_office_submission(server, tmp_pa
     assert result.failure_reason == "artifact_processing_failed"
     assert json.loads((state.task / "judge-failure.json").read_text())["kind"] == "artifact_processing"
     assert (state.task / "artifacts/report.docx").read_bytes() == submission.read_bytes()
+
+
+async def test_verify_of_a_lost_session_is_masked_not_refused(server, monkeypatch):
+    run_judge = AsyncMock()
+    monkeypatch.setattr(GDPValResourcesServer, "_judge_saved_artifacts", run_judge)
+    result = await server.verify(request(), body(responses=[{"id": "segment"}]))
+    assert result.mask_sample and not result.reward_valid and not result.evaluation_completed
+    assert result.failure_kind == "session_lost" and result.reward == 0.0 and result.judge_skipped
+    assert result.responses == [{"id": "segment"}]
+    run_judge.assert_not_awaited()
+
+
+async def test_verify_for_another_task_is_still_a_conflict(server, tmp_path):
+    live_session(server, tmp_path).task_id = "other"
+    with pytest.raises(HTTPException) as rejected:
+        await server.verify(request(), body())
+    assert rejected.value.status_code == 409
+
+
+async def test_interrupted_verify_is_masked_on_retry(server, tmp_path, monkeypatch):
+    state = live_session(server, tmp_path)
+    started = asyncio.Event()
+
+    async def hang(self, state):
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(GDPValResourcesServer, "_download_outputs", hang)
+    first = asyncio.create_task(server.verify(request(), body()))
+    await started.wait()
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    retried = await server.verify(request(), body())
+    assert retried.mask_sample and retried.failure_kind == "session_lost"
+    state.sandbox.stop.assert_awaited_once()
+
+
+async def test_seed_after_cleanup_is_refused(server, monkeypatch):
+    sandbox = MagicMock(spec=AsyncSandbox)
+    sandbox.serialize.return_value = {"sandbox_id": "box", "workdir": "/workspace"}
+    monkeypatch.setattr(GDPValResourcesServer, "_new_sandbox", lambda _: sandbox)
+    run = BaseRunRequest(responses_create_params={"input": "", "metadata": {"task_id": "sample"}})
+    seeded = await server.seed_session(request(), run)
+    assert seeded.sandbox_descriptor == {"sandbox_id": "box", "workdir": "/workspace"}
+    sandbox.serialize.assert_awaited_once_with(scope="operate")
+    await server.cleanup_session(request())
+    with pytest.raises(HTTPException) as rejected:
+        await server.seed_session(request(), run)
+    assert rejected.value.status_code == 409
+    assert not server._sessions
+    sandbox.start_with_setup.assert_awaited_once()
+
+
+async def test_seed_waiting_on_cleanup_does_not_return_a_stopped_sandbox(server, tmp_path):
+    state = live_session(server, tmp_path)
+    state.verify_started = True
+    release = asyncio.Event()
+
+    async def slow_stop():
+        await release.wait()
+
+    state.sandbox.stop.side_effect = slow_stop
+    cleanup = asyncio.create_task(server.cleanup_session(request()))
+    await asyncio.sleep(0)
+    run = BaseRunRequest(responses_create_params={"input": "", "metadata": {"task_id": "sample"}})
+    seed = asyncio.create_task(server.seed_session(request(), run))
+    await asyncio.sleep(0)
+    release.set()
+    await cleanup
+    with pytest.raises(HTTPException) as rejected:
+        await seed
+    assert rejected.value.status_code == 409
+    state.sandbox.serialize.assert_not_awaited()
+
+
+async def test_unexpected_judge_error_is_masked(server, tmp_path, monkeypatch):
+    state = live_session(server, tmp_path)
+    (state.task / "agent/deliverables/report.txt").write_text("Hello")
+    monkeypatch.setattr(GDPValResourcesServer, "_download_outputs", AsyncMock())
+    monkeypatch.setattr(
+        GDPValResourcesServer, "_judge_saved_artifacts", AsyncMock(side_effect=OSError("too many open files"))
+    )
+    monkeypatch.setattr("resources_servers.gdpval_disaggregated.app.get_server_url", lambda _: "http://judge")
+    result = await server.verify(request(), body())
+    assert result.mask_sample and result.failure_reason == "judge_unavailable"
+    assert result.judge_skipped is False
+
+
+async def test_outputs_unavailable_reports_the_judge_as_skipped(server, tmp_path, monkeypatch):
+    live_session(server, tmp_path)
+    monkeypatch.setattr(GDPValResourcesServer, "_download_outputs", AsyncMock(side_effect=RuntimeError("gone")))
+    result = await server.verify(request(), body())
+    assert result.failure_reason == "outputs_unavailable" and result.judge_skipped is True
+
+
+async def test_judge_deadline_starts_after_a_judge_slot_is_free(server, tmp_path, monkeypatch):
+    server.config.judge_timeout = 1
+    server._judge_sem = asyncio.Semaphore(1)
+    state = live_session(server, tmp_path)
+    monkeypatch.setattr(GDPValResourcesServer, "_run_judge", AsyncMock())
+    await server._judge_sem.acquire()
+    queued = asyncio.create_task(server._judge_saved_artifacts(state, tmp_path / "judge-config.json", {}))
+    await asyncio.sleep(1.5)  # longer than judge_timeout, spent waiting for the slot
+    server._judge_sem.release()
+    await queued
+    GDPValResourcesServer._run_judge.assert_awaited_once()
+
+
+async def test_packaging_stops_before_transfer_when_deliverables_exceed_the_limit(server, tmp_path, monkeypatch):
+    state = live_session(server, tmp_path)
+    monkeypatch.setattr(resources_app, "MAX_OUTPUT_FILES", 2)
+    sandbox_root = tmp_path / "sandbox"
+    (sandbox_root / "workspace/deliverables").mkdir(parents=True)
+    (sandbox_root / "trace").mkdir()
+    for name in ("a.txt", "b.txt", "c.txt"):
+        (sandbox_root / "workspace/deliverables" / name).write_text(name)
+
+    async def execute_packaging(command, **kwargs):
+        script = shlex.split(command)[2]
+        script = script.replace("/tmp/gdpval-output.zip", str(sandbox_root / "output.zip"))
+        script = script.replace("/workspace/deliverables", str(sandbox_root / "workspace/deliverables"))
+        script = script.replace("/trace", str(sandbox_root / "trace"))
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", script, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        return SandboxExecResult(
+            return_code=process.returncode,
+            error_type=None,
+            stdout=stdout.decode(errors="replace"),
+            stderr=stderr.decode(errors="replace"),
+        )
+
+    state.sandbox.exec.side_effect = execute_packaging
+    run_judge = AsyncMock()
+    monkeypatch.setattr(GDPValResourcesServer, "_judge_saved_artifacts", run_judge)
+    result = await server.verify(request(), body())
+    assert result.mask_sample and result.failure_reason == "outputs_unavailable"
+    assert "exceed the output extraction limit" in (state.task / "outputs-unavailable.txt").read_text()
+    state.sandbox.download.assert_not_awaited()
+    run_judge.assert_not_awaited()
+
+
+async def test_packaging_skips_trace_files_over_the_limit(server, tmp_path, monkeypatch):
+    state = live_session(server, tmp_path)
+    monkeypatch.setattr(resources_app, "MAX_OUTPUT_FILES", 2)
+    sandbox_root = tmp_path / "sandbox"
+    (sandbox_root / "workspace/deliverables").mkdir(parents=True)
+    (sandbox_root / "trace").mkdir()
+    (sandbox_root / "workspace/deliverables/report.txt").write_text("Complete submission")
+    for name in ("one.json", "two.json"):
+        (sandbox_root / "trace" / name).write_text("{}")
+    archive = sandbox_root / "output.zip"
+
+    async def execute_packaging(command, **kwargs):
+        script = shlex.split(command)[2]
+        script = script.replace("/tmp/gdpval-output.zip", str(archive))
+        script = script.replace("/workspace/deliverables", str(sandbox_root / "workspace/deliverables"))
+        script = script.replace("/trace", str(sandbox_root / "trace"))
+        # Archive names relative to the stand-in sandbox root, as the real script names them relative to "/".
+        script = script.replace("p.relative_to('/')", f"p.relative_to({str(sandbox_root)!r})")
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", script, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        report = json.loads(stdout)
+        for entry in report["skipped"]:
+            entry["path"] = entry["path"].removeprefix(str(sandbox_root))
+        return SandboxExecResult(
+            return_code=process.returncode, error_type=None, stdout=json.dumps(report), stderr=stderr.decode()
+        )
+
+    async def download(remote, local):
+        shutil.copyfile(archive, local)
+
+    state.sandbox.exec.side_effect = execute_packaging
+    state.sandbox.download.side_effect = download
+    await server._download_outputs(state)
+    assert (state.task / "agent/deliverables/report.txt").read_text() == "Complete submission"
+    skipped = json.loads((state.task / "packaging-skipped.json").read_text())
+    assert [entry["reason"] for entry in skipped] == ["over the output extraction limit"]

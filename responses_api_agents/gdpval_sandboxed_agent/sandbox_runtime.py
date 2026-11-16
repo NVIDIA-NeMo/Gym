@@ -62,6 +62,10 @@ def _output(result: SandboxExecResult) -> str:
     return "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
 
 
+class RuntimeInstallError(RuntimeError):
+    """The harness runtime could not be installed in the sandbox after every attempt."""
+
+
 async def install_runtime(
     sandbox: AsyncSandbox,
     *,
@@ -107,7 +111,7 @@ async def install_runtime(
         diag = _output(probe)
     except Exception as exc:  # diagnostics must not mask the real error
         diag = f"(diagnostics failed: {exc!r})"
-    raise RuntimeError(
+    raise RuntimeInstallError(
         f"OpenHands runtime installation failed after {attempts} attempts (exit {last.return_code}): "
         f"{_output(last)[-1500:]} | diag: {diag[:800]}"
     )

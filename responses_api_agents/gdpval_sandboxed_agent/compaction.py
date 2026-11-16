@@ -186,6 +186,13 @@ def export_segment_responses(calls: list[dict[str, Any]], *, model: str, session
         for key in ("generation_topk_ids", "generation_topk_logprobs")
     ):
         raise ValueError("Top-k score-centering metadata is not supported by this GDPVal port")
+    # The echo is checked over the whole rollout, not per segment: a fully echoed segment beside an unechoed one,
+    # or replies that each carry only some of the fields, would otherwise export as silently text-only segments.
+    token_fields = TOKEN_KEYS + OPTIONAL_TOKEN_KEYS
+    if any(call["reply"].get(key) is not None for call in calls for key in token_fields) and not all(
+        call["reply"].get(key) is not None for call in calls for key in TOKEN_KEYS
+    ):
+        raise ValueError("policy token echo is incomplete or inconsistent across the rollout's calls")
     responses = []
     for segment in segments(calls):
         messages, prefix = segment_messages(segment)

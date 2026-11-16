@@ -10,9 +10,21 @@ from aiohttp import ClientError
 from responses_api_agents.gdpval_sandboxed_agent import web_tools_mcp as wt
 
 
+class Content:
+    def __init__(self, raw: bytes):
+        self.raw = raw
+        self.requested = None
+
+    async def read(self, n=-1):
+        self.requested = n
+        return self.raw if n < 0 else self.raw[:n]
+
+
 class Response:
-    def __init__(self, status=200, *, data=None, text=""):
+    def __init__(self, status=200, *, data=None, text="", raw=None, charset=None):
         self.status, self.data, self.body = status, data, text
+        self.content = Content(raw if raw is not None else text.encode())
+        self.charset = charset
         self.closed = False
 
     async def __aenter__(self):
@@ -68,6 +80,15 @@ async def test_fetch_extracts_text_and_reports_http_errors(monkeypatch):
     assert ok.startswith("<web_fetch><url>https://good/page</url><body>") and "Hello" in ok and "x()" not in ok
     assert "404" in await tools.fetch("https://bad/page")
     assert good.closed and bad.closed
+
+
+async def test_fetch_is_bounded_and_decodes_invalid_bytes(monkeypatch):
+    page = Response(raw=b"<p>caf\xe9 ok</p>" + b"x" * 100, charset="no-such-charset")
+    monkeypatch.setattr(wt, "request", AsyncMock(return_value=page))
+    monkeypatch.setattr(wt, "MAX_FETCH_BYTES", 40)
+    out = await wt.WebTools(["k"]).fetch("https://latin1/page")
+    assert "<body>" in out and "caf\ufffd ok" in out
+    assert page.content.requested == 40
 
 
 @pytest.mark.parametrize("response", [Response(data=ValueError("bad json")), Response(data=None)])

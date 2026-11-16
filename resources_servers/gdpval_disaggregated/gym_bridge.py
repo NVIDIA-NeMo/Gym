@@ -6,7 +6,10 @@ import argparse
 import asyncio
 import json
 import math
+import os
 import re
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, Literal
 
@@ -41,14 +44,33 @@ class JudgeConfig(BaseModel):
     empty_submission_zero_reward: bool = False
 
 
+def _finite_number(value: object) -> bool:
+    return isinstance(value, (float, int)) and not isinstance(value, bool) and math.isfinite(value)
+
+
 def valid_reward(reward: object, judgement: object) -> bool:
-    """Accept a completed structured-rubric trial, including a genuine zero."""
+    """Accept a completed structured-rubric trial, including a genuine zero.
+
+    Each trial's score must lie within its positive maximum. The shared scorer checks the judge's maximum only when
+    the rubric carries per-criterion points, and clips the normalized score, so a judgement such as ``0 out of 0``
+    or ``5 out of 2`` would otherwise pass as a measured reward.
+    """
+    if not isinstance(judgement, dict):
+        return False
+    scores = judgement.get("scores")
+    maxima = judgement.get("max_possible_scores")
+    if not isinstance(scores, list) or not isinstance(maxima, list) or len(scores) != len(maxima):
+        return False
+    if not all(
+        _finite_number(score) and _finite_number(top) and top > 0 and 0 <= score <= top
+        for score, top in zip(scores, maxima)
+    ):
+        return False
     return (
-        isinstance(judgement, dict)
-        and not judgement.get(SCORING_ERROR_KEY)
+        not judgement.get(SCORING_ERROR_KEY)
         and judgement.get("scoring_method") == "structured_rubric"
         and judgement.get("num_trials_completed", 0) >= 1
-        and bool(judgement.get("scores"))
+        and bool(scores)
         and isinstance(reward, (float, int))
         and not isinstance(reward, bool)
         and math.isfinite(reward)
@@ -56,26 +78,43 @@ def valid_reward(reward: object, judgement: object) -> bool:
     )
 
 
-def read_artifacts(root: Path, config: JudgeConfig) -> tuple[str, list[dict[str, Any]]]:
-    """Read every submission directory with the shared GDPVal media converter.
+def _flatten_submission(root: Path, flat: Path) -> None:
+    """Link every submitted file into one directory, labelling a nested file by its relative path.
 
-    Keep directory labels: submissions may contain two files with the same basename.
-    A converter error is an inconclusive measurement, never an invisible missing file.
+    The shared reader reads one directory and applies its text and attachment budgets per call, so one call over
+    the whole submission keeps a single budget. A nested file is named ``dir__file.ext``, which keeps two files
+    with the same basename apart.
+    """
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        label = "__".join(path.relative_to(root).parts)
+        destination = flat / label
+        if destination.exists():
+            raise ValueError(f"Two GDPVal deliverables map to the same label: {label}")
+        try:
+            os.link(path, destination)
+        except OSError:
+            shutil.copy2(path, destination)
+
+
+def read_artifacts(root: Path, config: JudgeConfig) -> tuple[str, list[dict[str, Any]]]:
+    """Read the whole submission with the shared GDPVal media converter.
+
+    The deliverables directory holds only the agent's work product, so no file name is reserved for run state
+    (a deliverable named ``metadata.json`` or ``log.txt`` is graded). A converter error is an inconclusive
+    measurement, never an invisible missing file.
     """
     if not config.office_rendering_available and any(
         path.is_file() and path.suffix.lower() in OFFICE_EXTS for path in root.rglob("*")
     ):
         raise ValueError("LibreOffice is unavailable; refusing to judge Office files without rendering")
-    text_sections = []
-    blocks = []
-    directories = [root, *sorted(path for path in root.rglob("*") if path.is_dir())]
-    for directory in directories:
-        label = str(directory.relative_to(root))
-        text = read_deliverable_files(str(directory))
-        if text:
-            text_sections.append(f"Directory {label}:\n{text}")
-        converted = convert_deliverables_to_content_blocks(
-            str(directory),
+    with tempfile.TemporaryDirectory(prefix="judge-input-", dir=root.parent) as temporary:
+        flat = Path(temporary)
+        _flatten_submission(root, flat)
+        text = read_deliverable_files(str(flat), ignore_files=frozenset())
+        blocks = convert_deliverables_to_content_blocks(
+            str(flat),
             media_mode=config.judge_media_mode,
             render_dpi=config.judge_pdf_render_dpi,
             max_pages=config.judge_pdf_max_pages,
@@ -83,13 +122,12 @@ def read_artifacts(root: Path, config: JudgeConfig) -> tuple[str, list[dict[str,
             audio_capable=config.judge_handles_audio,
             video_capable=config.judge_handles_video,
             libreoffice_command=config.libreoffice_command,
+            ignore_files=frozenset(),
         )
-        for block in converted:
-            if block.get("type") == "text" and re.match(r"\s*[^\n]+: \[Error:", block.get("text", "")):
-                raise ValueError("Unreadable GDPVal deliverable; refusing partial grading")
-        if converted:
-            blocks.extend([{"type": "text", "text": f"Directory {label}:"}, *converted])
-    return "\n\n".join(text_sections), blocks
+    for block in blocks:
+        if block.get("type") == "text" and re.match(r"\s*[^\n]+: \[Error:", block.get("text", "")):
+            raise ValueError("Unreadable GDPVal deliverable; refusing partial grading")
+    return text, blocks
 
 
 async def judge(task: Path, config: JudgeConfig) -> None:

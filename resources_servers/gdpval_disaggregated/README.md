@@ -11,9 +11,13 @@ and the `legacy_agent` environment server supplied by that configuration.
 their live sessions are process-local. Multiple named resources instances can
 be selected by the agent's `resources_servers` configuration.
 
-The resources server owns the task sandbox. The agent borrows its connection;
-`/cleanup_session` and server shutdown retry failed releases. Completed verification
-is cached within the live session, so a repeated request does not call the judge twice.
+The resources server owns the task sandbox. The seed returns its
+`AsyncSandbox.serialize(scope="operate")` descriptor, and the agent borrows a
+connection from it; `/cleanup_session` and server shutdown retry failed releases.
+A seed for a session that was already cleaned up is refused with 409. Completed
+verification is cached within the live session, so a repeated request does not call
+the judge twice. A verify for a session this server no longer holds (a restart, or
+an earlier verify that was interrupted) is masked with `failure_kind: session_lost`.
 
 ## Configuration and data
 
@@ -68,13 +72,22 @@ or invalid judges are `judge_unavailable`. Saved deliverables remain available
 for inspection in either case. Unfinished agents and inconclusive measurements return
 `mask_sample: true`, `reward_valid: false`, and `evaluation_completed: false`.
 `agent_finished` is preserved for training masks, as are any compaction `responses`.
-Queueing, retry delays, and judge attempts share one `judge_timeout` budget.
+Retry delays and judge attempts share one `judge_timeout` budget, which starts
+when a judge slot (`judge_concurrency`) is free; time queued for a slot does not count.
+A judgement whose score lies outside its positive maximum (for example `0 out of 0`)
+is not a valid measurement and is masked as `judge_unavailable`.
 
 Artifacts include the staged task, original trajectory, deliverable manifest,
-judge diagnostics, reward, and final rollout. Nested submission directories are
-read with their relative directory labels. Unsafe paths and symlinks are rejected.
-Extraction is bounded to 10,000 archive entries and 1 GiB; submissions are limited
-to 200 deliverable files. Exceeding these limits masks the measurement.
+judge diagnostics, reward, and final rollout. The judge reads the whole submission
+in one pass, so the shared reader's text and attachment budgets cover all of it; a
+nested file is labelled by its relative path (`nested/report.txt` becomes
+`nested__report.txt`). Every regular file in the deliverables directory is graded,
+including names such as `metadata.json` or `log.txt` that the shared reader skips by
+default in mixed output directories. Unsafe paths and symlinks are rejected.
+Output is bounded to 10,000 archive entries and 1 GiB, checked in the sandbox before
+transfer and again on extraction (trace files over the limit are skipped instead);
+submissions are limited to 200 deliverable files. Exceeding these limits masks the
+measurement.
 
 This port uses current Gym media conversion instead of the former custom judge
 transport. That changes media conversion details and removes its model-name-based

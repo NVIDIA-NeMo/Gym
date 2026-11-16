@@ -129,6 +129,7 @@ async def main(args: argparse.Namespace) -> None:
         "finished": bool(state and state.agent_state == AgentState.FINISHED and not state.last_error),
     }
     (trace / "agent-status.json").write_text(json.dumps(status, indent=2) + "\n")
+    args.status_written = True
     if not status["finished"]:
         raise RuntimeError(f"OpenHands did not finish successfully: {status['agent_state']}")
 
@@ -140,7 +141,8 @@ async def run_with_diagnostics(args: argparse.Namespace) -> None:
         args.trace.mkdir(parents=True, exist_ok=True)
         (args.trace / "controller-error.log").write_text(traceback.format_exc())
         status = args.trace / "agent-status.json"
-        if not status.exists():
+        # The policy shares this sandbox and can write /trace, so only a status this runner wrote is kept.
+        if not getattr(args, "status_written", False):
             status.write_text(
                 json.dumps(
                     {

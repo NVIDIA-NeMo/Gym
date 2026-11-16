@@ -36,17 +36,32 @@ def config(**updates: object) -> JudgeConfig:
     return JudgeConfig(judge_url="http://judge/v1", judge_model="judge", judge_timeout=10, **updates)
 
 
+def judgement(scores: list[float], maxima: list[float]) -> dict[str, object]:
+    return {
+        "scoring_method": "structured_rubric",
+        "num_trials_completed": len(scores),
+        "scores": scores,
+        "max_possible_scores": maxima,
+    }
+
+
 @pytest.mark.parametrize("reward", [0.0, 0.5, 1.0])
 def test_valid_structured_score_includes_zero(reward):
-    assert valid_reward(reward, {"scoring_method": "structured_rubric", "num_trials_completed": 1, "scores": [reward]})
+    assert valid_reward(reward, judgement([reward * 2], [2]))
 
 
 @pytest.mark.parametrize(
     "reward,metadata",
     [
-        (float("nan"), {"scoring_method": "structured_rubric", "num_trials_completed": 1, "scores": [1]}),
-        (True, {"scoring_method": "structured_rubric", "num_trials_completed": 1, "scores": [1]}),
-        (0, {"scoring_method": "structured_rubric", "num_trials_completed": 0, "scores": []}),
+        (float("nan"), judgement([1], [2])),
+        (True, judgement([1], [2])),
+        (0, judgement([], [])),
+        # "0 out of 0": a malformed judgement, not a measured zero.
+        (0.0, judgement([0], [0])),
+        # A score above its maximum is clipped to 1.0 by the scorer; it is not a valid measurement.
+        (1.0, judgement([5], [2])),
+        (0.0, judgement([-1], [2])),
+        (0.5, {"scoring_method": "structured_rubric", "num_trials_completed": 1, "scores": [1]}),
         (0, {SCORING_ERROR_KEY: "no_valid_scores"}),
         (0, None),
     ],
@@ -56,9 +71,7 @@ def test_invalid_judgement_is_not_a_policy_zero(reward, metadata):
 
 
 async def test_real_artifacts_use_one_structured_trial(task, monkeypatch):
-    scorer = AsyncMock(
-        return_value=(0.5, {"scoring_method": "structured_rubric", "num_trials_completed": 1, "scores": [1]})
-    )
+    scorer = AsyncMock(return_value=(0.5, judgement([1], [2])))
     monkeypatch.setattr(gym_bridge, "score_with_rubric_structured", scorer)
     await judge(task, config())
     kwargs = scorer.await_args.kwargs
@@ -90,9 +103,38 @@ def test_nested_deliverables_are_read_with_directory_labels(task):
     (task / "artifacts/nested/greeting.txt").write_text("Bonjour")
     text, blocks = read_artifacts(task / "artifacts", config())
     assert "Hello" in text and "Bonjour" in text
-    assert "Directory nested:" in text
+    assert "=== nested__greeting.txt ===" in text and "=== greeting.txt ===" in text
     serialized = json.dumps(blocks)
-    assert "Hello" in serialized and "Bonjour" in serialized and "Directory nested:" in serialized
+    assert "Hello" in serialized and "Bonjour" in serialized and "nested__greeting.txt" in serialized
+
+
+def test_deliverables_with_run_state_names_are_graded(task):
+    # This directory holds only deliverables, so names the shared reader reserves for run state are work product.
+    (task / "artifacts/metadata.json").write_text('{"marker": "metadata-marker"}')
+    (task / "artifacts/log.txt").write_text("log-marker")
+    text, blocks = read_artifacts(task / "artifacts", config())
+    serialized = json.dumps(blocks)
+    for marker in ("metadata-marker", "log-marker", "Hello"):
+        assert marker in text and marker in serialized
+
+
+def test_nested_text_shares_one_submission_budget(task, monkeypatch):
+    from resources_servers.gdpval import file_reader
+
+    monkeypatch.setattr(file_reader, "MAX_TOTAL_CHARS", 1_000)
+    for index in range(4):
+        (task / f"artifacts/part{index}").mkdir()
+        (task / f"artifacts/part{index}/notes.txt").write_text("x" * 900)
+    text, _ = read_artifacts(task / "artifacts", config())
+    assert len(text) <= 1_000
+
+
+def test_label_collision_refuses_partial_judgement(task):
+    (task / "artifacts/nested").mkdir()
+    (task / "artifacts/nested/a.txt").write_text("nested")
+    (task / "artifacts/nested__a.txt").write_text("flat")
+    with pytest.raises(ValueError, match="same label"):
+        read_artifacts(task / "artifacts", config())
 
 
 def test_media_conversion_error_refuses_partial_judgement(task, monkeypatch):

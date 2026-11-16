@@ -17,10 +17,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path, PurePosixPath
 from shlex import quote
 from types import SimpleNamespace
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 
 from fastapi import HTTPException, Request
-from pydantic import ConfigDict, Field, PrivateAttr, field_validator
+from pydantic import ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
@@ -29,14 +29,20 @@ from nemo_gym.agents import (
 from nemo_gym.client import get_server_url, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
+    FailureBoundary,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
 )
 from nemo_gym.sandbox import AsyncSandbox, create_provider, resolve_provider_config
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.gdpval_sandboxed_agent.compaction import export_segments_from_trace
-from responses_api_agents.gdpval_sandboxed_agent.sandbox_runtime import DEFAULT_PYTHON, install_runtime
+from responses_api_agents.gdpval_sandboxed_agent.sandbox_runtime import (
+    DEFAULT_PYTHON,
+    RuntimeInstallError,
+    install_runtime,
+)
 from responses_api_agents.gdpval_sandboxed_agent.trajectory import export_trajectory
 
 
@@ -50,12 +56,8 @@ class TraceExportError(RuntimeError):
     """Saved controller output could not be safely reconstructed for training."""
 
 
-try:  # the OpenSandbox SDK is only present in the agent's venv
-    from opensandbox.exceptions.sandbox import SandboxApiException
-except Exception:  # pragma: no cover
-
-    class SandboxApiException(Exception):  # type: ignore[no-redef]
-        """Placeholder so isinstance checks stay valid without the SDK."""
+# Sandbox failures that are configuration errors, not a lost sandbox: they fail /run instead of masking every row.
+SANDBOX_CONFIGURATION_FAILURE_KINDS = frozenset({"provider_credentials_rejected"})
 
 
 def _load_web_keys(path: Optional[str]) -> list[str]:
@@ -113,6 +115,13 @@ class GDPValSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
     context_summarization_max_event_chars: int = Field(default=10_000, ge=100)
     checkpoint: str
 
+    @model_validator(mode="after")
+    def require_web_search_keys(self) -> "GDPValSandboxedAgentConfig":
+        """Refuse missing web-search keys at startup rather than failing every rollout."""
+        if self.web_tools_enabled:
+            _load_web_keys(self.web_search_api_keys_file)
+        return self
+
     @field_validator("remote_openhands_install_script_path", "remote_openhands_archive_path", "sandbox_python")
     @classmethod
     def require_absolute_runtime_path(cls, value: str) -> str:
@@ -142,6 +151,8 @@ def _incomplete_response(model: str, tag: str) -> NeMoGymResponse:
 
 class GDPValSandboxedAgent(SimpleResponsesAPIAgent):
     config: GDPValSandboxedAgentConfig
+    # OpenHands calls the policy from inside the task sandbox.
+    calls_model_from_sandbox: ClassVar[bool] = True
     # No Ray inside this server (Gym would otherwise initialize it in every worker).
     ray_enabled = False
     _sem: asyncio.Semaphore = PrivateAttr()
@@ -181,18 +192,18 @@ class GDPValSandboxedAgent(SimpleResponsesAPIAgent):
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
         raise HTTPException(405, "Use /run for an artifact-producing GDPVal rollout")
 
-    async def _attach(self, sandbox_id: str) -> AsyncSandbox:
+    async def _attach(self, descriptor: dict[str, Any]) -> AsyncSandbox:
         provider = create_provider(
             resolve_provider_config(self.config.sandbox_provider, self.server_client.global_config_dict)
         )
         try:
-            return await AsyncSandbox.connect({"sandbox_id": sandbox_id, "workdir": "/workspace"}, provider=provider)
+            return await AsyncSandbox.connect(descriptor, provider=provider)
         except BaseException:
             await provider.aclose()
             raise
 
     @staticmethod
-    async def _download_trace(sandbox: AsyncSandbox, local: Path) -> None:
+    async def _download_trace(sandbox: AsyncSandbox, local: Path, *, python: str = DEFAULT_PYTHON) -> None:
         script = """from pathlib import Path
 import zipfile
 root = Path('/trace')
@@ -211,11 +222,16 @@ with zipfile.ZipFile('/tmp/gdpval-trace.zip', 'w', zipfile.ZIP_DEFLATED) as z:
                 raise ValueError('OpenHands trace exceeds extraction limits')
             z.write(p, p.relative_to('/'))
 """
-        result = await sandbox.exec("python3 -c " + quote(script), timeout_s=300)
+        result = await sandbox.exec(f"{quote(python)} -c " + quote(script), timeout_s=300)
         if result.error_type is not None or result.return_code != 0:
             raise RuntimeError(f"Failed to package OpenHands trace: {result.error_type}: {result.stderr}")
         archive = local / "trace.zip"
         await sandbox.download("/tmp/gdpval-trace.zip", archive)
+        await asyncio.to_thread(GDPValSandboxedAgent._extract_trace, archive, local)
+
+    @staticmethod
+    def _extract_trace(archive: Path, local: Path) -> None:
+        """Unpack the trace archive (blocking; the caller runs it off the event loop)."""
         with zipfile.ZipFile(archive) as bundle:
             members = bundle.infolist()
             if (
@@ -304,7 +320,7 @@ with zipfile.ZipFile('/tmp/gdpval-trace.zip', 'w', zipfile.ZIP_DEFLATED) as z:
             try:
                 log_path.write_text((result.stdout or "") + "\n" + (result.stderr or ""))
                 await sandbox.upload(log_path, "/trace/agent.log")
-                await self._download_trace(sandbox, local)
+                await self._download_trace(sandbox, local, python=cfg.sandbox_python)
             except (OSError, ValueError, RuntimeError, zipfile.BadZipFile) as error:
                 raise TraceExportError(f"Cannot collect OpenHands trace: {error}") from error
             failure_reason = None
@@ -441,7 +457,6 @@ with zipfile.ZipFile('/tmp/gdpval-trace.zip', 'w', zipfile.ZIP_DEFLATED) as z:
         async with self._sem, self._resource_route() as resource_server:
             cookies = dict(request.cookies)
             sandbox = None
-            seeded = False
             try:
                 seed_response = await self.server_client.post(
                     server_name=resource_server,
@@ -451,21 +466,35 @@ with zipfile.ZipFile('/tmp/gdpval-trace.zip', 'w', zipfile.ZIP_DEFLATED) as z:
                 )
                 cookies.update(seed_response.cookies)
                 await raise_for_status(seed_response)
-                seeded = True
                 seed = await seed_response.json()
                 try:
-                    sandbox = await self._attach(seed["sandbox_handle"])
+                    sandbox = await self._attach(seed["sandbox_descriptor"])
                     verify_body = await self._execute(sandbox, body)
                 except TraceExportError as error:
                     logger.warning("GDPVal trace export failed; reporting masked attempt: %s", error)
                     verify_body = self._sandbox_lost_body(body, error)
                     verify_body["incomplete_reason"] = "agent_exec_incomplete"
                     verify_body["agent_error"] = verify_body.pop("sandbox_error")
-                except SandboxApiException as error:
+                except RuntimeInstallError as error:
+                    logger.warning("GDPVal runtime installation failed; reporting masked attempt: %s", error)
+                    verify_body = self._sandbox_lost_body(body, error)
+                    verify_body["incomplete_reason"] = "agent_exec_incomplete"
+                    verify_body["agent_error"] = verify_body.pop("sandbox_error")
+                except NgFailureEvent as error:
+                    if (
+                        error.boundary != FailureBoundary.SANDBOX
+                        or error.failure_kind in SANDBOX_CONFIGURATION_FAILURE_KINDS
+                    ):
+                        raise
                     # Preserve a lost sandbox as an explicitly masked attempt
                     # so callers can distinguish it from a measured policy failure.
-                    logger.warning("GDPVal sandbox lost mid-rollout; reporting masked attempt: %s", error)
+                    logger.warning(
+                        "GDPVal sandbox failed mid-rollout (%s); reporting masked attempt: %s",
+                        error.failure_kind,
+                        error,
+                    )
                     verify_body = self._sandbox_lost_body(body, error)
+                    verify_body["sandbox_error"] = f"{error.failure_kind}: {verify_body['sandbox_error']}"[:500]
                 verify_response = await self.server_client.post(
                     server_name=resource_server,
                     url_path="/verify",
@@ -475,17 +504,18 @@ with zipfile.ZipFile('/tmp/gdpval-trace.zip', 'w', zipfile.ZIP_DEFLATED) as z:
                 await raise_for_status(verify_response)
                 return GDPValRunResponse.model_validate(await verify_response.json())
             finally:
-                if seeded:
-                    try:
-                        cleanup = await self.server_client.post(
-                            server_name=resource_server,
-                            url_path="/cleanup_session",
-                            json={},
-                            cookies=cookies,
-                        )
-                        await raise_for_status(cleanup)
-                    except Exception:
-                        logger.exception("GDPVal resources-server cleanup failed")
+                # Always clean up, even after a failed seed: the resources server may still hold a sandbox for
+                # this session, and /cleanup_session is a no-op for a session it never created.
+                try:
+                    cleanup = await self.server_client.post(
+                        server_name=resource_server,
+                        url_path="/cleanup_session",
+                        json={},
+                        cookies=cookies,
+                    )
+                    await raise_for_status(cleanup)
+                except Exception:
+                    logger.exception("GDPVal resources-server cleanup failed")
                 if sandbox is not None:
                     try:
                         # Resources owns the sandbox; release only this process's borrowed connection.

@@ -311,6 +311,29 @@ def test_export_without_echo_is_text_only(tmp_path):
         assert r.output and all("prompt_token_ids" not in item.model_dump() for item in r.output)
 
 
+def _drop_echo(payload, keys):
+    for key in keys:
+        payload["response"]["choices"][0]["message"].pop(key, None)
+        (payload.get("provider_specific_fields") or {}).pop(key, None)
+
+
+def test_export_rejects_the_same_partial_echo_on_every_call(tmp_path):
+    # Every reply lacks prompt_token_ids, so no single segment looks inconsistent on its own.
+    payloads = compacting_rollout()
+    for payload in payloads:
+        _drop_echo(payload, ["prompt_token_ids"])
+    with pytest.raises(ValueError, match="incomplete or inconsistent"):
+        compaction.export_segments_from_trace(_write(tmp_path, payloads), model="gdpval-policy", session_id="t")
+
+
+def test_export_rejects_an_echoed_segment_beside_an_unechoed_one(tmp_path):
+    payloads = compacting_rollout()
+    for payload in payloads[3:]:  # the continuation segment after the summary call
+        _drop_echo(payload, compaction.TOKEN_KEYS + compaction.OPTIONAL_TOKEN_KEYS)
+    with pytest.raises(ValueError, match="incomplete or inconsistent"):
+        compaction.export_segments_from_trace(_write(tmp_path, payloads), model="gdpval-policy", session_id="t")
+
+
 def test_export_requires_completion_logs(tmp_path):
     with pytest.raises(ValueError, match="no completion logs"):
         compaction.export_segments_from_trace(tmp_path, model="m", session_id="t")

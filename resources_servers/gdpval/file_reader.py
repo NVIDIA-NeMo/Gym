@@ -66,8 +66,11 @@ def _bounded_text(text: str, cap: int, marker: str = "\n[...truncated]") -> str:
     return text[: cap - len(marker)] + marker
 
 
-def read_deliverable_files(output_dir: str) -> str:
+def read_deliverable_files(output_dir: str, *, ignore_files: frozenset[str] = IGNORE_FILES) -> str:
     """Read text from all deliverable files in *output_dir*.
+
+    Files named in *ignore_files* are skipped. The default is the agent run-state names that share a mixed output
+    directory; a caller whose directory holds only deliverables passes an empty set.
 
     Returns a single string with sections like::
 
@@ -91,7 +94,7 @@ def read_deliverable_files(output_dir: str) -> str:
     used = 0
 
     for fpath in files:
-        if not is_deliverable(fpath):
+        if not fpath.is_file() or fpath.name in ignore_files:
             continue
 
         ext = fpath.suffix.lower()
@@ -734,6 +737,7 @@ def convert_deliverables_to_content_blocks(
     audio_capable: bool = False,
     video_capable: bool = False,
     libreoffice_command: Sequence[str] | None = None,
+    ignore_files: frozenset[str] = IGNORE_FILES,
 ) -> list[dict[str, Any]]:
     """Convert deliverable files to OpenAI-compatible content blocks for multimodal judging.
 
@@ -762,6 +766,8 @@ def convert_deliverables_to_content_blocks(
     ``image_url`` data URL, while ``images_and_text`` (self-hosted vLLM judges)
     uses the standard ``video_url`` / ``input_audio`` content types vLLM routes to
     the media tower.
+
+    Files named in *ignore_files* are skipped, as in ``read_deliverable_files``.
     """
     output_path = Path(output_dir)
     if not output_path.is_dir():
@@ -777,10 +783,14 @@ def convert_deliverables_to_content_blocks(
     )
 
     entries = sorted(output_path.iterdir())
+
+    def submitted(path: Path) -> bool:
+        return path.is_file() and path.name not in ignore_files
+
     # Shared provenance rules keep the comparison and rubric paths in lockstep:
     # prefer source.ext.pdf, consume derived renders, and quarantine an old
     # source.pdf when multiple Office files share the stem.
-    provenance = resolve_pdf_provenance(entry for entry in entries if is_deliverable(entry))
+    provenance = resolve_pdf_provenance(entry for entry in entries if submitted(entry))
     consumed_pdfs = provenance.suppressed_pdfs
 
     # Which files the judge receives AS TEXT. Decided once and reused by both the
@@ -789,7 +799,7 @@ def convert_deliverables_to_content_blocks(
     texty = {
         p
         for p in entries
-        if is_deliverable(p)
+        if submitted(p)
         and p not in consumed_pdfs
         and (p.suffix.lower() in TEXT_EXTS or (p.suffix.lower() not in HANDLED_EXTS and _sniffs_as_text(p)))
     }
@@ -863,7 +873,7 @@ def convert_deliverables_to_content_blocks(
         ]
 
     for fpath in entries:
-        if not is_deliverable(fpath) or fpath in consumed_pdfs:
+        if not submitted(fpath) or fpath in consumed_pdfs:
             continue
 
         ext = fpath.suffix.lower()

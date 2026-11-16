@@ -33,12 +33,19 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesSessionFences,
     ReverifyMode,
     SimpleResourcesServer,
+    lost_session_verification,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.gdpval.setup_libreoffice import ensure_libreoffice
-from resources_servers.gdpval_disaggregated.artifact_io import ArtifactIO, ArtifactProcessingError
+from resources_servers.gdpval_disaggregated.artifact_io import (
+    MAX_OUTPUT_BYTES,
+    MAX_OUTPUT_FILES,
+    ArtifactIO,
+    ArtifactProcessingError,
+)
 from resources_servers.gdpval_disaggregated.stage_gdpval_task import reference_name, stage
 
 
@@ -70,7 +77,9 @@ class GDPValResourcesConfig(BaseResourcesServerConfig):
 
 
 class GDPValSeedResponse(BaseSeedSessionResponse):
-    sandbox_handle: str
+    # ``AsyncSandbox.serialize(scope="operate")``: what the harness passes to ``AsyncSandbox.connect``. It carries
+    # the provider's own fields (an Apptainer instance needs more than an id), the workdir and the default user.
+    sandbox_descriptor: dict[str, Any]
     # Task fields for a harness that renders its own prompt.
     task: dict[str, Any] | None = None
 
@@ -109,6 +118,7 @@ class TaskSession:
     ready: bool = False
     setup_failed: bool = False
     verify_started: bool = False
+    closed: bool = False
     result: GDPValVerifyResponse | None = None
 
 
@@ -118,6 +128,8 @@ class GDPValResourcesServer(SimpleResourcesServer, ArtifactIO):
     ray_enabled: ClassVar[bool] = False
     _rows: dict[str, dict[str, Any]] = PrivateAttr(default_factory=dict)
     _sessions: dict[str, TaskSession] = PrivateAttr(default_factory=dict)
+    # A seed that arrives after /cleanup_session for the same cookie is refused, not given a new sandbox.
+    _closed_sessions: ResourcesSessionFences[None] = PrivateAttr()
     _manifest: str = PrivateAttr(default="")
     _judge_sem: asyncio.Semaphore = PrivateAttr()
     _office_rendering_available: bool = PrivateAttr(default=False)
@@ -127,6 +139,7 @@ class GDPValResourcesServer(SimpleResourcesServer, ArtifactIO):
         if self.config.num_workers not in (None, 1):
             raise ValueError("GDPVal resources sessions require num_workers=1")
         self._judge_sem = asyncio.Semaphore(self.config.judge_concurrency)
+        self._closed_sessions = ResourcesSessionFences(self.config.session_close_retry_window_seconds)
         for line in Path(self.config.dataset_path).read_text().splitlines():
             if not line.strip():
                 continue
@@ -197,6 +210,8 @@ class GDPValResourcesServer(SimpleResourcesServer, ArtifactIO):
         if task_id not in self._rows:
             raise HTTPException(422, "Unknown task_id in responses_create_params.metadata")
         key = request.session[SESSION_ID_KEY]
+        if key in self._closed_sessions:
+            raise HTTPException(409, "GDPVal session is already closed")
         state = self._sessions.get(key)
         if state is None:
             root = Path(self.config.artifact_root) / os.environ.get("SLURM_JOB_ID", "local") / self.config.name
@@ -207,6 +222,9 @@ class GDPValResourcesServer(SimpleResourcesServer, ArtifactIO):
         if state.task_id != task_id:
             raise HTTPException(409, "Session already belongs to another task")
         async with state.lock:
+            # Cleanup may have stopped this sandbox while the seed waited for the lock.
+            if state.closed or self._sessions.get(key) is not state:
+                raise HTTPException(409, "GDPVal session is already closed")
             if state.setup_failed:
                 raise HTTPException(409, "GDPVal setup failed; close the session before retrying")
             if not state.ready:
@@ -215,7 +233,7 @@ class GDPValResourcesServer(SimpleResourcesServer, ArtifactIO):
                     references = (
                         Path(self.config.data_root) / "references" / str(reference_name(row["reference_root_key"]))
                     )
-                    stage(row, references, state.task, self._manifest)
+                    await asyncio.to_thread(stage, row, references, state.task, self._manifest)
                     (state.task / "trace").mkdir()
 
                     async def setup(sandbox: AsyncSandbox) -> None:
@@ -246,7 +264,7 @@ class GDPValResourcesServer(SimpleResourcesServer, ArtifactIO):
                 except json.JSONDecodeError:
                     names = []
             return GDPValSeedResponse(
-                sandbox_handle=state.sandbox.sandbox_id,
+                sandbox_descriptor=await state.sandbox.serialize(scope="operate"),
                 task={
                     "task_id": task_id,
                     "prompt": row.get("prompt", ""),
@@ -259,23 +277,35 @@ class GDPValResourcesServer(SimpleResourcesServer, ArtifactIO):
     async def _download_outputs(self, state: TaskSession) -> None:
         # Preserve readable files and report omissions. A skipped deliverable makes
         # the measurement inconclusive; a missing diagnostic trace does not.
-        pack_script = """from pathlib import Path
+        # The archive is bounded inside the sandbox, before it is transferred: deliverables over the
+        # host's extraction limit abort packaging, while trace files over it are skipped (diagnostic only).
+        pack_script = f"""from pathlib import Path
 import json, sys, zipfile
 skipped = []
+count = total = 0
 with zipfile.ZipFile('/tmp/gdpval-output.zip', 'w', zipfile.ZIP_DEFLATED) as z:
     for root in (Path('/workspace/deliverables'), Path('/trace')):
         if root.is_symlink() or not root.is_dir():
-            skipped.append({'path': str(root), 'reason': 'symlink or non-directory root'})
+            skipped.append({{'path': str(root), 'reason': 'symlink or non-directory root'}})
             continue
         for p in root.rglob('*'):
             try:
                 if p.is_symlink():
-                    skipped.append({'path': str(p), 'reason': 'symlink'})
+                    skipped.append({{'path': str(p), 'reason': 'symlink'}})
                 elif p.is_file():
+                    size = p.stat().st_size
+                    if count + 1 > {MAX_OUTPUT_FILES} or total + size > {MAX_OUTPUT_BYTES}:
+                        if root.name == 'deliverables':
+                            # SystemExit is not an Exception: it ends packaging with a non-zero exit.
+                            raise SystemExit('GDPVal deliverables exceed the output extraction limit')
+                        skipped.append({{'path': str(p), 'reason': 'over the output extraction limit'}})
+                        continue
                     z.write(p, p.relative_to('/'))
+                    count += 1
+                    total += size
             except Exception as error:
-                skipped.append({'path': str(p), 'reason': repr(error)[:200]})
-print(json.dumps({'skipped': skipped}))
+                skipped.append({{'path': str(p), 'reason': repr(error)[:200]}})
+print(json.dumps({{'skipped': skipped}}))
 """
         packed = await state.sandbox.exec("python3 -c " + quote(pack_script), timeout_s=300)
         if packed.error_type is not None or packed.return_code != 0:
@@ -297,9 +327,19 @@ print(json.dumps({'skipped': skipped}))
             (state.task / "packaging-skipped.json").write_text(json.dumps(skipped) + "\n")
         archive = state.run / "sandbox-output.zip"
         await state.sandbox.download("/tmp/gdpval-output.zip", archive)
-        self._extract_results(archive, state.task)
+        await asyncio.to_thread(self._extract_results, archive, state.task)
         if any(PurePosixPath(entry["path"]).is_relative_to("/workspace/deliverables") for entry in skipped):
             raise RuntimeError("GDPVal output packaging skipped deliverables; refusing partial grading")
+
+    @staticmethod
+    def _lost_session_result(body: GDPValVerifyRequest, reason: str) -> GDPValVerifyResponse:
+        return GDPValVerifyResponse(
+            **(
+                body.model_dump()
+                | lost_session_verification(reason)
+                | {"reward_valid": False, "evaluation_completed": False, "judge_skipped": True}
+            )
+        )
 
     @staticmethod
     def _save_masked_result(state: TaskSession, body: GDPValVerifyRequest, reason: str) -> GDPValVerifyResponse:
@@ -313,7 +353,8 @@ print(json.dumps({'skipped': skipped}))
             agent_finished=body.agent_finished,
             failure_kind=f"gdpval:{reason}",
             failure_reason=reason,
-            judge_skipped=not body.agent_finished,
+            # The judge ran (and failed) only on these two endings.
+            judge_skipped=reason not in {"judge_unavailable", "artifact_processing_failed"},
             **body.model_dump(
                 include={"agent_error", "sandbox_error", "incomplete_reason", "policy_failure_reason"},
                 exclude_none=True,
@@ -339,12 +380,13 @@ print(json.dumps({'skipped': skipped}))
         return result
 
     async def _judge_saved_artifacts(self, state: TaskSession, config_path: Path, config: dict[str, Any]) -> None:
-        # Queueing, backoff, and all attempts share the original judge deadline.
+        # Backoff and all attempts share one judge deadline, which starts once a judge slot is free:
+        # time queued behind other rollouts' judges is not the judge failing.
         # Cancellation propagates to _run_judge, which kills its subprocess group.
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + self.config.judge_timeout
-        async with asyncio.timeout(self.config.judge_timeout):
-            async with self._judge_sem:
+        async with self._judge_sem:
+            deadline = loop.time() + self.config.judge_timeout
+            async with asyncio.timeout(self.config.judge_timeout):
                 for attempt in range(1, self.config.judge_max_attempts + 1):
                     remaining = deadline - loop.time()
                     budget = remaining / (self.config.judge_max_attempts - attempt + 1)
@@ -373,13 +415,19 @@ print(json.dumps({'skipped': skipped}))
 
     async def verify(self, request: Request, body: GDPValVerifyRequest) -> GDPValVerifyResponse:
         state = self._sessions.get(request.session[SESSION_ID_KEY])
-        if state is None or state.task_id != body.task_id:
-            raise HTTPException(409, "No matching GDPVal task session")
+        if state is None:
+            # Restarted or cleaned up between seed and verify: the outputs are gone, so this is not the policy's 0.
+            return self._lost_session_result(body, "GDPVal resources session was lost before verification")
+        if state.task_id != body.task_id:
+            raise HTTPException(409, "GDPVal session belongs to another task")
         async with state.lock:
             if state.result is not None:
                 return state.result
-            if not state.ready or state.verify_started:
-                raise HTTPException(409, "GDPVal session is not available for verification")
+            if state.closed or not state.ready:
+                return self._lost_session_result(body, "GDPVal session was closed before verification")
+            if state.verify_started:
+                # An earlier verify was cancelled after it started stopping the sandbox.
+                return self._lost_session_result(body, "GDPVal verification was interrupted; the sandbox is gone")
             state.verify_started = True
             try:
                 outputs_unavailable = None
@@ -411,7 +459,7 @@ print(json.dumps({'skipped': skipped}))
                 state.result = self._save_masked_result(state, body, "outputs_unavailable")
                 return state.result
             try:
-                manifest = self._collect_artifacts(state.task)
+                manifest = await asyncio.to_thread(self._collect_artifacts, state.task)
             except (OSError, ValueError) as error:
                 logger.warning("GDPVal deliverables unavailable: %s", error)
                 state.result = self._save_masked_result(state, body, "outputs_unavailable")
@@ -445,7 +493,19 @@ print(json.dumps({'skipped': skipped}))
                 logger.warning("Judge exhausted its budget/attempts; masking saved rollout %s", state.task)
                 state.result = self._save_masked_result(state, body, "judge_unavailable")
                 return state.result
-            state.result = GDPValVerifyResponse.model_validate_json((state.task / "rollout.json").read_text())
+            except Exception:
+                # The judge could not run (for example the subprocess could not start or its output was
+                # unreadable). Masking keeps this from failing /verify, which could then never be measured.
+                logger.exception("GDPVal judge failed unexpectedly; masking saved rollout %s", state.task)
+                state.result = self._save_masked_result(state, body, "judge_unavailable")
+                return state.result
+            try:
+                judged = GDPValVerifyResponse.model_validate_json((state.task / "rollout.json").read_text())
+            except (OSError, ValueError):
+                logger.exception("GDPVal judge left no readable rollout; masking %s", state.task)
+                state.result = self._save_masked_result(state, body, "judge_unavailable")
+                return state.result
+            state.result = judged
             state.result = state.result.model_copy(
                 update={
                     "evaluation_completed": True,
@@ -473,8 +533,10 @@ print(json.dumps({'skipped': skipped}))
                 except Exception:
                     logger.exception("Failed to preserve GDPVal failure outputs in %s", state.run)
                 finally:
+                    state.closed = True
                     await state.sandbox.stop()
                     self._sessions.pop(key, None)
+                    self._closed_sessions.fence(key, None)
         return {"cleaned": True}
 
     async def shutdown(self) -> None:

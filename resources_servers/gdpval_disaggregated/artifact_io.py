@@ -18,6 +18,11 @@ from typing import Any
 from nemo_gym.sandbox import AsyncSandbox
 
 
+# One limit for the sandbox output archive, checked while packaging in the sandbox and again on extraction.
+MAX_OUTPUT_FILES = 10_000
+MAX_OUTPUT_BYTES = 1_073_741_824
+
+
 class ArtifactProcessingError(RuntimeError):
     """Saved submissions could not be read; this is not a judge service outage."""
 
@@ -45,7 +50,7 @@ class ArtifactIO:
         }
         with zipfile.ZipFile(archive) as bundle:
             members = bundle.infolist()
-            if len(members) > 10_000 or sum(member.file_size for member in members) > 1_073_741_824:
+            if len(members) > MAX_OUTPUT_FILES or sum(member.file_size for member in members) > MAX_OUTPUT_BYTES:
                 raise ValueError("GDPVal outputs exceed the 10,000-entry / 1 GiB extraction limit")
             for member in members:
                 mode = member.external_attr >> 16

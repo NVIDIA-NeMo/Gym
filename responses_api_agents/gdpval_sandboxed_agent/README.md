@@ -9,7 +9,15 @@ The supplied `training.yaml` uses the `legacy_agent` Environment Server. `/run`
 seeds the resources session, borrows its sandbox, installs the staged runtime,
 runs the controller, exports its response, and asks resources to verify. Resources
 owns sandbox deletion; the agent disconnects its borrowed handle after cleanup.
-The resource-session cookie follows seed, verification, and cleanup.
+The resource-session cookie follows seed, verification, and cleanup; cleanup is
+sent even when the seed fails.
+
+The task prompt comes from the resources server's staged task, and the tools are
+the CodeAct tools. Sampling is fixed in the controller (`temperature` and `top_p`
+1.0, `max_output_tokens` from this config); per-rollout sampling reaches the model
+server through Gym's run-specific endpoint. The other fields of the row's
+`responses_create_params` (`input`, `instructions`, `tools`, `temperature`,
+`max_output_tokens`) are not forwarded to OpenHands.
 
 ## Runtime and configuration
 
@@ -63,7 +71,7 @@ Agent `concurrency` is total capacity across workers and must divide evenly by
 and cleanup; bound episode admission before creating task sandboxes.
 
 Set `web_tools_enabled: true` and `web_search_api_keys_file` to enable Exa search
-and page fetching. The file holds one key per line. These keys enter the sandbox,
+and page fetching; a missing or empty key file fails at startup. The file holds one key per line. These keys enter the sandbox,
 where the agent has shell access, so use keys intended for that trust boundary.
 
 ## Training traces
@@ -85,11 +93,19 @@ twice. Use a downstream consumer that accepts these compaction traces and a
 model server that echoes token metadata. Set Gym `token_id_capture.rebuild_response`
 to `false` for this mode so finalization does not replace the exported segments.
 Absent token metadata produces text-only segments, which cannot be used for
-token-based training. Partial or inconsistent token echo masks the row rather
-than fabricating training data. Top-k score-centering metadata is unsupported and rejected.
+token-based training. Partial or inconsistent token echo anywhere in the rollout
+masks the row rather than fabricating training data. Top-k score-centering metadata
+is unsupported and rejected.
+
+The segment tokens are read from the controller's completion logs under `/trace`,
+which the policy can write from its shell in the same sandbox. They are not checked
+against Gym's token-capture records, so treat compaction training as unqualified
+until the segments are built from, or checked against, those records.
 
 Unfinished infrastructure attempts retain `agent_finished: false` and an explicit
-reason. Policy context, iteration and loop limits keep their distinct reasons;
+reason. A sandbox failure the provider reports as a sandbox-boundary failure event
+(other than rejected credentials) and a runtime installation that fails every
+attempt are reported this way instead of failing `/run`. Policy context, iteration and loop limits keep their distinct reasons;
 the resources server controls their scoring/masking policy.
 
 ## Provenance and checks

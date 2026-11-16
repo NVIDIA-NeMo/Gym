@@ -7,6 +7,7 @@ Run with the agent venv python:
 """
 
 import hashlib
+import shutil
 import subprocess
 import tarfile
 from types import SimpleNamespace
@@ -59,6 +60,10 @@ def staged(tmp_path):
     return SimpleNamespace(script=script, archive=archive, prefix=root / "gdpval-openhands", local=tmp_path / "local")
 
 
+# The installer wraps each attempt in GNU coreutils `timeout`, which macOS does not ship.
+requires_timeout = pytest.mark.skipif(shutil.which("timeout") is None, reason="GNU timeout is not installed")
+
+
 def _run(staged, timeout_s=900):
     command = install_command(
         str(staged.script),
@@ -75,6 +80,7 @@ def _run(staged, timeout_s=900):
     )
 
 
+@requires_timeout
 def test_clean_install(staged):
     result = _run(staged)
     assert result.returncode == 0, result.stdout
@@ -82,6 +88,7 @@ def test_clean_install(staged):
     assert (staged.prefix / ".installed-sha256").is_file()
 
 
+@requires_timeout
 def test_partial_install_is_removed_before_the_attempt(staged):
     """A killed attempt leaves files but no marker; installing on top of it must still succeed."""
     (staged.prefix / "venv").mkdir(parents=True)
@@ -93,6 +100,7 @@ def test_partial_install_is_removed_before_the_attempt(staged):
     assert (staged.prefix / "venv" / "bin" / "python").is_file()
 
 
+@requires_timeout
 def test_finished_install_is_kept(staged):
     assert _run(staged).returncode == 0
     (staged.prefix / "keep-me").write_text("x")
@@ -102,6 +110,7 @@ def test_finished_install_is_kept(staged):
     assert (staged.prefix / "keep-me").exists()
 
 
+@requires_timeout
 def test_installer_errors_reach_stdout_and_the_local_copy_is_removed(staged):
     staged.archive.write_bytes(b"truncated")
     result = _run(staged)

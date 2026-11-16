@@ -42,7 +42,9 @@ async def test_run_keeps_seed_cookie_and_resources_ownership(monkeypatch):
         "agent_finished": False,
     }
     replies = [
-        SimpleNamespace(cookies={"session": "seeded"}, json=AsyncMock(return_value={"sandbox_handle": "owned"})),
+        SimpleNamespace(
+            cookies={"session": "seeded"}, json=AsyncMock(return_value={"sandbox_descriptor": {"sandbox_id": "owned"}})
+        ),
         SimpleNamespace(json=AsyncMock(return_value=result)),
         SimpleNamespace(),
     ]
@@ -66,7 +68,7 @@ async def test_run_cancellation_still_closes_resources_and_disconnects(monkeypat
     instance = agent()
     instance.server_client.post = AsyncMock(
         side_effect=[
-            SimpleNamespace(cookies={}, json=AsyncMock(return_value={"sandbox_handle": "owned"})),
+            SimpleNamespace(cookies={}, json=AsyncMock(return_value={"sandbox_descriptor": {"sandbox_id": "owned"}})),
             SimpleNamespace(),
         ]
     )
@@ -117,7 +119,9 @@ async def test_unsafe_trace_returns_masked_payload_and_releases_borrow(monkeypat
 
     async def post(**kwargs):
         if kwargs["url_path"] == "/seed_session":
-            return SimpleNamespace(cookies={}, json=AsyncMock(return_value={"sandbox_handle": "owned"}))
+            return SimpleNamespace(
+                cookies={}, json=AsyncMock(return_value={"sandbox_descriptor": {"sandbox_id": "owned"}})
+            )
         if kwargs["url_path"] == "/verify":
             verify_payloads.append(kwargs["json"])
             return SimpleNamespace(json=AsyncMock(return_value={**kwargs["json"], "reward": 0.0, "mask_sample": True}))
@@ -170,3 +174,104 @@ async def test_trace_read_error_has_a_typed_boundary(monkeypatch):
     )
     with pytest.raises(app.TraceExportError, match="Cannot collect OpenHands trace: unsafe archive"):
         await instance._execute(sandbox, run_body())
+
+
+def lost_sandbox(failure_kind: str) -> app.NgFailureEvent:
+    return app.NgFailureEvent(boundary="sandbox", failure_kind=failure_kind, failure_reason="sandbox went away")
+
+
+def verify_capturing_agent(monkeypatch, execute_error: BaseException):
+    instance = agent()
+    verify_payloads = []
+
+    async def post(**kwargs):
+        if kwargs["url_path"] == "/seed_session":
+            return SimpleNamespace(
+                cookies={}, json=AsyncMock(return_value={"sandbox_descriptor": {"sandbox_id": "x"}})
+            )
+        if kwargs["url_path"] == "/verify":
+            verify_payloads.append(kwargs["json"])
+            return SimpleNamespace(json=AsyncMock(return_value={**kwargs["json"], "reward": 0.0, "mask_sample": True}))
+        return SimpleNamespace()
+
+    instance.server_client.post = AsyncMock(side_effect=post)
+    sandbox = SimpleNamespace(disconnect=AsyncMock())
+    monkeypatch.setattr(app, "raise_for_status", AsyncMock())
+    monkeypatch.setattr(app.GDPValSandboxedAgent, "_attach", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(app.GDPValSandboxedAgent, "_execute", AsyncMock(side_effect=execute_error))
+    return instance, verify_payloads, sandbox
+
+
+async def test_typed_sandbox_loss_is_reported_as_a_masked_attempt(monkeypatch):
+    instance, verify_payloads, sandbox = verify_capturing_agent(monkeypatch, lost_sandbox("provider_unavailable"))
+    await instance.run(run_body(), SimpleNamespace(cookies={}))
+    assert verify_payloads[0]["agent_finished"] is False
+    assert verify_payloads[0]["incomplete_reason"] == "sandbox_ended"
+    assert verify_payloads[0]["sandbox_error"].startswith("provider_unavailable: ")
+    assert instance.server_client.post.call_args_list[-1].kwargs["url_path"] == "/cleanup_session"
+    sandbox.disconnect.assert_awaited_once()
+
+
+async def test_rejected_sandbox_credentials_fail_the_run(monkeypatch):
+    instance, verify_payloads, sandbox = verify_capturing_agent(
+        monkeypatch, lost_sandbox("provider_credentials_rejected")
+    )
+    with pytest.raises(app.NgFailureEvent):
+        await instance.run(run_body(), SimpleNamespace(cookies={}))
+    assert not verify_payloads
+    assert instance.server_client.post.call_args_list[-1].kwargs["url_path"] == "/cleanup_session"
+
+
+async def test_failed_runtime_install_is_a_masked_attempt(monkeypatch):
+    error = app.RuntimeInstallError("OpenHands runtime installation failed after 4 attempts")
+    instance, verify_payloads, _ = verify_capturing_agent(monkeypatch, error)
+    await instance.run(run_body(), SimpleNamespace(cookies={}))
+    assert verify_payloads[0]["incomplete_reason"] == "agent_exec_incomplete"
+    assert verify_payloads[0]["agent_error"].startswith("OpenHands runtime installation failed")
+
+
+async def test_failed_seed_still_cleans_up(monkeypatch):
+    instance = agent()
+
+    async def check(response):
+        if getattr(response, "status", 200) >= 400:
+            raise RuntimeError("seed failed")
+
+    instance.server_client.post = AsyncMock(
+        side_effect=[SimpleNamespace(cookies={"session": "seeded"}, status=500), SimpleNamespace(status=200)]
+    )
+    monkeypatch.setattr(app, "raise_for_status", check)
+    with pytest.raises(RuntimeError, match="seed failed"):
+        await instance.run(run_body(), SimpleNamespace(cookies={}))
+    calls = instance.server_client.post.call_args_list
+    assert [call.kwargs["url_path"] for call in calls] == ["/seed_session", "/cleanup_session"]
+    assert calls[1].kwargs["cookies"] == {"session": "seeded"}
+
+
+def test_missing_web_search_keys_fail_at_startup(tmp_path):
+    empty = tmp_path / "keys.txt"
+    empty.write_text("# no keys\n")
+    with pytest.raises(ValueError, match="no web search keys"):
+        app.GDPValSandboxedAgentConfig(
+            name="gdpval_train",
+            host="127.0.0.1",
+            port=8080,
+            entrypoint="app.py",
+            model_server={"type": "responses_api_models", "name": "policy_model"},
+            resources_server={"type": "resources_servers", "name": "gdpval_resources"},
+            checkpoint="policy",
+            remote_openhands_install_script_path="/runtime/install.sh",
+            remote_openhands_archive_path="/runtime/runtime.tar.gz",
+            web_tools_enabled=True,
+            web_search_api_keys_file=str(empty),
+        )
+
+
+async def test_trace_is_packaged_with_the_runtime_python(tmp_path):
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=1, error_type=None, stderr="stop")),
+        download=AsyncMock(),
+    )
+    with pytest.raises(RuntimeError):
+        await app.GDPValSandboxedAgent._download_trace(sandbox, tmp_path, python="/opt/runtime/bin/python3")
+    assert sandbox.exec.call_args.args[0].startswith("/opt/runtime/bin/python3 -c ")
