@@ -17,6 +17,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -28,8 +29,9 @@ import nemo_gym.core.runtime_files as runtime_files
 from nemo_gym.core.episode_context import rollout_context
 from nemo_gym.core.runtime_files import (
     async_temp_folder,
+    create_owned_folder,
     debug_folder,
-    finish_run_files,
+    delete_owned_folder,
     remove_stale_temp_folders,
     temp_folder,
 )
@@ -174,7 +176,7 @@ class TestTempFolder:
 def test_temp_dir_is_checked_once_on_the_writing_node(set_global_config, tmp_path: Path, monkeypatch) -> None:
     checked: list[tuple[str, Path]] = []
     monkeypatch.setattr(runtime_files, "warn_if_unsuitable", lambda setting, path: checked.append((setting, path)))
-    monkeypatch.setattr(runtime_files, "_reaped_parents", set())
+    monkeypatch.setattr(runtime_files, "_checked_temp_parents", set())
     set_global_config({"temp_dir": str(tmp_path / "temp")})
 
     with temp_folder(kind="workspace"):
@@ -185,61 +187,101 @@ def test_temp_dir_is_checked_once_on_the_writing_node(set_global_config, tmp_pat
     assert checked == [("temp_dir", tmp_path / "temp")]
 
 
-@pytest.mark.skipif(not Path("/proc/self/ns/pid").exists(), reason="needs Linux PID namespaces")
+@pytest.mark.skipif(
+    not Path("/proc/self/ns/pid").exists() or not Path("/proc/sys/kernel/random/boot_id").exists(),
+    reason="needs Linux PID namespaces and a boot id",
+)
 class TestStaleTempFolders:
     def _dead_pid(self) -> int:
         process = subprocess.Popen([sys.executable, "-c", "pass"])
         process.wait()
         return process.pid
 
-    def test_folders_of_dead_processes_in_this_namespace_are_removed(self, tmp_path: Path) -> None:
+    def _name(self, pid: int, *, host: str | None = None, namespace: int | None = None, tag: str = "abc123") -> str:
+        host = host or Path("/proc/sys/kernel/random/boot_id").read_text().strip().replace("-", "")[:12]
+        namespace = namespace or os.stat("/proc/self/ns/pid").st_ino
+        return f"nemo-gym-workspace.{host}.{namespace}.{pid}.{tag}"
+
+    def test_only_folders_of_dead_processes_on_this_host_and_namespace_are_removed(self, tmp_path: Path) -> None:
         namespace = os.stat("/proc/self/ns/pid").st_ino
-        dead = tmp_path / f"nemo-gym-workspace.{namespace}.{self._dead_pid()}.abc123"
-        live = tmp_path / f"nemo-gym-workspace.{namespace}.{os.getpid()}.def456"
-        other_namespace = tmp_path / f"nemo-gym-workspace.{namespace + 1}.{self._dead_pid()}.ghi789"
+        dead = tmp_path / self._name(self._dead_pid())
+        live = tmp_path / self._name(os.getpid(), tag="def456")
+        other_namespace = tmp_path / self._name(self._dead_pid(), namespace=namespace + 1, tag="ghi789")
+        # Another host's folder on a shared directory: same namespace number, a dead pid here, a live process there.
+        other_host = tmp_path / self._name(self._dead_pid(), host="0" * 12, tag="jkl012")
         unrelated = tmp_path / "something-else"
-        for folder in (dead, live, other_namespace, unrelated):
+        for folder in (dead, live, other_namespace, other_host, unrelated):
             folder.mkdir()
 
         assert remove_stale_temp_folders(tmp_path) == [dead]
-        assert sorted(p.name for p in tmp_path.iterdir()) == sorted(p.name for p in (live, other_namespace, unrelated))
+        assert sorted(p.name for p in tmp_path.iterdir()) == sorted(
+            p.name for p in (live, other_namespace, other_host, unrelated)
+        )
 
-    def test_first_folder_in_a_temp_dir_clears_leftovers(self, set_global_config, tmp_path: Path) -> None:
-        namespace = os.stat("/proc/self/ns/pid").st_ino
-        leftover = tmp_path / f"nemo-gym-workspace.{namespace}.{self._dead_pid()}.abc123"
+    def test_first_folder_in_a_temp_dir_clears_leftovers(self, set_global_config, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(runtime_files, "_checked_temp_parents", set())
+        leftover = tmp_path / self._name(self._dead_pid())
         leftover.mkdir()
         set_global_config({"temp_dir": str(tmp_path)})
 
         with temp_folder(kind="workspace") as path:
-            assert path.name.startswith(f"nemo-gym-workspace.{namespace}.{os.getpid()}.")
+            assert path.name.startswith(self._name(os.getpid(), tag=""))
 
         assert not leftover.exists()
 
+    def test_leftovers_are_kept_on_a_shared_filesystem(self, set_global_config, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(runtime_files, "_checked_temp_parents", set())
+        monkeypatch.setattr(runtime_files, "warn_if_unsuitable", lambda setting, path: "lustre")
+        leftover = tmp_path / self._name(self._dead_pid())
+        leftover.mkdir()
+        set_global_config({"temp_dir": str(tmp_path)})
 
-class TestFinishRunFiles:
-    def test_deletes_the_capture_folder(self, tmp_path: Path) -> None:
-        capture = tmp_path / "capture"
-        (capture / "ledgers").mkdir(parents=True)
+        with temp_folder(kind="workspace"):
+            pass
+
+        assert leftover.exists()
+
+
+def test_parent_replaces_temp_dir_for_code_without_gym_configuration(set_global_config, tmp_path: Path) -> None:
+    set_global_config(None)
+
+    with temp_folder(kind="harbor-job", parent=tmp_path / "from-server") as path:
+        assert path.parent == tmp_path / "from-server"
+
+    assert not path.exists()
+
+
+class TestOwnedFolders:
+    def test_deletes_a_folder_gym_created(self, tmp_path: Path) -> None:
+        capture = create_owned_folder(tmp_path / "capture")
+        (capture / "ledgers").mkdir()
         (capture / "ledgers" / "0-0.jsonl").write_text("{}")
 
-        assert finish_run_files(capture_dir=capture, deadline=time.monotonic() + 60) is True
+        assert delete_owned_folder(capture, deadline=time.monotonic() + 60) is True
         assert not capture.exists()
 
+    def test_keeps_a_folder_a_user_chose(self, tmp_path: Path) -> None:
+        chosen = tmp_path / "my-capture"
+        chosen.mkdir()
+        (chosen / "0-0.jsonl").write_text("{}")
+
+        assert delete_owned_folder(chosen) is False
+        assert (chosen / "0-0.jsonl").exists()
+
     def test_a_second_call_or_a_missing_folder_does_nothing(self, tmp_path: Path) -> None:
-        capture = tmp_path / "capture"
-        capture.mkdir()
+        capture = create_owned_folder(tmp_path / "capture")
 
-        assert finish_run_files(capture_dir=capture) is True
-        assert finish_run_files(capture_dir=capture) is True
-        assert finish_run_files(capture_dir=None) is True
+        assert delete_owned_folder(capture) is True
+        assert delete_owned_folder(capture) is True
 
-    def test_stops_at_the_deadline_and_reports_it(self, tmp_path: Path) -> None:
-        capture = tmp_path / "capture"
-        capture.mkdir()
+    def test_stops_at_the_deadline_and_a_later_call_finishes(self, tmp_path: Path) -> None:
+        capture = create_owned_folder(tmp_path / "capture")
         (capture / "0-0.jsonl").write_text("{}")
 
-        assert finish_run_files(capture_dir=capture, deadline=time.monotonic() - 1) is False
+        assert delete_owned_folder(capture, deadline=time.monotonic() - 1) is False
         assert (capture / "0-0.jsonl").exists()
+        assert delete_owned_folder(capture) is True
+        assert not capture.exists()
 
 
 class TestAsyncTempFolder:
@@ -262,3 +304,46 @@ class TestAsyncTempFolder:
             await task
 
         assert created and not created[0].exists()
+
+
+async def test_folder_is_removed_when_cancelled_while_it_is_created(
+    set_global_config, tmp_path: Path, monkeypatch
+) -> None:
+    set_global_config({"temp_dir": str(tmp_path)})
+    started, release = threading.Event(), threading.Event()
+    create = runtime_files._create_temp_folder
+
+    def slow_create(kind: str, parent: Path | None) -> Path:
+        started.set()
+        release.wait(5)
+        return create(kind, parent)
+
+    monkeypatch.setattr(runtime_files, "_create_temp_folder", slow_create)
+
+    async def work() -> None:
+        async with async_temp_folder(kind="workspace"):
+            pass
+
+    task = asyncio.create_task(work())
+    await asyncio.to_thread(started.wait, 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    release.set()
+    for _ in range(100):
+        if not any(tmp_path.iterdir()):
+            break
+        await asyncio.sleep(0.01)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_debug_folder_segments_are_quoted(set_global_config, tmp_path: Path, monkeypatch) -> None:
+    set_global_config({"debug_dir": str(tmp_path)})
+    monkeypatch.setattr(runtime_files, "_current_agent_instance", lambda: "../escape")
+
+    path = debug_folder(server_name="swebench", kind="verification")
+
+    assert path is not None
+    assert path.is_relative_to(tmp_path / "swebench" / "verification")
+    assert ".." not in path.parts

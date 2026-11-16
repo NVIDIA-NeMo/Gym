@@ -26,7 +26,9 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Filesystems shared by many hosts, whose metadata servers every file create and delete loads.
-SHARED_FILESYSTEM_TYPES = frozenset({"lustre", "nfs", "nfs4", "gpfs", "beegfs"})
+SHARED_FILESYSTEM_TYPES = frozenset(
+    {"lustre", "nfs", "nfs4", "gpfs", "beegfs", "ceph", "cifs", "smb3", "wekafs", "glusterfs", "9p", "virtiofs"}
+)
 # Filesystems held in memory: what is written there counts against the job's memory, as /tmp can be in a container.
 MEMORY_FILESYSTEM_TYPES = frozenset({"tmpfs", "ramfs"})
 MOUNTINFO = Path("/proc/self/mountinfo")

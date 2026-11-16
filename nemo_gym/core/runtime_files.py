@@ -23,7 +23,7 @@ Each kind of runtime file has one global setting, named by what it holds, and on
   The folder is removed when the block exits.
 - Debug files, such as verification logs, screenshots, trajectories and failure records: :func:`debug_folder`.
   They are written only when ``debug_dir`` or the server's own ``debug_dir`` names a folder.
-- Model-call capture: ``model_call_capture_dir``. :func:`finish_run_files` deletes it at the end of a run.
+- Model-call capture: ``model_call_capture_dir``. :func:`delete_owned_folder` deletes a folder an entry point created.
 - Caches: ``cache_dir``. Run output that a later run reads back: the server's ``output_dir``, under ``results_dir``.
 
 A kind of file gets a top-level setting of its own only when several components use it by path,
@@ -51,7 +51,7 @@ from nemo_gym.config.global_config import (
     maybe_get_global_config_dict,
 )
 from nemo_gym.core.episode_context import current_rollout_id
-from nemo_gym.core.filesystems import warn_if_unsuitable
+from nemo_gym.core.filesystems import SHARED_FILESYSTEM_TYPES, warn_if_unsuitable
 
 
 logger = logging.getLogger(__name__)
@@ -61,10 +61,18 @@ _KIND = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _MAX_LABEL_LENGTH = 100
 NO_ROLLOUT_SEGMENT = "no-rollout"
 UNNAMED_AGENT_INSTANCE_SEGMENT = "unnamed"
-# A temporary folder's name records the process that made it: nemo-gym-<kind>.<pid namespace>.<pid>.<random>.
-_TEMP_FOLDER = re.compile(r"^nemo-gym-[a-z0-9_-]+\.(?P<namespace>\d+)\.(?P<pid>\d+)\.[^./]+$")
-# Parents this process has already cleared of folders left by dead processes.
-_reaped_parents: set[Path] = set()
+# A temporary folder's name records the process that made it:
+# nemo-gym-<kind>.<host boot id>.<pid namespace>.<pid>.<random>.
+# PID namespace numbers repeat across hosts (every host's initial namespace has the same one), so the boot id is
+# what tells hosts apart when two of them share a directory.
+_TEMP_FOLDER = re.compile(r"^nemo-gym-[a-z0-9_-]+\.(?P<host>[0-9a-f]{12})\.(?P<namespace>\d+)\.(?P<pid>\d+)\.[^./]+$")
+_BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
+_UNKNOWN_HOST = "unknown"
+# Parents this process has already checked and cleared of folders left by dead processes.
+_checked_temp_parents: set[Path] = set()
+_checked_debug_roots: set[Path] = set()
+# Marks a folder that Gym created for a run, so a cleanup never deletes a folder a user chose.
+OWNED_MARKER = ".nemo-gym-owned"
 
 
 def debug_folder(
@@ -85,6 +93,9 @@ def debug_folder(
     Call this once per unit of work that owns the files.
     That is once per request, or once when a session opens, keeping the folder on the session.
     Nothing is created here; the folder exists only if the caller writes into it.
+
+    Only a process started with Gym's configuration sees the global ``debug_dir``.
+    Code in a Ray task or another helper process gets the folder from the server that started it.
     """
     if not _KIND.fullmatch(kind):
         raise ValueError(f"kind must be lowercase letters, digits, '-' and '_', got {kind!r}")
@@ -105,8 +116,12 @@ def debug_folder(
     if label:
         leaf += "-" + quote(label, safe="")[:_MAX_LABEL_LENGTH]
     leaf += "-" + uuid4().hex[:12]
-    rollout = current_rollout_id() or NO_ROLLOUT_SEGMENT
-    return root / kind / rollout / (_current_agent_instance() or UNNAMED_AGENT_INSTANCE_SEGMENT) / leaf
+    if root not in _checked_debug_roots:
+        _checked_debug_roots.add(root)
+        warn_if_unsuitable(DEBUG_DIR_KEY_NAME, root)
+    rollout = quote(current_rollout_id() or NO_ROLLOUT_SEGMENT, safe="")
+    agent_instance = quote(_current_agent_instance() or UNNAMED_AGENT_INSTANCE_SEGMENT, safe="")
+    return root / kind / rollout / agent_instance / leaf
 
 
 def _current_agent_instance() -> str | None:
@@ -116,6 +131,14 @@ def _current_agent_instance() -> str | None:
     Once named agent sessions set one, this function reads it, and callers do not change.
     """
     return None
+
+
+def _host_id() -> str:
+    """This host's current boot, as 12 hex digits, or ``unknown`` where Linux does not expose it."""
+    try:
+        return _BOOT_ID.read_text().strip().replace("-", "")[:12] or _UNKNOWN_HOST
+    except OSError:
+        return _UNKNOWN_HOST
 
 
 def _pid_namespace() -> int | None:
@@ -140,12 +163,14 @@ def remove_stale_temp_folders(parent: Path) -> list[Path]:
     """Remove this user's temporary folders under ``parent`` whose process is gone.
 
     A killed process cannot remove its own folders.
-    Each folder's name records its process and PID namespace.
-    A folder goes only when it belongs to this user and this PID namespace and its process no longer exists.
-    A process in another namespace, such as another container that shares the directory, keeps its folders.
+    Each folder's name records its host's boot, its PID namespace and its process.
+    A folder goes only when it belongs to this user, this boot of this host and this PID namespace,
+    and its process no longer exists.
+    A process on another host, or in another container's namespace, keeps its folders.
     """
+    host = _host_id()
     namespace = _pid_namespace()
-    if namespace is None:
+    if host == _UNKNOWN_HOST or namespace is None:
         return []
     removed = []
     uid = os.getuid()
@@ -155,7 +180,7 @@ def remove_stale_temp_folders(parent: Path) -> list[Path]:
         return []
     for entry in entries:
         match = _TEMP_FOLDER.fullmatch(entry.name)
-        if match is None or int(match["namespace"]) != namespace:
+        if match is None or match["host"] != host or int(match["namespace"]) != namespace:
             continue
         try:
             if not entry.is_dir(follow_symlinks=False) or entry.stat(follow_symlinks=False).st_uid != uid:
@@ -169,24 +194,27 @@ def remove_stale_temp_folders(parent: Path) -> list[Path]:
     return removed
 
 
-def _temp_parent() -> Path:
-    configured = (maybe_get_global_config_dict() or {}).get(TEMP_DIR_KEY_NAME)
-    # Without a setting, the node's own temporary directory, as this process sees it.
-    parent = Path(configured) if configured else Path(tempfile.gettempdir())
+def _temp_parent(parent: Path | None) -> Path:
+    if parent is None:
+        configured = (maybe_get_global_config_dict() or {}).get(TEMP_DIR_KEY_NAME)
+        # Without a setting, the node's own temporary directory, as this process sees it.
+        parent = Path(configured) if configured else Path(tempfile.gettempdir())
     parent.mkdir(parents=True, exist_ok=True)
-    if parent not in _reaped_parents:
-        _reaped_parents.add(parent)
+    if parent not in _checked_temp_parents:
+        _checked_temp_parents.add(parent)
         # Checked here, on the node that writes, because the mount table differs per node.
-        warn_if_unsuitable(TEMP_DIR_KEY_NAME, parent)
-        remove_stale_temp_folders(parent)
+        found = warn_if_unsuitable(TEMP_DIR_KEY_NAME, parent)
+        # On a filesystem other hosts share, a process check made on this host cannot speak for theirs.
+        if found not in SHARED_FILESYSTEM_TYPES:
+            remove_stale_temp_folders(parent)
     return parent
 
 
-def _create_temp_folder(kind: str) -> Path:
+def _create_temp_folder(kind: str, parent: Path | None) -> Path:
     if not _KIND.fullmatch(kind):
         raise ValueError(f"kind must be lowercase letters, digits, '-' and '_', got {kind!r}")
-    prefix = f"nemo-gym-{kind}.{_pid_namespace() or 0}.{os.getpid()}."
-    return Path(tempfile.mkdtemp(prefix=prefix, dir=_temp_parent()))
+    prefix = f"nemo-gym-{kind}.{_host_id()}.{_pid_namespace() or 0}.{os.getpid()}."
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=_temp_parent(parent)))
 
 
 def _finish_temp_folder(path: Path, keep_as: Path | None) -> None:
@@ -201,7 +229,7 @@ def _finish_temp_folder(path: Path, keep_as: Path | None) -> None:
 
 
 @contextmanager
-def temp_folder(*, kind: str, keep_as: Path | None = None) -> Iterator[Path]:
+def temp_folder(*, kind: str, keep_as: Path | None = None, parent: Path | None = None) -> Iterator[Path]:
     """Create a temporary folder for one request or session and remove it when the block exits.
 
     The folder is under ``temp_dir``, which defaults to the node's temporary directory.
@@ -211,9 +239,12 @@ def temp_folder(*, kind: str, keep_as: Path | None = None) -> Iterator[Path]:
     When it is set, the folder is moved there on exit instead of being deleted.
     A server then writes to one place whether debug files are on or off.
 
+    ``parent`` replaces ``temp_dir`` for code that runs without Gym's configuration, such as a Ray task:
+    the server that starts it passes the folder it reads from its own configuration.
+
     This blocks on filesystem calls; use :func:`async_temp_folder` in a coroutine.
     """
-    path = _create_temp_folder(kind)
+    path = _create_temp_folder(kind, parent)
     try:
         yield path
     finally:
@@ -221,9 +252,17 @@ def temp_folder(*, kind: str, keep_as: Path | None = None) -> Iterator[Path]:
 
 
 @asynccontextmanager
-async def async_temp_folder(*, kind: str, keep_as: Path | None = None) -> AsyncIterator[Path]:
+async def async_temp_folder(
+    *, kind: str, keep_as: Path | None = None, parent: Path | None = None
+) -> AsyncIterator[Path]:
     """:func:`temp_folder` for a coroutine: creating and removing the folder run in a worker thread."""
-    path = await asyncio.to_thread(_create_temp_folder, kind)
+    creating = asyncio.ensure_future(asyncio.to_thread(_create_temp_folder, kind, parent))
+    try:
+        path = await asyncio.shield(creating)
+    except asyncio.CancelledError:
+        # The thread may still create the folder after this task is cancelled; remove it once it does.
+        creating.add_done_callback(_remove_created_folder)
+        raise
     try:
         yield path
     finally:
@@ -231,30 +270,52 @@ async def async_temp_folder(*, kind: str, keep_as: Path | None = None) -> AsyncI
         await asyncio.shield(asyncio.to_thread(_finish_temp_folder, path, keep_as))
 
 
-def finish_run_files(*, capture_dir: Path | None = None, deadline: float | None = None) -> bool:
-    """Delete a run's model-call capture folder after its servers have stopped.
+def _remove_created_folder(creating: "asyncio.Future[Path]") -> None:
+    if not creating.cancelled() and creating.exception() is None:
+        shutil.rmtree(creating.result(), ignore_errors=True)
 
-    Call it only when a checkpoint controller ran for the run: NeMo RL, or rollout collection with ``checkpoint_dir``.
-    Their checkpoint commits hold the durable copy of the capture rows, so nothing is archived.
-    Without one, capture is the run's only copy of the model calls and is run output, not to be deleted.
-    Call it only for a folder the caller set up for this run, never for one a user configured.
+
+def create_owned_folder(path: Path) -> Path:
+    """Create ``path`` as a folder Gym owns for one run, so :func:`delete_owned_folder` may remove it later.
+
+    An entry point calls this for a folder it chose for the run, such as a node-local capture folder.
+    A folder a user configured is never marked, so it is never deleted.
+    """
+    path.mkdir(parents=True, exist_ok=True)
+    (path / OWNED_MARKER).touch()
+    return path
+
+
+def delete_owned_folder(path: Path, *, deadline: float | None = None) -> bool:
+    """Delete a folder that :func:`create_owned_folder` marked, after the processes writing into it have stopped.
+
+    A folder without the marker is left alone and logged, because a user chose it.
     A folder that is already gone is not an error, because a shutdown can run twice.
     ``deadline`` is a ``time.monotonic()`` value.
     Past it, the remaining files are left in place and logged rather than holding up the shutdown.
+    The marker goes last, so a later call can finish a deletion the deadline cut short.
     Returns whether the folder is gone.
+
+    For model-call capture, delete the folder only when a checkpoint controller ran for the run:
+    NeMo RL, or rollout collection with ``checkpoint_dir``, whose checkpoints hold the durable copy.
+    Without one, capture is the run's only copy of the model calls and is run output.
     """
-    if capture_dir is None or not capture_dir.exists():
+    if not path.exists():
         return True
-    if deadline is None:
-        shutil.rmtree(capture_dir, ignore_errors=True)
-    else:
-        for current, folders, files in os.walk(capture_dir, topdown=False):
-            if time.monotonic() > deadline:
-                logger.warning("Ran out of time deleting model-call capture folder %s", capture_dir)
-                return False
-            for name in files:
-                Path(current, name).unlink(missing_ok=True)
-            for name in folders:
-                shutil.rmtree(Path(current, name), ignore_errors=True)
-        shutil.rmtree(capture_dir, ignore_errors=True)
-    return not capture_dir.exists()
+    marker = path / OWNED_MARKER
+    if not marker.is_file():
+        logger.warning("Not deleting %s: Gym did not create it for this run", path)
+        return False
+    for current, folders, files in os.walk(path, topdown=False):
+        if deadline is not None and time.monotonic() > deadline:
+            logger.warning("Ran out of time deleting %s", path)
+            return False
+        for name in files:
+            file = Path(current, name)
+            if file != marker:
+                file.unlink(missing_ok=True)
+        for name in folders:
+            shutil.rmtree(Path(current, name), ignore_errors=True)
+    marker.unlink(missing_ok=True)
+    shutil.rmtree(path, ignore_errors=True)
+    return not path.exists()
