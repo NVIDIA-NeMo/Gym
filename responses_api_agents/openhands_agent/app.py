@@ -52,7 +52,7 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, MCPToolAccess
 from nemo_gym.trajectory import AgentObservationBundle, ObservationGap, SandboxObservation
 from responses_api_agents.openhands_agent.conversion import (
     RunOutcome,
@@ -135,16 +135,27 @@ class OpenHandsAgentConfig(BaseResponsesAPIAgentConfig):
     llm_settings: dict[str, Any] = Field(
         default_factory=dict, description="OpenHands SDK LLM settings; see SUPPORTED_LLM_SETTINGS."
     )
+    finish_tool_names: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Tools from the episode's MCP grants whose successful call ends the run. When set, OpenHands' own finish "
+            "tool is not offered, and at least one configured name must be available from a grant. A reply without "
+            "a tool call or a run limit can still end the run without submitting."
+        ),
+    )
+    mcp_tool_timeout_seconds: float = Field(
+        default=900, gt=0, allow_inf_nan=False, description="Per call to a tool from an MCP grant."
+    )
     # Only for an agent-owned sandbox, when Resources supplies no sandbox_access.
     sandbox_provider: Optional[str] = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     network_access: SandboxNetworkAccess = Field(
         default="inherit",
         description=(
-            "Egress of a sandbox OpenHands creates: `model_only` allows only the model server's host. OpenHands keeps "
-            "no tool grants, so `model_and_tools` allows the same. A borrowed task sandbox keeps its owner's network, "
-            "so a session that borrows one rejects any other value than `inherit`. The Agent Server builds the runtime "
-            "and uploads it, so a restricted sandbox needs no network for setup."
+            "Egress of a sandbox OpenHands creates: `model_only` allows only the model server's host, and "
+            "`model_and_tools` also the hosts of the episode's MCP grants. A borrowed task sandbox keeps its owner's "
+            "network, so a session that borrows one rejects any other value than `inherit`. The Agent Server builds "
+            "the runtime and uploads it, so a restricted sandbox needs no network for setup."
         ),
     )
     sandbox_install_timeout_seconds: float = Field(default=1200, gt=0, allow_inf_nan=False)
@@ -180,12 +191,15 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
         return state.session if isinstance(state, OpenHandsSandboxSession) else None
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> OpenHandsSandboxSession:
-        required = sorted(access.name for access in self.effective_tool_accesses(body) if access.required)
+        accesses = self.effective_tool_accesses(body)
+        required = sorted(
+            access.name for access in accesses if access.required and not isinstance(access, MCPToolAccess)
+        )
         if required:
             raise AgentSeedRejectedError(
-                "OpenHands runs its own terminal, file editor and task tracker and cannot use required tool grants: "
-                + ", ".join(required)
+                "OpenHands takes tool grants only over MCP and cannot use required tool grants: " + ", ".join(required)
             )
+        mcp_grants = [access for access in accesses if isinstance(access, MCPToolAccess)]
         global_config = self.server_client.global_config_dict
         access = body.sandbox_access
         owns_sandbox = access is None
@@ -237,9 +251,14 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
 
         try:
             if owns_sandbox:
-                # OpenHands keeps no tool grants (required ones were refused above), so only the model's host opens.
+                # Only the model's host and, for model_and_tools, the MCP grants' hosts open.
                 spec = restrict_sandbox_network(
-                    spec, network_access=self.config.network_access, provider=provider, model_base_url=model_base_url
+                    spec,
+                    network_access=self.config.network_access,
+                    provider=provider,
+                    model_base_url=model_base_url,
+                    tool_urls=[str(access.connection.url) for access in mcp_grants],
+                    required_tool_urls=[str(access.connection.url) for access in mcp_grants if access.required],
                 )
                 sandbox = AsyncSandbox(provider)
             else:
@@ -311,9 +330,10 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
             or AgentObservationBundle(source="openhands", gaps=[ObservationGap(code="agent_activation_interrupted")]),
         )
 
-    def _validate_request(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
-        """Accept one text prompt with optional system text; return (prompt, system)."""
-        supported = {"input", "instructions", "model"}
+    def _validate_request(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str, dict[str, Any]]:
+        """Accept one text prompt with optional system text and sampling; return (prompt, system, LLM settings)."""
+        # Training frameworks send these on every request; they become OpenHands LLM settings for the run.
+        supported = {"input", "instructions", "model", "temperature", "top_p", "max_output_tokens"}
         for name, field in type(body).model_fields.items():
             value = getattr(body, name)
             if name in supported or (name in ("stream", "background") and value is False):
@@ -341,9 +361,21 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
                 raise HTTPException(422, "OpenHands accepts only text input")
             texts.append("".join(part["text"] if isinstance(part, dict) else part.text for part in item.content))
         system = "\n\n".join(part for part in (self.config.system_prompt, body.instructions, *texts[:-1]) if part)
-        return texts[-1], system
+        sampling = {
+            name: value
+            for name, value in (
+                ("temperature", body.temperature),
+                ("top_p", body.top_p),
+                # A per-call limit, as OpenHands applies it, not a budget for the whole run.
+                ("max_output_tokens", body.max_output_tokens),
+            )
+            if value is not None
+        }
+        return texts[-1], system, sampling
 
-    def _runner_input(self, state: OpenHandsSandboxSession, *, prompt: str, system: str) -> dict[str, Any]:
+    def _runner_input(
+        self, state: OpenHandsSandboxSession, *, prompt: str, system: str, sampling: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         invocation_id = state.request.episode_id.capture_key
         endpoint = self.model_endpoint(model_server=self.config.model_server, rollout_id=invocation_id)
         return {
@@ -355,6 +387,7 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
                 # to /responses; the adapter's model connection is Chat Completions.
                 "api_mode": "chat",
                 **self.config.llm_settings,
+                **(sampling or {}),
                 # LiteLLM's openai provider sends Chat Completions to the base URL as given.
                 "model": f"openai/{self.config.model}",
                 "base_url": endpoint.base_url,
@@ -370,6 +403,18 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
             },
             "condenser": self.config.condenser,
             "max_iterations": self.config.max_iterations,
+            # The episode's MCP grants, by grant name; the runner connects to each required one before the first call.
+            "mcp_servers": {
+                access.name: {
+                    "url": str(access.connection.url),
+                    "headers": access.connection.headers,
+                    "required": access.required,
+                    "timeout": self.config.mcp_tool_timeout_seconds,
+                }
+                for access in self.effective_tool_accesses(state.request)
+                if isinstance(access, MCPToolAccess)
+            },
+            "finish_tool_names": self.config.finish_tool_names,
             "state_dir": state.path("state"),
             "events_path": state.path("events.jsonl"),
             "result_path": state.path("result.json"),
@@ -382,6 +427,7 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
         *,
         prompt: str,
         system: str,
+        sampling: dict[str, Any] | None = None,
     ) -> NeMoGymResponse:
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         failure: BaseException | None = None
@@ -390,7 +436,7 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
             # Close can fence the staging phase just as it fences execution.
             async with self.sem:
                 artifacts = await state.execute(
-                    self._runner_input(state, prompt=prompt, system=system),
+                    self._runner_input(state, prompt=prompt, system=system, sampling=sampling),
                     timeout=timeout,
                     close_timeout=self.config.session_close_timeout_seconds,
                 )
@@ -534,11 +580,11 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
             raise HTTPException(409, "OpenHands activation does not match the seeded session and rollout")
         if state.session.closing:
             raise HTTPException(409, "OpenHands session is closing")
-        prompt, system = self._validate_request(body)
+        prompt, system, sampling = self._validate_request(body)
         if state.task is None:
             state.activation_request = body.model_copy(deep=True)
             state.task = asyncio.create_task(
-                self._activate(state, state.activation_request, prompt=prompt, system=system)
+                self._activate(state, state.activation_request, prompt=prompt, system=system, sampling=sampling)
             )
         elif body != state.activation_request:
             raise HTTPException(409, "OpenHands sessions support one activation; retry the same request")
