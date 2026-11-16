@@ -24,7 +24,10 @@ from pydantic import ValidationError
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import (
+    AGENT_LIMIT,
     JUDGE_FAILED,
+    MODEL_CONTEXT_LIMIT,
+    SESSION_LOST,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
@@ -34,6 +37,7 @@ from nemo_gym.core import (
 from nemo_gym.verification import judge_failsafe
 from resources_servers.gdpval import persisted_layout
 from resources_servers.gdpval.app import (
+    _NO_READABLE_SUBMISSION_TEXT,
     GDPValResourcesServer,
     GDPValResourcesServerConfig,
     GDPValVerifyRequest,
@@ -133,12 +137,64 @@ class TestRubricEmptyCollectedSubmission:
         assert response.failure_kind is None
         assert response.judge_response == {"manual_imputation": "no_deliverable_as_zero"}
         scorer.assert_not_awaited()
-        assert json.loads((tmp_path / persisted_layout.FINISH_PARAMS_FILE).read_text()) == finish
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("stop_reason", "kind"), [("max_turns", AGENT_LIMIT), ("context_limit", MODEL_CONTEXT_LIMIT)]
+    )
+    async def test_model_stop_without_output_keeps_its_failure_kind(self, tmp_path, stop_reason, kind) -> None:
+        (tmp_path / persisted_layout.FINISH_PARAMS_FILE).write_text("null")
+        body = _verify_request(deliverables_dir=str(tmp_path), rubric_json=[{"criterion": "Submit it", "score": 1}])
+        body.response.metadata = {"stop_reason": stop_reason}
+
+        response = await _server().verify(_NO_SESSION, body)
+
+        assert response.reward == 0.0
+        assert response.mask_sample is False
+        assert response.failure_kind == kind
+        assert response.judge_response == {"manual_imputation": "no_deliverable_as_zero"}
+
+    @pytest.mark.asyncio
+    async def test_missing_deliverables_dir_is_masked_not_judged_on_the_message(self, tmp_path) -> None:
+        body = _verify_request(
+            deliverables_dir=str(tmp_path / "gone"),
+            deliverable_text="I created Sample.xlsx with all required analysis.",
+            rubric_json=[{"criterion": "Submit the completed workbook", "score": 1}],
+        )
+        scorer = AsyncMock(return_value=(1.0, {}))
+        with patch("resources_servers.gdpval.scoring.score_with_rubric_structured", new=scorer):
+            response = await _server(rubric_scoring_mode="structured").verify(_NO_SESSION, body)
+
+        assert response.mask_sample is True
+        assert response.failure_kind == SESSION_LOST
+        assert response.reward == 0.0
+        scorer.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_collected_file_without_text_is_not_replaced_by_the_message(self, tmp_path) -> None:
+        openpyxl = pytest.importorskip("openpyxl")
+        (tmp_path / persisted_layout.FINISH_PARAMS_FILE).write_text('{"paths": ["Sample.xlsx"]}')
+        openpyxl.Workbook().save(tmp_path / "Sample.xlsx")
+        claim = "I created Sample.xlsx with all required analysis."
+        body = _verify_request(
+            deliverables_dir=str(tmp_path),
+            deliverable_text=claim,
+            rubric_json=[{"criterion": "Submit the completed workbook", "score": 1}],
+        )
+        scorer = AsyncMock(return_value=(0.0, {}))
+        with (
+            patch("resources_servers.gdpval.scoring.score_with_rubric_structured", new=scorer),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+        ):
+            await _server(rubric_scoring_mode="structured").verify(_NO_SESSION, body)
+
+        scorer.assert_awaited_once()
+        assert scorer.call_args.kwargs["deliverable_text"] == _NO_READABLE_SUBMISSION_TEXT
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("collected", [False, True])
-    async def test_real_file_and_legacy_text_still_reach_judge(self, tmp_path, collected) -> None:
-        text = "Submitted policy content." if collected else "Legacy text deliverable."
+    async def test_submitted_file_and_unmarked_text_reach_judge(self, tmp_path, collected) -> None:
+        text = "Submitted policy content." if collected else "Text deliverable."
         if collected:
             (tmp_path / persisted_layout.FINISH_PARAMS_FILE).write_text('{"paths": ["policy.txt"]}')
             (tmp_path / "policy.txt").write_text(text)
