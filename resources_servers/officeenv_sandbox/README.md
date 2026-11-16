@@ -380,6 +380,17 @@ Gym:
 The caller check is not a network boundary: a gateway that exposes only MCP and the file API to
 sandboxes would be one.
 
+## Episodes without a sandbox
+
+`configs/officeenv_sandboxless.yaml` runs OfficeEnv's rows without a sandbox in the same run as
+the sandboxed harnesses. It composes the OfficeEnv server's config
+(`resources_servers/officeenv/configs/officeenv.yaml`) and copies its three instances (`_copy`, so
+they keep their names) as `officeenv_sandboxless_resources_server`,
+`officeenv_sandbox_simple_agent` and `officeenv_sandbox_environment_server`, each copy pointing at
+the other copies and taking whatever the OfficeEnv server's instances configure. Rows that name
+`officeenv_sandbox_simple_agent` (`agent_ref`) run on the copies; the copied agent declares no
+dataset, so the OfficeEnv server's example rows and their taskset stay with its own instances.
+
 # Licensing information
 Code: this server, Apache 2.0; the `officeenv` package, NVIDIA, not yet published (its open-source release is under review)
 Data: the example rows are synthetic, emitted from OfficeEnv's built-in examples

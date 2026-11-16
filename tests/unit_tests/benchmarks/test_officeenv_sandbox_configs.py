@@ -1,14 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The OfficeEnv sandbox server's harness configs, resolved with a model config: each names its instances after its
-harness, so several compose in one run without overriding each other. Resolving them needs no OfficeEnv, which the
-server's own tests do."""
+"""The OfficeEnv sandbox server's harness configs and its sandboxless arm, resolved with a model config: each names its
+instances after itself, so several compose in one run without overriding each other. Resolving them needs no
+OfficeEnv, which the server's own tests do."""
 
 from pathlib import Path
 
 import pytest
 from omegaconf import DictConfig, OmegaConf
 
+from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServerConfig
 from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.rollouts.rollout_collection import _environment_server_for_agent, _environment_servers_by_agent
@@ -32,6 +33,17 @@ HARNESSES = {
 }
 # The generic instances the harness configs inherit from, which no resolved config keeps under their own names
 GENERIC = {"single_agent_turn_legacy", *(agent_type for _, agent_type, _, _ in HARNESSES.values())}
+# The OfficeEnv server's instances (resources_servers/officeenv/configs/officeenv.yaml), and the sandboxless copies
+OFFICEENV = ("officeenv_resources_server", "officeenv_simple_agent", "officeenv_environment_server")
+SANDBOXLESS = (
+    "officeenv_sandboxless_resources_server",
+    "officeenv_sandbox_simple_agent",
+    "officeenv_sandbox_environment_server",
+)
+ENVIRONMENT_SERVER_CONFIGS = {
+    "single_agent_turn": SingleAgentTurnEnvironmentServerConfig,
+    "single_agent_turn_legacy": SingleAgentTurnLegacyEnvironmentServerConfig,
+}
 
 
 def resolve(*config_paths: str, **overrides: object) -> tuple[list[str], DictConfig, dict]:
@@ -147,3 +159,48 @@ def test_the_opensandbox_config_reaches_the_copy_of_a_harness_composed_before_it
         sandbox = resolved[resources_server_of(harness)]["resources_servers"]["officeenv_sandbox"]["sandbox_config"]
         assert sandbox["image"].startswith("python:3.12-bookworm@sha256:") and sandbox["resources"]["cpu"] == 2
 
+
+def without(settings: dict, *keys: str) -> dict:
+    """``settings`` without ``keys`` and the address each server is given."""
+    return {key: value for key, value in settings.items() if key not in {*keys, "host", "port"}}
+
+
+@pytest.mark.parametrize("harnesses", [(), ("pi", "codex")], ids=["alone", "beside Pi and Codex"])
+def test_the_sandboxless_arm_copies_the_officeenv_servers_instances(harnesses: tuple[str, ...]) -> None:
+    paths = [f"{CONFIGS}/officeenv_sandboxless.yaml", *(harness_config(harness) for harness in harnesses)]
+    started, config, resolved = resolve(*paths, *([DOCKER] if harnesses else []))
+    resources, agent, environment = OFFICEENV
+    copied_resources, copied_agent, copied_environment = SANDBOXLESS
+
+    # The OfficeEnv server's instances keep their names and their bindings.
+    assert {*OFFICEENV, *SANDBOXLESS} <= set(started)
+    for harness in harnesses:
+        check_harness(resolved, harness)
+    main_agent = resolved[agent]["responses_api_agents"]["simple_agent"]
+    assert main_agent["resources_server"]["name"] == resources
+    assert [dataset["taskset"] for dataset in main_agent["datasets"]] == ["officeenv:example"]
+    assert resolved["environment_server_routes"] == {"officeenv:example": environment}
+
+    # Each copy is its source with its references pointing at the other copies, and the agent declares no dataset.
+    assert without(resolved[copied_resources]["resources_servers"]["officeenv"]) == without(
+        resolved[resources]["resources_servers"]["officeenv"]
+    )
+    copy = resolved[copied_agent]["responses_api_agents"]["simple_agent"]
+    assert without(copy, "resources_server", "datasets") == without(main_agent, "resources_server", "datasets")
+    assert copy["resources_server"] == {"type": "resources_servers", "name": copied_resources}
+    assert copy["datasets"] == []
+    main_environment = resolved[environment]["environment_servers"]
+    copied = resolved[copied_environment]["environment_servers"]
+    assert list(copied) == list(main_environment)  # the server type the OfficeEnv server's environment server runs
+    (server_type,) = main_environment
+    references = ("resources_server", "agent_server")
+    assert without(copied[server_type], *references) == without(main_environment[server_type], *references)
+    assert copied[server_type]["resources_server"] == {"type": "resources_servers", "name": copied_resources}
+    assert copied[server_type]["agent_server"] == {"type": "responses_api_agents", "name": copied_agent}
+    ENVIRONMENT_SERVER_CONFIGS[server_type].model_validate(copied[server_type] | {"name": copied_environment})
+
+    # A flat row that names the copied agent (agent_ref) reaches the copied environment server, and one that names the
+    # OfficeEnv server's agent its own.
+    servers_by_agent = _environment_servers_by_agent(config)
+    assert _environment_server_for_agent(copied_agent, servers_by_agent) == copied_environment
+    assert _environment_server_for_agent(agent, servers_by_agent) == environment
