@@ -13,8 +13,6 @@ denovo_swe_resources_server:
       domain: coding
       verified: false
 
-      # Verification logs are off unless this or the global debug_dir names an absolute node-local folder.
-      debug_dir: null
       # pip install -e . + a per-file pytest sweep over passed_ptp, not a build -- similar shape
       # to Scale-SWE's Python-only sizing.
       evaluation_timeout: 1800

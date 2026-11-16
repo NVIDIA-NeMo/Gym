@@ -42,7 +42,6 @@ from pydantic import BaseModel, ConfigDict
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import VERIFIER_ERROR
-from nemo_gym.core.runtime_files import debug_folder
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -72,6 +71,7 @@ from resources_servers.swebench.patch_capture import (
     prepare_git_for_commits,
 )
 from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
+from resources_servers.swebench.verification_logs import run_keeping_logs
 from resources_servers.swemer_ultra.verification import (
     VerificationInputs,
     VerificationResult,
@@ -93,12 +93,11 @@ class SwemerUltraResourcesServerConfig(BaseResourcesServerConfig):
     patch_capture_mode: PatchCaptureMode = "worktree"
     include_model_patch_in_response: bool = True
     evaluation_timeout: int | None = 1200
-    # Verification logs are off unless this or the global debug_dir names a folder.
-    # Give an absolute node-local path, such as one under /tmp.
-    debug_dir: Path | None = None
     # A verdict-less run is retried on a fresh sandbox: an image pull or a flaky provider start
     # is not evidence about the patch.
     inconclusive_verification_retries: int = 1
+    # Keep each verification attempt's logs under <results_dir>/<server name>/verification/.
+    keep_verification_logs: bool = False
     apply_anti_cheating: bool = True
     # Write the Maven Central mirror to ~/.m2/settings.xml in the agent and eval sandboxes. Turn off for providers
     # that mount their own read-only settings.xml, e.g. one that already mirrors Maven Central.
@@ -392,9 +391,6 @@ class SwemerUltraResourcesServer(SandboxSessionResourcesServer):
         patch = capture.patch
 
         inputs = self._inputs(body, patch)
-        log_dir = debug_folder(
-            server_name=self.config.name, kind="verification", label=body.instance_id, override=self.config.debug_dir
-        )
 
         files = verification_files(inputs, overwrite_maven_settings=self.config.overwrite_maven_settings)
         attempts = 1 + max(self.config.inconclusive_verification_retries, 0)
@@ -408,6 +404,7 @@ class SwemerUltraResourcesServer(SandboxSessionResourcesServer):
             test_output="",
             error="unattempted",
         )
+        kept_logs: Path | None = None
         for attempt in range(1, attempts + 1):
             sandbox: AsyncSandbox | None = None
             started = time()
@@ -415,11 +412,17 @@ class SwemerUltraResourcesServer(SandboxSessionResourcesServer):
                 sandbox = await self._create_sandbox(body, files=files, verifier_session_id=session_id)
                 start_time_taken = time() - started
                 verification_started = time()
-                result = await run_verification(
-                    sandbox=sandbox,
-                    inputs=inputs,
-                    timeout_s=self.config.evaluation_timeout,
-                    log_dir=log_dir / f"attempt-{attempt}" if log_dir is not None else None,
+                result, kept_logs = await run_keeping_logs(
+                    lambda logs: run_verification(
+                        sandbox=sandbox,
+                        inputs=inputs,
+                        timeout_s=self.config.evaluation_timeout,
+                        log_dir=logs,
+                    ),
+                    keep=self.config.keep_verification_logs,
+                    server_name=self.config.name,
+                    instance_id=body.instance_id,
+                    attempt=attempt,
                 )
                 verification_time_taken = time() - verification_started
             except Exception as exc:
@@ -452,7 +455,7 @@ class SwemerUltraResourcesServer(SandboxSessionResourcesServer):
                 # evaluation_completed distinguishes them so a broken row is not read as a hard task.
                 "reward": 1.0 if result.resolved else 0.0,
                 "evaluation_completed": result.completed,
-                "verification_log_dir": str(log_dir) if log_dir is not None else None,
+                "verification_log_dir": str(kept_logs) if kept_logs is not None else None,
                 **(
                     {"mask_sample": True, "failure_kind": VERIFIER_ERROR, "failure_reason": result.error}
                     if not result.completed

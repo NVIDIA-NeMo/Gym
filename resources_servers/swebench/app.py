@@ -41,7 +41,6 @@ from nemo_gym.core import (
     current_verifier_invocation_id,
     observe_failure,
 )
-from nemo_gym.core.runtime_files import async_temp_folder, debug_folder
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -73,6 +72,7 @@ from resources_servers.swebench.swebench_patches import (
     run_instance,
 )
 from resources_servers.swebench.task_data import SWEBenchImageAssets, SWEBenchTestAsset, image_assets_from_json
+from resources_servers.swebench.verification_logs import run_keeping_logs
 
 
 # The longest failure_reason a failure event accepts.
@@ -115,17 +115,17 @@ class SwebenchResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_provider: str
     sandbox_config: Dict[str, Any]
 
-    # The harness writes each verification's logs to a temporary folder that is removed afterwards.
-    # They are kept only when this or the global debug_dir names a folder.
-    # Give an absolute node-local path, such as one under /tmp.
-    debug_dir: Path | None = None
+    # Keep each verification's harness logs under <results_dir>/<server name>/verification/.
+    keep_verification_logs: bool = False
     # No longer has an effect: the harness logs are always removed after each verify.
     # It is still accepted so existing configs load.
     clear_swebench_debug_logs: bool | None = None
 
     def model_post_init(self, context: Any, /) -> None:
-        if self.clear_swebench_debug_logs is False and self.debug_dir is None:
-            LOG.warning("clear_swebench_debug_logs no longer keeps logs. Set debug_dir to keep each verify's logs.")
+        if self.clear_swebench_debug_logs is False and not self.keep_verification_logs:
+            LOG.warning(
+                "clear_swebench_debug_logs no longer keeps logs. Set keep_verification_logs to keep each verify's logs."
+            )
 
 
 class SWEBenchInstanceRequest(BaseModel):
@@ -550,13 +550,10 @@ Stderr:
 
         # Res has 2 keys: completed (whether evaluation completed or not), resolved (whether the issue is resolved)
         start_time = time()
-        log_dir = debug_folder(
-            server_name=self.config.name, kind="verification", label=body.instance_id, override=self.config.debug_dir
-        )
+
         # The harness writes its logs under its working directory by default, which is this server's source folder.
-        # A temporary folder keeps them off the checkout.
-        # It is removed when the block exits, interrupted or not, unless debug files are on.
-        async with async_temp_folder(kind="swebench-harness", keep_as=log_dir) as log_root:
+        # It gets a temporary folder instead, removed when the verify ends, interrupted or not.
+        async def grade(log_root: Path) -> tuple[dict, str]:
             res = await run_instance(
                 test_spec=test_spec,
                 pred={
@@ -572,7 +569,15 @@ Stderr:
                 log_root=log_root,
             )
             test_output_fpaths = glob(str(log_root / "**" / "test_output.txt"), recursive=True)
-            test_output = Path(test_output_fpaths[0]).read_text() if test_output_fpaths else ""
+            return res, Path(test_output_fpaths[0]).read_text() if test_output_fpaths else ""
+
+        (res, test_output), kept_logs = await run_keeping_logs(
+            grade,
+            keep=self.config.keep_verification_logs,
+            server_name=self.config.name,
+            instance_id=body.instance_id,
+            attempt=1,
+        )
         patch_verification_time_taken = time() - start_time
         verifier_sandbox_wall_time_s = monotonic() - verifier_sandbox_lifecycle_started_at
 
@@ -630,7 +635,7 @@ Stderr:
             failure_kind=VERIFIER_ERROR if failure_reason is not None else None,
             failure_reason=failure_reason,
             test_output=test_output,
-            log_dir=str(log_dir) if log_dir is not None else "",
+            log_dir=str(kept_logs) if kept_logs is not None else "",
             verifier_sandbox_observation=verifier_sandbox_observation,
         )
 

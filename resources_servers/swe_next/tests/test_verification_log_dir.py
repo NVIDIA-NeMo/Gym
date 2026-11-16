@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Verification logs stay out of the server's source folder unless debug_dir names a folder."""
+"""Each verify writes its logs to a temporary folder that is removed afterwards, and keeps a copy only when asked."""
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.config.global_config import DEBUG_DIR_KEY_NAME
+from nemo_gym.config.global_config import RESULTS_DIR_KEY_NAME
 from nemo_gym.core import runtime_files
 from resources_servers.swe_next import app as swe_next_app
 from resources_servers.swe_next.app import (
@@ -35,8 +35,9 @@ from resources_servers.swe_next.verification import VerificationResult
 _INSTANCE_ID = "owner/repo-1"
 
 
-async def _verify_log_dir(monkeypatch: pytest.MonkeyPatch, log_root: Path | None) -> Path | None:
-    """Run one golden-patch verify and return the log folder the verifier was handed."""
+async def _verify(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, keep: bool) -> Path:
+    """Run one golden-patch verify with results under ``tmp_path``; return the log folder the verifier wrote to."""
+    monkeypatch.setattr(runtime_files, "maybe_get_global_config_dict", lambda: {RESULTS_DIR_KEY_NAME: str(tmp_path)})
     config = SWENextResourcesServerConfig(
         host="0.0.0.0",
         port=8080,
@@ -45,12 +46,18 @@ async def _verify_log_dir(monkeypatch: pytest.MonkeyPatch, log_root: Path | None
         sandbox_provider="docker",
         sandbox_config={},
         is_verifying_golden_patch=True,
-        debug_dir=log_root,
+        keep_verification_logs=keep,
     )
     server = SWENextResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
     monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=MagicMock()))
     monkeypatch.setattr(server, "_stop_sandbox", AsyncMock())
-    verify = AsyncMock(return_value=VerificationResult(True, True, True, {}, "ok"))
+    log_dirs: list[Path] = []
+
+    async def verify(*, log_dir: Path, **kwargs: object) -> VerificationResult:
+        log_dirs.append(log_dir)
+        (log_dir / "test_output.log").write_text("test log")
+        return VerificationResult(True, True, True, {}, "ok")
+
     monkeypatch.setattr(swe_next_app, "run_verification", verify)
     body = SWENextVerifyRequest.model_validate(
         {
@@ -73,30 +80,27 @@ async def _verify_log_dir(monkeypatch: pytest.MonkeyPatch, log_root: Path | None
         }
     )
     await server.verify(SimpleNamespace(session={SESSION_ID_KEY: "session"}), body)
-    return verify.await_args.kwargs["log_dir"]
+    [log_dir] = log_dirs
+    return log_dir
 
 
 @pytest.mark.asyncio
-async def test_no_log_folder_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert await _verify_log_dir(monkeypatch, None) is None
-
-
-@pytest.mark.asyncio
-async def test_logs_go_under_the_configured_folder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    log_dir = await _verify_log_dir(monkeypatch, tmp_path)
-
-    # <debug_dir>/verification/<rollout>/<agent instance>/<time>-<instance id>-<random>/attempt-1
-    assert log_dir.relative_to(tmp_path).parts[0] == "verification"
-    assert "-owner%2Frepo-1-" in log_dir.parent.name
-    assert log_dir.name == "attempt-1"
-
-
-@pytest.mark.asyncio
-async def test_the_global_debug_dir_applies_under_the_server_name(
+async def test_logs_go_to_a_temporary_folder_and_are_not_kept_by_default(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(runtime_files, "maybe_get_global_config_dict", lambda: {DEBUG_DIR_KEY_NAME: str(tmp_path)})
+    log_dir = await _verify(monkeypatch, tmp_path, keep=False)
 
-    log_dir = await _verify_log_dir(monkeypatch, None)
+    assert not log_dir.is_relative_to(Path(swe_next_app.__file__).parent)
+    assert not log_dir.exists()
+    assert not any(tmp_path.iterdir())
 
-    assert log_dir.relative_to(tmp_path).parts[:2] == ("swe_next", "verification")
+
+@pytest.mark.asyncio
+async def test_kept_logs_are_copied_under_the_server_results(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    log_dir = await _verify(monkeypatch, tmp_path, keep=True)
+
+    # <results_dir>/<server>/verification/<rollout>/<time>-<instance id>-attempt<n>-<random>/
+    [kept] = (tmp_path / "swe_next" / "verification").rglob("test_output.log")
+    assert kept.read_text() == "test log"
+    assert "-owner%2Frepo-1-attempt1-" in kept.parent.name
+    assert not log_dir.exists()
