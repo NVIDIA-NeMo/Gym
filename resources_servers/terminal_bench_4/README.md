@@ -50,8 +50,12 @@ denominator. `sandbox_resource_limit` retains the resource and provider evidence
 in the rollout and trial result; `verifier_result.source` is
 `sandbox_resource_limit`, and test counts remain null. The original agent
 termination and diagnostics are preserved, but the result carries no
-infrastructure-failure marker. Recognition requires an explicit provider death
-report. Setup failures, node-pressure evictions, unrelated sandbox losses, and a
+infrastructure-failure marker: the harness's failure events (such as a process
+cleanup the dead sandbox could not confirm) stay on the row as observations,
+with none selected as its failure. Recognition requires an explicit provider
+death report. OpenSandbox's report of an unavailable sandbox names no container,
+so it counts only when it carries the pod's own ephemeral-storage-limit eviction.
+Setup failures, node-pressure evictions, unrelated sandbox losses, and a
 verifier that fails to start retain their existing infrastructure-error handling.
 
 An agent whose process was killed before it finished (`termination.reason:
