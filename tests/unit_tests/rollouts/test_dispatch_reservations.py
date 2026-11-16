@@ -95,3 +95,23 @@ async def test_write_failure_reaches_every_waiter_in_the_batch():
     results = await asyncio.gather(*waiters, return_exceptions=True)
 
     assert [type(result) for result in results] == [OSError, OSError]
+
+
+async def test_a_batch_the_budget_ran_out_on_is_drained_and_not_written():
+    batches = []
+    drained = {"drained": True}
+    reservations = _DispatchReservations(batches.append, interval_s=0.0, drained=lambda: drained)
+
+    results = await asyncio.gather(reservations.reserve({"id": 0}), reservations.reserve({"id": 1}))
+
+    assert batches == []
+    assert results == [drained, drained]
+    assert results[0] is not results[1] and results[0] is not drained, "each waiter gets its own result"
+
+
+async def test_an_eligible_batch_is_reserved_and_returns_none():
+    batches = []
+    reservations = _DispatchReservations(batches.append, interval_s=0.0, drained=lambda: None)
+
+    assert await reservations.reserve({"id": 0}) is None
+    assert batches == [[{"id": 0}]]

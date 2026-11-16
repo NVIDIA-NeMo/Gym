@@ -8904,6 +8904,44 @@ class TestDispatchBudget:
         assert tracker.drained == 4
         assert all(result[NG_DISPATCH_DRAINED_KEY] for _row, result in drained)
 
+    @pytest.mark.parametrize(
+        "budget_s, margin_s, history",
+        [(0.5, 0.0, []), (1.5, 1.0, []), (1.5, None, [1.0] * 5)],
+        ids=["deadline", "margin", "adaptive-margin"],
+    )
+    async def test_a_row_the_budget_runs_out_on_while_its_reservation_waits_is_drained_unreserved(
+        self, monkeypatch: pytest.MonkeyPatch, budget_s: float, margin_s: float | None, history: list
+    ) -> None:
+        # Row 0 is reserved at once. Row 1 passes the drain check, then waits 1 s for the next manifest write.
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "DISPATCH_RESERVATION_INTERVAL_SECONDS", 1.0)
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "get_response_json", AsyncMock(return_value={"reward": 1.0})
+        )
+        posted: list = []
+        reserved: list = []
+        tracker = DispatchLatencyTracker()
+        for seconds in history:
+            tracker.record(seconds)
+
+        started = time.monotonic()
+        completions = self._helper(posted)._run_examples_with_metadata(
+            [self._row(0), self._row(1)],
+            semaphore=asyncio.Semaphore(1),
+            on_dispatch_batch=lambda rows: reserved.append([row[TASK_INDEX_KEY_NAME] for row in rows]),
+            dispatch_budget_s=budget_s,
+            drain_margin_s=margin_s,
+            latency_tracker=tracker,
+        )
+        results = [(await future).result for future in completions]
+
+        assert posted == [0]
+        assert reserved == [[0]], "a row drained while waiting must not be reserved"
+        assert tracker.drained == 1
+        drained = [result for result in results if result.get(NG_DISPATCH_DRAINED_KEY)]
+        assert len(drained) == 1 and drained[0][NG_NO_PERSIST_KEY] is True
+        assert time.monotonic() - started >= 0.9, "row 1 must have passed the first check and waited"
+
     async def test_drain_margin_blocks_a_task_that_cannot_finish(self, monkeypatch: pytest.MonkeyPatch) -> None:
         posted: list = []
         monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "raise_for_status", AsyncMock())
