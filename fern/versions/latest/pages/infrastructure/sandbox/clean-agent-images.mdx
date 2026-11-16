@@ -1,0 +1,160 @@
+---
+title: "Audited offline SWE agent images"
+description: "Reconstruct SWE-Gym agent images from base exports and reject unsupported artifact and network controls."
+position: 20
+---
+
+SWE-Gym can opt into reconstructed, offline **agent** images with the resources-server setting
+`agent_image_manifests`. The default remains the prebuilt dataset image with its best-effort Git scrub.
+The strict path does not change verifier sandboxes, hidden-test execution, or search environments.
+ASearcher training and BrowseComp evaluation have server-side search/browse tools and no agent shell;
+this feature supplies no additional protection to that workflow.
+
+## Build boundary
+
+Run the builder on a trusted offline build host, before collecting policy rollouts:
+
+```bash
+python resources_servers/swe_gym/clean_image.py \
+  --runtime runtime-rootfs.tar --runtime-sha256 APPROVED_RUNTIME_SHA256 \
+  --repo /trusted/source --base-commit FULL_BASE_COMMIT \
+  --reference /trusted/reference.patch --reference /trusted/hidden_test.py \
+  --task-id example-1 --output /artifacts/example-1.tar --import-docker
+```
+
+The runtime tar must be a separately reviewed, task-free, flattened filesystem export containing the
+required interpreter, Git and installed dependencies. It must contain no `/testbed`, source checkout,
+credentials, caches, hidden tests or solution material. Do **not** export a dataset's existing task
+image as this runtime. Pin and review dependency versions and their dates against the task cutoff;
+the scanner cannot infer package provenance or dependency publication dates from bytes.
+An approved hash is an operator trust decision, not proof that the runtime is clean.
+
+The builder never runs an input image. It verifies the runtime hash, exports the specified source
+tree and blob objects with Git, constructs a fresh single-commit `main` repository, and combines it with the runtime
+in one rootfs tar. Original refs, reflogs, Git configuration, unreachable objects, packed fix commits,
+untracked files and caches are never copied from the source checkout. Git replacement objects are
+disabled; attributes, export substitutions, filters, worktree files and the original index are ignored. Source submodules and symlinks require a reviewed
+export and are currently rejected. Public tests present at the base commit remain available.
+
+Every tar member's mtime is zeroed and uid/gid are normalized. The builder rejects known credential,
+cache and Git paths, Git pack signatures, private-key/token signatures, and distinctive reference or
+hidden-test lines in regular files and bounded gzip, bzip2, XZ, ZIP and zlib content. Every supplied reference
+must have at least one distinctive line of 40 bytes; unified patches use added lines. Supply **all**
+reference patches and hidden tests. A match, unsupported filesystem entry or scanner limit fails the build and removes
+partial output. No reference content is written to the image or manifest.
+
+`--import-docker` imports the flattened tar directly as a single image layer, so deleted data from
+an original task image's lower layers cannot survive. It writes `example-1.json` with the immutable
+local Docker image ID, original base commit, reconstructed base commit, runtime/rootfs/reference
+hashes, scanner version and completed checks. Without the import flag the manifest lacks an image
+ID and cannot pass runtime admission. Import discards original image config, volumes, history,
+entrypoints and environment; the resources server supplies its normal testbed environment.
+
+Keep manifests in trusted host storage outside agent mounts and dataset-controlled paths. Treat a
+manifest as a release approval artifact: review and sign it through the deployment's existing artifact
+signing system and distribute it read-only with configuration. The JSON builder does **not** implement
+signatures or verify registry attestations. Admission trusts host configuration and does not accept a
+manifest or an image ID from a task row. Local Docker IDs are intentional; registry publication and
+registry digest binding are not implemented.
+
+## Enable admission
+
+Add these settings to the SWE-Gym resources server and its selected provider block:
+
+```yaml
+# Under the SWE-Gym resources server configuration:
+agent_image_manifests:
+  example-1: /trusted-manifests/example-1.json
+sandbox_config:
+  # Clear inherited provider-specific grants/mounts when composing with the stock config.
+  provider_options: null
+  ttl_s: 1800
+  resources:
+    cpu: 2
+    memory_mib: 4096
+
+# The provider selected by sandbox_provider:
+sandbox:
+  docker:
+    create:
+      network: none
+      cap_drop: [ALL]
+      security_opt: [no-new-privileges]
+      pids_limit: 256
+      apply_resource_limits: true
+    exec:
+      default_timeout_s: 180
+```
+
+An empty manifest map enables strict mode and rejects every task. Missing/mismatched manifests,
+mutable tags, unsupported providers, raw Docker flags and host mounts fail before allocation.
+The strict agent image replaces the row's image only for the agent sandbox. Patch capture uses the
+reconstructed commit ID; the original base commit remains in the row for existing verification.
+Sandbox metadata includes the rootfs hash prefix and scanner version; retain the full trusted
+manifest alongside rollout records for audit.
+
+Docker `network=none` enforces the offline network namespace at container creation. Dropping all
+capabilities and applying `no-new-privileges` prevent the workload from restoring network interfaces
+through normal privileged operations. Before handing control to the agent, a fail-closed admission
+probe requires only loopback interfaces and tests direct IPv4/IPv6 TCP plus UDP/TCP DNS to both the
+configured resolvers and public resolvers. Even a DNS refusal response rejects admission. Probe
+failure follows the existing failed-seed cleanup path. The probe is a deployment check, not a substitute
+for provider enforcement. Docker itself remains a shared-kernel runtime, not a VM escape defense.
+
+Run the agent harness and model/tool clients on the trusted host, for example an agent that invokes
+shell commands remotely through the provider. Sandboxed harnesses that must contact a model server,
+package installation requiring the Internet, and online tools are incompatible with this offline path.
+Dependencies must already be installed in the runtime. No arbitrary networking fallback is provided.
+The shipped SWE-Gym OpenCode configuration runs its model client inside the sandbox and is **not**
+a drop-in consumer of this offline mode. Use the existing resources-server seed/sandbox connection
+contract from a host-side driver; selecting a compatible production harness or adding a separately
+audited narrow gateway mode remains deployment work.
+
+## CoreWeave and tool-service networking
+
+The audited Gym base (`59d0b04f17cc5860e66bc51a35a7dcd8db0b1ebb`) has no CoreWeave sandbox provider.
+CoreWeave's [public configuration guide](https://docs.coreweave.com/products/sandboxes/client/guides/sandbox-configuration)
+documents `NetworkOptions(deny_egress=..., egress=...)`, with DNS managed separately. The documented
+Python type does not expose `dnsEgress`; where supported, the
+[NetworkConfig API](https://docs.coreweave.com/products/sandboxes/reference/network-configs) exposes
+`dnsEgress` and reports `status.effectiveDnsEgress`. Match the client, API and deployed runner versions
+before relying on these controls.
+
+`deny_egress=True` alone is insufficient: DNS and platform-required traffic can remain available.
+DNS denial controls outgoing UDP/TCP destination port 53; it does not authorize query names or block
+DNS carried over another allowed transport. Review all platform exceptions and deployed network
+policies, then verify the actual traffic behavior. Do not infer complete isolation from an SDK flag
+or an effective-state report alone.
+
+A future CoreWeave integration must verify effective runner policy, DNS denial, all platform exceptions,
+image digest admission and actual direct-IP/DNS behavior before lending an agent sandbox. When tools
+need network access, use only narrow approved gateway IP/port destinations enforced outside the guest,
+with no general upstream proxy or CONNECT tunnel. Test both successful gateway requests and rejected
+upstream/direct-IP/DNS bypasses. Unsupported controls must reject allocation. This implementation
+rejects CoreWeave, OpenSandbox, Apptainer and other providers rather than treating hostname filtering
+or command-name deny lists as equivalent to network isolation.
+
+## Validation and limits
+
+```bash
+pytest resources_servers/swe_gym/tests/test_clean_image.py
+```
+
+Fixtures construct a repository with packed future refs, an unreachable hidden-test object and cached
+reference material. They verify those objects cannot be recovered, enumerate the fresh Git objects,
+check normalized mtimes, reject runtime leaks and test ordinary patch generation. Admission tests
+exercise unsafe network settings, immutable task/image binding, mount rejection and explicit direct-IP
+and DNS bypass responses. These are CPU-only tests with no model calls.
+
+This is a scoped opt-in integration, not certification of existing dataset images. Arbitrarily encoded,
+encrypted or semantic answer material can evade fragment scanning; unrecognized secret formats can
+evade credential checks. Completeness depends on the trusted runtime review and reference inputs.
+The builder rejects several common cache paths but cannot identify every application-specific cache.
+Compressed scanning has a per-file/archive size and depth limit and does not decode every binary format.
+Runtime symlinks are preserved without traversing them on the build host; special files and hardlinks
+are rejected. No historical task images are automatically rebuilt, signed or published.
+
+Before deployment, exercise the actual Docker daemon with the approved runtime, inspect its applied
+network namespace and security settings, confirm offline tests and ordinary edits work, and run a
+representative model rollout. Local unit tests do not establish live CNI/provider behavior or benchmark
+results. Fresh verifier sandboxes and trusted test execution remain the separate verifier defense.
