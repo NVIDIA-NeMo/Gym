@@ -28,7 +28,7 @@ from uuid import uuid4
 
 import model_tools  # noqa: F401  # fail-fast if hermes-agent isn't installed  # pyright: ignore[reportMissingImports]
 from fastapi import HTTPException, Request
-from pydantic import ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field
 from toolsets import TOOLSETS  # pyright: ignore[reportMissingImports]
 
 from nemo_gym.agents import (
@@ -56,6 +56,7 @@ from nemo_gym.core import (
     MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
+    MediaFile,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -68,6 +69,7 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
     NeMoGymSummary,
+    UnsupportedContentError,
 )
 from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.sandbox import (
@@ -256,7 +258,33 @@ if not LOG.handlers:
     LOG.addHandler(_SafeStderrHandler(level=logging.WARNING))
 
 
-def _split_input_to_user_and_history(input_items) -> tuple[str, list[dict], Optional[str]]:
+def _hermes_message_content(content: str | list[dict[str, Any] | BaseModel]) -> str | list[dict[str, Any]]:
+    """Keep images and text in order using Hermes' Chat Completions content format.
+
+    Image data URIs have already been checked and normalized at the HTTP boundary.
+    Text-only content keeps the existing concatenation behavior.
+    """
+    if isinstance(content, str):
+        return content
+    parts = [part if isinstance(part, dict) else part.model_dump() for part in content]
+    if not any(part.get("type") == "input_image" for part in parts):
+        return "".join(part.get("text", "") for part in parts)
+    return [
+        # Chat has no "original" detail; use its highest supported level.
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": part["image_url"],
+                "detail": "high" if part.get("detail") == "original" else part.get("detail", "auto"),
+            },
+        }
+        if part.get("type") == "input_image"
+        else {"type": "text", "text": part.get("text", "")}
+        for part in parts
+    ]
+
+
+def _split_input_to_user_and_history(input_items) -> tuple[str | list[dict[str, Any]], list[dict], Optional[str]]:
     if isinstance(input_items, str):
         return input_items, [], None
     items = list(input_items)
@@ -273,14 +301,12 @@ def _split_input_to_user_and_history(input_items) -> tuple[str, list[dict], Opti
             system_message = first_content or ""
             items = items[1:]
 
-    user_message = ""
+    user_message: str | list[dict[str, Any]] = ""
     history: list[dict] = []
     for idx, item in enumerate(items):
         role = getattr(item, "role", None) or (item.get("role") if isinstance(item, dict) else None)
         content = getattr(item, "content", None) or (item.get("content") if isinstance(item, dict) else None)
-        if isinstance(content, list):
-            content = "".join((p.get("text", "") if isinstance(p, dict) else getattr(p, "text", "")) for p in content)
-        content = content or ""
+        content = _hermes_message_content(content or "")
         if idx == len(items) - 1 and role == "user":
             user_message = content
         else:
@@ -837,14 +863,30 @@ class HermesAgent(SimpleResponsesAPIAgent):
             or conversation_roles[-1] != "user"
             or any(role not in ("user", "assistant") for role in conversation_roles)
         ):
-            raise HTTPException(422, "Hermes accepts text history ending with a user message")
+            raise HTTPException(422, "Hermes accepts user/assistant history ending with a user message")
         for item in body.input:
-            if not isinstance(item.content, str) and any(
-                (part.get("type") if isinstance(part, dict) else getattr(part, "type", None))
-                not in ("input_text", "output_text")
-                for part in item.content
-            ):
-                raise HTTPException(422, "Hermes only supports text input")
+            if isinstance(item.content, str):
+                continue
+            for part in item.content:
+                part_type = part.get("type") if isinstance(part, dict) else getattr(part, "type", None)
+                if part_type in ("input_text", "output_text"):
+                    continue
+                if part_type != "input_image":
+                    raise HTTPException(422, f"Hermes does not support content part {part_type!r}")
+                if item.role != "user":
+                    raise HTTPException(422, "Hermes accepts images only in user messages")
+                uri = part.get("image_url") if isinstance(part, dict) else getattr(part, "image_url", None)
+                if not isinstance(uri, str):
+                    raise HTTPException(422, "Hermes input_image must hold a base64 data URI")
+                try:
+                    uri = MediaFile.from_data_uri(uri).to_data_uri()
+                except UnsupportedContentError as error:
+                    raise HTTPException(422, f"Hermes: {error}") from error
+                # Normalize the MIME label to the image bytes without mutating the caller's request.
+                if isinstance(part, dict):
+                    part["image_url"] = uri
+                else:
+                    part.image_url = uri
         return body
 
     def _agent_timeout_sec(self, body: NeMoGymResponseCreateParamsNonStreaming) -> float:
