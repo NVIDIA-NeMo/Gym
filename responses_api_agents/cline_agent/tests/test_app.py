@@ -132,17 +132,19 @@ def _tool_end(name: str, call_id: str, output=None, error: str | None = None) ->
     return _agent_event(event)
 
 
-def _usage(total_in: int, total_out: int, reasoning: int = 0) -> dict:
-    return _agent_event(
-        {
-            "type": "usage",
-            "inputTokens": total_in,
-            "outputTokens": total_out,
-            "totalInputTokens": total_in,
-            "totalOutputTokens": total_out,
-            "totalReasoningTokens": reasoning,
-        }
-    )
+def _usage(total_in: int, total_out: int, reasoning: int = 0, cache_read: int | None = None) -> dict:
+    event = {
+        "type": "usage",
+        "inputTokens": total_in,
+        "outputTokens": total_out,
+        "totalInputTokens": total_in,
+        "totalOutputTokens": total_out,
+        "totalReasoningTokens": reasoning,
+    }
+    if cache_read is not None:
+        event["cacheReadTokens"] = cache_read
+        event["totalCacheReadTokens"] = cache_read
+    return _agent_event(event)
 
 
 def _run_result(**kwargs) -> dict:
@@ -202,7 +204,13 @@ class TestParseClineEvents:
     def test_empty_stream(self) -> None:
         items, metadata = parse_cline_events("")
         assert items == []
-        assert metadata == {"input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0}
+        # Nothing reported, so every count stays unknown rather than zero.
+        assert metadata == {
+            "input_tokens": None,
+            "output_tokens": None,
+            "reasoning_tokens": None,
+            "cached_tokens": None,
+        }
 
     def test_malformed_lines_skipped(self) -> None:
         stream = "not json\n" + _lines(_text_end("answer is 4")) + "\n{ broken"
@@ -329,7 +337,7 @@ class TestParseClineEvents:
 
     def test_usage_from_run_result_aggregate(self) -> None:
         stream = _lines(
-            _usage(50, 10, 2),
+            _usage(50, 10, 2, cache_read=5),
             _run_result(
                 aggregateUsage={
                     "inputTokens": 100,
@@ -340,9 +348,26 @@ class TestParseClineEvents:
             ),
         )
         _, metadata = parse_cline_events(stream)
-        assert metadata["input_tokens"] == 105
+        # openai-compatible's inputTokens already include the cache reads.
+        assert metadata["input_tokens"] == 100
         assert metadata["output_tokens"] == 20
         assert metadata["reasoning_tokens"] == 7
+        assert metadata["cached_tokens"] == 5
+
+    @pytest.mark.parametrize(("cache_read", "expected"), [(5, 105), (0, 100), (None, None)])
+    def test_cache_reads_are_added_for_providers_that_report_them_separately(self, cache_read, expected) -> None:
+        usage = {"inputTokens": 100, "outputTokens": 20}
+        if cache_read is not None:
+            usage["cacheReadTokens"] = cache_read
+        _, metadata = parse_cline_events(_lines(_run_result(aggregateUsage=usage)), cache_reads_in_input=False)
+        assert metadata["input_tokens"] == expected
+
+    def test_counts_cline_does_not_report_stay_unknown(self) -> None:
+        _, metadata = parse_cline_events(_lines(_run_result(aggregateUsage={"cacheReadTokens": 3})))
+        assert metadata["input_tokens"] is None
+        assert metadata["output_tokens"] is None
+        assert metadata["reasoning_tokens"] is None
+        assert metadata["cached_tokens"] == 3
 
     def test_usage_falls_back_to_events_without_run_result(self) -> None:
         # A killed run never prints run_result; the per-turn totals are what remains.
@@ -350,6 +375,36 @@ class TestParseClineEvents:
         assert metadata["input_tokens"] == 50
         assert metadata["output_tokens"] == 10
         assert metadata["reasoning_tokens"] == 3
+        # These usage events carry no cache-read total, so cache reads stay unknown.
+        assert metadata["cached_tokens"] is None
+
+    @pytest.mark.parametrize(("cache_read", "expected"), [(0, 0), (5, 5), (None, None)])
+    def test_cached_tokens_are_reported_only_when_cline_reports_them(self, cache_read, expected) -> None:
+        usage = {"inputTokens": 10, "outputTokens": 2}
+        if cache_read is not None:
+            usage["cacheReadTokens"] = cache_read
+        _, metadata = parse_cline_events(_lines(_run_result(aggregateUsage=usage)))
+        assert metadata["cached_tokens"] == expected
+
+    @pytest.mark.parametrize(
+        ("per_call", "expected"),
+        [
+            ([17920, 18944, 19456], 56320),
+            ([None, 17920, 18944, None, 19456], None),  # Cline counts the two unreported calls as 0
+            ([None], None),
+            ([0, 0], 0),
+        ],
+    )
+    def test_the_aggregate_cache_reads_count_only_when_every_call_reported_them(self, per_call, expected) -> None:
+        total = sum(value or 0 for value in per_call)
+        events = [_usage(10, 2, cache_read=value) for value in per_call]
+        aggregate = {"inputTokens": 100, "outputTokens": 20, "cacheReadTokens": total}
+        _, metadata = parse_cline_events(_lines(*events, _run_result(aggregateUsage=aggregate)))
+        assert metadata["cached_tokens"] == expected
+        _, separate = parse_cline_events(
+            _lines(*events, _run_result(aggregateUsage=aggregate)), cache_reads_in_input=False
+        )
+        assert separate["input_tokens"] == (None if expected is None else 100 + expected)
 
     def test_reasoning_usage_falls_back_to_output_details(self) -> None:
         _, metadata = parse_cline_events(
@@ -621,6 +676,36 @@ class TestModelServer:
         response = asyncio.run(agent.responses(request=request, body=body))
         assert response.usage.output_tokens_details.reasoning_tokens == 6
         assert response.usage.total_tokens == 20
+        # Cline reported no cache reads, so the response does not claim zero.
+        assert response.usage.input_tokens_details.cached_tokens is None
+
+    def test_response_propagates_reported_cached_tokens(self) -> None:
+        agent = _make_agent()
+        agent._run_cline = AsyncMock(
+            return_value=([], {"input_tokens": 11, "output_tokens": 9, "reasoning_tokens": 6, "cached_tokens": 4}, "m")
+        )
+        body = NeMoGymResponseCreateParamsNonStreaming(input="solve this", model="model")
+        request = Request({"type": "http", "path_params": {}})
+        response = asyncio.run(agent.responses(request=request, body=body))
+        assert response.usage.input_tokens_details.cached_tokens == 4
+
+    def test_response_keeps_unreported_reasoning_unknown(self) -> None:
+        agent = _make_agent()
+        agent._run_cline = AsyncMock(
+            return_value=([], {"input_tokens": 11, "output_tokens": 9, "reasoning_tokens": None}, "m")
+        )
+        body = NeMoGymResponseCreateParamsNonStreaming(input="solve this", model="model")
+        request = Request({"type": "http", "path_params": {}})
+        response = asyncio.run(agent.responses(request=request, body=body))
+        assert response.usage.output_tokens_details.reasoning_tokens is None
+
+    def test_response_usage_is_unknown_without_token_counts(self) -> None:
+        agent = _make_agent()
+        agent._run_cline = AsyncMock(return_value=([], {"input_tokens": None, "output_tokens": None}, "m"))
+        body = NeMoGymResponseCreateParamsNonStreaming(input="solve this", model="model")
+        request = Request({"type": "http", "path_params": {}})
+        response = asyncio.run(agent.responses(request=request, body=body))
+        assert response.usage is None
 
     def test_host_budget_refusal_precedes_cli_setup_and_corrected_request_runs(self, tmp_path) -> None:
         workspace = tmp_path / "ws"

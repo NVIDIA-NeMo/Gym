@@ -28,7 +28,7 @@ BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "ifbench_benchmark.jsonl"
 RAW_FPATH = DATA_DIR / "IFBench_test.jsonl"
-URL = "https://raw.githubusercontent.com/allenai/IFBench/refs/heads/main/data/IFBench_test.jsonl"
+URL = "https://raw.githubusercontent.com/allenai/IFBench/fcd289db21d43aaa96c6d9291d32561cd6e19305/data/IFBench_test.jsonl"
 
 
 def prepare() -> Path:

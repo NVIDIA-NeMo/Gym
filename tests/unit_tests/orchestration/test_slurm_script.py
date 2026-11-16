@@ -797,7 +797,14 @@ def test_render_driver_entrypoint_puts_uv_on_path_without_env_file():
 
 
 def _run_private_uv_entrypoint(
-    tmp_path: Path, *, shared_uv: str, tmpdir: Path | None = None
+    tmp_path: Path,
+    *,
+    shared_uv: str,
+    tmpdir: Path | None = None,
+    uv_version: str = "0.0.0",
+    required_version: str | None = None,
+    fresh_uv_version: str | None = None,
+    check: bool = True,
 ) -> tuple[str, Path, Path]:
     """Run a private-uv reader entrypoint with stub git, uv and curl; return its report, the shared uv and curl log."""
     home, tools = tmp_path / "home", tmp_path / "tools"
@@ -805,7 +812,7 @@ def _run_private_uv_entrypoint(
     tools.mkdir()
     # `uv venv` records the interpreter preference it ran with, which decides whether a Python on PATH may be used.
     fake_uv = (
-        '#!/bin/bash\ncase "$1" in --version) echo "uv 0.0.0";; venv) mkdir -p .venv/bin; '
+        '#!/bin/bash\ncase "$1" in --version) echo "uv ' + uv_version + '";; venv) mkdir -p .venv/bin; '
         "printf 'export VIRTUAL_ENV=%q\\n' \"$PWD/.venv\" > .venv/bin/activate; "
         'printf %s "${UV_PYTHON_PREFERENCE:-unset}" > .venv/python-preference;; esac\n'
     )
@@ -816,7 +823,9 @@ def _run_private_uv_entrypoint(
     # The clone declares the extras the entrypoint asks for, and `python` is the one that reads them.
     (tools / "git").write_text(
         '#!/bin/bash\nif [[ $1 == clone ]]; then mkdir -p "$3"; '
-        'printf "[project.optional-dependencies]\\nray = []\\n" > "$3/pyproject.toml"; fi\nexit 0\n'
+        'printf "[tool.uv]\\n%b[project.optional-dependencies]\\nray = []\\n" '
+        + shlex.quote(f'required-version = "{required_version}"\\n' if required_version else "")
+        + ' > "$3/pyproject.toml"; fi\nexit 0\n'
     )
     (tools / "python").symlink_to(sys.executable)
     curl_log = tmp_path / "curl.log"
@@ -824,7 +833,7 @@ def _run_private_uv_entrypoint(
     # unmanaged writes the user-level receipt.
     installer = (
         'dir="${UV_UNMANAGED_INSTALL:-${UV_INSTALL_DIR:-$HOME/.local/bin}}"; mkdir -p "$dir"; printf %s '
-        + shlex.quote(fake_uv)
+        + shlex.quote(fake_uv.replace(uv_version, fresh_uv_version or uv_version, 1))
         + ' > "$dir/uv"; chmod +x "$dir/uv"; if [ -z "${UV_UNMANAGED_INSTALL:-}" ]; then '
         'mkdir -p "$HOME/.config/uv"; echo "{\\"install_prefix\\":\\"$dir\\"}" > "$HOME/.config/uv/uv-receipt.json"; fi'
     )
@@ -841,8 +850,43 @@ def _run_private_uv_entrypoint(
         "https://github.com/NVIDIA-NeMo/gym", "main", None, command=report, cleanup=True, private_uv=True
     )
     env = {"HOME": str(home), "PATH": f"{tools}:/usr/bin:/bin"} | ({"TMPDIR": str(tmpdir)} if tmpdir else {})
-    result = subprocess.run(["bash", "-c", out], env=env, capture_output=True, text=True, check=True)
+    result = subprocess.run(["bash", "-c", out], env=env, capture_output=True, text=True, check=check)
+    if not check:
+        assert result.returncode != 0, result.stdout + result.stderr
+        return result.stdout + result.stderr, shared, curl_log
     return result.stdout, shared, curl_log
+
+
+def test_a_private_uv_older_than_the_checkout_requires_is_replaced_by_a_fresh_install(tmp_path: Path) -> None:
+    out, shared, curl_log = _run_private_uv_entrypoint(
+        tmp_path,
+        shared_uv="working",
+        uv_version="0.11.32",
+        fresh_uv_version="0.13.8",
+        required_version=">=0.13.4",
+    )
+    fields = dict(part.split("=", 1) for part in out.split())
+    assert curl_log.exists()  # the fresh install ran
+    assert fields["UV"] == f"{fields['SRC']}/uv-bin/uv"
+    assert "VENV_PREFERENCE=only-managed" in out  # and the read went on
+    assert "0.11.32" in shared.read_text()  # the user's own uv is left as it was
+
+
+def test_a_private_uv_that_stays_too_old_after_the_fresh_install_fails_naming_both_versions(tmp_path: Path) -> None:
+    out, _, _ = _run_private_uv_entrypoint(
+        tmp_path, shared_uv="working", uv_version="0.11.32", required_version=">=0.13.4", check=False
+    )
+    assert "uv 0.11.32" in out and "0.13.4" in out and "older" in out
+    assert "VENV_PREFERENCE" not in out  # stopped before `uv venv` and the command
+
+
+@pytest.mark.parametrize("uv_version", ["0.13.4", "0.13.10", "1.0.0"])
+def test_a_private_uv_that_meets_the_requirement_runs_on(tmp_path: Path, uv_version: str) -> None:
+    out, _, curl_log = _run_private_uv_entrypoint(
+        tmp_path, shared_uv="working", uv_version=uv_version, required_version=">=0.13.4"
+    )
+    assert "VENV_PREFERENCE=only-managed" in out
+    assert not curl_log.exists()  # no reinstall when the copy already meets the requirement
 
 
 @pytest.mark.parametrize("shared_uv", ["working", "broken", "missing"])
@@ -2863,6 +2907,13 @@ def test_the_collector_is_probed_beside_a_non_zero_driver_node(tmp_path):
     assert "Waiting for otel_collector at http://${gym_nodes[1]}:4319" in script
 
 
+def test_the_collector_is_stopped_on_its_own_node_beside_a_non_zero_driver_node(tmp_path):
+    # pkill sees only the node it runs on, and the batch script runs on node 0.
+    stop = next(line for line in _driver_on_aux(tmp_path, {}).splitlines() if "pkill -TERM" in line)
+    assert stop.startswith('srun --overlap --nodelist="${gym_nodes[1]}" --nodes=1 --ntasks=1 pkill -TERM ')
+    assert stop.endswith(" || true")
+
+
 def test_services_on_node_0_are_probed_locally(tmp_path):
     script = _render(tmp_path, {"policy": _vllm(8000, "gpu", tensor_parallel_size=4), "ray": _RAY_WITH_PROBE})
     assert "Waiting for ray at http://localhost:8011" in script
@@ -3266,11 +3317,11 @@ def test_a_service_named_driver_is_watched_apart_from_the_driver(tmp_path):
 
 def test_one_task_exiting_ends_its_service_step_and_the_driver_step_is_unchanged(tmp_path):
     # A multi-task service (a vllm_pd tier, a Ray worker pool) must not outlive one of its tasks, whatever the cluster's
-    # KillOnBadExit and WaitTime defaults; the driver and OTel collector steps keep Slurm's defaults.
+    # KillOnBadExit and WaitTime defaults; the driver and OTel collector steps (its stop included) keep Slurm's defaults.
     script = _driver_on_aux(tmp_path, {"ray": _RAY_WITH_PROBE})
     steps = [line for line in script.splitlines() if "srun --overlap" in line]
     driver_steps = [line for line in steps if "logs/driver-" in line]
-    collector_steps = [line for line in steps if "logs/otel_collector-" in line]
+    collector_steps = [line for line in steps if "logs/otel_collector-" in line or " pkill -TERM " in line]
     service_steps = [line for line in steps if line not in driver_steps and line not in collector_steps]
 
     assert service_steps and driver_steps
