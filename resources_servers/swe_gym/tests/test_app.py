@@ -60,7 +60,11 @@ def _inputs(**overrides) -> VerificationInputs:
         repo="getmoto/moto",
         version="5.0",
         base_commit="7f6c9cb1deafb280fe7fcc7551c38e397f11a706",  # pragma: allowlist secret
-        patch="diff --git a/moto/dynamodb/models/dynamo_type.py b/moto/dynamodb/models/dynamo_type.py\n",
+        patch=(
+            "diff --git a/moto/dynamodb/models/dynamo_type.py b/moto/dynamodb/models/dynamo_type.py\n"
+            "--- a/moto/dynamodb/models/dynamo_type.py\n+++ b/moto/dynamodb/models/dynamo_type.py\n"
+            "@@ -1 +1 @@\n-old\n+new\n"
+        ),
         test_patch="diff --git a/tests/test_dynamodb/test_update.py b/tests/test_dynamodb/test_update.py\n",
         fail_to_pass=["tests/test_dynamodb/test_update.py::test_update_item_add_float"],
         pass_to_pass=["tests/test_dynamodb/test_update.py::test_update_different_map_elements"],
@@ -216,10 +220,10 @@ class TestBuildEvalScript:
         assert f"conda activate testbed >/dev/null 2>&1 || exit {EXIT_NO_CONDA}" in script
         assert f"cd /testbed || exit {EXIT_NO_REPO}" in script
 
-    def test_applies_the_patch_strictly_with_the_harness_fallback(self) -> None:
+    def test_applies_the_patch_strictly_without_fuzzy_fallback(self) -> None:
         script = build_eval_script(_inputs())
-        assert "git apply -v /tmp/nemo_gym_patch.diff" in script
-        assert "patch --batch --fuzz=5 -p1 -i /tmp/nemo_gym_patch.diff" in script
+        assert "git apply --check /tmp/nemo_gym_patch.diff" in script
+        assert "--fuzz" not in script
         assert f"echo {PATCH_FAILED}" in script
 
     def test_follows_the_swebench_recipe_in_order(self) -> None:
@@ -255,7 +259,12 @@ class TestBuildEvalScript:
 class TestVerificationFiles:
     def test_ships_the_script_and_only_the_patches_that_exist(self) -> None:
         files = verification_files(_inputs(test_patch=""))
-        assert set(files) == {"/tmp/nemo_gym_eval.sh", "/tmp/nemo_gym_patch.diff"}
+        assert set(files) == {
+            "/tmp/nemo_gym_eval.sh",
+            "/tmp/nemo_gym_patch.diff",
+            "/tmp/nemo_gym_preflight.py",
+            "/tmp/nemo_gym_preflight.json",
+        }
         files = verification_files(_inputs())
         assert "/tmp/nemo_gym_test_patch.diff" in files
 

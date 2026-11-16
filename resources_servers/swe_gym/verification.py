@@ -28,11 +28,15 @@ sandbox created for grading, so the held-out tests and the golden patch never si
 from __future__ import annotations
 
 import asyncio
+import json
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from nemo_gym.core import AGENT_INVALID_OUTPUT
+from resources_servers.swe_gym.patch_policy import trusted_test_paths, validate_patch
+from resources_servers.swe_gym.patch_preflight import EXIT_UNSAFE_PATH, EXIT_WRONG_BASE
 from resources_servers.swe_gym.swebench_specs import (
     PASSING_STATUSES,
     normalize_test_id,
@@ -55,6 +59,7 @@ TEST_PATCH_FAILED = "___NEMO_GYM_SWE_GYM_TEST_PATCH_FAILED___"
 # verdicts (evaluation incomplete), never a 0 for the patch.
 EXIT_NO_REPO = 97
 EXIT_NO_CONDA = 96
+EXIT_PREFLIGHT_FAILED = 93
 
 
 def as_list(value: Any) -> list[str]:
@@ -96,6 +101,7 @@ class VerificationResult:
     test_output: str
     error: str | None = None
     test_patch_failed: bool = False
+    failure_kind: str | None = None
 
 
 def patch_section_path(section: str) -> str | None:
@@ -142,7 +148,7 @@ def _sections(patch: str) -> list[str]:
 def build_eval_script(inputs: VerificationInputs) -> str:
     """The SWE-bench eval recipe as one bash script, run from a sandbox created for grading.
 
-    The candidate patch is applied strictly (``git apply`` then ``patch --fuzz=5`` as the harness does);
+    The candidate patch is applied strictly with ``git apply``;
     a patch that does not apply is a real verdict about the patch, reported through ``PATCH_FAILED``
     rather than by exiting, so the caller still gets the log. The install step is advisory (``set +e``)
     because on a prebuilt image it mostly re-confirms what is already there.
@@ -157,11 +163,9 @@ def build_eval_script(inputs: VerificationInputs) -> str:
     apply_patch = ""
     if inputs.patch.strip():
         apply_patch = (
-            "if ! git apply -v /tmp/nemo_gym_patch.diff; then\n"
-            "    if ! patch --batch --fuzz=5 -p1 -i /tmp/nemo_gym_patch.diff; then\n"
-            f"        echo {PATCH_FAILED}\n"
-            "        exit 0\n"
-            "    fi\n"
+            "if ! git apply --check /tmp/nemo_gym_patch.diff || ! git apply /tmp/nemo_gym_patch.diff; then\n"
+            f"    echo {PATCH_FAILED}\n"
+            "    exit 0\n"
             "fi"
         )
     apply_test_patch = ""
@@ -177,6 +181,13 @@ source /opt/miniconda3/bin/activate >/dev/null 2>&1 || exit {EXIT_NO_CONDA}
 conda activate {CONDA_ENV} >/dev/null 2>&1 || exit {EXIT_NO_CONDA}
 cd {REPO_DIRECTORY} || exit {EXIT_NO_REPO}
 git config --global --add safe.directory {REPO_DIRECTORY} >/dev/null 2>&1
+python3 -I /tmp/nemo_gym_preflight.py /tmp/nemo_gym_preflight.json
+__preflight_exit=$?
+case $__preflight_exit in
+    0) ;;
+    {EXIT_UNSAFE_PATH}|{EXIT_WRONG_BASE}) exit $__preflight_exit ;;
+    *) exit {EXIT_PREFLIGHT_FAILED} ;;
+esac
 {eval_commands}
 git -c core.fileMode=false status --short | head -20
 
@@ -233,7 +244,14 @@ def grade(statuses: dict[str, str], fail_to_pass: Iterable[str], pass_to_pass: I
 
 def verification_files(inputs: VerificationInputs) -> dict[str, str]:
     """Files the grading sandbox is created with (one provider round trip, large patches included)."""
-    files = {"/tmp/nemo_gym_eval.sh": build_eval_script(inputs)}
+    paths = validate_patch(inputs.patch, protected_paths=trusted_test_paths(inputs.test_patch))
+    files = {
+        "/tmp/nemo_gym_eval.sh": build_eval_script(inputs),
+        "/tmp/nemo_gym_preflight.py": Path(__file__).with_name("patch_preflight.py").read_text(encoding="utf-8"),
+        "/tmp/nemo_gym_preflight.json": json.dumps(
+            {"repo": REPO_DIRECTORY, "base_commit": inputs.base_commit, "paths": paths}
+        ),
+    }
     if inputs.patch.strip():
         files["/tmp/nemo_gym_patch.diff"] = inputs.patch
     if inputs.test_patch.strip():
@@ -262,20 +280,38 @@ async def run_verification(
 
         await asyncio.to_thread(_persist_log)
 
+    if getattr(result, "error_type", None) is not None or result.return_code in {None, 124, 137}:
+        return VerificationResult(False, False, False, None, output, "provider did not report a process exit")
+    if result.return_code == EXIT_UNSAFE_PATH:
+        return VerificationResult(
+            True,
+            False,
+            False,
+            None,
+            output,
+            "patch targets a symlink or special file",
+            failure_kind=AGENT_INVALID_OUTPUT,
+        )
+    if result.return_code == EXIT_PREFLIGHT_FAILED:
+        return VerificationResult(False, False, False, None, output, "trusted patch preflight failed")
+    if result.return_code == EXIT_WRONG_BASE:
+        return VerificationResult(False, False, False, None, output, "verifier image does not match task base")
     if result.return_code == EXIT_NO_REPO:
         return VerificationResult(False, False, False, None, output, f"{REPO_DIRECTORY} is not present in the image")
     if result.return_code == EXIT_NO_CONDA:
         return VerificationResult(False, False, False, None, output, f"conda env {CONDA_ENV!r} missing in the image")
     if PATCH_FAILED in output:
         # A verdict, not an infrastructure fault: the patch does not apply to base_commit.
-        return VerificationResult(True, False, False, None, output, "patch does not apply")
+        return VerificationResult(
+            True, False, False, None, output, "patch does not apply", failure_kind=AGENT_INVALID_OUTPUT
+        )
 
     statuses = await asyncio.to_thread(parse_log_pytest, slice_test_output(output))
     report = grade(statuses, inputs.fail_to_pass, inputs.pass_to_pass)
     test_patch_failed = TEST_PATCH_FAILED in output
     return VerificationResult(
         completed=not test_patch_failed,
-        resolved=bool(report["resolved"]) and not test_patch_failed,
+        resolved=bool(report["resolved"]) and not test_patch_failed and result.return_code == 0,
         patch_applied=True,
         test_results=report,
         test_output=output,

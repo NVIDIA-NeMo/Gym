@@ -38,11 +38,11 @@ from traceback import format_exc
 from typing import Any
 
 from fastapi import Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
-from nemo_gym.core import SESSION_LOST
+from nemo_gym.core import AGENT_INVALID_OUTPUT, SESSION_LOST, VERIFIER_ERROR
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -63,6 +63,12 @@ from nemo_gym.server_runtime import (
     lost_session_verification,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from resources_servers.swe_gym.patch_policy import (
+    MAX_PATCH_BYTES,
+    PatchPolicyError,
+    trusted_test_paths,
+    validate_patch,
+)
 from resources_servers.swe_gym.swebench_specs import spec_for
 from resources_servers.swe_gym.verification import (
     CONDA_ENV,
@@ -71,14 +77,15 @@ from resources_servers.swe_gym.verification import (
     VerificationResult,
     as_list,
     drop_patch_sections,
-    drop_test_patch_files,
     run_verification,
     verification_files,
 )
 from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
 from resources_servers.swebench.patch_capture import (
+    CaptureCommandError,
     PatchCapture,
     PatchCaptureMode,
+    PatchSizeError,
     capture_model_patch,
     prepare_git_for_commits,
 )
@@ -101,7 +108,7 @@ class SWEGymResourcesServerConfig(BaseResourcesServerConfig):
     # "worktree" (diff of the working tree) or "committed" (committed work only); see swebench/patch_capture.py.
     patch_capture_mode: PatchCaptureMode = "worktree"
     include_model_patch_in_response: bool = True
-    evaluation_timeout: int | None = 3600
+    evaluation_timeout: int = Field(default=3600, gt=0)
     # A verdict-less run is retried on a fresh sandbox: an image pull or a flaky provider start
     # is not evidence about the patch.
     inconclusive_verification_retries: int = 1
@@ -181,7 +188,7 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
             repo=body.repo,
             version=str(body.version),
             base_commit=body.base_commit,
-            patch=drop_test_patch_files(patch, body.test_patch),
+            patch=patch,
             test_patch=body.test_patch,
             fail_to_pass=as_list(body.FAIL_TO_PASS),
             pass_to_pass=as_list(body.PASS_TO_PASS),
@@ -201,7 +208,12 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
 
         # Cap test parallelism to the CPU limit: a container sees the HOST core count, so pytest-xdist
         # and BLAS fan out ~96 workers against a small quota and spend their time CFS-throttled.
-        sandbox_resources = SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {}))
+        resources = self.config.sandbox_config.get("resources", {})
+        if verifier_session_id is not None:
+            resources = {"cpu": 2, "memory_mib": 4096, "disk_gib": 8} | resources
+            if any(resources[key] is None or resources[key] <= 0 for key in ("cpu", "memory_mib", "disk_gib")):
+                raise ValueError("verifier CPU, memory and disk limits must be positive")
+        sandbox_resources = SandboxResources.from_mapping(resources)
         env = dict(self.config.sandbox_config.get("env", {}))
         if self.config.sandbox_config.get("derive_cpu_env", True):
             env = cpu_cap_env(sandbox_resources.cpu) | env
@@ -210,7 +222,12 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
         spec = SandboxSpec(
             # The row names its own image; there is no repository template to apply.
             image=body.image_name,
-            ttl_s=self.config.sandbox_config.get("ttl_s"),
+            ttl_s=self.config.sandbox_config.get("ttl_s")
+            or (
+                (self.config.sandbox_config.get("ready_timeout_s") or 1200) + self.config.evaluation_timeout + 300
+                if verifier_session_id is not None
+                else None
+            ),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s"),
             workdir=REPO_DIRECTORY,
             env=env,
@@ -255,6 +272,7 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
             mode=self.config.patch_capture_mode,
             pristine_untracked=self._session_id_to_pristine_untracked.get(session_id, frozenset()),
             drop_sections=drop_patch_sections,
+            max_patch_bytes=MAX_PATCH_BYTES,
         )
 
     async def seed_session(
@@ -357,6 +375,15 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
             async def capture_or_fallback() -> tuple[PatchCapture, str | None]:
                 try:
                     return await self._extract_model_patch(session_id, REPO_DIRECTORY, body.base_commit), None
+                except CaptureCommandError as exc:
+                    # The bounded diff command uses 91 only when Git itself failed.
+                    # Missing interpreters and provider failures remain inconclusive.
+                    if exc.error_type is None and exc.return_code == 91:
+                        return PatchCapture.static("", mode, "rejected"), str(exc)
+                    return PatchCapture.static("", mode, "none"), f"Failed to extract model patch: {exc}"
+                except PatchSizeError as exc:
+                    # Preserve the classified failure across session retries without transferring the patch.
+                    return PatchCapture.static("", mode, "rejected"), str(exc)
                 except Exception as exc:
                     return PatchCapture.static("", mode, "none"), f"Failed to extract model patch: {exc}"
 
@@ -364,6 +391,46 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
             capture, extraction_error = await self.capture_task_sandbox_patch(session_id, capture_or_fallback)
             await self.stop_task_sandbox_after_capture(session_id)
         patch = capture.patch
+        try:
+            if capture.source == "rejected":
+                raise PatchPolicyError(extraction_error or "patch exceeds size limit")
+            # Check the complete declared submission before dropping any sections. Silently
+            # removing a test edit would hide an attributable tampering attempt.
+            validate_patch(patch, protected_paths=trusted_test_paths(body.test_patch))
+        except PatchPolicyError as exc:
+            return self._response(
+                body,
+                reward=0.0,
+                evaluation_completed=not self.config.is_verifying_golden_patch,
+                mask_sample=self.config.is_verifying_golden_patch,
+                failure_kind=VERIFIER_ERROR if self.config.is_verifying_golden_patch else AGENT_INVALID_OUTPUT,
+                failure_reason=str(exc),
+                resolved=False,
+                patch_applied=False,
+                test_results=None,
+                test_output="",
+                error=str(exc),
+                eval_sandbox_start_time_taken=0.0,
+                patch_verification_time_taken=0.0,
+                **capture.response_fields(False),
+            )
+        if extraction_error:
+            return self._response(
+                body,
+                reward=0.0,
+                evaluation_completed=False,
+                mask_sample=True,
+                failure_kind=VERIFIER_ERROR,
+                failure_reason=extraction_error,
+                resolved=False,
+                patch_applied=False,
+                test_results=None,
+                test_output="",
+                error=extraction_error,
+                eval_sandbox_start_time_taken=0.0,
+                patch_verification_time_taken=0.0,
+                **capture.response_fields(False),
+            )
 
         # Resolve the spec before spending a sandbox: a (repo, version) without one can never be graded.
         try:
@@ -373,6 +440,9 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
                 body,
                 reward=0.0,
                 evaluation_completed=False,
+                mask_sample=True,
+                failure_kind=VERIFIER_ERROR,
+                failure_reason=str(exc),
                 resolved=False,
                 patch_applied=False,
                 test_results=None,
@@ -429,12 +499,18 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
                     flush=True,
                 )
 
+        if self.config.is_verifying_golden_patch and result.failure_kind == AGENT_INVALID_OUTPUT:
+            result.completed = False
+
         return self._response(
             body,
             # An unresolved-but-completed run is a real 0. An incomplete run is also 0, but
             # evaluation_completed distinguishes them so a broken row is not read as a hard task.
             reward=1.0 if result.resolved else 0.0,
             evaluation_completed=result.completed,
+            mask_sample=not result.completed,
+            failure_kind=result.failure_kind if result.completed else VERIFIER_ERROR,
+            failure_reason=result.error if result.failure_kind or not result.completed else None,
             resolved=result.resolved,
             patch_applied=result.patch_applied,
             test_results=result.test_results,

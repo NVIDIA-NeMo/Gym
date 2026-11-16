@@ -88,7 +88,7 @@ def test_capture_survives_failed_task_teardown_and_preserves_capture_mode(consum
         assert len(sandboxes) == 1
         retried = client.post("/verify", json=fixtures._VERIFY)
         assert retried.status_code == 200 and retried.json()["reward"] == 1, retried.text
-        assert retried.json()["model_patch"] == "diff --git a/x b/x\n"
+        assert retried.json()["model_patch"] == module.capture_model_patch.return_value.patch
         assert module.capture_model_patch.await_count == 1
         assert module.capture_model_patch.await_args.kwargs["mode"] == "committed"
         assert task.stop.await_count == 2
@@ -169,14 +169,16 @@ def test_failed_close_keeps_task_owned_until_successful_retry(consumer):
 def test_seedless_golden_verification_keeps_hidden_files_in_the_grader_only(consumer):
     module, fixtures, server, sandboxes, _ = consumer
     server.config.is_verifying_golden_patch = True
-    body = fixtures._VERIFY | {"patch": "diff --git a/fix.py b/fix.py\n"}
+    body = fixtures._VERIFY | {
+        "patch": "diff --git a/fix.py b/fix.py\n--- a/fix.py\n+++ b/fix.py\n@@ -1 +1 @@\n-old\n+new\n"
+    }
     with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
         verified = client.post("/verify", json=body)
         assert verified.status_code == 200 and verified.json()["reward"] == 1, verified.text
         assert verified.json()["patch_source"] == "golden"
         module.capture_model_patch.assert_not_awaited()
         assert len(sandboxes) == 1
-        assert "diff --git a/fix.py b/fix.py\n" in sandboxes[0].initial_files.values()
+        assert body["patch"] in sandboxes[0].initial_files.values()
         sandboxes[0].stop.assert_awaited_once()
 
 
@@ -356,7 +358,10 @@ def test_a_failed_task_stop_after_capture_keeps_an_episode_session_retryable_on_
 
         retried = client.post("/verify", json=fixtures._VERIFY)
         assert retried.status_code == 200, retried.text
-        assert retried.json()["reward"] == 1.0 and retried.json()["model_patch"] == "diff --git a/x b/x\n"
+        assert (
+            retried.json()["reward"] == 1.0
+            and retried.json()["model_patch"] == module.capture_model_patch.return_value.patch
+        )
         assert module.capture_model_patch.await_count == 1, "the retry reuses the saved patch"
         assert sandboxes[0].stop.await_count == 2
 
@@ -405,6 +410,13 @@ async def test_an_interrupted_grading_after_a_failed_extraction_grades_the_same_
     request = Request({"type": "http", "session": {SESSION_ID_KEY: episode_seed.resources_session_id}})
     await server.seed_session(request, episode_seed)
     body = verify_type.model_validate(fixtures._VERIFY)
+
+    if module.__name__ == "resources_servers.swe_gym.app":
+        result = await server.verify(request, body)
+        assert result.mask_sample and not result.evaluation_completed
+        assert result.failure_kind == "verifier_error" and calls == 0
+        assert not server._session_id_to_sandbox
+        return
 
     interrupted = asyncio.create_task(server.verify(request, body))
     await grading_started.wait()

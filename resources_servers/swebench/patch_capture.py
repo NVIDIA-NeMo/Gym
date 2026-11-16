@@ -196,8 +196,44 @@ class CaptureCommandError(RuntimeError):
         self.error_type = error_type
 
 
-async def _exec(sandbox: Any, command: str, *, timeout_s: int = 300) -> Any:
+class PatchSizeError(ValueError):
+    """The agent produced more patch bytes than the declared submission limit."""
+
+
+# Limit bytes before the provider sends stdout to the resources server. This command
+# runs in the untrusted agent sandbox; the verifier MUST independently validate it.
+_BOUNDED_CAPTURE = """
+import os, signal, subprocess, sys
+p = subprocess.Popen(["bash", "-c", sys.argv[1]], stdout=subprocess.PIPE,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+try:
+    output = p.stdout.read(int(sys.argv[2]) + 1)
+    if len(output) > int(sys.argv[2]):
+        sys.exit(90)
+    code = p.wait()
+    if code:
+        sys.exit(91)
+    sys.stdout.buffer.write(output)
+finally:
+    try:
+        os.killpg(p.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        # Some execution backends permit killing a child but not a process group.
+        # The owning session must still stop the sandbox after capture.
+        p.kill()
+    p.wait()
+"""
+
+
+async def _exec(sandbox: Any, command: str, *, timeout_s: int = 300, max_output_bytes: int | None = None) -> Any:
+    if max_output_bytes is not None:
+        command = f"python3 -I -c {shlex.quote(_BOUNDED_CAPTURE)} {shlex.quote(command)} {max_output_bytes}"
     result = await sandbox.exec(command, timeout_s=timeout_s)
+    if max_output_bytes is not None and getattr(result, "error_type", None) is None:
+        if result.return_code == 90 or len((result.stdout or "").encode("utf-8")) > max_output_bytes:
+            raise PatchSizeError(f"patch exceeds {max_output_bytes} bytes")
     if result.return_code != 0 or getattr(result, "error_type", None) is not None:
         raise CaptureCommandError(
             result.stderr or result.stdout or f"exit {result.return_code}",
@@ -215,14 +251,25 @@ async def capture_model_patch(
     mode: str = "worktree",
     pristine_untracked: frozenset[str] | set[str] = frozenset(),
     drop_sections: Callable[[str, Iterable[str]], str] | None = None,
+    *,
+    max_patch_bytes: int | None = None,
 ) -> PatchCapture:
     """Capture the agent's patch from its sandbox per ``mode``. ``drop_sections(patch, paths)``
     strips files that were already untracked before the agent started. Raises ``CaptureCommandError``
-    (a ``RuntimeError``) when git fails; an agent that left nothing yields an empty patch."""
+    (a ``RuntimeError``) when git fails; an agent that left nothing yields an empty patch.
+    ``max_patch_bytes`` bounds each diff stream and raises ``PatchSizeError`` if the
+    selected submission exceeds it. Oversized diagnostics do not discard a valid
+    selected patch. Other capture output and provider transport quotas are separate.
+    """
     if mode not in PATCH_CAPTURE_MODES:
         raise ValueError(f"unknown patch_capture_mode {mode!r}; expected one of {PATCH_CAPTURE_MODES}")
     started = time()
     wd, base = shlex.quote(workdir), shlex.quote(base_commit)
+    diff_command = f"git -C {wd} --no-pager diff"
+    if max_patch_bytes is not None:
+        if max_patch_bytes <= 0:
+            raise ValueError("max_patch_bytes must be positive")
+        diff_command += " --no-ext-diff --no-textconv --no-renames"
     cap = PatchCapture(patch="", mode=mode, source="none", base_commit=base_commit)
 
     def _clean(patch: str) -> str:
@@ -248,16 +295,27 @@ async def capture_model_patch(
         cap.tip_commit, cap.branch, cap.commits = tip.sha, tip.ref, tip.commits_since_base
         if not tip.is_descendant:
             cap.warnings.append(f"tip {tip.sha[:12]} ({tip.ref}) does not descend from base; history was rewritten")
-        diff = await _exec(sandbox, f"git -C {wd} --no-pager diff {base} {shlex.quote(tip.sha)}")
-        committed_patch = drop_sections_under(_clean(diff.stdout or ""), pristine_dirs)
+        try:
+            diff = await _exec(
+                sandbox, f"{diff_command} {base} {shlex.quote(tip.sha)}", max_output_bytes=max_patch_bytes
+            )
+            committed_patch = drop_sections_under(_clean(diff.stdout or ""), pristine_dirs)
+        except PatchSizeError:
+            if mode == "committed":
+                raise
+            cap.warnings.append("committed diff exceeded size limit (diagnostic only)")
     cap.committed_patch_bytes = len(committed_patch.encode("utf-8", errors="replace"))
 
     # Working tree vs base; intent-to-add so new files appear. Diagnostic only in `committed` mode,
     # so a failure there must not throw away a committed patch that was already captured.
     try:
-        diff = await _exec(sandbox, f"git -C {wd} add -N . && git -C {wd} --no-pager diff {base}")
+        diff = await _exec(
+            sandbox,
+            f"git -C {wd} add -N . && {diff_command} {base}",
+            max_output_bytes=max_patch_bytes,
+        )
         worktree_patch = _clean(diff.stdout or "")
-    except RuntimeError as exc:
+    except (RuntimeError, PatchSizeError) as exc:
         if mode == "committed" and tip is not None:
             worktree_patch = ""
             cap.warnings.append(f"worktree diff failed (diagnostic only): {exc}")

@@ -115,3 +115,130 @@ after the Environment Server migration.
 ```bash
 gym env test --resources-server swe_gym
 ```
+
+## Patch submission boundary
+
+Candidate patches pass a strict intake gate before a verifier sandbox is allocated.
+The limit is 1 MiB of UTF-8 text. Only canonical, unquoted ASCII paths and ordinary
+regular-file text hunks are accepted. The gate rejects traversal, mismatched file
+headers, duplicate sections, binary patches, renames/copies, symlinks, submodules,
+and mode-only changes. New and deleted regular files are supported. This narrower
+contract can reject previously accepted benchmark submissions; compare golden-patch
+coverage before using it to produce benchmark results.
+
+Edits to recognized test directories, `conftest.py`, pytest/build/environment
+configuration, Python startup hooks, and known grader/request/result filenames
+reject the **whole** submission. Paths in the trusted hidden-test patch are also
+protected, including files outside conventionally named test directories. This
+replaces the previous behavior of silently dropping candidate edits to hidden tests.
+The list of recognized names is a conservative gate, not a complete inventory of
+all files any project can use as grading inputs.
+
+The fresh verifier checks its HEAD against the trusted task's `base_commit` and
+checks every existing candidate path component with `lstat` before candidate code
+or the repository install step runs. Symlinks, dangling symlinks, directories used
+as file targets, and special files are refused. It applies the diff with `git apply
+--check` and `git apply`; the fuzzy `patch` fallback is removed. These checks require
+an audited task image with a trusted, clean working tree and no concurrent writer.
+The preflight uses an isolated Python interpreter so repository startup modules do
+not run during the check.
+
+The existing two-sandbox lifecycle is retained. Only the patch is captured from the
+agent; the verifier image, hidden tests, script, test lists, and grading authority
+come from the server/task definition. No agent environment, test tree, request,
+result file, or harness directory is copied into the verifier. The expected test
+outcomes stay in the resources server. A small preflight JSON contains only the
+trusted base commit and candidate paths.
+
+Malformed/oversized submissions receive `reward=0`, `evaluation_completed=True`,
+`mask_sample=False`, and `failure_kind=agent_invalid_output`. An unsafe path in the
+fresh verifier is likewise an attributable failed submission. Capture failures,
+wrong-base images, preflight failures, and provider errors are inconclusive and
+masked with `failure_kind=verifier_error`. Invalid **golden** patches are masked as
+verifier/data failures, rather than attributed to the policy. Provider-reported
+interruptions and ambiguous exit codes 124/137 are masked; this environment cannot
+reliably attribute them to the candidate. A nonzero test-process exit cannot earn
+credit from passing-looking log lines.
+
+Capture bounds the normal Git diff stream before provider transfer, disables Git
+external diff/textconv, checks returned patch size again on the server, and retains
+the existing capture deadline. The agent controls its executable/image state, so
+this is not a provider-enforced output quota; malicious output producers still
+need provider-side transport/output limits. `evaluation_timeout` must be positive
+and finite. The verifier receives a fallback TTL when none is configured. CPU,
+memory and disk ceilings remain the provider's responsibility; the shipped YAML
+already requests these. When absent from a verifier config, the request defaults
+to 2 CPUs, 4096 MiB memory and 8 GiB disk; null/nonpositive values are refused. Configure an isolated provider that enforces those limits.
+Session ownership, bounded retries, stop-on-close/shutdown, and retained handles
+when stop fails remain with the shared SWE sandbox-session implementation.
+
+### Security scope and remaining grading gap
+
+This is patch-boundary hardening, **not a claim of tamper-proof SWE verification**.
+In particular, candidate source code is executable: it can influence pytest from
+inside the test process, print forged test-status lines, or attempt to rewrite
+verifier files at runtime under the existing shared user identity. Filtering test
+filenames and creating a fresh sandbox cannot eliminate those attacks. The current
+log parser remains a grading trust limitation even after these changes. The strict
+expected-failure test `test_runtime_forged_success_remains_an_unclosed_grader_boundary`
+records a passing-looking stdout payload that the current grader still credits.
+It must stop being an expected failure when a stronger grading boundary is built.
+
+A complete stronger boundary needs a task-specific test architecture: keep the
+trusted controller and expected outputs outside candidate-controlled processes;
+run candidate operations through a restricted, resource-bounded interface with
+separate credentials/filesystem authority; compare observable outputs in the
+trusted controller. A separate UID or read-only tests alone cannot prevent Python
+code from monkeypatching assertions in its own test process. Do not describe this
+SWE implementation as satisfying that stronger guarantee. Do not run it with the
+`local` provider or with shared host mounts for untrusted submissions.
+
+This change does not alter agent-image hygiene or outbound network access. Those
+are separate controls. It also does not change search-only agents or their
+server-side judges.
+
+### Audit baseline and local checks
+
+The implementation was audited against upstream NeMo Gym
+`59d0b04f17cc5860e66bc51a35a7dcd8db0b1ebb`:
+
+- `nemo_gym/verification/sandbox_verification.py` already creates one sandbox per
+  call, delivers trusted files through `SandboxSpec.files`, uses a unique work
+  directory, applies resources/TTL/deadlines, checks process/provider errors,
+  validates the downloaded result, and attempts teardown in `finally`. It does not
+  isolate the runner from code it launches or protect its result from a shared UID.
+- `code_gen/sandbox_execution.py` and `competitive_coding_challenges/sandbox_evaluator.py`
+  already use that helper. Code-gen removes its expected-output-bearing request
+  file before execution; this does not make its in-process harness trustworthy
+  against arbitrary introspection or mutation by submitted Python.
+- SWE-Gym already uses a separate sandbox from the same task image and keeps hidden
+  tests out of the agent session. Its shared SWE sandbox-session implementation
+  owns retries and cleanup. Replacing that lifecycle with the generic helper would
+  duplicate infrastructure and disrupt session retry/cleanup behavior.
+- `terminal_multi_harness` grades tool-call action comparisons; it is not a SWE
+  workspace patch verifier.
+
+No provider implementation was added. No model/GPU rollout was run: these checks
+exercise local trusted fixtures and mocked provider/session boundaries. Before
+claiming rollout readiness, run representative model rollouts on a configured
+isolated provider and inspect the agent, patch, verifier logs and outcome fields.
+
+Local validation: 213 tests passed and one strict expected failure records the
+unclosed stdout-forgery boundary. Scoped pre-commit/Ruff checks passed; the private
+guardwords catalog was unavailable and its hook skipped that scan. Focused mypy
+could not start because the locked development environment lacks `pathspec`.
+No production-provider or model rollout claim is made.
+
+Run the focused regression suite from the Gym checkout:
+
+```bash
+pytest resources_servers/swe_gym/tests \
+  resources_servers/swebench/tests/test_patch_capture.py \
+  tests/unit_tests/verification/test_sandbox_verification.py
+```
+
+The malicious patch fixtures cover traversal, conflicting headers, oversized
+output, binary/special-file modes, grader/test/environment edits and trusted-tree
+symlinks. A real temporary Git repository exercises an ordinary patch captured from
+one workspace and applied to a separate trusted checkout. Session tests exercise
+hidden-file separation, retries, failed starts/stops, replay, and final teardown.
