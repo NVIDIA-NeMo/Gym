@@ -5,6 +5,11 @@ config_paths:
   - benchmarks/osworld/configs/osworld_agent_nano_omni.yaml
   - benchmarks/osworld/configs/osworld_opensandbox.yaml
 
+policy_model:
+  responses_api_models:
+    vllm_model:
+      propagate_context_overflow_errors: true
+
 osworld_nano_omni_agent:
   responses_api_agents:
     osworld_agent:
