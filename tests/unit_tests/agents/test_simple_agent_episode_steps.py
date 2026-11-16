@@ -6,7 +6,7 @@ import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from nemo_gym.agents import AGENT_EPISODE_STEP_LIMIT_HEADER
+from nemo_gym.agents.base_responses_api_agent import AGENT_EPISODE_STEP_LIMIT_HEADER
 from nemo_gym.trajectory.trajectory_record import AgentInvocation, ModelCallRef
 from responses_api_agents.simple_agent.app import _episode_step_limit, _extend_episode_invocation
 
