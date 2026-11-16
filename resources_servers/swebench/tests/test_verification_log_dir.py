@@ -57,7 +57,7 @@ _REQUEST = {
 }
 
 
-def _server(monkeypatch: MonkeyPatch, verification_log_dir: Path | None) -> SwebenchResourcesServer:
+def _server(monkeypatch: MonkeyPatch, debug_dir: Path | None) -> SwebenchResourcesServer:
     config = SwebenchResourcesServerConfig(
         host="0.0.0.0",
         port=8080,
@@ -66,7 +66,7 @@ def _server(monkeypatch: MonkeyPatch, verification_log_dir: Path | None) -> Sweb
         sandbox_provider="test",
         sandbox_config=dict(),
         is_verifying_golden_patch=True,
-        verification_log_dir=verification_log_dir,
+        debug_dir=debug_dir,
     )
     sandbox = MagicMock()
     sandbox._handle = SandboxHandle(sandbox_id="sandbox-123", provider_name="test-provider", raw=None)
@@ -113,7 +113,8 @@ def test_a_copy_is_kept_under_the_configured_folder(monkeypatch: MonkeyPatch, tm
 
     assert response.status_code == 200
     log_dir = Path(response.json()["log_dir"])
-    assert log_dir.parent == tmp_path / "instance-astropy__astropy-12907"
+    assert log_dir.relative_to(tmp_path).parts[0] == "verification"
+    assert "-astropy__astropy-12907-" in log_dir.name
     [kept] = log_dir.rglob("test_output.txt")
     assert kept.read_text() == "test log"
     assert not harness.log_root.exists()
@@ -141,5 +142,5 @@ def test_the_old_setting_still_loads_and_says_how_to_keep_logs(caplog: pytest.Lo
         clear_swebench_debug_logs=False,
     )
 
-    assert config.verification_log_dir is None
-    assert "Set verification_log_dir" in caplog.text
+    assert config.debug_dir is None
+    assert "Set debug_dir" in caplog.text

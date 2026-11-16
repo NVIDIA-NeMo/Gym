@@ -42,6 +42,7 @@ from pydantic import BaseModel, ConfigDict
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import VERIFIER_ERROR
+from nemo_gym.core.runtime_files import debug_folder
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -71,7 +72,6 @@ from resources_servers.swebench.patch_capture import (
     prepare_git_for_commits,
 )
 from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
-from resources_servers.swebench.verification_logs import verification_log_path
 from resources_servers.swemer_ultra.verification import (
     VerificationInputs,
     VerificationResult,
@@ -93,8 +93,9 @@ class SwemerUltraResourcesServerConfig(BaseResourcesServerConfig):
     patch_capture_mode: PatchCaptureMode = "worktree"
     include_model_patch_in_response: bool = True
     evaluation_timeout: int | None = 1200
-    # None disables disk logs. Set an output directory to retain per-task, per-attempt logs.
-    verification_log_dir: Path | None = None
+    # Verification logs are off unless this or the global debug_dir names a folder.
+    # Give an absolute node-local path, such as one under /tmp.
+    debug_dir: Path | None = None
     # A verdict-less run is retried on a fresh sandbox: an image pull or a flaky provider start
     # is not evidence about the patch.
     inconclusive_verification_retries: int = 1
@@ -391,7 +392,9 @@ class SwemerUltraResourcesServer(SandboxSessionResourcesServer):
         patch = capture.patch
 
         inputs = self._inputs(body, patch)
-        log_dir = verification_log_path(self.config.verification_log_dir, body.instance_id)
+        log_dir = debug_folder(
+            server_name=self.config.name, kind="verification", label=body.instance_id, override=self.config.debug_dir
+        )
 
         files = verification_files(inputs, overwrite_maven_settings=self.config.overwrite_maven_settings)
         attempts = 1 + max(self.config.inconclusive_verification_retries, 0)

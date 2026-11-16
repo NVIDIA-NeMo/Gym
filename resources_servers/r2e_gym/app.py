@@ -44,6 +44,7 @@ from pydantic import BaseModel, ConfigDict
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import SESSION_LOST
+from nemo_gym.core.runtime_files import debug_folder
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -83,7 +84,6 @@ from resources_servers.swebench.patch_capture import (
     prepare_git_for_commits,
 )
 from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
-from resources_servers.swebench.verification_logs import verification_log_path
 
 
 class R2EGymResourcesServerConfig(BaseResourcesServerConfig):
@@ -95,8 +95,9 @@ class R2EGymResourcesServerConfig(BaseResourcesServerConfig):
     # A verdict-less run is retried on a fresh sandbox: an image pull or a flaky provider start
     # is not evidence about the patch.
     inconclusive_verification_retries: int = 1
-    # None keeps verification logs off. To keep them, give an absolute node-local path such as one under /tmp.
-    verification_log_dir: Path | None = None
+    # Verification logs are off unless this or the global debug_dir names a folder.
+    # Give an absolute node-local path, such as one under /tmp.
+    debug_dir: Path | None = None
     apply_anti_cheating: bool = True
     sandbox_provider: str
     sandbox_config: dict[str, Any]
@@ -368,7 +369,9 @@ class R2EGymResourcesServer(SandboxSessionResourcesServer):
                 **capture.response_fields(self.config.include_model_patch_in_response),
             )
 
-        log_dir = verification_log_path(self.config.verification_log_dir, body.instance_id)
+        log_dir = debug_folder(
+            server_name=self.config.name, kind="verification", label=body.instance_id, override=self.config.debug_dir
+        )
         files = verification_files(inputs)
         attempts = 1 + max(self.config.inconclusive_verification_retries, 0)
         start_time_taken = 0.0

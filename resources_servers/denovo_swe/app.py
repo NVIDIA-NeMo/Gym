@@ -43,6 +43,7 @@ from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
+from nemo_gym.core.runtime_files import debug_folder
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -70,7 +71,6 @@ from resources_servers.denovo_swe.verification import (
     verification_files,
 )
 from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
-from resources_servers.swebench.verification_logs import verification_log_path
 
 
 class DeNovoSWEResourcesServerConfig(BaseResourcesServerConfig):
@@ -79,8 +79,9 @@ class DeNovoSWEResourcesServerConfig(BaseResourcesServerConfig):
     # A verdict-less run is retried on a fresh sandbox: an image pull or a flaky provider start
     # is not evidence about the patch.
     inconclusive_verification_retries: int = 1
-    # None keeps verification logs off. To keep them, give an absolute node-local path such as one under /tmp.
-    verification_log_dir: Path | None = None
+    # Verification logs are off unless this or the global debug_dir names a folder.
+    # Give an absolute node-local path, such as one under /tmp.
+    debug_dir: Path | None = None
     apply_anti_cheating: bool = True
     sandbox_provider: str
     sandbox_config: dict[str, Any]
@@ -300,7 +301,9 @@ class DeNovoSWEResourcesServer(SimpleResourcesServer):
                     extraction_error = f"Failed to extract model patch: {exc}"
 
         inputs = self._inputs(body, patch)
-        log_dir = verification_log_path(self.config.verification_log_dir, body.instance_id)
+        log_dir = debug_folder(
+            server_name=self.config.name, kind="verification", label=body.instance_id, override=self.config.debug_dir
+        )
 
         files = verification_files(inputs, is_golden)
         attempts = 1 + max(self.config.inconclusive_verification_retries, 0)

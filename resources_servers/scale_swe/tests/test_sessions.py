@@ -955,7 +955,7 @@ async def test_golden_patch_mode_refuses_episode_seeds(server):
 @pytest.mark.parametrize("configured", [False, True])
 async def test_verification_logs_are_written_only_under_the_configured_folder(server, grading, tmp_path, configured):
     if configured:
-        server.config.verification_log_dir = tmp_path
+        server.config.debug_dir = tmp_path
     request = SimpleNamespace(session={})
     await server.seed_session(request, seed())
     await server.verify(request, verify_body())

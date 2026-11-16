@@ -12,8 +12,8 @@ r2e_gym_resources_server:
       domain: coding
       verified: false
 
-      # Verification logs are off. To keep them, give an absolute node-local path such as one under /tmp.
-      verification_log_dir: null
+      # Verification logs are off unless this or the global debug_dir names an absolute node-local folder.
+      debug_dir: null
       evaluation_timeout: 1800
       is_verifying_golden_patch: false
       # seed_session always deletes /r2e_tests, the runner and the R2E sidecar JSON from the agent's
