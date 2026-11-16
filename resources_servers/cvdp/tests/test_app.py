@@ -15,6 +15,7 @@
 
 import json
 import shutil
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -297,6 +298,28 @@ class TestBuildCommand:
 class TestCVDPServerVerify:
     def setup_method(self):
         self.server = _make_server()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("failure", ["nesting", "integer"])
+    async def test_verify_json_decoder_limits_return_parse_failure(self, failure):
+        if failure == "nesting":
+            depth = max(10000, sys.getrecursionlimit() * 2)
+            output = '{"code":' + "[" * depth + "0" + "]" * depth + "}"
+        else:
+            limit = sys.get_int_max_str_digits()
+            if not limit:
+                pytest.skip("Python integer string conversion limit is disabled")
+            output = '{"code":' + "9" * (limit + 1) + "}"
+        with pytest.raises((ValueError, RecursionError)):
+            json.loads(output)
+        body = _make_body(output_text=output, target_files=["rtl/a.sv", "rtl/b.sv"])
+        with patch.object(self.server._harness, "run", new_callable=AsyncMock) as run:
+            result = await self.server.verify(_make_request(body))
+        run.assert_not_awaited()
+        assert result.reward == 0.0
+        assert result.parse_failed is True
+        assert result.mask_sample is False
+        assert result.evaluation_completed is True
 
     @pytest.mark.asyncio
     async def test_verify_empty_output_returns_zero_reward(self):

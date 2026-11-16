@@ -149,6 +149,9 @@ def _parse_model_response(res: str, target_files: List[str]) -> Optional[Dict[st
             json.loads(res)
         except json.JSONDecodeError:
             res = _helpers.fix_json_formatting(res)
+        except (ValueError, RecursionError):
+            # Decoder limits are parse failures, not verifier infrastructure failures.
+            return None
 
     output, success = _helpers.parse_model_response(res, files=target_files, no_schema=no_schema)
 
