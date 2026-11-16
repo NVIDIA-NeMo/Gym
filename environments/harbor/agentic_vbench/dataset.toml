@@ -1,0 +1,22 @@
+# Agentic-VBench on the Harbor task shape: the committed entry for the 100 pinned video-editing tasks
+# (Repair 18, Assembly 18, Sequencing 28, Repurpose 36) of PhiloLabs/agentic-vbench at revision
+# 410a75fe3dae37de4344fc9e5317da089505330a, run by the generic `harbor` environment server with Gym's own
+# sandboxed harnesses.
+#
+# `dataset.toml` declares no source: the tasks come from the pinned upstream git checkout, not from a Harbor
+# hub, so `python -m benchmarks.agentic_vbench.prepare_harbor_env` writes them into this folder (the task
+# folders, the manifest and the preparation records are gitignored beside this file), and
+# `gym dataset validate agentic_vbench` and `gym eval run agentic_vbench ...` resolve the entry name to it.
+[dataset]
+name = "philolabs/agentic-vbench"
+version = "0.1.0"
+
+[gym]
+type = "benchmark"
+domain = "agent"
+license = "Apache 2.0"
+# The task prompt is text and the videos are files in the task's own image, so any harness that works inside a
+# lent sandbox can run the tasks. `opencode_agent` is the harness the benchmark's published numbers use (OpenCode
+# inside the task container) and the one this entry is being validated with; a full-set run through this entry
+# with per-family scored and masked counts is still to be recorded in the README before more harnesses are added.
+allowed_agents = ["opencode_agent"]
