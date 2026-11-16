@@ -765,6 +765,9 @@ omit = [
     "temp*",
     "results/*",
     "/tmp/*",
+    # Vendored VoiceBench and Google IFEval evaluators (resources_servers/voicebench/vendor/PROVENANCE.json); the
+    # NVIDIA-authored scorers around them are measured, and the vendored source is pinned by SHA-256 parity tests.
+    "resources_servers/voicebench/vendor/*",
     "benchmarks/*",
     "environments/*",
     "scripts/*",

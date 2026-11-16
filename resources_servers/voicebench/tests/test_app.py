@@ -3,7 +3,6 @@
 import asyncio
 import json
 import os
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -105,9 +104,9 @@ def test_nltk_cache_existing_permissions_are_preserved_and_default_is_private(tm
     with patch.dict("sys.modules", {"nltk": fake_nltk}):
         _ensure_nltk(str(existing))
         assert existing.stat().st_mode & 0o777 == 0o755
-        with patch.dict(os.environ, {}, clear=True), patch.object(Path, "home", return_value=tmp_path):
+        with patch.dict(os.environ, {}, clear=True), patch("resources_servers.voicebench.app.CACHE_DIR", tmp_path):
             _ensure_nltk(None)
-    assert (tmp_path / ".voicebench_nltk_data").stat().st_mode & 0o777 == 0o700
+    assert (tmp_path / "voicebench" / "nltk_data").stat().st_mode & 0o777 == 0o700
     fake_nltk.download.assert_not_called()
 
 
@@ -353,3 +352,25 @@ def test_nonfinite_legacy_metrics_survive_json_transport(tmp_path, outputs, expe
     assert restored.reward == (1.2 if outputs == ["6"] else 0.0)
     metrics = svc.compute_metrics([[saved]])
     assert metrics["voicebench/legacy/normalized_score"] == expected
+
+
+def _global_config(base_url):
+    """The OmegaConf document Gym produces: the judge model server instance under its server type."""
+    from omegaconf import OmegaConf
+
+    return OmegaConf.create({"judge_model": {"responses_api_models": {"openai_model": {"openai_base_url": base_url}}}})
+
+
+def test_startup_rejects_a_judge_endpoint_left_at_the_unset_placeholder(tmp_path):
+    """A judge model config defaults the judge URL to ``unset.local``; a judged run must fail at startup, not per row."""
+    with patch(
+        "resources_servers.voicebench.app.get_global_config_dict", return_value=_global_config("http://unset.local/v1")
+    ):
+        with pytest.raises(ValueError, match="judge_base_url"):
+            server(tmp_path)
+        # A subset scored without a judge never reads the endpoint.
+        server(tmp_path, subset="openbookqa", scoring_type="mcq")
+    with patch(
+        "resources_servers.voicebench.app.get_global_config_dict", return_value=_global_config("http://judge/v1")
+    ):
+        server(tmp_path)
