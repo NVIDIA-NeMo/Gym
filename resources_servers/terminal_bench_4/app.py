@@ -713,6 +713,10 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 failure_type = failure
         elif session.termination.reason == "infrastructure_error" and not result.get("sandbox_resource_limit"):
             failure = session.termination.detail or "Agent infrastructure failure"
+        if result.get("sandbox_resource_limit"):
+            # The sandbox's limit death is the graded result: the harness's failure events (a cleanup the dead
+            # sandbox could not confirm) stay as observations, and none is selected as the row's failure.
+            extra = {key: value for key, value in extra.items() if key != FailureReportRow.FAILURE_ID}
         legacy = getattr(session, "resources_request", None) is None
         ungraded_verifier = bool(failure) and not completed and session.termination.reason != "infrastructure_error"
         legacy_failure = {}

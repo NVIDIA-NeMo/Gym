@@ -93,6 +93,15 @@ without new code where upstream already has them:
   (`compaction_summary_max_tokens`, `compaction_summary_max_attempts`). See
   [`benchmarks/agentic_vbench/opencode_plugins/`](../../../benchmarks/agentic_vbench/opencode_plugins/README.md).
 
+**Delegation**, opt-in through [`subagents.yaml`](subagents.yaml): the primary agent's `task` tool offers one
+subagent, `analyst`, the report-only media analyst of the Agentic-VBench subagent SFT traces (10 steps, no further
+delegation, must not write the judged output); the built-in `general` and `explore` are hidden. The analyst runs on
+the policy with the run's sampling, and each analyst session's model calls are captured with the rollout's and
+reported as a child invocation of the primary agent's. Which calls of a child session train, and how its context is
+reconstructed, is NeMo RL's decision; Gym's local lineage treats a child's first call as a new root. Pass the
+overlay after `harbor_train.yaml` (and after `compaction_plugins.yaml` when both are on);
+`agentic_vbench_subagent_steps` changes the analyst's step cap.
+
 Images with OpenCode baked in: `opencode_agent` installs OpenCode into the sandbox at session start unless
 `sandbox_executable_path` (with `sandbox_executable_sha256`) names a binary the image already holds; a task image
 built with the runtime at that path skips the download (the harness README, "Preinstalled runtime").
@@ -100,7 +109,7 @@ built with the runtime at that path skips the download (the harness README, "Pre
 ## Validation status
 
 Unit tests cover the prepare script's task-root path, the staged plugins (node tests), the model server's summary
-recovery and the verifier-only multiplier.
+recovery, the verifier-only multiplier and the subagent overlay (a session configuration the harness accepts).
 
 `gym dataset validate agentic_vbench_train --sandbox docker` with `harbor_train.yaml` (judge protocol
 `nvinference-hybrid`) on a root of eight generated tasks, two per family, from the internal curriculum: 8/8 scored,
@@ -108,5 +117,43 @@ recovery and the verifier-only multiplier.
 rubric judge scores the generated reference edit itself below 1; `gym dataset validate` exits non-zero for them,
 as it does for any reference solution below 1). Verification ran separately for the repurpose tasks and in the
 agent's sandbox for the rest, with the task images prebuilt on a rootless Podman backend and the generated tasks'
-shared base image present on it. Not recorded yet: a training-shaped rollout with token capture on against a vLLM
-policy; it will be added here before the entry is used for a reported run.
+shared base image present on it.
+
+A training-shaped `gym eval run` of the same eight tasks with `harbor_train.yaml` against a standalone vLLM 0.26 server
+(the curriculum run's start checkpoint, TP4, `--return-tokens-as-token-ids`, `return_token_id_information: true`):
+every OpenCode model call was captured with its prompt and generation token ids (18 to 100 calls per episode), and
+every row was masked, because Gym's local `fingerprint` lineage could not chain the calls (`parent_digest_mismatch`
+on most of them, no terminal attribution): the next prompt OpenCode sends is the chat template's rendering of the
+parsed tool calls and reasoning, not the tokens the model generated, so no prompt starts with its parent's tokens.
+Keeping history reasoning in the template (`chat_template_kwargs.truncate_history_thinking=false`) did not change
+that. This is the case Gym's capture docs route to framework-owned reconstruction (`token_id_capture.parent_resolution:
+source_history` with the training framework's external staging), which NeMo RL uses; the standalone run therefore
+shows the records, not a training batch.
+
+A NeMo RL smoke (main 0.8.0, `run_grpo_single_controller.py`, five nodes: one vLLM generation node at TP8/EP8 and
+four Megatron training nodes at TP8/EP16/CP2, Gym from this branch, the eight generated tasks with two generations
+each, token capture with `parent_resolution: source_history` and vLLM-worker external staging as NeMo RL configures
+it) trained one GRPO step on this entry: the three Gym servers started under NeMo RL, sixteen episodes ran through the
+harbor server, `opencode_agent` and the Podman sandboxes (16 to 49 model calls each, 33 calls per rollout on average,
+27k to 65k cumulative tokens), the ledger chained every served call to its parent (no poisoned rollout, invalid-row
+rate 0), the environment scored all sixteen (reward mean 0.318, four at 1.0, median 0), and the step ran on 13 valid
+sequences and 225k tokens (loss -0.131, grad norm 0.18, token multiplicative probability error 1.06); the three
+sequences left out had filled the 65,536-token window (`finish_reason: length`, masked by NeMo RL's overlong filter).
+Two settings made that possible, both in the run's config rather than this entry: OpenCode was told the engine's
+real window (`agentic_vbench_context_tokens: 65536`) and automatic compaction was off (`compaction.auto: false`). With
+the entry's defaults (49,152 tokens, compaction on), a first attempt had every chain break where OpenCode compacted
+(41k to 46k cumulative tokens; every call from the compaction summary on was `unresolved_parent`, 11 of 16 rollouts
+rejected) and the step then failed in NeMo RL's loss diagnostics on an empty valid mask. Reconstruction across OpenCode
+compaction is the training framework's (Gym's capture docs route it there), and NeMo RL main does not have it yet; a
+run with compaction on needs that first. One more NeMo RL main gap met on the way: a harbor row's `task_input` is a
+single-step `turns` list, which main's `_build_inputs` rejects (the smoke read `turns[0].responses_create_params`
+through a local patch).
+
+Subagents (`subagents.yaml`), `gym eval run` on one generated task per family with Gemini 4 through
+`inference_provider` and token capture off: the sequencing episode ran three OpenCode sessions, the primary agent made
+two `task` calls (127 s and 139 s) that each spawned an analyst session (27 and 25 messages, both ending with status
+`failed` in OpenCode's export, not inspected further), reward 0; the repair episode ran two sessions, three `task` calls
+(300 s, 255 s, 197 s) to one analyst session (52 messages, `completed`, the follow-ups through the task id it returned),
+reward 0.819. Every child session was reported as a child invocation of the primary's (`parent_invocation_id`), with one
+`subagent_spawn_ambiguous` gap where the three calls share the child. The assembly and repurpose episodes were dropped by
+the same `OpenCode exited with code 1` as the benchmark entry's full-set run on that route.

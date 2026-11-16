@@ -166,7 +166,9 @@ if [ -n "$expected_digest" ]; then
     exit 1
   fi
 fi
-tar -xzf "$runtime/opencode.tar.gz" -C "$runtime" opencode
+# The archive records its builder's uid; as root inside a user namespace that does not map it (rootless Podman or
+# Docker), restoring that owner fails with EINVAL, so the binary is owned by whoever extracts it.
+tar --no-same-owner -xzf "$runtime/opencode.tar.gz" -C "$runtime" opencode
 chmod +x "$runtime/opencode"
 actual=$("$runtime/opencode" --version)
 if ! is_requested_version "$actual"; then

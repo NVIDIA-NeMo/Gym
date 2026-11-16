@@ -1,0 +1,40 @@
+# Opt-in overlay: delegation to a media-analysis subagent. Pass it after `harbor_train.yaml` (and after
+# `compaction_plugins.yaml` when both are on).
+#
+# OpenCode's primary agent owns a `task` tool that starts a child session with its own context; the default permission
+# profile leaves the tool enabled, and this overlay defines what it offers. `analyst` is the child of the Agentic-VBench
+# subagent SFT traces (a report-only analyst capped at 10 steps; the SFT system prompts list the description below
+# verbatim, so a policy trained on those traces meets the same child here). It runs on the session's model with the
+# session's sampling, may not delegate further (`task: deny`, the depth-one boundary) and must not write the judged
+# output. The built-in `general` and `explore` subagents are hidden so the tool lists one delegate.
+#
+# Every model call of a child session is captured with the rollout's and reported as a child invocation of the
+# primary agent's (`parent_invocation_id`, `spawned_by_tool_call_id`). Which of those calls train, and how a child's
+# context is reconstructed, is the training framework's decision (Gym's capture docs, "Train with external agent
+# harnesses"); Gym's local `fingerprint` lineage treats a child's first call as a new root.
+opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      opencode_config:
+        agent:
+          analyst:
+            mode: subagent
+            steps: ${oc.select:agentic_vbench_subagent_steps,10}
+            permission:
+              task: deny
+            description: >-
+              Video/audio analysis subagent. Give it ONE self-contained analysis goal on the materials under
+              /workspace/materials (e.g. describe and timestamp the shots of a set of clips, read on-screen text,
+              find a cut/glitch/duplicated span, measure loudness or noise, transcribe a span). It inspects media with
+              ffmpeg/ffprobe/python and reports findings with exact timestamps; it must not write anything under
+              /workspace/output. Several analysts can run in parallel on independent goals; call task again with the
+              task_id it returned to ask the same analyst a follow-up that builds on what it already found.
+            prompt: >-
+              You are an analysis subagent with a budget of at most 10 tool calls. Complete exactly the analysis goal
+              you were given using ffmpeg/ffprobe/python and image reads (prefer a few targeted calls over exhaustive
+              scans), then stop and report precise timestamps, counts and quotes with the evidence you used, stating
+              uncertainty. Never write under /workspace/output; only report.
+          general:
+            disable: true
+          explore:
+            disable: true

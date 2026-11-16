@@ -14,7 +14,6 @@ from benchmarks.agentic_vbench.staging import (
     OPENCODE_PLUGINS_DIR,
     OPENCODE_PLUGINS_SANDBOX_DIR,
 )
-from responses_api_models.vllm_model.app import OPENCODE_AGENT_HEADER
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -42,6 +41,7 @@ def test_the_training_overlay_loads_the_staged_plugins_and_turns_on_summary_reco
     assert plugins == [f"{OPENCODE_PLUGINS_SANDBOX_DIR}/{name}" for name in OPENCODE_PLUGINS]
     vllm = overlay["policy_model"]["responses_api_models"]["vllm_model"]
     assert set(vllm) == {"compaction_summary_max_tokens", "compaction_summary_max_attempts"}
-    # The header plugin and the model server agree on the header name.
+    # The model server's own tests check that it reads the header this plugin sets (test_compaction_summary.py):
+    # importing the server module here would count the whole server in the core coverage total.
     header_plugin = (OPENCODE_PLUGINS_DIR / "compaction_summary_header.mjs").read_text()
-    assert f'export const HEADER = "{OPENCODE_AGENT_HEADER}";' in header_plugin
+    assert 'export const HEADER = "X-NeMo-Gym-OpenCode-Agent";' in header_plugin
