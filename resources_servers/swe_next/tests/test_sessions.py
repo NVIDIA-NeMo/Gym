@@ -21,7 +21,7 @@ def isolated_global_config(monkeypatch):
 
 @pytest.mark.parametrize("typed", [False, True])
 @pytest.mark.parametrize("completed", [False, True])
-def test_routes_capture_before_cleanup_and_mask_infrastructure(monkeypatch, tmp_path, typed, completed):
+def test_routes_capture_before_cleanup_and_mask_infrastructure(monkeypatch, typed, completed):
     sandboxes = []
 
     async def create(self, body, files=None, *, session_id=None, verifier_session_id=None, for_agent=False):
@@ -60,7 +60,6 @@ def test_routes_capture_before_cleanup_and_mask_infrastructure(monkeypatch, tmp_
             sandbox_provider="docker",
             sandbox_config={},
             apply_anti_cheating=False,
-            verification_log_dir=tmp_path,
         ),
         server_client=MagicMock(spec=ServerClient),
     )
@@ -116,7 +115,7 @@ def test_routes_capture_before_cleanup_and_mask_infrastructure(monkeypatch, tmp_
     "outcome",
     ["correct", "incorrect", "grading_timeout", "grading_provider_error", "capture_provider_error", "git_failure"],
 )
-def test_routes_execute_capture_and_grading(monkeypatch, tmp_path, typed, outcome):
+def test_routes_execute_capture_and_grading(monkeypatch, typed, outcome):
     """Control only sandbox I/O; keep capture, verifier, retries and response accounting real."""
     from resources_servers.swe_next.verification import TEST_OUTPUT_BEGIN, TEST_OUTPUT_END
 
@@ -179,7 +178,6 @@ def test_routes_execute_capture_and_grading(monkeypatch, tmp_path, typed, outcom
             sandbox_provider="docker",
             sandbox_config={},
             apply_anti_cheating=False,
-            verification_log_dir=tmp_path,
         ),
         server_client=MagicMock(spec=ServerClient),
     )

@@ -48,7 +48,6 @@ from nemo_gym.core import (
     current_verifier_invocation_id,
     observe_failure,
 )
-from nemo_gym.core.runtime_files import debug_folder
 from nemo_gym.sandbox import (
     AsyncSandbox,
     ConnectableProvider,
@@ -77,6 +76,7 @@ from nemo_gym.server_runtime import (
     lost_session_verification,
 )
 from nemo_gym.utils import explicit_causes, is_nemo_gym_fastapi_entrypoint
+from resources_servers.swebench.verification_logs import run_keeping_logs
 from resources_servers.swebench_pro.image_cache import digest_hex, verify_local_image
 from resources_servers.swebench_pro.verification import (
     DEFAULT_ENVIRONMENT_REPAIRS,
@@ -235,9 +235,8 @@ class SWEBenchProResourcesServerConfig(BaseResourcesServerConfig):
     evaluation_timeout: int | None = None
     # A verdict-less run is retried on a new sandbox; see `inconclusive_reason`.
     inconclusive_verification_retries: int = 2
-    # Verification logs are off unless this or the global debug_dir names a folder.
-    # Give an absolute node-local path, such as one under /tmp.
-    debug_dir: Path | None = None
+    # Keep each verification attempt's logs under <results_dir>/<server name>/verification/.
+    keep_verification_logs: bool = False
     # Ceiling on ONE verification attempt, covering sandbox creation as well as
     # the verification run. `evaluation_timeout` bounds only the test command
     # inside the sandbox, so creation is otherwise unbounded here. 1200s is
@@ -324,7 +323,7 @@ class SWEBenchProVerifyResponse(BaseVerifyResponse):
     test_results: dict[str, Any] | None
     test_output: str
     error: str | None
-    # Empty unless debug_dir or the global debug_dir is set.
+    # The kept copy of the last attempt's logs; empty unless keep_verification_logs is on.
     log_dir: str
     # Lifecycle facts of the sandbox that produced this grade; the agent attaches it as a verifier SandboxObservation.
     verifier_sandbox_observation: dict[str, Any] | None = None
@@ -705,15 +704,13 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             f"/workspace/{relative_path}": contents for relative_path, contents in workspace_files.items()
         }
 
-        run_log_dir = debug_folder(
-            server_name=self.config.name, kind="verification", label=body.instance_id, override=self.config.debug_dir
-        )
         eval_sandbox_start_time_taken = 0.0
         patch_verification_time_taken = 0.0
         attempts = 1 + max(self.config.inconclusive_verification_retries, 0)
         deadline = _verification_deadline(self.config.verification_total_timeout)
         verifier_sandbox_observation = None
         verifier_sandbox_observations = []
+        kept_logs: Path | None = None
         for attempt in range(1, attempts + 1):
             attempt_error: Exception | None = None
             eval_sandbox: AsyncSandbox | None = None
@@ -723,11 +720,17 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                     eval_sandbox = await self._create_sandbox(body, files=sandbox_files)
                     eval_sandbox_start_time_taken = time() - start_time
                     verification_start = time()
-                    result = await self._run_verification(
-                        sandbox=eval_sandbox,
-                        inputs=inputs,
-                        log_dir=run_log_dir / f"attempt-{attempt}" if run_log_dir is not None else None,
-                        timeout_s=self.config.evaluation_timeout,
+                    result, kept_logs = await run_keeping_logs(
+                        lambda logs: self._run_verification(
+                            sandbox=eval_sandbox,
+                            inputs=inputs,
+                            log_dir=logs,
+                            timeout_s=self.config.evaluation_timeout,
+                        ),
+                        keep=self.config.keep_verification_logs,
+                        server_name=self.config.name,
+                        instance_id=body.instance_id,
+                        attempt=attempt,
                     )
                     patch_verification_time_taken = time() - verification_start
             except Exception as exc:
@@ -817,7 +820,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             "test_results": result.test_results,
             "test_output": result.test_output,
             "error": extraction_error or result.error or reason,
-            "log_dir": str(run_log_dir) if run_log_dir is not None else "",
+            "log_dir": str(kept_logs) if kept_logs is not None else "",
             # Older observation schemas forbid unknown fields; the plural field retains the full facts.
             "verifier_sandbox_observation": {
                 key: value

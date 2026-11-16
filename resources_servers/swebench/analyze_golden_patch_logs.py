@@ -22,8 +22,7 @@ from shutil import copytree
 from swebench.harness.constants import MAP_REPO_TO_EXT
 
 
-# The verification logs a golden-patch run kept: `<debug_dir>/verification` when the server's own debug_dir was set,
-# or `<global debug_dir>/<server name>/verification` otherwise.
+# The verification logs a golden-patch run kept with keep_verification_logs on: `<results_dir>/<server name>/verification`.
 log_root = Path(sys.argv[1])
 benchmark_fpath = Path("benchmarks/swebench/data/swebench_multilingual_benchmark.jsonl")
 failed_sample_dirpath = Path("results/failed_swe_multilingual_golden_patch")
@@ -41,7 +40,7 @@ writer.writeheader()
 
 def copy_sample(path: Path, instance_id: str):
     relative_report_path = path.relative_to(log_root)
-    # A report is at <verify folder>/<run id>/<model>/<instance id>/report.json; copy that one verification's folder.
+    # A report is at <kept folder>/<run id>/<model>/<instance id>/report.json; copy that one verification's folder.
     verify_dir = path.parents[3]
     copytree(
         src=verify_dir,

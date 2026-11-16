@@ -83,7 +83,7 @@ from nemo_gym.core import (
     observe_failure,
 )
 from nemo_gym.core.failure_kinds import PROVIDER_COMMAND_OUTCOME_UNKNOWN
-from nemo_gym.core.runtime_files import async_temp_folder
+from nemo_gym.core.runtime_files import async_request_temp_dir
 from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -675,7 +675,7 @@ async def _opencode_results_dir(artifacts_dir: Optional[str], session_id: str) -
         results_dir.mkdir(parents=True, exist_ok=True)
         yield results_dir
     else:
-        async with async_temp_folder(kind="opencode-results") as tmp:
+        async with async_request_temp_dir("opencode-results") as tmp:
             yield tmp
 
 

@@ -22,6 +22,8 @@ from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
 from nemo_gym.client import ServerClient
+from nemo_gym.config.global_config import RESULTS_DIR_KEY_NAME
+from nemo_gym.core import runtime_files
 from nemo_gym.sandbox import SandboxHandle
 from resources_servers.swebench import app as swebench_app
 from resources_servers.swebench.app import SwebenchResourcesServer, SwebenchResourcesServerConfig
@@ -57,16 +59,19 @@ _REQUEST = {
 }
 
 
-def _server(monkeypatch: MonkeyPatch, debug_dir: Path | None) -> SwebenchResourcesServer:
+def _server(monkeypatch: MonkeyPatch, results_dir: Path, *, keep: bool) -> SwebenchResourcesServer:
+    monkeypatch.setattr(
+        runtime_files, "maybe_get_global_config_dict", lambda: {RESULTS_DIR_KEY_NAME: str(results_dir)}
+    )
     config = SwebenchResourcesServerConfig(
         host="0.0.0.0",
         port=8080,
         entrypoint="",
-        name="",
+        name="swebench",
         sandbox_provider="test",
         sandbox_config=dict(),
         is_verifying_golden_patch=True,
-        debug_dir=debug_dir,
+        keep_verification_logs=keep,
     )
     sandbox = MagicMock()
     sandbox._handle = SandboxHandle(sandbox_id="sandbox-123", provider_name="test-provider", raw=None)
@@ -92,39 +97,40 @@ class _Harness:
         return {"completed": True, "resolved": True}
 
 
-def test_logs_go_to_a_temporary_folder_that_is_removed(monkeypatch: MonkeyPatch) -> None:
+def test_logs_go_to_a_temporary_folder_that_is_removed(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
     harness = _Harness()
     monkeypatch.setattr(swebench_app, "run_instance", harness)
 
-    response = TestClient(_server(monkeypatch, None).setup_webserver()).post("/verify", json=_REQUEST)
+    response = TestClient(_server(monkeypatch, tmp_path, keep=False).setup_webserver()).post("/verify", json=_REQUEST)
 
     assert response.status_code == 200
     assert response.json()["test_output"] == "test log"
     assert response.json()["log_dir"] == ""
     assert not harness.log_root.is_relative_to(Path(swebench_app.__file__).parent)
     assert not harness.log_root.exists()
+    assert not any(tmp_path.iterdir())
 
 
-def test_a_copy_is_kept_under_the_configured_folder(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+def test_kept_logs_are_copied_under_the_server_results(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
     harness = _Harness()
     monkeypatch.setattr(swebench_app, "run_instance", harness)
 
-    response = TestClient(_server(monkeypatch, tmp_path).setup_webserver()).post("/verify", json=_REQUEST)
+    response = TestClient(_server(monkeypatch, tmp_path, keep=True).setup_webserver()).post("/verify", json=_REQUEST)
 
     assert response.status_code == 200
     log_dir = Path(response.json()["log_dir"])
-    assert log_dir.relative_to(tmp_path).parts[0] == "verification"
-    assert "-astropy__astropy-12907-" in log_dir.name
+    assert log_dir.relative_to(tmp_path).parts[:2] == ("swebench", "verification")
+    assert "-astropy__astropy-12907-attempt1-" in log_dir.name
     [kept] = log_dir.rglob("test_output.txt")
     assert kept.read_text() == "test log"
     assert not harness.log_root.exists()
 
 
-def test_a_verify_that_fails_still_removes_its_logs(monkeypatch: MonkeyPatch) -> None:
+def test_a_verify_that_fails_still_removes_its_logs(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
     harness = _Harness(error=RuntimeError("harness crashed"))
     monkeypatch.setattr(swebench_app, "run_instance", harness)
 
-    TestClient(_server(monkeypatch, None).setup_webserver(), raise_server_exceptions=False).post(
+    TestClient(_server(monkeypatch, tmp_path, keep=False).setup_webserver(), raise_server_exceptions=False).post(
         "/verify", json=_REQUEST
     )
 
@@ -142,5 +148,5 @@ def test_the_old_setting_still_loads_and_says_how_to_keep_logs(caplog: pytest.Lo
         clear_swebench_debug_logs=False,
     )
 
-    assert config.debug_dir is None
-    assert "Set debug_dir" in caplog.text
+    assert config.keep_verification_logs is False
+    assert "Set keep_verification_logs" in caplog.text

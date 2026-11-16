@@ -4,6 +4,7 @@
 
 import asyncio
 import logging
+from pathlib import Path
 from time import monotonic
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -20,7 +21,8 @@ import resources_servers.scale_swe.app as scale_swe_app
 import resources_servers.scale_swe.verification as verification
 import resources_servers.swebench.patch_capture as patch_capture
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.config.global_config import RESULTS_DIR_KEY_NAME
+from nemo_gym.core import EpisodeId, TaskId, runtime_files
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
@@ -953,15 +955,23 @@ async def test_golden_patch_mode_refuses_episode_seeds(server):
 
 
 @pytest.mark.parametrize("configured", [False, True])
-async def test_verification_logs_are_written_only_under_the_configured_folder(server, grading, tmp_path, configured):
-    if configured:
-        server.config.debug_dir = tmp_path
+async def test_verification_logs_are_written_only_under_the_configured_folder(
+    monkeypatch, server, grading, tmp_path, configured
+):
+    # The results folder is set either way, so only keep_verification_logs differs.
+    monkeypatch.setattr(runtime_files, "maybe_get_global_config_dict", lambda: {RESULTS_DIR_KEY_NAME: str(tmp_path)})
+    server.config.name = "scale_swe"
+    server.config.keep_verification_logs = configured
     request = SimpleNamespace(session={})
     await server.seed_session(request, seed())
     await server.verify(request, verify_body())
     log_dir = grading.run.await_args.kwargs["log_dir"]
     if configured:
-        assert log_dir.is_relative_to(tmp_path) and log_dir.name == "attempt-1"
+        # The attempt's temporary folder was copied once under the server's results.
+        [kept] = (tmp_path / "scale_swe" / "verification").glob("*/*")
+        assert "-attempt1-" in kept.name
     else:
-        # Without a folder, nothing is written; the server's own source folder is never the default.
-        assert log_dir is None
+        assert not any(tmp_path.iterdir())
+    # The verifier wrote to a temporary folder outside the server's source folder, removed after the attempt.
+    assert not log_dir.is_relative_to(Path(scale_swe_app.__file__).parent)
+    assert not log_dir.exists()

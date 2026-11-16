@@ -7,8 +7,6 @@ swebench_pro_resources_server:
       domain: coding
       verified: false
 
-      # Verification logs are off unless this or the global debug_dir names an absolute node-local folder.
-      debug_dir: null
       # Bounds only the test command inside the sandbox.
       evaluation_timeout: 3600
       # Bound the surrounding work too: one attempt (creation + verification)

@@ -11,8 +11,6 @@ swe_gym_resources_server:
       domain: coding
       verified: false
 
-      # Verification logs are off unless this or the global debug_dir names an absolute node-local folder.
-      debug_dir: null
       evaluation_timeout: 3600
       is_verifying_golden_patch: false
       # Scrub the agent sandbox's git history (SWE-bench images clone the full upstream history, so

@@ -32,7 +32,6 @@ the dataset-health check; ``apply_golden_patch.py`` runs it over the training js
 """
 
 import sys
-from pathlib import Path
 from shlex import quote
 from time import time
 from traceback import format_exc
@@ -44,7 +43,6 @@ from pydantic import BaseModel, ConfigDict
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import SESSION_LOST
-from nemo_gym.core.runtime_files import debug_folder
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -84,6 +82,7 @@ from resources_servers.swebench.patch_capture import (
     prepare_git_for_commits,
 )
 from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
+from resources_servers.swebench.verification_logs import run_keeping_logs
 
 
 class R2EGymResourcesServerConfig(BaseResourcesServerConfig):
@@ -95,9 +94,8 @@ class R2EGymResourcesServerConfig(BaseResourcesServerConfig):
     # A verdict-less run is retried on a fresh sandbox: an image pull or a flaky provider start
     # is not evidence about the patch.
     inconclusive_verification_retries: int = 1
-    # Verification logs are off unless this or the global debug_dir names a folder.
-    # Give an absolute node-local path, such as one under /tmp.
-    debug_dir: Path | None = None
+    # Keep each verification attempt's logs under <results_dir>/<server name>/verification/.
+    keep_verification_logs: bool = False
     apply_anti_cheating: bool = True
     sandbox_provider: str
     sandbox_config: dict[str, Any]
@@ -369,9 +367,6 @@ class R2EGymResourcesServer(SandboxSessionResourcesServer):
                 **capture.response_fields(self.config.include_model_patch_in_response),
             )
 
-        log_dir = debug_folder(
-            server_name=self.config.name, kind="verification", label=body.instance_id, override=self.config.debug_dir
-        )
         files = verification_files(inputs)
         attempts = 1 + max(self.config.inconclusive_verification_retries, 0)
         start_time_taken = 0.0
@@ -384,11 +379,17 @@ class R2EGymResourcesServer(SandboxSessionResourcesServer):
                 sandbox = await self._create_sandbox(body, files=files, verifier_session_id=session_id)
                 start_time_taken = time() - started
                 verification_started = time()
-                result = await run_verification(
-                    sandbox=sandbox,
-                    inputs=inputs,
-                    timeout_s=self.config.evaluation_timeout,
-                    log_dir=log_dir / f"attempt-{attempt}" if log_dir is not None else None,
+                result, _ = await run_keeping_logs(
+                    lambda logs: run_verification(
+                        sandbox=sandbox,
+                        inputs=inputs,
+                        timeout_s=self.config.evaluation_timeout,
+                        log_dir=logs,
+                    ),
+                    keep=self.config.keep_verification_logs,
+                    server_name=self.config.name,
+                    instance_id=body.instance_id,
+                    attempt=attempt,
                 )
                 verification_time_taken = time() - verification_started
             except Exception as exc:

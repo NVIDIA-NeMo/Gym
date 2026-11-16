@@ -15,8 +15,6 @@ swemer_ultra_resources_server:
       domain: coding
       verified: false
 
-      # Verification logs are off unless this or the global debug_dir names an absolute node-local folder.
-      debug_dir: null
       evaluation_timeout: 1800
       is_verifying_golden_patch: false
       apply_anti_cheating: true
@@ -49,8 +47,6 @@ swemer_ultra_golden_patch_resources_server:
       domain: coding
       verified: false
 
-      # Verification logs are off unless this or the global debug_dir names an absolute node-local folder.
-      debug_dir: null
       evaluation_timeout: 1800
       is_verifying_golden_patch: true
 

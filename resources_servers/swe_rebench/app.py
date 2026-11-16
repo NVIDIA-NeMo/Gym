@@ -36,7 +36,6 @@ from pydantic import BaseModel, ConfigDict
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import VERIFIER_ERROR
-from nemo_gym.core.runtime_files import debug_folder
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -83,6 +82,7 @@ from resources_servers.swebench.swe_agents_container_setup import (
     apply_swe_agents_container_setup,
     swe_agents_container_files,
 )
+from resources_servers.swebench.verification_logs import run_keeping_logs
 
 
 # Gradle only auto-loads init scripts from $GRADLE_USER_HOME/init.d, so the mirror script
@@ -104,12 +104,11 @@ class SWERebenchResourcesServerConfig(BaseResourcesServerConfig, AgentNetworkCon
     patch_capture_mode: PatchCaptureMode = "worktree"
     include_model_patch_in_response: bool = True
     evaluation_timeout: int | None = 3600
-    # Verification logs are off unless this or the global debug_dir names a folder.
-    # Give an absolute node-local path, such as one under /tmp.
-    debug_dir: Path | None = None
     # A verdict-less run is retried on a fresh sandbox: an image pull or a flaky provider start
     # is not evidence about the patch.
     inconclusive_verification_retries: int = 1
+    # Keep each verification attempt's logs under <results_dir>/<server name>/verification/.
+    keep_verification_logs: bool = False
     # Where the upstream log-parser repo is cloned. Empty uses the shared nemo_gym cache.
     log_parser_cache_dir: str = ""
     apply_anti_cheating: bool = True
@@ -390,9 +389,6 @@ class SWERebenchResourcesServer(SandboxSessionResourcesServer):
         patch = capture.patch
 
         inputs = self._inputs(body, patch)
-        log_dir = debug_folder(
-            server_name=self.config.name, kind="verification", label=body.instance_id, override=self.config.debug_dir
-        )
 
         # Resolve the parser before spending a sandbox on the run: an unknown parser name means
         # this row can never be graded, and finding that out after the tests have run wastes the
@@ -434,6 +430,7 @@ class SWERebenchResourcesServer(SandboxSessionResourcesServer):
             test_output="",
             error="unattempted",
         )
+        kept_logs: Path | None = None
         for attempt in range(1, attempts + 1):
             sandbox: AsyncSandbox | None = None
             started = time()
@@ -441,12 +438,18 @@ class SWERebenchResourcesServer(SandboxSessionResourcesServer):
                 sandbox = await self._create_sandbox(body, files=files, verifier_session_id=session_id)
                 start_time_taken = time() - started
                 verification_started = time()
-                result = await run_verification(
-                    sandbox=sandbox,
-                    inputs=inputs,
-                    parser=parser,
-                    timeout_s=self.config.evaluation_timeout,
-                    log_dir=log_dir / f"attempt-{attempt}" if log_dir is not None else None,
+                result, kept_logs = await run_keeping_logs(
+                    lambda logs: run_verification(
+                        sandbox=sandbox,
+                        inputs=inputs,
+                        parser=parser,
+                        timeout_s=self.config.evaluation_timeout,
+                        log_dir=logs,
+                    ),
+                    keep=self.config.keep_verification_logs,
+                    server_name=self.config.name,
+                    instance_id=body.instance_id,
+                    attempt=attempt,
                 )
                 verification_time_taken = time() - verification_started
             except Exception as exc:
@@ -479,7 +482,7 @@ class SWERebenchResourcesServer(SandboxSessionResourcesServer):
                 # evaluation_completed distinguishes them so a broken row is not read as a hard task.
                 "reward": 1.0 if result.resolved else 0.0,
                 "evaluation_completed": result.completed,
-                "verification_log_dir": str(log_dir) if log_dir is not None else None,
+                "verification_log_dir": str(kept_logs) if kept_logs is not None else None,
                 **(
                     {"mask_sample": True, "failure_kind": VERIFIER_ERROR, "failure_reason": result.error}
                     if not result.completed
