@@ -107,7 +107,8 @@ def test_the_admitted_episodes_follow_pis_concurrency(monkeypatch, concurrency: 
 def test_a_sandbox_create_outlasts_its_request_and_readiness_wait(monkeypatch, caplog) -> None:
     # One create attempt on OpenSandbox holds the request, which blocks while the cell places the sandbox, and the
     # readiness wait that starts once the request returns: a budget below both gives up on a sandbox the cell is still
-    # starting within its bounds, deletes it and starts again, and the provider warns.
+    # starting within its bounds, deletes it and starts again, and the provider warns. The seed's own limit on the
+    # start lets such an attempt end.
     config = _compose(monkeypatch, CAPPED["pi-opensandbox"][0])
     monkeypatch.setattr(opensandbox_provider, "_BUDGET_WARNINGS", set())
     server = config["officeenv_sandbox_pi_resources_server"]["resources_servers"]["officeenv_sandbox"]
@@ -120,3 +121,4 @@ def test_a_sandbox_create_outlasts_its_request_and_readiness_wait(monkeypatch, c
     ready = spec.ready_timeout_s or inspect.signature(Sandbox.create).parameters["ready_timeout"].default.seconds
     assert budget >= request + ready
     assert "create.timeout_s" not in caplog.text
+    assert sandbox.start_timeout_s > budget

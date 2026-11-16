@@ -163,6 +163,7 @@ VERIFY_BODY = {"responses_create_params": {"input": []}, "response": RESPONSE}
 # keeps 2 s of it for the exit
 GRACE_OF_3_S = {"sandbox": {"docker": {}}, "server_shutdown_timeout_seconds": 3.0}
 IMAGE = {"image": "officeenv-sandbox:pilot"}
+RELAY = {"host_relay": "host.lima.internal", "trusted_workstation": True}  # a workstation's relay, accepted
 LOCAL = ("127.0.0.1", 50000)
 SANDBOX = ("203.0.113.47", 50000)  # a public address (TEST-NET-3), as a cluster node sees a cloud sandbox's calls
 
@@ -1130,7 +1131,7 @@ def test_a_host_relay_starts_in_the_sandbox_before_it_is_lent(sandboxes, monkeyp
         "policy_model": {"responses_api_models": {"inference_provider": {"port": 18173}}},
     }
     monkeypatch.setattr(sandbox_app, "get_global_config_dict", lambda: named)
-    server = make_server(host="127.0.0.1", sandbox_config={**IMAGE, "host_relay": "host.lima.internal"})
+    server = make_server(host="127.0.0.1", sandbox_config={**IMAGE, **RELAY})
     with mcp_client(server) as client:
         assert client.post("/seed_session", json=seed_body()).status_code == 200
         (sandbox,) = sandboxes.started
@@ -1138,6 +1139,19 @@ def test_a_host_relay_starts_in_the_sandbox_before_it_is_lent(sandboxes, monkeyp
         assert sandbox.spec.env["COMPANY_API_URL"] == "http://127.0.0.1:8080"
         assert "relay.py host.lima.internal 8080 18173" in sandbox.commands[0]
         assert "relay ready" in sandbox.commands[1]
+
+
+def test_a_host_relay_needs_a_trusted_workstation() -> None:
+    """Relayed connections reach the server from the host's loopback, which the caller check takes for Gym's own
+    servers, so code in a sandbox could call the routes kept for Gym: a config relays only on a workstation it marks
+    as trusted."""
+    assert is_trusted_caller("127.0.0.1", local=frozenset(), networks=())  # where relayed connections arrive from
+    with pytest.raises(ValueError, match="set trusted_workstation: true"):
+        OfficeEnvSandboxConfig(host_relay="host.lima.internal")
+    with pytest.raises(ValueError, match="set trusted_workstation: true"):
+        make_server(sandbox_config={**IMAGE, "host_relay": "host.docker.internal"})
+    assert OfficeEnvSandboxConfig(**RELAY).host_relay == "host.lima.internal"
+    assert not OfficeEnvSandboxConfig().trusted_workstation
 
 
 # Sandboxes without the internet.
@@ -1188,8 +1202,8 @@ def test_blocking_the_internet_needs_opensandbox_a_reachable_server_and_one_poli
     assert not sandboxes.started
     with pytest.raises(ValueError, match="one or the other"):
         OfficeEnvSandboxConfig(block_internet=True, provider_options={"network_policy": {"defaultAction": "deny"}})
-    with pytest.raises(ValueError, match="host_relay"):
-        OfficeEnvSandboxConfig(block_internet=True, host_relay="host.lima.internal")
+    with pytest.raises(ValueError, match="host_relay serves a workstation's Docker"):
+        OfficeEnvSandboxConfig(block_internet=True, **RELAY)
 
 
 # Images and what a row needs.
@@ -2662,7 +2676,7 @@ def sandbox_view(server: OfficeEnvResourcesServer, sandboxes: type[FakeSandbox],
 
 @pytest.mark.parametrize("exposure", SANDBOX_EXPOSURES)
 def test_a_sandbox_reads_environment_names_only_in_the_model_url(sandboxes, exposure: str) -> None:
-    server = make_server(sandbox_config={**IMAGE, "host_relay": "host.lima.internal"}, **configured_mcp_settings())
+    server = make_server(sandbox_config={**IMAGE, **RELAY}, **configured_mcp_settings())
     text = sandbox_view(server, sandboxes, exposure)
     assert "COMPANY_API_URL=http://10.0.0.1:8080" in text and "/workspace/README.md" in text
     assert "savedTo" in text and "$COMPANY_API_URL/v1/files" in text  # a saved download, a refused pasted upload
@@ -2895,6 +2909,30 @@ def test_a_close_waits_for_a_seed_still_starting_its_sandbox_and_stops_it(sandbo
     asyncio.run(scenario())
     assert len(sandboxes.started) == 1 and sandboxes.stopped == sandboxes.started
     assert not server._episodes and not server._tokens
+
+
+def test_a_sandbox_start_ends_at_the_configured_limit(sandboxes, monkeypatch, caplog) -> None:
+    """sandbox_config.start_timeout_s (1800 s by default) bounds a sandbox's start: a create that hangs fails its seed
+    at the limit and leaves no episode, and since the provider never returned the sandbox's id, the cut is logged at
+    ERROR with the session and the task, for a reaper."""
+    assert OfficeEnvSandboxConfig().start_timeout_s == 1800
+    for limit in (0, -1, float("inf"), float("nan")):
+        with pytest.raises(ValueError, match="start_timeout_s"):
+            OfficeEnvSandboxConfig(start_timeout_s=limit)
+
+    async def hung_start(sandbox: FakeSandbox, spec) -> None:
+        sandbox.spec = spec
+        await asyncio.Event().wait()  # a provider's create that never returns
+
+    monkeypatch.setattr(FakeSandbox, "start", hung_start)
+    server = make_server(sandbox_config={**IMAGE, "start_timeout_s": 0.05})
+    with caplog.at_level(logging.ERROR, logger=sandbox_lending.__name__), mcp_client(server) as client:
+        with pytest.raises(TimeoutError):
+            client.post("/seed_session", json=seed_body())
+    assert not server._episodes and not server._tokens
+    assert len(sandboxes.stopped) == 1  # the stop LentSandboxes tries, which cannot reach what the create left
+    cut = "resources session rs-1 (task sandbox-files of taskset oe) did not start within start_timeout_s (0.05 s)"
+    assert cut in caplog.text
 
 
 def test_shutdown_during_a_seeds_turn_starts_no_sandbox(sandboxes, monkeypatch) -> None:
