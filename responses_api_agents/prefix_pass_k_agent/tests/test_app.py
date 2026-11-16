@@ -204,6 +204,7 @@ def _bare_agent(**config):
         replay_through_target=False,
         debug=False,
         model_server=SimpleNamespace(name="policy_model"),
+        outcome_policy=AGENT._default_commit_outcome_policy(),
     )
     agent = AGENT.PrefixPassKAgent.__new__(AGENT.PrefixPassKAgent)
     object.__setattr__(agent, "config", SimpleNamespace(**(defaults | config)))
@@ -900,11 +901,11 @@ class TestSandboxIsReleasedOnEveryExit:
 @pytest.mark.parametrize(
     "failure,kind",
     [
-        (_result(stderr="provider error", error_type="sandbox"), "agent_run_error"),
-        (_result(stderr="timed out", error_type="timeout"), "agent_run_error"),
+        (_result(stderr="provider error", error_type="sandbox"), "provider_request_failed"),
+        (_result(stderr="timed out", error_type="timeout"), "provider_io_timeout"),
         (ConnectionResetError("peer reset"), "transport_peer_drop"),
-        (RuntimeError("provider error"), "agent_run_error"),
-        (TimeoutError("commit timed out"), "agent_run_error"),
+        (RuntimeError("provider error"), "provider_request_failed"),
+        (TimeoutError("commit timed out"), "provider_io_timeout"),
     ],
 )
 def test_failed_required_commit_masks_attempt_and_releases_sandbox(monkeypatch, failure, kind):
@@ -1071,6 +1072,7 @@ def test_deepswe_builder_joins_full_task_names_and_preserves_multicall_observati
         assert block["target"]["action"] == "DECISIVE"
 
 
+@pytest.mark.skipif(shutil.which("git") is None or shutil.which("bash") is None, reason="needs git and bash")
 @pytest.mark.parametrize("reject_commit", [False, True])
 @pytest.mark.parametrize("verify_fails", [False, True])
 def test_required_commit_with_real_git(tmp_path, monkeypatch, reject_commit, verify_fails):
@@ -1130,7 +1132,7 @@ def test_required_commit_with_real_git(tmp_path, monkeypatch, reject_commit, ver
         result = asyncio.run(agent.run(request, body))
         assert (result.reward, result.mask_sample) == (0.0 if reject_commit else 1.0, False)
         if reject_commit:
-            assert result.failure_kind == "prefix_pass_k:commit_rejected"
+            assert result.failure_kind == "git_worktree_commit_rejected"
             assert "worktree commit rejected" in result.failure_reason
         else:
             assert repo.run("git show HEAD:new-file").stdout == "untracked change"
@@ -1142,5 +1144,250 @@ def test_required_commit_with_real_git(tmp_path, monkeypatch, reject_commit, ver
 @pytest.mark.parametrize("return_code", [1, 128])
 def test_plain_git_exit_is_not_evidence_of_infrastructure_failure(return_code):
     """Ambiguous nonzero process exits follow the unmasked task-failure policy."""
-    with pytest.raises(AGENT.WorktreeCommitError, match=f"exit={return_code}"):
+    with pytest.raises(AGENT.NgFailureEvent, match=f"exit={return_code}") as caught:
         asyncio.run(_bare_agent()._commit_worktree(FakeSandbox(_result(return_code=return_code))))
+    assert caught.value.failure_kind == "git_worktree_commit_rejected"
+    assert caught.value.stage == "verification"
+
+
+def _commit_policy_config(**overrides):
+    """Validate a real prefix-agent configuration with optional policy overrides."""
+    return AGENT.PrefixPassKAgentConfig(
+        name="agent",
+        host="127.0.0.1",
+        port=0,
+        entrypoint="app.py",
+        sandbox_provider="sandbox",
+        resources_server={"type": "resources_servers", "name": "resources"},
+        model_server={"type": "responses_api_models", "name": "model"},
+        **overrides,
+    )
+
+
+def _run_commit_attempt(monkeypatch, failure, *, policy=None, verify_report=None):
+    """Run generation, a failed required commit and verifier cleanup through the real agent method."""
+    from nemo_gym.core import FailureReportRow, RequestFailureLog
+
+    helper = TestSandboxIsReleasedOnEveryExit()
+    verified = []
+
+    async def responses(request, params):
+        """Return a completed candidate turn before commit preparation."""
+        return helper._response()
+
+    def verify(params):
+        """Offer a stale passing score and retain independent verifier evidence."""
+        verified.append(params)
+        return params | {"reward": 1.0} | (FailureReportRow.fields(verify_report) if verify_report else {})
+
+    agent, stops, request, body = helper._agent(monkeypatch, responses, verify)
+    agent.config.commit_worktree = True
+    agent.config.uncommit_worktree = True
+    agent.config.outcome_policy = policy or _commit_policy_config().outcome_policy
+    connect = agent._connect_sandbox
+    commands = []
+
+    async def exec_command(command, timeout_s=None):
+        """Return or raise the supplied commit failure without fabricating a verifier result."""
+        commands.append(command)
+        if isinstance(failure, Exception):
+            raise failure
+        return failure
+
+    async def connect_with_exec(seed):
+        """Attach command execution to the sandbox whose release the fixture records."""
+        sandbox = await connect(seed)
+        sandbox.exec = exec_command
+        return sandbox
+
+    async def uncommit(*args):
+        """Reject mutations following any failed commit, independent of the selected outcome."""
+        raise AssertionError("uncommit after a failed required commit")
+
+    object.__setattr__(agent, "_connect_sandbox", connect_with_exec)
+    object.__setattr__(agent, "_uncommit_worktree", uncommit)
+    with RequestFailureLog.capture() as log:
+        result = asyncio.run(agent.run(request, body))
+    helper._assert_released(agent, stops)
+    assert len(verified) == len(commands) == 1
+    saved = AGENT.PrefixPassKVerifyResponse.model_validate_json(result.model_dump_json())
+    return saved, log.report
+
+
+@pytest.mark.parametrize("action,masked", [("count_as_zero", False), ("fail", True)])
+def test_commit_rejection_policy_is_saved_with_failure_report(monkeypatch, action, masked):
+    """A configured rejection decision survives JSON persistence and never accepts the stale pass."""
+    from nemo_gym.core import FailureReportRow
+
+    policy = _commit_policy_config(
+        outcome_policy={
+            "by_stage": {"verification": {"by_failure_kind": {"git_worktree_commit_rejected": action}}},
+        }
+    ).outcome_policy
+    result, observed = _run_commit_attempt(
+        monkeypatch, _result(return_code=128, stderr="identity rejected"), policy=policy
+    )
+    assert (result.reward, result.mask_sample, result.failure_outcome_action) == (0.0, masked, action)
+    assert result.failure_outcome_attribution == "model"
+    row = result.model_dump(mode="json")
+    report = FailureReportRow.report(row)
+    event = report.events[report.failure_id]
+    assert (event.boundary, event.failure_kind, event.stage, event.operation) == (
+        "agent",
+        "git_worktree_commit_rejected",
+        "verification",
+        "agent.git_worktree_commit",
+    )
+    assert event.failure_reason.endswith("identity rejected")
+    assert observed.events[event.event_id] == event
+
+
+def test_rejection_attribution_is_independent_of_action(monkeypatch):
+    """A benchmark may keep the counted zero while explicitly declining responsibility attribution."""
+    policy = _commit_policy_config(
+        outcome_policy={
+            "classification": {
+                "by_stage": {"verification": {"by_failure_kind": {"git_worktree_commit_rejected": "unknown"}}}
+            },
+        }
+    ).outcome_policy
+    result, _ = _run_commit_attempt(monkeypatch, _result(return_code=1), policy=policy)
+    assert (result.reward, result.mask_sample) == (0.0, False)
+    assert (result.failure_outcome_action, result.failure_outcome_attribution) == ("count_as_zero", "unknown")
+
+
+@pytest.mark.parametrize("stage", [None, "agent", "seed", "verification"])
+def test_provider_commit_failure_preserves_identity_stage_and_explicit_causes(monkeypatch, stage):
+    """Forwarded provider events keep their identity and causes in successful HTTP result bodies."""
+    from nemo_gym.core import (
+        FailureBoundary,
+        FailureReportRow,
+        NgFailureEvent,
+        SandboxFailureDetails,
+        failure_report_for,
+    )
+
+    cause = NgFailureEvent(
+        boundary=FailureBoundary.SANDBOX,
+        failure_kind="provider_io_timeout",
+        failure_reason="status read timed out",
+        operation="status",
+        stage=stage,
+    )
+    provider = NgFailureEvent(
+        boundary=FailureBoundary.SANDBOX,
+        failure_kind="provider_unavailable",
+        http_status=503,
+        failure_reason="backend unavailable",
+        operation="exec",
+        stage=stage,
+        details=SandboxFailureDetails(provider="docker", sandbox_id="sandbox-id", provider_status_reason="missing"),
+    )
+    provider.__cause__ = cause
+    verifier = NgFailureEvent(
+        boundary=FailureBoundary.RESOURCES_SERVER,
+        failure_kind="verifier_error",
+        failure_reason="verifier observed the lost sandbox",
+        stage="verification",
+    )
+    original = failure_report_for(provider)
+    result, observed = _run_commit_attempt(monkeypatch, provider, verify_report=failure_report_for(verifier))
+    assert (result.reward, result.mask_sample, result.failure_outcome_action) == (0.0, True, "fail")
+    assert result.failure_kind == "provider_unavailable"
+    assert result.failure_outcome_attribution == "evaluation"
+    report = FailureReportRow.report(result.model_dump(mode="json"))
+    root = report.events[report.failure_id]
+    assert (root.boundary, root.operation, root.stage, root.cause_id) == (
+        "agent",
+        "agent.git_worktree_commit",
+        stage or "verification",
+        provider.event_id,
+    )
+    for event_id, event in original.events.items():
+        assert report.events[event_id] == observed.events[event_id] == event
+    assert verifier.event_id in report.events
+    assert provider.__cause__ is cause and provider.stage == stage
+
+
+def test_known_origin_selects_agent_policy_instead_of_verification_policy(monkeypatch):
+    """An agent-stage event caught during commit preparation still uses its originating policy."""
+    from nemo_gym.core import NgFailureEvent
+
+    policy = _commit_policy_config(
+        outcome_policy={
+            "by_stage": {"agent": {"by_failure_kind": {"provider_unavailable": "count_as_zero"}}},
+        }
+    ).outcome_policy
+    failure = NgFailureEvent(
+        boundary="sandbox",
+        failure_kind="provider_unavailable",
+        failure_reason="agent operation failed",
+        stage="agent",
+    )
+    result, _ = _run_commit_attempt(monkeypatch, failure, policy=policy)
+    assert (result.reward, result.mask_sample, result.failure_outcome_action) == (0.0, False, "count_as_zero")
+    assert result.failure_outcome_attribution == "evaluation"
+
+
+@pytest.mark.parametrize("stage", ["agent", "seed", "verification", "cleanup"])
+@pytest.mark.parametrize("action", ["retry", "verify"])
+def test_commit_policy_rejects_unsupported_actions(stage, action):
+    """The commit boundary cannot retry uncertain commands or select an unimplemented action."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="supports only fail and count_as_zero"):
+        _commit_policy_config(outcome_policy={"by_stage": {stage: {"default_action": action}}})
+
+
+def test_default_commit_policy_does_not_inherit_verifier_or_oom_retry_rules(monkeypatch):
+    """An empty or partial override retains commit defaults instead of shared verifier retries."""
+    from nemo_gym.core import NgFailureEvent
+
+    policy = _commit_policy_config(
+        outcome_policy={"classification": {"by_status_code": {429: "unknown"}}}
+    ).outcome_policy
+    failure = NgFailureEvent(
+        boundary="sandbox",
+        failure_kind="provider_oom_killed",
+        failure_reason="OOM during preparation",
+        stage="verification",
+    )
+    result, _ = _run_commit_attempt(monkeypatch, failure, policy=policy)
+    assert (result.failure_outcome_action, result.mask_sample) == ("fail", True)
+    rejection, _ = _run_commit_attempt(monkeypatch, _result(return_code=128), policy=policy)
+    assert (rejection.failure_outcome_action, rejection.failure_outcome_attribution) == ("count_as_zero", "model")
+
+
+def test_typed_commit_failure_is_not_replaced_or_mutated():
+    """The provider's typed exception remains the exact explicit cause the boundary receives."""
+    from nemo_gym.core import NgFailureEvent
+
+    failure = NgFailureEvent(
+        boundary="sandbox",
+        failure_kind="provider_request_failed",
+        failure_reason="provider failed",
+        stage="seed",
+    )
+    cause = RuntimeError("SDK failure")
+    failure.__cause__ = cause
+
+    class BrokenSandbox:
+        """Raise an already classified provider event from exec."""
+
+        async def exec(self, command, timeout_s=None):
+            """Preserve a provider failure with an explicit SDK cause."""
+            raise failure
+
+    with pytest.raises(NgFailureEvent) as caught:
+        asyncio.run(_bare_agent()._commit_worktree(BrokenSandbox()))
+    assert caught.value is failure
+    assert failure.__cause__ is cause and failure.stage == "seed"
+
+
+def test_commit_rejection_diagnostics_are_bounded():
+    """Persist bounded rejection diagnostics even when Git returns a large error body."""
+    from nemo_gym.core import NgFailureEvent
+
+    with pytest.raises(NgFailureEvent) as caught:
+        asyncio.run(_bare_agent()._commit_worktree(FakeSandbox(_result(return_code=1, stderr="x" * 10000))))
+    assert len(caught.value.failure_reason) <= 500
