@@ -59,3 +59,12 @@ def test_warns_for_shared_and_memory_filesystems_only(mountinfo: Path, caplog: p
     assert len(caplog.records) == 2
     assert "temp_dir is /lustre/project/temp, on a lustre filesystem shared by many hosts" in caplog.text
     assert "temp_dir is /tmp/gym, on a tmpfs filesystem held in memory" in caplog.text
+
+
+def test_the_caller_supplies_the_advice(mountinfo: Path, caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING):
+        warn_if_unsuitable(
+            "model_call_capture_dir", "/lustre/run/model-calls", advice="Kept as run output.", mountinfo=mountinfo
+        )
+
+    assert caplog.text.rstrip().endswith("Kept as run output.")

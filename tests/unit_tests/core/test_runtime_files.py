@@ -18,7 +18,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
 from pathlib import Path
 
 import pytest
@@ -29,9 +28,7 @@ import nemo_gym.core.runtime_files as runtime_files
 from nemo_gym.core.episode_context import rollout_context
 from nemo_gym.core.runtime_files import (
     async_temp_folder,
-    create_owned_folder,
     debug_folder,
-    delete_owned_folder,
     remove_stale_temp_folders,
     temp_folder,
 )
@@ -229,7 +226,10 @@ class TestStaleTempFolders:
 
         assert not leftover.exists()
 
-    def test_leftovers_are_kept_on_a_shared_filesystem(self, set_global_config, tmp_path: Path, monkeypatch) -> None:
+    def test_leftovers_are_removed_on_a_shared_filesystem_too(
+        self, set_global_config, tmp_path: Path, monkeypatch
+    ) -> None:
+        # The boot id keeps other hosts' folders safe, so a shared temp_dir still gets an end of life.
         monkeypatch.setattr(runtime_files, "_checked_temp_parents", set())
         monkeypatch.setattr(runtime_files, "warn_if_unsuitable", lambda setting, path: "lustre")
         leftover = tmp_path / self._name(self._dead_pid())
@@ -239,7 +239,32 @@ class TestStaleTempFolders:
         with temp_folder(kind="workspace"):
             pass
 
-        assert leftover.exists()
+        assert not leftover.exists()
+
+    def test_a_folder_name_with_an_impossible_pid_is_kept_and_never_fails_the_request(
+        self, set_global_config, tmp_path: Path, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(runtime_files, "_checked_temp_parents", set())
+        crafted = tmp_path / self._name(10**30)
+        crafted.mkdir()
+        set_global_config({"temp_dir": str(tmp_path)})
+
+        with temp_folder(kind="workspace") as path:
+            assert path.exists()
+
+        assert crafted.exists()
+
+    def test_a_failing_cleanup_never_fails_the_request(self, set_global_config, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr(runtime_files, "_checked_temp_parents", set())
+
+        def broken(parent: Path) -> list[Path]:
+            raise OSError("listing failed")
+
+        monkeypatch.setattr(runtime_files, "remove_stale_temp_folders", broken)
+        set_global_config({"temp_dir": str(tmp_path)})
+
+        with temp_folder(kind="workspace") as path:
+            assert path.exists()
 
 
 def test_parent_replaces_temp_dir_for_code_without_gym_configuration(set_global_config, tmp_path: Path) -> None:
@@ -249,66 +274,6 @@ def test_parent_replaces_temp_dir_for_code_without_gym_configuration(set_global_
         assert path.parent == tmp_path / "from-server"
 
     assert not path.exists()
-
-
-class TestOwnedFolders:
-    def test_deletes_a_folder_gym_created(self, tmp_path: Path) -> None:
-        capture = create_owned_folder(tmp_path / "capture")
-        (capture / "ledgers").mkdir()
-        (capture / "ledgers" / "0-0.jsonl").write_text("{}")
-
-        assert delete_owned_folder(capture, deadline=time.monotonic() + 60) is True
-        assert not capture.exists()
-
-    def test_keeps_a_folder_a_user_chose(self, tmp_path: Path) -> None:
-        chosen = tmp_path / "my-capture"
-        chosen.mkdir()
-        (chosen / "0-0.jsonl").write_text("{}")
-
-        assert delete_owned_folder(chosen) is False
-        assert (chosen / "0-0.jsonl").exists()
-
-    def test_refuses_to_mark_a_folder_that_already_exists(self, tmp_path: Path) -> None:
-        chosen = tmp_path / "kept-capture"
-        chosen.mkdir()
-        (chosen / "0-0.jsonl").write_text("{}")
-
-        with pytest.raises(FileExistsError, match="Gym did not create it"):
-            create_owned_folder(chosen)
-
-        assert not (chosen / ".nemo-gym-owned").exists()
-        assert delete_owned_folder(chosen) is False
-        assert (chosen / "0-0.jsonl").exists()
-
-    def test_takes_an_existing_empty_folder(self, tmp_path: Path) -> None:
-        # A job script's `mkdir -p`, or a start that died between the mkdir and the marker, leaves one.
-        (tmp_path / "capture").mkdir()
-
-        capture = create_owned_folder(tmp_path / "capture")
-
-        assert (capture / ".nemo-gym-owned").is_file()
-
-    def test_a_restarted_run_reuses_its_own_folder(self, tmp_path: Path) -> None:
-        capture = create_owned_folder(tmp_path / "capture")
-        (capture / "0-0.jsonl").write_text("{}")
-
-        assert create_owned_folder(capture) == capture
-        assert (capture / "0-0.jsonl").exists()
-
-    def test_a_second_call_or_a_missing_folder_does_nothing(self, tmp_path: Path) -> None:
-        capture = create_owned_folder(tmp_path / "capture")
-
-        assert delete_owned_folder(capture) is True
-        assert delete_owned_folder(capture) is True
-
-    def test_stops_at_the_deadline_and_a_later_call_finishes(self, tmp_path: Path) -> None:
-        capture = create_owned_folder(tmp_path / "capture")
-        (capture / "0-0.jsonl").write_text("{}")
-
-        assert delete_owned_folder(capture, deadline=time.monotonic() - 1) is False
-        assert (capture / "0-0.jsonl").exists()
-        assert delete_owned_folder(capture) is True
-        assert not capture.exists()
 
 
 class TestAsyncTempFolder:
@@ -374,3 +339,35 @@ def test_debug_folder_segments_are_quoted(set_global_config, tmp_path: Path, mon
     assert path is not None
     assert path.is_relative_to(tmp_path / "swebench" / "verification")
     assert ".." not in path.parts
+
+
+async def test_folder_is_removed_when_an_anyio_cancel_scope_fires(set_global_config, tmp_path: Path) -> None:
+    import anyio
+
+    set_global_config({"temp_dir": str(tmp_path)})
+
+    with anyio.move_on_after(0.05):
+        async with async_temp_folder(kind="workspace"):
+            await anyio.sleep(3600)
+
+    for _ in range(100):
+        if not any(tmp_path.iterdir()):
+            break
+        await asyncio.sleep(0.01)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_debug_folder_rejects_a_server_name_that_leaves_the_root(set_global_config, tmp_path: Path) -> None:
+    set_global_config({"debug_dir": str(tmp_path)})
+
+    for name in ("", ".", ".."):
+        with pytest.raises(ValueError, match="server_name"):
+            debug_folder(server_name=name, kind="verification")
+
+
+def test_debug_folder_accepts_a_string_override(set_global_config, tmp_path: Path) -> None:
+    set_global_config(None)
+
+    path = debug_folder(server_name="swebench", kind="verification", override=str(tmp_path))
+
+    assert path is not None and path.is_relative_to(tmp_path)

@@ -148,16 +148,6 @@ def _validate_rollout_id(rollout_id: str) -> str:
     return rollout_id
 
 
-_checked_capture_dirs: set[Path] = set()
-
-
-def _warn_once_about_capture_dir(root: Path) -> None:
-    """Warn once per process and folder when capture writes to shared or memory-backed storage on this node."""
-    if root not in _checked_capture_dirs:
-        _checked_capture_dirs.add(root)
-        warn_if_unsuitable(MODEL_CALL_CAPTURE_DIR_KEY_NAME, root)
-
-
 class CaptureStore:
     """Append-only, rollout-keyed JSONL sink for model exchanges."""
 
@@ -165,7 +155,6 @@ class CaptureStore:
         self._root = Path(root)
         if create:
             self._root.mkdir(parents=True, exist_ok=True)
-            _warn_once_about_capture_dir(self._root)
 
     @property
     def root(self) -> Path:
@@ -379,6 +368,15 @@ def make_capture_store(config: ModelCallCaptureConfig) -> Optional[CaptureStore]
         return None
     root = config.model_call_capture_dir
     assert root is not None  # enforced by ModelCallCaptureConfig
+    # Checked by the writer only, on its own node; readers such as rollout collection open the same folder quietly.
+    warn_if_unsuitable(
+        MODEL_CALL_CAPTURE_DIR_KEY_NAME,
+        root,
+        advice=(
+            "That is expected when capture is kept as run output, as in an evaluation run. A run that deletes "
+            "capture at shutdown, such as NeMo RL, should place it on the node's local disk."
+        ),
+    )
     try:
         return CaptureStore(root)
     except Exception:
