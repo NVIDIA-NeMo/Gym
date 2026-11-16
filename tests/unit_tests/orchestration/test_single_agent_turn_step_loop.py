@@ -14,11 +14,11 @@ from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
 )
-from nemo_gym.agents import AGENT_ACTIVATION_HEADER, AGENT_EPISODE_STEP_LIMIT_HEADER
-from nemo_gym.client import ServerClient
-from nemo_gym.config import BaseServerConfig
-from nemo_gym.core import RequestFailureLog
-from nemo_gym.server_runtime import RESOURCES_TASK_STATE_PATH
+from nemo_gym.agents.base_responses_api_agent import AGENT_ACTIVATION_HEADER, AGENT_EPISODE_STEP_LIMIT_HEADER
+from nemo_gym.client.server_client import ServerClient
+from nemo_gym.config.config_types import BaseServerConfig
+from nemo_gym.core.failure_transport import RequestFailureLog
+from nemo_gym.server_runtime.base_resources_server import RESOURCES_TASK_STATE_PATH
 from tests.helpers.single_agent_turn import _request
 
 
