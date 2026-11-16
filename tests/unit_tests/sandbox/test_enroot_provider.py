@@ -1195,6 +1195,24 @@ async def test_exec_cpu_is_read_from_the_report_file_and_stderr_is_never_touched
         assert (sample.cpu_usage_usec_total, sample.process_count) == (2 * cpu_usec, 2)
 
 
+async def test_an_exec_runs_unwrapped_when_no_report_file_can_be_made(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    provider, rec, _sr = _make_provider(monkeypatch, lambda argv: (3, "out", "warn"), tmp_path)
+    monkeypatch.setattr(provider._usage_reader, "host_process_usage", lambda *args, **kwargs: ())
+    handle = _make_handle(tmp_path)
+
+    def no_space(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(enroot_provider.tempfile, "mkstemp", no_space)
+    result = await provider.exec(handle, "true")
+
+    assert (result.return_code, result.stdout, result.stderr, result.error_type) == (3, "out", "warn", None)
+    assert rec.calls[0]["argv"][:2] == [FAKE_BINARY, "exec"]
+    assert await provider.usage(handle) == ()
+
+
 async def _run_wrapped(provider, tmp_path: Path, command: str, *, stdin: bytes | None = None):
     report = tmp_path / "report"
     code, out, err = await provider._run(
@@ -1256,3 +1274,19 @@ async def test_the_exec_cpu_report_passes_stdin_and_keeps_stderr_without_a_final
     code, out, err, cpu_usec = await _run_wrapped(provider, tmp_path, "cat; printf partial >&2", stdin=b"piped")
 
     assert (code, out, err) == (0, "piped", "partial") and cpu_usec is not None
+
+
+@pytest.mark.skipif(not Path("/bin/sh").exists(), reason="no /bin/sh")
+async def test_an_unwritable_report_loses_the_sample_not_the_command_output_or_status(
+    fake_binary: str, tmp_path: Path
+) -> None:
+    provider = enroot_provider.EnrootProvider(create={"base_dir": str(tmp_path / "home")})
+    report = tmp_path / "gone" / "report"
+
+    code, out, err = await provider._run(
+        ["/bin/sh", "-c", enroot_provider.EXEC_TIMES_SCRIPT, "sh", str(report), "/bin/sh", "-c"]
+        + ["printf out; printf partial >&2; exit 4"],
+        timeout_s=60,
+    )
+
+    assert (code, out, err) == (4, "out", "partial") and not report.exists()
