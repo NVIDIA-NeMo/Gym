@@ -224,8 +224,8 @@ def _reported_count(value: Any) -> Optional[int]:
     return value if type(value) is int and value >= 0 else None
 
 
-def _reasoning_token_count(usage: dict[str, Any], *, running_total: bool = False) -> int:
-    """Return Cline's reasoning-token count across its supported usage shapes."""
+def _reasoning_token_count(usage: dict[str, Any], *, running_total: bool = False) -> Optional[int]:
+    """Cline's reasoning-token count across its supported usage shapes, or None when it reported none."""
     direct_keys = (
         ("totalReasoningTokens", "reasoningTokens")
         if running_total
@@ -237,15 +237,25 @@ def _reasoning_token_count(usage: dict[str, Any], *, running_total: bool = False
     for key in direct_keys:
         value = usage.get(key)
         if value is not None:
-            return int(value or 0)
+            return _reported_count(value)
 
     details = usage.get("outputTokenDetails") or usage.get("outputTokensDetails") or {}
     if isinstance(details, dict):
-        return int(details.get("reasoningTokens") or details.get("reasoning_tokens") or 0)
-    return 0
+        for key in ("reasoningTokens", "reasoning_tokens"):
+            if details.get(key) is not None:
+                return _reported_count(details[key])
+    return None
 
 
-def parse_cline_events(stdout: str) -> tuple[list[Any], dict[str, Any]]:
+def _input_total(input_tokens: Any, cache_reads: Optional[int], cache_reads_in_input: bool) -> Optional[int]:
+    """Prompt tokens including cache reads, or None when Cline's counts cannot establish them."""
+    reported = _reported_count(input_tokens)
+    if reported is None or cache_reads_in_input:
+        return reported
+    return None if cache_reads is None else reported + cache_reads
+
+
+def parse_cline_events(stdout: str, *, cache_reads_in_input: bool = True) -> tuple[list[Any], dict[str, Any]]:
     """Convert ``cline --json`` stdout into (output_items, metadata).
 
     ``cline --json`` writes one JSON object per line. Two record types carry the trajectory:
@@ -264,10 +274,18 @@ def parse_cline_events(stdout: str) -> tuple[list[Any], dict[str, Any]]:
     ignored. Reasoning arrives as ``contentType: "reasoning"`` and becomes a ``<think>`` block on
     the assistant message of the turn that produced it, matching the other CLI agents. Verified
     against cline 3.0.55.
+
+    Token counts Cline does not report stay None. ``cache_reads_in_input`` says whether the provider's
+    ``inputTokens`` already include cache reads, as ``openai-compatible``'s do (see ``_session_usage``);
+    otherwise cache reads are added to make the prompt total.
     """
     output_items: list[Any] = []
-    # Cache reads stay unknown unless Cline reports a count.
-    metadata: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0, "cached_tokens": None}
+    metadata: dict[str, Any] = {
+        "input_tokens": None,
+        "output_tokens": None,
+        "reasoning_tokens": None,
+        "cached_tokens": None,
+    }
     # Text/reasoning chunks for the turn being streamed; the matching content_end supersedes them.
     text_chunks: list[str] = []
     reasoning_chunks: list[str] = []
@@ -320,10 +338,11 @@ def parse_cline_events(stdout: str) -> tuple[list[Any], dict[str, Any]]:
             if isinstance(usage, dict) and usage:
                 # The aggregate is authoritative: Cline computes it from the session rather than
                 # summing per-turn events, which a truncated stream can drop.
-                metadata["input_tokens"] = int(usage.get("inputTokens") or 0) + int(usage.get("cacheReadTokens") or 0)
-                metadata["output_tokens"] = int(usage.get("outputTokens") or 0)
+                cache_reads = _reported_count(usage.get("cacheReadTokens"))
+                metadata["input_tokens"] = _input_total(usage.get("inputTokens"), cache_reads, cache_reads_in_input)
+                metadata["output_tokens"] = _reported_count(usage.get("outputTokens"))
                 metadata["reasoning_tokens"] = _reasoning_token_count(usage)
-                metadata["cached_tokens"] = _reported_count(usage.get("cacheReadTokens"))
+                metadata["cached_tokens"] = cache_reads
                 saw_usage = True
             model = record.get("model")
             if isinstance(model, dict) and model.get("id"):
@@ -427,12 +446,11 @@ def parse_cline_events(stdout: str) -> tuple[list[Any], dict[str, Any]]:
         elif etype == "usage":
             # Running totals for the session so far; run_result's aggregate wins when the run ends
             # normally, and these are what remains when it does not.
-            metadata["input_tokens"] = int(event.get("totalInputTokens") or 0) + int(
-                event.get("totalCacheReadTokens") or 0
-            )
-            metadata["output_tokens"] = int(event.get("totalOutputTokens") or 0)
+            cache_reads = _reported_count(event.get("totalCacheReadTokens"))
+            metadata["input_tokens"] = _input_total(event.get("totalInputTokens"), cache_reads, cache_reads_in_input)
+            metadata["output_tokens"] = _reported_count(event.get("totalOutputTokens"))
             metadata["reasoning_tokens"] = _reasoning_token_count(event, running_total=True)
-            metadata["cached_tokens"] = _reported_count(event.get("totalCacheReadTokens"))
+            metadata["cached_tokens"] = cache_reads
             saw_usage = True
 
         elif etype == "done":
@@ -455,7 +473,7 @@ def parse_cline_events(stdout: str) -> tuple[list[Any], dict[str, Any]]:
         output_items.append(_message(len(output_items), f"<think>\n{trailing_think}\n</think>"))
 
     if not saw_usage:
-        LOG.debug("cline stream carried no usage events; token counts reported as 0")
+        LOG.debug("cline stream carried no usage events; token counts stay unknown")
 
     return output_items, metadata
 
@@ -804,7 +822,9 @@ class ClineAgent(SimpleResponsesAPIAgent):
             elif returncode != 0:
                 LOG.warning("cline exited %d: %s", returncode, stderr[:500])
 
-            output_items, metadata = parse_cline_events(stdout)
+            output_items, metadata = parse_cline_events(
+                stdout, cache_reads_in_input=self._effective_provider() == OPENAI_COMPATIBLE_PROVIDER
+            )
             if returncode == -1:
                 metadata["timed_out"] = True
             model_name = metadata.get("model") or self.config.model or ""
@@ -1295,9 +1315,8 @@ class ClineAgent(SimpleResponsesAPIAgent):
                 )
             )
 
-        input_tokens = metadata.get("input_tokens", 0)
-        output_tokens = metadata.get("output_tokens", 0)
-        reasoning_tokens = metadata.get("reasoning_tokens", 0)
+        input_tokens = metadata.get("input_tokens")
+        output_tokens = metadata.get("output_tokens")
 
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
@@ -1308,13 +1327,18 @@ class ClineAgent(SimpleResponsesAPIAgent):
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
+            # Without Cline's input and output counts the run's usage is unknown, not zero.
             usage=NeMoGymResponseUsage(
                 input_tokens=input_tokens,
                 input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=metadata.get("cached_tokens")),
                 output_tokens=output_tokens,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=reasoning_tokens),
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(
+                    reasoning_tokens=metadata.get("reasoning_tokens")
+                ),
                 total_tokens=input_tokens + output_tokens,
-            ),
+            )
+            if input_tokens is not None and output_tokens is not None
+            else None,
         )
 
     async def run(self, request: Request, body: ClineAgentRunRequest) -> ClineAgentVerifyResponse:
