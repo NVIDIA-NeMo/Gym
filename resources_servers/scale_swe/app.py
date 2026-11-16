@@ -114,7 +114,7 @@ class ScaleSWEResourcesServerConfig(BaseResourcesServerConfig, AgentNetworkConfi
     # A verdict-less run is retried on a fresh sandbox: an image pull or a flaky provider start
     # is not evidence about the patch.
     inconclusive_verification_retries: int = 1
-    # None keeps verification logs off. To keep them, name a node-local folder such as one under /tmp.
+    # None keeps verification logs off. To keep them, give an absolute node-local path such as one under /tmp.
     verification_log_dir: Path | None = None
     apply_anti_cheating: bool = True
     sandbox_stop_timeout_seconds: float = Field(
