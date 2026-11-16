@@ -131,21 +131,21 @@ class ModelCallCaptureConfig(BaseModel):
         return self
 
 
-# Runs from older releases claimed each call with its own `<rollout id>.<call token>.capture.pending` file.
+# Earlier Gym versions claimed each call with its own `<rollout id>.<call token>.capture.pending` file.
 _PENDING_SUFFIX = ".capture.pending"
 _CLAIMS_SUFFIX = ".capture.claims"
 _CLAIM_APPEND_ATTEMPTS = 5
 
 
 def _pending_marker_rollout_id(name: str) -> Optional[str]:
-    """The rollout id an older release's pending marker names; its call token has no dot."""
+    """The rollout id an earlier Gym version's pending marker names; its call token has no dot."""
     if not name.endswith(_PENDING_SUFFIX):
         return None
     return name.removesuffix(_PENDING_SUFFIX).rsplit(".", 1)[0]
 
 
 def _is_live(handle: Any, path: Path) -> bool:
-    """Whether a locked claims file is still the one at ``path``, not one a reader has retired."""
+    """Whether a locked claims file is still the one at ``path``, not one a reader has deleted."""
     opened = os.fstat(handle.fileno())
     if opened.st_nlink == 0:
         return False
@@ -213,14 +213,14 @@ class CaptureStore:
             with path.open("ab") as handle:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
                 try:
-                    # A file retired after this open would hide the line; append to its replacement instead.
+                    # A file deleted after this open would hide the line; append to its replacement instead.
                     if _is_live(handle, path):
                         handle.write(line)
                         handle.flush()
                         return
                 finally:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        raise OSError(f"The claims file of rollout {rollout_id} was retired on every attempt.")
+        raise OSError(f"The claims file of rollout {rollout_id} was deleted on every attempt.")
 
     def mark_pending(self, rollout_id: str, model_call_id: str) -> None:
         """Claim a write before it is queued, so a reader can tell 'not yet' from 'never'.
@@ -230,14 +230,14 @@ class CaptureStore:
         try:
             self._append_claim_line(rollout_id, {"claim": model_call_id})
         except OSError:
-            logger.warning("Could not mark model-call capture pending for rollout %s.", rollout_id, exc_info=True)
+            logger.warning("Could not take the capture claim for rollout %s.", rollout_id, exc_info=True)
 
     def clear_pending(self, rollout_id: str, model_call_id: str) -> None:
         """Release a claim: its write has finished or failed."""
         try:
             self._append_claim_line(rollout_id, {"release": model_call_id})
         except OSError:
-            logger.warning("Could not clear model-call capture pending for rollout %s.", rollout_id, exc_info=True)
+            logger.warning("Could not release the capture claim for rollout %s.", rollout_id, exc_info=True)
 
     def has_pending(self, rollout_id: str) -> bool:
         """True while a claimed write of this rollout has not been released. Reads only the claims file."""
@@ -252,11 +252,11 @@ class CaptureStore:
             return False
         return _has_outstanding_claim(content)
 
-    def retire_claims_if_settled(self, rollout_id: str) -> bool:
-        """Unlink the claims file if no claim in it is outstanding; False while one is.
+    def delete_claims_if_settled(self, rollout_id: str) -> bool:
+        """Delete the claims file if no claim in it is outstanding; False while one is.
 
-        The read and the unlink hold the appenders' lock, and an appender skips a retired file, so a claim
-        admitted at any point stays visible.
+        The read and the unlink hold the claims file's lock, and an appender skips a deleted file, so a claim
+        taken at any point stays visible.
         """
         path = self.claims_path_for(rollout_id)
         for _ in range(_CLAIM_APPEND_ATTEMPTS):
@@ -274,17 +274,18 @@ class CaptureStore:
                     try:
                         path.unlink()
                     except OSError:
-                        logger.warning("Could not retire the capture claims of rollout %s.", rollout_id, exc_info=True)
+                        logger.warning("Could not delete the capture claims of rollout %s.", rollout_id, exc_info=True)
                     return True
                 finally:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         return not self.has_pending(rollout_id)
 
-    def clear_all_pending(self, rollout_id: str) -> None:
+    def delete_claims(self, rollout_id: str) -> None:
+        """Delete the claims file whatever it holds, before the rollout ID is reused."""
         self.claims_path_for(rollout_id).unlink(missing_ok=True)
 
     def remove_pending_markers(self, rollout_ids: set[str]) -> None:
-        """Remove older releases' per-call pending markers of these rollouts, listing the dir once."""
+        """Remove earlier Gym versions' per-call pending markers of these rollouts, listing the directory once."""
         with os.scandir(self._root) as entries:
             stale = [entry.path for entry in entries if _pending_marker_rollout_id(entry.name) in rollout_ids]
         for marker in stale:

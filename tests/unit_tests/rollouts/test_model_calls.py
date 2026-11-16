@@ -381,7 +381,7 @@ def test_merge_drops_the_claims_file_only_when_nothing_is_outstanding(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_capture_reads_never_list_the_capture_dir(tmp_path, monkeypatch):
+async def test_capture_reads_never_list_the_capture_directory(tmp_path, monkeypatch):
     import os
     from pathlib import Path
 
@@ -397,7 +397,7 @@ async def test_capture_reads_never_list_the_capture_dir(tmp_path, monkeypatch):
     store.clear_pending("10-0", "call-1")
 
     def listed(*_args, **_kwargs):
-        raise AssertionError("listed the capture dir")
+        raise AssertionError("listed the capture directory")
 
     for owner, name in ((Path, "glob"), (Path, "iterdir"), (os, "listdir")):
         monkeypatch.setattr(owner, name, listed)
@@ -411,7 +411,7 @@ async def test_capture_reads_never_list_the_capture_dir(tmp_path, monkeypatch):
     clear_model_call_captures_for_rollouts([record], [tmp_path], before_dispatch=False)
     assert scans == []
 
-    # Before dispatch, each dir is listed once per call for older releases' markers, however many rows it clears.
+    # Before dispatch, each directory is listed once per call for earlier Gym versions' markers, however many rows.
     clear_model_call_captures_for_rollouts([record, {"_ng_task_index": 10, "_ng_rollout_index": 1}], [tmp_path])
     assert scans == [tmp_path]
     assert len(record["ng_model_call_capture"]["calls"]) == 1
@@ -419,10 +419,10 @@ async def test_capture_reads_never_list_the_capture_dir(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_an_older_run_dir_reads_without_waiting_on_its_marker_files(tmp_path):
+async def test_a_run_directory_of_an_earlier_version_reads_without_waiting_on_its_marker_files(tmp_path):
     from nemo_gym.rollouts.model_calls import await_model_call_capture_quiescence, merge_model_call_capture_into_record
 
-    # Older releases left a stranded `<rollout id>.<call token>.capture.pending` marker per claimed call.
+    # Earlier Gym versions left a stranded `<rollout id>.<call token>.capture.pending` marker per claimed call.
     store = CaptureStore(tmp_path)
     store.record("11-0", _capture_exchange("responses", "A", {}, {"id": "resp-A"}))
     (tmp_path / "11-0.c0ffee.capture.pending").touch()
@@ -468,7 +468,7 @@ def test_a_torn_tail_cannot_swallow_a_release(tmp_path):
     assert store.has_pending("15-1") is False
 
 
-def test_retiring_settled_claims_never_hides_a_call_admitted_meanwhile(tmp_path, monkeypatch):
+def test_deleting_settled_claims_never_hides_a_call_admitted_meanwhile(tmp_path, monkeypatch):
     import asyncio
     import fcntl
     import threading
@@ -488,7 +488,7 @@ def test_retiring_settled_claims_never_hides_a_call_admitted_meanwhile(tmp_path,
 
     def flock(fd, operation):
         if threading.current_thread() is admission and operation == fcntl.LOCK_EX:
-            admitting.set()  # The admission holds the file the merge is about to retire.
+            admitting.set()  # The admission holds the file the merge is about to delete.
         fcntl.flock(fd, operation)
 
     monkeypatch.setattr(
@@ -524,7 +524,7 @@ def test_retiring_settled_claims_never_hides_a_call_admitted_meanwhile(tmp_path,
     assert [exchange["model_call_id"] for exchange in fresh.read("13-0")] == ["call-1", "call-2"]
 
 
-def test_retiring_follows_a_claims_file_replaced_before_its_lock(tmp_path, monkeypatch):
+def test_deleting_follows_a_claims_file_replaced_before_its_lock(tmp_path, monkeypatch):
     import nemo_gym.models.model_call_capture as capture
 
     store = CaptureStore(tmp_path)
@@ -538,7 +538,7 @@ def test_retiring_follows_a_claims_file_replaced_before_its_lock(tmp_path, monke
 
     monkeypatch.setattr(capture, "_is_live", replaced_once)
 
-    assert store.retire_claims_if_settled("16-0") is False
+    assert store.delete_claims_if_settled("16-0") is False
     assert len(checks) == 2 and store.claims_path_for("16-0").exists()
 
 
@@ -554,16 +554,16 @@ def test_a_claims_file_is_live_only_while_its_path_still_names_it(tmp_path):
         assert _is_live(handle, tmp_path / "missing") is False
 
 
-def test_claims_that_keep_being_retired_give_up_without_losing_state(tmp_path, monkeypatch, caplog):
+def test_claims_that_keep_being_deleted_give_up_without_losing_state(tmp_path, monkeypatch, caplog):
     import nemo_gym.models.model_call_capture as capture
 
     store = CaptureStore(tmp_path)
     store.mark_pending("16-1", "call-1")
     monkeypatch.setattr(capture, "_is_live", lambda *_: False)
 
-    assert store.retire_claims_if_settled("16-1") is False
+    assert store.delete_claims_if_settled("16-1") is False
     store.mark_pending("16-1", "call-2")
-    assert "Could not mark model-call capture pending" in caplog.text
+    assert "Could not take the capture claim" in caplog.text
 
 
 def test_settled_claims_that_cannot_be_removed_still_read_as_settled(tmp_path, monkeypatch, caplog):
@@ -578,8 +578,8 @@ def test_settled_claims_that_cannot_be_removed_still_read_as_settled(tmp_path, m
 
     monkeypatch.setattr(Path, "unlink", refuse)
 
-    assert store.retire_claims_if_settled("16-2") is True
-    assert "Could not retire the capture claims" in caplog.text
+    assert store.delete_claims_if_settled("16-2") is True
+    assert "Could not delete the capture claims" in caplog.text
 
 
 def test_clearing_after_a_snapshot_keeps_an_outstanding_claim(tmp_path):
@@ -597,11 +597,11 @@ def test_clearing_after_a_snapshot_keeps_an_outstanding_claim(tmp_path):
 
     assert not store.path_for("14-0").exists() and not store.claims_path_for("14-0").exists()
     assert store.has_pending("14-1") is True
-    # Older releases' markers are a pre-dispatch concern.
+    # Earlier Gym versions' markers are a pre-dispatch concern.
     assert (tmp_path / "14-0.old.capture.pending").exists()
 
 
-def test_clearing_before_dispatch_removes_only_the_cleared_keys_older_markers(tmp_path):
+def test_clearing_before_dispatch_removes_only_the_cleared_keys_pending_markers(tmp_path):
     from nemo_gym.rollouts.model_calls import clear_model_call_captures_for_rollouts
 
     store = CaptureStore(tmp_path)

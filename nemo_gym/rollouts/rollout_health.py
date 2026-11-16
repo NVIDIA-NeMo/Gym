@@ -991,7 +991,7 @@ def _with_captured_calls(rows: Iterable[dict[str, Any]], capture_dirs: Sequence[
                 stacklevel=2,
             )
             continue
-        # Older releases claimed each write with its own pending marker.
+        # Earlier Gym versions claimed each write with its own pending marker.
         pending = {rollout_id for name in names if (rollout_id := _pending_marker_rollout_id(name)) is not None}
         listings.append((CaptureStore(directory, create=False), names, pending))
     for row in rows:

@@ -559,7 +559,7 @@ class TestCapturesOfFailedRollouts:
         assert timeouts["time_split"]["rollouts_with_captures"] == 3
 
     @pytest.mark.parametrize(
-        "partial", ["torn record", "pending write", "older release's pending write", "failed write"]
+        "partial", ["torn record", "pending write", "earlier version's pending write", "failed write"]
     )
     def test_a_partial_capture_leaves_the_rollout_unmeasured(self, tmp_path: Path, partial: str) -> None:
         """Each capture here lacks the second of two 40 s calls, so timing it would halve the policy share."""
@@ -568,7 +568,7 @@ class TestCapturesOfFailedRollouts:
             store.path_for("0-0").write_bytes(orjson.dumps(exchange(40, 80))[:40] + b"\n")
         elif partial == "pending write":
             store.mark_pending("0-0", "second-call")
-        elif partial == "older release's pending write":
+        elif partial == "earlier version's pending write":
             (store.root / "0-0.second_call.capture.pending").touch()
         else:
             store.mark_incomplete("0-0")

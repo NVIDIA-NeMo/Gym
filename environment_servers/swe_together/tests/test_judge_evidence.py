@@ -294,7 +294,7 @@ async def test_a_judge_call_admitted_during_the_read_keeps_its_claim(tmp_path, m
     read_available = CaptureStore.read_available
 
     def admit_then_read(self, rollout_id):
-        # The drain already returned; a later call must still not be retired with the settled ones.
+        # The drain already returned; a later call must still not be deleted with the settled ones.
         self.mark_pending(rollout_id, "second")
         return read_available(self, rollout_id)
 

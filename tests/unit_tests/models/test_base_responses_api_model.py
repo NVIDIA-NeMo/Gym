@@ -963,8 +963,8 @@ def test_capture_claim_write_failures_are_logged_not_raised(tmp_path, caplog):
     store.mark_pending("r", "call-1")
     store.clear_pending("r", "call-1")
 
-    assert "Could not mark model-call capture pending" in caplog.text
-    assert "Could not clear model-call capture pending" in caplog.text
+    assert "Could not take the capture claim" in caplog.text
+    assert "Could not release the capture claim" in caplog.text
 
 
 def test_record_falls_back_to_raw_when_request_parser_raises(tmp_path, monkeypatch):

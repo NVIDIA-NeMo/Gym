@@ -152,9 +152,9 @@ def clear_model_call_captures_for_rollouts(
     Capture files are keyed by a deterministic rollout id (task-rollout-attempt), so without this a
     fresh run or a kill-shaped retry would append onto the previous attempt's capture for the same
     id. The caller passes only rows about to be dispatched, after assigning any retry suffix.
-    Before dispatch, claims and older releases' pending markers of these ids go too, with one listing of
-    each dir per call. After a snapshot (``before_dispatch=False``) claims go only once settled, and
-    nothing is listed.
+    Before dispatch, claims and earlier Gym versions' pending markers of these ids go too, with one
+    listing of each directory per call. After a snapshot (``before_dispatch=False``) claims go only
+    once settled, and nothing is listed.
     """
     if not capture_dirs:
         return
@@ -165,9 +165,9 @@ def clear_model_call_captures_for_rollouts(
             store.path_for(rollout_id).unlink(missing_ok=True)
             store.incomplete_path_for(rollout_id).unlink(missing_ok=True)
             if before_dispatch:
-                store.clear_all_pending(rollout_id)
+                store.delete_claims(rollout_id)
             else:
-                store.retire_claims_if_settled(rollout_id)
+                store.delete_claims_if_settled(rollout_id)
         if before_dispatch and rollout_ids:
             store.remove_pending_markers(rollout_ids)
 
@@ -183,7 +183,7 @@ def merge_model_call_capture_into_record(
     records. Raw request and response payloads remain in the capture store and are omitted from the
     attachment unless ``include_payloads`` is true. Capture/read/join failures are attached as
     ``gaps``. The harness output and reward are not modified. A rollout with no outstanding claim
-    has its claims file removed.
+    has its claims file deleted.
     """
     if not capture_dirs:
         return record
@@ -206,7 +206,7 @@ def merge_model_call_capture_into_record(
                         detail=f"count={invalid_count}",
                     )
                 )
-            if not store.retire_claims_if_settled(rollout_id):
+            if not store.delete_claims_if_settled(rollout_id):
                 gaps.append(ObservationGap(code="model_call_capture_pending"))
             if store.is_incomplete(rollout_id):
                 gaps.append(ObservationGap(code="model_call_capture_incomplete"))
