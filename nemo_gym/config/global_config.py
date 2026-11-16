@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+import os
 import re
 import sys
 import textwrap
@@ -2051,7 +2052,9 @@ Set the keys individually, in a config or as overrides, e.g.:
                     continue
                 if not isinstance(dir_value, str) or not dir_value:
                     raise ConfigError(f"{dir_key_name} must be a non-empty path string, got {dir_value!r}.")
-                global_config_dict[dir_key_name] = str(Path(dir_value).expanduser().resolve())
+                # Made absolute without following symlinks: the path is used on every node, and a symlink on the
+                # driver may point elsewhere, or nowhere, on another node.
+                global_config_dict[dir_key_name] = os.path.abspath(os.path.expanduser(dir_value))
 
             # UV related configuration
             # An explicit `uv_cache_dir` wins, then a UV_CACHE_DIR the user already exported, then a

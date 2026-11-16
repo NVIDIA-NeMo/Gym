@@ -14,6 +14,7 @@
 # limitations under the License.
 import importlib
 import importlib.metadata
+import os
 import sys
 from contextlib import nullcontext as does_not_raise
 from pathlib import Path
@@ -370,8 +371,18 @@ class TestGlobalConfig:
 
         global_config_dict = get_global_config_dict()
         # A server resolves a relative path against its own source folder, so the parser hands it an absolute one.
-        assert global_config_dict["debug_dir"] == str((Path.cwd() / "relative/debug").resolve())
-        assert global_config_dict["temp_dir"] == str((Path.home() / "gym-temp").resolve())
+        assert global_config_dict["debug_dir"] == os.path.abspath("relative/debug")
+        assert global_config_dict["temp_dir"] == os.path.join(os.path.expanduser("~"), "gym-temp")
+
+    def test_runtime_file_roots_keep_symlinks_for_each_node_to_follow(
+        self, monkeypatch: MonkeyPatch, tmp_path
+    ) -> None:
+        (tmp_path / "real").mkdir()
+        (tmp_path / "link").symlink_to(tmp_path / "real")
+        self._mock_versions_for_testing(monkeypatch)
+        self._mock_parse_environment(monkeypatch, DictConfig({"temp_dir": str(tmp_path / "link" / "temp")}))
+
+        assert get_global_config_dict()["temp_dir"] == str(tmp_path / "link" / "temp")
 
     def test_get_global_config_dict_global_exists(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
