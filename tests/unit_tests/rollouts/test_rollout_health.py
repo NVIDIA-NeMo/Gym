@@ -1824,6 +1824,42 @@ def test_health_check_peak_memory_does_not_grow_with_the_run(tmp_path: Path, man
     assert large - small < 3 * _LARGE_ROW_BYTES
 
 
+def test_health_check_keeps_a_small_record_per_model_operation(tmp_path: Path) -> None:
+    """What does grow with a run is a small record per rollout and per model operation: its verdict, and the
+    operation ids that count each operation once across rows. About 660 bytes per operation here, with 20
+    operations per rollout; keeping each call's metadata until the end of the run took about 1500."""
+    calls_per_rollout = 20
+
+    def peak_bytes(root: Path, tasks: int) -> int:
+        root.mkdir()
+        output = root / "rollouts.jsonl"
+        with output.open("wb") as rollouts:
+            for task in range(tasks):
+                record = _record(task, 0)
+                record["ng_trajectory"]["model_calls"] = []
+                for index in range(calls_per_rollout):
+                    call = _trajectory_call(_call(model_call_id=f"c{index}"))
+                    call["response_metadata"]["model_operations"] = [
+                        {"operation_id": f"op-{task}-{index}", "outcome": "completed", "http_attempts": 1}
+                    ]
+                    record["ng_trajectory"]["model_calls"].append(call)
+                rollouts.write(orjson.dumps(record) + b"\n")
+        tracemalloc.start()
+        try:
+            result = run_health_checks(output, workers=1)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        effort = result.summary["run"]["stats"]["observed_request_effort"]["http_attempts"]
+        assert effort["operations_observed"] == tasks * calls_per_rollout
+        return peak
+
+    small = peak_bytes(tmp_path / "small", 50)
+    large = peak_bytes(tmp_path / "large", 200)
+
+    assert (large - small) / (150 * calls_per_rollout) < 1024
+
+
 def test_request_effort_counts_an_operation_only_when_its_observations_agree() -> None:
     effort = health._RequestEffort()
     for operation in (
