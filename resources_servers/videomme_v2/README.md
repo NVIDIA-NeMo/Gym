@@ -176,7 +176,9 @@ and a counter that ends on 5. The clips are stored once, in
 as an MP4 `data:` URL; `video_source` names the committed file and
 `video_sha256` is its SHA-256. `data/example_cohort.json` freezes the five
 example task IDs, and `data/example_rollouts.jsonl` holds one real-model
-rollout per row. The model and serving setup are in the
+rollout per row. The agentic counterparts are `data/example_agentic.jsonl`,
+`data/example_agentic_cohort.json` and `data/example_agentic_rollouts.jsonl`.
+The model, serving and sandbox setup are in the
 [shared README](../video_mcqa/README.md#example-data).
 
 ## CPU tests

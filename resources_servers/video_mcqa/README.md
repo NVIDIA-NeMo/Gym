@@ -273,6 +273,39 @@ In each server the model answers the first four questions correctly. On the
 counter it reads the final 5 as 9, or runs out of output tokens, so the rows also
 show the `incorrect` and `no_answer` outcomes.
 
+`data/example_agentic_rollouts.jsonl` in the VideoMME-v2, VideoMME-v1 and
+LVBench servers holds one agentic rollout per row from the same model on one
+GPU, served by vLLM `0.32.0rc1.dev190+g3f1bcfd82` with the model card's flags
+plus OpenCode's tool calls and room for the frames of a `watch_video` call. The
+model's default sampling applies (temperature 0.6, top-p 0.95; OpenCode sends
+none for this model), with at most 16,384 output tokens per call, and the
+sandboxes are OpenSandbox sandboxes from the image of `sandbox_image/Dockerfile`:
+
+```bash
+vllm serve nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16 --max-model-len 131072 \
+  --trust-remote-code --video-pruning-rate 0.5 --reasoning-parser nemotron_v3 \
+  --enable-auto-tool-choice --tool-call-parser qwen3_coder --limit-mm-per-prompt '{"image": 256, "video": 0}'
+```
+
+```bash
+export VIDEO_MCQA_SANDBOX_IMAGE=<the sandbox image, pinned by digest>  # and OPENSANDBOX_DOMAIN, OPENSANDBOX_API_KEY
+gym env start "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml,resources_servers/videomme_v2/configs/videomme_v2_agentic.yaml]" \
+  +policy_base_url=http://127.0.0.1:8000/v1 +policy_api_key=EMPTY \
+  +policy_model_name=nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16 \
+  +videomme_v2_agentic_cohort_manifest=$PWD/resources_servers/videomme_v2/data/example_agentic_cohort.json \
+  "+videomme_v2_agentic_video_roots=[$PWD/resources_servers/video_mcqa/data/example_videos]" \
+  ++videomme_v2_agentic_opencode.responses_api_agents.opencode_agent.context_window=131072 \
+  ++videomme_v2_agentic_opencode.responses_api_agents.opencode_agent.max_output_tokens=16384
+gym eval run --no-serve --agent videomme_v2_agentic_opencode \
+  --input resources_servers/videomme_v2/data/example_agentic.jsonl \
+  --output resources_servers/videomme_v2/data/example_agentic_rollouts.jsonl
+```
+
+All 15 episodes complete with a `\boxed{}` answer. The model answers the five
+VideoMME-v2 questions correctly, each after two or three `watch_video` calls,
+and two of the five VideoMME-v1 and four of the five LVBench questions. In four
+of those ten episodes it answers without calling a tool.
+
 These are evaluation-only adapters. Dataset terms remain those of their
 authors; this Apache-2.0 code does not relicense or redistribute benchmark data.
 Dataset registration and full EF acceptance are separate from these
