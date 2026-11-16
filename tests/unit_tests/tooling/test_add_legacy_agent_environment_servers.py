@@ -292,3 +292,13 @@ def test_wildclaw_sessions_do_not_gain_a_legacy_relay() -> None:
     assert not migration.needs_environment_server(default["wildclaw_agent"])
     assert not migration.needs_environment_server(pairing["wildclaw_agent"])
     assert list(pairing["wildclaw_environment_server"]["environment_servers"]) == ["single_agent_turn_legacy"]
+
+
+def test_agentvista_session_template_does_not_get_a_legacy_relay(tmp_path: Path) -> None:
+    config = tmp_path / "agentvista.yaml"
+    config.write_text(
+        "agentvista_agent:\n  responses_api_agents:\n    agentvista_agent:\n      entrypoint: app.py\n      resources_server: null\n"
+    )
+    before = config.read_text()
+    assert migration.main([str(config)]) == 0
+    assert config.read_text() == before

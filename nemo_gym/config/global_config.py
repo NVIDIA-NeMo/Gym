@@ -227,6 +227,7 @@ ENVIRONMENT_SERVER_TYPE_KEY_NAME = "environment_servers"
 # so this list is the source of truth; a unit test keeps it in step with the agent apps.
 AGENT_SESSION_AGENT_TYPES = frozenset(
     {
+        "agentvista_agent",
         "browsecomp_agent",
         "claude_code_agent",
         "cline_agent",
@@ -273,6 +274,7 @@ _LEGACY_RELAY_KEPT_KEYS = (
     "port",
     "num_workers",
     "uvicorn_reuse_port",
+    "default_episode_timeout_seconds",
 )
 # Carried over from the environment's agent instance onto the composed agent; every other key is dropped.
 _COMPOSED_AGENT_CARRY_OVER_KEYS = ("resources_server", "model_server", "datasets")
