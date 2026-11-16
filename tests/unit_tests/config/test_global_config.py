@@ -54,6 +54,7 @@ from nemo_gym.config.global_config import (
     ALLOW_UNSUPPORTED_PAIRING_KEY_NAME,
     DEFAULT_HEAD_SERVER_PORT,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
+    STEP_DRIVEN_AGENT_TYPES,
     USE_ABSOLUTE_IP,
     UV_CACHE_DIR_KEY_NAME,
     UV_LOCK_TIMEOUT_KEY_NAME,
@@ -3736,6 +3737,20 @@ class TestComposeUnboundAgent:
         }
 
         assert implementing == AGENT_SESSION_AGENT_TYPES
+
+    def test_step_driven_agent_types_match_the_agent_apps(self) -> None:
+        """Every agent app that reads the episode's step limit, and so takes one step per activation that names it, is
+        listed, and nothing else is; each keeps agent sessions. A subclass that inherits the reading is not listed
+        until it is checked to take one step."""
+        agents_root = Path(nemo_gym.config.global_config.__file__).parents[2] / "responses_api_agents"
+        reading = {
+            app.parent.name
+            for app in agents_root.glob("*/app.py")
+            if "AGENT_EPISODE_STEP_LIMIT_HEADER" in app.read_text(encoding="utf-8")
+        }
+
+        assert reading == STEP_DRIVEN_AGENT_TYPES
+        assert STEP_DRIVEN_AGENT_TYPES <= AGENT_SESSION_AGENT_TYPES
 
     def test_langgraph_swap_keeps_unrelated_session_tool_grants(self) -> None:
         config = self._session_environment_config("langgraph_agent")

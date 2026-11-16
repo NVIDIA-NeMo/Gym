@@ -3,10 +3,12 @@
 """The step loop (max_episode_steps): the agent driven one step per activation, ending on the task state."""
 
 import re
+from types import SimpleNamespace
 from typing import Any
 
 import orjson
 import pytest
+from aiohttp import ClientConnectionError, ClientResponseError
 from omegaconf import OmegaConf
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -14,10 +16,13 @@ from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
 )
+from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
 from nemo_gym.agents.base_responses_api_agent import AGENT_ACTIVATION_HEADER, AGENT_EPISODE_STEP_LIMIT_HEADER
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig
 from nemo_gym.core.failure_transport import RequestFailureLog
+from nemo_gym.core.responses_api_types import NeMoGymResponse
+from nemo_gym.server_runtime.base_environment_server import dependency_failure
 from nemo_gym.server_runtime.base_resources_server import RESOURCES_TASK_STATE_PATH
 from tests.helpers.single_agent_turn import _request
 
@@ -30,6 +35,7 @@ USAGE = {
     "input_tokens_details": {"cached_tokens": 0},
     "output_tokens_details": {"reasoning_tokens": 1},
 }
+SESSION_LOST_BODY = orjson.dumps({"detail": {"failure_kind": "session_lost", "message": "This session has ended."}})
 
 
 class _Cookie:
@@ -50,8 +56,28 @@ class _Response:
         return self.body
 
 
+class _ErrorResponse:
+    """A reply with an HTTP error status, which raises as aiohttp's does."""
+
+    ok = False
+
+    def __init__(self, status: int, body: bytes) -> None:
+        self.status = status
+        self.body = body
+        self.headers: dict[str, str] = {}
+        self.cookies: dict[str, _Cookie] = {}
+
+    async def read(self) -> bytes:
+        return self.body
+
+    def raise_for_status(self) -> None:
+        url = f"http://resources:8000{RESOURCES_TASK_STATE_PATH}"
+        request_info = SimpleNamespace(url=url, method="GET", headers={}, real_url=url)
+        raise ClientResponseError(request_info, (), status=self.status, message="error", headers={})
+
+
 def _tool_step(step: int, tool: str = "jira_add_comment") -> dict[str, Any]:
-    """One step of the simple agent with max_steps 1: a tool call and its output."""
+    """One step of the simple agent: a tool call and its output."""
     return {
         "output": [
             {
@@ -101,7 +127,8 @@ def _reply(step: dict[str, Any], status: str | None = "completed", **fields: Any
 
 class _Client(ServerClient):
     """The agent and the resources server: the agent replies with ``steps`` in order, and the task has ended from the
-    step ``ended_after`` on."""
+    step ``ended_after`` on. The activation numbered ``failing_activation`` loses its connection, and the task state
+    read fails with ``task_state_error`` once that many steps ran, or answers ``task_state_reply``."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -109,7 +136,10 @@ class _Client(ServerClient):
     steps: list[dict]
     ended_after: int | None = None
     activations: int = 0
+    failing_activation: int | None = None
     task_state_error: Exception | None = None
+    task_state_error_from: int = 1
+    task_state_reply: Any = None
 
     async def post(self, server_name: str, url_path: str, **kwargs) -> _Response:
         body = kwargs.get("json")
@@ -122,6 +152,8 @@ class _Client(ServerClient):
             return _Response({"agent_session_id": body["agent_session_id"]}, {"agent": "seeded"})
         if url_path.endswith("/v1/responses"):
             self.activations += 1
+            if self.activations == self.failing_activation:
+                raise ClientConnectionError("agent connection dropped")
             return _Response(self.steps[self.activations - 1])
         if url_path == "/v1/agent_sessions/close":
             return _Response({"agent_session_id": body["agent_session_id"]})
@@ -131,11 +163,13 @@ class _Client(ServerClient):
             return _Response({"resources_session_id": body["resources_session_id"]})
         raise AssertionError(f"unexpected POST {server_name}{url_path}")
 
-    async def get(self, server_name: str, url_path: str, **kwargs) -> _Response:
+    async def get(self, server_name: str, url_path: str, **kwargs) -> _Response | _ErrorResponse:
         self.calls.append(("GET", server_name, url_path, kwargs))
         assert (server_name, url_path) == ("resources", RESOURCES_TASK_STATE_PATH)
-        if self.task_state_error is not None:
+        if self.task_state_error is not None and self.activations >= self.task_state_error_from:
             raise self.task_state_error
+        if self.task_state_reply is not None:
+            return self.task_state_reply
         ended = self.ended_after is not None and self.activations >= self.ended_after
         return _Response({"task_ended": ended})
 
@@ -158,7 +192,7 @@ def _server(
     agent: dict[str, Any] | None = None,
     agent_type: str = "simple_agent",
 ) -> tuple[SingleAgentTurnEnvironmentServer, _Client]:
-    agent_config = {"host": "agent", "port": 8001, "entrypoint": "app.py", "max_steps": 1, **(agent or {})}
+    agent_config = {"host": "agent", "port": 8001, "entrypoint": "app.py", **(agent or {})}
     global_config = OmegaConf.create(
         {
             "resources": {"resources_servers": {"officeenv": {"host": "resources", "port": 8000}}},
@@ -217,6 +251,8 @@ async def test_the_episode_ends_at_the_step_after_which_the_task_has_ended() -> 
     # Summed over the steps, as the agent's own loop sums its model calls.
     assert (response["usage"]["input_tokens"], response["usage"]["output_tokens"]) == (20, 8)
     assert response["usage"]["output_tokens_details"]["reasoning_tokens"] == 2
+    # The task ended the episode, not the step limit.
+    assert "ng_termination_reason" not in (response["metadata"] or {})
 
 
 async def test_each_step_continues_the_conversation_and_names_the_episodes_step_limit() -> None:
@@ -249,11 +285,9 @@ async def test_the_episode_ends_when_the_model_answers_without_a_tool() -> None:
     assert client.activations == 2
     # No tool ran in the last step, so the task state is not read after it.
     assert client.paths().count(f"GET {RESOURCES_TASK_STATE_PATH}") == 1
-    assert [item["type"] for item in _verified_response(client)["output"]] == [
-        "function_call",
-        "function_call_output",
-        "message",
-    ]
+    response = _verified_response(client)
+    assert [item["type"] for item in response["output"]] == ["function_call", "function_call_output", "message"]
+    assert "ng_termination_reason" not in (response["metadata"] or {})
 
 
 async def test_the_episode_ends_at_a_step_that_did_not_complete() -> None:
@@ -289,13 +323,32 @@ async def test_a_truncated_reply_ends_the_episode_whatever_its_status(status: st
     assert client.paths().count(f"GET {RESOURCES_TASK_STATE_PATH}") == 0
 
 
-async def test_the_episode_ends_after_max_episode_steps() -> None:
+async def test_the_episode_ends_after_max_episode_steps_and_its_reply_says_so() -> None:
     server, client = _server([_reply(_tool_step(step)) for step in range(1, 5)], max_episode_steps=3)
 
-    await server.run_request(_request())
+    result = await server.run_request(_request())
 
+    assert result.result.reward == 1.0
     assert client.activations == 3
-    assert len(_verified_response(client)["output"]) == 6
+    response = _verified_response(client)
+    assert len(response["output"]) == 6
+    # Only the metadata names the cutoff: the status stays the last step's, and incomplete_details stays unset.
+    assert response["metadata"] == {"ng_termination_reason": "max_episode_steps"}
+    assert (response["status"], response["incomplete_details"]) == ("completed", None)
+
+
+async def test_the_task_state_is_not_read_after_the_last_step() -> None:
+    # A read after the last step would fail; the episode ends there either way, so it is verified.
+    server, client = _server([_reply(_tool_step(1)), _reply(_tool_step(2))], max_episode_steps=2)
+    client.task_state_error = ConnectionError("resources server down")
+    client.task_state_error_from = 2
+
+    result = await server.run_request(_request())
+
+    assert result.result.reward == 1.0
+    assert client.activations == 2
+    assert client.paths().count(f"GET {RESOURCES_TASK_STATE_PATH}") == 1
+    assert "POST /verify" in client.paths()
 
 
 async def test_without_end_on_task_state_only_the_steps_end_the_episode() -> None:
@@ -318,7 +371,7 @@ async def test_the_task_state_is_read_with_the_resources_session_cookie() -> Non
     assert reads == [{"cookies": {"resources": "seeded"}}]
 
 
-async def test_a_failed_task_state_read_fails_the_episode() -> None:
+async def test_a_failed_task_state_read_fails_the_episode_and_keeps_the_step_before_it() -> None:
     server, client = _server([_reply(_tool_step(1)), _reply(_tool_step(2))])
     client.task_state_error = ConnectionError("resources server down")
 
@@ -328,6 +381,90 @@ async def test_a_failed_task_state_read_fails_the_episode() -> None:
     assert result.failure.stage == "agent"
     assert "resources server down" in result.failure.failure_reason
     assert client.activations == 1
+    assert "POST /verify" not in client.paths()
+    partial = result.failure.partial_response
+    assert [(item.type, item.call_id) for item in partial.output] == [
+        ("function_call", "call1"),
+        ("function_call_output", "call1"),
+    ]
+    assert (partial.usage.input_tokens, partial.usage.output_tokens) == (10, 4)
+
+
+async def test_a_step_that_fails_keeps_the_steps_before_it_with_their_usage() -> None:
+    server, client = _server([_reply(_tool_step(1)), _reply(_tool_step(2)), _reply(_tool_step(3))])
+    client.failing_activation = 3
+
+    result = await server.run_request(_request())
+
+    assert result.failure.stage == "agent"
+    assert result.failure.terminal is False
+    assert "POST /verify" not in client.paths()
+    partial = result.failure.partial_response
+    assert [(item.type, item.call_id) for item in partial.output] == [
+        ("function_call", "call1"),
+        ("function_call_output", "call1"),
+        ("function_call", "call2"),
+        ("function_call_output", "call2"),
+    ]
+    usage = partial.usage
+    assert (usage.input_tokens, usage.output_tokens, usage.total_tokens) == (20, 8, 28)
+    assert usage.output_tokens_details.reasoning_tokens == 2
+
+
+async def test_a_failure_before_the_first_reply_has_no_partial_response() -> None:
+    server, client = _server([_reply(_tool_step(1))])
+    client.failing_activation = 1
+
+    result = await server.run_request(_request())
+
+    assert result.failure.stage == "agent"
+    assert result.failure.partial_response is None
+
+
+async def test_a_partial_response_the_failure_carries_is_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+    carried = NeMoGymResponse.model_validate(_reply(_answer_step(9)) | {"id": "carried"})
+
+    async def task_ended(self: SingleAgentTurnEnvironmentServer, handles: Any) -> bool:
+        raise dependency_failure(ConnectionError("lost"), stage="agent", partial_response=carried)
+
+    monkeypatch.setattr(SingleAgentTurnEnvironmentServer, "_task_ended", task_ended)
+    server, _ = _server([_reply(_tool_step(1)), _reply(_tool_step(2))])
+
+    result = await server.run_request(_request())
+
+    assert result.failure.partial_response.id == "carried"
+
+
+async def test_a_lost_resources_session_ends_the_episode_and_goes_on_to_verification() -> None:
+    # The same loss a tool call finds goes to /verify, which masks the episode.
+    server, client = _server([_reply(_tool_step(1)), _reply(_tool_step(2))])
+    client.task_state_reply = _ErrorResponse(404, SESSION_LOST_BODY)
+
+    result = await server.run_request(_request())
+
+    assert result.failure is None
+    assert client.activations == 1
+    assert client.paths()[-3:] == ["POST /v1/agent_sessions/close", "POST /verify", "POST /close_session"]
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "terminal"),
+    [
+        (404, b'{"detail": "Not Found"}', True),
+        (404, orjson.dumps({"detail": {"failure_kind": "verifier_error", "message": "no"}}), True),
+        (404, b"[]", True),
+        (404, b"not json", True),
+        (500, SESSION_LOST_BODY, False),
+    ],
+)
+async def test_any_other_failed_task_state_read_fails_the_episode(status: int, body: bytes, terminal: bool) -> None:
+    server, client = _server([_reply(_tool_step(1)), _reply(_tool_step(2))])
+    client.task_state_reply = _ErrorResponse(status, body)
+
+    result = await server.run_request(_request())
+
+    assert result.result is None
+    assert (result.failure.stage, result.failure.terminal) == ("agent", terminal)
     assert "POST /verify" not in client.paths()
 
 
@@ -360,18 +497,58 @@ async def test_without_max_episode_steps_the_agent_runs_its_own_loop_in_one_acti
     assert client.activation_calls()[0]["headers"] == {AGENT_ACTIVATION_HEADER: "1"}
 
 
+async def test_the_legacy_server_runs_a_flat_row_through_the_step_loop() -> None:
+    server, client = _server(
+        [_reply(_tool_step(1)), _reply(_tool_step(2, "user_complete_task")), _reply(_tool_step(3))], ended_after=2
+    )
+    legacy = SingleAgentTurnLegacyEnvironmentServer(config=server.config, server_client=client)
+
+    result = await legacy.run_legacy(
+        {"_ng_task_index": 0, "_ng_rollout_index": 0, "responses_create_params": {"input": "task"}}
+    )
+
+    assert (legacy.config.max_episode_steps, legacy.config.end_on_task_state) == (5, True)
+    assert result["reward"] == 1.0
+    assert [call["headers"] for call in client.activation_calls()] == [
+        {AGENT_ACTIVATION_HEADER: str(step), AGENT_EPISODE_STEP_LIMIT_HEADER: "5"} for step in (1, 2)
+    ]
+    assert client.paths().count(f"GET {RESOURCES_TASK_STATE_PATH}") == 2
+
+
 def test_driven_episodes_take_part_in_checkpoints_as_restarts() -> None:
     assert _server([])[0].checkpoint_mode_in_effect() == "restart_only"
     assert _server([], max_episode_steps=None, agent={"max_steps": 50})[0].checkpoint_mode_in_effect() == "exported"
 
 
 @pytest.mark.parametrize(
+    "agent",
+    [
+        {},
+        {"max_steps": None},
+        {"max_steps": 50},
+        {"max_steps": "1"},
+        {"execute_tools": True},
+        {"execute_tools": "true"},
+    ],
+)
+def test_a_simple_agent_that_runs_its_tools_is_driven_whatever_its_max_steps(agent: dict) -> None:
+    # The step-limit header makes each activation one step, so the agent's own max_steps does not matter.
+    server, _ = _server([], agent=agent)
+
+    assert server.config.max_episode_steps == 5
+
+
+@pytest.mark.parametrize(
     ("agent", "agent_type", "problem"),
     [
-        ({"max_steps": None}, "simple_agent", "max_steps: None steps per activation, not 1"),
-        ({"max_steps": 50}, "simple_agent", "max_steps: 50 steps per activation, not 1"),
         ({"execute_tools": False}, "simple_agent", "does not run the tools it calls (execute_tools: false)"),
+        # As the agent's config reads the setting: from YAML or ${oc.env:...,false}, a string.
+        ({"execute_tools": "false"}, "simple_agent", "does not run the tools it calls (execute_tools: false)"),
+        ({"execute_tools": "False"}, "simple_agent", "does not run the tools it calls (execute_tools: false)"),
         ({}, "an_agent_without_sessions", "its type 'an_agent_without_sessions' keeps no agent session"),
+        # Keeping a session is not taking one step per activation: these run their own loop in one.
+        ({"max_steps": 1}, "hermes_agent", "its type 'hermes_agent' does not take one step per activation"),
+        ({"max_steps": 1}, "browsecomp_agent", "its type 'browsecomp_agent' does not take one step per activation"),
     ],
 )
 def test_an_agent_that_cannot_take_one_step_per_activation_stops_the_server_at_startup(
@@ -379,6 +556,12 @@ def test_an_agent_that_cannot_take_one_step_per_activation_stops_the_server_at_s
 ) -> None:
     with pytest.raises(ValueError, match=f"drives 'agent' one step per activation .*{re.escape(problem)}"):
         _server([], agent=agent, agent_type=agent_type)
+
+
+def test_an_agent_that_runs_its_own_loop_is_checked_only_when_driven_one_step_at_a_time() -> None:
+    server, _ = _server([], max_episode_steps=None, agent_type="hermes_agent")
+
+    assert server.config.max_episode_steps is None
 
 
 def test_the_task_state_is_read_between_steps_only() -> None:

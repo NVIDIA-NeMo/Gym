@@ -266,6 +266,12 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "wildclawbench_agent",
     }
 )
+# Agent types whose sessions an environment server can drive one step per activation (single_agent_turn's
+# max_episode_steps): an activation that carries the episode's step limit (`x-ng-agent-episode-step-limit`) runs one
+# model call and the tool calls it makes, whatever the agent's own step limit. Keeping a session is not enough, since
+# another session agent runs its whole loop in an activation. A subset of AGENT_SESSION_AGENT_TYPES; a unit test keeps
+# it in step with the agent apps.
+STEP_DRIVEN_AGENT_TYPES = frozenset({"simple_agent"})
 # Session agents whose swap-source template (`resources_server.name: ???`) runs on the host through /run.
 # Their sessions need an explicitly bound sandbox template, so a swap keeps the legacy_agent relay.
 HOST_RUN_SWAP_AGENT_TYPES = frozenset({"prime_agent", "simple_strands_agent"})
