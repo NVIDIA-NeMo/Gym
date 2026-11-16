@@ -1165,3 +1165,45 @@ async def test_a_failure_without_an_intent_or_a_name_stays_episode_wide(store):
     [failure] = RolloutManifest.model_validate(await store.manifest("r1")).failures
 
     assert failure.agent_instance is None and failure.model_ref is None
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_export_keeps_the_identity_a_failure_inherits_from_its_intent(tmp_path):
+    from nemo_gym.core.episode_types import EpisodeId
+    from nemo_gym.models._checkpoint import export_model_records, import_model_records
+
+    judge_model = ModelRef(name="judge-model")
+    store = FileLineageStore(tmp_path / "source")
+    for call_id in ("inherits", "own-name", "model-only"):
+        await store.begin_call("r1", call_id, identity=JUDGE)
+    await store.record_failure("r1", "inherits", "worker_capture_failed")
+    await store.record_failure("r1", "own-name", "worker_capture_failed", identity=ASSISTANT)
+    await store.record_failure(
+        "r1", "model-only", "worker_capture_failed", identity=CallIdentity(model_ref=judge_model)
+    )
+    # No intent and no identity: nothing to inherit, so the failure applies to the whole episode.
+    await store.record_failure("r1", "no-intent", "worker_capture_failed")
+
+    def identities(manifest: RolloutManifest) -> dict:
+        return {
+            failure.model_call_id: (failure.agent_instance, failure.agent_kind, failure.model_ref)
+            for failure in manifest.failures
+        }
+
+    expected = {
+        "inherits": ("judge.1", "judge", POLICY),
+        "own-name": ("assistant", "assistant", POLICY),
+        "model-only": ("judge.1", "judge", judge_model),
+        "no-intent": (None, None, None),
+    }
+    assert identities(RolloutManifest.model_validate(await store.manifest("r1"))) == expected
+
+    records = export_model_records(store, [EpisodeId(rollout_id="r1")], [], {})
+    restored = FileLineageStore(tmp_path / "restored")
+    import_model_records(restored, records)
+    target = EpisodeId(rollout_id="r1", attempt=1).capture_key
+    manifest = RolloutManifest.model_validate(await restored.manifest(target))
+
+    # The intents stay with the old attempt, and the failures keep the identity they read from them.
+    assert manifest.pending_call_ids == []
+    assert identities(manifest) == expected
