@@ -1,0 +1,48 @@
+{
+  "harness_version": "3.0.0",
+  "purpose": "Bounded live integration smoke; not a benchmark accuracy or upstream-parity result.",
+  "policy": "nvidia/moonshotai/kimi-k3",
+  "transport": "inference API through real Gym HTTP model routes",
+  "limits": {
+    "default_max_turns": 3,
+    "opencode_max_steps": 3,
+    "context_tokens": 65536,
+    "output_tokens": 32768,
+    "opencode_actor_seconds": 240
+  },
+  "worker_requirements_sha256": "4614b7e868fef74956b6dee5069501d4677172679d57d5b95f0e45c9217652df",
+  "opencode_version": "1.17.11",
+  "results": [
+    {
+      "harness": "default",
+      "task_id": "agentvista-000",
+      "mask_sample": false,
+      "reward": 0.0,
+      "verifier_status": "FAIL",
+      "source_provenance": {
+        "repository": "https://github.com/hkust-nlp/AgentVista.git",
+        "revision": "a3385d51d0c3dd0c8501350a08d52065e3e94ab4",
+        "files_verified": 26
+      },
+      "termination": "upstream_turn_limit",
+      "tool_calls": null,
+      "tool_errors": null
+    },
+    {
+      "harness": "opencode",
+      "task_id": "agentvista-000",
+      "mask_sample": false,
+      "reward": 0.0,
+      "verifier_status": "FAIL",
+      "source_provenance": {
+        "repository": "https://github.com/hkust-nlp/AgentVista.git",
+        "revision": "a3385d51d0c3dd0c8501350a08d52065e3e94ab4",
+        "files_verified": 26
+      },
+      "termination": "completed",
+      "tool_calls": 2,
+      "tool_errors": 0
+    }
+  ],
+  "qualification": "Both runs reached the original answer judge and retained measured zeros. OpenCode listed its four MCP tools and executed two tool calls without tool errors. The full 25/209-task evaluation has not been rerun under this protocol."
+}

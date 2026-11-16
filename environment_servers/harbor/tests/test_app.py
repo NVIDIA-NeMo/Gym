@@ -519,6 +519,26 @@ class TestEpisode:
         assert spec.metadata["nemo_gym_environment_server"] == "harbor_environment_server"
         assert spec.user is None  # no USER in the Dockerfile and no [agent].user: the image's own default
 
+    def test_tb4_overlay_leaves_the_shared_s3_bucket_out_of_agent_and_verifier(self, tmp_path, monkeypatch):
+        """The Terminal-Bench 4 deployment overlay opts every sandbox out of the cell's shared /mnt/s3-data bucket."""
+        root = Path(__file__).resolve().parents[3]
+        merged = OmegaConf.to_container(
+            OmegaConf.merge(
+                OmegaConf.load(root / "nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml"),
+                OmegaConf.load(root / "environments/harbor/terminal_bench_4/harbor_sandbox.yaml"),
+            ),
+            resolve=False,
+        )
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+        monkeypatch.setattr("environment_servers.harbor.sandboxes.get_global_config_dict", lambda: merged)
+        verifier_environment = HarborEnvironment(docker_image="org/verifier:1")
+        for spec in (
+            server._sandbox_spec(task, "/app"),
+            server._sandbox_spec(task, None, environment=verifier_environment, role="verifier"),
+        ):
+            assert spec.metadata["nemo.nvidia.com/s3-hostpath"] == "false"
+            assert spec.metadata["sandbox-api"] == "opensandbox-sdk"
+
     def test_sandbox_spec_user_is_the_dockerfile_user_for_the_task_image_only(self, tmp_path, monkeypatch):
         server, task, _, _ = make_server(tmp_path, monkeypatch, dockerfile="FROM ubuntu:24.04\nUSER agent\n")
         monkeypatch.setattr(

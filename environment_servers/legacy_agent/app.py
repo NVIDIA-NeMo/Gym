@@ -65,12 +65,12 @@ class LegacyAgentEnvironmentServerConfig(BaseEnvironmentServerConfig):
 
     agent_server: AgentServerRef
 
-    # The episode deadline bounds the relayed `/run` call when set; unset, the agent's own limits are the only
-    # ones. A relay enforces none of the other limits. They carry defaults only because the base declares them,
-    # so configs need not repeat values that do nothing.
+    # The episode deadline bounds the relayed `/run` call, six hours by default like the other Environment Servers.
+    # `null` removes it, leaving the agent's own limits as the only ones. A relay enforces none of the other limits.
+    # They carry defaults only because the base declares them, so configs need not repeat values that do nothing.
     max_concurrent_episodes: PositiveInt | None = None
     queue_timeout_seconds: PositiveFloat | None = None
-    default_episode_timeout_seconds: PositiveFloat | None = None
+    default_episode_timeout_seconds: PositiveFloat | None = 21600
     cleanup_timeout_seconds: PositiveFloat = 180
 
     @model_validator(mode="after")
