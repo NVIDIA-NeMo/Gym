@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The Agentic-VBench training entry's subagent overlay is a session configuration the OpenCode harness accepts."""
+"""The Agentic-VBench training entry's subagent overlay is a session configuration the OpenCode harness accepts.
+
+A harness-suite test: importing the harness module from a core test would count the whole harness in the core
+coverage total.
+"""
 
 from pathlib import Path
 

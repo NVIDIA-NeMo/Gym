@@ -197,3 +197,14 @@ def test_other_calls_and_an_unset_cap_keep_the_ordinary_path(headers) -> None:
             headers={OPENCODE_AGENT_HEADER: "compaction"},
         )
     assert response.status_code == 200, response.text
+
+
+def test_the_staged_header_plugin_sets_the_header_this_server_reads() -> None:
+    """The Agentic-VBench compaction plugin and the model server agree on the agent header's name."""
+    from pathlib import Path
+
+    plugin = (
+        Path(__file__).resolve().parents[3]
+        / "benchmarks/agentic_vbench/opencode_plugins/compaction_summary_header.mjs"
+    )
+    assert f'export const HEADER = "{OPENCODE_AGENT_HEADER}";' in plugin.read_text()
