@@ -57,6 +57,6 @@ canonical_split: test
 standard_prompt_config: benchmarks/prompts/generic/default.yaml
 adopted_from:
   source: https://github.com/EleutherAI/lm-evaluation-harness
-  ref: f4d4b3de3ee6741a7151a9fe74945ee515262f4c
+  ref: f4d4b3de3ee6741a7151a9fe74945ee515262f4c  # pragma: allowlist secret
   reconciled: '2026-07-31'
 lifecycle: active

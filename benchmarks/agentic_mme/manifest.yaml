@@ -58,6 +58,6 @@ canonical_split: train
 prompt_source: prepared
 adopted_from:
   source: https://huggingface.co/datasets/Crystal1047/Agentic-MME
-  ref: b9ea9d3f68ff896d83fec666b6143da594c054a8
+  ref: b9ea9d3f68ff896d83fec666b6143da594c054a8  # pragma: allowlist secret
   reconciled: '2026-11-09'
 lifecycle: active

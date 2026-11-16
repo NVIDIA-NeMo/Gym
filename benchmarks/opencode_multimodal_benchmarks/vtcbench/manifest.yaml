@@ -41,5 +41,5 @@ canonical_split: test
 prompt_source: prepared
 adopted_from:
   source: https://github.com/zhuzil/VTC-Bench
-  ref: 5e0a5533f597b0c56dae7d9705771498202ab19b
+  ref: 5e0a5533f597b0c56dae7d9705771498202ab19b  # pragma: allowlist secret
   reconciled: '2026-11-13'

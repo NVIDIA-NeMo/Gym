@@ -49,6 +49,6 @@ canonical_split: test
 prompt_source: prepared
 adopted_from:
   source: https://github.com/ParticleMedia/RAGTruth
-  ref: c103204b9ce28d6bbad859304bf30de72b8ed8fe
+  ref: c103204b9ce28d6bbad859304bf30de72b8ed8fe  # pragma: allowlist secret
   reconciled: '2026-07-14'
 lifecycle: active

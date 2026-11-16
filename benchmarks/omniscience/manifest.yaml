@@ -54,6 +54,6 @@ canonical_split: test
 standard_prompt_config: benchmarks/omniscience/prompts/generation.yaml
 adopted_from:
   source: https://huggingface.co/datasets/ArtificialAnalysis/AA-Omniscience-Public-v1.1
-  ref: 1f9cbcec472000b28f9782205f1ef9498b45bd21
+  ref: 1f9cbcec472000b28f9782205f1ef9498b45bd21  # pragma: allowlist secret
   reconciled: '2026-11-13'
 lifecycle: active

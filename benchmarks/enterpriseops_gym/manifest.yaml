@@ -58,5 +58,5 @@ lifecycle: active
 resources_server: enterpriseops_gym
 adopted_from:
   source: https://huggingface.co/datasets/ServiceNow-AI/EnterpriseOps-Gym
-  ref: c8e538eae8a6205294f0a86675fefdc1fac408f6
+  ref: c8e538eae8a6205294f0a86675fefdc1fac408f6  # pragma: allowlist secret
   reconciled: '2026-10-25'

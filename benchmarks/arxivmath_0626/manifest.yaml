@@ -48,6 +48,6 @@ canonical_split: train
 standard_prompt_config: benchmarks/arxivmath_0626/prompts/default.yaml
 adopted_from:
   source: https://huggingface.co/datasets/MathArena/arxivmath-0626
-  ref: dca0d771ab20c1b8e8c50d0921bf693f7bfe663d
+  ref: dca0d771ab20c1b8e8c50d0921bf693f7bfe663d  # pragma: allowlist secret
   reconciled: '2026-09-16'
 lifecycle: active

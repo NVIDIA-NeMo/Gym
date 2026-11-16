@@ -41,5 +41,5 @@ canonical_split: test
 prompt_source: prepared
 adopted_from:
   source: https://huggingface.co/datasets/DreamMr/HR-Bench
-  ref: 83b9013d6293b85dc507e87199ca52517536939c
+  ref: 83b9013d6293b85dc507e87199ca52517536939c  # pragma: allowlist secret
   reconciled: '2026-11-13'

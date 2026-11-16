@@ -51,6 +51,6 @@ canonical_split: test
 standard_prompt_config: benchmarks/hle_diamond/prompts/default.yaml
 adopted_from:
   source: https://huggingface.co/datasets/cais/hle-diamond
-  ref: 04eeb7efa7e3e4f83a00cbd5ce436a38fd5dda23
+  ref: 04eeb7efa7e3e4f83a00cbd5ce436a38fd5dda23  # pragma: allowlist secret
   reconciled: '2026-10-24'
 lifecycle: active
