@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""The TB4 Harbor-path overlay restores the poll cadence of the benchmark's own server."""
+"""The TB4 Harbor-path overlay restores the poll cadence of the benchmark's own server and leaves out the S3 bucket."""
 
 from pathlib import Path
 
@@ -27,11 +27,12 @@ SHIPPED = ROOT / "nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yam
 OVERLAY = ROOT / "environments/harbor/terminal_bench_4/harbor_sandbox.yaml"
 
 
-def test_overlay_only_sets_the_poll_cadence():
+def test_overlay_only_sets_the_poll_cadence_and_the_s3_opt_out():
     overlay = yaml.safe_load(OVERLAY.read_text())
     assert overlay == {
         "sandbox": {
-            "opensandbox": {"operations": {"background_poll_initial_s": 0.25, "background_poll_interval_s": 2.0}}
+            "default_metadata": {"nemo.nvidia.com/s3-hostpath": "false"},
+            "opensandbox": {"operations": {"background_poll_initial_s": 0.25, "background_poll_interval_s": 2.0}},
         }
     }
 

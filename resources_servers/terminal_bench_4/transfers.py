@@ -45,8 +45,37 @@ async def download_file(sandbox, source, target):
     await sandbox.download(source, target)
 
 
+def extract_safe_members(tar: tarfile.TarFile, target: Path) -> list[str]:
+    """Extract with the ``data`` filter and skip each member it refuses, as Harbor sanitizes artifacts.
+
+    Links that leave the target, FIFOs, sockets and device files are skipped one by one, and
+    setuid/setgid bits are cleared, so one unsafe entry does not drop the rest of the directory.
+    Returns why each skipped member was refused.
+    """
+    refused = []
+
+    def safe(member: tarfile.TarInfo, destination: str) -> tarfile.TarInfo | None:
+        try:
+            return tarfile.data_filter(member, destination)
+        except tarfile.FilterError as exc:
+            refused.append(str(exc))
+            return None
+
+    # extractall, not a loop over extract: only extractall filters the member a hard link falls back to.
+    tar.extractall(target, filter=safe)
+    return refused
+
+
 async def download_dir(
-    sandbox, source, target, *, exclude=None, exec_command=None, shared_archive=None, deadline=None
+    sandbox,
+    source,
+    target,
+    *,
+    exclude=None,
+    exec_command=None,
+    shared_archive=None,
+    deadline=None,
+    refused: list[str] | None = None,
 ):
     def remaining(limit):
         if deadline is None:
@@ -84,7 +113,9 @@ async def download_dir(
             archive = Path(tmp) / "download.tar.gz"
             await sandbox.download(remote, archive)
             with tarfile.open(archive, "r:gz") as tar:
-                tar.extractall(target, filter="data")
+                skipped = extract_safe_members(tar, target)
+            if refused is not None:
+                refused.extend(skipped)
             if shared_archive:
                 with archive.open("rb") as stream:
                     digest = hashlib.file_digest(stream, "sha256").hexdigest()
