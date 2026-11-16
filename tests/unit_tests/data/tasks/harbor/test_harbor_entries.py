@@ -46,6 +46,8 @@ from tests.unit_tests.data.tasks.harbor.test_harbor_tasks import (
 
 
 TB4_REF = "harbor:terminal-bench/terminal-bench@4.0.0"
+# What environments/harbor/terminal_bench_4/dataset.toml declares.
+COMMITTED_TB4_REF = "harbor:terminal-bench/terminal-bench@4.1.0"
 
 
 @pytest.fixture
@@ -129,7 +131,7 @@ class TestSourceKey:
 
         tb4 = read_dataset_config(PARENT_DIR / "environments" / "harbor" / "terminal_bench_4")
         tb21 = read_dataset_config(PARENT_DIR / "environments" / "harbor" / "terminal_bench_2_1")
-        assert tb4.source == TB4_REF
+        assert tb4.source == COMMITTED_TB4_REF
         assert tb21.source == (
             "harbor:terminal-bench/terminal-bench-2-1@sha256:"
             "7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a"  # pragma: allowlist secret
