@@ -206,7 +206,12 @@ def merge_model_call_capture_into_record(
                         detail=f"count={invalid_count}",
                     )
                 )
-            if not store.delete_claims_if_settled(rollout_id):
+            try:
+                settled = store.delete_claims_if_settled(rollout_id)
+            except OSError:
+                logger.warning("Could not check the capture claims of rollout %s.", rollout_id, exc_info=True)
+                settled = False
+            if not settled:
                 gaps.append(ObservationGap(code="model_call_capture_pending"))
             if store.is_incomplete(rollout_id):
                 gaps.append(ObservationGap(code="model_call_capture_incomplete"))

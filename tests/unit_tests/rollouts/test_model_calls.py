@@ -601,6 +601,25 @@ def test_clearing_after_a_snapshot_keeps_an_outstanding_claim(tmp_path):
     assert (tmp_path / "14-0.old.capture.pending").exists()
 
 
+def test_merge_keeps_the_calls_it_read_when_the_claims_cannot_be_checked(tmp_path, monkeypatch, caplog):
+    from nemo_gym.rollouts.model_calls import merge_model_call_capture_into_record
+
+    store = CaptureStore(tmp_path)
+    store.mark_pending("17-0", "call-1")
+    store.record("17-0", {**_capture_exchange("responses", "A", {}, {"id": "resp-A"}), "model_call_id": "call-1"})
+    store.clear_pending("17-0", "call-1")
+
+    def read_only(*_args):
+        raise PermissionError("read-only claims file")
+
+    monkeypatch.setattr(CaptureStore, "delete_claims_if_settled", read_only)
+    record = merge_model_call_capture_into_record({"_ng_task_index": 17, "_ng_rollout_index": 0}, [tmp_path])
+
+    assert len(record["ng_model_call_capture"]["calls"]) == 1
+    assert [gap["code"] for gap in record["ng_model_call_capture"]["gaps"]] == ["model_call_capture_pending"]
+    assert "Could not check the capture claims" in caplog.text
+
+
 def test_clearing_before_dispatch_removes_only_the_cleared_keys_pending_markers(tmp_path):
     from nemo_gym.rollouts.model_calls import clear_model_call_captures_for_rollouts
 

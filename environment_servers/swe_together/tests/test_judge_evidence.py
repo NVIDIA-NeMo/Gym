@@ -301,11 +301,32 @@ async def test_a_judge_call_admitted_during_the_read_keeps_its_claim(tmp_path, m
     monkeypatch.setattr(CaptureStore, "read_available", admit_then_read)
     verification = {"judge_capture_episode": "child", "judge_close": receipt("first").model_dump(mode="json")}
 
-    await collect_judge_evidence(
+    result = await collect_judge_evidence(
         parent(), verification, {"observability_enabled": True, "model_call_capture_dir": str(tmp_path)}, tmp_path
     )
 
     assert store.has_pending("child") is True
+    assert "judge_capture_incomplete" in {gap.code for gap in result.gaps}
+
+
+async def test_judge_claims_that_cannot_be_checked_count_as_incomplete(tmp_path, monkeypatch):
+    store = CaptureStore(tmp_path)
+    store.mark_pending("child", "first")
+    store.record("child", exchange("first", "first"))
+    store.clear_pending("child", "first")
+
+    def read_only(*_args):
+        raise PermissionError("read-only claims file")
+
+    monkeypatch.setattr(CaptureStore, "delete_claims_if_settled", read_only)
+    verification = {"judge_capture_episode": "child", "judge_close": receipt("first").model_dump(mode="json")}
+
+    result = await collect_judge_evidence(
+        parent(), verification, {"observability_enabled": True, "model_call_capture_dir": str(tmp_path)}, tmp_path
+    )
+
+    assert [call.model_call_id for call in result.model_calls] == ["first"]
+    assert "judge_capture_incomplete" in {gap.code for gap in result.gaps}
 
 
 @pytest.mark.parametrize("placement", ["middle", "last", "only"])

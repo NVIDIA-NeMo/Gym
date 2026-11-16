@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Preserve separately captured judge exchanges using the judge's own close evidence."""
 
-import contextlib
 import json
 import shutil
 from collections import defaultdict
@@ -178,9 +177,11 @@ async def collect_judge_evidence(
             raise FileNotFoundError("Judge capture is unavailable")
         shutil.copyfile(store.path_for(episode), artifact_dir / "judge-model-calls.capture.jsonl")
         entries, invalid_count = store.read_available(episode)
-        # Judged under the claims file's lock now, not from the earlier drain.
-        with contextlib.suppress(OSError):
-            store.delete_claims_if_settled(episode)
+        # Checked again under the claims file's lock: a judge call can be claimed after the drain returned.
+        try:
+            settled = store.delete_claims_if_settled(episode)
+        except OSError:
+            settled = False
         exchanges = [exchange for _, exchange in entries]
         (artifact_dir / "judge-model-calls.json").write_text(json.dumps(exchanges, indent=2))
         raw_close = verification.get("judge_close")
@@ -191,7 +192,7 @@ async def collect_judge_evidence(
             result.gaps.append(
                 ObservationGap(code="judge_capture_records_unreadable", detail=f"count={invalid_count}")
             )
-        if not drained or store.is_incomplete(episode):
+        if not drained or not settled or store.is_incomplete(episode):
             result.gaps.append(ObservationGap(code="judge_capture_incomplete"))
         verification["judge_evidence_provenance"] = provenance
         (artifact_dir / "judge-evidence-provenance.json").write_text(json.dumps(provenance, indent=2))
