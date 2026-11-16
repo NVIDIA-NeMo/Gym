@@ -8,10 +8,11 @@ import json
 import logging
 import shlex
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from time import time
-from typing import ClassVar
+from typing import Any, ClassVar
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
@@ -19,12 +20,14 @@ from pydantic import Field
 
 from nemo_gym.agents import (
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
     SandboxCommand,
     SandboxSession,
+    SimpleResponsesAPIAgent,
 )
 from nemo_gym.client import request as http_request
 from nemo_gym.config import get_global_config_dict
@@ -90,6 +93,12 @@ class PrimeChildAgent(PrimeAgent):
 
     config: PrimeChildConfig
     calls_model_from_sandbox: ClassVar[bool] = True
+    # SDK child sessions retain the base refusal; the CLI's stop hook only handles PrimeSession.
+    _rollout_sandbox_session = SimpleResponsesAPIAgent._rollout_sandbox_session
+
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Leave SDK failures to the pairing's verifier, which checks retained parent-delivery evidence."""
+        return AgentOutcome(failure_kind="unknown")
 
     def model_post_init(self, context: object) -> None:
         # The sandbox owns the runtime; do not install an unused host CLI.

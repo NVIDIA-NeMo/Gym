@@ -42,18 +42,32 @@ export async function createAgentSession(options){
 """
 
 
-def sdk_error_capture(tmp_path, *, delivered: bool, dispose_error: bool = False):
+def sdk_error_capture(tmp_path, *, delivered: bool, dispose_error: bool = False, provider_error: str | None = None):
     """Have the actual checked-in shim catch an SDK error and write its real capture."""
     send = "if(turn===2) await options.agentMessageController.sendAgentMessage({target:'parent',message:'report on last allowed turn'});"
+    failure_event = (
+        "emit("
+        + json.dumps(
+            {
+                "type": "message_end",
+                "message": {"role": "assistant", "content": [], "stopReason": "error", "errorMessage": provider_error},
+            }
+        )
+        + ");"
+        if provider_error is not None
+        else ""
+    )
     replacement = """
         if(turn===2){
           const receipt=await options.agentMessageController.sendAgentMessage({target:'parent',message:'Task-specific findings'});
           emit({type:'tool_execution_end',toolName:'ipython',toolCallId:String(turn),result:{details:{status:'ok',sentAgentMessages:[{id:receipt.id,receiverRole:'parent',deliveryStatus:'delivered'}]}}});
           THROW_AFTER_SEND
         }
-    """.replace("THROW_AFTER_SEND", "" if dispose_error else "throw new Error('SDK failed after delivery');")
+    """.replace(
+        "THROW_AFTER_SEND", failure_event + ("" if dispose_error else "throw new Error('SDK failed after delivery');")
+    )
     if not delivered:
-        replacement = "if(turn===2) throw new Error('SDK failed without delivery');"
+        replacement = "if(turn===2){" + failure_event + "throw new Error('SDK failed without delivery');}"
     source = SDK_DOUBLE.replace(send, replacement)
     if dispose_error:
         source = source.replace(

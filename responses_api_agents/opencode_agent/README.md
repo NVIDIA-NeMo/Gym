@@ -3,7 +3,11 @@
 `configs/opencode_agent.yaml` uses a Gym model server and supports sandbox
 EnvironmentServer sessions and local CLI calls. An agent session selects the
 sandbox; without one, requests run locally. Invalid or closed sessions fail.
-Local `/run` requires a Resources binding; direct `/v1/responses` does not.
+Episodes use an Environment Server; the default agent `/run` returns HTTP 422.
+Direct local `/v1/responses` remains available without a Resources binding.
+
+The agent runs OpenCode 1.17.11 by default. `opencode_version: "2.2.7"` selects OpenCode 2 through the same
+adapter; see [OpenCode 2](#opencode-2) for what differs.
 
 Training token-ID capture is off by default. Enable the agent's `token_id_capture`
 only when explicitly collecting training data; evaluation observability remains independent.
@@ -31,6 +35,22 @@ Resources-owned lifecycle. HLE and APEX Shortlist run this agent from their plai
 
 The old `opencode_sandboxed_agent` package remains separate; only its shell PATH
 quoting is fixed for directories containing spaces.
+
+## Deprecated local episodes
+
+Existing callers of the agent's local `/run` can select
+`configs/opencode_legacy_agent.yaml` in place of `configs/opencode_agent.yaml`.
+It keeps the `opencode_agent` instance name and selects `legacy_app.py`.
+For a custom instance that sets its own entry point, set
+`responses_api_agents.opencode_agent.entrypoint: legacy_app.py` on that instance.
+Keep its Resources binding and `legacy_agent` Environment Server routing.
+
+This entry point preserves local seed → responses → verify orchestration,
+including cookies, rollout identity, observations and trajectory metadata.
+It requires `resources_server` and refuses sandbox-session `/run` calls.
+New configurations should use the default `app.py` and agent sessions below.
+The SWE `*_legacy_agent` recipes use the separate `opencode_sandboxed_agent`
+package and do not need this local compatibility entry point.
 
 ## EnvironmentServer sessions
 
@@ -458,3 +478,88 @@ an import that times out or is ended by a signal is a retryable setup error.
 OpenCode takes its directory from `PWD` before the process working directory. `run`,
 `export` and `import` all start in the task workdir with `PWD` set to it (for `run`, the
 harness runner's `cd` sets it), so all three bind the session to the same directory.
+
+## OpenCode 2
+
+OpenCode 2 is the rewrite of OpenCode that upstream (`anomalyco/opencode`) releases as 2.x: npm `@opencode/cli`
+and the `opencode-linux-*` assets of its GitHub releases, which the npm package `opencode-ai` (1.x) no longer
+tracks. Setting `opencode_version` to a 2.x release selects it; the adapter pins 2.2.7. `opencode_agent` keeps
+OpenCode 1.17.11 as its default, so existing configs run unchanged. To run a recipe on OpenCode 2, set the version
+on its agent instance:
+
+```yaml
+opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      opencode_version: "2.2.7"
+```
+
+The version is a setting of `opencode_agent`, like the permission profile, not a separate agent variant.
+
+The session contract, the sandbox lifecycle, the settings and their checks are shared. What OpenCode 2 changed is
+handled in `opencode2/`:
+
+- **Installation.** The installer downloads the same release asset names and checks each download against the
+  release's SHA-256 (`OPENCODE_RELEASE_SHA256` in `runtime.py`); a 2.x version without pinned digests needs
+  `sandbox_executable_path`. OpenCode 2 prints `opencode v2.2.7` for `--version`. It installs no plugin
+  dependencies, so `sandbox_plugin_dependencies_path` is refused. ripgrep is found as in OpenCode 1.
+- **Processes.** Every command runs with `--standalone`: without it, OpenCode 2 joins (or, for `session export`
+  and `session import`, starts) a background OpenCode service with that service's configuration. Each run's
+  private server exits with the CLI.
+- **Configuration.** The adapter writes OpenCode 2's schema for the provider, model, plugins, MCP servers and image
+  limits. The session's `opencode_config` keys keep their OpenCode 1 form, which OpenCode 2 migrates: `bash` rules
+  apply to its `shell` tool and `task` rules to `subagent`; `attachment` becomes `media` and the boolean `snapshot`
+  becomes `snapshots`. OpenCode 2 assumes image input for a model it does not know, so a text-only session declares
+  `capabilities.input: ["text"]`.
+- **Plugin.** OpenCode 2 loads plugins from directories through a new API, so `opencode2/plugin/index.js` replaces
+  the three OpenCode 1 plugin files. It gives tool shells the task's HOME and XDG directories, applies request
+  `temperature` and `top_p` to every model call (OpenCode 2 accepts per-agent sampling but does not apply it),
+  checks MCP grants before the first model call, sets `X-Session-Id`, and removes the tools OpenCode offers only
+  through Code Mode (see Tools below). Owner `plugins` must be OpenCode 2 plugin directories.
+- **Model-call identity.** OpenCode 2 names a reply only once its response starts streaming, after the request is
+  sent. With model-call capture on, the plugin sends a label of its own in `X-OpenCode-Assistant-Message-Id`
+  and records which reply it became; Gym's records name each reply by that label (`msg_gym_...`), so captured
+  calls join to their turns. A call retried before any output keeps its reply under a new label, and the reply
+  takes the last one, so the call whose response it holds joins it. Compaction calls carry no label, so they are
+  not joined to their compaction record (each compaction carries `compaction_model_call_boundary_unavailable`).
+  The labels read at earlier captures still apply when the label file cannot be read, and that capture carries
+  `model_call_labels_unavailable`.
+- **Session store.** OpenCode 2 keeps sessions in new tables (`session_v2`, `session_message`). The capture copies
+  the store out as before, and `opencode2/store.py` translates it into the OpenCode 1 tables that the trajectory,
+  observation, usage and outcome readers parse. A record it cannot translate (a message, content or status type
+  that 2.2.7 does not save in a headless run) is named in a `harness_records_untranslated` gap instead of being
+  dropped silently.
+- **Exports and imports.** `export_dir` holds `opencode session export` output, OpenCode 2's own format with one
+  session per file. `session_import_path` takes an OpenCode 2 export, imported with `session import --directory`
+  into the task workdir; OpenCode 1 exports cannot be imported.
+
+What OpenCode 2 does differently, and a recipe may notice:
+
+- Tools: `shell`, `read` (also lists directories), `write`, `edit`, `glob`, `grep`, `subagent`, `question`,
+  `skill`, `webfetch` and `websearch` (the default permission profile hides the last two). Code Mode is off: the adapter denies its `execute` tool after
+  every other `permission` rule, and the plugin removes the tools OpenCode offers only through it (OpenCode's own
+  sessions, worktrees, models, schedules, artifacts and MCP resources, all `opencode_*`), which OpenCode 1 did not
+  offer. `todowrite` is off in OpenCode 2 releases. MCP grants are direct tools named `<grant>_<tool>`
+  (`codemode: false`).
+- A tool call that a permission rule denies fails with an error the model reads, and the run continues; OpenCode 1
+  ended the run's turn on a rejection, which the adapter reported as `permission_denied`.
+- At the `agent.build.steps` limit OpenCode 2 adds the same note as OpenCode 1 and also sets `tool_choice: none`,
+  so the model must answer in text. Compaction does not count as a step.
+- Prompt images follow the task text, and their sandbox paths are not shown to the model. The adapter lifts
+  OpenCode 2's image limits and turns off its resizing (`media.image.auto_resize: false`), which otherwise also
+  re-encodes a large PNG as JPEG. OpenCode 2 itself caps a file its `read` tool opens at 20 MiB and trims the
+  oldest images when one request carries more than 25 MiB of them.
+- A provider error is translated to OpenCode 1's: an HTTP status becomes an `APIError` with `statusCode`, a
+  transport failure a retryable `APIError`, and a provider rejection of an over-long prompt a
+  `ContextOverflowError`. OpenCode 2 retries 429, 408, 409, 5xx and transport failures itself, up to 10 times.
+  When a stream breaks after output started, it saves the error on that step and continues with a new one; that
+  step keeps the error as `recoveredError`, and only an error on the last reply fails the run.
+- After a reply truncated at `max_output_tokens`, OpenCode 2 asks the model to continue, twice; a third truncated
+  reply ends the run with an `output-limit` error and exit code 1, which the adapter reports as a failed run. With
+  OpenCode 1, a run whose last reply was truncated is reported as incomplete (`max_output_tokens`).
+- With `mcp_tool_timeout_seconds` unset, an MCP call may run for OpenCode 2's default of 12 hours.
+
+Local calls (unseeded requests and `/run`) download the pinned Linux release into `.opencode_runtime/<version>`
+of this directory; on another host, set `command` to an OpenCode 2 binary. A download that waits 60 s for data or
+takes longer than 10 minutes fails, and a later call retries it. Local calls run with the sandbox sessions'
+isolation and a fixed title, so OpenCode 2 makes no model call outside the rollout.

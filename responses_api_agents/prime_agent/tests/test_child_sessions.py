@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from nemo_gym.agents import AgentSeedSessionRequest, check_agent_seed_rejected
@@ -60,6 +62,20 @@ def test_no_unused_host_cli_install():
 
 def test_unsupported_seed_returns_terminal_422():
     assert "task sandbox" in check_agent_seed_rejected(agent().setup_webserver(), seed())
+
+
+@pytest.mark.parametrize("phase", ["seeding", "active"])
+def test_child_rollout_stops_remain_unsupported(phase):
+    instance = agent()
+    session = AsyncMock()
+    state = ChildSession(request=seed(), runtime="/runtime", session=session) if phase == "active" else None
+    record = SimpleNamespace(state=state, stop_requested=False, stop_reason=None)
+    with patch.object(PrimeChildAgent, "_open_rollout_record", return_value=record):
+        with TestClient(instance.setup_webserver()) as client:
+            response = client.post("/rollouts/0-0/stop", json={"reason": "operator stop"})
+    assert response.status_code == 501
+    assert record.stop_requested is False
+    session.expire.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
@@ -381,19 +397,29 @@ async def test_child_legacy_run_is_not_exposed():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("delivered,dispose_error", [(True, False), (True, True), (False, False)])
-async def test_sdk_error_capture_survives_export_close_and_shared_grading(tmp_path, delivered, dispose_error):
+@pytest.mark.parametrize("provider_error", [None, "503 Service Unavailable", "Connection error."])
+async def test_sdk_error_capture_survives_export_close_and_shared_grading(
+    tmp_path, delivered, dispose_error, provider_error
+):
     import json
     import shutil
 
     if shutil.which("node") is None:
         pytest.skip("Node is required for the actual SDK shim")
-    from nemo_gym.agents import SandboxSession
+    from pathlib import Path
+
+    import yaml
+
+    from nemo_gym.agents import AgentOutcomePolicyConfig, SandboxSession
     from resources_servers.partner_if.app import VerifyRequest
     from resources_servers.partner_if.tests.test_prime_evidence import seed as resource_seed
     from resources_servers.partner_if.tests.test_prime_evidence import server as resource_server
     from responses_api_agents.prime_agent.tests.test_child_runtime import sdk_error_capture
+    from tests.helpers.single_agent_turn import _Client, _environment_server, _request, _Response
 
-    captured = sdk_error_capture(tmp_path, delivered=delivered, dispose_error=dispose_error)
+    captured = sdk_error_capture(
+        tmp_path, delivered=delivered, dispose_error=dispose_error, provider_error=provider_error
+    )
     assert captured["termination"] == "error"
     instance = agent(artifact_directory=str(tmp_path / "captures"))
     from nemo_gym.sandbox import SandboxExecResult
@@ -450,15 +476,46 @@ async def test_sdk_error_capture_survives_export_close_and_shared_grading(tmp_pa
             "verifier_metadata": {"partner_if": contract},
         }
     )
-    seeded = resource_seed().model_copy(
-        update={"task_data": {"verifier_metadata": body.verifier_metadata.model_dump(mode="json")}}
-    )
-    resources._seeds[seeded.resources_session_id] = seeded
-    resources._sandboxes[seeded.resources_session_id] = AsyncMock()
-    with patch("resources_servers.partner_if.prime_app.read_text", AsyncMock(return_value=json.dumps(captured))):
-        graded = await resources.verify(
-            Request({"type": "http", "session": {"session_id": seeded.resources_session_id}}), body
-        )
+    environment, client = _environment_server()
+    pairing = yaml.safe_load((Path(__file__).resolve().parents[3] / "benchmarks/partner_if/config.yaml").read_text())
+    policy = pairing["partner_if_prime_environment_server"]["environment_servers"]["single_agent_turn_legacy"][
+        "agent_outcome_policy"
+    ]
+    environment.config.agent_outcome_policy = AgentOutcomePolicyConfig.model_validate(policy)
+    request = _request()
+    request.task.task_input.responses_create_params = body.responses_create_params
+    request.task.task_input.task_data = {"verifier_metadata": body.verifier_metadata.model_dump(mode="json")}
+    client.responses[2] = _Response(reply.model_dump(mode="json"))
+    client.responses[3] = _Response(closed.model_dump(mode="json"))
+    original_post = _Client.post
+    session_id = None
+
+    async def post(self, server_name, url_path, **kwargs):
+        nonlocal session_id
+        result = await original_post(self, server_name, url_path, **kwargs)
+        if url_path == "/seed_session":
+            session_id = kwargs["json"]["resources_session_id"]
+            seeded = resource_seed().model_copy(
+                update={"resources_session_id": session_id, "task_data": request.task.task_input.task_data}
+            )
+            resources._seeds[session_id] = seeded
+            resources._sandboxes[session_id] = AsyncMock()
+        if url_path == "/verify":
+            verified = await resources.verify(
+                Request({"type": "http", "session": {"session_id": session_id}}),
+                VerifyRequest.model_validate(kwargs["json"]),
+            )
+            return _Response(verified.model_dump(mode="json"))
+        return result
+
+    with (
+        patch.object(_Client, "post", post),
+        patch("resources_servers.partner_if.prime_app.read_text", AsyncMock(return_value=json.dumps(captured))),
+    ):
+        result = await environment.run_request(request)
+    assert result.failure is None
+    assert sum(path == "/verify" for _, path, _ in client.calls) == 1
+    graded = result.result
     assert graded.mask_sample is (not delivered)
     assert graded.evaluation_completed is delivered
     if delivered:

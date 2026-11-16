@@ -36,10 +36,10 @@ migration = load_migration()
         "langgraph_agent",
         "hermes_agent",
         "pi_agent",
-        "prime_agent",
         "pool_agent",
         "simple_strands_agent",
         "goose_agent",
+        "prime_agent",
         "kimi_code_agent",
         "codex_agent",
         "openclaw_agent",
@@ -64,7 +64,7 @@ def test_migration_respects_agent_session_templates(
                 "my_agent": {
                     "responses_api_agents": {
                         agent_type: {
-                            "entrypoint": "child_app.py" if agent_type == "prime_agent" else "app.py",
+                            "entrypoint": "app.py",
                             "resources_server": resources,
                         }
                     }
@@ -80,7 +80,13 @@ def test_migration_respects_agent_session_templates(
         assert _environment_servers(yaml.safe_load(config.read_text())) == {"my_agent": ["my_environment_server"]}
 
 
-def test_prime_host_entrypoint_still_requires_a_legacy_relay() -> None:
-    assert migration.needs_environment_server(
-        {"responses_api_agents": {"prime_agent": {"entrypoint": "app.py", "resources_server": None}}}
-    )
+@pytest.mark.parametrize("entrypoint", ["app.py", "child_app.py"])
+def test_unbound_prime_session_entrypoints_do_not_get_a_legacy_relay(tmp_path: Path, entrypoint: str) -> None:
+    instance = {"responses_api_agents": {"prime_agent": {"entrypoint": entrypoint, "resources_server": None}}}
+    config = tmp_path / "agent.yaml"
+    config.write_text(yaml.safe_dump({"my_agent": instance}))
+    before = config.read_text()
+
+    assert not migration.needs_environment_server(instance)
+    assert migration.main([str(config)]) == 0
+    assert config.read_text() == before
