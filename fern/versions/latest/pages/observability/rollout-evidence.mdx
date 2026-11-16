@@ -314,6 +314,9 @@ and return an `AgentObservationBundle` as `ng_agent_observations`:
   for example when every request was rejected. Omit usage only when a finished response's usage
   was lost; [rollout health](/main/evaluation/rollout-health) then leaves the token comparison
   unobserved.
+- Report a usage detail such as `input_tokens_details.cached_tokens` only when the harness reported
+  it for every summed call; otherwise set it to `None`, never to an unmeasured 0. Use 0 only for a
+  known zero, with a comment saying why.
 - Supply explicit `TrajectoryTurn` records in a producer `ng_trajectory` when semantic turns are
   observable. Collection preserves them; it does not derive them from an invocation's conversation.
 

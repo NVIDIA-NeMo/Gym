@@ -230,7 +230,7 @@ def test_off_the_batch_node_the_dir_is_handled_by_a_step_on_the_driver_node():
     script = _script(config)
     assert '--nodelist="${gym_nodes[1]}" --nodes=1 --ntasks=1' in _driver_line(script)
     assert (
-        '_gym_nl_run() { srun --overlap --nodelist="${gym_nodes[1]}" --nodes=1 --ntasks=1 '
+        '_gym_nl_run() { srun --overlap --nodelist="${gym_nodes[1]}" --nodes=1 --ntasks=1 --account=acct '
         'bash -c "$1" _gym_node_local "${@:2}"; }'
     ) in script
     # A step cannot start once the job is ending, so there is no TERM archive.

@@ -877,7 +877,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
 
         usage = NeMoGymResponseUsage(
             input_tokens=context.n_input_tokens or 0,
-            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=context.n_cache_tokens or 0),
+            input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=context.n_cache_tokens),
             output_tokens=context.n_output_tokens or 0,
             output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
             total_tokens=(context.n_input_tokens or 0) + (context.n_output_tokens or 0),
