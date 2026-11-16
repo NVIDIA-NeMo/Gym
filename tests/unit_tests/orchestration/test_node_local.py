@@ -68,6 +68,27 @@ def _driver_line(script: str) -> str:
     return next(line for line in script.splitlines() if "logs/driver-" in line)
 
 
+# --- model-call capture ------------------------------------------------------------------------------------------
+
+
+def test_capture_defaults_to_the_node_local_dir():
+    script = _script(_config(True))
+    assert "model_call_capture_dir=/tmp/gym-node-local/20261116_run/b/model-calls" in script
+    assert "/jobs/20261116_run/b/model-calls" not in script
+
+
+def test_capture_stays_in_the_benchmark_dir_without_node_local():
+    assert "model_call_capture_dir=/jobs/20261116_run/b/model-calls" in _script(_config())
+
+
+def test_an_explicit_capture_dir_wins_over_the_node_local_default():
+    config = _config(True)
+    config.driver.benchmarks["b"].run["model_call_capture_dir"] = "/custom/calls"
+    script = _script(config)
+    assert "model_call_capture_dir=/custom/calls" in script
+    assert "/tmp/gym-node-local/20261116_run/b/model-calls" not in script
+
+
 # --- config ------------------------------------------------------------------------------------------------------
 
 

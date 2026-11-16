@@ -942,11 +942,14 @@ def _node_totals(compute: SlurmComputeConfig) -> tuple[int, int]:
     return total_nodes, total_ntasks
 
 
-def _with_default_capture_dir(run: dict[str, Any], remote_bench_dir: Path) -> dict[str, Any]:
+def _with_default_capture_dir(
+    run: dict[str, Any], remote_bench_dir: Path, *, capture_root: str | None = None
+) -> dict[str, Any]:
     """Enable capture for submitted evaluations unless explicitly disabled.
 
     Auto-derive model_call_capture_dir from this benchmark's own real output
-    directory when observability is on and the caller didn't set one.
+    directory, or from ``capture_root`` (the node-local dir) when given, when
+    observability is on and the caller didn't set one.
 
     Hydra interpolation resolves before remote_bench_dir exists (it's computed
     here, in build_sbatch_script, well after SubmitConfig validation), so
@@ -956,7 +959,7 @@ def _with_default_capture_dir(run: dict[str, Any], remote_bench_dir: Path) -> di
     """
     run = {OBSERVABILITY_ENABLED_KEY_NAME: True, **run}
     if run.get(OBSERVABILITY_ENABLED_KEY_NAME) and MODEL_CALL_CAPTURE_DIR_KEY_NAME not in run:
-        return {**run, MODEL_CALL_CAPTURE_DIR_KEY_NAME: str(remote_bench_dir / "model-calls")}
+        return {**run, MODEL_CALL_CAPTURE_DIR_KEY_NAME: f"{capture_root or remote_bench_dir}/model-calls"}
     return run
 
 
@@ -1147,8 +1150,11 @@ def build_sbatch_script(
             ),
             **driver_env,
         }
+    node_local = benchmark.node_local_config
     if benchmark.command is None:
-        run_args = _with_default_capture_dir(benchmark.run, remote_bench_dir)
+        # With a node-local dir, the per-call capture files stay on the driver's disk and reach the job dir archived.
+        capture_root = node_local_script.container_dir(remote_bench_dir) if node_local is not None else None
+        run_args = _with_default_capture_dir(benchmark.run, remote_bench_dir, capture_root=capture_root)
         run_args.setdefault("require_complete", True)
         run_args = _with_resume_flag(run_args, resume is not None)
         gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(run_args))
@@ -1169,7 +1175,6 @@ def build_sbatch_script(
         gym_cmd = ""
         driver_env |= _command_env(benchmark, remote_bench_dir)
     exports = effective_exports(config, benchmark_name)
-    node_local = benchmark.node_local_config
     export_tail = (
         render_export_tail(
             remote_bench_dir,
