@@ -399,14 +399,18 @@ async def test_capture_reads_never_list_the_capture_dir(tmp_path, monkeypatch):
     def listed(*_args, **_kwargs):
         raise AssertionError("listed the capture dir")
 
-    for owner, name in ((Path, "glob"), (Path, "iterdir"), (os, "listdir"), (os, "scandir")):
+    for owner, name in ((Path, "glob"), (Path, "iterdir"), (os, "listdir")):
         monkeypatch.setattr(owner, name, listed)
+    scans = []
+    scandir = os.scandir
+    monkeypatch.setattr(os, "scandir", lambda path: scans.append(path) or scandir(path))
     record = {"_ng_task_index": 10, "_ng_rollout_index": 0}
 
     assert await await_model_call_capture_quiescence("10-0", [tmp_path]) is True
     merge_model_call_capture_into_record(record, [tmp_path])
-    clear_model_call_captures_for_rollouts([record], [tmp_path])
-
+    clear_model_call_captures_for_rollouts([record], [tmp_path], before_dispatch=False)
+    clear_model_call_captures_for_rollouts([record, {"_ng_task_index": 10, "_ng_rollout_index": 1}], [tmp_path])
+    assert scans == []
     assert len(record["ng_model_call_capture"]["calls"]) == 1
     assert not store.path_for("10-0").exists()
 
@@ -459,3 +463,133 @@ def test_a_torn_tail_cannot_swallow_a_release(tmp_path):
     assert store.has_pending("15-1") is True
     store.clear_pending("15-1", "open")
     assert store.has_pending("15-1") is False
+
+
+def test_retiring_settled_claims_never_hides_a_call_admitted_meanwhile(tmp_path, monkeypatch):
+    import asyncio
+    import fcntl
+    import threading
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    import nemo_gym.models.model_call_capture as capture
+    from nemo_gym.rollouts.model_calls import await_model_call_capture_quiescence, merge_model_call_capture_into_record
+
+    store = CaptureStore(tmp_path)
+    store.mark_pending("13-0", "call-1")
+    store.record("13-0", {**_capture_exchange("responses", "A", {}, {"id": "resp-A"}), "model_call_id": "call-1"})
+    store.clear_pending("13-0", "call-1")
+
+    admitting = threading.Event()
+    admission = threading.Thread(target=store.mark_pending, args=("13-0", "call-2"))
+
+    def flock(fd, operation):
+        if threading.current_thread() is admission and operation == fcntl.LOCK_EX:
+            admitting.set()  # The admission holds the file the merge is about to retire.
+        fcntl.flock(fd, operation)
+
+    monkeypatch.setattr(
+        capture,
+        "fcntl",
+        SimpleNamespace(flock=flock, LOCK_EX=fcntl.LOCK_EX, LOCK_SH=fcntl.LOCK_SH, LOCK_UN=fcntl.LOCK_UN),
+    )
+    unlink = Path.unlink
+
+    def unlink_after_an_admission(path, *args, **kwargs):
+        if path == store.claims_path_for("13-0") and not admitting.is_set():
+            # The merge has read the claims as settled; a second call opens the file before the unlink.
+            admission.start()
+            assert admitting.wait(5)
+        unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink_after_an_admission)
+
+    snapshot = merge_model_call_capture_into_record({"_ng_task_index": 13, "_ng_rollout_index": 0}, [tmp_path])
+    admission.join(5)
+
+    assert "gaps" not in snapshot["ng_model_call_capture"]
+    fresh = CaptureStore(tmp_path)
+    assert fresh.has_pending("13-0") is True
+    later = merge_model_call_capture_into_record({"_ng_task_index": 13, "_ng_rollout_index": 0}, [tmp_path])
+    assert "model_call_capture_pending" in [gap["code"] for gap in later["ng_model_call_capture"]["gaps"]]
+    drained = asyncio.run(await_model_call_capture_quiescence("13-0", [tmp_path], timeout_s=0.05, poll_s=0.01))
+    assert drained is False
+
+    fresh.record("13-0", {**_capture_exchange("responses", "B", {}, {"id": "resp-B"}), "model_call_id": "call-2"})
+    fresh.clear_pending("13-0", "call-2")
+    assert asyncio.run(await_model_call_capture_quiescence("13-0", [tmp_path], timeout_s=1.0)) is True
+    assert [exchange["model_call_id"] for exchange in fresh.read("13-0")] == ["call-1", "call-2"]
+
+
+def test_retiring_follows_a_claims_file_replaced_before_its_lock(tmp_path, monkeypatch):
+    import nemo_gym.models.model_call_capture as capture
+
+    store = CaptureStore(tmp_path)
+    store.mark_pending("16-0", "call-1")
+    is_live = capture._is_live
+    checks = []
+
+    def replaced_once(handle, path):
+        checks.append(path)
+        return len(checks) > 1 and is_live(handle, path)
+
+    monkeypatch.setattr(capture, "_is_live", replaced_once)
+
+    assert store.retire_claims_if_settled("16-0") is False
+    assert len(checks) == 2 and store.claims_path_for("16-0").exists()
+
+
+def test_a_claims_file_is_live_only_while_its_path_still_names_it(tmp_path):
+    from nemo_gym.models.model_call_capture import _is_live
+
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.write_bytes(b"")
+    second.write_bytes(b"")
+    with first.open("rb") as handle:
+        assert _is_live(handle, first) is True
+        assert _is_live(handle, second) is False
+        assert _is_live(handle, tmp_path / "missing") is False
+
+
+def test_claims_that_keep_being_retired_give_up_without_losing_state(tmp_path, monkeypatch, caplog):
+    import nemo_gym.models.model_call_capture as capture
+
+    store = CaptureStore(tmp_path)
+    store.mark_pending("16-1", "call-1")
+    monkeypatch.setattr(capture, "_is_live", lambda *_: False)
+
+    assert store.retire_claims_if_settled("16-1") is False
+    store.mark_pending("16-1", "call-2")
+    assert "Could not mark model-call capture pending" in caplog.text
+
+
+def test_settled_claims_that_cannot_be_removed_still_read_as_settled(tmp_path, monkeypatch, caplog):
+    from pathlib import Path
+
+    store = CaptureStore(tmp_path)
+    store.mark_pending("16-2", "call-1")
+    store.clear_pending("16-2", "call-1")
+
+    def refuse(*_args, **_kwargs):
+        raise PermissionError("read-only")
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+
+    assert store.retire_claims_if_settled("16-2") is True
+    assert "Could not retire the capture claims" in caplog.text
+
+
+def test_clearing_after_a_snapshot_keeps_an_outstanding_claim(tmp_path):
+    from nemo_gym.rollouts.model_calls import clear_model_call_captures_for_rollouts
+
+    store = CaptureStore(tmp_path)
+    for rollout_index in (0, 1):
+        store.mark_pending(f"14-{rollout_index}", "call-1")
+        store.record(f"14-{rollout_index}", {"model_call_id": "call-1"})
+    store.clear_pending("14-0", "call-1")
+
+    rows = [{"_ng_task_index": 14, "_ng_rollout_index": rollout_index} for rollout_index in (0, 1)]
+    clear_model_call_captures_for_rollouts(rows, [tmp_path], before_dispatch=False)
+
+    assert not store.path_for("14-0").exists() and not store.claims_path_for("14-0").exists()
+    assert store.has_pending("14-1") is True

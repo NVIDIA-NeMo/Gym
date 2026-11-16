@@ -134,6 +134,34 @@ class ModelCallCaptureConfig(BaseModel):
 # Runs from older releases claimed each call with its own `<rollout id>.<call token>.capture.pending` file.
 _PENDING_SUFFIX = ".capture.pending"
 _CLAIMS_SUFFIX = ".capture.claims"
+_CLAIM_APPEND_ATTEMPTS = 5
+
+
+def _is_live(handle: Any, path: Path) -> bool:
+    """Whether a locked claims file is still the one at ``path``, not one a reader has retired."""
+    opened = os.fstat(handle.fileno())
+    if opened.st_nlink == 0:
+        return False
+    try:
+        current = os.stat(path)
+    except FileNotFoundError:
+        return False
+    return (current.st_dev, current.st_ino) == (opened.st_dev, opened.st_ino)
+
+
+def _has_outstanding_claim(content: bytes) -> bool:
+    claimed: set[str] = set()
+    released: set[str] = set()
+    for line in content.splitlines():
+        try:
+            entry = orjson.loads(line)
+        except orjson.JSONDecodeError:
+            continue  # A torn claim was never forwarded; a torn release leaves its claim outstanding.
+        if isinstance(entry, dict) and isinstance(entry.get("claim"), str):
+            claimed.add(entry["claim"])
+        elif isinstance(entry, dict) and isinstance(entry.get("release"), str):
+            released.add(entry["release"])
+    return bool(claimed - released)
 
 
 def _validate_rollout_id(rollout_id: str) -> str:
@@ -170,15 +198,22 @@ class CaptureStore:
         return self._root / f"{_validate_rollout_id(rollout_id)}{_CLAIMS_SUFFIX}"
 
     def _append_claim_line(self, rollout_id: str, entry: dict[str, str]) -> None:
-        # No fsync: readers on other nodes see the line without one, and a crash that loses it ends the call too.
-        with self.claims_path_for(rollout_id).open("ab") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                # The leading newline ends a torn previous append, so it cannot swallow this entry.
-                handle.write(b"\n" + orjson.dumps(entry, option=orjson.OPT_APPEND_NEWLINE))
-                handle.flush()
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        path = self.claims_path_for(rollout_id)
+        # The leading newline ends a torn previous append, so it cannot swallow this entry.
+        line = b"\n" + orjson.dumps(entry, option=orjson.OPT_APPEND_NEWLINE)
+        for _ in range(_CLAIM_APPEND_ATTEMPTS):
+            # No fsync: readers on other nodes see the line without one, and a crash that loses it ends the call too.
+            with path.open("ab") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    # A file retired after this open would hide the line; append to its replacement instead.
+                    if _is_live(handle, path):
+                        handle.write(line)
+                        handle.flush()
+                        return
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        raise OSError(f"The claims file of rollout {rollout_id} was retired on every attempt.")
 
     def mark_pending(self, rollout_id: str, model_call_id: str) -> None:
         """Claim a write before it is queued, so a reader can tell 'not yet' from 'never'.
@@ -203,23 +238,40 @@ class CaptureStore:
             with self.claims_path_for(rollout_id).open("rb") as handle:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
                 try:
-                    lines = handle.read().splitlines()
+                    content = handle.read()
                 finally:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         except FileNotFoundError:
             return False
-        claimed: set[str] = set()
-        released: set[str] = set()
-        for line in lines:
+        return _has_outstanding_claim(content)
+
+    def retire_claims_if_settled(self, rollout_id: str) -> bool:
+        """Unlink the claims file if no claim in it is outstanding; False while one is.
+
+        The read and the unlink hold the appenders' lock, and an appender skips a retired file, so a claim
+        admitted at any point stays visible.
+        """
+        path = self.claims_path_for(rollout_id)
+        for _ in range(_CLAIM_APPEND_ATTEMPTS):
             try:
-                entry = orjson.loads(line)
-            except orjson.JSONDecodeError:
-                continue  # A torn claim was never forwarded; a torn release leaves its claim outstanding.
-            if isinstance(entry, dict) and isinstance(entry.get("claim"), str):
-                claimed.add(entry["claim"])
-            elif isinstance(entry, dict) and isinstance(entry.get("release"), str):
-                released.add(entry["release"])
-        return bool(claimed - released)
+                handle = path.open("r+b")
+            except FileNotFoundError:
+                return True
+            with handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    if not _is_live(handle, path):
+                        continue
+                    if _has_outstanding_claim(handle.read()):
+                        return False
+                    try:
+                        path.unlink()
+                    except OSError:
+                        logger.warning("Could not retire the capture claims of rollout %s.", rollout_id, exc_info=True)
+                    return True
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return not self.has_pending(rollout_id)
 
     def clear_all_pending(self, rollout_id: str) -> None:
         self.claims_path_for(rollout_id).unlink(missing_ok=True)

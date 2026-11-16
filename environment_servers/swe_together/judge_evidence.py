@@ -178,10 +178,9 @@ async def collect_judge_evidence(
             raise FileNotFoundError("Judge capture is unavailable")
         shutil.copyfile(store.path_for(episode), artifact_dir / "judge-model-calls.capture.jsonl")
         entries, invalid_count = store.read_available(episode)
-        if drained:
-            # Nothing is outstanding, so the claims file has done its job.
-            with contextlib.suppress(OSError):
-                store.clear_all_pending(episode)
+        # Judged under the appenders' lock now, not from the earlier drain.
+        with contextlib.suppress(OSError):
+            store.retire_claims_if_settled(episode)
         exchanges = [exchange for _, exchange in entries]
         (artifact_dir / "judge-model-calls.json").write_text(json.dumps(exchanges, indent=2))
         raw_close = verification.get("judge_close")

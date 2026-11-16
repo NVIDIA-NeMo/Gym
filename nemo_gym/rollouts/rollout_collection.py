@@ -1094,7 +1094,7 @@ async def enrich_run_result(
     _attach_ng_perf(result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms)
 
     if delete_capture and safe_to_delete:
-        clear_model_call_captures_for_rollouts([result], capture_dirs)
+        clear_model_call_captures_for_rollouts([result], capture_dirs, before_dispatch=False)
     return result
 
 

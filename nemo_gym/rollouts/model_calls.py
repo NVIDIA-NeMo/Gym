@@ -4,7 +4,6 @@
 """Read saved model exchanges, resolve ownership, and attach evidence to rollouts."""
 
 import asyncio
-import contextlib
 import logging
 import time
 from pathlib import Path
@@ -145,23 +144,29 @@ async def await_model_call_capture_quiescence(
         poll_s = min(poll_s * 2, _CAPTURE_DRAIN_MAX_POLL_S)
 
 
-def clear_model_call_captures_for_rollouts(records: list[Any], capture_dirs: list[Path]) -> None:
+def clear_model_call_captures_for_rollouts(
+    records: list[Any], capture_dirs: list[Path], *, before_dispatch: bool = True
+) -> None:
     """Remove stale per-rollout capture files for these records before dispatch.
 
     Capture files are keyed by a deterministic rollout id (task-rollout-attempt), so without this a
     fresh run or a kill-shaped retry would append onto the previous attempt's capture for the same
     id. The caller passes only rows about to be dispatched, after assigning any retry suffix.
+    Before dispatch, claims of these ids go too. After a snapshot (``before_dispatch=False``) claims go
+    only once settled.
     """
     if not capture_dirs:
         return
+    rollout_ids = {rollout_id for record in records if (rollout_id := maybe_rollout_id_from_run_body(record))}
     for directory in capture_dirs:
         store = CaptureStore(directory)
-        for record in records:
-            rollout_id = maybe_rollout_id_from_run_body(record)
-            if rollout_id:
-                store.path_for(rollout_id).unlink(missing_ok=True)
-                store.incomplete_path_for(rollout_id).unlink(missing_ok=True)
+        for rollout_id in rollout_ids:
+            store.path_for(rollout_id).unlink(missing_ok=True)
+            store.incomplete_path_for(rollout_id).unlink(missing_ok=True)
+            if before_dispatch:
                 store.clear_all_pending(rollout_id)
+            else:
+                store.retire_claims_if_settled(rollout_id)
 
 
 def merge_model_call_capture_into_record(
@@ -198,12 +203,8 @@ def merge_model_call_capture_into_record(
                         detail=f"count={invalid_count}",
                     )
                 )
-            if store.has_pending(rollout_id):
+            if not store.retire_claims_if_settled(rollout_id):
                 gaps.append(ObservationGap(code="model_call_capture_pending"))
-            else:
-                # Nothing is outstanding at the snapshot, so the claims file has done its job.
-                with contextlib.suppress(OSError):
-                    store.clear_all_pending(rollout_id)
             if store.is_incomplete(rollout_id):
                 gaps.append(ObservationGap(code="model_call_capture_incomplete"))
             elif not calls and not invalid_count:

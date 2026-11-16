@@ -286,6 +286,28 @@ async def test_drained_judge_capture_drops_its_claims_file(tmp_path):
     assert store.path_for("child").exists()
 
 
+async def test_a_judge_call_admitted_during_the_read_keeps_its_claim(tmp_path, monkeypatch):
+    store = CaptureStore(tmp_path)
+    store.mark_pending("child", "first")
+    store.record("child", exchange("first", "first"))
+    store.clear_pending("child", "first")
+    read_available = CaptureStore.read_available
+
+    def admit_then_read(self, rollout_id):
+        # The drain already returned; a later call must still not be retired with the settled ones.
+        self.mark_pending(rollout_id, "second")
+        return read_available(self, rollout_id)
+
+    monkeypatch.setattr(CaptureStore, "read_available", admit_then_read)
+    verification = {"judge_capture_episode": "child", "judge_close": receipt("first").model_dump(mode="json")}
+
+    await collect_judge_evidence(
+        parent(), verification, {"observability_enabled": True, "model_call_capture_dir": str(tmp_path)}, tmp_path
+    )
+
+    assert store.has_pending("child") is True
+
+
 @pytest.mark.parametrize("placement", ["middle", "last", "only"])
 async def test_damaged_capture_retains_intact_exchanges_and_raw_bytes(tmp_path, placement):
     first, second = exchange("first", "first"), exchange("second", "second")
