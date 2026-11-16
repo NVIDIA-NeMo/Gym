@@ -228,6 +228,8 @@ def test_missing_ripgrep_fails_setup_unless_opencode_may_download_it(sandbox, do
         (root / "bin/apk").chmod(0o755)
     if download:
         env["NG_OPENCODE_ALLOW_RIPGREP_DOWNLOAD"] = "1"
+    runtime_binary = root / "runtime/opencode"
+    cached_binary = runtime_binary.read_bytes() if cached else None
     result = run_installer(root, env)
     if download:
         assert result.returncode == (0 if cached else 19), result.stderr
@@ -239,7 +241,8 @@ def test_missing_ripgrep_fails_setup_unless_opencode_may_download_it(sandbox, do
         assert "OpenCode grep and glob tools need ripgrep" in result.stderr
         assert "sandbox_ripgrep_path" in result.stderr and "sandbox_ripgrep_download" in result.stderr
         assert not (root / "download.log").exists()
-        assert not (root / "runtime/ready").exists()
+        # The cached runtime stays as it was, and no runtime appears when none was cached.
+        assert (runtime_binary.read_bytes() if runtime_binary.exists() else None) == cached_binary
     if unavailable in {"nonroot", "no_manager"}:
         assert not (root / "packages.log").exists()
 
