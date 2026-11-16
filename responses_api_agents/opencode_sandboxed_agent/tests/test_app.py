@@ -601,6 +601,8 @@ class TestOpenCodeSandboxedAgent:
             finally:
                 upload_dir.chmod(0o755)
             assert completed.returncode == 0, completed.stderr
+            # A read-only upload cannot be removed, and that does not fail setup.
+            assert uploaded.is_file()
             installed = bin_dir / "rg"
             assert installed.read_bytes() == uploaded.read_bytes() == binary.read_bytes()
             assert installed.stat().st_mode & 0o777 == 0o755
@@ -616,6 +618,8 @@ class TestOpenCodeSandboxedAgent:
             )
             assert mismatched.returncode != 0
             assert not (home / "agent-started").is_file()
+            # The folder is writable again for this run, so the upload is removed even though setup failed.
+            assert not uploaded.exists()
         else:
             assert "nemo-gym-ripgrep" not in command
 
@@ -825,6 +829,8 @@ class TestOpenCodeSandboxedAgent:
             ({"local_opencode_binary_sha256": "0" * 64}, "has SHA-256"),
             ({"preinstalled_opencode": True}, "Set one way to install OpenCode"),
             ({"remote_opencode_binary_path": "/mnt/opencode"}, "Set one way to install OpenCode"),
+            ({"remote_opencode_musl_binary_path": "/mnt/opencode-musl"}, "Set one way to install OpenCode"),
+            ({"remote_opencode_install_script_path": "/mnt/install.sh"}, "Set one way to install OpenCode"),
         ],
     )
     def test_local_opencode_binary_config_is_refused(
@@ -848,12 +854,20 @@ class TestOpenCodeSandboxedAgent:
         config = self._local_opencode_config(binary, local_opencode_binary_sha256=digest.upper())
         assert config.local_opencode_binary_sha256 == digest
 
+    @mark.parametrize("status", [0, 3])
+    def test_upload_is_removed_and_the_command_status_kept(self, tmp_path: Path, status: int) -> None:
+        upload = tmp_path / "upload with spaces"
+        upload.write_bytes(b"binary")
+        command = app_module._then_remove_upload(f"(exit {status})", str(upload))
+        assert subprocess.run(["sh", "-c", command], timeout=10).returncode == status
+        assert not upload.exists()
+
     @mark.skipif(shutil.which("sha256sum") is None, reason="the staging script needs sha256sum")
     async def test_local_opencode_binary_is_uploaded_checked_and_installed(
         self, monkeypatch: MonkeyPatch, tmp_path: Path
     ) -> None:
         """The binary is uploaded instead of downloaded, and the launch command installs it only if the
-        uploaded bytes have the pinned SHA-256."""
+        uploaded bytes have the pinned SHA-256. The upload is removed afterwards when it can be."""
         binary = tmp_path / "opencode with spaces"
         binary.write_text('#!/bin/sh\nif [ "$1" = --version ]; then echo test; else touch "$HOME/agent-started"; fi\n')
         config = self._local_opencode_config(binary)
@@ -872,15 +886,20 @@ class TestOpenCodeSandboxedAgent:
         assert [mock_call[0] for mock_call in sandbox_mock.mock_calls[:2]] == ["upload", "exec"]
         command = sandbox_mock.exec.await_args_list[0].kwargs["command"]
         assert "opencode.ai" not in command
+        # Rollouts may share $HOME on some providers, so each launch stages under its own name.
+        assert re.search(r"\.opencode-staging-[0-9a-f]{32}", command)
 
-        def run_launch_command(uploaded_bytes: bytes, root: Path) -> subprocess.CompletedProcess:
-            # Uploads may land read-only and root-owned, so the copy is made from a read-only folder.
+        def run_launch_command(
+            uploaded_bytes: bytes, root: Path, *, read_only: bool = True
+        ) -> subprocess.CompletedProcess:
+            # Uploads may land read-only and root-owned; such an upload cannot be removed and must not fail setup.
             upload_dir = root / "uploads"
             upload_dir.mkdir(parents=True)
             uploaded = upload_dir / "opencode"
             uploaded.write_bytes(uploaded_bytes)
             uploaded.chmod(0o444)
-            upload_dir.chmod(0o555)
+            if read_only:
+                upload_dir.chmod(0o555)
             (root / "agent home").mkdir()
             local_command = command.replace(staged, shlex.quote(str(uploaded))).replace(
                 "/tmp/nemo-gym-mcp-setup-error", shlex.quote(str(root / "mcp-error"))
@@ -909,6 +928,17 @@ class TestOpenCodeSandboxedAgent:
         assert "SHA-256 mismatch" in tampered.stderr
         assert not (tmp_path / "tampered/agent home/.opencode/bin/opencode").exists()
         assert not (tmp_path / "tampered/agent home/agent-started").exists()
+
+        removable = run_launch_command(binary.read_bytes(), tmp_path / "removable", read_only=False)
+        assert removable.returncode == 0, removable.stderr
+        assert not (tmp_path / "removable/uploads/opencode").exists()
+        assert (tmp_path / "removable/agent home/agent-started").is_file()
+        removable_tampered = run_launch_command(
+            binary.read_bytes().replace(b"echo test", b"echo evil"), tmp_path / "removable-tampered", read_only=False
+        )
+        assert removable_tampered.returncode != 0
+        assert not (tmp_path / "removable-tampered/uploads/opencode").exists()
+        assert not (tmp_path / "removable-tampered/agent home/agent-started").exists()
 
     @mark.parametrize("error_type", [TimeoutError, sandbox_io_timeout])
     async def test_ripgrep_upload_timeout_retries_at_new_path_before_agent_execution(

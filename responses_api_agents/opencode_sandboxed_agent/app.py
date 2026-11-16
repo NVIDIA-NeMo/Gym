@@ -635,9 +635,14 @@ class OpenCodeSandboxedAgentConfig(BaseResponsesAPIAgentConfig):
             return self
         if self.local_opencode_binary_sha256 is None:
             raise ValueError("local_opencode_binary_path needs local_opencode_binary_sha256")
-        if self.preinstalled_opencode or self.remote_opencode_binary_path:
+        if (
+            self.preinstalled_opencode
+            or self.remote_opencode_binary_path
+            or self.remote_opencode_musl_binary_path
+            or self.remote_opencode_install_script_path
+        ):
             raise ValueError(
-                "Set one way to install OpenCode: local_opencode_binary_path, remote_opencode_binary_path "
+                "Set one way to install OpenCode: local_opencode_binary_path, the remote_opencode_* paths "
                 "or preinstalled_opencode"
             )
         self.local_opencode_binary_sha256 = self.local_opencode_binary_sha256.lower()
@@ -667,6 +672,15 @@ def _build_remote_opencode_install_command(
         f"--glibc-binary {quote(binary_path)} "
         f"--musl-binary {quote(musl_binary_path)}"
     )
+
+
+def _then_remove_upload(command: str, upload_path: str) -> str:
+    """Run ``command``, then remove the uploaded ``upload_path`` whatever the outcome, keeping the command's status.
+
+    Some providers put an absolute upload path in the host's /tmp and never clean it up, so the copy is removed here.
+    A failed removal is ignored: a root-owned upload in a sticky /tmp cannot be removed by a non-root user.
+    """
+    return f'{{ {command}; status=$?; rm -f -- {quote(upload_path)} 2>/dev/null; (exit "$status"); }}'
 
 
 def _extract_opencode_session_id(session_list_stdout: str) -> str:
@@ -1294,10 +1308,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 sandbox, self.config.local_opencode_binary_path, name="opencode-binary"
             )
             # Copies the upload, keeps it only if its SHA-256 matches and it answers --version, then installs it.
-            install_str = (
+            # The staging name is unique because rollouts may share $HOME on some providers.
+            install_str = _then_remove_upload(
                 f"sh -c {quote(STAGE_EXECUTABLE)} sh {quote(opencode_remote_path)} "
                 f"{quote(self.config.local_opencode_binary_sha256)} "
-                '"$HOME/.opencode/bin/.opencode-staging" "$HOME/.opencode/bin/opencode"'
+                f'"$HOME/.opencode/bin/.opencode-staging-{uuid4().hex}" "$HOME/.opencode/bin/opencode"',
+                opencode_remote_path,
             )
         elif not self.config.preinstalled_opencode:
             if self.config.remote_opencode_binary_path and self.config.remote_opencode_install_script_path:
@@ -1366,12 +1382,14 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             ripgrep_remote_path = await self._stage_binary(
                 sandbox, self.config.local_ripgrep_binary_path, name="ripgrep"
             )
-            # Uploads may be root-owned: copy as the execution user; teardown removes the source.
-            ripgrep_install_str = (
-                '&& mkdir -p "$HOME/.opencode/bin" '
+            # Uploads may be root-owned: copy as the execution user, then remove the upload.
+            ripgrep_copy = (
+                'mkdir -p "$HOME/.opencode/bin" '
                 f'&& cp {quote(ripgrep_remote_path)} "$HOME/.opencode/bin/rg" '
-                '&& chmod 0755 "$HOME/.opencode/bin/rg" '
-                '&& "$HOME/.opencode/bin/rg" --version'
+                '&& chmod 0755 "$HOME/.opencode/bin/rg"'
+            )
+            ripgrep_install_str = (
+                f'&& {_then_remove_upload(ripgrep_copy, ripgrep_remote_path)} && "$HOME/.opencode/bin/rg" --version'
             )
 
         extra_env_str = " ".join(f"{k}={quote(v)}" for k, v in sorted(self._resolve_opencode_env(query).items()))
