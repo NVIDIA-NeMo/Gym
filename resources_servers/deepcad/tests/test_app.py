@@ -118,6 +118,7 @@ async def test_reference_mask(server: DeepCADResourcesServer, reference: str) ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("bonus_enabled", [False, True])
 @pytest.mark.parametrize(
     "probe, execution, check, kind, mask",
     [
@@ -151,8 +152,9 @@ async def test_reference_mask(server: DeepCADResourcesServer, reference: str) ->
     ],
 )
 async def test_sandbox_outcomes(
-    server: DeepCADResourcesServer, probe, execution, check, kind, mask, monkeypatch: pytest.MonkeyPatch
+    server: DeepCADResourcesServer, probe, execution, check, kind, mask, bonus_enabled, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    server.config.operation_bonus.enabled = bonus_enabled
     monkeypatch.setenv("BASH_FUNC_exit-dramatically%%", "() { exit 1; }")
     sandbox = AsyncMock()
     sandbox.exec.side_effect = [probe, execution, check]
@@ -168,6 +170,8 @@ async def test_sandbox_outcomes(
     else:
         assert result["reward"] == 0.82
         sandbox.download.assert_awaited_once()
+        assert sandbox.exec.await_count == 3
+    assert "--trace-operations" not in str(sandbox.exec.call_args_list)
     spec = factory.call_args.args[1]
     assert set(spec.files) == {"/sandbox/model.py", "/sandbox/runner.py"}
     assert "box.step" not in str(spec.files)
@@ -236,7 +240,10 @@ async def test_worker_cleanup(server: DeepCADResourcesServer, outcome: str) -> N
 @pytest.mark.parametrize("failure", [None, "deepcad:execution", "deepcad:infrastructure"])
 @pytest.mark.parametrize("reference, expected_bonus", [(["fillet", "loft"], 0.02), (["fillet"], 0.04), ([], 0.0)])
 @pytest.mark.parametrize("metric", ["geometry"])
-async def test_operation_bonus_composition_and_failure_gates(server, failure, reference, expected_bonus, metric):
+@pytest.mark.parametrize("masked", [False, True])
+async def test_operation_bonus_composition_and_failure_gates(
+    server, failure, reference, expected_bonus, metric, masked
+):
     from resources_servers.deepcad.app import OperationBonusConfig
 
     server.config.verification_metric = metric
@@ -244,24 +251,60 @@ async def test_operation_bonus_composition_and_failure_gates(server, failure, re
     scored = {
         "reward": 0.4,
         "volume_iou": 0.3,
-        "executed_operations": ["fillet", "fillet", "shell"],
     }
     if failure:
         scored["failure_kind"] = failure
-        scored["mask_sample"] = failure == "deepcad:infrastructure"
+    scored["mask_sample"] = masked or failure == "deepcad:infrastructure"
     server._evaluate = AsyncMock(return_value=scored)
-    body = request("import cadquery as cq\nresult = cq.Workplane('XY').box(1,1,1)")
+    body = request("import cadquery as cq\nresult = cq.Workplane('XY').box(4,4,4).edges().fillet(.2)")
     body.verifier_metadata.reference_operations = reference
     result = await server.verify(body)
-    bonus = 0 if failure else expected_bonus
+    bonus = 0 if failure or masked else expected_bonus
+    assert result.source_operations == ([] if failure or masked else ["box", "fillet"])
     assert result.operation_bonus == pytest.approx(bonus)
     assert result.reward == pytest.approx(0.4 + bonus)
     assert result.reward_components["voxel_iou"] == 0.4
     assert result.reward_components["operation_bonus"] == pytest.approx(bonus)
     assert result.raw_metrics["volume_iou"] == 0.3
-    assert result.raw_metrics["operation_matched_count"] == (0 if failure or not reference else 1)
+    assert result.raw_metrics["operation_matched_count"] == (0 if failure or masked or not reference else 1)
     assert result.raw_metrics["operation_reference_count"] == len(set(reference))
-    assert result.raw_metrics["operation_recall"] == (0 if failure or not reference else 1 / len(set(reference)))
+    assert result.raw_metrics["operation_recall"] == (
+        0 if failure or masked or not reference else 1 / len(set(reference))
+    )
+
+
+@pytest.mark.asyncio
+async def test_operation_bonus_ignores_forged_trace_and_uses_extracted_source(server):
+    server.config.operation_bonus.enabled = True
+    server._evaluate = AsyncMock(return_value={"reward": 0.4})
+    code = """import cadquery as cq
+from pathlib import Path
+Path("/sandbox/operations.json").write_text('["loft", "fillet"]')
+result = cq.Workplane().box(1, 2, 3)
+"""
+    body = request(f"```python\n{code}```")
+    body.verifier_metadata.reference_operations = ["box", "loft", "fillet"]
+    result = await server.verify(body)
+    assert server._evaluate.call_args.args[0] == code.strip()
+    assert result.source_operations == ["box"]
+    assert result.matched_operations == ["box"]
+    assert result.operation_bonus == pytest.approx(0.4 * 0.1 / 3)
+    assert result.reward == pytest.approx(0.4 + result.operation_bonus)
+    assert sum(result.reward_components.values()) == pytest.approx(result.reward)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [SyntaxError, RecursionError, MemoryError])
+async def test_operation_source_parse_failure_keeps_geometry_reward(server, error):
+    server.config.operation_bonus.enabled = True
+    server._evaluate = AsyncMock(return_value={"reward": 0.4})
+    body = request("result = 1")
+    body.verifier_metadata.reference_operations = ["box"]
+    with patch("resources_servers.deepcad.app.extract_operation_candidates", side_effect=error):
+        result = await server.verify(body)
+    assert result.reward == 0.4 and not result.mask_sample
+    assert result.operation_bonus == 0
+    assert result.source_operations == result.matched_operations == []
 
 
 def test_operation_bonus_config_rejects_removed_calibration_fields():

@@ -165,6 +165,25 @@ def test_final_file_is_authoritative_and_workspace_stops_before_grading(runtime)
     assert "prose" in result.json()["response"]["output"][0]["content"][0]["text"]
 
 
+def test_operation_bonus_uses_frozen_workspace_source_and_survives_verify_retry(runtime):
+    runtime.server.config.operation_bonus.enabled = True
+    runtime.evaluate.side_effect = [{"reward": 0.75}, {"reward": 0.75}]
+    start(runtime)
+    body = verify_body()
+    body["verifier_metadata"]["reference_operations"] = ["box", "loft"]
+    body["response"]["output"][0]["content"][0]["text"] = "part.loft()"
+    for _ in range(2):
+        result = runtime.client.post("/verify", json=body)
+        assert result.status_code == 200, result.text
+        scored = result.json()
+        assert scored["source_operations"] == scored["matched_operations"] == ["box"]
+        assert scored["operation_bonus"] == pytest.approx(0.75 * 0.1 / 2)
+        assert scored["reward"] == pytest.approx(0.75 + 0.75 * 0.1 / 2)
+        assert not runtime.workspaces
+    assert runtime.evaluate.await_count == 2
+    assert all(call.args[0] == CODE for call in runtime.evaluate.call_args_list)
+
+
 @pytest.mark.parametrize("stdout", ["False", ""])
 def test_missing_file_never_uses_prose_or_caller_final_code(runtime, stdout):
     start(runtime)

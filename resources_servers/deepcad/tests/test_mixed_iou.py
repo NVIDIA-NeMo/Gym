@@ -187,7 +187,7 @@ async def test_verify_applies_bonus_once_and_stable_failure_schema():
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = {}
     server = DeepCADResourcesServer(config=c, server_client=client)
-    body = request("import cadquery as cq\nresult=1")
+    body = request("import cadquery as cq\nresult=cq.Workplane().circle(1).extrude(2)")
     body.verifier_metadata.reference_operations = ["extrude", "fillet"]
     evaluated = dict(
         reward=0.5,
@@ -198,7 +198,6 @@ async def test_verify_applies_bonus_once_and_stable_failure_schema():
         volume_iou=0.2,
         voxel_iou=0.2,
         reward_components=dict(brep_iou=0.06, octree_iou=0.12, boundary_iou=0.32),
-        executed_operations=["extrude"],
     )
     with patch.object(DeepCADResourcesServer, "_evaluate", AsyncMock(return_value=evaluated)):
         result = await server.verify(body)
