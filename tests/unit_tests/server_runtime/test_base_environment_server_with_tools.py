@@ -20,6 +20,7 @@ from nemo_gym.server_runtime.base_environment_server import (
     BaseEnvironmentServerWithToolsConfig,
     CleanupContext,
     ServedTools,
+    handled_episode_failure,
 )
 from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from nemo_gym.server_runtime.episode_tokens import EPISODE_TOKEN_HEADER, EpisodeTokens, episode_token_secret
@@ -571,3 +572,26 @@ def test_several_workers_are_refused_while_calls_reach_any_worker() -> None:
 
     with pytest.raises(ValueError, match="needs num_workers=1"):
         refuse_unsupported_num_workers(server)
+
+
+def test_a_handled_failure_in_a_tool_fails_the_episode() -> None:
+    """A sandbox that crashes during a tool call is an environment failure, not the agent's."""
+    replies: list[httpx.Response] = []
+
+    class _Crashing(_Counter):
+        @episode_tool
+        async def execute(self, arguments: _Nothing) -> None:
+            """Run a command in a sandbox that has crashed."""
+            raise handled_episode_failure(terminal=False, failure_reason="The episode's sandbox crashed")
+
+    async def agent(server: _Server, counter: _Counter, served: ServedTools) -> None:
+        replies.append(await http.post("/execute", json={}, headers=_headers(served)))
+        replies.append(await http.post("/execute", json={}, headers=_headers(served)))
+
+    server, http = _server(agent)
+    type(server).toolset = staticmethod(lambda counter: TypedToolset(_Crashing()))
+    response = asyncio.run(server.run_request(_request()))
+
+    assert [reply.status_code for reply in replies] == [500, 500]
+    assert response.failure is not None and response.failure.terminal is False
+    assert "sandbox crashed" in response.failure.failure_reason
