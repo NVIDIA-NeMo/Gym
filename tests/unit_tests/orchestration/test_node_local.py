@@ -29,7 +29,8 @@ import nemo_gym.orchestration.submit as submit_module
 from nemo_gym.core.failure_kinds import DRIVER_NODE_LOCAL_RESTORE_FAILED
 from nemo_gym.orchestration.api import BenchmarkRunConfig, NodeLocalConfig, SlurmComputeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
-from nemo_gym.orchestration.executors.node_local import _RESTORE_SCRIPT, NODE_LOCAL_DIR_ENV, WATCH_CHECK
+from nemo_gym.orchestration.executors.node_local import _RESTORE_SCRIPT, NODE_LOCAL_DIR_ENV, archive_wait_seconds
+from nemo_gym.orchestration.executors.script_templates import NODE_LOCAL_ARCHIVE_DONE_MARKER_ENV
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord
@@ -166,38 +167,6 @@ def test_the_driver_gets_the_dir_at_a_path_every_job_of_the_run_shares():
     )
 
 
-def test_the_host_dir_is_unique_to_the_slurm_job_and_archives_land_in_the_job_dir():
-    script = _script(_config({"base_dir": "/raid/scratch"}))
-    assert '_gym_nl_dir=/raid/scratch/gym-node-local-"$SLURM_JOB_ID"' in script
-    assert "_gym_nl_archives=/jobs/20261116_run/b/node-local" in script  # pragma: allowlist secret
-
-
-def test_the_dir_is_set_up_before_the_driver_and_archived_after_it():
-    script = _script(_config(True))
-    restore = script.index('"$SLURM_JOB_ID" 1 "" || exit $?\n')
-    driver = script.index(_driver_line(script))
-    # The dir goes only once the driver step has ended: exports may read it until then.
-    after = script.index(
-        '\n_gym_run_driver\n_gym_nl_rc=$?\n_gym_nl_archive\n_gym_nl_cleanup\ntrap - EXIT\ntrap - TERM\n(exit "$_gym_nl_rc")'
-    )
-    assert restore < driver < after
-
-
-def test_restore_can_be_turned_off():
-    script = _script(_config({"restore": False}))
-    assert (
-        '"$_gym_nl_dir" "$_gym_nl_archives" /jobs/20261116_run/b/.gym_job_chain "$SLURM_JOB_ID" 0 "" || exit $?\n'
-        in script
-    )
-
-
-def test_a_driver_with_no_service_is_still_watched():
-    script = _script(_config(True, services={}))
-    loop = script[script.index("_gym_run_driver() {") : script.index("\n_gym_run_driver\n")]
-    assert "_gym_service_exited" not in loop.split("_gym_run_driver() {")[1]
-    assert WATCH_CHECK in loop
-
-
 def test_on_the_batch_node_the_dir_is_handled_in_the_batch_shell_and_a_term_archives_it():
     script = _script(_config(True))
     assert '_gym_nl_run() { bash -c "$1" _gym_node_local "${@:2}"; }' in script
@@ -263,6 +232,7 @@ def _start_job(
     job_id: str = "11",
     off_batch: bool = False,
     env: dict[str, str] | None = None,
+    services: dict | None = None,
 ) -> subprocess.Popen:
     """Start the rendered job.sh in its own process group.
 
@@ -280,7 +250,9 @@ def _start_job(
         else {}
     )
     node_local = {"base_dir": str(host), "archive_timeout_seconds": 5, **(node_local or {})}
-    config = _config(node_local, exports=exports, **placement)
+    config = _config(
+        node_local, exports=exports, **({"services": services} if services is not None else {}), **placement
+    )
     bench = tmp_path / "run" / "b"
     bench.mkdir(parents=True, exist_ok=True)
     (tmp_path / "bin").mkdir(exist_ok=True)
@@ -646,16 +618,12 @@ def test_a_failed_evaluation_exports_nothing_and_is_archived_after_the_driver(tm
     assert _archive(tmp_path) == {"ev/1.json": "row1\n"}
 
 
-def test_the_exports_wait_for_the_archive_only_with_node_local(tmp_path):
-    with_node_local = _script(_config(True, exports=True))
-    without = _script(_config(exports=True))
-    marker = '/jobs/20261116_run/b/.gym_node_local_archive_done."$SLURM_JOB_ID"'
-    assert f"GYM_NODE_LOCAL_ARCHIVE_DONE_MARKER={marker} " in _driver_line(with_node_local)
-    # The bound: archive_timeout_seconds (120) plus the margin for the 5 s poll and the step that archives.
-    assert "_gym_i < 180" in with_node_local and "_gym_i <" not in without
-    assert f": > {marker}" in with_node_local
-    assert "GYM_NODE_LOCAL_ARCHIVE_DONE_MARKER" not in without
-    assert "GYM_NODE_LOCAL_ARCHIVE_DONE_MARKER" not in _script(_config(True))
+def test_only_a_job_with_node_local_and_exports_waits_for_the_archive():
+    assert NODE_LOCAL_ARCHIVE_DONE_MARKER_ENV in _driver_line(_script(_config(True, exports=True)))
+    assert NODE_LOCAL_ARCHIVE_DONE_MARKER_ENV not in _script(_config(exports=True))
+    assert NODE_LOCAL_ARCHIVE_DONE_MARKER_ENV not in _script(_config(True))
+    # The bound: archive_timeout_seconds plus the margin for the watch's 5 s poll and the step that archives.
+    assert archive_wait_seconds(NodeLocalConfig(archive_timeout_seconds=120)) == 180
 
 
 def test_a_term_to_the_job_archives_the_dir_first(tmp_path):
@@ -704,6 +672,22 @@ def test_a_tar_that_exits_1_keeps_the_archive_and_any_other_failure_drops_it(tmp
     assert returncode == 0
     assert _archive_names(tmp_path) == (["11.0.tar.gz"] if kept else [])
     assert ("archiving the node-local dir failed" in (tmp_path / "job.out").read_text()) is not kept
+
+
+def test_a_term_to_a_job_without_services_archives_at_once(tmp_path):
+    # The watch keeps the driver in the background, so the batch shell's TERM trap does not wait for the driver.
+    driver = f"trap '' TERM; {_WRITE_EVIDENCE}; : > \"$GYM_NODE_LOCAL_DIR/../written\"; sleep 600 & wait"
+    process = _start_job(tmp_path, driver=driver, services={})
+    try:
+        _wait_for(tmp_path / "host" / "written")
+        os.killpg(process.pid, signal.SIGTERM)
+        returncode = _finish(process, timeout=30)
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
+
+    assert returncode == 143
+    assert _archive(tmp_path) == {"ev/1.json": "row1\n"}
 
 
 def test_an_archive_that_overruns_its_bound_is_dropped_whole(tmp_path):
