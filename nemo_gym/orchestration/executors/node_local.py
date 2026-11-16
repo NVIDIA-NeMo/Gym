@@ -129,8 +129,10 @@ _gym_nl_stop_for_walltime() {{
 _TERM_TRAP = """\
 _gym_nl_on_term() {
     trap '' TERM
-    echo "The job got TERM: archiving the node-local dir before Slurm kills the job."
-    _gym_nl_archive
+    if [[ -z "$_gym_nl_done" ]]; then
+        echo "The job got TERM: archiving the node-local dir before Slurm kills the job."
+        _gym_nl_archive
+    fi
     exit 143
 }
 trap _gym_nl_on_term TERM"""

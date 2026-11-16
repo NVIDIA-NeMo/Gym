@@ -427,6 +427,7 @@ def test_before_the_time_limit_the_driver_is_stopped_archived_and_the_job_waits_
     output = (tmp_path / "job.out").read_text()
     assert "stopping the driver and archiving the node-local dir" in output
     assert "driver got TERM" in output
+    assert "The job got TERM" not in output and output.count("Archived the node-local dir") == 1
     assert returncode == 143
     assert _archive(tmp_path) == {"ev/1.json": "row1\n"}
 
