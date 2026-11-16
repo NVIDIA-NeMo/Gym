@@ -179,6 +179,30 @@ def test_golden_patch_verify_and_cleanup(monkeypatch: MonkeyPatch) -> None:
     sandbox.stop.assert_awaited_once()
 
 
+@pytest.mark.parametrize("configured", [False, True])
+def test_verification_logs_are_written_only_under_the_configured_folder(
+    monkeypatch: MonkeyPatch, tmp_path: Path, configured: bool
+) -> None:
+    server = make_server(golden=True, verification_log_dir=tmp_path if configured else None)
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=SimpleNamespace(stop=AsyncMock())))
+    verify = AsyncMock(
+        return_value=VerificationResult(completed=True, resolved=True, patch_applied=True, test_results={"tests": []})
+    )
+    monkeypatch.setattr("resources_servers.swebench_pro.app.run_verification", verify)
+
+    response = TestClient(server.setup_webserver()).post("/verify", json=request_body())
+
+    assert response.status_code == 200
+    log_dir = verify.await_args.kwargs["log_dir"]
+    if configured:
+        assert log_dir.is_relative_to(tmp_path) and log_dir.name == "attempt-1"
+        assert response.json()["log_dir"] == str(log_dir.parent)
+    else:
+        # Without a folder, nothing is written; the server's own source folder is never the default.
+        assert log_dir is None
+        assert response.json()["log_dir"] == ""
+
+
 @pytest.mark.parametrize(
     "tests,completed",
     [

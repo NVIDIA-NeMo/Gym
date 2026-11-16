@@ -13,6 +13,8 @@ denovo_swe_resources_server:
       domain: coding
       verified: false
 
+      # Verification logs are off. To keep them, name a node-local folder such as one under /tmp.
+      verification_log_dir: null
       # pip install -e . + a per-file pytest sweep over passed_ptp, not a build -- similar shape
       # to Scale-SWE's Python-only sizing.
       evaluation_timeout: 1800

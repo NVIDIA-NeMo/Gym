@@ -7,6 +7,8 @@ swebench_pro_resources_server:
       domain: coding
       verified: false
 
+      # Verification logs are off. To keep them, name a node-local folder such as one under /tmp.
+      verification_log_dir: null
       # Bounds only the test command inside the sandbox.
       evaluation_timeout: 3600
       # Bound the surrounding work too: one attempt (creation + verification)

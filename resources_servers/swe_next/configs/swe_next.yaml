@@ -11,6 +11,8 @@ swe_next_resources_server:
       domain: coding
       verified: false
 
+      # Verification logs are off. To keep them, name a node-local folder such as one under /tmp.
+      verification_log_dir: null
       evaluation_timeout: 1200
       is_verifying_golden_patch: false
       apply_anti_cheating: true
