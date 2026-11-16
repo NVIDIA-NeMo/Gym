@@ -41,8 +41,11 @@ is the task's critical and knowledge ambiguities plus `question_patience` (defau
   the ADK, questions are not capped; the instruction tells the agent to submit after `max_turn`.
 - `submit_sql` grades the SQL for the current phase and returns the grader's message, the reward and the follow-up
   question when they apply, and `Budget remaining: 0 bird-coins`, as the ADK's tool does.
-- A turn ends at its submission: a later call in the turn gets `SQL submitted. Awaiting result.`, and a call once the
-  task is done `Task completed.`, the replies the ADK's agent gets.
+- A turn ends at its submission, with no further model call, as the ADK's callback ends it: the reply carries
+  `X-NeMo-Gym-End-Activation: true` (`ToolResult.ends_activation`), and `simple_agent` returns the activation after the
+  model response's tool calls. Another call in that response gets `SQL submitted. Awaiting result.`, and a call once
+  the task is done `Task completed.`, the replies the ADK's agent gets. An agent that ignores the header, such as one
+  over MCP, calls the model again and gets the same replies.
 - After a turn in which the phase did not pass, with a submission or without one, the next turn is the phase's debug
   turn: `Your SQL is not executable: <error>` when the last submission did not run, `Your SQL is not correct. You have
   one more chance.` otherwise. After phase 1 passes, the follow-up question opens phase 2, which has its own debug turn.

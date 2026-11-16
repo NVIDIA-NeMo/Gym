@@ -377,9 +377,11 @@ def _submission_reply(submission: _Submission, *, budget: float | None) -> str:
 class CInteractTools:
     """The ADK's two c-Interact tools of one episode, ``ask_user`` and ``submit_sql``, with its descriptions.
 
-    As in the ADK, a turn ends at its submission: a later call in the turn gets the reply that the ADK's agent gets
-    instead of another model call, and so does a call once the task is done. Questions are not capped; each answer
-    says how many of the clarification turns remain.
+    As in the ADK, a turn ends at its submission. The ADK's callback answers the next model call itself; here the
+    submission's reply ends the agent's activation (``ToolResult.ends_activation``), so the model is not called again
+    in the turn. Another call in the same model response gets the reply that the ADK's agent gets after a submission,
+    and so does a call once the task is done. Questions are not capped; each answer says how many of the clarification
+    turns remain.
     """
 
     def __init__(self, server: "BirdInteractEnvironmentServer", episode: BirdInteractEpisode) -> None:
@@ -403,10 +405,11 @@ class CInteractTools:
         except ValidationError as error:
             raise ToolArgumentsError(str(error)) from error
         if self._episode.finished:
-            return ToolResult(output=TASK_COMPLETED_REPLY)
+            return ToolResult(output=TASK_COMPLETED_REPLY, ends_activation=True)
         if self._episode.submitted_this_turn:
-            return ToolResult(output=SUBMITTED_REPLY)
-        return ToolResult(output=await run(parsed))
+            return ToolResult(output=SUBMITTED_REPLY, ends_activation=True)
+        output = await run(parsed)
+        return ToolResult(output=output, ends_activation=self._episode.submitted_this_turn)
 
     async def _ask_user(self, arguments: AskArguments) -> str:
         episode = self._episode
