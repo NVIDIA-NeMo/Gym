@@ -195,6 +195,8 @@ def _render_service_command(
     single_node: bool = False,
     nodelist: str | None = None,
     end_step_on_task_exit: bool = True,
+    *,
+    account: str | None = None,
 ) -> str:
     var = bash_var(name)
     env_prefix = _resolve_env(env) if env else ""
@@ -229,9 +231,12 @@ def _render_service_command(
     # cluster's KillOnBadExit and WaitTime defaults, so a multi-task service (vllm_pd tiers, Ray workers) cannot
     # lose a task while its srun stays alive and the driver's watch sees nothing.
     step_flags = " --kill-on-bad-exit=1 --wait=1" if end_step_on_task_exit else ""
+    # Some sites validate each step against the user default account unless it is explicit.
+    # Use the owning allocation account consistently for services, telemetry and drivers.
+    account_flag = f" --account={shlex.quote(account)}" if account else ""
     return (
         f"# service: {name}\n"
-        f"{env_prefix}srun --overlap{node_flags}{container_flags}{step_flags}"
+        f"{env_prefix}srun --overlap{node_flags}{container_flags}{step_flags}{account_flag}"
         f" --output={LOGS_DIRNAME}/{name}-$SLURM_JOB_ID.log {command} &\n"
         f"{var}_PID=$!"
     )
@@ -614,6 +619,7 @@ def _render_ray_service(
             ntasks=_srun_ntasks(service, compute, total_nodes, total_ntasks),
             pre_command=service.pre_command,
             nodelist=_service_nodelist(service, driver_node, total_nodes),
+            account=compute.account,
         )
     ]
     # A worker only joins a running head, and the head may still be installing.
@@ -630,6 +636,7 @@ def _render_ray_service(
                 ntasks=count,
                 pre_command=f"{service.pre_command.rstrip()}\n{wait_for_head}".lstrip(),
                 nodelist=ray_workers_var(name, pool),
+                account=compute.account,
             )
         )
     return "\n\n".join(steps)
@@ -720,7 +727,12 @@ def _with_vllm_traces(
 
 
 def _render_collector_service(
-    config: SubmitConfig, remote_bench_dir: Path, *, is_multi_node: bool, driver_node: int | None = None
+    config: SubmitConfig,
+    remote_bench_dir: Path,
+    *,
+    is_multi_node: bool,
+    driver_node: int | None = None,
+    account: str | None = None,
 ) -> str:
     """The collector's srun step. Started before the model services so the scrape covers their
     startup.
@@ -753,6 +765,7 @@ def _render_collector_service(
         ntasks=1 if driver_node is not None else None,
         # Not watched: losing the collector costs telemetry, not the run, so its step keeps Slurm's defaults.
         end_step_on_task_exit=False,
+        account=account,
         **container_kwargs,
     )
 
@@ -1044,7 +1057,15 @@ def build_sbatch_script(
     driver_node = _driver_node(config, compute) if is_multi_node else None
     service_commands = "\n\n".join(
         (
-            [_render_collector_service(config, remote_bench_dir, is_multi_node=is_multi_node, driver_node=driver_node)]
+            [
+                _render_collector_service(
+                    config,
+                    remote_bench_dir,
+                    is_multi_node=is_multi_node,
+                    driver_node=driver_node,
+                    account=compute.account,
+                )
+            ]
             if observed
             else []
         )
@@ -1068,6 +1089,7 @@ def build_sbatch_script(
                 ntasks=_srun_ntasks(service, compute, total_nodes, total_ntasks),
                 pre_command=_service_pre_command(service),
                 nodelist=_service_nodelist(service, driver_node, total_nodes),
+                account=compute.account,
             )
             for name, service in (
                 (name, _with_vllm_traces(name, service, config, compute, driver_node))
@@ -1154,6 +1176,8 @@ def build_sbatch_script(
         # as a calling convention it would have to parse.
         gym_cmd = ""
         driver_env |= _command_env(benchmark, remote_bench_dir)
+    # Host PWD can resolve to an alias that is absent from the container bind mounts.
+    driver_env["NEMO_GYM_BENCH_DIR"] = str(remote_bench_dir)
     exports = effective_exports(config, benchmark_name)
     export_tail = (
         render_export_tail(
@@ -1222,7 +1246,7 @@ def build_sbatch_script(
     driver_mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in driver_mounts)}"
     driver_srun = (
         f"{driver_env_prefix}{failure_file}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
-        f" --container-image={shlex.quote(config.driver.container)} "
+        f" --account={shlex.quote(compute.account)} --container-image={shlex.quote(config.driver.container)} "
         f"--output={LOGS_DIRNAME}/driver-$SLURM_JOB_ID.log {entrypoint}"
     )
     if resume and benchmark.command is None:
@@ -1249,7 +1273,7 @@ def build_sbatch_script(
         )
         admission_command = (
             f'{driver_env_prefix}GYM_PREVIOUS_STATE="$_prev_state" GYM_PREVIOUS_JOB_ID="$_prev_slurm_job_id" GYM_PREVIOUS_EXIT_CODE="$_gym_exit_code" srun --overlap --nodes=1 --ntasks=1 '
-            f"--no-container-mount-home{driver_mounts_flag} "
+            f"--no-container-mount-home{driver_mounts_flag} --account={shlex.quote(compute.account)} "
             f"--container-image={shlex.quote(config.driver.container)} {admission_entrypoint}"
         )
         resume_prologue = render_resume_prologue(resume, admission_command=admission_command)

@@ -1164,6 +1164,26 @@ def test_build_sbatch_script_no_capture_dir_when_observability_off(submit_config
     assert "model_call_capture_dir" not in script
 
 
+@pytest.mark.parametrize("resumable", [False, True])
+def test_every_step_uses_the_selected_slurm_account(submit_config, bench_dir, resumable):
+    benchmark = submit_config.driver.benchmarks["gsm8k"]
+    benchmark.resumable = resumable
+    compute = next(iter(submit_config.compute.values()))
+    compute.account = "operator_account_override"
+    script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
+    steps = [line for line in script.splitlines() if "srun --overlap" in line]
+    assert len(steps) >= 2
+    assert all("--account=operator_account_override" in line for line in steps)
+
+
+def test_ray_head_and_worker_steps_use_the_selected_slurm_account(tmp_path):
+    script = _render(tmp_path, {"ray": {"type": "ray", "container": "img", "node_pools": ["gpu", "aux"]}})
+    steps = [line for line in script.splitlines() if "srun --overlap" in line]
+    assert any("ray start --block --head" in line for line in steps)
+    assert any("--output=logs/ray_aux_workers-" in line for line in steps)
+    assert all("--account=acct" in line for line in steps)
+
+
 def test_build_sbatch_script_contains_shebang(submit_config, bench_dir):
     benchmark = submit_config.driver.benchmarks["gsm8k"]
     compute = next(iter(submit_config.compute.values()))
@@ -2041,6 +2061,14 @@ def test_a_command_keeps_the_driver_env_the_config_declared(tmp_path):
     assert "NEMO_GYM_BENCH_DIR=" in script
 
 
+@pytest.mark.parametrize("command", [None, "harness"])
+def test_driver_bench_dir_uses_bound_path_instead_of_host_pwd(tmp_path, command):
+    script = _render_command(tmp_path, command, env={"NEMO_GYM_BENCH_DIR": "runtime:PWD"})
+    bench_dir = tmp_path / "jobs" / "x" / "osworld"
+    assert f"NEMO_GYM_BENCH_DIR={bench_dir}" in script
+    assert "NEMO_GYM_BENCH_DIR=${PWD}" not in script
+
+
 def test_a_command_still_runs_prepare_first(tmp_path):
     config = SubmitConfig.model_validate(
         {
@@ -2060,7 +2088,7 @@ def test_a_command_still_runs_prepare_first(tmp_path):
     )
 
     prepare_at = script.index("gym eval prepare")
-    assert prepare_at < script.index("harness")
+    assert prepare_at < script.index("    harness\n", prepare_at)
 
 
 def test_a_multi_line_command_survives_quoting(tmp_path):

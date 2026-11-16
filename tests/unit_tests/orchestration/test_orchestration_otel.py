@@ -453,7 +453,7 @@ def test_script_runs_the_collector_on_the_node_by_default():
     assert "--container" not in line
     assert line.startswith("env ")
     assert (
-        f" srun --overlap --output=logs/otel_collector-$SLURM_JOB_ID.log otelcol-contrib --config {collector_config_path(BENCH_DIR)} &"
+        f" srun --overlap --account=acct --output=logs/otel_collector-$SLURM_JOB_ID.log otelcol-contrib --config {collector_config_path(BENCH_DIR)} &"
         in line
     )
 
