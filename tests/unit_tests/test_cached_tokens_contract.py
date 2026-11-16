@@ -56,7 +56,8 @@ def test_agents_do_not_report_a_literal_zero_for_cache_reads() -> None:
     violations = []
     for path in sorted(AGENTS_DIR.rglob("*.py")):
         relative = path.relative_to(AGENTS_DIR)
-        if _is_test_file(relative) or relative in PENDING:
+        # Local server runs install dependencies into each agent's .venv; only Gym's own code is checked.
+        if ".venv" in relative.parts or _is_test_file(relative) or relative in PENDING:
             continue
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             if LITERAL_ZERO.search(line) and ALLOW_MARKER not in line:
