@@ -24,6 +24,8 @@ def _commit_task(source: Path, instruction: str) -> str:
     task.mkdir(parents=True, exist_ok=True)
     (task / "task.toml").write_text('[task]\nname = "org/task-a"\n[environment]\ndocker_image = "image:1"\n')
     (task / "instruction.md").write_text(instruction)
+    (task / "tests").mkdir(exist_ok=True)
+    (task / "tests" / "test.sh").write_text("true\n")
     _git(source, "add", "-A")
     _git(source, "commit", "-q", "-m", instruction)
     return _git(source, "rev-parse", "HEAD")
@@ -108,3 +110,50 @@ def test_task_revision_does_not_reset_a_modified_checkout(task_repository: tuple
 
     with pytest.raises(ValueError, match="is modified"):
         preparation.prepare(task_revision=old)
+
+
+@pytest.mark.parametrize("which", ["current", "other"])
+def test_task_revision_rejects_an_ignored_file_in_the_checkout(task_repository: tuple[Path, Path], which: str) -> None:
+    source, benchmark_dir = task_repository
+    old = _commit_task(source, "old instruction")
+    new = _commit_task(source, "new instruction")
+    preparation.prepare(task_revision=new)
+    checkout = benchmark_dir / "terminal-bench-2-1"
+    (checkout / ".git" / "info" / "exclude").write_text("extra.txt\n")
+    (checkout / "tasks" / "task-a" / "tests" / "extra.txt").write_text("not part of the pinned commit")
+
+    with pytest.raises(ValueError, match="is modified"):
+        preparation.prepare(task_revision=new if which == "current" else old)
+
+    assert _git(checkout, "rev-parse", "HEAD") == new
+
+
+def test_task_revision_on_a_clean_checkout_at_the_same_commit_still_works(task_repository: tuple[Path, Path]) -> None:
+    source, _ = task_repository
+    revision = _commit_task(source, "instruction")
+    preparation.prepare(task_revision=revision)
+
+    assert _instruction(preparation.prepare(task_revision=revision)) == "instruction"
+
+
+def test_task_revision_accepts_ignored_files_the_verifier_does_not_upload(task_repository: tuple[Path, Path]) -> None:
+    source, benchmark_dir = task_repository
+    revision = _commit_task(source, "instruction")
+    preparation.prepare(task_revision=revision)
+    checkout = benchmark_dir / "terminal-bench-2-1"
+    (checkout / ".git" / "info" / "exclude").write_text("__pycache__/\n")
+    cache = checkout / "tasks" / "task-a" / "__pycache__"
+    cache.mkdir()
+    (cache / "x.pyc").write_bytes(b"\0")
+
+    assert _instruction(preparation.prepare(task_revision=revision)) == "instruction"
+
+
+def test_task_revision_rejects_an_untracked_file_anywhere_in_the_checkout(task_repository: tuple[Path, Path]) -> None:
+    source, benchmark_dir = task_repository
+    revision = _commit_task(source, "instruction")
+    preparation.prepare(task_revision=revision)
+    (benchmark_dir / "terminal-bench-2-1" / "stray.txt").write_text("x")
+
+    with pytest.raises(ValueError, match="is modified"):
+        preparation.prepare(task_revision=revision)

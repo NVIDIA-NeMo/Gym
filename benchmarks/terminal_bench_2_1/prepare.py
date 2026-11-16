@@ -24,8 +24,13 @@ def _git(repo_path: Path, *args: str) -> str:
 
 def _check_out(repo_path: Path, task_revision: str) -> None:
     """Leave the task repository checked out at exactly ``task_revision``."""
-    if _git(repo_path, "status", "--porcelain"):
-        # The verifier uploads files from this checkout, so it is never reset under a run.
+    # The verifier uploads every non-hidden file under a task's tests directory, so a change anywhere in the checkout,
+    # an untracked file, or an ignored file under tasks/*/tests/ counts. Ignored files elsewhere (bytecode caches from
+    # an earlier run) are not uploaded and do not. The flags also override a user's status.showUntrackedFiles setting.
+    if _git(repo_path, "status", "--porcelain", "--untracked-files=all") or _git(
+        repo_path, "status", "--porcelain", "--untracked-files=all", "--ignored", "--", "tasks/*/tests/*"
+    ):
+        # The checkout is never reset under a run.
         raise ValueError(f"Task checkout {repo_path} is modified. Move it aside and retry; it will not be reset.")
     if _git(repo_path, "rev-parse", "HEAD") == task_revision:
         return
