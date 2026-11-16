@@ -12,7 +12,6 @@ pdf_analyst_qa_opencode_binary_sha256: ${oc.env:PDF_ANALYST_QA_OPENCODE_SHA256,n
 pdf_analyst_qa_opencode_plugin_sha256: ${oc.env:PDF_ANALYST_QA_OPENCODE_PLUGIN_SHA256,null}
 pdf_analyst_qa_dataset_root: ???
 pdf_analyst_qa_document_prefix: ???
-pdf_analyst_qa_node_cache_host_path: null
 pdf_analyst_qa_agent_timeout_s: 3000
 
 # Sandbox egress allows every port on the model host. Pin control servers so a

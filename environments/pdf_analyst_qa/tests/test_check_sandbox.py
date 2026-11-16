@@ -10,8 +10,7 @@ from environments.pdf_analyst_qa import check_sandbox
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("read_only", [True, False])
-async def test_deployment_probe_switches_task_user_and_checks_mount_as_root(monkeypatch, read_only):
+async def test_deployment_probe_switches_task_user(monkeypatch):
     sandbox = MagicMock(default_user=0)
     sandbox.start = AsyncMock()
     sandbox.stop = AsyncMock()
@@ -22,7 +21,7 @@ async def test_deployment_probe_switches_task_user_and_checks_mount_as_root(monk
         uid = sandbox.default_user if user is None else user
         calls.append((command, uid))
         return SimpleNamespace(
-            return_code=int(not read_only) if "touch" in command else 0,
+            return_code=0,
             error_type=None,
             stdout=str(uid) if command == "id -u" else "",
             stderr="",
@@ -33,11 +32,10 @@ async def test_deployment_probe_switches_task_user_and_checks_mount_as_root(monk
     monkeypatch.setattr(check_sandbox, "create_provider", lambda config: None)
     monkeypatch.setattr(check_sandbox, "resolve_provider_config", lambda *args: None)
     report = await check_sandbox.check(
-        "test-image", "environments/pdf_analyst_qa/example.yaml", "http://model.example:8000", "/tmp/cache"
+        "test-image", "environments/pdf_analyst_qa/example.yaml", "http://model.example:8000"
     )
     assert report["root"]["stdout"] == "0"
     assert report["default"]["stdout"] == "65534"
     assert next(uid for command, uid in calls if "network_probe.py" in command) == 65534
-    assert next(uid for command, uid in calls if "touch" in command) == 0
-    assert report["missing_view_mount"]["return_code"] == int(not read_only)
+    assert ("id -u", 0) in calls
     sandbox.stop.assert_awaited_once()

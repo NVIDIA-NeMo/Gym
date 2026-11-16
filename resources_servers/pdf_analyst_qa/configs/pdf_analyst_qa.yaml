@@ -15,7 +15,6 @@ pdf_analyst_qa_resources_server:
       mounted_documents:
         mount_root: /mnt/s3-data/data
         prefix: ${pdf_analyst_qa_document_prefix}
-        node_cache_host_path: ${pdf_analyst_qa_node_cache_host_path}
       command_timeout_s: 600
       rollout_timeout_s: ${pdf_analyst_qa_agent_timeout_s}
       sandbox_ttl_s: 4500

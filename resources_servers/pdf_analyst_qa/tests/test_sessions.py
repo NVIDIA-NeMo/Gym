@@ -299,8 +299,7 @@ async def test_verifier_fixture_covers_reference_and_format_variants():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("use_cache", [True, False])
-async def test_provider_spec_stages_as_root_and_lends_selected_view(server, monkeypatch, tmp_path, use_cache):
+async def test_provider_spec_stages_as_root_and_lends_selected_view(server, monkeypatch, tmp_path):
     from environments.pdf_analyst_qa.prepare_example import prepare_example
     from resources_servers.pdf_analyst_qa import app
 
@@ -310,10 +309,7 @@ async def test_provider_spec_stages_as_root_and_lends_selected_view(server, monk
     resource.config.dataset_root = str(root)
     resource.config.sandbox_request_cpu = 0.75
     resource.config.sandbox_request_memory_mib = 2048
-    resource.config.mounted_documents = MountedDocumentsConfig(
-        prefix="example",
-        node_cache_host_path="/var/lib/pdf-analyst-qa-cache/release-one" if use_cache else None,
-    )
+    resource.config.mounted_documents = MountedDocumentsConfig(prefix="example")
     resource.server_client.global_config_dict = {
         "sandbox": {"default_metadata": {"team": "test"}, "opensandbox": {"connection": {"domain": "sandbox.example"}}}
     }
@@ -340,10 +336,7 @@ async def test_provider_spec_stages_as_root_and_lends_selected_view(server, monk
         "defaultAction": "deny",
         "egress": [{"action": "allow", "target": "10.2.3.4"}],
     }
-    if use_cache:
-        assert spec.provider_options["volumes"][1]["host"]["path"].endswith("/views/" + WORKSPACE_ID)
-        assert spec.provider_options["volumes"][1]["readOnly"] is True
-        assert spec.provider_options["volumes"][0]["readOnly"] is False
+    assert "volumes" not in spec.provider_options
     assert spec.provider_options["resource_requests"] == {"cpu": 0.75, "memory_mib": 2048, "disk_gib": 10}
     assert spec.files and spec.env["OPENCODE_CONFIG"] == "/opt/cli/opencode-model.json"
     assert sandbox.exec.await_args.kwargs["user"] == 0
@@ -351,9 +344,8 @@ async def test_provider_spec_stages_as_root_and_lends_selected_view(server, monk
     command = shlex.split(sandbox.exec.await_args.args[0])
     assert command[1] == f"{app.SANDBOX_SCRIPTS_ROOT}/documents.py"
     assert command[1] in spec.files
-    assert f"{app.SANDBOX_SCRIPTS_ROOT}/document_cache.py" in spec.files
     assert f"{app.SANDBOX_SCRIPTS_ROOT}/preflight.py" in spec.files
-    assert (command[-1] == WORKSPACE_ID) == use_cache
+    assert command[2:] == [app.DOCUMENT_MANIFEST_PATH, "/mnt/s3-data/data"]
 
 
 @pytest.mark.asyncio

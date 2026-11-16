@@ -36,8 +36,6 @@ pdf_analyst_qa_agent:
 
 Keep the dataset outside the source tree. Copy its `document_store/` to the configured bucket prefix. The dataset root points to the corresponding local directory on the resources server.
 
-The optional document cache speeds up sandbox startup when tasks select different document sets from a large shared corpus. It caches PDFs on each worker and uses hard links to assemble each task's read-only document directory, so later sandboxes on that worker can reuse documents without downloading or copying them again. Configure it through `pdf_analyst_qa_node_cache_host_path`.
-
 Start Gym with `gym env start --config /path/to/dataset.yaml`. Configure the policy model through Gym's model server and keep training recipes in the training framework.
 
 ## Included example
@@ -79,8 +77,6 @@ python -m environments.pdf_analyst_qa.check_sandbox \
   --image "$PDF_ANALYST_QA_DOCUMENT_IMAGE" \
   --model-url <model-server-url>
 ```
-
-Add `--node-cache-host-path` if using a worker cache.
 
 ## Verification
 

@@ -51,11 +51,9 @@ from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import VerifierFixture
 from resources_servers.pdf_analyst_qa.documents import (
     DOCUMENT_MANIFEST_PATH,
-    NODE_CACHE_ROOT,
     SANDBOX_SCRIPTS_ROOT,
     MountedDocumentsConfig,
     mounted_document_manifest,
-    node_document_manifest,
     sandbox_script_files,
 )
 from resources_servers.pdf_analyst_qa.task_data import PdfAnalystQaSeedRequest, PdfAnalystQaTask
@@ -69,7 +67,6 @@ from resources_servers.pdf_analyst_qa.verifiers.verifier import grade_task_answe
 
 
 LOGGER = logging.getLogger(__name__)
-DOCS_ROOT = "/workspace/docs"
 TASK_ROOT = "/workspace/task"
 SANDBOX_ENV = {
     "HOME": TASK_ROOT,
@@ -250,13 +247,7 @@ class PdfAnalystQaResourcesServer(SimpleResourcesServer):
     async def _start_sandbox(self, state: _SessionState, workspace_id: str) -> None:
         config = self.config
         root = Path(config.dataset_root).expanduser().resolve()
-        node_cache = config.mounted_documents.node_cache_host_path
-        manifest = await asyncio.to_thread(
-            node_document_manifest if node_cache else mounted_document_manifest,
-            root,
-            workspace_id,
-            config.mounted_documents,
-        )
+        manifest = await asyncio.to_thread(mounted_document_manifest, root, workspace_id, config.mounted_documents)
         global_config = self.server_client.global_config_dict
         provider_config = resolve_provider_config(config.sandbox_provider, global_config)
         if set(provider_config) != {"opensandbox"}:
@@ -275,21 +266,6 @@ class PdfAnalystQaResourcesServer(SimpleResourcesServer):
             "memory_mib": config.sandbox_request_memory_mib,
             "disk_gib": config.sandbox_disk_gib,
         }
-        if node_cache:
-            options["volumes"] = [
-                {
-                    "name": "pdf-analyst-qa-node-cache",
-                    "host": {"path": node_cache},
-                    "mountPath": NODE_CACHE_ROOT,
-                    "readOnly": False,
-                },
-                {
-                    "name": "pdf-analyst-qa-documents",
-                    "host": {"path": f"{node_cache}/views/{workspace_id}"},
-                    "mountPath": DOCS_ROOT,
-                    "readOnly": True,
-                },
-            ]
         metadata = (
             resolve_provider_metadata(config.sandbox_provider, global_config)
             | dict(config.sandbox_config.get("metadata", {}))
@@ -318,7 +294,6 @@ class PdfAnalystQaResourcesServer(SimpleResourcesServer):
                     f"{SANDBOX_SCRIPTS_ROOT}/documents.py",
                     DOCUMENT_MANIFEST_PATH,
                     config.mounted_documents.mount_root,
-                    *([workspace_id] if node_cache else []),
                 ]
             ),
             cwd="/",
@@ -336,7 +311,7 @@ class PdfAnalystQaResourcesServer(SimpleResourcesServer):
             raise RuntimeError("could not stage selected PDFs from the shared bucket")
         # Keep the supervisor privileged for trusted initialization, and carry
         # the task UID through serialize/connect so every harness command runs
-        # without access to the protected backing cache.
+        # without access to the hidden source bucket.
         state.sandbox.set_default_user(65534)
 
     async def release_session_state(self, session_id: str) -> None:

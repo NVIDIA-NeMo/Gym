@@ -60,13 +60,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("manifest", type=pathlib.Path)
     parser.add_argument("source_mount", type=pathlib.Path)
-    parser.add_argument("workspace", nargs="?")
     args = parser.parse_args()
-    if args.workspace:
-        from document_cache import check_document_cache, initialize_cache
-
-        print(json.dumps(initialize_cache(args.manifest, args.source_mount, args.workspace)), flush=True)
-        check_document_cache(args.manifest)
-    else:
-        materialize_documents(args.manifest)
+    materialize_documents(args.manifest)
     hide_document_store(args.source_mount)

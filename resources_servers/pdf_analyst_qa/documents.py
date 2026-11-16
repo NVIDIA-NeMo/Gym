@@ -16,18 +16,6 @@ class MountedDocumentsConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     mount_root: str = "/mnt/s3-data/data"
     prefix: str = Field(min_length=1)
-    node_cache_host_path: str | None = None
-
-    @field_validator("node_cache_host_path")
-    @classmethod
-    def safe_node_cache_path(cls, value: str | None) -> str | None:
-        if value is not None:
-            if not value.startswith("/") or ".." in value.split("/") or "\\" in value or "\x00" in value:
-                raise ValueError("node_cache_host_path must be an absolute directory without traversal")
-            if len(PurePosixPath(value).parts) < 4:
-                raise ValueError("node_cache_host_path must identify a dedicated dataset cache")
-            return str(PurePosixPath(value))
-        return value
 
     @field_validator("mount_root")
     @classmethod
@@ -105,26 +93,9 @@ def mounted_document_manifest(root: Path, workspace_id: str, storage: MountedDoc
     return json.dumps(files)
 
 
-def node_document_manifest(root: Path, workspace_id: str, storage: MountedDocumentsConfig) -> str:
-    """Describe selected published PDFs by size without rereading their contents."""
-    return json.dumps(
-        [
-            {
-                "source": str(
-                    PurePosixPath(storage.mount_root, storage.prefix, "document_store", record.document_id + ".pdf")
-                ),
-                "target": record.relative_path,
-                "bytes": (root / "document_store" / (record.document_id + ".pdf")).stat().st_size,
-            }
-            for record in workspace_documents(root, workspace_id)
-        ]
-    )
-
-
 DOCUMENT_MANIFEST_PATH = "/tmp/pdf-analyst-qa-document-manifest.json"
 
 SANDBOX_SCRIPTS_ROOT = "/tmp/pdf-analyst-qa-scripts"
-NODE_CACHE_ROOT = "/var/lib/pdf-analyst-qa-cache"
 
 
 def sandbox_script_files() -> dict[str, str]:

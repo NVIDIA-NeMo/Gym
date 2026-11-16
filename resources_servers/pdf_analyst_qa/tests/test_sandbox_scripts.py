@@ -80,7 +80,7 @@ def test_network_probe_requires_model_access_and_blocked_public_network(monkeypa
         network_probe.check("http://model.example:8000")
 
 
-@pytest.mark.parametrize("script", ["documents.py", "document_cache.py", "preflight.py", "network_probe.py"])
+@pytest.mark.parametrize("script", ["documents.py", "preflight.py", "network_probe.py"])
 def test_delivered_script_runs_without_installed_packages(tmp_path, script):
     for destination, contents in sandbox_script_files().items():
         (tmp_path / Path(destination).name).write_text(contents)

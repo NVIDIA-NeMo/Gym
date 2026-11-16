@@ -19,10 +19,6 @@ def check(source_mount: pathlib.Path, model_url: str) -> None:
         raise RuntimeError("selected PDFs are missing")
     if os.access(str(source_mount), os.R_OK | os.X_OK):
         raise RuntimeError("unselected shared bucket PDFs are accessible")
-    if pathlib.Path("/var/lib/pdf-analyst-qa-cache").exists() and os.access(
-        "/var/lib/pdf-analyst-qa-cache", os.R_OK | os.X_OK
-    ):
-        raise RuntimeError("node cache backing paths are accessible")
     for path in [docs, *docs.rglob("*")]:
         if os.access(path, os.W_OK):
             raise RuntimeError("document evidence is writable")
