@@ -93,8 +93,10 @@ uv sync --active --extra all
 
 # See benchmarks/scicode/README.md
 uv pip install gdown
+# SciCode data is irrelevant to the nl2repobench build and Google Drive rate-limits it ("Too many users
+# have viewed or downloaded this file recently"), which aborted a build; don't let it be fatal.
 gdown --folder "https://drive.google.com/drive/folders/1W5GZW6_bdiDAiipuFMqdUhvUaHIj6-pR" \
-    -O benchmarks/scicode/data
+    -O benchmarks/scicode/data || echo ">>> WARNING: scicode data download failed; continuing (not needed for nl2repobench)"
 
 if [[ -n "$TAU_2_MOUNT_BASE_GYM_DIR" ]]; then
     echo "Copying Tau2 and Tau3 data from mounted Gym dir: $TAU_2_MOUNT_BASE_GYM_DIR"

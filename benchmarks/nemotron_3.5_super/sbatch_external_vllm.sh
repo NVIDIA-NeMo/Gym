@@ -148,6 +148,18 @@ if [[ "$VLLM_MODE" == aggregated && "$ENABLE_MOONCAKE" != 0 ]]; then
     echo "ENABLE_MOONCAKE requires VLLM_MODE=pd" >&2
     exit 1
 fi
+# Aggregated only: VLLM_AGGREGATED_MULTINODE=1 makes the NUM_NODES nodes form ONE
+# multi-node engine (e.g. --tensor-parallel-size 16 across 4 GB200 nodes) for models
+# too big for one node. Node 0 serves the API + router; the rest run --headless.
+VLLM_AGGREGATED_MULTINODE="${VLLM_AGGREGATED_MULTINODE:-0}"
+if [[ "$VLLM_AGGREGATED_MULTINODE" != 0 && "$VLLM_MODE" != aggregated ]]; then
+    echo "VLLM_AGGREGATED_MULTINODE requires VLLM_MODE=aggregated" >&2
+    exit 1
+fi
+if [[ "$VLLM_AGGREGATED_MULTINODE" != 0 && "${VLLM_ENGINES_PER_NODE:-1}" != 1 ]]; then
+    echo "VLLM_AGGREGATED_MULTINODE requires VLLM_ENGINES_PER_NODE=1" >&2
+    exit 1
+fi
 # Independent mode starts one TP replica, two TP2 replicas, or four TP1 replicas per node. Coupled mode
 # forms one multi-node DP/EP engine per tier for models that cannot fit per node.
 VLLM_PD_DEPLOYMENT_MODE="${VLLM_PD_DEPLOYMENT_MODE:-independent}"
@@ -998,12 +1010,17 @@ else
             done
         else
             router_args+=(--policy $ROUTER_POLICY --worker-urls)
-            for node in "\${nodes[@]}"; do
-                for (( engine_index = 0; engine_index < $VLLM_ENGINES_PER_NODE; engine_index++ )); do
-                    worker_port=\$(( $WORKER_SERVER_PORT + engine_index ))
-                    router_args+=("http://\$node:\$worker_port")
+            if [[ "$VLLM_AGGREGATED_MULTINODE" != 0 ]]; then
+                # One engine; only node 0 exposes an API server.
+                router_args+=("http://\$this_node_hostname:$WORKER_SERVER_PORT")
+            else
+                for node in "\${nodes[@]}"; do
+                    for (( engine_index = 0; engine_index < $VLLM_ENGINES_PER_NODE; engine_index++ )); do
+                        worker_port=\$(( $WORKER_SERVER_PORT + engine_index ))
+                        router_args+=("http://\$node:\$worker_port")
+                    done
                 done
-            done
+            fi
         fi
 
         vllm-router "\${router_args[@]}" &
@@ -1043,9 +1060,19 @@ else
         if (( $VLLM_ENGINES_PER_NODE > 1 )); then
             serve_independent_engines $PREFILL_VLLM_NIXL_SIDE_CHANNEL_PORT "\${aggregated_args[@]}"
         else
+            multinode_args=()
+            if [[ "$VLLM_AGGREGATED_MULTINODE" != 0 ]]; then
+                master_addr=\$(getent ahostsv4 "\${nodes[0]}" | awk 'NR == 1 {print \$1}')
+                multinode_args=(--nnodes $NUM_NODES --node-rank \$SLURM_PROCID \
+                    --master-addr "\$master_addr" --master-port ${AGGREGATED_MASTER_PORT:-29500})
+                if (( SLURM_PROCID != 0 )); then
+                    multinode_args+=(--headless)
+                fi
+            fi
             vllm serve "$MODEL" --served-model-name "$MODEL_NAME" "\${aggregated_args[@]}" \
                 --host \$this_node_hostname \
-                --port $WORKER_SERVER_PORT
+                --port $WORKER_SERVER_PORT \
+                "\${multinode_args[@]}"
         fi
     elif (( $VLLM_ENGINES_PER_NODE > 1 )); then
         if (( SLURM_PROCID < $NUM_PREFILL_NODES )); then
@@ -1272,6 +1299,7 @@ main_job_id=$(
         ${mooncake_memory_arg:+"$mooncake_memory_arg"} \
         --segment=$SEGMENT \
         ${NODELIST:+--nodelist="$NODELIST"} \
+        ${EXCLUDE_NODES:+--exclude="$EXCLUDE_NODES"} \
         --wrap 'exec bash -c "$batch_command"'
 )
 main_job_id=${main_job_id%%;*}
