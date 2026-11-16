@@ -342,6 +342,17 @@ class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
         allow_inf_nan=False,
         description="Per-phase session close timeout, and total shutdown session-drain budget.",
     )
+    rollout_stop_grace_seconds: float | None = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+        description=(
+            "How long a harness may run after a rollout stop reaches it. Past this, the agent stops waiting for "
+            "the harness's command, and the run fails with harness_termination_unconfirmed unless the supervisor's "
+            "receipt shows the harness ended. Unset: the supervisor's own cleanup bound, "
+            "session_close_timeout_seconds plus 30 s."
+        ),
+    )
     session_close_retry_window_seconds: float = Field(
         default=300,
         gt=0,
@@ -1081,7 +1092,11 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                     await self._undo_seed(body.agent_session_id, record)
                     raise
                 if record.stop_requested and (session := self._rollout_sandbox_session(record.state)) is not None:
-                    await session.expire(timeout=ROLLOUT_STOP_TIMEOUT_SECONDS, reason=record.stop_reason)
+                    await session.expire(
+                        timeout=ROLLOUT_STOP_TIMEOUT_SECONDS,
+                        reason=record.stop_reason,
+                        grace=self.config.rollout_stop_grace_seconds,
+                    )
             elif record.state.request != body or (record.restored and self._rebinds_restored_sessions()):
                 # An agent that re-binds restored sessions does so even for an unchanged seed:
                 # its restore installed the session without a connection to the sandbox the seed names.
@@ -1400,7 +1415,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             session = self._rollout_sandbox_session(record.state)
             try:
                 stopped = session is not None and await session.expire(
-                    timeout=ROLLOUT_STOP_TIMEOUT_SECONDS, reason=reason
+                    timeout=ROLLOUT_STOP_TIMEOUT_SECONDS, reason=reason, grace=self.config.rollout_stop_grace_seconds
                 )
             except ExpiryUnsupportedError as error:
                 raise HTTPException(501, f"Cannot stop rollout {rollout_id}: {error}") from error

@@ -20,6 +20,7 @@ from nemo_gym.agents.utils.sandbox_session import (
     shell_assignments,
 )
 from nemo_gym.agents.utils.supervisor_client import is_harness_termination_failure
+from nemo_gym.core.episode_context import rollout_context
 from nemo_gym.core.failure_kinds import PROVIDER_OOM_KILLED
 from nemo_gym.core.failure_records import SandboxFailureDetails
 from nemo_gym.core.typed_exceptions import NgFailureEvent
@@ -1008,6 +1009,149 @@ async def test_expire_before_launch_works_whatever_the_sandbox_uploads(session, 
     assert await execute(session) == "transcript"
     assert session.expired_before_launch
     await session.close(timeout=1)
+
+
+# A stall after a delivered stop: the supervised command never completes, as when memory pressure keeps the
+# supervisor from running, and the provider's status polls hang or keep reporting it running.
+GRACE = 0.2
+CLOSE = 0.3
+
+
+def _stalled(session):
+    """Hang the supervised launch until cancelled; other commands succeed. Returns the launch's cancellation flag."""
+    cancelled = asyncio.Event()
+    launched = asyncio.Event()
+
+    async def exec_(command, **_):
+        if "--expire-file" in command:
+            launched.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+        return OK
+
+    session.sandbox.exec.side_effect = exec_
+    return launched, cancelled
+
+
+async def _hang(*_, **__):
+    await asyncio.Event().wait()
+
+
+@pytest.mark.parametrize("before_launch", [False, True])
+@pytest.mark.parametrize("receipt", ["missing", "hangs"])
+@pytest.mark.parametrize("owned", [False, True])
+async def test_a_stopped_harness_that_outlives_its_supervisor_fails_within_the_grace(
+    session, receipt_reader, caplog, before_launch, receipt, owned
+):
+    session.owns_sandbox = owned
+    launched, cancelled = _stalled(session)
+    receipt_reader.side_effect = FileNotFoundError("cleanup.json") if receipt == "missing" else _hang
+    collect = AsyncMock(return_value="transcript")
+    with rollout_context("rollout-a2"):
+        if before_launch:
+            assert await session.expire(timeout=1, reason="budget", grace=GRACE) is True
+        activation = asyncio.create_task(execute(session, collect=collect, timeout=CLOSE))
+        await asyncio.wait_for(launched.wait(), 2)
+        if not before_launch:
+            assert await session.expire(timeout=1, reason="budget", grace=GRACE) is True
+        started = monotonic()
+        with pytest.raises(NgFailureEvent) as failure:
+            await asyncio.wait_for(activation, 5)
+    # The activation stopped waiting for the command after the grace, plus at most one bounded receipt read.
+    assert monotonic() - started < GRACE + CLOSE + 0.5
+    assert is_harness_termination_failure(failure.value) and failure.value is session.termination_error
+    assert str(failure.value) == (
+        f"test harness termination was not confirmed: it did not end within {GRACE:g} s of its stop, "
+        "and no receipt confirms that it ended"
+    )
+    assert cancelled.is_set() and not session.cleanup_confirmed
+    # Termination is unconfirmed, so nothing is captured from the stalled sandbox and nothing is graded.
+    collect.assert_not_awaited()
+    assert session.artifacts is None and not session.expired
+    # A stop request could turn the expiry into a cancellation if the supervisor resumed, so none was written.
+    assert not any("touch /session/stop.request" in call.args[0] for call in session.sandbox.exec.await_args_list)
+    overdue = [record for record in caplog.records if "no longer waiting" in record.getMessage()]
+    assert [(record.levelname, record.getMessage()) for record in overdue] == [
+        (
+            "WARNING",
+            f"Rollout rollout-a2: the test harness did not end within {GRACE:g} s of its stop; "
+            "no longer waiting for its command",
+        )
+    ]
+    # Close takes the path of any unconfirmed termination: an owned sandbox is stopped, a borrowed one released.
+    await asyncio.wait_for(session.close(timeout=CLOSE), 5)
+    assert session.closed and session.capture_error is failure.value
+    if owned:
+        session.sandbox.stop.assert_awaited_once()
+    else:
+        session.sandbox.stop.assert_not_awaited()
+        session.sandbox.disconnect.assert_awaited_once()
+
+
+async def test_a_stopped_harness_whose_command_status_hangs_is_graded_from_its_receipt(session, receipt_reader):
+    launched, cancelled = _stalled(session)
+    collect = AsyncMock(return_value="transcript")
+    activation = asyncio.create_task(execute(session, collect=collect, timeout=CLOSE))
+    await asyncio.wait_for(launched.wait(), 2)
+    assert await session.expire(timeout=1, reason="budget", grace=GRACE) is True
+    # The supervisor ended the harness at the stop, but the command's status never reports it.
+    receipt_reader.return_value = json.dumps({**RECEIPT, "return_code": 143, "timed_out": True})
+    assert await asyncio.wait_for(activation, 5) == "transcript"
+    assert session.expired and session.expire_reason == "budget" and session.cleanup["return_code"] == 143
+    collect.assert_awaited_once()
+    assert cancelled.is_set()
+    assert not any("touch /session/stop.request" in call.args[0] for call in session.sandbox.exec.await_args_list)
+    await session.close(timeout=CLOSE)
+    assert session.closed
+
+
+async def test_a_negative_receipt_found_after_the_grace_is_the_failure(session, receipt_reader):
+    launched, cancelled = _stalled(session)
+    activation = asyncio.create_task(execute(session, timeout=CLOSE))
+    await asyncio.wait_for(launched.wait(), 2)
+    assert await session.expire(timeout=1, grace=GRACE) is True
+    error = "Harness termination was not confirmed: the harness process did not exit"
+    receipt_reader.return_value = json.dumps(
+        {"cleanup_confirmed": False, "return_code": None, "error": error, "timed_out": True}
+    )
+    with pytest.raises(NgFailureEvent, match="the harness process did not exit") as failure:
+        await asyncio.wait_for(activation, 5)
+    assert is_harness_termination_failure(failure.value) and failure.value is session.termination_error
+    assert cancelled.is_set()
+    await session.close(timeout=CLOSE)
+    assert session.closed
+
+
+async def test_a_supervisor_that_ends_the_harness_promptly_is_waited_for(session, receipt_reader, caplog):
+    launched = asyncio.Event()
+    expired = asyncio.Event()
+
+    async def exec_(command, **_):
+        if "--expire-file" in command:
+            launched.set()
+            await expired.wait()
+            await asyncio.sleep(GRACE / 2)
+            return SandboxExecResult(stdout="", stderr="", return_code=143)
+        return OK
+
+    session.sandbox.exec.side_effect = exec_
+    receipt_reader.return_value = json.dumps({**RECEIPT, "return_code": 143, "timed_out": True})
+    async with _launched(session, launched) as activation:
+        assert await session.expire(timeout=1, reason="budget", grace=GRACE) is True
+        expired.set()
+        assert await asyncio.wait_for(activation, 5) == "transcript"
+    assert session.expired and session.termination_error is None
+    assert not [record for record in caplog.records if "no longer waiting" in record.getMessage()]
+    await session.close(timeout=1)
+
+
+def test_the_default_stop_grace_is_the_supervisors_cleanup_bound():
+    cleanup_timeout, provider_timeout = supervisor_client.supervision_timeouts(timeout=100, close_timeout=60)
+    # Three cleanup phases of 20 s each, plus 30 s for polling and receipt I/O: the provider deadline's reserve.
+    assert supervisor_client.cleanup_bound(cleanup_timeout=cleanup_timeout) == 90 == provider_timeout - 100
 
 
 @pytest.mark.parametrize(

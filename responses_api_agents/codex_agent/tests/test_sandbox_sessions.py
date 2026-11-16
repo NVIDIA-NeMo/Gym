@@ -1505,6 +1505,66 @@ async def test_rollout_stop_without_a_transcript_check_reports_the_missing_event
     sandbox.disconnect.assert_awaited_once()
 
 
+async def test_rollout_stop_of_a_stalled_codex_fails_cleanly_after_the_grace(setup):
+    agent, sandbox = setup
+    agent.config.rollout_stop_grace_seconds = 0.2
+    sandbox.blocked = True
+    upload = sandbox.upload
+
+    async def stall(source, destination):
+        # The marker lands, but memory pressure keeps the supervisor from running: nothing ends Codex.
+        if destination.endswith("/expire.request"):
+            sandbox.files[destination] = ""
+            return
+        await upload(source, destination)
+
+    sandbox.upload = stall
+    request, session_id, task = await activate(agent, sandbox)
+    stopped_at = time.monotonic()
+    assert (await agent.stop_rollout(seed().episode_id.capture_key, RolloutStopRequest(reason="budget"))).stopped
+    with pytest.raises(NgFailureEvent) as failure:
+        await asyncio.wait_for(task, 10)
+    # The grace, then one receipt read bounded by session_close_timeout_seconds (1 s here).
+    assert time.monotonic() - stopped_at < 0.2 + 1 + 1
+    assert is_harness_termination_failure(failure.value)
+    assert str(failure.value) == (
+        "Codex harness termination was not confirmed: it did not end within 0.2 s of its stop, "
+        "and no receipt confirms that it ended"
+    )
+    closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    assert closed.agent_observations.records[0].status == "incomplete"
+    assert "agent_activation_interrupted" in [gap.code for gap in closed.agent_observations.gaps]
+    # The borrowed sandbox is released for the Resources Server's teardown, as after any unconfirmed termination.
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
+
+
+async def test_rollout_stop_whose_command_status_hangs_is_still_graded(setup):
+    agent, sandbox = setup
+    agent.config.rollout_stop_grace_seconds = 0.2
+    sandbox.blocked = True
+    sandbox.events = "\n".join(sandbox.events.splitlines()[:-1])
+
+    async def end_without_status(source, destination):
+        sandbox.files[destination] = Path(source).read_text()
+        if destination.endswith("/expire.request"):
+            # The supervisor ends Codex at the stop and writes its receipt, but the command's status never says so.
+            sandbox.result.update(timed_out=True, return_code=-signal.SIGTERM)
+            sandbox.publish()
+
+    sandbox.upload = end_without_status
+    request, session_id, task = await activate(agent, sandbox)
+    assert (await agent.stop_rollout(seed().episode_id.capture_key, RolloutStopRequest(reason="budget"))).stopped
+    response = await asyncio.wait_for(task, 10)
+    # Graded as the stop it is, from the transcript the receipt let the session capture.
+    assert response.status == "incomplete" and response.error is None
+    assert json.loads(response.metadata["ng_rollout_stop"]) == {"reason": "budget"}
+    assert [item.type for item in response.output] == ["reasoning", "function_call", "function_call_output", "message"]
+    closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    assert closed.agent_observations.records[0].status == "incomplete"
+    sandbox.disconnect.assert_awaited_once()
+
+
 async def test_close_cancels_active_codex_before_detaching(setup):
     agent, sandbox = setup
     sandbox.blocked = True

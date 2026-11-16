@@ -79,7 +79,8 @@ TRANSPORT_LOCAL_RESOURCE = "transport_local_resource"
 AGENT_RUN_ERROR = "agent_run_error"
 # An agent server route failed; its reply is its cause's reply.
 AGENT_ROUTE_FAILED = "agent_route_failed"
-# A harness supervisor reported that termination was not confirmed (a negative cleanup receipt).
+# A harness supervisor reported that termination was not confirmed (a negative cleanup receipt), or a harness
+# outlived its supervisor's cleanup bound after a rollout stop and left no receipt.
 HARNESS_TERMINATION_UNCONFIRMED = "harness_termination_unconfirmed"
 # An environment server handled an episode failure that names no more specific kind.
 EPISODE_FAILED = "environment_episode_failed"
