@@ -1828,7 +1828,7 @@ def _benchmark_agent(
     if agent_type:
         agent = replace(resolve_agent(agent_type), benchmark_settings=benchmark.agent.benchmark_settings)
         loaded.add(Path(asset_config_path("agent-type", agent_type)).resolve())
-        overrides = [token for token in overrides if not token.startswith("+_selected_langgraph_config=")]
+        overrides = [token for token in overrides if not token.startswith("+_selected_agent_config=")]
     else:
         agent = benchmark.agent
     collection = _without_config_paths(overrides, loaded)
