@@ -159,7 +159,7 @@ def test_the_host_dir_is_unique_to_the_slurm_job_and_archives_land_in_the_job_di
 
 def test_the_dir_is_set_up_before_the_driver_and_archived_after_it():
     script = _script(_config(True))
-    restore = script.index('"$_gym_nl_dir" "$_gym_nl_archives" 1\n')
+    restore = script.index('"$_gym_nl_dir" "$_gym_nl_archives" 1 || exit $?\n')
     driver = script.index(_driver_line(script))
     after = script.index('\n_gym_run_driver\n_gym_nl_rc=$?\n_gym_nl_archive\ntrap - TERM\n(exit "$_gym_nl_rc")')
     assert restore < driver < after
@@ -169,7 +169,7 @@ def test_the_dir_is_set_up_before_the_driver_and_archived_after_it():
 
 def test_restore_can_be_turned_off_and_then_no_archive_is_pruned():
     script = _script(_config({"restore": False}))
-    assert '"$_gym_nl_dir" "$_gym_nl_archives" 0\n' in script
+    assert '"$_gym_nl_dir" "$_gym_nl_archives" 0 || exit $?\n' in script
     assert '"$_gym_nl_dir" "$_gym_nl_archives" "$SLURM_JOB_ID" 120 0\n' in script
 
 
@@ -339,16 +339,37 @@ def test_restore_extracts_the_newest_archive_and_the_next_archive_holds_everythi
     assert _archive(tmp_path) == {"ev/0.json": "row0\n", "ev/1.json": "row1\n"}
 
 
+def _truncated_archive(path: Path) -> None:
+    """A gzip that ends mid-stream: tar may extract its first member before it fails."""
+    _write_archive(path, {"ev/partial.json": "p" * 50000, "ev/other.json": bytes(range(256)).hex() * 400})
+    path.write_bytes(path.read_bytes()[: path.stat().st_size // 2])
+
+
 def test_restore_falls_back_to_an_older_archive_when_the_newest_does_not_extract(tmp_path):
     archives = tmp_path / "run" / "b" / "node-local"
     _write_archive(archives / "9.tar.gz", {"ev/0.json": "row0\n"})
-    (archives / "10.tar.gz").write_bytes(b"not a tar")
+    _truncated_archive(archives / "10.tar.gz")
+    driver = 'cat "$GYM_NODE_LOCAL_DIR/ev/0.json"; test ! -e "$GYM_NODE_LOCAL_DIR/ev/partial.json"'
 
-    returncode = _finish(_start_job(tmp_path, driver='cat "$GYM_NODE_LOCAL_DIR/ev/0.json"'))
+    returncode = _finish(_start_job(tmp_path, driver=driver))
 
     assert returncode == 0
     output = (tmp_path / "job.out").read_text()
     assert "cannot extract" in output and "row0" in output
+
+
+def test_when_no_archive_restores_the_driver_does_not_start(tmp_path):
+    archives = tmp_path / "run" / "b" / "node-local"
+    (archives / "10.tar.gz").parent.mkdir(parents=True)
+    (archives / "10.tar.gz").write_bytes(b"not a tar")
+    _truncated_archive(archives / "9.tar.gz")
+
+    returncode = _finish(_start_job(tmp_path, driver=": > driver-ran"))
+
+    assert returncode == 1
+    assert "ERROR: no node-local archive in" in (tmp_path / "job.out").read_text()
+    assert not (tmp_path / "run" / "b" / "driver-ran").exists()
+    assert sorted(p.name for p in archives.iterdir()) == ["10.tar.gz", "9.tar.gz"]
 
 
 def test_without_restore_the_dir_starts_empty(tmp_path):

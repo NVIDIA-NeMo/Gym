@@ -43,7 +43,9 @@ _RESTORE_SCRIPT = """\
 dir=$1 archives=$2
 rm -rf -- "$dir" && mkdir -p -m 700 -- "$dir" || { echo "ERROR: cannot create the node-local dir $dir"; exit 1; }
 [ "$3" = 1 ] || exit 0
+found=0
 for name in $(ls -1 "$archives" 2>/dev/null | grep -xE '[0-9]{1,15}[.]tar[.]gz' | sort -rn); do
+    found=1
     if tar -xzf "$archives/$name" -C "$dir"; then
         echo "Restored the node-local dir from $archives/$name"
         exit 0
@@ -51,6 +53,11 @@ for name in $(ls -1 "$archives" 2>/dev/null | grep -xE '[0-9]{1,15}[.]tar[.]gz' 
     echo "WARNING: cannot extract $archives/$name; trying an older archive"
     rm -rf -- "$dir" && mkdir -p -m 700 -- "$dir" || exit 1
 done
+# Saved results may name files in those archives: an empty dir would publish a run without them.
+if [ "$found" = 1 ]; then
+    echo "ERROR: no node-local archive in $archives could be restored; the driver does not start"
+    exit 1
+fi
 echo "No earlier archive in $archives: the node-local dir starts empty"
 """
 
@@ -98,7 +105,7 @@ _gym_nl_archive() {{
     _gym_nl_done=1
     _gym_nl_run {archive_script} "$_gym_nl_dir" "$_gym_nl_archives" "$SLURM_JOB_ID" {archive_timeout} {restore}
 }}
-_gym_nl_run {restore_script} "$_gym_nl_dir" "$_gym_nl_archives" {restore}"""
+_gym_nl_run {restore_script} "$_gym_nl_dir" "$_gym_nl_archives" {restore} || exit $?"""
 
 _DEADLINE_TEMPLATE = """\
 _gym_nl_job=$(SLURM_TIME_FORMAT=%s scontrol show job "$SLURM_JOB_ID" -o 2>/dev/null) || _gym_nl_job=""
