@@ -363,8 +363,10 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     judge_pdf_include_text: bool = True
     # Exact request-wide image cap for raster and PDF-overflow transports.
     judge_max_images_per_request: int = 450
-    # Include nested task inputs while leaving submission directories shallow.
-    judge_reference_files_recursive: bool = False
+    # Show the judges the task's input files. GDPval stores each one a directory down
+    # (reference_files/<hash>/<name>), so without recursion the judges see none of them.
+    # Submission directories stay shallow either way.
+    judge_reference_files_recursive: bool = True
     # Use the eval tree's prepared copies of the original benchmark inputs,
     # persisted from host downloads separately from model-authored submissions.
     # Enable only after validating those inputs during preparation.
