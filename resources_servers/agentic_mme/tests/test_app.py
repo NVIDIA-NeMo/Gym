@@ -124,6 +124,23 @@ async def test_terminal_tool_and_incomplete_do_not_score(server) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_graded_failed_response_records_its_policy_error(server) -> None:
+    # Under an agent session the harness fails the response with its cause, and the outcome policy grades a context-limit
+    # refusal. The row records it as the Agentic-MME agent's /run does: 0, "policy_error", and the message.
+    message = 'HTTP 400: {"error": {"code": "context_length_exceeded"}}'
+    failed = NeMoGymResponse.model_validate(
+        response("<answer>blue</answer>").model_dump()
+        | {"status": "failed", "error": {"code": "server_error", "message": message}}
+    )
+    body = AgenticMMEVerifyRequest(
+        responses_create_params={"input": "q"}, response=failed, verifier_metadata={"golden_answer": {"value": "blue"}}
+    )
+    result = await server.verify(no_session(), body)
+    assert (result.reward, result.failure_reason, result.policy_error) == (0.0, "policy_error", message)
+    assert result.evaluation_completed and not result.mask_sample
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("score_step_limit_answer", "marked", "reward", "reason"),
     [

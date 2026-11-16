@@ -24,7 +24,7 @@ from typing import Annotated, Any, ClassVar, Literal, Optional
 
 import anyio
 import cv2
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from PIL import Image
 from pydantic import BeforeValidator, ConfigDict, Field, PrivateAttr, TypeAdapter, ValidationError
 
@@ -262,6 +262,9 @@ class AgenticMMEVerifyResponse(BaseVerifyResponse):
     # 1.0 when the harness marked the response as reaching its step limit, so the share of such rollouts shows in
     # the per-key metrics whether or not the answer is scored.
     step_limit_reached: float = 0.0
+    # The failed model call that ended the episode unanswered (failure_reason "policy_error"), such as a context-limit
+    # refusal: the harness's error message, under an agent session as on the Agentic-MME agent's /run.
+    policy_error: str | None = None
 
 
 # The Agentic-MME agent reports its tool trace under this key of response.metrics, which the model never sees. Only the
@@ -340,6 +343,10 @@ class AgenticMMEServer(SimpleResourcesServer):
             raise ValueError("task_images_in_sandbox: false needs sandbox_provider, which lends the sandbox")
         if self._loads_task_images and self.config.image_root is None:
             raise ValueError("Set image_root to the folder that benchmarks/agentic_mme/prepare.py wrote")
+        if self.config.serve_image_tools:
+            # The image tools run in to_thread workers, many at once; one OpenCV thread each keeps them from
+            # oversubscribing the CPU, as in the Agentic-MME agent.
+            cv2.setNumThreads(1)
 
     @property
     def _loads_task_images(self) -> bool:
@@ -484,8 +491,11 @@ class AgenticMMEServer(SimpleResourcesServer):
                 if self._fences.get(session_id) is not None:
                     raise ResourcesSessionLostError(f"Resources session {session_id} is closed")
                 session = self._sessions.get(session_id)
-                if session is None or session.workspace is None:
-                    raise HTTPException(409, "No image workspace for this session; seed it with serve_image_tools set")
+                if session is None:
+                    # Never seeded, or lost: this server restarted, or a checkpoint retired the attempt. The session
+                    # middleware gives every request an ID, so the two look alike. Session-lost, not a tool error the
+                    # model would answer around; verify masks the row.
+                    raise ResourcesSessionLostError(f"Resources session {session_id} has no image workspace here")
                 # A client that disconnects cancels this handler, but not the worker thread, which keeps changing the
                 # workspace. The shield keeps the lock held until the worker finishes, so no other call overlaps it.
                 with anyio.CancelScope(shield=True):
@@ -564,6 +574,14 @@ class AgenticMMEServer(SimpleResourcesServer):
             return AgenticMMEVerifyResponse(
                 **(body.model_dump() | tool_fields | lost | {"evaluation_completed": False})
             )
+        session_id = request.session.get(SESSION_ID_KEY, "")
+        if self.config.serve_image_tools and session_id and session_id not in self._sessions:
+            # The image tools' workspace is gone (a restart or a retired attempt), so the episode's tool calls after
+            # that were refused as session-lost. Masked, as for a closed session.
+            lost = lost_session_verification("This agentic_mme session has no image workspace here")
+            return AgenticMMEVerifyResponse(
+                **(body.model_dump() | tool_fields | lost | {"evaluation_completed": False})
+            )
         result = AgenticMMEVerifyResponse(**(body.model_dump() | tool_fields), reward=0.0)
         result.step_limit_reached = float(
             (body.response.metadata or {}).get(HARNESS_STEP_LIMIT_METADATA_KEY) == "true"
@@ -584,6 +602,12 @@ class AgenticMMEServer(SimpleResourcesServer):
                 terminal = []
             elif item.type == "message" and item.role == "assistant":
                 terminal = [part.text for part in item.content if part.type == "output_text"]
+        if body.response.status == "failed":
+            # A failed model call ended the episode unanswered, and the outcome policy chose to grade it (a
+            # context-limit refusal): 0, recorded with its cause as the Agentic-MME agent's /run records it.
+            result.failure_reason = "policy_error"
+            result.policy_error = body.response.error.message if body.response.error else None
+            return result
         if body.response.incomplete_details:
             result.failure_reason = "incomplete_response"
             return result

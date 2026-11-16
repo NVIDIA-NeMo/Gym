@@ -136,7 +136,9 @@ def test_a_failed_tool_returns_the_agent_s_error_to_the_model(image_root) -> Non
 
 def test_a_tool_call_needs_a_seeded_workspace_and_answers_404_after_close(image_root) -> None:
     server = _server(image_root)
-    assert TestClient(server.setup_webserver()).post("/invert", json={"image_index": 0}).status_code == 409
+    unseeded = TestClient(server.setup_webserver()).post("/invert", json={"image_index": 0})
+    assert unseeded.status_code == 404
+    assert unseeded.json()["detail"]["failure_kind"] == "session_lost"
 
     client = _seeded(server, _seed())
     close = ResourcesCloseSessionRequest(resources_session_id="session", episode_id=_seed().episode_id)
@@ -147,6 +149,29 @@ def test_a_tool_call_needs_a_seeded_workspace_and_answers_404_after_close(image_
     # The harness records a failed tool call that names the lost session, and nothing is recreated.
     assert late.status_code == 404
     assert late.json()["detail"]["failure_kind"] == "session_lost"
+    assert server._sessions == {}
+
+
+def test_a_session_this_server_lost_is_masked_not_answered_around(image_root) -> None:
+    # A restart empties the server's sessions, while the episode's cookie still names its session. The tool call is
+    # session-lost, not a tool error the model answers around, and verify masks the row instead of grading it.
+    server = _server(image_root)
+    client = _seeded(server, _seed())
+    server._sessions.clear()
+
+    late = client.post("/invert", json={"image_index": 0})
+    assert late.status_code == 404
+    assert late.json()["detail"]["failure_kind"] == "session_lost"
+    verified = client.post(
+        "/verify",
+        json={
+            "responses_create_params": {"input": "q"},
+            "response": response("<answer>red</answer>").model_dump(mode="json"),
+            "verifier_metadata": {"golden_answer": {"value": "red"}},
+        },
+    ).json()
+    assert verified["reward"] == 0.0 and verified["mask_sample"] is True
+    assert verified["failure_kind"] == "session_lost" and verified["evaluation_completed"] is False
     assert server._sessions == {}
 
 
