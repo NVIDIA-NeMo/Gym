@@ -280,6 +280,14 @@ class TestOwnedFolders:
         assert delete_owned_folder(chosen) is False
         assert (chosen / "0-0.jsonl").exists()
 
+    def test_takes_an_existing_empty_folder(self, tmp_path: Path) -> None:
+        # A job script's `mkdir -p`, or a start that died between the mkdir and the marker, leaves one.
+        (tmp_path / "capture").mkdir()
+
+        capture = create_owned_folder(tmp_path / "capture")
+
+        assert (capture / ".nemo-gym-owned").is_file()
+
     def test_a_restarted_run_reuses_its_own_folder(self, tmp_path: Path) -> None:
         capture = create_owned_folder(tmp_path / "capture")
         (capture / "0-0.jsonl").write_text("{}")
