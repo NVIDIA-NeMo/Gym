@@ -131,23 +131,36 @@ gym eval run --no-serve --resources-server officeenv --model-type openai_model \
   --input results/officeenv_example_data/example.jsonl --output results/officeenv_rollouts.jsonl
 ```
 
-The taskset routes to Gym's `single_agent_turn` (this config's `officeenv_environment_server`), which drives the
-simple agent one step at a time (one model call and the tool calls it makes: the agent's `max_steps: 1`) and reads
-`GET /task_state` between steps (`end_on_task_state`). An episode ends before the next model call once its task has
-ended (`complete_task` succeeded), when the model answers without calling a tool, or after `max_episode_steps` (50)
-steps. With `close_tools_on_task_end` (on in this config) the server refuses a tool call once the task has ended, so
-the calls a step makes after the one that ended its task change nothing. Tasks explored through `api_search` spend a
-search and a fetch on every endpoint before calling it, so long ones need more steps:
-`++officeenv_environment_server.environment_servers.single_agent_turn.max_episode_steps=150`.
+The rows run on Gym's `single_agent_turn_legacy` (this config's `officeenv_environment_server`), which takes the
+taskset's episodes and flat rows alike, such as a training corpus's rows routed by their agent. It drives the simple
+agent one step at a time: each activation names the episode's step limit, and the agent then takes one step (one model
+call and the tool calls it makes), whatever its own `max_steps`. Between steps it reads `GET /task_state`
+(`end_on_task_state`). An episode ends before the next model call once its task has ended (`complete_task`
+succeeded), when the model answers without calling a tool, or after `max_episode_steps` (50) steps, which the reply's
+metadata then names (`ng_termination_reason: max_episode_steps`). A session lost during the episode (`GET /task_state`
+answers 404 with `failure_kind: session_lost`) ends it too, and `/verify` masks its reward. With
+`close_tools_on_task_end` (on in this config) the server refuses a tool call once the task has ended, so the calls a
+step makes after the one that ended its task change nothing. Tasks explored through `api_search` spend a search and a
+fetch on every endpoint before calling it, so long ones need more steps:
+`++officeenv_environment_server.environment_servers.single_agent_turn_legacy.max_episode_steps=150`.
 
-The config allows only the simple agent (`allowed_agents`): an agent that runs its own loop would take steps after
-the task ended. Episodes the step loop drives take part in checkpoints as restarts. NeMo RL's turn and prefix recovery
-accept only the `legacy_agent` environment server for now, so OfficeEnv training sets `target_level: sibling` until
+`--agent-type` adds the named agent's config to the run. A template that leaves its resources server unset is
+composed in place of `officeenv_simple_agent`, and `allowed_agents` refuses any other such template before anything
+starts. The simple agent stays on the step loop. The compaction agent (`simple_agent_with_compaction`) keeps no agent
+session, so composition relays it through a `legacy_agent` server to its own `/run`, which runs its own loop and takes
+flat rows, not the taskset's episodes. A session harness such as `hermes_agent` resolves as its own environment
+server, and these rows still run on `officeenv_simple_agent`. The step loop checks its agent at startup, so an
+`agent_server` set directly to an agent that cannot take one step per activation stops the server.
+
+Episodes the step loop drives take part in checkpoints as restarts. NeMo RL's turn and prefix recovery accept no
+environment server but `legacy_agent` in a run's config for now, so a training run with OfficeEnv sets
+`rollout_recovery.target_level: sibling`. The setting applies to the whole training run: NeMo RL checks every
+environment server in the run's config, so a setting for OfficeEnv's taskset alone would not help. It stays until
 NeMo RL follows.
 
 ## Episode sessions and MCP
 
-An environment server (for example `single_agent_turn`) seeds with a `ResourcesSeedSessionRequest`
+An environment server (for example `single_agent_turn_legacy`) seeds with a `ResourcesSeedSessionRequest`
 whose `task_data` holds the row's fields other than `responses_create_params`. The OfficeEnv
 session takes the request's `resources_session_id`, which the seed's session cookie also names;
 the agent calls the same `POST /<tool_name>` routes with that cookie, and `/verify` grades the

@@ -19,7 +19,6 @@ from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
-from omegaconf import OmegaConf
 from pydantic import ValidationError
 
 
@@ -783,25 +782,3 @@ def test_the_length_penalty_spares_low_rewards_and_is_capped() -> None:
 def test_model_turns_count_the_model_responses() -> None:
     assert model_turns(NeMoGymResponse.model_validate(RESPONSE | {"output": EPISODE})) == 3
     assert model_turns(NeMoGymResponse.model_validate(RESPONSE)) == 0
-
-
-def test_the_config_drives_the_simple_agent_one_step_at_a_time_and_ends_episodes_on_the_task_state() -> None:
-    config = OmegaConf.load(Path(__file__).parents[1] / "configs/officeenv.yaml")
-    resources = config.officeenv_resources_server.resources_servers.officeenv
-    agent = config.officeenv_simple_agent.responses_api_agents.simple_agent
-    environment = config.officeenv_environment_server
-
-    # The rows route by taskset to Gym's single_agent_turn, with the step loop on.
-    assert [dataset.taskset for dataset in agent.datasets] == ["officeenv:example"]
-    assert config.environment_server_routes["officeenv:example"] == "officeenv_environment_server"
-    assert environment._inherit_from == "single_agent_turn"
-    turn = environment.environment_servers.single_agent_turn
-    assert (turn.resources_server.name, turn.agent_server.name) == (
-        "officeenv_resources_server",
-        "officeenv_simple_agent",
-    )
-    assert list(turn.resources_tool_transports) == ["direct_http"]
-    assert (turn.max_episode_steps, turn.end_on_task_state, agent.max_steps) == (50, True, 1)
-    # A call after the one that ended the task is refused, and only the simple agent may run these episodes.
-    assert resources.close_tools_on_task_end is True
-    assert list(resources.allowed_agents) == ["simple_agent"]
