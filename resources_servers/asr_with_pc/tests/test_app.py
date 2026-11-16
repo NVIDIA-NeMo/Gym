@@ -6,7 +6,7 @@
 """Unit tests for the asr_with_pc resources server.
 
 Each test fixes the model output and the reference transcript and asserts the
-WER values against numeric expectations computed offline (jiwer 3.x).
+WER values against numeric expectations computed offline (unchanged between jiwer 3.x and 4.0).
 """
 
 import base64
