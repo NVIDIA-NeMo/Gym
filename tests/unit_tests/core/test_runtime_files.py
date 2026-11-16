@@ -36,6 +36,11 @@ from nemo_gym.core.runtime_files import (
 )
 
 
+def _request_folders(parent: Path) -> list[Path]:
+    """The request folders under ``parent``: everything inside its per-process folders."""
+    return [folder for process in parent.iterdir() for folder in process.iterdir()]
+
+
 @pytest.fixture
 def set_global_config(monkeypatch: pytest.MonkeyPatch):
     def set_(values: dict | None) -> None:
@@ -134,7 +139,7 @@ class TestTempFolder:
 
         with temp_folder(kind="workspace") as path:
             (path / "file.txt").write_text("x")
-            assert path.parent == Path(tempfile.gettempdir())
+            assert path.parent.parent == Path(tempfile.gettempdir())
 
         assert not path.exists()
 
@@ -142,9 +147,9 @@ class TestTempFolder:
         set_global_config({"temp_dir": str(tmp_path / "temp")})
 
         with temp_folder(kind="workspace") as path:
-            assert path.parent == tmp_path / "temp"
+            assert path.parent.parent == tmp_path / "temp"
 
-        assert list((tmp_path / "temp").iterdir()) == []
+        assert _request_folders(tmp_path / "temp") == []
 
     def test_folder_is_removed_when_the_block_raises(self, set_global_config) -> None:
         set_global_config(None)
@@ -201,20 +206,23 @@ class TestStaleTempFolders:
         process.wait()
         return process.pid
 
-    def _name(self, pid: int, *, host: str | None = None, namespace: int | None = None, tag: str = "abc123") -> str:
+    def _name(self, pid: int, *, host: str | None = None, namespace: int | None = None) -> str:
         host = host or Path("/proc/sys/kernel/random/boot_id").read_text().strip().replace("-", "")[:12]
         namespace = namespace or os.stat("/proc/self/ns/pid").st_ino
-        return f"nemo-gym-workspace.{host}.{namespace}.{pid}.{tag}"
+        return f"nemo-gym-{host}-{namespace}-{pid}"
 
     def test_only_folders_of_dead_processes_on_this_host_and_namespace_are_removed(self, tmp_path: Path) -> None:
         namespace = os.stat("/proc/self/ns/pid").st_ino
         dead = tmp_path / self._name(self._dead_pid())
-        live = tmp_path / self._name(os.getpid(), tag="def456")
-        other_namespace = tmp_path / self._name(self._dead_pid(), namespace=namespace + 1, tag="ghi789")
+        live = tmp_path / self._name(os.getpid())
+        # The dead process's request folders go with its process folder.
+        (dead / "workspace-abc" / "nested").mkdir(parents=True)
+        (dead / "workspace-abc" / "nested" / "file.txt").write_text("x")
+        other_namespace = tmp_path / self._name(self._dead_pid(), namespace=namespace + 1)
         # Another host's folder on a shared directory: same namespace number, a dead pid here, a live process there.
-        other_host = tmp_path / self._name(self._dead_pid(), host="0" * 12, tag="jkl012")
+        other_host = tmp_path / self._name(self._dead_pid(), host="0" * 12)
         unrelated = tmp_path / "something-else"
-        for folder in (dead, live, other_namespace, other_host, unrelated):
+        for folder in (live, other_namespace, other_host, unrelated):
             folder.mkdir()
 
         assert remove_stale_temp_folders(tmp_path) == [dead]
@@ -229,7 +237,7 @@ class TestStaleTempFolders:
         set_global_config({"temp_dir": str(tmp_path)})
 
         with temp_folder(kind="workspace") as path:
-            assert path.name.startswith(self._name(os.getpid(), tag=""))
+            assert path.parent.name == self._name(os.getpid())
 
         assert not leftover.exists()
 
@@ -287,7 +295,7 @@ class TestStaleTempFolders:
         target = tmp_path / "target"
         target.mkdir()
         (target / "keep").write_text("")
-        (tmp_path / self._name(self._dead_pid(), tag="lnk")).symlink_to(target)
+        (tmp_path / self._name(self._dead_pid())).symlink_to(target)
 
         assert remove_stale_temp_folders(tmp_path) == []
         assert (target / "keep").exists()
@@ -303,11 +311,58 @@ class TestStaleTempFolders:
         assert folder.exists()
 
 
+def test_request_folders_share_one_folder_per_process(set_global_config, tmp_path: Path) -> None:
+    set_global_config({"temp_dir": str(tmp_path)})
+
+    with temp_folder(kind="workspace") as first, temp_folder(kind="harness") as second:
+        assert first.parent == second.parent
+        assert first.parent.parent == tmp_path
+        assert first.name.startswith("workspace-") and second.name.startswith("harness-")
+
+    assert [p.name for p in tmp_path.iterdir()] == [first.parent.name]
+
+
+def test_exit_removes_this_process_folder_and_a_forked_child_does_not(
+    set_global_config, tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(runtime_files, "_process_folders", {})
+    set_global_config({"temp_dir": str(tmp_path)})
+    with temp_folder(kind="workspace") as path:
+        (path / "file.txt").write_text("x")
+        process_folder = path.parent
+
+        # A forked child inherits the exit handler and the record of this folder, but must leave it alone.
+        real_pid = os.getpid()
+        monkeypatch.setattr(os, "getpid", lambda: real_pid + 1)
+        runtime_files._remove_own_process_folders(real_pid)
+        monkeypatch.setattr(os, "getpid", lambda: real_pid)
+        assert process_folder.exists()
+
+        runtime_files._remove_own_process_folders(os.getpid())
+
+    assert not process_folder.exists()
+
+
+def test_a_stale_folder_with_this_process_name_is_cleared_before_use(
+    set_global_config, tmp_path: Path, monkeypatch
+) -> None:
+    # Only an earlier process with the same id, now dead, can have left a folder with this name.
+    monkeypatch.setattr(runtime_files, "_process_folders", {})
+    stale = tmp_path / runtime_files._process_folder_name()
+    (stale / "workspace-old").mkdir(parents=True)
+    set_global_config({"temp_dir": str(tmp_path)})
+
+    with temp_folder(kind="workspace") as path:
+        assert path.parent == stale
+
+    assert not (stale / "workspace-old").exists()
+
+
 def test_parent_replaces_temp_dir_for_code_without_gym_configuration(set_global_config, tmp_path: Path) -> None:
     set_global_config(None)
 
     with temp_folder(kind="harbor-job", parent=tmp_path / "from-server") as path:
-        assert path.parent == tmp_path / "from-server"
+        assert path.parent.parent == tmp_path / "from-server"
 
     assert not path.exists()
 
@@ -369,7 +424,7 @@ async def test_folder_is_removed_when_cancelled_while_it_is_created(
         await asyncio.sleep(0.01)
 
     assert not made[0].exists()
-    assert list(tmp_path.iterdir()) == []
+    assert _request_folders(tmp_path) == []
 
 
 def test_debug_folder_segments_are_quoted(set_global_config, tmp_path: Path, monkeypatch) -> None:
@@ -393,10 +448,10 @@ async def test_folder_is_removed_when_an_anyio_cancel_scope_fires(set_global_con
             await anyio.sleep(3600)
 
     for _ in range(100):
-        if not any(tmp_path.iterdir()):
+        if not _request_folders(tmp_path):
             break
         await asyncio.sleep(0.01)
-    assert list(tmp_path.iterdir()) == []
+    assert _request_folders(tmp_path) == []
 
 
 def test_debug_folder_rejects_a_server_name_that_leaves_the_root(set_global_config, tmp_path: Path) -> None:
@@ -465,7 +520,7 @@ def test_cleanup_survives_a_repeated_cancellation_while_queued(
     set_global_config({"temp_dir": str(tmp_path / "temp")})
 
     assert _cleanup_left_after_a_repeated_cancellation(cancel_kind) == []
-    assert list((tmp_path / "temp").iterdir()) == []
+    assert _request_folders(tmp_path / "temp") == []
 
 
 def test_a_server_name_with_a_slash_stays_one_segment(set_global_config, tmp_path: Path) -> None:

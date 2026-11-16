@@ -21,6 +21,8 @@ Each kind of runtime file has one global setting, named by what it holds, and on
 
 - A request's or session's temporary folder: :func:`temp_folder` or :func:`async_temp_folder`, under ``temp_dir``.
   The folder is removed when the block exits.
+  Each process keeps its request folders inside one folder of its own, removed when the process exits;
+  the next process on the same host removes the folder of a process that was killed.
 - Debug files, such as verification logs, screenshots, trajectories and failure records: :func:`debug_folder`.
   They are written only when ``debug_dir`` or the server's own ``debug_dir`` names a folder.
 - Model-call capture: ``model_call_capture_dir``.
@@ -32,6 +34,7 @@ Files that one server writes go through these helpers instead.
 """
 
 import asyncio
+import atexit
 import logging
 import os
 import re
@@ -51,6 +54,7 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.core.episode_context import current_rollout_id
 from nemo_gym.core.filesystems import warn_if_unsuitable
+from nemo_gym.core.processes import process_may_be_running
 
 
 logger = logging.getLogger(__name__)
@@ -62,15 +66,17 @@ _MAX_LABEL_LENGTH = 100
 NO_ROLLOUT_SEGMENT = "no-rollout"
 # The debug folder segment for a request that runs as no named agent instance.
 UNNAMED_AGENT_INSTANCE_SEGMENT = "unnamed"
-# A temporary folder's name records the process that made it:
-# nemo-gym-<kind>.<host boot id>.<pid namespace>.<pid>.<random>.
+# Each process keeps its temporary folders in one folder of its own under a parent, named for the process:
+# nemo-gym-<host boot id>-<pid namespace>-<pid>. Request folders inside it carry no process data.
 # PID namespace numbers repeat across hosts (every host's initial namespace has the same one), so the boot id is
 # what tells hosts apart when two of them share a directory.
-_TEMP_FOLDER = re.compile(r"^nemo-gym-[a-z0-9_-]+\.(?P<host>[0-9a-f]{12})\.(?P<namespace>\d+)\.(?P<pid>\d+)\.[^./]+$")
+_PROCESS_FOLDER = re.compile(r"^nemo-gym-(?P<host>[0-9a-f]{12})-(?P<namespace>\d+)-(?P<pid>\d+)$")
 _BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 _UNKNOWN_HOST = "unknown"
 # Parents this process has already checked and cleared of folders left by dead processes.
 _checked_temp_parents: set[Path] = set()
+# This process's own folder under each parent, keyed by process id so a forked child makes its own.
+_process_folders: dict[tuple[int, Path], Path] = {}
 _checked_debug_roots: set[Path] = set()
 
 
@@ -154,26 +160,19 @@ def _pid_namespace() -> int | None:
         return None
 
 
-def _process_exists(pid: int) -> bool:
-    """Whether ``pid`` may still be running; any doubt counts as running, so its folder is kept."""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except (PermissionError, OverflowError, ValueError):
-        return True
-    return True
+def _process_folder_name() -> str:
+    return f"nemo-gym-{_host_id()}-{_pid_namespace() or 0}-{os.getpid()}"
 
 
 def remove_stale_temp_folders(parent: Path) -> list[Path]:
-    """Remove this user's temporary folders under ``parent`` whose process is gone.
+    """Remove this user's process folders under ``parent`` whose process is gone, with every request folder inside.
 
-    A killed process cannot remove its own folders.
-    Each folder's name records its host's boot, its PID namespace and its process.
+    A killed process cannot remove its own folder.
+    Each process folder's name records its host's boot, its PID namespace and its process.
     A folder goes only when it belongs to this user, this boot of this host and this PID namespace,
-    and its process no longer exists.
-    A process on another host, or in another container's namespace, keeps its folders.
-    That holds on a filesystem many hosts share too, since each host only removes its own boot's folders.
+    and its process is no longer running.
+    A process on another host, or in another container's namespace, keeps its folder,
+    which holds on a filesystem many hosts share too.
     """
     host = _host_id()
     namespace = _pid_namespace()
@@ -186,7 +185,7 @@ def remove_stale_temp_folders(parent: Path) -> list[Path]:
     except OSError:
         return []
     for entry in entries:
-        match = _TEMP_FOLDER.fullmatch(entry.name)
+        match = _PROCESS_FOLDER.fullmatch(entry.name)
         if match is None or match["host"] != host or int(match["namespace"]) != namespace:
             continue
         try:
@@ -194,11 +193,36 @@ def remove_stale_temp_folders(parent: Path) -> list[Path]:
                 continue
         except OSError:
             continue
-        if _process_exists(int(match["pid"])):
+        pid = int(match["pid"])
+        if process_may_be_running(pid):
             continue
         shutil.rmtree(entry.path, ignore_errors=True)
         removed.append(Path(entry.path))
     return removed
+
+
+def _remove_own_process_folders(pid: int) -> None:
+    """Remove the folders this process made, at its exit; a forked child that inherited the handler does nothing."""
+    if os.getpid() != pid:
+        return
+    for (owner, _), folder in list(_process_folders.items()):
+        if owner == pid:
+            shutil.rmtree(folder, ignore_errors=True)
+
+
+def _process_folder(parent: Path) -> Path:
+    """This process's own folder under ``parent``, created once and removed when the process exits."""
+    pid = os.getpid()
+    folder = _process_folders.get((pid, parent))
+    if folder is None:
+        folder = parent / _process_folder_name()
+        # A folder with this name can only be left by an earlier process of the same id that has died.
+        shutil.rmtree(folder, ignore_errors=True)
+        folder.mkdir()
+        if not any(owner == pid for owner, _ in _process_folders):
+            atexit.register(_remove_own_process_folders, pid)
+        _process_folders[(pid, parent)] = folder
+    return folder
 
 
 def _temp_parent(parent: Path | None) -> Path:
@@ -222,8 +246,7 @@ def _temp_parent(parent: Path | None) -> Path:
 def _create_temp_folder(kind: str, parent: Path | None) -> Path:
     if not _KIND.fullmatch(kind):
         raise ValueError(f"kind must be lowercase letters, digits, '-' and '_', got {kind!r}")
-    prefix = f"nemo-gym-{kind}.{_host_id()}.{_pid_namespace() or 0}.{os.getpid()}."
-    return Path(tempfile.mkdtemp(prefix=prefix, dir=_temp_parent(parent)))
+    return Path(tempfile.mkdtemp(prefix=f"{kind}-", dir=_process_folder(_temp_parent(parent))))
 
 
 def _finish_temp_folder(path: Path, keep_as: Path | None) -> None:
