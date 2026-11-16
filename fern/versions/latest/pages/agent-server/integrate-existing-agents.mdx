@@ -397,9 +397,26 @@ tool_rewards:
   shell_tool_name: shell
 ```
 
-When omitted, `invalid_tool_call_names` defaults to the configured shell name.
+To use one reward configuration with several shell tool names:
+
+```yaml
+tool_rewards:
+  shell_tool_names: [terminal, bash, shell, exec, exec_command]
+  invalid_tool_call_names: null
+```
+
+`shell_tool_names` overrides `shell_tool_name` when supplied. It must be a nonempty
+list of nonempty names. Omitted or `null` retains the single-name setting and its
+default of `bash`. All selected names share one shell-call count and success-bonus
+schedule, including the existing `correct_bash_call_penalties` schedule. Duplicate
+comparison retains the tool name: identical arguments sent to different tools are
+not treated as duplicate calls.
+
+When omitted, `invalid_tool_call_names` defaults to the configured shell names.
 An explicit list selects tools eligible for failure penalties; `null` includes all
-tools and `[]` disables failure penalties. The shell name must be a nonempty string.
+supported function tools and `[]` disables failure penalties. `null` penalizes
+failed calls, not every call, and the existing correctness gates still apply.
+These settings control scoring; they do not enable tools in the harness.
 
 A nonzero shell exit must be reported as a failed tool observation.
 `shell_tool_name` controls shell counting, duplicate normalization and success

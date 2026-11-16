@@ -228,6 +228,82 @@ def test_shell_name_must_be_nonempty(name):
         OpenCodeToolRewardConfig(shell_tool_name=name)
 
 
+@pytest.mark.parametrize("names", [[], [""], ["bash", ""], [None], "bash"])
+def test_shell_names_reject_invalid_lists(names):
+    with pytest.raises(ValidationError, match="shell_tool_names"):
+        OpenCodeToolRewardConfig(shell_tool_names=names)
+
+
+def test_shell_names_override_singular_and_default_failure_filter():
+    config = OpenCodeToolRewardConfig(shell_tool_name="legacy", shell_tool_names=["terminal", "exec"])
+    calls = [call(0, "terminal"), call(1, "exec"), call(2, "legacy")]
+    records = execution_records(calls, statuses={str(i): ("error", None) for i in range(3)})
+    result = score_opencode_tools(records, calls, 1.0, config)
+    assert config.invalid_tool_call_names == ("terminal", "exec")
+    assert result.bash_call_count == 2
+    assert result.tool_error_count == 3
+    assert result.auxiliary_reward == pytest.approx(-0.10)
+    assert OpenCodeToolRewardConfig.model_validate_json(config.model_dump_json()) == config
+
+
+@pytest.mark.parametrize("names", [None, ["shell"]])
+def test_null_or_singleton_shell_names_preserve_singular_behavior(names):
+    calls = [call(i, "shell") for i in range(4)]
+    records = execution_records(calls, statuses={"0": ("completed", 1)})
+    singular = OpenCodeToolRewardConfig(shell_tool_name="shell")
+    plural = OpenCodeToolRewardConfig(shell_tool_name="shell", shell_tool_names=names)
+    assert score_opencode_tools(records, calls, 1.0, plural) == score_opencode_tools(records, calls, 1.0, singular)
+
+
+@pytest.mark.parametrize("base,penalty", [(0.0, 0.0), (1.0, -0.175)])
+def test_multiple_shell_names_share_count_schedule_and_all_tool_failures(base, penalty):
+    names = ["terminal", "bash", "shell", "exec", "exec_command"]
+    config = OpenCodeToolRewardConfig(shell_tool_names=names, invalid_tool_call_names=None)
+    calls = [call(i, name) for i, name in enumerate(names)] + [call(5, "read")]
+    records = execution_records(calls, statuses={"2": ("completed", 7), "5": ("error", None)})
+    result = score_opencode_tools(records, calls, base, config)
+    assert config.invalid_tool_call_names is None
+    assert result.bash_call_count == 5
+    assert result.bash_success_count == 4
+    assert result.tool_call_count == 6
+    assert result.tool_error_count == 2
+    # Five total shell attempts cost .075, plus .05 for each failed shell/read call.
+    assert result.auxiliary_reward == pytest.approx(penalty)
+
+
+@pytest.mark.parametrize("names,penalty", [((), 0.0), (("read",), -0.05), (("terminal", "exec"), -0.10)])
+def test_multiple_shell_names_preserve_explicit_failure_filter(names, penalty):
+    config = OpenCodeToolRewardConfig(shell_tool_names=["terminal", "exec"], invalid_tool_call_names=names)
+    calls = [call(0, "terminal"), call(1, "exec"), call(2, "read")]
+    records = execution_records(calls, statuses={str(i): ("error", None) for i in range(3)})
+    assert config.invalid_tool_call_names == names
+    assert score_opencode_tools(records, calls, 1.0, config).auxiliary_reward == pytest.approx(penalty)
+
+
+def test_multiple_shell_names_share_bonus_cap_and_keep_duplicate_identity():
+    config = OpenCodeToolRewardConfig(
+        shell_tool_names=["terminal", "bash"],
+        correct_only=False,
+        tool_success_reward=0.02,
+        tool_success_reward_cap=0.03,
+        correct_tool_call_bonuses=(0.0, 0.1, 0.15),
+        correct_bash_call_penalties=(0.0,),
+    )
+    calls = [
+        call(0, "terminal", {"command": "echo hello"}),
+        call(1, "bash", {"command": "echo hello"}),
+        call(2, "bash", {"command": " echo hello ", "description": "same command"}),
+    ]
+    records = execution_records(calls)
+    exploration = score_opencode_tools(records, calls, 0.0, config)
+    correct = score_opencode_tools(records, calls, 1.0, config)
+    assert correct.bash_call_count == 3
+    assert correct.bash_success_count == 2
+    assert correct.duplicate_tool_call_count == 1
+    assert exploration.auxiliary_reward == pytest.approx(0.03 - 0.02)
+    assert correct.auxiliary_reward == pytest.approx(0.15 - 0.02)
+
+
 @pytest.mark.parametrize("status,exit_code", [("completed", 0), ("completed", 1), ("error", None)])
 @pytest.mark.parametrize("base", [0.0, 0.65, 1.0])
 def test_configured_shell_name_preserves_reward_schedule(status, exit_code, base):
