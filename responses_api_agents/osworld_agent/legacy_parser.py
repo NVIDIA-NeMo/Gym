@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Legacy OSWorld response parsing.
+"""OSWorld ``mm_agents`` Nemotron response parsing.
 
 ``parse_response_to_cot_and_action`` and ``project_coordinate_to_absolute_scale``
-are copied from the pinned OSWorld ``mm_agents.nvidia.nemotron_agent`` module;
-``normalize_vendor_parser_input`` and ``is_invalid_legacy_parse`` add the input
-normalization and invalid-parse rule used with that parser. Keep them
-byte-for-byte in behavior.
+are copied, with logging changed, from ``mm_agents/nvidia/nemotron_agent.py``
+in https://github.com/terrykong/OSWorld at commit
+5d8c93592be588ab8e9909bed82f3b480fd4f533 (Apache-2.0, a fork of
+xlang-ai/OSWorld). ``normalize_vendor_parser_input`` and
+``is_invalid_legacy_parse`` add the input normalization and invalid-parse rule
+used with that parser. Keep them byte-for-byte in behavior.
 """
 
 from __future__ import annotations

@@ -76,7 +76,7 @@ osworld_nano_omni_agent:
         validate_python_syntax: ${oc.decode:${oc.env:OSWORLD_VALIDATE_PYTHON_SYNTAX,true}}
         require_clean_finish: ${oc.decode:${oc.env:OSWORLD_REQUIRE_CLEAN_FINISH,true}}
         train_invalid_terminal_call: ${oc.decode:${oc.env:OSWORLD_TRAIN_INVALID_TERMINAL_CALL,false}}
-        # Parse with the pinned OSWorld mm_agents parser.
+        # Parse with the OSWorld mm_agents Nemotron parser (legacy_parser.py).
         legacy_response_parser: ${oc.decode:${oc.env:OSWORLD_LEGACY_RESPONSE_PARSER,false}}
         mask_context_limit: ${oc.decode:${oc.env:OSWORLD_MASK_CONTEXT_LIMIT,false}}
       task_timeout: ${oc.decode:${oc.env:OSWORLD_TASK_TIMEOUT,7200}}
