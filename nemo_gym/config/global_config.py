@@ -253,6 +253,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "simple_agent",
         "simple_strands_agent",
         "stirrup_agent",
+        "terminus_2_agent",
         "terminus_2_sandboxed_agent",
     }
 )
@@ -271,6 +272,7 @@ _LEGACY_RELAY_KEPT_KEYS = (
     "port",
     "num_workers",
     "uvicorn_reuse_port",
+    "default_episode_timeout_seconds",
 )
 # Carried over from the environment's agent instance onto the composed agent; every other key is dropped.
 _COMPOSED_AGENT_CARRY_OVER_KEYS = ("resources_server", "model_server", "datasets")
