@@ -6,7 +6,7 @@ import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiohttp import ClientConnectionError
@@ -26,9 +26,18 @@ from nemo_gym.agents import (
     OutcomeAction,
     agent_outcome_policy,
 )
-from nemo_gym.client import ServerClient
+from nemo_gym.client import MODEL_RESPONSE_TIMEOUT_REASON, ServerClient
 from nemo_gym.config import BaseServerConfig
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
+    FailureBoundary,
+    FailureEvent,
+    FailureReport,
+    ModelFailureDetails,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    SdkErrorDetails,
+)
 from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
 from resources_servers.agentic_mme.app import AgenticMMEConfig, AgenticMMEServer, AgenticMMEVerifyRequest
 from resources_servers.agentic_mme.tests.test_app import no_session, response
@@ -41,6 +50,7 @@ from responses_api_agents.agentic_mme_agent.tests.test_app import (
     body,
     call,
     make_agent,
+    refused_reply,
 )
 
 
@@ -237,18 +247,17 @@ BENCHMARK_POLICY = AgentOutcomePolicyConfig.model_validate(
         (400, UNSUPPORTED_PARAMETER, {"failure_kind": "model_request_error", "status_code": 400}, OutcomeAction.FAIL),
         (503, IMAGE_LIMIT, {"failure_kind": "model_request_error", "status_code": 503}, OutcomeAction.RETRY),
         (401, IMAGE_LIMIT, {"failure_kind": "model_request_error", "status_code": 401}, OutcomeAction.FAIL),
+        # aiohttp raises a redirect loop as a ClientResponseError with a 3xx status, which no agent outcome may carry.
+        (302, b"", {"failure_kind": "unknown"}, OutcomeAction.RETRY),
     ],
-    ids=["context_400", "context_413", "image_limit", "unsupported_parameter", "unavailable", "bad_key"],
+    ids=["context_400", "context_413", "image_limit", "unsupported_parameter", "unavailable", "bad_key", "redirect"],
 )
 async def test_refused_model_call_is_graded_only_when_the_context_refused_it(
     status, error_body, outcome, action
 ) -> None:
     # As on /run: a context or request-size refusal is the model's own result and scores 0. A serving limit or an
     # unsupported parameter is not, so under the benchmark's outcome policy the rollout fails ungraded.
-    refused = FakeResponse(None)
-    refused.ok, refused.status = False, status
-    refused.read = AsyncMock(return_value=error_body)
-    result = await run_session_with_failing_call(refused, failing_call=1)
+    result = await run_session_with_failing_call(refused_reply(status, error_body), failing_call=1)
 
     assert result.status == "failed" and result.incomplete_details is None
     assert error_body.decode() in result.error.message
@@ -256,6 +265,40 @@ async def test_refused_model_call_is_graded_only_when_the_context_refused_it(
     # The work before the refused call stays in the response: the tool call, its output and the tool image.
     assert [item.type for item in result.output][:2] == ["function_call", "function_call_output"]
     assert agent_outcome_policy(result, config=BENCHMARK_POLICY) == action
+
+
+def timed_out_report() -> FailureReport:
+    """The policy model server's report of a call that timed out waiting for the model on each of its 3 attempts."""
+    attempts = [
+        FailureEvent(
+            boundary=FailureBoundary.MODEL,
+            failure_kind=MODEL_REQUEST_ERROR,
+            failure_reason=MODEL_RESPONSE_TIMEOUT_REASON,
+            operation="model_request",
+            operation_id="final-call",
+            attempt_id=f"attempt-{index}",
+            details=ModelFailureDetails(request_upload_complete=True),
+            foreign_error=SdkErrorDetails(exception_type="TimeoutError", message=""),
+        )
+        for index in range(3)
+    ]
+    return FailureReport(failure_id=attempts[-1].event_id, events={event.event_id: event for event in attempts})
+
+
+@pytest.mark.asyncio
+async def test_a_policy_timeout_keeps_its_cause_and_the_model_servers_report() -> None:
+    # The model server spent its own attempts waiting for the model and answered 500. The response names the timeout,
+    # as simple_agent's session reply does, and keeps the model server's report.
+    report = timed_out_report()
+    refused = refused_reply(500, b"Internal Server Error", report)
+    result = await run_session_with_failing_call(refused, failing_call=1)
+
+    assert result.status == "failed"
+    assert json.loads(result.metadata[AGENT_OUTCOME_METADATA_KEY]) == {"failure_kind": "model_policy_response_timeout"}
+    kept = FailureReport.model_validate(result.model_dump()["failure_report"])
+    assert set(report.events) <= set(kept.events)
+    # Gym's default for a confirmed policy timeout: the rollout fails ungraded, under this benchmark's policy too.
+    assert agent_outcome_policy(result, config=BENCHMARK_POLICY) == OutcomeAction.FAIL
 
 
 @pytest.mark.asyncio
@@ -298,42 +341,22 @@ class Reply(FakeResponse):
     headers: dict = {}
 
 
-@pytest.mark.asyncio
-async def test_a_collected_session_rollout_keeps_the_tool_trace_and_its_counts(monkeypatch) -> None:
-    """The default recipe's rollout row keeps what /run returned: the trace, its retrieval metadata and the counts.
+async def collect_config_rollout(
+    monkeypatch: pytest.MonkeyPatch, replies: list, retrieval: dict | None = None
+) -> tuple[dict, list, list]:
+    """Collect one rollout of the default recipe, and return its row, the servers' calls and the model's inputs.
 
     Collection, the single-agent-turn Environment Server, the agent's session routes and the grader run in this
-    process; only the policy model and the live search provider are scripted.
+    process; only the policy model (``replies``, in order) is scripted.
     """
-    # A live search result: the provider's answer, the leak guard's count and the cache outcome stay out of the
-    # model's tool output.
-    searched = {
-        "ok": True,
-        "tool": "google_search",
-        "context": "1. Red",
-        "raw": {"organic": [{"title": "provider-only answer"}]},
-        "contaminated": 1,
-        "cache": "miss",
-    }
-    monkeypatch.setattr(Retrieval, "call", AsyncMock(return_value=searched))
-    replies = [
-        response(output=[call("google_search", {"query": "image color"}, call_id="search")]),
-        response(output=[call(call_id="crop")]),
-        response(output=[call("zoom", {}, call_id="unknown")]),
-        response("<answer>red</answer>"),
-    ]
     config = load("config")
     config.policy_model = {"responses_api_models": {"openai_model": {"host": "model", "port": 9000}}}
     transport = ServerClient(head_server_config=BaseServerConfig(host="head", port=1), global_config_dict=config)
     agent_config = OmegaConf.to_container(
         config.agentic_mme_agent.responses_api_agents.agentic_mme_agent, resolve=True
     )
-    agent_config["retrieval"] = {
-        "mode": "live",
-        "serper_api_key": "k",
-        "serpapi_api_key": "k",
-        "allow_image_upload": True,
-    }
+    if retrieval is not None:
+        agent_config["retrieval"] = retrieval
     agent = AgenticMMEAgent(
         config=AgenticMMEAgentConfig(name="agentic_mme_agent", host="agent", port=8001, **agent_config),
         server_client=transport,
@@ -361,7 +384,8 @@ async def test_a_collected_session_rollout_keeps_the_tool_trace_and_its_counts(m
             return Reply(await environment.run_legacy(body))
         if server_name == "policy_model":
             model_inputs.append(body.model_dump(mode="json")["input"])
-            return Reply(replies.pop(0).model_dump(mode="json"))
+            reply = replies.pop(0)
+            return reply if isinstance(reply, MagicMock) else Reply(reply.model_dump(mode="json"))
         body = body.model_dump(mode="json") if hasattr(body, "model_dump") else body
         if server_name == "agentic_mme":
             if url_path == "/verify":
@@ -407,6 +431,31 @@ async def test_a_collected_session_rollout_keeps_the_tool_trace_and_its_counts(m
         ),
     )
     _, row = await next(RolloutCollectionHelper().run_examples(rows))
+    return row, calls, model_inputs
+
+
+@pytest.mark.asyncio
+async def test_a_collected_session_rollout_keeps_the_tool_trace_and_its_counts(monkeypatch) -> None:
+    """The default recipe's rollout row keeps what /run returned: the trace, its retrieval metadata and the counts."""
+    # A live search result: the provider's answer, the leak guard's count and the cache outcome stay out of the
+    # model's tool output.
+    searched = {
+        "ok": True,
+        "tool": "google_search",
+        "context": "1. Red",
+        "raw": {"organic": [{"title": "provider-only answer"}]},
+        "contaminated": 1,
+        "cache": "miss",
+    }
+    monkeypatch.setattr(Retrieval, "call", AsyncMock(return_value=searched))
+    replies = [
+        response(output=[call("google_search", {"query": "image color"}, call_id="search")]),
+        response(output=[call(call_id="crop")]),
+        response(output=[call("zoom", {}, call_id="unknown")]),
+        response("<answer>red</answer>"),
+    ]
+    live = {"mode": "live", "serper_api_key": "k", "serpapi_api_key": "k", "allow_image_upload": True}
+    row, calls, model_inputs = await collect_config_rollout(monkeypatch, replies, retrieval=live)
 
     # The episode ran under an agent session, not through the agent's /run.
     assert ("agentic_mme_agent", "/v1/agent_sessions/close") in calls
@@ -422,4 +471,22 @@ async def test_a_collected_session_rollout_keeps_the_tool_trace_and_its_counts(m
     # The model saw only the search context, and the row stores the trace once.
     assert "provider-only answer" not in json.dumps(model_inputs)
     assert json.loads(model_inputs[1][-1]["output"]) == {"ok": True, "tool": "google_search", "context": "1. Red"}
+    assert row["response"].get("metrics") is None
+
+
+@pytest.mark.asyncio
+async def test_a_collected_context_limit_ending_scores_zero_with_its_cause(monkeypatch) -> None:
+    """The benchmark's rule under sessions: a context-limit refusal after a crop is the model's own result.
+
+    The Environment Server grades the failed response: the row scores 0, is graded, counts the crop, and records the
+    refusal as /run does.
+    """
+    refused = refused_reply(400, b'{"error": {"code": "context_length_exceeded", "message": "too many tokens"}}')
+    row, calls, _ = await collect_config_rollout(monkeypatch, [response(output=[call(call_id="crop")]), refused])
+
+    assert ("agentic_mme_agent", "/run") not in calls
+    assert ("agentic_mme", "/verify") in calls
+    assert row["reward"] == 0.0 and row["evaluation_completed"] is True and not row.get("mask_sample")
+    assert row["failure_reason"] == "policy_error" and "context_length_exceeded" in row["policy_error"]
+    assert row["tool_call_count"] == 1 and [event["tool_name"] for event in row["tool_trace"]] == ["crop"]
     assert row["response"].get("metrics") is None

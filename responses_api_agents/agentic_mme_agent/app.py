@@ -25,17 +25,22 @@ from nemo_gym.agents import (
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.agents.agent_outcome import policy_timeout_failure
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
     MODEL_CONTEXT_LIMIT,
+    MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
+    FailureHeader,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    RequestFailureLog,
     accumulate_response_usage,
+    report_for_current_request,
 )
 from nemo_gym.server_runtime import BaseRunRequest
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -94,30 +99,56 @@ class AgenticMMERunRequest(BaseRunRequest):
 
 
 @dataclass(frozen=True)
-class PolicyCallError:
-    """A policy-model call that failed and ended the episode.
+class PolicyCallFailure:
+    """A policy-model call that failed and ended the episode, with its cause as Gym's shared agent outcome.
 
-    ``status`` is the HTTP status when the model server refused the call for a reason other than a context or
-    request-size limit; that refusal is ``model_context_limit`` instead, so an outcome policy can tell the two apart.
-    A call that failed before a status (timeout, lost connection) is a transport error, and a reply that is not a
-    Response has an unknown cause.
+    A refusal for the context or request size is ``model_context_limit``, so an outcome policy can tell it from any
+    other refusal (``model_request_error`` with its HTTP status). A model server that timed out waiting for the model
+    on every attempt reports ``model_policy_response_timeout``. A call that failed before a status (timeout, lost
+    connection) is a transport error, and a reply that is not a Response has an unknown cause.
     """
 
     message: str
-    failure_kind: str
-    status: int | None = None
-    # False only for a context or request-size refusal, which ends the episode unanswered (the model's own
-    # result). Every other failure is infrastructure: /run raises it into the failures sidecar.
-    infrastructure: bool = True
+    outcome: AgentOutcome
+    # The failed call's failure report (the model server's report merged with this request's own), which recovery and
+    # health read from the response. None for a call that failed before a reply.
+    failure_report: dict[str, Any] | None = None
+
+    @property
+    def infrastructure(self) -> bool:
+        """False only for a context or request-size refusal, which ends the episode unanswered (the model's own
+        result). /run raises every other failure into the failures sidecar."""
+        return self.outcome.failure_kind != MODEL_CONTEXT_LIMIT
+
+    @classmethod
+    def from_reply(cls, error: ClientResponseError) -> "PolicyCallFailure":
+        """The failure for a model reply with an error status, as simple_agent classifies it under an agent session."""
+        content = getattr(error, "response_content", None)
+        detail = content.decode(errors="replace") if isinstance(content, bytes) else str(content or error.message)
+        timeout = policy_timeout_failure(error)
+        if is_context_limit(error.status, detail):
+            outcome = AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
+        elif timeout is not None:
+            outcome = AgentOutcome(failure_kind=MODEL_POLICY_RESPONSE_TIMEOUT)
+        elif 400 <= error.status <= 599:
+            outcome = AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=error.status)
+        else:
+            # aiohttp raises ClientResponseError for a redirect loop too, with a 3xx status.
+            outcome = AgentOutcome(failure_kind="unknown")
+        log = RequestFailureLog.current()
+        report = log.reply_report(timeout or error) if log else report_for_current_request(timeout or error)
+        forwarded = FailureHeader.decode(error.headers)
+        if forwarded is not None:
+            report = report.merged(forwarded)
+        return cls(f"HTTP {error.status}: {detail[:1000]}", outcome, report.model_dump(mode="json"))
 
     def failed_response(self, response: NeMoGymResponse) -> NeMoGymResponse:
-        """Mark the episode's response failed with this cause, as Gym's shared agent outcome.
+        """Mark the episode's response failed with this cause.
 
         The Environment Server then applies its outcome policy. ``configs/agentic_mme.yaml`` sets it to grade a
         context-limit refusal as the model's own result and to fail any other rejected request (400, 413, 422)
         ungraded, as ``/run`` does; a transport failure or a retryable status such as 429 or 503 is retried.
         """
-        outcome = AgentOutcome(failure_kind=self.failure_kind, status_code=self.status)
         return NeMoGymResponse.model_validate(
             response.model_dump()
             | {
@@ -126,9 +157,10 @@ class PolicyCallError:
                 "error": {"code": "server_error", "message": self.message},
                 "metadata": {
                     **(response.metadata or {}),
-                    AGENT_OUTCOME_METADATA_KEY: outcome.model_dump_json(exclude_none=True),
+                    AGENT_OUTCOME_METADATA_KEY: self.outcome.model_dump_json(exclude_none=True),
                 },
             }
+            | ({"failure_report": self.failure_report} if self.failure_report is not None else {})
         )
 
 
@@ -167,7 +199,7 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
         cookies: Any,
         replay: list[dict[str, Any]] | None = None,
         model_url_path: str = "/v1/responses",
-    ) -> tuple[NeMoGymResponse, Any, PolicyCallError | None]:
+    ) -> tuple[NeMoGymResponse, Any, PolicyCallFailure | None]:
         async with self._rollouts:
             workspace = ImageWorkspace(
                 max_pixels=self.config.max_image_pixels,
@@ -183,7 +215,7 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
         replay: list[dict[str, Any]] | None,
         workspace: ImageWorkspace,
         model_url_path: str = "/v1/responses",
-    ) -> tuple[NeMoGymResponse, Any, PolicyCallError | None]:
+    ) -> tuple[NeMoGymResponse, Any, PolicyCallFailure | None]:
         params = params.model_copy(deep=True)
         if isinstance(params.input, str):
             params.input = [NeMoGymEasyInputMessage(role="user", content=params.input)]
@@ -227,31 +259,20 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
                     json=new_params,
                     cookies=cookies,
                 )
-                if response.ok:
-                    reply = NeMoGymResponse.model_validate(await get_response_json(response))
-                else:
-                    error_body = (await response.read()).decode(errors="replace")
-            except (TimeoutError, ClientError, ValueError) as exc:
-                # The call failed without an HTTP status (connection lost, timeout after the client's
-                # retries, a body that is not JSON or not a Response): infrastructure, not the model.
-                message = f"{type(exc).__name__}: {str(exc)[:1000]}"
-                if isinstance(exc, ClientResponseError):
-                    policy_error = PolicyCallError(message, MODEL_REQUEST_ERROR, exc.status)
-                elif isinstance(exc, ValueError):
-                    policy_error = PolicyCallError(message, "unknown")
-                else:
-                    policy_error = PolicyCallError(message, MODEL_TRANSPORT_ERROR)
-                break
-            if not response.ok:
+                await raise_for_status(response)
+                reply = NeMoGymResponse.model_validate(await get_response_json(response))
+            except ClientResponseError as error:
                 # A context or request-size refusal (many tool images accumulated) ends the episode
                 # unanswered; any other status (a serving limit such as vLLM's per-prompt image limit, an
                 # unsupported parameter, 401, 429, 5xx) is infrastructure.
-                context_limit = is_context_limit(response.status, error_body)
-                policy_error = PolicyCallError(
-                    f"HTTP {response.status}: {error_body[:1000]}",
-                    MODEL_CONTEXT_LIMIT if context_limit else MODEL_REQUEST_ERROR,
-                    None if context_limit else response.status,
-                    infrastructure=not context_limit,
+                policy_error = PolicyCallFailure.from_reply(error)
+                break
+            except (TimeoutError, ClientError, ValueError) as exc:
+                # The call failed without an HTTP status (connection lost, timeout after the client's
+                # retries, a body that is not JSON or not a Response): infrastructure, not the model.
+                kind = "unknown" if isinstance(exc, ValueError) else MODEL_TRANSPORT_ERROR
+                policy_error = PolicyCallFailure(
+                    f"{type(exc).__name__}: {str(exc)[:1000]}", AgentOutcome(failure_kind=kind)
                 )
                 break
             cookies = response.cookies
