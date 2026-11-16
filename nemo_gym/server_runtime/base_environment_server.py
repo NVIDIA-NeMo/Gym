@@ -1,20 +1,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared lifecycle for environment servers."""
+"""Shared lifecycle for environment servers, and the base for those that serve each episode's tools."""
 
 import asyncio
+import json
 import logging
 from abc import abstractmethod
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Generic, TypeVar
+from time import perf_counter
+from typing import Any, ClassVar, Generic, Optional, TypeVar
 
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from anyio import CancelScope
-from fastapi import Body, FastAPI
+from fastapi import Body, FastAPI, Request
+from fastapi.responses import JSONResponse
 from pydantic import ConfigDict, Field, JsonValue, PositiveFloat, PositiveInt, model_validator
+from starlette.datastructures import Headers
 from typing_extensions import Self
 
 from nemo_gym.client.http_client import format_exception_with_response_body
@@ -33,6 +37,20 @@ from nemo_gym.server_runtime._checkpoint.participant_workers import install_serv
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime._checkpoint.steps import StepType
 from nemo_gym.server_runtime.base_server import SimpleServer
+from nemo_gym.server_runtime.episode_tokens import (
+    EPISODE_TOKEN_HEADER,
+    EpisodeTokenClaims,
+    EpisodeTokens,
+    episode_token_secret,
+)
+from nemo_gym.server_runtime.episode_tools import EpisodeToolset, ToolArgumentsError, ToolCallRecord, ToolSpec
+from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
+from nemo_gym.server_runtime.tool_access import (
+    TOOL_CALL_ID_HEADER,
+    TOOL_ERROR_HEADER,
+    DirectHTTPToolAccess,
+    ToolAccess,
+)
 from nemo_gym.telemetry.concurrency import MeteredSemaphore
 
 
@@ -554,3 +572,267 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
     @abstractmethod
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Aggregate per-rollout scores into task-level metrics."""
+
+
+class BaseEnvironmentServerWithToolsConfig(BaseEnvironmentServerConfig):
+    """Configure how a ``BaseEnvironmentServerWithTools`` serves its episodes' tools."""
+
+    tool_call_timeout_seconds: PositiveFloat | None = Field(
+        default=None,
+        description=(
+            "How long one tool call may run before the server cancels it and answers 504. Calls to one episode run "
+            "one at a time, so this also bounds how long a hung call, or one whose client disconnected, makes the "
+            "episode's next calls wait. None lets a call run until it returns or the episode ends."
+        ),
+    )
+
+
+@dataclass
+class ServedTools:
+    """The grants that give the agent one episode's tools, and the calls it has made so far."""
+
+    tool_accesses: list[ToolAccess]
+    calls: list[ToolCallRecord]
+
+
+@dataclass
+class _OpenEpisode:
+    claims: EpisodeTokenClaims
+    toolset: EpisodeToolset
+    specs: dict[str, ToolSpec]
+    calls: list[ToolCallRecord]
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # The call that holds the lock, so the end of the episode can stop it.
+    running: Optional[asyncio.Task] = None
+
+
+class _EpisodeTokensOpenOnlyTools:
+    """Refuse a request that carries an episode token anywhere but the episode's tools.
+
+    The agent sends the token with every call it makes through the grant, so this stops a model's call named
+    ``run`` (or ``../run``) from starting another episode on this server.
+    """
+
+    def __init__(self, app: Any, is_tool_path: Callable[[str], bool]) -> None:
+        self._app = app
+        self._is_tool_path = is_tool_path
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if (
+            scope.get("type") == "http"
+            and EPISODE_TOKEN_HEADER in Headers(scope=scope)
+            and not self._is_tool_path(scope["path"])
+        ):
+            response = JSONResponse(
+                status_code=403, content={"detail": "An episode token grants only the episode's tools"}
+            )
+            await response(scope, receive, send)
+            return
+        await self._app(scope, receive, send)
+
+
+class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, EpisodeResponseT]):
+    """An Environment Server that serves each episode's tools itself, so it needs no Resources Server.
+
+    Other Environment Servers grant the agent a Resources Server's tools; this one owns the tools, their state and
+    verification.
+
+    ``run`` holds the episode's state, and ``serve_tools`` grants the agent the episode's tools until the episode
+    ends. A tool call is a separate request to ``POST /<tool name>`` at the server's root, as on a Resources
+    Server, with the episode token in the ``X-NeMo-Gym-Episode-Token`` header. A request with an episode token
+    reaches only the tools. Calls to one episode run one at a time, each under the episode's rollout, and each is
+    recorded in ``ServedTools.calls``. When the episode ends, a call still running is cancelled. A call that runs
+    longer than ``tool_call_timeout_seconds`` is cancelled and answered 504. A client that disconnects
+    cancels its call, which is recorded.
+
+    The tool route takes every one-segment ``POST`` path that the server does not route when ``setup_webserver``
+    returns, so a subclass that adds its own routes gives them more than one path segment.
+
+    An agent may send the model's ``call_id`` in ``X-NeMo-Gym-Tool-Call-Id``; the record keeps it, to join the call
+    to the agent's trajectory. Every call runs, as on a Resources Server: an agent's client that resends a call after
+    a dropped connection runs it again.
+
+    The base refuses ``checkpoint_mode = "exported"``: a restored attempt has a new episode ID, and the agent's
+    grant still names the old one.
+    """
+
+    config: BaseEnvironmentServerWithToolsConfig
+    _episode_tokens: Optional[EpisodeTokens] = None
+    _open_episodes: Optional[dict[EpisodeId, _OpenEpisode]] = None
+    _reserved_tool_names: frozenset[str] = frozenset()
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if cls.checkpoint_mode == "exported":
+            raise TypeError(
+                f"{cls.__name__} sets checkpoint_mode='exported', which BaseEnvironmentServerWithTools does not "
+                "support: an agent's grant names the episode attempt that a restore replaces"
+            )
+
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
+        self._episode_tokens = EpisodeTokens(episode_token_secret())
+        self._open_episodes = {}
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        # Added before RolloutContextMiddleware, so it runs inside it and sees the path without a rollout prefix.
+        app.add_middleware(_EpisodeTokensOpenOnlyTools, is_tool_path=self._is_tool_path)
+        # A tool call under /ng-rollout/<id>/ (an agent that correlates its calls with the rollout) routes as bare.
+        app.add_middleware(RolloutContextMiddleware)
+        # A tool cannot take the name of the server's own routes; the catch-all below comes after them.
+        self._reserved_tool_names = frozenset(
+            route.path.strip("/").split("/")[0] for route in app.routes if getattr(route, "path", "/") != "/"
+        )
+        app.post("/{tool_name}")(self._tool_call_endpoint)
+        return app
+
+    def _is_tool_path(self, path: str) -> bool:
+        segments = path.strip("/").split("/")
+        return len(segments) == 1 and segments[0] not in self._reserved_tool_names
+
+    def multiple_workers_unsupported_reason(self) -> Optional[str]:
+        return "a tool call reaches whichever worker accepts it, and only the worker that runs the episode holds it"
+
+    async def serve_tools(
+        self, request: EpisodeRequestT, toolset: EpisodeToolset, cleanup: CleanupContext
+    ) -> ServedTools:
+        """Grant the agent ``toolset`` for this episode, until the episode's cleanup runs.
+
+        Returns the grants for the agent's seed (``AgentSeedSessionRequest.tool_accesses``) and the list that
+        records each call. A call after the episode ends gets 410. Declare the tools to the model with
+        ``ToolSpec.function_tool``.
+        """
+        episode_id = request.episode_id
+        if episode_id in self._open_episodes:
+            raise ValueError(f"Episode {episode_id.capture_key} already serves its tools")
+        listed = list(toolset.specs())
+        specs = {spec.name: spec for spec in listed}
+        if len(specs) != len(listed):
+            raise ValueError("Episode tool names must be unique")
+        reserved = sorted(specs.keys() & self._reserved_tool_names)
+        if reserved:
+            raise ValueError(f"Episode tools cannot take the names of the server's routes: {', '.join(reserved)}")
+
+        token, claims = self._episode_tokens.mint(episode_id)
+        episode = _OpenEpisode(claims=claims, toolset=toolset, specs=specs, calls=[])
+        self._open_episodes[episode_id] = episode
+
+        async def stop_serving() -> None:
+            if self._open_episodes.get(episode_id) is episode:
+                del self._open_episodes[episode_id]
+            # A call still running would change state that the episode no longer owns, such as a stopped sandbox.
+            running = episode.running
+            if running is not None and not running.done():
+                running.cancel()
+                await asyncio.wait({running})
+
+        cleanup.register_cleanup("episode tools", stop_serving)
+        base_url = self.server_client._resolve_base_url(self.config.name)
+        grant = DirectHTTPToolAccess(
+            name=f"{self.config.name}.direct_http",
+            required=True,
+            base_url=base_url,
+            headers={EPISODE_TOKEN_HEADER: token},
+        )
+        return ServedTools(tool_accesses=[grant], calls=episode.calls)
+
+    async def _tool_call_endpoint(self, tool_name: str, request: Request) -> JSONResponse:
+        claims = self._episode_tokens.read(request.headers.get(EPISODE_TOKEN_HEADER, ""))
+        if claims is None:
+            return _refusal(401, f"A tool call needs a valid {EPISODE_TOKEN_HEADER} header")
+        episode = self._open_episodes.get(claims.episode_id)
+        if episode is None:
+            return _refusal(410, f"Episode {claims.episode_id.capture_key} is not running on this server")
+        if not episode.claims.matches(claims):
+            return _refusal(403, "The episode token was not granted for this episode")
+
+        try:
+            arguments = await request.json()
+        except ValueError:
+            arguments = None
+        call_id = request.headers.get(TOOL_CALL_ID_HEADER) or None
+        async with episode.lock:
+            # The episode can end while this call waits for its body or for the calls before it.
+            if self._open_episodes.get(claims.episode_id) is not episode:
+                return _refusal(410, f"Episode {claims.episode_id.capture_key} is not running on this server")
+            episode.running = asyncio.ensure_future(self._call_tool(episode, tool_name, arguments, call_id))
+            try:
+                status, output, is_error = await episode.running
+            except asyncio.CancelledError:
+                if asyncio.current_task().cancelling():
+                    raise
+                # The end of the episode cancelled the call, not this request.
+                return _refusal(410, f"Episode {claims.episode_id.capture_key} ended while the call ran")
+            finally:
+                episode.running = None
+        return JSONResponse(
+            status_code=status, content=output, headers={TOOL_ERROR_HEADER: "true"} if is_error else None
+        )
+
+    async def _call_tool(
+        self, episode: _OpenEpisode, name: str, arguments: Any, call_id: Optional[str] = None
+    ) -> tuple[int, JsonValue, bool]:
+        """Run one call, under the episode's rollout, and record it, including a call to a tool it does not have."""
+        started = perf_counter()
+        status, is_error = 200, False
+
+        def record(output: JsonValue) -> None:
+            episode.calls.append(
+                ToolCallRecord(
+                    name=name,
+                    arguments=arguments,
+                    output=output,
+                    is_error=is_error,
+                    duration_seconds=perf_counter() - started,
+                    call_id=call_id,
+                )
+            )
+
+        try:
+            with rollout_context(episode.claims.episode_id.capture_key):
+                if name not in episode.specs:
+                    detail = f"Episode {episode.claims.episode_id.capture_key} has no tool {name!r}"
+                    status, is_error, output = 404, True, {"detail": detail}
+                elif not isinstance(arguments, dict):
+                    raise ToolArgumentsError("Tool arguments must be a JSON object")
+                else:
+                    timeout = self.config.tool_call_timeout_seconds
+                    deadline = asyncio.timeout(timeout)
+                    try:
+                        async with deadline:
+                            result = await episode.toolset.call(name, arguments)
+                    except TimeoutError:
+                        # A TimeoutError the tool raises itself is a failure of the tool, handled below.
+                        if not deadline.expired():
+                            raise
+                        status, is_error = 504, True
+                        output = {"detail": f"Tool {name!r} did not finish within {timeout} seconds"}
+                    else:
+                        output, is_error = result.output, result.is_error
+        except ToolArgumentsError as error:
+            status, is_error, output = 422, True, {"detail": str(error)}
+        except asyncio.CancelledError:
+            is_error = True
+            record({"detail": f"Tool {name!r} was cancelled"})
+            raise
+        except Exception as error:
+            LOGGER.exception(f"Episode tool {name!r} failed: episode_id={episode.claims.episode_id}")
+            status, is_error, output = 500, True, {"detail": f"Tool {name!r} failed: {type(error).__name__}"}
+        if not _is_json(output):
+            status, is_error = 500, True
+            output = {"detail": f"Tool {name!r} returned a value that is not JSON, such as NaN or Infinity"}
+        record(output)
+        return status, output, is_error
+
+
+def _is_json(value: JsonValue) -> bool:
+    try:
+        json.dumps(value, allow_nan=False)
+    except ValueError:
+        return False
+    return True
+
+
+def _refusal(status: int, detail: str) -> JSONResponse:
+    return JSONResponse(status_code=status, content={"detail": detail})
