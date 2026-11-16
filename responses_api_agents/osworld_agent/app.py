@@ -63,6 +63,7 @@ from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
+from nemo_gym.trajectory import ModelCallRef, TrajectoryRecord, TrajectoryTurn
 from responses_api_agents.osworld_agent.agent_contract import (
     ResolvedAgentContract,
     assert_train_eval_parity,
@@ -1691,6 +1692,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 max_output_tokens=max_tokens,
                 exact_trace_transport_version=self.config.exact_trace_transport_version,
                 served_call_output=self._token_id_capture_enabled(),
+                policy_model_ref=self.config.model_server,
             )
 
 
@@ -1759,6 +1761,7 @@ def _build_response(
     max_output_tokens: Optional[int] = None,
     exact_trace_transport_version: Literal[2, 3] = 2,
     served_call_output: bool = False,
+    policy_model_ref: Optional[ModelServerRef] = None,
 ) -> OSWorldVerifyResponse:
     """Pack one run without changing its prompt policy for training consumers.
 
@@ -1925,11 +1928,29 @@ def _build_response(
     if terminal_response_id is not None:
         # Names the scored (last) generation by the id the model server served.
         response_fields["terminal_response_id"] = terminal_response_id
-    if accepted_call_references:
+    if accepted_call_references and policy_model_ref is not None:
         # The trainer resolves these served response IDs against capture records.
         # Keeping membership separate from response.output means rejected
         # retries remain in the capture manifest as exact context evidence.
-        response_fields["ng_trajectory"] = {"turns": [{"model_calls": accepted_call_references}]}
+        task_id = trajectory_fields["trajectory_contract"]["task_id"]
+        rollout_id = trajectory_fields["trajectory_contract"]["rollout_id"]
+        response_fields["ng_trajectory"] = TrajectoryRecord(
+            task_id=task_id,
+            rollout_id=rollout_id,
+            turns=[
+                TrajectoryTurn(
+                    invocation_id=rollout_id,
+                    task_id=task_id,
+                    rollout_id=rollout_id,
+                    turn_no=turn_no,
+                    timestamp=0.0,
+                    answer=[item],
+                    step_count=turn_no,
+                    model_calls=[ModelCallRef(model_ref=policy_model_ref, response_id=reference["response_id"])],
+                )
+                for turn_no, (item, reference) in enumerate(zip(output, accepted_call_references, strict=True), 1)
+            ],
+        ).model_dump(mode="json")
     # A refused rollout is a typed failure row: an infrastructure cause retries, a failed policy call is the model's.
     response_fields |= _admission_failure_fields(result, runtime_admission)
     sandbox_start_failure = result.get("sandbox_start_failure")

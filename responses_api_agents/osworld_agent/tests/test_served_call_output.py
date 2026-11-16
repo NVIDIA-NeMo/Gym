@@ -10,14 +10,16 @@ the model server served; complete evidence also retains rejected attempts.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any, Dict
+from typing import Any, Dict, List
 from unittest.mock import patch
 
 import pytest
 
+from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.models.token_capture.completion import completion_items, output_item_fingerprint
+from nemo_gym.trajectory import TrajectoryRecord
 from responses_api_agents.osworld_agent.app import (
     OSWorldRunRequest,
     _build_messages_model_fn,
@@ -26,6 +28,12 @@ from responses_api_agents.osworld_agent.app import (
 
 
 _WRAP = ChatCompletionsConverter(return_token_id_information=False, uses_reasoning_parser=True)
+_POLICY = ModelServerRef(type="responses_api_models", name="policy_model")
+
+
+def _trajectory_response_ids(dumped: Dict[str, Any]) -> List[str]:
+    record = TrajectoryRecord.model_validate(dumped["ng_trajectory"])
+    return [ref.response_id for turn in record.turns for ref in turn.model_calls]
 
 
 def _served(reasoning: str, content: str) -> str:
@@ -153,7 +161,9 @@ def _captured_fingerprint(response_id: str) -> str:
 
 def test_capture_on_output_returns_only_accepted_generations_verbatim() -> None:
     result = _capture_on_result()
-    response = _build_response(_request(), result, "policy", 0.6, 0.95, served_call_output=True)
+    response = _build_response(
+        _request(), result, "policy", 0.6, 0.95, served_call_output=True, policy_model_ref=_POLICY
+    )
     dumped = response.model_dump()
 
     output = dumped["response"]["output"]
@@ -170,17 +180,7 @@ def test_capture_on_output_returns_only_accepted_generations_verbatim() -> None:
     assert len(calls) == 6
     assert calls[1]["accepted"] is False
     assert calls[1]["action"]["raw_completion"] == _SERVED["chatcmpl-2"]
-    assert dumped["ng_trajectory"] == {
-        "turns": [
-            {
-                "model_calls": [
-                    {"response_id": "chatcmpl-1"},
-                    {"response_id": "chatcmpl-3"},
-                    {"response_id": "chatcmpl-5"},
-                ]
-            }
-        ]
-    }
+    assert _trajectory_response_ids(dumped) == ["chatcmpl-1", "chatcmpl-3", "chatcmpl-5"]
     # Semantic per-step evidence is unchanged.
     transitions = dumped["response"]["trajectory_transitions"]
     assert [t["action"]["raw_completion"] for t in transitions] == [
@@ -194,7 +194,9 @@ def test_capture_on_output_returns_only_accepted_generations_verbatim() -> None:
 def test_rejected_terminal_is_not_reattributed_to_an_earlier_accepted_call() -> None:
     result = _capture_on_result()
     result["steps"][-1]["info"]["agent"]["model_calls"][-1]["accepted"] = False
-    response = _build_response(_request(), result, "policy", 0.6, 0.95, served_call_output=True).model_dump()
+    response = _build_response(
+        _request(), result, "policy", 0.6, 0.95, served_call_output=True, policy_model_ref=_POLICY
+    ).model_dump()
     assert [item["id"] for item in response["response"]["output"]] == ["msg-call-1", "msg-call-3"]
     assert response["terminal_response_id"] == "chatcmpl-5"
     assert response["reward"] == 1.0
@@ -218,7 +220,9 @@ def test_capture_history_keeps_runtime_failure_fields(reason: str, failure_kind:
         error="TimeoutError: request timed out",
     )
 
-    response = _build_response(_request(), result, "policy", 0.6, 0.95, served_call_output=True).model_dump()
+    response = _build_response(
+        _request(), result, "policy", 0.6, 0.95, served_call_output=True, policy_model_ref=_POLICY
+    ).model_dump()
 
     assert response["terminal_response_id"] == "chatcmpl-5"
     assert response["failure_kind"] == failure_kind
@@ -239,7 +243,9 @@ def test_capture_with_no_accepted_output_never_falls_back_to_step_text(kind: str
         call["response"]["raw_content"] = ""
     elif kind == "missing":
         call["response"] = None
-    response = _build_response(_request(), result, "policy", 0.6, 0.95, served_call_output=True).model_dump()
+    response = _build_response(
+        _request(), result, "policy", 0.6, 0.95, served_call_output=True, policy_model_ref=_POLICY
+    ).model_dump()
     assert response["response"]["output"] == []
     if kind == "rejected":
         assert response["terminal_response_id"] == "chatcmpl-1"
@@ -250,14 +256,18 @@ def test_capture_with_no_accepted_output_never_falls_back_to_step_text(kind: str
 def test_capture_does_not_reuse_an_earlier_terminal_id_when_the_last_id_is_missing() -> None:
     result = _capture_on_result()
     result["steps"][-1]["info"]["agent"]["model_calls"][-1]["response"].pop("response_id")
-    response = _build_response(_request(), result, "policy", 0.6, 0.95, served_call_output=True).model_dump()
+    response = _build_response(
+        _request(), result, "policy", 0.6, 0.95, served_call_output=True, policy_model_ref=_POLICY
+    ).model_dump()
     assert "terminal_response_id" not in response
 
 
 def test_member_without_a_served_id_omits_call_references() -> None:
     result = _capture_on_result()
     result["steps"][0]["info"]["agent"]["model_calls"][0]["response"].pop("response_id")
-    response = _build_response(_request(), result, "policy", 0.6, 0.95, served_call_output=True).model_dump()
+    response = _build_response(
+        _request(), result, "policy", 0.6, 0.95, served_call_output=True, policy_model_ref=_POLICY
+    ).model_dump()
     assert response["terminal_response_id"] == "chatcmpl-5"
     assert "ng_trajectory" not in response
 
@@ -268,7 +278,7 @@ def test_rejected_terminal_without_a_served_id_fails_closed() -> None:
     terminal["accepted"] = False
     terminal["response"].pop("response_id")
     with pytest.raises(ValueError, match="Rejected terminal call has no served response_id"):
-        _build_response(_request(), result, "policy", 0.6, 0.95, served_call_output=True)
+        _build_response(_request(), result, "policy", 0.6, 0.95, served_call_output=True, policy_model_ref=_POLICY)
 
 
 def test_capture_off_output_keeps_step_messages() -> None:
@@ -283,7 +293,9 @@ def test_capture_on_without_call_evidence_keeps_step_messages() -> None:
     result = _capture_on_result()
     for step in result["steps"]:
         step["info"] = {}
-    response = _build_response(_request(), result, "policy", 0.6, 0.95, served_call_output=True)
+    response = _build_response(
+        _request(), result, "policy", 0.6, 0.95, served_call_output=True, policy_model_ref=_POLICY
+    )
     dumped = response.model_dump()
 
     assert [item["id"] for item in dumped["response"]["output"]] == ["msg-step-0", "msg-step-1", "msg-step-2"]
@@ -297,7 +309,9 @@ def test_capture_on_with_no_accepted_calls_returns_empty_membership() -> None:
             call["accepted"] = False
             call["parse_error"] = "bad action"
 
-    response = _build_response(_request(), result, "policy", 0.6, 0.95, served_call_output=True)
+    response = _build_response(
+        _request(), result, "policy", 0.6, 0.95, served_call_output=True, policy_model_ref=_POLICY
+    )
     dumped = response.model_dump()
 
     assert dumped["response"]["output"] == []

@@ -8,9 +8,11 @@ from typing import Any, Dict, List
 
 import pytest
 
+from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.models.token_capture.completion import completion_items, output_item_fingerprint
+from nemo_gym.trajectory import TrajectoryRecord
 from responses_api_agents.osworld_agent.adapter_agents import (
     NemotronV3NanoOmniAgent,
     normalize_nemotron_agent_options,
@@ -22,6 +24,12 @@ GOOD = "## Action:\nClick.\n## Code:\n```python\npyautogui.click(0.5, 0.5)\n```"
 SYNTAX_ERROR = "## Action:\nClick.\n## Code:\n```python\nif True\n    pyautogui.click(0.5, 0.5)\n```"
 NO_CODE = "I keep thinking about the next step"
 _WRAP = ChatCompletionsConverter(return_token_id_information=False, uses_reasoning_parser=True)
+_POLICY = ModelServerRef(type="responses_api_models", name="policy_model")
+
+
+def _trajectory_response_ids(dumped: Dict[str, Any]) -> List[str]:
+    record = TrajectoryRecord.model_validate(dumped["ng_trajectory"])
+    return [ref.response_id for turn in record.turns for ref in turn.model_calls]
 
 
 def _agent(**kwargs: Any) -> NemotronV3NanoOmniAgent:
@@ -212,14 +220,14 @@ def _request() -> OSWorldRunRequest:
 
 def test_terminal_loss_member_is_returned_for_capture_membership() -> None:
     result, runaway = _result(terminal_loss_member=True)
-    dumped = _build_response(_request(), result, "policy", 1.0, 1.0, served_call_output=True).model_dump()
+    dumped = _build_response(
+        _request(), result, "policy", 1.0, 1.0, served_call_output=True, policy_model_ref=_POLICY
+    ).model_dump()
 
     output = dumped["response"]["output"]
     assert [item["content"][0]["text"] for item in output][-1] == runaway
     assert dumped["terminal_response_id"] == "chatcmpl-2"
-    assert dumped["ng_trajectory"] == {
-        "turns": [{"model_calls": [{"response_id": "chatcmpl-1"}, {"response_id": "chatcmpl-2"}]}]
-    }
+    assert _trajectory_response_ids(dumped) == ["chatcmpl-1", "chatcmpl-2"]
     captured = {
         "id": "chatcmpl-2",
         "object": "chat.completion",
@@ -289,11 +297,13 @@ def test_legacy_parser_keeps_policy_terminate_semantics() -> None:
 
 def test_rejected_terminal_call_stays_out_of_membership_by_default() -> None:
     result, _ = _result(terminal_loss_member=False)
-    dumped = _build_response(_request(), result, "policy", 1.0, 1.0, served_call_output=True).model_dump()
+    dumped = _build_response(
+        _request(), result, "policy", 1.0, 1.0, served_call_output=True, policy_model_ref=_POLICY
+    ).model_dump()
 
     # The terminal still names the scored (rejected) call; only membership excludes it.
     assert dumped["terminal_response_id"] == "chatcmpl-2"
-    assert dumped["ng_trajectory"] == {"turns": [{"model_calls": [{"response_id": "chatcmpl-1"}]}]}
+    assert _trajectory_response_ids(dumped) == ["chatcmpl-1"]
 
 
 def _over_guard_reply() -> Dict[str, Any]:
