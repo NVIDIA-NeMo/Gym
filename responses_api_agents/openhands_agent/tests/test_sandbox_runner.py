@@ -150,11 +150,17 @@ class Conversation:
 MCP_STUB = """
 import contextlib, json, os
 
+class MCPServer:
+    # create_mcp_tools takes only these, not plain settings.
+    def __init__(self, **settings):
+        self.settings = settings
+
 @contextlib.contextmanager
 def create_mcp_tools(config, timeout):
     (name,) = config
+    assert all(isinstance(server, MCPServer) for server in config.values())
     with open(os.environ["STUB_LOG"], "a") as handle:
-        handle.write(json.dumps({"mcp_probe": config, "timeout": timeout}) + "\\n")
+        handle.write(json.dumps({"mcp_probe": {n: s.settings for n, s in config.items()}, "timeout": timeout}) + "\\n")
     if name == os.environ.get("STUB_MCP_DOWN"):
         raise ConnectionError("refused")
     class Client:

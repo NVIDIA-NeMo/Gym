@@ -95,11 +95,14 @@ def mcp_config(servers: dict[str, dict[str, object]]) -> dict[str, dict[str, obj
 
 def check_required_mcp(servers: dict[str, dict[str, object]]) -> None:
     """Connect to every required grant once; OpenHands itself skips a server it cannot reach, with a warning."""
-    from openhands.sdk.mcp import create_mcp_tools
+    required = mcp_config({name: server for name, server in servers.items() if server.get("required")})
+    if not required:
+        return
+    from openhands.sdk.mcp import MCPServer, create_mcp_tools
 
-    for name, server in mcp_config({n: s for n, s in servers.items() if s.get("required")}).items():
+    for name, server in required.items():
         try:
-            with create_mcp_tools({name: server}, timeout=60) as client:
+            with create_mcp_tools({name: MCPServer(**server)}, timeout=60) as client:
                 if not client.tools:
                     raise RuntimeError("it offers no tools")
         except Exception as error:

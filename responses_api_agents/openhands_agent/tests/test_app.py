@@ -97,7 +97,9 @@ def mcp_grant(*, required):
             agent(),
             seed(
                 tool_accesses=[
-                    DirectHTTPToolAccess(name="task_tools.direct_http", required=True, base_url="http://resources:8080")
+                    DirectHTTPToolAccess(
+                        name="task_tools.direct_http", required=True, base_url="http://resources:8080"
+                    )
                 ]
             ),
             "only over MCP",
@@ -576,7 +578,12 @@ def test_request_sampling_becomes_the_runs_llm_settings():
     assert sampling == {"temperature": 0.6, "top_p": 0.9, "max_output_tokens": 512}
     llm = instance._runner_input(session_state(), prompt=prompt, system=system, sampling=sampling)["llm"]
     # The request wins over the configured setting; the adapter's connection fields still win over both.
-    assert (llm["temperature"], llm["top_p"], llm["max_output_tokens"], llm["reasoning_effort"]) == (0.6, 0.9, 512, None)
+    assert (llm["temperature"], llm["top_p"], llm["max_output_tokens"], llm["reasoning_effort"]) == (
+        0.6,
+        0.9,
+        512,
+        None,
+    )
     assert llm["num_retries"] == 0 and llm["api_key"] == "gym"
 
 
