@@ -8,7 +8,7 @@ from asyncio import create_subprocess_shell
 from asyncio.subprocess import PIPE, STDOUT
 from collections.abc import Iterator
 from contextlib import contextmanager
-from os import killpg
+from os import environ, killpg
 from pathlib import Path
 from shlex import join, quote, split
 from signal import SIGKILL, SIGTERM
@@ -1108,10 +1108,15 @@ class BuildContainerHelper(BaseModel):
         builder_srun_slurm_vars: Dict[str, Any],
     ) -> CommandOutput:
         env_vars = builder_env_vars.copy()
-        srun_slurm_vars = self.config.slurm | builder_srun_slurm_vars
+        # Builds use absolute image/interpreter paths and create their sources in
+        # /tmp. The submission checkout need not be accessible on the build node.
+        srun_slurm_vars = {"chdir": "/tmp", "container-workdir": "/tmp"} | self.config.slurm | builder_srun_slurm_vars
         # Export names only: values stay shell-quoted in srun's environment,
         # including values containing commas. Do not inherit the host virtualenv.
-        srun_slurm_vars["export"] = ",".join(env_vars) or "NONE"
+        # Pyxis starts Enroot before the build script, so it also needs the
+        # submitting user's identity/home even with --no-container-mount-home.
+        runtime_env = [name for name in ("HOME", "USER", "LOGNAME") if name in environ]
+        srun_slurm_vars["export"] = ",".join(dict.fromkeys([*runtime_env, *env_vars])) or "NONE"
         # A unique name identifies even a pending allocation, before a job ID
         # or remote task is available. Never cancel unrelated builds by name.
         job_name = f"{srun_slurm_vars.get('job-name', 'build-container')}-{uuid4().hex}"

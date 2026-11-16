@@ -103,7 +103,7 @@ def test_all_build_stages_export_python_and_fail_before_building(
 
 
 @pytest.mark.parametrize("with_env", [True, False])
-async def test_srun_exports_only_builder_env(container_config, tmp_path, monkeypatch, with_env):
+async def test_srun_exports_builder_and_container_runtime_env(container_config, tmp_path, monkeypatch, with_env):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     srun = bin_dir / "srun"
@@ -116,6 +116,8 @@ assert len(exports) == 1
 print(json.dumps(exports[0]), flush=True)
 names = [] if exports[0] == 'NONE' else exports[0].split(',')
 env = {name: os.environ[name] for name in names}
+# Enroot runs before the container entrypoint, under this filtered environment.
+subprocess.run(['/bin/bash', '-u', '-c', ': "$HOME" "$USER" "$LOGNAME"'], env=env, check=True)
 while args[0].startswith('--'):
     args.pop(0)
 sys.exit(subprocess.run(args, env=env).returncode)
@@ -125,17 +127,37 @@ sys.exit(subprocess.run(args, env=env).returncode)
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
     monkeypatch.setenv("VIRTUAL_ENV", "/host/.venv")
     monkeypatch.setenv("PYO3_PYTHON", "/host/.venv/bin/python")
+    monkeypatch.setenv("PYTHONPATH", "/host/site-packages")
+    runtime_env = {"HOME": "/home/build user,quoted'$(touch INJECTED)", "USER": "builder", "LOGNAME": "builder"}
+    for key, value in runtime_env.items():
+        monkeypatch.setenv(key, value)
     env = {"BUILD_REPO": "repo with spaces ' $(touch INJECTED)", "BUILD_MODULES": "one,two"} if with_env else {}
     container_config.slurm["export"] = "ALL"
     helper = BuildContainerHelper(config=container_config)
-    keys = ["BUILD_REPO", "BUILD_MODULES", "VIRTUAL_ENV", "PYO3_PYTHON"]
+    keys = ["HOME", "USER", "LOGNAME", "BUILD_REPO", "BUILD_MODULES", "VIRTUAL_ENV", "PYO3_PYTHON", "PYTHONPATH"]
     command = shlex.join(
         [sys.executable, "-c", f"import json, os; print(json.dumps({{k: os.environ.get(k) for k in {keys!r}}}))"]
     )
     result = await helper._run_single_srun(command, env, {"export": "ALL"})
     assert result.returncode == 0
-    assert json.loads(result.output_lines[0]) == ("BUILD_REPO,BUILD_MODULES" if with_env else "NONE")
-    assert json.loads(result.output_lines[1]) == {key: env.get(key) for key in keys}
+    assert set(json.loads(result.output_lines[0]).split(",")) == set(runtime_env) | set(env)
+    assert json.loads(result.output_lines[1]) == {key: (runtime_env | env).get(key) for key in keys}
+
+
+@pytest.mark.parametrize("configured", [False, True])
+async def test_build_workdir_does_not_require_the_submission_directory(
+    container_config: BuildContainerConfig, monkeypatch: pytest.MonkeyPatch, configured: bool
+) -> None:
+    if configured:
+        container_config.slurm.update({"chdir": "/shared/build dir", "container-workdir": "/workspace"})
+    run_command = AsyncMock(return_value=CommandOutput(returncode=0, output_lines=[]))
+    monkeypatch.setattr(build_containers, "_run_command", run_command)
+
+    await BuildContainerHelper(config=container_config)._run_single_srun("true", {}, {})
+
+    argv = shlex.split(run_command.call_args.args[0])
+    assert f"--chdir={'/shared/build dir' if configured else '/tmp'}" in argv
+    assert f"--container-workdir={'/workspace' if configured else '/tmp'}" in argv
 
 
 @pytest.mark.asyncio
