@@ -70,6 +70,7 @@ env:
       - results/harbor/claweval_train/run_config_opencode_agent.yaml
       - environments/harbor/claweval_train/harbor_train.yaml
       # optional, both or neither: the two entries' compaction_plugins.yaml
+      # optional: environments/harbor/agentic_vbench_train/subagents.yaml (delegation to the analyst)
       - environments/unified_video_agentic/config.yaml
     sandbox: docker   # or the provider the run configs name
 ```
@@ -77,8 +78,11 @@ env:
 The two overlays set the shared `opencode_agent` instance (image input, token capture, the time ceiling, the
 context and output budgets) to the same values, so their order does not matter; a value for one member only goes
 under that taskset's agent instance, `harbor_agentic_vbench_train_agent` or `harbor_claweval_train_agent`, which
-the run configs derive from the base. The harbor server resolves each row's task folder through the run config's
-taskset mapping, so the entries must stay where they were prepared. The judge key for both verifiers is
+the run configs derive from the base. The Agentic-VBench `subagents.yaml` overlay also sets the base, so in a
+composed run every member's sessions get the `analyst` delegate; key its `opencode_config.agent` block under
+`harbor_agentic_vbench_train_agent` instead to keep delegation to that member. The harbor server resolves each
+row's task folder through the run config's taskset mapping, so the entries must stay where they were prepared.
+The judge key for both verifiers is
 `NVINFERENCE_API_KEY` in the server's environment (the overlays' `secrets`).
 
 ## Build a training mixture
