@@ -109,7 +109,7 @@ class TestGlobalConfig:
             "uv_venv_dir": str(WORKING_DIR),
             "results_dir": str(RESULTS_DIR.expanduser().resolve()),
             "cache_dir": str(CACHE_DIR.expanduser().resolve()),
-            "debug_dir": None,
+            "debug_files": False,
             "temp_dir": None,
         }
 
@@ -363,16 +363,19 @@ class TestGlobalConfig:
         with raises(ConfigError, match="results_dir must be a non-empty path string"):
             get_global_config_dict()
 
-    def test_runtime_file_roots_resolve_to_absolute_paths(self, monkeypatch: MonkeyPatch) -> None:
+    def test_temp_dir_resolves_to_an_absolute_path(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
-        self._mock_parse_environment(
-            monkeypatch, DictConfig({"debug_dir": "relative/debug", "temp_dir": "~/gym-temp"})
-        )
+        self._mock_parse_environment(monkeypatch, DictConfig({"temp_dir": "~/gym-temp"}))
 
-        global_config_dict = get_global_config_dict()
         # A server resolves a relative path against its own source folder, so the parser hands it an absolute one.
-        assert global_config_dict["debug_dir"] == os.path.abspath("relative/debug")
-        assert global_config_dict["temp_dir"] == os.path.join(os.path.expanduser("~"), "gym-temp")
+        assert get_global_config_dict()["temp_dir"] == os.path.join(os.path.expanduser("~"), "gym-temp")
+
+    def test_debug_files_must_be_a_boolean(self, monkeypatch: MonkeyPatch) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        self._mock_parse_environment(monkeypatch, DictConfig({"debug_files": "/some/folder"}))
+
+        with raises(ConfigError, match="debug_files must be a boolean"):
+            get_global_config_dict()
 
     def test_runtime_file_roots_keep_symlinks_for_each_node_to_follow(
         self, monkeypatch: MonkeyPatch, tmp_path
@@ -384,13 +387,12 @@ class TestGlobalConfig:
 
         assert get_global_config_dict()["temp_dir"] == str(tmp_path / "link" / "temp")
 
-    @mark.parametrize("key", ["debug_dir", "temp_dir"])
-    def test_empty_runtime_file_root_is_refused(self, monkeypatch: MonkeyPatch, key: str) -> None:
+    def test_empty_temp_dir_is_refused(self, monkeypatch: MonkeyPatch) -> None:
         # An empty string would otherwise become the working directory: the source checkout.
         self._mock_versions_for_testing(monkeypatch)
-        self._mock_parse_environment(monkeypatch, DictConfig({key: ""}))
+        self._mock_parse_environment(monkeypatch, DictConfig({"temp_dir": ""}))
 
-        with raises(ConfigError, match=f"{key} must be a non-empty path string"):
+        with raises(ConfigError, match="temp_dir must be a non-empty path string"):
             get_global_config_dict()
 
     def test_get_global_config_dict_global_exists(self, monkeypatch: MonkeyPatch) -> None:

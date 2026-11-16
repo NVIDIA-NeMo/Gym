@@ -28,6 +28,7 @@ from omegaconf import DictConfig
 
 import nemo_gym.config.global_config as global_config
 import nemo_gym.core.runtime_files as runtime_files
+from nemo_gym.config.config_types import BaseRunServerInstanceConfig
 from nemo_gym.core.episode_context import rollout_context
 from nemo_gym.core.runtime_files import (
     async_temp_folder,
@@ -52,37 +53,36 @@ def set_global_config(monkeypatch: pytest.MonkeyPatch):
 
 
 class TestDebugFolder:
-    def test_off_without_a_global_or_server_setting(self, set_global_config) -> None:
-        set_global_config({"debug_dir": None})
+    def test_off_unless_the_global_or_server_switch_is_on(self, set_global_config, tmp_path: Path) -> None:
+        set_global_config({"debug_files": False, "results_dir": str(tmp_path)})
         assert debug_folder(server_name="swebench", kind="verification") is None
+        assert debug_folder(server_name="swebench", kind="verification", debug_files=False) is None
 
         set_global_config(None)
         assert debug_folder(server_name="swebench", kind="verification") is None
 
-    def test_global_root_separates_server_kind_rollout_and_agent_instance(
-        self, set_global_config, tmp_path: Path
-    ) -> None:
-        set_global_config({"debug_dir": str(tmp_path)})
+    def test_lands_under_the_server_results_by_kind_and_rollout(self, set_global_config, tmp_path: Path) -> None:
+        set_global_config({"debug_files": True, "results_dir": str(tmp_path)})
 
         with rollout_context("4-2-a1"):
             path = debug_folder(server_name="swebench", kind="verification", label="astropy__astropy-1")
 
         assert path is not None
-        assert path.parent == tmp_path / "swebench" / "verification" / "4-2-a1" / "unnamed"
+        assert path.parent == tmp_path / "swebench" / "debug" / "verification" / "4-2-a1"
         assert "-astropy__astropy-1-" in path.name
         # Nothing is created until the server writes into the folder.
         assert not path.exists()
 
     def test_outside_a_rollout_uses_a_fixed_segment(self, set_global_config, tmp_path: Path) -> None:
-        set_global_config({"debug_dir": str(tmp_path)})
+        set_global_config({"debug_files": True, "results_dir": str(tmp_path)})
 
         path = debug_folder(server_name="vision2code", kind="render")
 
         assert path is not None
-        assert path.parent == tmp_path / "vision2code" / "render" / "no-rollout" / "unnamed"
+        assert path.parent == tmp_path / "vision2code" / "debug" / "render" / "no-rollout"
 
     def test_repeated_calls_in_one_rollout_get_separate_folders(self, set_global_config, tmp_path: Path) -> None:
-        set_global_config({"debug_dir": str(tmp_path)})
+        set_global_config({"debug_files": True, "results_dir": str(tmp_path)})
 
         with rollout_context("0-0"):
             first = debug_folder(server_name="swebench", kind="verification", label="same")
@@ -92,45 +92,66 @@ class TestDebugFolder:
         assert first.parent == second.parent
 
     def test_label_with_slashes_stays_one_folder(self, set_global_config, tmp_path: Path) -> None:
-        set_global_config({"debug_dir": str(tmp_path)})
+        set_global_config({"debug_files": True, "results_dir": str(tmp_path)})
 
         path = debug_folder(server_name="swebench", kind="verification", label="../../org/repo")
 
         assert path is not None
-        assert path.parent == tmp_path / "swebench" / "verification" / "no-rollout" / "unnamed"
+        assert path.parent == tmp_path / "swebench" / "debug" / "verification" / "no-rollout"
         assert "/" not in path.name
 
-    def test_server_setting_overrides_the_global_root(self, set_global_config, tmp_path: Path) -> None:
-        set_global_config({"debug_dir": str(tmp_path / "global")})
+    def test_server_switch_overrides_the_global_one(self, set_global_config, tmp_path: Path) -> None:
+        set_global_config({"debug_files": False, "results_dir": str(tmp_path)})
+        path = debug_folder(server_name="swebench", kind="verification", debug_files=True)
+        assert path is not None
+        assert path.is_relative_to(tmp_path / "swebench" / "debug")
 
-        path = debug_folder(server_name="swebench", kind="verification", override=tmp_path / "mine")
+        set_global_config({"debug_files": True, "results_dir": str(tmp_path)})
+        assert debug_folder(server_name="swebench", kind="verification", debug_files=False) is None
+
+    def test_every_server_config_carries_its_own_switch(self, set_global_config, tmp_path: Path) -> None:
+        set_global_config({"debug_files": False, "results_dir": str(tmp_path)})
+        server = {"host": "127.0.0.1", "port": 8000, "entrypoint": "app.py", "name": "swebench"}
+
+        follows_global = BaseRunServerInstanceConfig(**server)
+        assert follows_global.debug_files is None
+        assert (
+            debug_folder(server_name="swebench", kind="verification", debug_files=follows_global.debug_files) is None
+        )
+
+        turned_on = BaseRunServerInstanceConfig(**server, debug_files=True)
+        path = debug_folder(server_name="swebench", kind="verification", debug_files=turned_on.debug_files)
+        assert path is not None and path.is_relative_to(tmp_path / "swebench" / "debug")
+
+    def test_server_output_dir_replaces_the_default_output(self, set_global_config, tmp_path: Path) -> None:
+        set_global_config({"debug_files": True, "results_dir": str(tmp_path / "results")})
+
+        path = debug_folder(server_name="swebench", kind="verification", output_dir=tmp_path / "mine")
 
         assert path is not None
-        assert path.parent == tmp_path / "mine" / "verification" / "no-rollout" / "unnamed"
+        assert path.parent == tmp_path / "mine" / "debug" / "verification" / "no-rollout"
 
-    def test_server_setting_turns_output_on_without_the_global_root(self, set_global_config, tmp_path: Path) -> None:
-        set_global_config(None)
-
-        path = debug_folder(server_name="swebench", kind="verification", override=tmp_path)
-
-        assert path is not None
-        assert path.is_relative_to(tmp_path)
-
-    def test_relative_server_setting_turns_debug_files_off_with_one_warning(
+    def test_relative_output_dir_turns_debug_files_off_with_one_warning(
         self, set_global_config, tmp_path: Path, monkeypatch, caplog
     ) -> None:
         # A relative path would land in the server's source folder; debug files never fail a request instead.
-        monkeypatch.setattr(runtime_files, "_warned_relative_debug_dirs", set())
-        set_global_config({"debug_dir": str(tmp_path)})
+        monkeypatch.setattr(runtime_files, "_warned_relative_output_dirs", set())
+        set_global_config({"debug_files": True, "results_dir": str(tmp_path)})
 
         with caplog.at_level("WARNING"):
-            assert debug_folder(server_name="swebench", kind="verification", override=Path("logs")) is None
-            assert debug_folder(server_name="swebench", kind="verification", override="logs") is None
+            assert debug_folder(server_name="swebench", kind="verification", output_dir=Path("out")) is None
+            assert debug_folder(server_name="swebench", kind="verification", output_dir="out") is None
 
         assert caplog.text.count("is not an absolute path") == 1
 
+    def test_a_process_without_gym_configuration_writes_nothing(self, set_global_config) -> None:
+        # A Ray task or helper process sees no results_dir; it gets its folder from the server instead.
+        set_global_config(None)
+
+        assert debug_folder(server_name="swebench", kind="verification", debug_files=True) is None
+
     def test_kind_must_be_one_safe_segment(self, set_global_config, tmp_path: Path) -> None:
-        set_global_config({"debug_dir": str(tmp_path)})
+        set_global_config({"debug_files": True, "results_dir": str(tmp_path)})
 
         with pytest.raises(ValueError, match="kind"):
             debug_folder(server_name="swebench", kind="../escape")
@@ -435,14 +456,14 @@ async def test_folder_is_removed_when_cancelled_while_it_is_created(
     assert _request_folders(tmp_path) == []
 
 
-def test_debug_folder_segments_are_quoted(set_global_config, tmp_path: Path, monkeypatch) -> None:
-    set_global_config({"debug_dir": str(tmp_path)})
-    monkeypatch.setattr(runtime_files, "_current_agent_instance", lambda: "../escape")
+def test_debug_folder_segments_are_quoted(set_global_config, tmp_path: Path) -> None:
+    set_global_config({"debug_files": True, "results_dir": str(tmp_path)})
 
-    path = debug_folder(server_name="swebench", kind="verification")
+    with rollout_context("../escape"):
+        path = debug_folder(server_name="swebench", kind="verification")
 
     assert path is not None
-    assert path.is_relative_to(tmp_path / "swebench" / "verification")
+    assert path.is_relative_to(tmp_path / "swebench" / "debug" / "verification")
     assert ".." not in path.parts
 
 
@@ -463,19 +484,19 @@ async def test_folder_is_removed_when_an_anyio_cancel_scope_fires(set_global_con
 
 
 def test_debug_folder_rejects_a_server_name_that_leaves_the_root(set_global_config, tmp_path: Path) -> None:
-    set_global_config({"debug_dir": str(tmp_path)})
+    set_global_config({"debug_files": True, "results_dir": str(tmp_path)})
 
     for name in ("", ".", ".."):
         with pytest.raises(ValueError, match="server_name"):
             debug_folder(server_name=name, kind="verification")
 
 
-def test_debug_folder_accepts_a_string_override(set_global_config, tmp_path: Path) -> None:
-    set_global_config(None)
+def test_debug_folder_accepts_a_string_output_dir(set_global_config, tmp_path: Path) -> None:
+    set_global_config({"debug_files": True})
 
-    path = debug_folder(server_name="swebench", kind="verification", override=str(tmp_path))
+    path = debug_folder(server_name="swebench", kind="verification", output_dir=str(tmp_path))
 
-    assert path is not None and path.is_relative_to(tmp_path)
+    assert path is not None and path.is_relative_to(tmp_path / "debug")
 
 
 def _cleanup_left_after_a_repeated_cancellation(cancel_kind: str) -> list[Path]:
@@ -532,7 +553,7 @@ def test_cleanup_survives_a_repeated_cancellation_while_queued(
 
 
 def test_a_server_name_with_a_slash_stays_one_segment(set_global_config, tmp_path: Path) -> None:
-    set_global_config({"debug_dir": str(tmp_path)})
+    set_global_config({"debug_files": True, "results_dir": str(tmp_path)})
 
     path = debug_folder(server_name="../escape", kind="verification")
 
@@ -582,10 +603,10 @@ def test_a_process_folder_removed_from_outside_is_made_again(set_global_config, 
 
 
 def test_the_server_name_is_checked_only_where_it_is_used(set_global_config, tmp_path: Path) -> None:
-    set_global_config(None)
+    set_global_config({"debug_files": False, "results_dir": str(tmp_path)})
     assert debug_folder(server_name="", kind="verification") is None
 
-    path = debug_folder(server_name="", kind="verification", override=tmp_path)
+    path = debug_folder(server_name="", kind="verification", debug_files=True, output_dir=tmp_path)
     assert path is not None and path.is_relative_to(tmp_path)
 
 
