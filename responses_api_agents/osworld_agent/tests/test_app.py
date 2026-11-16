@@ -40,6 +40,7 @@ from responses_api_agents.osworld_agent.app import (
     _resolve_run_rollout_purpose,
     _validate_runner_runtime,
 )
+from responses_api_agents.osworld_agent.client import EPISODE_END_KINDS
 from responses_api_agents.osworld_agent.rollout_outcome import (
     LEGACY_RUNTIME_ADMISSION_POLICY_ID,
     RUNTIME_ADMISSION_POLICY_ID,
@@ -900,7 +901,7 @@ def test_build_response_preserves_evaluated_horizon_without_runtime_mask(score: 
     assert response.verifier_metadata["osworld_horizon_reached"] is True
 
 
-@pytest.mark.parametrize("episode_end", ["done", "agent_fail", "forced_fail", "unterminated"])
+@pytest.mark.parametrize("episode_end", EPISODE_END_KINDS)
 def test_build_response_exposes_episode_end_as_one_hot_scalars(episode_end: str) -> None:
     request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
     result = {**DEFAULT_RUN_RESULT, "episode_end": episode_end}
@@ -910,8 +911,7 @@ def test_build_response_exposes_episode_end_as_one_hot_scalars(episode_end: str)
 
     assert response.verifier_metadata["osworld_episode_end"] == episode_end
     assert {key: value for key, value in dumped.items() if key.startswith("episode_end_")} == {
-        f"episode_end_{kind}": float(kind == episode_end)
-        for kind in ("done", "agent_fail", "forced_fail", "unterminated")
+        f"episode_end_{kind}": float(kind == episode_end) for kind in EPISODE_END_KINDS
     }
 
 

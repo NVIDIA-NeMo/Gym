@@ -254,7 +254,7 @@ def _terminal_action_name(action: Any) -> Optional[str]:
     return None
 
 
-EPISODE_END_KINDS = ("done", "agent_fail", "forced_fail", "unterminated")
+EPISODE_END_KINDS = ("done", "agent_fail", "forced_fail", "unterminated", "aborted")
 
 
 def _episode_end_kind(terminal_action: Optional[str], forced_terminal: Optional[str]) -> str:
@@ -2727,6 +2727,8 @@ def run_osworld_task(
         )
 
     episode_end = _episode_end_kind(agent_terminal_action, agent_forced_terminal)
+    if episode_end == "unterminated" and infrastructure_failure_reason is not None:
+        episode_end = "aborted"
     print(
         "OSWORLD_EPISODE_END|"
         f"rollout_id={event_context.get('rollout_id', 'none')}|"
