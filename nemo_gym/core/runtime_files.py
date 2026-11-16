@@ -94,8 +94,11 @@ def debug_folder(
     That is once per request, or once when a session opens, keeping the folder on the session.
     Nothing is created here; the folder exists only if the caller writes into it.
 
-    Only a process started with Gym's configuration sees the global ``debug_dir``.
-    Code in a Ray task or another helper process gets the folder from the server that started it.
+    Debug folders are grouped by rollout only while the request carries a rollout id.
+    Today that holds when model-call capture is on; with it off, folders fall under ``no-rollout``.
+
+    Only a process started with Gym's configuration sees the global ``debug_dir``, and only a request sees its rollout.
+    So call this in the server's request and pass the folder it returns to a Ray task or helper process.
     """
     if not _KIND.fullmatch(kind):
         raise ValueError(f"kind must be lowercase letters, digits, '-' and '_', got {kind!r}")
@@ -238,6 +241,7 @@ def temp_folder(*, kind: str, keep_as: Path | None = None, parent: Path | None =
     ``keep_as`` is a folder from :func:`debug_folder`.
     When it is set, the folder is moved there on exit instead of being deleted.
     A server then writes to one place whether debug files are on or off.
+    The whole folder moves, across filesystems by copying each file, so use it for a folder of logs, never a workspace.
 
     ``parent`` replaces ``temp_dir`` for code that runs without Gym's configuration, such as a Ray task:
     the server that starts it passes the folder it reads from its own configuration.
@@ -279,9 +283,18 @@ def create_owned_folder(path: Path) -> Path:
     """Create ``path`` as a folder Gym owns for one run, so :func:`delete_owned_folder` may remove it later.
 
     An entry point calls this for a folder it chose for the run, such as a node-local capture folder.
-    A folder a user configured is never marked, so it is never deleted.
+    The folder must not exist yet, so a folder that already holds someone's files is never marked.
+    A folder that already carries the marker is reused, so a restarted run can take its folder back.
+    Raises ``FileExistsError`` for any other existing path.
     """
-    path.mkdir(parents=True, exist_ok=True)
+    try:
+        path.mkdir(parents=True)
+    except FileExistsError:
+        if not (path / OWNED_MARKER).is_file():
+            raise FileExistsError(
+                f"{path} already exists and Gym did not create it for a run; choose a new folder for this run"
+            ) from None
+        return path
     (path / OWNED_MARKER).touch()
     return path
 
