@@ -1,0 +1,18 @@
+# The top-level key names this instance; routes, `_inherit_from`, and server references use it.
+# The key under `environment_servers` names the implementation directory, environment_servers/agent_arena.
+# agent_server plays the turn (agentic_turn_simulation_agent); resources_server is the agentic_turn_simulation instance
+# whose tool simulator, judge and scoring settings the episode uses.
+agent_arena:
+  environment_servers:
+    agent_arena:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: ???
+      resources_server:
+        type: resources_servers
+        name: ???
+      max_concurrent_episodes: null
+      queue_timeout_seconds: null
+      default_episode_timeout_seconds: 21600
+      cleanup_timeout_seconds: 180

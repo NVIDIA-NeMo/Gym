@@ -12,7 +12,11 @@ over partial work as complete) show up at the end of a turn, not in its first st
 [docs/data.md](docs/data.md) shows how to build rows from your own traces.
 
 The environment pairs with the agent
-[`agentic_turn_simulation_agent`](../../responses_api_agents/agentic_turn_simulation_agent/README.md).
+[`agentic_turn_simulation_agent`](../../responses_api_agents/agentic_turn_simulation_agent/README.md). Each row runs
+as one episode of the [`agent_arena`](../../environment_servers/agent_arena/README.md) Environment Server, which sets
+the turn up, serves its simulated tools to the agent's session and scores it, with this resources server's settings.
+This resources server serves the deprecated `legacy_agent` relay (`configs/agentic_turn_simulation_legacy_agent.yaml`)
+and re-scores saved rows (`gym eval reverify`); both servers run the turn through the same code (`turns.py`).
 
 - [docs/design.md](docs/design.md): why whole-turn simulation, and how the simulator, the judge and masking work.
 - [docs/harnesses.md](docs/harnesses.md): each harness's formats, Cline's XML protocol, adding a harness.
@@ -24,14 +28,17 @@ The environment pairs with the agent
 ```
 row: history up to a user message + the harness's system prompt and tools
   |
-/seed_session ....... store the history, pick the row's harness, replay recorded results into a model of its files
+setup ............... store the history, pick the row's harness, replay recorded results into a model of its files
   |
 agent loop .......... policy step -> tool calls -> /simulate_tool_call -> answered in code if exact, else by the LLM
   |                   ends on: a final message (or an empty reply), a stop tool, the step (model call) or time cap,
   |                   a context overflow, a cut-off reply with a call or nothing visible (Cline: the mistake limit)
   |
-/verify ............. masked? -> code gate -> LLM judge -> reward 1.0 if the turn is correct, else 0.0
+score ............... masked? -> code gate -> LLM judge -> reward 1.0 if the turn is correct, else 0.0
 ```
+
+The `agent_arena` Environment Server sets the turn up when its episode starts and scores it in process; on the relay,
+setup is this resources server's `/seed_session` and scoring its `/verify`.
 
 - A **stop tool** is the harness's "ask the user" or "finish" tool. A call to one never runs: the reply's other calls
   run (on Cline rows, only those before it), then the turn ends; the user's next message is never simulated.
@@ -85,8 +92,9 @@ gym eval run --no-serve \
   `failure_kind`), the metrics in `..._aggregate_metrics.json` (see [Scoring](#scoring)), and
   `..._materialized_inputs.jsonl`, which `gym eval reverify` and `gym eval profile` read. A rollout whose `/run`
   fails ends the run; add `++route_failures_to_sidecar=true` to record it in `..._failures.jsonl` and keep going.
-- Run one resources-server worker (`num_workers` unset or 1, the default): sessions live in its memory, and a call
-  that reaches another worker finds no session.
+- Run one worker of each server (`num_workers` unset or 1, the default): a turn's session lives in the memory of the
+  worker that set it up, and a call that reaches another worker finds no session. The `agent_arena` Environment Server
+  refuses more than one.
 - The simulator and judge set throughput. For more than a few hundred rollouts, or to serve them from separate models,
   see [docs/training.md](docs/training.md#serving-the-simulator-and-the-judge).
 

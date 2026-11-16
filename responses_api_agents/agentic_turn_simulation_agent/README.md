@@ -1,17 +1,23 @@
 # Agentic Turn Simulation Agent
 
-A `simple_agent` that plays one whole agent turn for the
-[`agentic_turn_simulation`](../../resources_servers/agentic_turn_simulation/README.md) resources server, which answers
-the tool calls and scores the turn. It inherits `simple_agent`'s `/run` and `/v1/responses` and replaces only the
-episode loop.
+A `simple_agent` that plays one whole agent turn of the
+[`agentic_turn_simulation`](../../resources_servers/agentic_turn_simulation/README.md) environment, whose server
+answers the tool calls and scores the turn. It inherits `simple_agent`'s `/run`, `/v1/responses` and agent sessions,
+and replaces only the episode loop.
+
+That server is the [`agent_arena`](../../environment_servers/agent_arena/README.md) Environment Server in an agent
+session: the session's direct HTTP grant points at it, and the agent sends `/harness` and `/simulate_tool_call` to the
+grant's URL with its headers and the session's cookies. A session seeded without such a grant is refused (422). On the
+deprecated `/run` relay it is the configured `resources_server`, with the cookies its `/seed_session` set.
 
 ## What the episode does differently
 
-- **The row's harness.** At the start of the turn the agent asks the resources server's `/harness`, with the session
-  the row was seeded with, for the row's stop tools and tool protocol (native function calls, or Cline's XML). A bare
-  `/v1/responses` call without a seeded session uses the config's `stop_tools` and native calls. A 404 for a seeded
-  session (the call reached another resources-server worker under `num_workers` > 1, or the server restarted) fails
-  the rollout instead of running a Cline row as native; so does any other `/harness` error or an unknown protocol.
+- **The row's harness.** At the start of the turn the agent asks the server's `/harness`, with the session the row was
+  seeded with, for the row's stop tools and tool protocol (native function calls, or Cline's XML). A bare
+  `/v1/responses` call without a grant or a seeded session uses the config's `stop_tools` and native calls. A 404 for a
+  seeded session (the call reached another resources-server worker under `num_workers` > 1, or the server restarted)
+  fails the rollout instead of running a Cline row as native; so does any `/harness` error through a grant, any other
+  `/harness` error, or an unknown protocol.
 - **Every tool call goes to `/simulate_tool_call`**, with its `call_id`, `name`, raw `arguments` (parseable or not)
   and the turn so far without reasoning: the simulator needs that context. A successful reply's output is the tool's
   result, including an error the simulated tool reports (a missing file, a failed command), which is judged as usual.
@@ -91,8 +97,8 @@ Cline sends them. A reply without a tool call gets Cline's own "no tools used" m
 Inherited: `skip_verification`, `skip_verification_reward`, `token_id_capture` (set `true` for training).
 
 Run it through this environment's config (`gym env start --resources-server agentic_turn_simulation`), not alone:
-every episode needs the session `/seed_session` opens on the resources server. Gym agent sessions are not supported:
-the agent is not in `AGENT_SESSION_AGENT_TYPES`, so Gym relays it through `/run`.
+every episode needs a turn session, which the `agent_arena` Environment Server sets up for each row (or, on the relay,
+`/seed_session` on the resources server).
 
 ## Tests
 
