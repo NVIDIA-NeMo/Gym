@@ -577,9 +577,10 @@ class TestCapturesOfFailedRollouts:
 
         assert (timeouts["timed_out"], timeouts["time_split"]["rollouts_with_captures"]) == (1, 0)
 
-    def test_a_claim_whose_row_landed_leaves_the_rollout_measured(self, tmp_path: Path) -> None:
+    def test_a_released_claim_leaves_the_rollout_measured(self, tmp_path: Path) -> None:
         store = CaptureStore(tmp_path / "model-calls")
         store.mark_pending("0-0", "only-call")
+        store.clear_pending("0-0", "only-call")
 
         timeouts = self.timeouts(
             tmp_path, [deadline_failure(0)], {"0-0": [{"model_call_id": "only-call", **exchange(0, 40)}]}

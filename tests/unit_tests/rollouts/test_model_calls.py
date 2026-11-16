@@ -314,39 +314,22 @@ def test_clear_captures_for_rollouts_drops_stale_pending_claims(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_claim_resolves_when_its_row_lands_without_a_release(tmp_path):
-    import asyncio
-
+async def test_has_pending_reads_only_the_claims_file(tmp_path, monkeypatch):
     from nemo_gym.rollouts.model_calls import await_model_call_capture_quiescence
 
     store = CaptureStore(tmp_path)
+    store.mark_pending("6-0", "call-1")
     store.record("6-0", {**_capture_exchange("responses", "A", {}, {"id": "resp-A"}), "model_call_id": "call-1"})
-    store.mark_pending("6-0", "call-2")
 
-    async def late_write():
-        await asyncio.sleep(0.1)
-        store.record("6-0", {**_capture_exchange("responses", "B", {}, {"id": "resp-B"}), "model_call_id": "call-2"})
+    def capture_file(*_args):
+        raise AssertionError("read the capture file")
 
-    task = asyncio.create_task(late_write())
+    monkeypatch.setattr(CaptureStore, "path_for", capture_file)
+    # A row on disk does not resolve its claim; only the release does, so the capture is never read.
     assert store.has_pending("6-0") is True
-
+    store.clear_pending("6-0", "call-1")
+    assert store.has_pending("6-0") is False
     assert await await_model_call_capture_quiescence("6-0", [tmp_path]) is True
-    await task
-    assert [exchange["model_call_id"] for exchange in store.read("6-0")] == ["call-1", "call-2"]
-
-
-def test_has_pending_reads_landed_ids_from_any_line_shape(tmp_path):
-    store = CaptureStore(tmp_path)
-    store.mark_pending("7-0", "spaced")
-    store.mark_pending("7-0", "torn")
-    with store.path_for("7-0").open("wb") as handle:
-        # Not written by `_record`, so the id is parsed rather than read from the line's head.
-        handle.write(b'{"dialect": "chat", "model_call_id": "spaced"}\n\n[1]\n')
-        handle.write(b'{"dialect": "chat", "model_call_id": "torn"')
-    assert store.has_pending("7-0") is True
-
-    store.clear_pending("7-0", "torn")
-    assert store.has_pending("7-0") is False
 
 
 def test_a_torn_claims_line_is_skipped(tmp_path):
@@ -354,16 +337,18 @@ def test_a_torn_claims_line_is_skipped(tmp_path):
     store.claims_path_for("8-0").write_bytes(b'{"claim":"call-1"}\n{"cla\n[]\n')
 
     assert store.has_pending("8-0") is True
-    store.record("8-0", {"model_call_id": "call-1"})
+    store.clear_pending("8-0", "call-1")
     assert store.has_pending("8-0") is False
 
 
 def test_merge_drops_the_claims_file_only_when_nothing_is_outstanding(tmp_path):
+    from nemo_gym.models.model_call_capture import _record
     from nemo_gym.rollouts.model_calls import merge_model_call_capture_into_record
 
     store = CaptureStore(tmp_path)
     store.mark_pending("9-0", "call-1")
     store.record("9-0", {**_capture_exchange("responses", "A", {}, {"id": "resp-A"}), "model_call_id": "call-1"})
+    store.clear_pending("9-0", "call-1")
     store.mark_pending("9-1", "call-2")
 
     landed = merge_model_call_capture_into_record({"_ng_task_index": 9, "_ng_rollout_index": 0}, [tmp_path])
@@ -374,6 +359,25 @@ def test_merge_drops_the_claims_file_only_when_nothing_is_outstanding(tmp_path):
     # A stranded claim stays on disk, so a later reader still sees the write that never landed.
     assert "model_call_capture_pending" in [gap["code"] for gap in stranded["ng_model_call_capture"]["gaps"]]
     assert store.claims_path_for("9-1").exists()
+
+    # A call after the snapshot recreates the claims file, and it reads as settled once its write is done.
+    store.mark_pending("9-0", "late")
+    _record(
+        store,
+        "responses",
+        "srv",
+        b"{}",
+        rollout_id="9-0",
+        model_call_id="late",
+        started_at=100.0,
+        completed_at=100.01,
+        response_body={},
+        status_code=200,
+        error_category=None,
+        latency_ms=1.0,
+    )
+    assert store.claims_path_for("9-0").exists()
+    assert store.has_pending("9-0") is False
 
 
 @pytest.mark.asyncio
@@ -390,6 +394,7 @@ async def test_capture_reads_never_list_the_capture_dir(tmp_path, monkeypatch):
     store = CaptureStore(tmp_path)
     store.mark_pending("10-0", "call-1")
     store.record("10-0", {**_capture_exchange("responses", "A", {}, {"id": "resp-A"}), "model_call_id": "call-1"})
+    store.clear_pending("10-0", "call-1")
 
     def listed(*_args, **_kwargs):
         raise AssertionError("listed the capture dir")

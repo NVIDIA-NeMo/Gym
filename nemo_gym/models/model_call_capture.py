@@ -134,22 +134,6 @@ class ModelCallCaptureConfig(BaseModel):
 # Runs from older releases claimed each call with its own `<rollout id>.<call token>.capture.pending` file.
 _PENDING_SUFFIX = ".capture.pending"
 _CLAIMS_SUFFIX = ".capture.claims"
-# `_record` writes `model_call_id` first, so a landed call's id is read without parsing its payloads.
-_LANDED_ID_PREFIX = b'{"model_call_id":"'
-
-
-def _landed_call_id(line: bytes) -> Optional[str]:
-    if line.startswith(_LANDED_ID_PREFIX):
-        end = line.find(b'"', len(_LANDED_ID_PREFIX))
-        raw = line[len(_LANDED_ID_PREFIX) : end]
-        if end > 0 and b"\\" not in raw:
-            return raw.decode("utf-8", errors="replace")
-    try:
-        exchange = orjson.loads(line)
-    except orjson.JSONDecodeError:
-        return None
-    call_id = exchange.get("model_call_id") if isinstance(exchange, dict) else None
-    return call_id if isinstance(call_id, str) else None
 
 
 def _validate_rollout_id(rollout_id: str) -> str:
@@ -198,7 +182,7 @@ class CaptureStore:
     def mark_pending(self, rollout_id: str, model_call_id: str) -> None:
         """Claim a write before it is queued, so a reader can tell 'not yet' from 'never'.
 
-        The claim resolves when the call's exchange lands, or through ``clear_pending`` when it never will.
+        ``_record`` releases the claim through ``clear_pending`` once the write has finished or failed.
         """
         try:
             self._append_claim_line(rollout_id, {"claim": model_call_id})
@@ -206,13 +190,14 @@ class CaptureStore:
             logger.warning("Could not mark model-call capture pending for rollout %s.", rollout_id, exc_info=True)
 
     def clear_pending(self, rollout_id: str, model_call_id: str) -> None:
-        """Resolve a claim whose exchange will not land."""
+        """Release a claim: its write has finished or failed."""
         try:
             self._append_claim_line(rollout_id, {"release": model_call_id})
         except OSError:
             logger.warning("Could not clear model-call capture pending for rollout %s.", rollout_id, exc_info=True)
 
-    def _unreleased_claims(self, rollout_id: str) -> set[str]:
+    def has_pending(self, rollout_id: str) -> bool:
+        """True while a claimed write of this rollout has not been released. Reads only the claims file."""
         try:
             with self.claims_path_for(rollout_id).open("rb") as handle:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
@@ -221,7 +206,7 @@ class CaptureStore:
                 finally:
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         except FileNotFoundError:
-            return set()
+            return False
         claimed: set[str] = set()
         released: set[str] = set()
         for line in lines:
@@ -233,27 +218,7 @@ class CaptureStore:
                 claimed.add(entry["claim"])
             elif isinstance(entry, dict) and isinstance(entry.get("release"), str):
                 released.add(entry["release"])
-        return claimed - released
-
-    def has_pending(self, rollout_id: str) -> bool:
-        """True while a claimed call of this rollout has neither landed nor been released."""
-        outstanding = self._unreleased_claims(rollout_id)
-        if not outstanding:
-            return False
-        try:
-            handle = self.path_for(rollout_id).open("rb")
-        except FileNotFoundError:
-            return True
-        with handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
-            try:
-                for line in handle:
-                    outstanding.discard(_landed_call_id(line))
-                    if not outstanding:
-                        return False
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        return True
+        return bool(claimed - released)
 
     def clear_all_pending(self, rollout_id: str) -> None:
         self.claims_path_for(rollout_id).unlink(missing_ok=True)
@@ -771,8 +736,9 @@ def _record(
             store.mark_incomplete(rollout_id)
         except Exception:
             logger.warning("Could not mark rollout %s capture as incomplete.", rollout_id, exc_info=True)
+    finally:
+        # Released only after the write returns, so a reader that sees no open claim also sees the row.
         try:
-            # The row will not land, so release its claim rather than leave readers to the drain timeout.
             store.clear_pending(rollout_id, model_call_id)
         except Exception:
             logger.warning("Could not release the capture claim for rollout %s.", rollout_id, exc_info=True)
@@ -1197,7 +1163,6 @@ class _CaptureMiddleware:
                 if body_bytes and (streaming or response_body is None)
                 else None
             )
-            # The landed row resolves this call's claim.
             _record(
                 store,
                 dialect,

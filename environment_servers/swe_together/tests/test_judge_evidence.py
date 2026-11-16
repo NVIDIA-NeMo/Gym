@@ -273,6 +273,7 @@ async def test_drained_judge_capture_drops_its_claims_file(tmp_path):
     store = CaptureStore(tmp_path)
     store.mark_pending("child", "first")
     store.record("child", exchange("first", "first"))
+    store.clear_pending("child", "first")
     verification = {"judge_capture_episode": "child", "judge_close": receipt("first").model_dump(mode="json")}
 
     result = await collect_judge_evidence(
