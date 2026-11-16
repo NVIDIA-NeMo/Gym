@@ -114,6 +114,26 @@ gym eval run --benchmark agentic_if --split benchmark --model-type vllm_model \
 
 `resources_servers/agentic_if/README.md` shows how to run the public `example` split.
 
+### Submitted runs: keep the episodes on the node
+
+Each episode saves several files, so a full run writes thousands. In a run submitted with `gym eval submit`,
+set `node_local: true` on the benchmark: the episodes then go to the job's node-local directory
+(`$GYM_NODE_LOCAL_DIR/agentic_if`) instead of shared storage, and each Slurm job leaves one archive,
+`<benchmark dir>/node-local/<SLURM_JOB_ID>.tar.gz`. Keep `restore` on (the default): a later job of the run, including
+the re-grading job `gym eval resubmit --recover` queues, then finds every earlier episode, and the newest archive holds
+them all. A job that ends without archiving (a failed node, for instance) loses its episodes; their rows stay saved but
+can no longer be re-graded.
+
+To re-verify such a run elsewhere, extract the newest archive at the path the rows name (`<submission id>` and
+`<benchmark>` are the last two parts of the benchmark dir) and point the run at it:
+
+```bash
+dir=/tmp/gym-node-local/<submission id>/<benchmark>
+mkdir -p "$dir"
+tar -xzf "<benchmark dir>/node-local/$(ls "<benchmark dir>/node-local" | grep -xE '[0-9]+[.]tar[.]gz' | sort -n | tail -n 1)" -C "$dir"
+GYM_NODE_LOCAL_DIR="$dir" gym eval reverify ...
+```
+
 ## Limitations
 
 - The task rows are internal: preparation needs read access to the registry project.
