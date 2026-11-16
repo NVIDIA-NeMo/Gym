@@ -23,7 +23,7 @@ transport, but it cannot know that `/run` is a rollout and `/verify` is a verifi
 cannot be switched on per span group, and it cannot attach Gym's rollout id. These
 wrappers add the semantic layer on top.
 
-The rollout id comes from `nemo_gym.core.episode.current_rollout_id`, the
+The rollout id comes from `nemo_gym.core.episode_context.current_rollout_id`, the
 ContextVar Gym already sets from `RolloutContextMiddleware` and the agent's `/run`
 wrapper. It is bridged onto the span rather than replaced: one correlation scheme, now
 visible from traces, Gym's own logs, and captured trajectories alike.
@@ -34,8 +34,9 @@ from collections.abc import Mapping
 from functools import wraps
 from typing import Any, Callable, Optional
 
-from nemo_gym.core.episode import current_rollout_id
+from nemo_gym.core.episode_context import current_rollout_id
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
+from nemo_gym.telemetry.setup import is_span_group_or_metrics_active
 
 
 #: Span attribute carrying Gym's existing rollout correlation id.
@@ -127,7 +128,7 @@ def traced_verify_endpoint(handler: Callable, static_attributes: Optional[dict] 
 
     @wraps(handler)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
-        if not is_span_group_enabled(GymSpanGroup.VERIFY):
+        if not is_span_group_or_metrics_active(GymSpanGroup.VERIFY):
             return await handler(*args, **kwargs)
 
         started = time.perf_counter()
@@ -158,7 +159,7 @@ def traced_rollout_endpoint(handler: Callable, static_attributes: Optional[dict]
 
     @wraps(handler)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
-        if not is_span_group_enabled(GymSpanGroup.ROLLOUT):
+        if not is_span_group_or_metrics_active(GymSpanGroup.ROLLOUT):
             return await handler(*args, **kwargs)
 
         started = time.perf_counter()

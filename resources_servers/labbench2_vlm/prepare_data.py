@@ -290,6 +290,7 @@ def prepare_tag(tag: str, output_path: Path, media_dir: Path, limit: int | None 
                         }
                     ]
                 },
+                "task_id": row["id"],
                 "verifier_metadata": {
                     "ideal": row["ideal"],
                     "tag": row["tag"],

@@ -24,7 +24,10 @@ async def test_real_runner_preserves_model_history_and_tool_observations(
 ):
     requests = []
     full_output = "start" + "x" * 6000 + "MIDDLE_MUST_BE_ELIDED" + "y" * 6000 + "end"
-    commands = ["echo first", "cat large.txt; sleep 10", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]
+    # Leave time for the shell and cat to start on loaded CI hosts so the
+    # timeout exercises output truncation, not an empty startup observation.
+    step_timeout = 10
+    commands = ["echo first", "cat large.txt; sleep 60", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]
 
     async def query(params):
         index = len(requests)
@@ -63,7 +66,7 @@ async def test_real_runner_preserves_model_history_and_tool_observations(
         context=module.HarnessContext(
             session_id="task", instruction="Official task instruction", skills_dir="/skills"
         ),
-        config=module.MiniSWEConfig(step_timeout_sec=1),
+        config=module.MiniSWEConfig(step_timeout_sec=step_timeout),
         params=NeMoGymResponseCreateParamsNonStreaming(input=[], tool_choice="required"),
         query=query,
         model_name="model",
@@ -71,7 +74,8 @@ async def test_real_runner_preserves_model_history_and_tool_observations(
         observability_enabled=observability_enabled,
     )
     Path(harness.context.workdir, "large.txt").write_text(full_output)
-    response, termination, extra = await harness.execute(30)
+    # The runner budget includes startup, separate from the command timeout under test.
+    response, termination, extra = await harness.execute(120)
     assert termination.reason == "completed", termination
     assert extra["harness_version"] == "2.4.6"
     assert len(response.output) == 8
@@ -93,7 +97,7 @@ async def test_real_runner_preserves_model_history_and_tool_observations(
     assert observation["output_head"] == full_output[:5000]
     # Some shells append a killed-process notice to stderr after the timeout.
     assert "end" in observation["output_tail"] and len(observation["output_tail"]) == 5000
-    assert "timed out after 1 seconds" in observation["exception_info"]
+    assert f"timed out after {step_timeout} seconds" in observation["exception_info"]
     native = extra["mini_swe_trajectory"]
     assert full_output in next(m for m in native["messages"] if m.get("call_id") == "call_1")["extra"]["raw_output"]
     assert [item["id"] for item in requests[-1]["input"] if item.get("type") == "reasoning"] == ["rs_0", "rs_1"]
@@ -102,9 +106,27 @@ async def test_real_runner_preserves_model_history_and_tool_observations(
     if observability_enabled:
         records = extra["ng_agent_observations"]["records"]
         assert records[0]["status"] == "completed"
-        assert [r["status"] for r in records[1:]] == ["completed", "timeout", "incomplete"]
-        assert all(r["duration_ms"] is None for r in records[1:])
+        assert [r["status"] for r in records[1:]] == ["completed", "timeout", "completed"]
+        # The submission has no tool output, but its successful command has an exit record with real timing.
+        saved = json.loads((harness.directory / "trajectory.json").read_text())
+        executions = {
+            message.get("call_id") or message["extra"].get("tool_call_id"): message["extra"]
+            for message in saved["messages"]
+            if message.get("type") == "function_call_output" or message.get("role") == "exit"
+        }
+        assert set(executions) == {"call_0", "call_1", "call_2"}
+        assert executions["call_2"]["exit_status"] == "Submitted"
+        for record in records[1:]:
+            execution = executions[record["tool_call_id"]]
+            for field in ("started_at", "completed_at", "duration_ms"):
+                assert record[field] == execution[field]
+                assert isinstance(record[field], float)
+            assert record["started_at"] <= record["completed_at"]
+            assert record["duration_ms"] >= 0
+            assert record["timing_source"] == "artifact"
         assert [t["step_count"] for t in extra["ng_trajectory"]["turns"]] == [1, 2, 2]
-        assert len(extra["ng_trajectory"]["gaps"]) == (3 if response_id else 6)
+        assert [gap["code"] for gap in extra["ng_trajectory"]["gaps"]] == (
+            [] if response_id else ["model_call_reference_unavailable"] * 3
+        )
     else:
         assert "ng_agent_observations" not in extra and "ng_trajectory" not in extra

@@ -162,7 +162,7 @@ def main() -> int:
     repo_root = Path(__file__).resolve().parents[2]
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
-    from nemo_gym.deliverables import IGNORE_FILES  # noqa: E402
+    from nemo_gym.environment import IGNORE_FILES  # noqa: E402
     from resources_servers.gdpval.comparison import (  # noqa: E402
         build_file_section,
         get_file_image_text_blocks,

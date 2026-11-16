@@ -1,0 +1,134 @@
+[
+ {
+  "_class": "zero",
+  "reward": 0.0,
+  "response": {
+   "object": "response",
+   "id": "resp-zero",
+   "status": "completed",
+   "output": [
+    {
+     "type": "message",
+     "role": "assistant",
+     "status": "completed",
+     "content": [
+      {
+       "type": "output_text",
+       "text": "Done."
+      }
+     ]
+    }
+   ],
+   "metrics": {
+    "aa_headline": 0.0,
+    "partial_credit": 0.0,
+    "task_completed_correctly": 0.0,
+    "objectives_passed": 0.0,
+    "objectives_total": 4.0,
+    "guardrails_violated": 0.0,
+    "guardrails_total": 6.0,
+    "num_turns": 4.0,
+    "total_tool_calls": 4.0
+   }
+  }
+ },
+ {
+  "_class": "guardrail",
+  "reward": 0.0,
+  "response": {
+   "object": "response",
+   "id": "resp-guardrail",
+   "status": "completed",
+   "output": [
+    {
+     "type": "message",
+     "role": "assistant",
+     "status": "completed",
+     "content": [
+      {
+       "type": "output_text",
+       "text": "Done."
+      }
+     ]
+    }
+   ],
+   "metrics": {
+    "aa_headline": 0.0,
+    "partial_credit": 0.0,
+    "task_completed_correctly": 0.0,
+    "objectives_passed": 0.0,
+    "objectives_total": 1.0,
+    "guardrails_violated": 1.0,
+    "guardrails_total": 6.0,
+    "num_turns": 10.0,
+    "total_tool_calls": 19.0
+   }
+  }
+ },
+ {
+  "_class": "partial",
+  "reward": 0.75,
+  "response": {
+   "object": "response",
+   "id": "resp-partial",
+   "status": "completed",
+   "output": [
+    {
+     "type": "message",
+     "role": "assistant",
+     "status": "completed",
+     "content": [
+      {
+       "type": "output_text",
+       "text": "Done."
+      }
+     ]
+    }
+   ],
+   "metrics": {
+    "aa_headline": 0.75,
+    "partial_credit": 0.75,
+    "task_completed_correctly": 0.0,
+    "objectives_passed": 3.0,
+    "objectives_total": 4.0,
+    "guardrails_violated": 0.0,
+    "guardrails_total": 6.0,
+    "num_turns": 10.0,
+    "total_tool_calls": 15.0
+   }
+  }
+ },
+ {
+  "_class": "full",
+  "reward": 1.0,
+  "response": {
+   "object": "response",
+   "id": "resp-full",
+   "status": "completed",
+   "output": [
+    {
+     "type": "message",
+     "role": "assistant",
+     "status": "completed",
+     "content": [
+      {
+       "type": "output_text",
+       "text": "Done."
+      }
+     ]
+    }
+   ],
+   "metrics": {
+    "aa_headline": 1.0,
+    "partial_credit": 1.0,
+    "task_completed_correctly": 1.0,
+    "objectives_passed": 2.0,
+    "objectives_total": 2.0,
+    "guardrails_violated": 0.0,
+    "guardrails_total": 2.0,
+    "num_turns": 12.0,
+    "total_tool_calls": 14.0
+   }
+  }
+ }
+]

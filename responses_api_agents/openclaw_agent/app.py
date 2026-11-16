@@ -36,27 +36,35 @@ import psutil
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym.agent_utils.sandbox_session import (
+from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AGENT_TIMEOUT_METADATA_KEY,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
-    SandboxCommand,
-    SandboxSession,
-    shell_assignments,
-)
-from nemo_gym.agent_utils.supervisor_client import OUTPUT_LOG_FILE
-from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
-from nemo_gym.base_responses_api_agent import (
+    OUTPUT_LOG_FILE,
     AgentCloseSessionResponse,
+    AgentOutcome,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    SandboxCommand,
+    SandboxNetworkAccess,
+    SandboxSession,
     SimpleResponsesAPIAgent,
+    resolve_agent_timeout,
+    restrict_sandbox_network,
+    shell_assignments,
 )
 from nemo_gym.client import get_response_json, raise_for_status
-from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
+    MODEL_CONTEXT_LIMIT,
+    MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
+    MediaFile,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -69,6 +77,8 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
     NeMoGymSummary,
+    UnsupportedContentError,
+    split_text_and_media,
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -81,12 +91,12 @@ from nemo_gym.sandbox import (
     upload_text,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, MCPToolAccess
-from nemo_gym.server_utils import get_global_config_dict
 from nemo_gym.trajectory import (
     AgentEpisode,
     AgentObservationBundle,
     ObservationGap,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.openclaw_agent.observability import (
     OPENCLAW_OBSERVATION_SOURCE,
     OpenClawSessionTree,
@@ -227,7 +237,24 @@ def parse_openclaw_session_items(events: list[dict[str, Any]], *, include_input:
                     for block in content
                     if isinstance(block, dict) and isinstance(block.get("text"), str) and block["text"]
                 )
-            if text:
+            if (
+                role == "user"
+                and isinstance(content, list)
+                and any(isinstance(block, dict) and block.get("type") == "image" for block in content)
+            ):
+                parts = [
+                    {
+                        "type": "input_image",
+                        "image_url": f"data:{block['mimeType']};base64,{block['data']}",
+                        "detail": "auto",
+                    }
+                    if block.get("type") == "image"
+                    else {"type": "input_text", "text": block["text"]}
+                    for block in content
+                    if isinstance(block, dict) and (block.get("type") == "image" or isinstance(block.get("text"), str))
+                ]
+                output_items.append(NeMoGymEasyInputMessage(role=role, content=parts))
+            elif text:
                 output_items.append(NeMoGymEasyInputMessage(role=role, content=text))
             continue
         if not include_input and not isinstance(content, list):
@@ -426,7 +453,7 @@ if [ "$#" -gt 0 ]; then
 fi
 """
     check_paths = f"(set -- {shlex.join([workdir, str(Path(directory).parent), runtime])}{_SANDBOX_PATH_CHECK})"
-    return bootstrap + f"{check_paths} && mkdir -p {shlex.quote(directory + '/home/.openclaw')}"
+    return bootstrap + f"{check_paths} && mkdir -p {shlex.quote(directory + '/home/.openclaw/media')}"
 
 
 # One ``openclaw mcp probe`` per MCP grant: CLI startup, connection and tool listing.
@@ -495,6 +522,14 @@ def _mcp_probe_problem(name: str, result: SandboxExecResult, *, url: str | None 
     return None
 
 
+# OpenClaw needs Node 22.19.0 or newer; an older bundled Node passes the package check but fails at activation.
+_NODE_FLOOR_CHECK = (
+    "const [major, minor] = process.versions.node.split('.').map(Number);"
+    "if (major < 22 || (major === 22 && minor < 19)) {"
+    "process.stderr.write('Node ' + process.versions.node + ' is older than 22.19.0'); process.exit(3); }"
+)
+
+
 class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: Optional[ResourcesServerRef] = None
     model_server: Optional[ModelServerRef] = None
@@ -515,12 +550,32 @@ class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
     openclaw_config: dict[str, Any] = Field(default_factory=dict)
     context_window: Optional[int] = None
     max_output_tokens: Optional[int] = None
+    image_input: bool = Field(
+        default=False,
+        description="Declare image input in sandbox sessions even without prompt images, for images read by tools.",
+    )
     # required: every config must pin an explicit version so runs are reproducible and cannot silently drift
     openclaw_version: str
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
+    network_access: SandboxNetworkAccess = Field(
+        default="inherit",
+        description=(
+            "Egress of a sandbox OpenClaw creates: `model_only` allows only the model server's host, "
+            "`model_and_tools` also each MCP grant's host. A borrowed task sandbox keeps its owner's network, so a "
+            "session that borrows one rejects any other value than `inherit`."
+        ),
+    )
+    sandbox_runtime_dir: Optional[str] = Field(
+        default=None,
+        pattern=r"^/",
+        description=(
+            "Directory inside the sandbox that already holds `node/` and `openclaw/` as "
+            "`install_openclaw_runtime.sh` lays them out, for sandboxes that cannot download the runtime. Setup "
+            "checks that it holds `openclaw_version` instead of installing one."
+        ),
+    )
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
-    session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
     # Per-request timeout of a sandbox session's MCP tool grants (OpenClaw's mcp.servers.<name>.timeout).
     mcp_tool_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
@@ -545,6 +600,23 @@ class OpenClawAgentVerifyResponse(BaseVerifyResponse):
 
 class OpenClawAgent(SimpleResponsesAPIAgent):
     """Runs the OpenClaw CLI (openclaw agent --local --json)"""
+
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Read pinned assistant errors or the CLI's typed context-overflow envelope."""
+        context_overflow = native_result.get("kind") == "context_overflow"
+        message = str(native_result.get("message" if context_overflow else "errorMessage") or "")
+        match = re.match(r"^(?:HTTP )?([45]\d{2})(?::|\s|$)", message)
+        if context_overflow:
+            return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
+        if native_result.get("stopReason") in {"error", "aborted"}:
+            if message in {"Connection error.", "terminated"} or re.fullmatch(
+                r"LLM idle timeout \(\d+(?:\.\d+)?s\): no response from model", message
+            ):
+                return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
+        if native_result.get("stopReason") == "error":
+            if match:
+                return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=int(match[1]))
+        return AgentOutcome(failure_kind="unknown")
 
     config: OpenClawAgentConfig
     # Sandbox sessions run the CLI inside the task sandbox, which calls the model server from there.
@@ -571,6 +643,10 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         else:
             if not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
                 raise HTTPException(422, "OpenClaw requires direct SandboxAccess")
+            if self.config.network_access != "inherit":
+                raise AgentSeedRejectedError(
+                    "OpenClaw network_access applies only to a sandbox it creates, not a borrowed one"
+                )
             workdir = body.sandbox_access.workdir
             provider_ref = body.sandbox_access.connection.provider_config_ref
         if not isinstance(workdir, str) or not workdir.startswith("/") or workdir in ("/", "/tmp"):
@@ -614,6 +690,27 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
 
         provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
         if owns_sandbox:
+            try:
+                spec = restrict_sandbox_network(
+                    spec,
+                    network_access=self.config.network_access,
+                    provider=provider,
+                    model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
+                    tool_urls=[
+                        str(access.connection.url)
+                        for access in self.effective_tool_accesses(body)
+                        if isinstance(access, MCPToolAccess)
+                    ],
+                    # model_only blocks these hosts, so a required grant is refused before the sandbox exists.
+                    required_tool_urls=[
+                        str(access.connection.url)
+                        for access in self.effective_tool_accesses(body)
+                        if isinstance(access, MCPToolAccess) and access.required
+                    ],
+                )
+            except BaseException:
+                await provider.aclose()
+                raise
             sandbox = AsyncSandbox(provider)
         else:
             try:
@@ -622,7 +719,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 await provider.aclose()
                 raise
         directory = f"/tmp/nemo-gym-openclaw-sessions/{uuid4().hex}"
-        runtime = f"/tmp/nemo-gym-openclaw-node-22.19.0-{self.config.openclaw_version}"
+        runtime = (
+            self.config.sandbox_runtime_dir or f"/tmp/nemo-gym-openclaw-node-22.19.0-{self.config.openclaw_version}"
+        )
         state = OpenClawSandboxSession(
             request=body,
             session=SandboxSession(
@@ -650,22 +749,50 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                     f"stderr={(prepared.stderr or '')[-16000:]}; stdout={(prepared.stdout or '')[-16000:]}"
                 )
             prepared_directory = True
-            # Install only the agent runtime in the existing task sandbox.
-            # Resources has already prepared the task repository and its dependencies.
-            installer = "install_openclaw_runtime.sh"
-            await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
-            installed = await sandbox.exec(
-                f"bash {shlex.quote(directory + '/' + installer)} {shlex.quote(runtime)} "
-                f"{shlex.quote(self.config.openclaw_version)}",
-                cwd=workdir,
-                timeout_s=self.config.sandbox_install_timeout_seconds,
-            )
-            if installed.return_code != 0 or installed.error_type:
-                raise RuntimeError(
-                    f"OpenClaw runtime setup failed (exit {installed.return_code}, error={installed.error_type}): "
-                    f"bash {directory}/{installer} {runtime} {self.config.openclaw_version}\n"
-                    f"stderr={(installed.stderr or '')[-16000:]}; stdout={(installed.stdout or '')[-16000:]}"
+            if self.config.sandbox_runtime_dir:
+                # The installer's ready checks: Node 22.19.0 or newer, the CLI runs, and the version the package
+                # declares. The CLI runs with a private home, so the check writes nothing into the task's home.
+                node = shlex.quote(runtime + "/node/bin/node")
+                version_home = f"{directory}/openclaw-version-home"
+                checked = await sandbox.exec(
+                    f"{node} -e {shlex.quote(_NODE_FLOOR_CHECK)} && mkdir -p {shlex.quote(version_home)} && "
+                    f"HOME={shlex.quote(version_home)} XDG_CACHE_HOME={shlex.quote(version_home + '/cache')} "
+                    f"XDG_CONFIG_HOME={shlex.quote(version_home + '/config')} "
+                    f"{node} {shlex.quote(runtime + '/openclaw/node_modules/openclaw/openclaw.mjs')} --version "
+                    f">/dev/null && {node} -e {shlex.quote('process.stdout.write(require(process.argv[1]).version)')} "
+                    f"{shlex.quote(runtime + '/openclaw/node_modules/openclaw/package.json')}",
+                    cwd=workdir,
+                    timeout_s=self.config.sandbox_install_timeout_seconds,
                 )
+                details = f"stderr={(checked.stderr or '')[-16000:]}; stdout={(checked.stdout or '')[-16000:]}"
+                if checked.error_type:
+                    # A transport failure or timeout may pass on another attempt.
+                    raise RuntimeError(
+                        f"OpenClaw could not check the runtime in {runtime} (error={checked.error_type}): {details}"
+                    )
+                if checked.return_code != 0 or checked.stdout != self.config.openclaw_version:
+                    # A missing or incomplete runtime, another version or an old Node fails the same way every time.
+                    raise AgentSeedRejectedError(
+                        f"OpenClaw runtime in {runtime} does not run openclaw_version {self.config.openclaw_version} "
+                        f"(exit {checked.return_code}): {details}"
+                    )
+            else:
+                # Install only the agent runtime in the existing task sandbox.
+                # Resources has already prepared the task repository and its dependencies.
+                installer = "install_openclaw_runtime.sh"
+                await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
+                installed = await sandbox.exec(
+                    f"bash {shlex.quote(directory + '/' + installer)} {shlex.quote(runtime)} "
+                    f"{shlex.quote(self.config.openclaw_version)}",
+                    cwd=workdir,
+                    timeout_s=self.config.sandbox_install_timeout_seconds,
+                )
+                if installed.return_code != 0 or installed.error_type:
+                    raise RuntimeError(
+                        f"OpenClaw runtime setup failed (exit {installed.return_code}, error={installed.error_type}): "
+                        f"bash {directory}/{installer} {runtime} {self.config.openclaw_version}\n"
+                        f"stderr={(installed.stderr or '')[-16000:]}; stdout={(installed.stdout or '')[-16000:]}"
+                    )
             await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
         except BaseException as error:
             try:
@@ -700,7 +827,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         system = "\n\n".join(part for part in (self.config.system_prompt, body.instructions, input_system) if part)
         return prompt, system
 
-    def _sandbox_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
+    def _sandbox_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str, list[MediaFile]]:
         """Validate and normalize input before consuming the session's activation."""
         if body.model is not None and body.model != self.config.model:
             raise HTTPException(422, "OpenClaw sandbox execution model must match the configured model")
@@ -728,18 +855,19 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         roles = [getattr(item, "role", None) for item in items]
         if roles not in (["user"], ["system", "user"]):
             raise HTTPException(
-                422, "OpenClaw sandbox execution accepts one text user prompt with an optional system message"
+                422, "OpenClaw sandbox execution accepts one user prompt with an optional system message"
             )
         for item in items:
-            if not isinstance(item.content, str) and any(
-                (part.get("type") if isinstance(part, dict) else getattr(part, "type", None)) != "input_text"
-                for part in item.content
-            ):
-                raise HTTPException(422, "OpenClaw sandbox execution only supports text input")
+            try:
+                _, media = split_text_and_media(item.content)
+            except UnsupportedContentError as error:
+                raise HTTPException(422, f"OpenClaw sandbox execution: {error}") from error
+            if media and item.role != "user":
+                raise HTTPException(422, "OpenClaw accepts images only in the user prompt")
         prompt, system = self._prompt_input(body)
-        if not prompt.strip():
-            raise HTTPException(422, "OpenClaw sandbox execution requires a nonempty user prompt")
-        return prompt, system
+        if not prompt.strip() and not media:
+            raise HTTPException(422, "OpenClaw sandbox execution requires a nonempty user prompt or an image")
+        return prompt, system, media
 
     async def _sandbox_response(
         self,
@@ -748,10 +876,16 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         *,
         prompt: str,
         system: str,
+        media: list[MediaFile] | None = None,
     ) -> NeMoGymResponse:
         # The pinned CLI reads configuration directly; onboarding would create
         # workspace bootstrap files and unrelated provider/channel state.
         session_config = self._build_openclaw_config({}, state.request.episode_id.capture_key)
+        session_id = state.session.session_dir.rsplit("/", 1)[-1]
+        if media or self.config.image_input:
+            session_config["models"]["providers"]["nemo"]["models"][0]["input"] = ["text", "image"]
+        # Capture rejected attempts too: they have no responseId in the transcript.
+        session_config["models"]["providers"]["nemo"]["headers"] = {"x-session-id": session_id}
         # OpenClaw conservatively disables stream usage for custom origins. Gym
         # supports it; request the final usage chunk instead of retaining zero counters.
         session_config["models"]["providers"]["nemo"]["models"][0]["compat"] = {
@@ -767,6 +901,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                         "model": {"primary": self._effective_model()},
                         "sandbox": {"mode": "off"},
                         "memorySearch": {"enabled": False},
+                        # Disable the configurable 1200 px resize for image-capable sessions.
+                        **({"imageMaxDimensionPx": 2**31 - 1} if media or self.config.image_input else {}),
                     }
                 },
                 "tools": {
@@ -787,7 +923,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             "--agent",
             "main",
             "--session-id",
-            state.session.session_dir.rsplit("/", 1)[-1],
+            session_id,
             "--thinking",
             self.config.thinking,
             "--model",
@@ -824,17 +960,49 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 session_config["tools"]["allow"].append("bundle-mcp")
         try:
             async with self.sem:
-                await state.execute(payload, timeout=timeout, close_timeout=self.config.session_close_timeout_seconds)
+                await state.execute(
+                    payload,
+                    media=media or (),
+                    timeout=timeout,
+                    close_timeout=self.config.session_close_timeout_seconds,
+                )
         except BaseException:
             # Cancellation/cleanup failure still leaves useful transcript evidence
             # for the subsequent close. Never convert uncertain cleanup to success.
             try:
-                await self._collect_sandbox_response(state, body, prompt=prompt, system=system)
+                await self._collect_sandbox_response(
+                    state, body, prompt=prompt, system=system, capture_correlated=True
+                )
                 state.observations.gaps.extend(mcp_gaps)
             except Exception:
                 LOG.exception("Could not salvage interrupted OpenClaw observations")
             raise
-        response = await self._collect_sandbox_response(state, body, prompt=prompt, system=system)
+        response = await self._collect_sandbox_response(
+            state, body, prompt=prompt, system=system, capture_correlated=True
+        )
+        if media and (
+            response.status == "completed"
+            or (response.status == "incomplete" and not (state.session.cleanup or {}).get("timed_out"))
+        ):
+            transcript = (state.session.artifacts or {}).get(
+                f"home/.openclaw/agents/main/sessions/{session_id}.jsonl", ""
+            )
+            messages = parse_openclaw_session_items(parse_openclaw_session_events(transcript), include_input=True)
+            image_count = max(
+                (
+                    sum(
+                        (part.get("type") if isinstance(part, dict) else getattr(part, "type", None)) == "input_image"
+                        for part in item.content
+                    )
+                    for item in messages
+                    if getattr(item, "role", None) == "user" and isinstance(item.content, list)
+                ),
+                default=0,
+            )
+            if image_count < len(media):
+                if state.observations is not None and state.observations.records:
+                    state.observations.records[0].status = "failed"
+                raise RuntimeError("OpenClaw retained fewer prompt images than supplied")
         # A grant can pass the probe and still fail at agent startup: OpenClaw 2026.6.11 then logs
         # `bundle-mcp: failed to start server "<name>"`, runs on without its tools and exits 0.
         stderr = _ANSI.sub("", (state.session.artifacts or {}).get("stderr.log", ""))
@@ -846,9 +1014,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         ]
         if state.observations is not None:
             state.observations.gaps.extend(mcp_gaps)
-        if response.error is not None:
-            # Preserve the transcript in session observations, but let the environment
-            # classify runtime/provider failures before it invokes the verifier.
+        if response.error is not None and AGENT_OUTCOME_METADATA_KEY not in (response.metadata or {}):
+            # Runtime and cleanup failures must not become gradable model outcomes.
             raise HTTPException(502, response.error.message)
         if lost_required := [name for name in lost if name in required_grants]:
             raise HTTPException(
@@ -995,6 +1162,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         *,
         prompt: str,
         system: str,
+        capture_correlated: bool = False,
     ) -> NeMoGymResponse:
         gaps = []
         artifacts = state.session.artifacts or {}
@@ -1107,6 +1275,15 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             gaps.append(ObservationGap(code="worker_exit_code_unavailable"))
         error = result["error"] if result else "OpenClaw activation ended without a cleanup receipt"
         last = assistants[-1] if assistants else {}
+        envelope_error = meta.get("error") if isinstance(meta, dict) else None
+        context_error = (
+            envelope_error
+            if isinstance(envelope_error, dict) and envelope_error.get("kind") == "context_overflow"
+            else None
+        )
+        terminal_result = context_error if context_error is not None else last
+        if context_error is not None:
+            error = error or str(context_error.get("message") or "OpenClaw context overflow")
         if last.get("stopReason") == "error" or (
             last.get("stopReason") == "aborted" and not (result and result["timed_out"])
         ):
@@ -1150,10 +1327,11 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 openclaw_session_conversation(events, input_items=input_items, fallback_output=output),
                 events,
                 transcript_available=bool(events),
+                prefer_openclaw_session_id=False,
+                capture_correlated=capture_correlated,
                 model_ref=self.config.model_server,
             )
-            # Sandbox sessions enable only local file/process tools, so there is
-            # exactly one invocation; child sessions cannot be spawned.
+            # Sandbox sessions disable child agents, so there is exactly one invocation.
             state.observations.gaps = [
                 gap for gap in state.observations.gaps if gap.code != "subagent_hierarchy_unavailable"
             ]
@@ -1165,6 +1343,33 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 source=OPENCLAW_OBSERVATION_SOURCE,
                 gaps=[ObservationGap(code="observation_capture_failed"), *gaps],
             )
+        if (
+            result
+            and (
+                result["return_code"] == 0
+                or (
+                    result["return_code"] == 1
+                    and artifacts.get("stderr.log", "").strip().rsplit("\n", 1)[-1].startswith("FailoverError: ")
+                )
+            )
+            and not result["timed_out"]
+            and not result["error"]
+            and (
+                context_error is not None
+                or last.get("stopReason") == "error"
+                or (
+                    last.get("stopReason") == "aborted"
+                    and self.classify_outcome(last).failure_kind == MODEL_TRANSPORT_ERROR
+                )
+            )
+        ):
+            # 2026.6.11 can surface model errors by throwing FailoverError and
+            # exiting 1. Require its terminal diagnostic as well as the assistant
+            # error; an unrelated worker exit must still raise. The environment
+            # owns verify/retry/fail policy for the preserved model response.
+            # An idle watchdog abort is a model failure; the supervisor's whole-run
+            # deadline and unrelated aborts must not be classified as transport errors.
+            return self.report_outcome(response, terminal_result)
         return response
 
     def model_post_init(self, __context: Any) -> None:
@@ -1488,6 +1693,15 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
+        if any(
+            isinstance(getattr(item, "content", None), list)
+            and any(
+                (part.get("type") if isinstance(part, dict) else getattr(part, "type", None)) == "input_image"
+                for part in item.content
+            )
+            for item in body.input
+        ):
+            raise HTTPException(422, "OpenClaw prompt images require an agent session")
         user_message, system_prompt = self._prompt_input(body)
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
 
@@ -1557,13 +1771,13 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             assert isinstance(state, OpenClawSandboxSession)
             if state.request.episode_id.capture_key != request.path_params.get("rollout_id"):
                 raise HTTPException(409, "OpenClaw activation does not match the seeded session and rollout route")
-            prompt, system = self._sandbox_input(body)
             if state.task is None:
+                prompt, system, media = self._sandbox_input(body)
                 # Bind the immutable request before yielding, so identical retries
                 # share one invocation and different requests cannot replace it.
                 state.activation_request = body.model_copy(deep=True)
                 state.task = asyncio.create_task(
-                    self._sandbox_response(state, state.activation_request, prompt=prompt, system=system)
+                    self._sandbox_response(state, state.activation_request, prompt=prompt, system=system, media=media)
                 )
             elif body != state.activation_request:
                 raise HTTPException(409, "OpenClaw sandbox sessions support one activation; retry the same request")
@@ -1724,3 +1938,6 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     OpenClawAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = OpenClawAgent.run_webserver()  # noqa: F401

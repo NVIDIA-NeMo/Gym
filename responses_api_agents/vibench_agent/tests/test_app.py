@@ -309,7 +309,7 @@ class TestSandboxModelUrl:
         agent = make_agent(tmp_path)
         monkeypatch.setattr(agent, "_uses_docker_provider", lambda: True)
         monkeypatch.setattr(
-            "nemo_gym.sandbox.agent_tools.get_server_url",
+            "nemo_gym.agents.agent_tools.get_server_url",
             lambda name: "http://127.0.0.1:9000",
         )
 
@@ -324,7 +324,7 @@ class TestSandboxModelUrl:
         agent = make_agent(tmp_path)
         monkeypatch.setattr(agent, "_uses_docker_provider", lambda: True)
         monkeypatch.setattr(
-            "nemo_gym.sandbox.agent_tools.get_server_url",
+            "nemo_gym.agents.agent_tools.get_server_url",
             lambda name: "http://127.0.0.1:9000",
         )
         monkeypatch.setattr(
@@ -343,7 +343,7 @@ class TestSandboxModelUrl:
         """sandbox_model_base_url is for providers whose boxes have their own address."""
         agent = make_agent(tmp_path, sandbox_model_base_url="http://sandbox-gw:7000/v1")
         monkeypatch.setattr(
-            "nemo_gym.sandbox.agent_tools.get_server_url",
+            "nemo_gym.agents.agent_tools.get_server_url",
             lambda name: "http://127.0.0.1:9000",
         )
         monkeypatch.setattr(type(agent), "base_url_for_run", lambda self, base_url, body: f"{base_url}/ng-rollout/xyz")
@@ -357,7 +357,7 @@ class TestSandboxModelUrl:
         agent = make_agent(tmp_path)
         monkeypatch.setattr(agent, "_uses_docker_provider", lambda: False)
         monkeypatch.setattr(
-            "nemo_gym.sandbox.agent_tools.get_server_url",
+            "nemo_gym.agents.agent_tools.get_server_url",
             lambda name: "http://10.0.0.5:9000",
         )
 

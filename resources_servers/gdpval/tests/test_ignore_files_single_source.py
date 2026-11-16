@@ -5,7 +5,7 @@
 import ast
 from pathlib import Path
 
-from nemo_gym.deliverables import IGNORE_FILES
+from nemo_gym.environment import IGNORE_FILES
 
 
 GDPVAL = Path(__file__).resolve().parents[1]
@@ -32,10 +32,10 @@ def test_comparison_does_not_keep_its_own_copy():
 
 
 def test_comparison_uses_the_shared_definition():
-    """The judge and Stirrup's file reader both read ``nemo_gym.deliverables``."""
+    """The judge and Stirrup's file reader both read ``IGNORE_FILES`` from ``nemo_gym.environment``."""
     from resources_servers.gdpval import comparison
 
-    assert _modules_importing_ignore_files(COMPARISON) == {"nemo_gym.deliverables"}
+    assert _modules_importing_ignore_files(COMPARISON) == {"nemo_gym.environment"}
     assert comparison.IGNORE_FILES is IGNORE_FILES
 
 
@@ -52,4 +52,4 @@ def test_comparison_does_not_import_the_agent_at_module_scope():
 
 
 def test_inspect_conversion_uses_the_shared_definition():
-    assert _modules_importing_ignore_files(INSPECT_CONVERSION) == {"nemo_gym.deliverables"}
+    assert _modules_importing_ignore_files(INSPECT_CONVERSION) == {"nemo_gym.environment"}

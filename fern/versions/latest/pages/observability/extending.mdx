@@ -21,8 +21,7 @@ step of a verifier or a retrieval call in an agent harness.
 ## Adding a Span
 
 ```python
-from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
-from nemo_gym.telemetry import GymSpanGroup
+from nemo_gym.telemetry import GymSpanGroup, is_span_group_enabled, managed_span
 
 
 class MyResourcesServer(SimpleResourcesServer):
@@ -35,8 +34,8 @@ class MyResourcesServer(SimpleResourcesServer):
         return BaseVerifyResponse(reward=self._score(answer))
 ```
 
-Import from `nemo_gym.telemetry._fallbacks`, never from `nemo.lens` directly. That module
-resolves to the real implementations when `nemo-lens` is installed and to no-op stubs when
+Import from `nemo_gym.telemetry`, never from `nemo.lens` directly. These names
+resolve to the real implementations when `nemo-lens` is installed and to no-op stubs when
 it is not, so your server keeps working for users who never install the extra.
 
 ## Check the Span Group First
@@ -68,7 +67,7 @@ Use `safe_set_span_attributes` to set attributes after a span starts. It drops n
 values instead of raising, and redacts values whose keys look sensitive.
 
 ```python
-from nemo_gym.telemetry._fallbacks import safe_set_span_attributes
+from nemo_gym.telemetry import safe_set_span_attributes
 
 with managed_span(GymSpanGroup.VERIFY, "my_server.parse") as span:
     result = self._parse(body)

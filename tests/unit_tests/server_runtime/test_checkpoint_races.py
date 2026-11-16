@@ -16,7 +16,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime._checkpoint.control import StaleAttemptError
 from nemo_gym.server_runtime._checkpoint.store import read_participant_state, write_participant_state
 from tests.unit_tests.server_runtime.test_checkpoint_control import (

@@ -15,7 +15,10 @@ from pydantic import BaseModel
 
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.core.episode import EpisodeId, TaskId
+from nemo_gym.core.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeId, MaterializedTask, TaskId
+from nemo_gym.core.failure_records import EpisodeFailure
+from nemo_gym.core.model_call_sampling import MODEL_SAMPLING_NULL, ModelCallSampling, encode_model_sampling
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.server_runtime.base_environment_server import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
@@ -24,12 +27,7 @@ from nemo_gym.server_runtime.base_environment_server import (
     is_retryable_dependency_error,
     is_retryable_dependency_status,
 )
-from nemo_gym.server_runtime.episode_types import (
-    BaseEpisodeRequest,
-    BaseEpisodeResponse,
-    EpisodeFailure,
-    MaterializedTask,
-)
+from nemo_gym.telemetry import concurrency
 
 
 class _TaskInput(BaseModel):
@@ -223,14 +221,15 @@ def test_each_cleanup_has_its_own_budget() -> None:
     calls: list[str] = []
     context = CleanupContext(
         episode_id=_request().episode_id,
-        cleanup_timeout_seconds=0.05,
+        cleanup_timeout_seconds=0.5,
     )
 
     async def sandbox() -> None:
         calls.append("sandbox")
 
     async def slow_but_finishes() -> None:
-        await asyncio.sleep(0.03)
+        # A tenth of its budget: a loaded runner cannot push it past its own timeout.
+        await asyncio.sleep(0.05)
         calls.append("slow")
 
     async def hung() -> None:
@@ -250,7 +249,8 @@ def test_each_cleanup_has_its_own_budget() -> None:
     # Under one shared budget the slow close would have eaten the time the hung one left; here each
     # callback is bounded on its own and the sandbox stop at the bottom of the stack still happens.
     assert calls == ["hung", "slow", "sandbox"]
-    assert elapsed < 0.05 * 3
+    # The hung callback sleeps for a minute, so finishing well short of that shows its budget cut it off.
+    assert elapsed < 10
 
 
 def test_explicit_cleanup_is_bounded_and_final_unwind_retries() -> None:
@@ -433,8 +433,49 @@ def test_failure_metadata_survives_the_environment_http_boundary(classified: boo
     assert response.json()["result"] is None
 
 
+def _sampling_request() -> _Request:
+    return _request().model_copy(
+        update={"model_sampling": ModelCallSampling(temperature=0.6, top_p=0.95, max_output_tokens=64)}
+    )
+
+
+def test_a_server_that_does_not_apply_sampling_values_refuses_an_episode_that_carries_them() -> None:
+    response = asyncio.run(_environment_server().run_request(_sampling_request()))
+
+    # The episode never ran: a run returns its task's value as the result.
+    assert response.result is None
+    assert response.failure.terminal is True
+    assert response.failure.stage == "admission"
+    assert (
+        "_EnvironmentServer does not apply a training framework's sampling values" in response.failure.failure_reason
+    )
+
+
+def test_a_server_that_applies_sampling_values_runs_an_episode_that_carries_them() -> None:
+    server_type = type("Applies", (_EnvironmentServer,), {"applies_model_sampling": True})
+    server = server_type(config=_environment_server().config, server_client=MagicMock(spec=ServerClient))
+
+    response = asyncio.run(server.run_request(_sampling_request()))
+
+    assert response.failure is None
+    assert response.result == "result"
+
+
+def test_the_trained_participant_gets_the_episodes_values_and_every_other_one_null() -> None:
+    request = _sampling_request()
+
+    assert BaseEnvironmentServer.model_sampling_segment(request, trained=True) == encode_model_sampling(
+        request.model_sampling
+    )
+    assert BaseEnvironmentServer.model_sampling_segment(request, trained=False) == MODEL_SAMPLING_NULL
+    # Without values, as in Gym-only evaluation, no participant gets a segment.
+    assert BaseEnvironmentServer.model_sampling_segment(_request(), trained=True) is None
+    assert BaseEnvironmentServer.model_sampling_segment(_request(), trained=False) is None
+
+
 def test_admission_timeout_reports_its_stage_before_running_the_episode() -> None:
     server = _environment_server(max_concurrent_episodes=1, queue_timeout_seconds=0.01)
+    timeouts_before = sum(concurrency._ADMISSION_TIMEOUTS.values())
 
     async def run() -> _Response:
         async with server._admission:
@@ -445,6 +486,13 @@ def test_admission_timeout_reports_its_stage_before_running_the_episode() -> Non
     assert response.failure.failure_reason == "Episode admission timed out"
     assert response.failure.stage == "admission"
     assert response.failure.terminal is False
+    assert server._admission.attributes == {
+        "nemo.gym.concurrency.component": "environment_server",
+        "nemo.gym.concurrency.limit_name": "episodes",
+        "nemo.gym.server.name": "environment",
+    }
+    assert sum(concurrency._ADMISSION_TIMEOUTS.values()) - timeouts_before == 1, "the admission limit counts it once"
+    assert (server._admission.active, server._admission.queued) == (0, 0)
 
 
 @pytest.mark.parametrize("records_boundaries", [False, True])
@@ -567,39 +615,29 @@ def test_only_transport_failures_retry_without_a_status(error: Exception, retrya
     assert is_retryable_dependency_error(error) is retryable
 
 
-class _EvidenceFailure(EpisodeFailure):
-    partial_response: str | None = None
-
-
 def test_dependency_failure_keeps_the_dependencys_reason_and_classifies_it() -> None:
     refusal = ClientResponseError(MagicMock(), (), status=422, message="Unprocessable Content")
     refusal.response_content = b'{"detail":"agent does not support sandbox access"}'
 
-    failure = dependency_failure(
-        refusal, failure_model=_EvidenceFailure, stage="agent", partial_response="partial"
-    ).failure
+    failure = dependency_failure(refusal, stage="agent", partial_response="partial")
 
-    assert type(failure) is _EvidenceFailure
-    assert failure.stage == "agent"
-    assert failure.terminal is True
-    assert failure.failure_reason.startswith("422, message='Unprocessable Content'")
-    assert "agent does not support sandbox access" in failure.failure_reason
-    assert failure.partial_response == "partial"
+    assert isinstance(failure, NgFailureEvent)
+    assert failure.event.stage == "agent"
+    assert failure.episode_terminal is True
+    assert failure.event.failure_reason.startswith("422, message='Unprocessable Content'")
+    assert "agent does not support sandbox access" in failure.event.failure_reason
+    assert failure.episode_evidence["partial_response"] == "partial"
 
 
 def test_dependency_failure_names_the_error_type_bounds_the_reason_and_honors_terminal() -> None:
-    failure = dependency_failure(
-        TimeoutError("x" * 3000), failure_model=EpisodeFailure, stage="cleanup", name_error_type=True
-    ).failure
-    assert failure.terminal is False
-    assert failure.failure_reason.startswith("TimeoutError: xxx")
-    assert len(failure.failure_reason) == 2000
+    failure = dependency_failure(TimeoutError("x" * 3000), stage="cleanup", name_error_type=True)
+    assert failure.episode_terminal is False
+    assert failure.event.failure_reason.startswith("TimeoutError: xxx")
+    assert len(failure.event.failure_reason) == 2000
 
-    forced = dependency_failure(
-        TimeoutError("timed out"), failure_model=EpisodeFailure, stage="cleanup", terminal=True
-    ).failure
-    assert forced.terminal is True
-    assert forced.failure_reason == "timed out"
+    forced = dependency_failure(TimeoutError("timed out"), stage="cleanup", terminal=True)
+    assert forced.episode_terminal is True
+    assert forced.event.failure_reason == "timed out"
 
 
 def test_a_protocol_may_derive_the_episode_deadline_per_request() -> None:
@@ -665,3 +703,72 @@ async def test_a_request_cancelled_while_its_bound_resolves_releases_its_admissi
     response = await server.run_request(_request())
     assert response.failure is not None and "RuntimeError: snapshot lost" in response.failure.failure_reason
     assert not server._admission.locked()
+
+
+@pytest.mark.parametrize("primary_kind", [None, "model_request_error", "judge_failed"])
+@pytest.mark.parametrize("cleanup_error", [None, "connection", "timeout", "typed"])
+def test_cleanup_observations_preserve_the_episode_outcome(primary_kind, cleanup_error, caplog):
+    from nemo_gym.server_runtime.base_environment_server import handled_episode_failure
+
+    primary = None
+    if primary_kind:
+        primary = handled_episode_failure(
+            failure_kind=primary_kind,
+            failure_reason="original failure",
+            terminal=True,
+            stage="verification" if primary_kind == "judge_failed" else "agent",
+            operation="episode",
+        )
+    cause = NgFailureEvent(
+        boundary="resources_server",
+        failure_kind="session_release_failed",
+        failure_reason="release not confirmed",
+        operation="resources.close",
+        event_id="original-cleanup-cause",
+    )
+
+    class Environment(_EnvironmentServer):
+        async def run(self, request, cleanup):
+            async def close():
+                if cleanup_error == "connection":
+                    raise ConnectionError("cleanup connection lost")
+                if cleanup_error == "timeout":
+                    raise TimeoutError("cleanup deadline")
+                if cleanup_error == "typed":
+                    raise cause
+
+            cleanup.register_cleanup("resources session", close)
+            if primary is not None:
+                raise primary
+            return await super().run(request, cleanup)
+
+    server = Environment(config=_environment_server().config, server_client=MagicMock(spec=ServerClient))
+    reply = TestClient(server.setup_webserver()).post("/run", json=_request().model_dump(mode="json"))
+    assert reply.status_code == 200
+    response = _Response.model_validate(reply.json())
+    if primary is None:
+        assert response.result == "result" and response.failure is None
+        assert response.failure_report is None or response.failure_report.failure_id is None
+    else:
+        assert response.failure.failure_kind == primary_kind and response.failure.terminal is True
+        assert response.failure_report.failure_id == primary.event_id
+        assert response.failure_report.events[primary.event_id].operation == "episode"
+    cleanup_events = [
+        e
+        for e in (response.failure_report.events.values() if response.failure_report else [])
+        if e.operation == "episode.cleanup"
+    ]
+    assert len(cleanup_events) == int(cleanup_error is not None)
+    if cleanup_error:
+        [event] = cleanup_events
+        assert event.failure_kind == "session_release_failed" and event.stage == "cleanup"
+        assert event.failure_reason == "Episode cleanup failed: resources session"
+        assert response.episode_id == _request().episode_id
+        assert "Episode cleanup" in caplog.text
+        if cleanup_error == "typed":
+            assert event.cause_id == cause.event_id
+            assert response.failure_report.events[cause.event_id].operation == "resources.close"
+        else:
+            assert event.foreign_error.exception_type.endswith(
+                "TimeoutError" if cleanup_error == "timeout" else "ConnectionError"
+            )

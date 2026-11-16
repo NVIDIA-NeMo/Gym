@@ -12,10 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import hashlib
 import logging
 import os
 from abc import ABC, abstractmethod
-from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -25,10 +25,11 @@ import orjson
 from omegaconf import DictConfig, OmegaConf
 from pydantic import TypeAdapter, ValidationError
 
-from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics
-from nemo_gym.artifacts.run_artifacts import RunArtifacts
+from nemo_gym._moved_paths import moved_names_getattr
+from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics, health_source_artifacts
+from nemo_gym.artifacts.run_artifacts import RunArtifacts, accepted_stage_omission
 from nemo_gym.config.config_types import DEPRECATED_UPLOAD_ROLLOUTS_KEY, RunExportConfig, UploadRolloutsConfigMixin
-from nemo_gym.config.secret_utils import recursively_hide_secrets
+from nemo_gym.config.secret_utils import hide_secrets_in_container
 from nemo_gym.utils.path_utils import exporter_run_id_path_for
 
 
@@ -107,6 +108,42 @@ def _write_marker_atomically(marker: Path, run_id: str) -> None:
         temporary.replace(marker)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _accepted_stage_omissions(materialized_inputs: Path) -> int:
+    """How many planned rows an accepted partial stage omitted: the number recovery's acceptance gate states."""
+    if not materialized_inputs.is_file():
+        return 0
+    with materialized_inputs.open("rb") as lines:
+        rows = (orjson.loads(line) for line in lines if line.strip())
+        return sum(isinstance(row, dict) and accepted_stage_omission(row) is not None for row in rows)
+
+
+def _artifact_version(artifacts: RunArtifacts) -> dict[str, Optional[str]]:
+    """Content identities for a run, independent of its writers, timestamps and directory location."""
+    version = {}
+    for name in (
+        "rollouts_jsonl_fpath",
+        "resolved_config_yaml_fpath",
+        "aggregate_metrics_json_fpath",
+        "failures_jsonl_fpath",
+        "materialized_inputs_jsonl_fpath",
+    ):
+        path = getattr(artifacts, name)
+        try:
+            with path.open("rb") as source:
+                before = os.fstat(source.fileno())
+                digest = hashlib.file_digest(source, "sha256").hexdigest()
+                after = os.fstat(source.fileno())
+            current = path.stat()
+        except FileNotFoundError:
+            version[name] = None
+            continue
+        identity = lambda stat: (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        if identity(before) != identity(after) or identity(after) != identity(current):
+            raise RuntimeError(f"Run artifact changed while reading: {path}")
+        version[name] = digest
+    return version
 
 
 def _upload_intent(config: DictConfig) -> UploadRolloutsConfigMixin:
@@ -203,6 +240,7 @@ class BaseExporter(Exporter):
         # The backend run id reported during a post-run export. `export()` writes it to the marker once the whole
         # run has been sent.
         self._pending_run_id: Optional[str] = None
+        self._delivery_failed = False
 
     @classmethod
     def from_global_config(cls, global_config_dict: DictConfig) -> "BaseExporter":
@@ -238,8 +276,9 @@ class BaseExporter(Exporter):
     def export_config(self) -> None:
         # `global_config_dict` holds live credentials (the backend needs its own API key to connect),
         # so mask a copy rather than shipping it to a tracking server as-is.
-        config_dict_to_log = deepcopy(self.global_config_dict)
-        recursively_hide_secrets(config_dict_to_log)
+        config_dict_to_log = OmegaConf.create(
+            hide_secrets_in_container(OmegaConf.to_container(self.global_config_dict, resolve=False))
+        )
         if self.reopened:
             # Collection may still find nothing to resume and start the output over (`start_over`): the earlier
             # job's run must not get this job's config then.
@@ -304,10 +343,18 @@ class BaseExporter(Exporter):
         of the run first, so that nothing more reaches it even when closing fails."""
         self.teardown()
 
+    def finalize_live(self, artifacts: RunArtifacts, version: dict[str, str | None]) -> None:
+        """Optionally certify an explicitly completed live activation; teardown alone never certifies it."""
+
+    def link_superseding_export(self, live_run_id: str, run_id: str) -> None:
+        """Optionally mark that the post-run export `run_id` supersedes the live run `live_run_id` it could not
+        certify. Best effort: a backend logs and ignores any failure, and never changes either run's data."""
+
     def _guard(self, what: str, fn, *args) -> None:
         try:
             fn(*args)
         except Exception as e:
+            self._delivery_failed = True
             logger.warning(f"Exporter {self.name} failed to log {what}; continuing: {e}", exc_info=True)
 
     def _run_id_fpath(self) -> Optional[Path]:
@@ -362,12 +409,61 @@ class BaseExporter(Exporter):
     def export(self, artifacts: RunArtifacts) -> ExportResult:
         """Send a finished run to the backend: its saved config, aggregate metrics and (optionally) rollouts.
 
-        Skipped, without contacting the backend, when the run was already exported. Failures come back in the
-        result rather than being swallowed the way live `export_*` calls are.
+        Skipped, without contacting the backend, when the run's export receipt matches its current artifacts; a
+        receipt that does not match them, or a marker that is not a version-1 receipt, is a failure and nothing is
+        sent. Failures come back in the result rather than being swallowed the way live `export_*` calls are.
         """
         marker = artifacts.export_done_fpath(self.name)
-        if marker.exists():
-            return ExportResult.skipped(reason="already exported", run_id=marker.read_text().strip())
+        try:
+            version = _artifact_version(artifacts)
+            if marker.exists():
+                try:
+                    receipt = orjson.loads(marker.read_bytes())
+                except orjson.JSONDecodeError:
+                    receipt = None
+                if (
+                    not isinstance(receipt, dict)
+                    or type(receipt.get("version")) is not int
+                    or receipt["version"] != 1
+                    or not isinstance(receipt.get("run_id"), str)
+                    or not receipt["run_id"].strip()
+                    or type(receipt.get("uploaded_rollouts")) is not bool
+                    or type(receipt.get("rollout_projection_version")) is not int
+                    or receipt["rollout_projection_version"] != 1
+                    or not isinstance(receipt.get("artifacts"), dict)
+                    or receipt["artifacts"].keys() != version.keys()
+                    or any(
+                        digest is not None
+                        and (
+                            not isinstance(digest, str)
+                            or len(digest) != 64
+                            or any(c not in "0123456789abcdef" for c in digest)
+                        )
+                        for digest in receipt["artifacts"].values()
+                    )
+                ):
+                    return ExportResult.failed(
+                        f"Cannot verify the legacy or malformed export receipt {marker}; it is left unchanged and "
+                        "nothing was exported."
+                    )
+                if receipt["artifacts"] != version:
+                    # The receipt describes other contents. It is kept as found, and nothing is sent again.
+                    return ExportResult.failed(
+                        f"The export receipt {marker} does not match the current run artifacts; it is left "
+                        "unchanged and nothing was exported.",
+                        run_id=receipt["run_id"],
+                    )
+                if artifacts.aggregate_metrics_json_fpath.is_file():
+                    entries = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
+                    if isinstance(entries, list) and any(
+                        isinstance(entry, dict) and "_ng_run_health_metrics" in entry for entry in entries
+                    ):
+                        flatten_aggregate_metrics(
+                            entries, source_artifacts=health_source_artifacts(artifacts, version)
+                        )
+                return ExportResult.skipped(reason="already exported", run_id=receipt["run_id"])
+        except (OSError, RuntimeError, ValueError) as exc:
+            return ExportResult.failed(f"Could not verify export artifacts: {exc}")
         # The rollouts file is only required below, when the rollouts are actually uploaded.
         unexportable = unexportable_reason(artifacts, rollouts_required=False)
         if unexportable is not None:
@@ -390,7 +486,10 @@ class BaseExporter(Exporter):
                     f"Rollouts file not found: {artifacts.rollouts_jsonl_fpath}. "
                     "Pass `+upload_rollouts=false` to export without the rollouts."
                 )
-            metrics = flatten_aggregate_metrics(orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes()))
+            health_version = health_source_artifacts(artifacts, version)
+            metrics = flatten_aggregate_metrics(
+                orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes()), source_artifacts=health_version
+            )
             rollouts = self._read_rollouts(artifacts) if upload else None
             with self:
                 self._log_config(saved_config)
@@ -398,6 +497,8 @@ class BaseExporter(Exporter):
                 if rollouts is not None:
                     self._log_rollouts(rollouts)
             run_id = self._pending_run_id
+            # Read before the version check below, so the count describes the inputs the receipt's digest names.
+            omitted = _accepted_stage_omissions(artifacts.materialized_inputs_jsonl_fpath)
             if not run_id:
                 # The marker records which backend run holds this export, and a skipped repeat reports it. A backend
                 # that never reports one is a bug in the exporter, and it shows on the first export.
@@ -405,7 +506,27 @@ class BaseExporter(Exporter):
                     f"The {self.name} exporter did not report a run id: its setup() must call _record_run_id(). "
                     "The export is not marked as done."
                 )
-            _write_marker_atomically(marker, run_id)
+            if (
+                _artifact_version(artifacts) != version
+                or health_source_artifacts(artifacts, version) != health_version
+            ):
+                return ExportResult.failed(
+                    "Run artifacts changed during export; the backend may hold the earlier version, "
+                    "but the current run is not marked as exported.",
+                    run_id=run_id,
+                )
+            # What this export delivered: every call above returned, so the rollouts table was sent exactly when
+            # this export read them for upload. A reader can tell a whole-run receipt from one without rows.
+            receipt = {
+                "version": 1,
+                "run_id": run_id,
+                "artifacts": version,
+                "uploaded_rollouts": rollouts is not None,
+                "rollout_projection_version": 1,
+            }
+            if omitted:
+                receipt["accepted_stage_omissions"] = omitted
+            _write_marker_atomically(marker, orjson.dumps(receipt).decode())
         except Exception as exc:
             logger.warning(f"Exporter {self.name} failed to export {artifacts.rollouts_jsonl_fpath}", exc_info=True)
             return ExportResult.failed(f"{type(exc).__name__}: {exc}")
@@ -432,8 +553,8 @@ class BaseExporter(Exporter):
         from nemo_gym.artifacts.rollout_rows import NG_DISPATCH_DRAINED_KEY, _rollout_for_export
 
         # Rows flagged as drained stand for tasks the dispatch budget never started, so there is nothing to upload,
-        # and a live run leaves them out of its upload too. `_rollout_for_export` drops the bulky trajectory and
-        # raw model-call payloads, the same trimming a live run applies.
+        # and a live run leaves them out of its upload too. `_rollout_for_export` preserves canonical operation metadata while
+        # dropping conversation and raw model-call payloads, the same trimming a live run applies.
         with artifacts.rollouts_jsonl_fpath.open("rb") as f:
             rows = (orjson.loads(line) for line in f if line.strip())
             return [_rollout_for_export(row) for row in rows if not row.get(NG_DISPATCH_DRAINED_KEY)]
@@ -444,3 +565,6 @@ class BaseExporter(Exporter):
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.teardown()
+
+
+__getattr__ = moved_names_getattr(__name__)

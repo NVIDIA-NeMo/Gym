@@ -1,0 +1,318 @@
+{
+  "materialized": [
+    {
+      "_ng_task_index": 0,
+      "_ng_rollout_index": 0,
+      "_ng_collected_task_id": "0"
+    }
+  ],
+  "results": [],
+  "failures": [
+    {
+      "_ng_task_index": 0,
+      "_ng_rollout_index": 0,
+      "_ng_attempt_index": 0,
+      "_ng_failure_class": "agent_run_error",
+      "_ng_failure_max_attempts": 3,
+      "_ng_failure_id": "21722fd984bf4412ba06ca18ee2186e9",
+      "_ng_failure_events": {
+        "1d9f76d8ecf846f080e307ba991cc69d": {
+          "event_id": "1d9f76d8ecf846f080e307ba991cc69d",
+          "boundary": "resources_server",
+          "exception_type": "RuntimeError",
+          "failure_reason": "Verification failed: RuntimeError",
+          "failure_kind": "verifier_error",
+          "operation": "verify",
+          "operation_id": "verify-c9ca38a4166348c1b08cca8c813eb6d2",
+          "stage": "verification",
+          "http_status": 500,
+          "foreign_error": {
+            "exception_type": "RuntimeError",
+            "message": "",
+            "http_status": null
+          }
+        },
+        "ef14d01c04df429e8d89205ea738c95d": {
+          "event_id": "ef14d01c04df429e8d89205ea738c95d",
+          "boundary": "agent",
+          "failure_reason": "Agent operation agent.run failed: ClientResponseError",
+          "failure_kind": "agent_route_failed",
+          "operation": "agent.run",
+          "stage": "agent",
+          "foreign_error": {
+            "exception_type": "aiohttp.client_exceptions.ClientResponseError",
+            "message": "Internal Server Error",
+            "http_status": 500
+          },
+          "cause_id": "1d9f76d8ecf846f080e307ba991cc69d"
+        },
+        "21722fd984bf4412ba06ca18ee2186e9": {
+          "event_id": "21722fd984bf4412ba06ca18ee2186e9",
+          "boundary": "collection",
+          "failure_reason": "Rollout dispatch failed: ClientResponseError",
+          "failure_kind": "collection_dispatch_failed",
+          "operation": "collection.run",
+          "foreign_error": {
+            "exception_type": "aiohttp.client_exceptions.ClientResponseError",
+            "message": "Internal Server Error",
+            "http_status": 500
+          },
+          "cause_id": "ef14d01c04df429e8d89205ea738c95d"
+        }
+      },
+      "_line": 0,
+      "_ng_failure_http_status": 500,
+      "_ng_failure_record": {
+        "source": "collector",
+        "delivery": "delivered",
+        "failure": {
+          "stage": null
+        }
+      }
+    }
+  ],
+  "resubmit_offset": 0,
+  "infra_retries_used": null,
+  "infra_retries_state": "absent",
+  "walltime_used_s": null,
+  "walltime_state": "absent",
+  "job_chain": [],
+  "chain_incomplete": false,
+  "accounted_walltime_s": null,
+  "quality": {
+    "source_matches": true,
+    "rollouts": [
+      "rollouts.jsonl"
+    ],
+    "artifacts": {
+      "expected": 1,
+      "missing": 0,
+      "healthy": true,
+      "unhealthy_reasons": [],
+      "partial": null
+    },
+    "verdicts": {
+      "healthy": 0,
+      "unhealthy": 0,
+      "unobserved": 0
+    },
+    "issues": {
+      "check_execution_error": 0,
+      "record_unreadable": 0,
+      "rollout_duplicate_identity": 0,
+      "rollout_missing_agent_turns": 0,
+      "rollout_ended_on_failed_model_call": 0,
+      "agent_turn_hollow": 0,
+      "model_call_zero_completion_tokens": 0,
+      "model_call_missing_token_counts": 0,
+      "trajectory_capture_mismatch": 0,
+      "rollout_token_count_mismatch": 0,
+      "model_call_runaway_generation": 0,
+      "task_consistently_unhealthy": 0,
+      "task_no_successful_model_calls": 0,
+      "run_excessive_failures": 0
+    },
+    "coverage": {
+      "check_execution_error": {
+        "evaluated": 0,
+        "unobserved": 0,
+        "ignored": 0
+      },
+      "record_unreadable": {
+        "evaluated": 0,
+        "unobserved": 0,
+        "ignored": 0
+      },
+      "rollout_duplicate_identity": {
+        "evaluated": 0,
+        "unobserved": 0,
+        "ignored": 0
+      },
+      "rollout_missing_agent_turns": {
+        "evaluated": 0,
+        "unobserved": 0,
+        "ignored": 0
+      },
+      "rollout_ended_on_failed_model_call": {
+        "evaluated": 0,
+        "unobserved": 0,
+        "ignored": 0
+      },
+      "agent_turn_hollow": {
+        "evaluated": 0,
+        "unobserved": 0,
+        "ignored": 0
+      },
+      "model_call_zero_completion_tokens": {
+        "evaluated": 0,
+        "unobserved": 0,
+        "ignored": 0
+      },
+      "model_call_missing_token_counts": {
+        "evaluated": 0,
+        "unobserved": 0,
+        "ignored": 0
+      },
+      "trajectory_capture_mismatch": {
+        "evaluated": 0,
+        "unobserved": 0,
+        "ignored": 0
+      },
+      "rollout_token_count_mismatch": {
+        "evaluated": 0,
+        "unobserved": 0,
+        "ignored": 0
+      },
+      "model_call_runaway_generation": {
+        "evaluated": 0,
+        "unobserved": 0,
+        "ignored": 0
+      },
+      "task_consistently_unhealthy": {
+        "evaluated": 0,
+        "unobserved": 0,
+        "ignored": 0
+      },
+      "task_no_successful_model_calls": {
+        "evaluated": 0,
+        "unobserved": 0,
+        "ignored": 0
+      },
+      "run_excessive_failures": {
+        "evaluated": 0,
+        "unobserved": 1,
+        "ignored": 0
+      }
+    },
+    "ignored_checks": [],
+    "responses": {
+      "rollouts": 0,
+      "unknown": 0,
+      "selected": 0,
+      "faulted": 0,
+      "duplicated": 0
+    },
+    "provenance": {
+      "resolved_config": "read",
+      "route_failures_to_sidecar": null,
+      "servers": {
+        "mcqa": {
+          "kind": "resources_servers",
+          "implementation": "example_multi_step"
+        },
+        "simple": {
+          "kind": "responses_api_agents",
+          "implementation": "simple_agent",
+          "resources_server": "mcqa",
+          "skip_verification": null
+        },
+        "simple_env": {
+          "kind": "environment_servers",
+          "implementation": "legacy_agent"
+        }
+      },
+      "mlflow": {
+        "configured": false
+      },
+      "rollout_artifact_digests": [
+        {
+          "rollouts_jsonl_fpath": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "failures_jsonl_fpath": "010d624864603f211296be306379eadd9e54718cba81630f5299cff45d921c92",
+          "materialized_inputs_jsonl_fpath": "47cf3b170926ec21d1c469828028f980becad90ba29fdf741ab38f15794a5bd1",
+          "resolved_config_yaml_fpath": "b05640ca2ee67c60bd2adcdbe1377454b6a763833ca9bc90e7fd275d0f697487"
+        }
+      ]
+    },
+    "observed_upstream_recovery": null,
+    "observed_runtime": {
+      "invocation_observations": 1,
+      "in_session": {
+        "true": 0,
+        "false": 1,
+        "absent": 0
+      },
+      "verification_skipped": {
+        "true": 0,
+        "false": 1,
+        "absent": 0
+      },
+      "row_elapsed_s": {
+        "sum_observed": 0.07204739795997739,
+        "absent": 0
+      }
+    },
+    "observed_request_effort": {
+      "http_attempts": {
+        "sum_observed": 2,
+        "operations_observed": 2,
+        "operations_unknown": 0
+      },
+      "transport_failures": {
+        "sum_observed": 0,
+        "operations_observed": 2,
+        "operations_unknown": 0
+      },
+      "retry_wait_s": {
+        "sum_observed": 0.0,
+        "operations_observed": 2,
+        "operations_unknown": 0
+      },
+      "request_elapsed_ms": {
+        "sum_observed": 2.0663690520450473,
+        "operations_observed": 2,
+        "operations_unknown": 0
+      }
+    },
+    "ended_on_failed_model_call": 0,
+    "verification_skipped": {
+      "true": 0,
+      "false": 0,
+      "absent": 0
+    },
+    "context_window_exceeded": {
+      "true": 0,
+      "false": 0,
+      "absent": 0
+    }
+  },
+  "score": null,
+  "mlflow": {
+    "live_run_id": null,
+    "receipt": null
+  },
+  "managed_store": true,
+  "source_digests": {
+    "rollouts.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rollouts_resolved_config.yaml": "b05640ca2ee67c60bd2adcdbe1377454b6a763833ca9bc90e7fd275d0f697487",
+    "rollouts_aggregate_metrics.json": null,
+    "rollouts_failures.jsonl": "010d624864603f211296be306379eadd9e54718cba81630f5299cff45d921c92",
+    "rollouts_materialized_inputs.jsonl": "47cf3b170926ec21d1c469828028f980becad90ba29fdf741ab38f15794a5bd1",
+    "quality_summary.json": "0ebe03ccb1293a2ec64673789025a183068f8a7dcadce2e79e49ce993d8ba20a",
+    "rollouts_manifest.json": "ad581e5bc783c58b53fc2929dcff3301a7b146aa82e3668160c2862d306b5b52",
+    "rollouts_attempts.jsonl": null,
+    "rollouts_resubmit_offset": null,
+    "rollouts_coverage.json": "c8ed4b0ad0355d322750e322bfa53b3fc340d115343a6576d520382841f7cebc",
+    "../.gym_infra_retries": null,
+    "../.gym_accumulated_walltime": null,
+    "../.gym_job_chain": null
+  },
+  "source_job_identity": [
+    "/synthetic/job",
+    64513,
+    30320736
+  ],
+  "managed_selection": [
+    {
+      "identity": [
+        0,
+        0
+      ],
+      "attempts": 1,
+      "max_attempts": 3,
+      "pending": true,
+      "reserved": true
+    }
+  ],
+  "managed_reader_error": null,
+  "checkpoint_enabled": false
+}

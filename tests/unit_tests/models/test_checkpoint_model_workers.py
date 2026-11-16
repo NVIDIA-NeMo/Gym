@@ -16,9 +16,12 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.models._checkpoint import GenerationCutRecord, ModelRecord, PolicyGate, _Ticket
 from nemo_gym.models._checkpoint_workers import PolicyCoordinator, PolicyWorkerLink
+from nemo_gym.models.token_capture.lineage import FileLineageStore
+from nemo_gym.models.token_capture.sink import CaptureContext
+from nemo_gym.models.token_capture.staging.records import GenerationCutContinuation
 from nemo_gym.server_runtime._checkpoint.control import (
     CheckpointRequest,
     CommitRequest,
@@ -28,11 +31,15 @@ from nemo_gym.server_runtime._checkpoint.control import (
     install_control_routes,
 )
 from nemo_gym.server_runtime._checkpoint.errors import ControlError, ExportFailedError, StaleAttemptError
-from nemo_gym.token_id_capture.lineage import FileLineageStore
-from nemo_gym.token_id_capture.sink import CaptureContext
-from nemo_gym.token_id_capture.staging.records import GenerationCutContinuation
 from tests.unit_tests.models.test_checkpoint_model import _staged_call, wait_until, watch_admission, watch_delivery
-from tests.unit_tests.test_token_capture_ledger import ASSISTANT_1, ASSISTANT_2, USER_1, USER_2, _call_record, _commit
+from tests.unit_tests.models.test_token_capture_ledger import (
+    ASSISTANT_1,
+    ASSISTANT_2,
+    USER_1,
+    USER_2,
+    _call_record,
+    _commit,
+)
 
 
 def control(checkpoint_id: str = "c1", *, timeout: float = 5, **extra) -> dict:
@@ -80,7 +87,7 @@ def worker_link(socket_path: str, lost: Optional[list[str]] = None) -> PolicyWor
 def held_call(gate: PolicyGate, capture_key: str, model_call_id: str, request_items: list) -> _Ticket:
     ticket = gate.enter(capture_key)
     ticket.capture = CaptureContext(
-        rollout_id=capture_key, model_call_id=model_call_id, token_sink=None, request_items=request_items
+        capture_key=capture_key, model_call_id=model_call_id, token_sink=None, request_items=request_items
     )
     return ticket
 
@@ -129,7 +136,7 @@ async def test_commit_leaves_out_undelivered_calls_on_every_worker(tmp_path: Pat
         await coordinator.controller.commit(
             CommitRequest(**control(checkpoint_dir=str(tmp_path / "ckpt"), episode_ids=[{"rollout_id": "r"}]))
         )
-        [record] = await coordinator.participant.export([EpisodeId(rollout_id="r")])
+        [record] = await coordinator.participant.export([EpisodeId(rollout_id="r")], checkpoint_id="c")
 
     assert [row["model_call_id"] for row in record.rows] == ["c1"]
 
@@ -188,13 +195,13 @@ async def test_a_worker_lost_between_readiness_and_snapshot_fails_the_commit(tmp
         await coordinator.controller.prepare(CheckpointRequest(**control()))
         export = participant.export
 
-        async def export_after_the_worker_left(episode_ids: Optional[list[EpisodeId]]) -> list:
+        async def export_after_the_worker_left(episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list:
             # The commit has checked readiness; the worker leaves before the snapshot.
             await second.disconnect()
             async with asyncio.timeout(5):
                 while len(participant.workers) > 1:
                     await asyncio.sleep(0.01)
-            return await export(episode_ids)
+            return await export(episode_ids, checkpoint_id=checkpoint_id)
 
         participant.export = export_after_the_worker_left
         commit = CommitRequest(**control(checkpoint_dir=str(tmp_path / "ckpt"), episode_ids=[{"rollout_id": "r"}]))
@@ -287,7 +294,7 @@ async def test_a_worker_call_that_used_a_restored_cut_never_gives_it_back_to_a_r
             continued = cutting.restored_cuts.take(resumed, "r-a1", "e" * 64)
             # The next checkpoint cuts the resumed call further; then the call ends before its response starts.
             await participant.close_admission(CheckpointRequest(**control("c2")))
-            [exported] = await participant.export([EpisodeId(rollout_id="r", attempt=1)])
+            [exported] = await participant.export([EpisodeId(rollout_id="r", attempt=1)], checkpoint_id="c")
             await participant.open_admission()
             await cutting.gate.exit(resumed)
             retry = held_call(cutting.gate, "r-a1", "c4", [])
@@ -578,7 +585,7 @@ async def test_each_worker_publishes_a_call_s_ledger_row_only_once_its_response_
         await coordinator.controller.commit(
             CommitRequest(**control(checkpoint_dir=str(tmp_path / "ckpt"), episode_ids=[{"rollout_id": "r"}]))
         )
-        [record] = await coordinator.participant.export([EpisodeId(rollout_id="r")])
+        [record] = await coordinator.participant.export([EpisodeId(rollout_id="r")], checkpoint_id="c")
         await coordinator.controller.resume(CheckpointRequest(**control()))
         await asyncio.wait_for(call, timeout=5)
 

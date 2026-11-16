@@ -97,7 +97,8 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.verification import JudgeError, call_judge
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import JUDGE_FAILURES, call_judge, is_judge_failure
 from resources_servers.beam.prompts import (
     BINARY_LLM_JUDGE_BASE_PROMPT,
     EQUIVALENCE_SYSTEM_PROMPT,
@@ -249,8 +250,12 @@ async def _gather_or_cancel(coros: List[Awaitable[Any]]) -> List[Any]:
     try:
         async with asyncio.TaskGroup() as tg:
             tasks = [tg.create_task(c) for c in coros]
-    except* JudgeError as group:
-        raise group.exceptions[0] from None
+    except* JUDGE_FAILURES as group:
+        _, other = group.split(is_judge_failure)
+        if other is not None:
+            raise
+        first = group.exceptions[0]
+        raise first from first.__cause__
     return [t.result() for t in tasks]
 
 
@@ -520,3 +525,6 @@ class BEAMResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     BEAMResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = BEAMResourcesServer.run_webserver()  # noqa: F401

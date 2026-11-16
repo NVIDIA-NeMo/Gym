@@ -22,3 +22,10 @@ genrm_mmrb1_resources_server:
   resources_servers:
     genrm_eval:
       verdict_format: brackets
+
+genrm_mmrb1_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: genrm_mmrb1_resources_server

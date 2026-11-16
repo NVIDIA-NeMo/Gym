@@ -70,7 +70,7 @@ natural-language specification". The paper publishes no system prompt and no
 instruction wrapper, so any wrapper added here would be invention that changes what is
 measured.
 
-Note that `system: ""` is not the same as no system message: `nemo_gym/prompt.py`
+Note that `system: ""` is not the same as no system message: `nemo_gym/data/prompt.py`
 emits a system turn whenever the key is present, and an empty one is
 template-dependent — Qwen templates drop their built-in default system prompt when
 any system message is supplied. The key is therefore omitted entirely.

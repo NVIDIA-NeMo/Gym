@@ -17,6 +17,7 @@ import pytest
 import stirrup.core.agent as stirrup_agent
 from stirrup.clients.utils import to_openai_tools
 
+from responses_api_agents.stirrup_agent import nemo_agent as runner_agent
 from responses_api_agents.stirrup_agent import sandbox_runner
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent
 from responses_api_agents.stirrup_agent.sandbox import HARNESS_FILES
@@ -241,6 +242,37 @@ def test_a_request_the_model_server_rejects_ends_the_run_as_failed_with_the_turn
     assert [u["total_tokens"] for u in output["usages"]] == [15]
 
 
+def test_a_run_whose_compaction_summaries_are_unusable_ends_as_failed_with_the_turns_so_far(
+    tmp_path, resources, monkeypatch
+):
+    init = runner_agent.NeMoAgent.__init__
+
+    def compact_after_every_turn(self, *args, **kwargs):
+        init(self, *args, **kwargs)
+        self._context_summarization_cutoff = 0.0
+
+    async def unusable_summary(self, messages, metadata):
+        raise runner_agent.CompactionSummaryError("no usable text after 3 attempts", messages)
+
+    monkeypatch.setattr(runner_agent.NeMoAgent, "__init__", compact_after_every_turn)
+    monkeypatch.setattr(runner_agent.NeMoAgent, "summarize_messages", unusable_summary)
+    workdir = tmp_path / "root"
+    workdir.mkdir()
+    model = _ModelServer([_call("code_exec", json.dumps({"cmd": "true"}))] * 3)
+    try:
+        output = _run_main(tmp_path, _payload(model.base_url, resources.base_url, workdir))
+    finally:
+        model.close()
+
+    assert "error" not in output
+    assert output["stop_reason"] == "compaction_failed"
+    assert "no usable text" in output["invalid_output"]
+    assert output["model_error"] is None
+    assert output["observations"]["status"] == "failed"
+    assert output["observations"]["model_response_ids"] == ["chatcmpl-1"]
+    assert [item["type"] for item in output["output_items"]] == ["function_call", "function_call_output"]
+
+
 @pytest.mark.parametrize("status", [401, 403, 404])
 def test_a_model_server_error_that_is_not_a_rejected_request_still_fails_the_run(tmp_path, resources, status):
     model = _ModelServer([status])
@@ -297,7 +329,7 @@ def test_a_run_that_uses_all_its_turns_without_finishing_is_incomplete(tmp_path,
     finally:
         model.close()
 
-    assert (output["observations"]["status"], output["stop_reason"]) == ("incomplete", None)
+    assert (output["observations"]["status"], output["stop_reason"]) == ("incomplete", "max_turns")
     assert len(model.requests) == 2
 
 
@@ -450,3 +482,34 @@ def test_the_staged_files_have_no_broken_imports():
                 assert not module.startswith(("nemo_gym", "resources_servers")), f"{name} imports {module}"
                 if module.startswith("responses_api_agents"):
                     assert f"{module.rsplit('.', 1)[-1]}.py" in HARNESS_FILES, f"{name} imports {module}"
+
+
+@pytest.mark.parametrize("failed", [False, True])
+async def test_compaction_observer_retains_all_summary_attempts_without_policy_calls(failed):
+    from types import SimpleNamespace
+
+    observer = Observer()
+    observer.response_ids.append("policy-before")
+    logged = []
+    agent = SimpleNamespace(_logger=SimpleNamespace(context_summarization_complete=lambda *args: logged.append(args)))
+
+    async def summarize(*args):
+        observer.response_ids.extend(["summary-rejected", "summary-accepted"])
+        if failed:
+            raise RuntimeError("unusable summary")
+        agent._logger.context_summarization_complete("Retain the changes.", "bridge")
+        return [], ["bridge"]
+
+    agent.summarize_messages = summarize
+    observer.watch_compaction(agent)
+    if failed:
+        with pytest.raises(RuntimeError, match="unusable summary"):
+            await agent.summarize_messages([], {})
+    else:
+        assert await agent.summarize_messages([], {}) == ([], ["bridge"])
+    observer.response_ids.append("policy-after")
+    event = observer.compactions[0]
+    assert [ref["response_id"] for ref in event["model_calls"]] == ["summary-rejected", "summary-accepted"]
+    assert event["outcome"] == ("failed" if failed else "completed")
+    assert event["summary"] == (None if failed else "Retain the changes.")
+    assert event["trigger"] == "automatic"

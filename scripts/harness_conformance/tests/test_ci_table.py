@@ -9,6 +9,7 @@ import sys
 
 import pytest
 from scripts.harness_conformance import ci_table
+from scripts.harness_conformance.scenarios import Scenario
 
 
 COMMIT = "a" * 40
@@ -164,6 +165,43 @@ def test_ci_renderer_does_not_import_probe_runtime_modules():
         ],
         check=True,
     )
+
+
+def test_ci_table_shows_p1_failure_separately_from_p0(ci_evidence, monkeypatch):
+    artifacts, _, _, output = ci_evidence
+    # The support PR has no catalog P1 scenario yet. Exercise a real P1
+    # compaction check instead of relabeling a failed P0 calls.outcome check.
+    if not any(s.name == "context_compaction" for s in ci_table.SCENARIOS):
+        scenario = Scenario("context_compaction", "Automatic compaction", tier="P1", compaction=True)
+        monkeypatch.setattr(ci_table, "SCENARIOS", (*ci_table.SCENARIOS, scenario))
+        for summary_path in artifacts.glob("*/probes/conformance_summary.json"):
+            fixture = json.loads(summary_path.read_text())
+            for fixture_row in fixture["harnesses"].values():
+                fixture_row["scenarios"].append(
+                    {
+                        "scenario": scenario.name,
+                        "verdict": "fulfilled",
+                        "checks": [{"id": "calls.outcome", "tier": "P0", "kind": "schema", "status": "pass"}],
+                    }
+                )
+            summary_path.write_text(json.dumps(fixture))
+    path = artifacts / "hermes" / "probes" / "conformance_summary.json"
+    summary = json.loads(path.read_text())
+    row = summary["harnesses"]["hermes"]
+    row["scenarios"][-1]["verdict"] = "not_fulfilled"
+    row["scenarios"][-1]["tier"] = "P1"
+    row["scenarios"][-1]["checks"].append(
+        {"id": "compaction.event", "tier": "P1", "kind": "behavioral", "status": "fail"}
+    )
+    path.write_text(json.dumps(summary))
+    ci_table.render_ci(artifacts=artifacts, commit=COMMIT, output=output, run_url="https://example.com/run")
+    count = len(ci_table.SCENARIOS)
+    text = output.read_text()
+    assert (
+        f'`hermes` | <Badge intent="launch" minimal>{count}/{count}</Badge> | <Badge intent="error" minimal>0/1</Badge> | —'
+        in text
+    )
+    assert "| Harness | P0 | P1 | P2 |" in text
 
 
 def test_ci_command_downloads_its_own_attempt_and_has_unambiguous_output(tmp_path, monkeypatch):

@@ -168,7 +168,7 @@ def example_records() -> List[Dict[str, Any]]:
 
 def build_example_rows() -> List[Dict[str, Any]]:
     """The committed fixture: synthetic rows with the paper prompt already rendered into them."""
-    from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config
+    from nemo_gym.data import apply_prompt_to_row, load_prompt_config
 
     prompt_config = load_prompt_config(str(REPO_ROOT / PROMPT_CONFIG_PATH))
     return [apply_prompt_to_row(to_gym_row(record, split="example"), prompt_config) for record in example_records()]

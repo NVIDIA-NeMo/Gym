@@ -6,12 +6,12 @@
 > Do not build new benchmarks, agents or configs on this harness. Where the resources server returns
 > `sandbox_access`, switch to a session harness that its `allowed_agents` lists, under an environment server:
 > [`opencode_agent`](../opencode_agent/README.md#environmentserver-sessions) where it is listed (Terminal Bench 2.1),
-> otherwise another such as `pi_agent` or `codex_agent` (SWE-bench Pro).
+> otherwise another such as `pi_agent` or `codex_agent` (SWE-bench Pro). `vibench_agent`, which extends this agent,
+> is replaced by `resources_servers/vibench/configs/vibench.yaml`, which runs `opencode_agent`.
 >
 > Some setups have no session path yet and stay on this agent until they do: the SWE resources servers that
-> return only a `sandbox_handle` (such as `swebench`, `swe_gym` and `r2e_gym`), the HLE search presets
-> (`tool_servers`), and `vibench_agent`, which extends this agent. Existing configs keep working; the agent logs a
-> deprecation warning when it starts.
+> return only a `sandbox_handle` (such as `swebench`, `swe_gym` and `r2e_gym`) and the HLE search presets
+> (`tool_servers`). Existing configs keep working; the agent logs a deprecation warning when it starts.
 
 ```bash
 # In terminal 1
@@ -63,6 +63,10 @@ installation is needed. The default is `null`, preserving existing behavior.
 
 ## Offline scientific evaluation with OpenCode or Pi
 
+The plain-named HLE and APEX Shortlist presets (`hle/opencode`, `hle/opencode_search`, `hle/pi`, `hle/pi_search`,
+`apex_shortlist/opencode`, `apex_shortlist/pi`) run `opencode_agent` and `pi_agent` sessions instead; this section
+describes their `*_legacy_agent` presets, and the benchmark READMEs list what differs.
+
 The dedicated `opencode_sandboxed_agent` and `pi_sandboxed_agent` run their native
 CLIs inside a provider-managed sandbox. Gym stays on the host: it provisions the
 sandbox, routes model requests, seeds authenticated MCP tools, collects transcripts,
@@ -81,7 +85,7 @@ only per-session Gym MCP headers. See [Tavily search](../../fern/versions/latest
 for exclusions, retry limits, and the source-only search response contract.
 
 ```bash
-gym eval run --benchmark hle/pi_search --model-type vllm_model
+gym eval run --benchmark hle/pi_search_legacy_agent --model-type vllm_model
 ```
 
 The presets use 512 concurrent requests per agent worker, 2 CPUs and 8 GiB per
@@ -104,7 +108,23 @@ idle timeout follows `sandbox_timeout`.
 Native agent prompts receive only a short note about network availability and the
 preinstalled scientific tools at `/opt/science/README.md`. The search variants
 mention Tavily explicitly. OpenCode accepts its existing single-user-turn input
-contract; Pi also combines supplied system/developer messages with its native prompt.
+contract, text or one `input_text` part plus any number of `input_image` data URIs
+(PNG, JPEG, GIF or WebP): each image is decoded on the host, uploaded to
+`/tmp/nemo-gym-attachments/` in the sandbox and attached with `opencode run -f`, and
+OpenCode's Read tool turns it into an `image_url` part of the first model call; the
+`detail` field is not transmitted. For such a turn the generated OpenCode config also
+declares the model's `modalities.input` as text and image, without which OpenCode
+replaces every image with an "ERROR: Cannot read ... (this model does not support
+image input)" text, and lifts OpenCode's `attachment.image` limits (2000 px on a side,
+5 MiB of base64), below which OpenCode otherwise downscales and re-encodes the image
+(PNG, else JPEG at quality 80 down to 40) whenever its bundled resizer loads; the model
+therefore receives the caller's bytes. Set `opencode_config.attachment.image.max_width`,
+`max_height` or `max_base64_bytes` to restore a limit (`auto_resize: false` is not that
+knob: it fails the turn on an oversized image instead). A text-only turn leaves the
+declaration, the limits, and the launch command exactly as before. Remote image URLs and other formats fail the row
+before anything runs, since the sandbox has no internet and OpenCode cannot show them.
+`opencode_attachment_count` on each row records how many images were attached. Pi also
+combines supplied system/developer messages with its native prompt.
 
 Restricted network policies require OpenSandbox. Python-only allows the Gym model
 host; search additionally allows the Gym tool host. Other destinations are denied.

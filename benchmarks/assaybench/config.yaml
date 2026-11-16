@@ -27,5 +27,8 @@ assaybench_assaybench_environment_server:
   _inherit_from: assaybench_environment_server
   environment_servers:
     single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: assaybench_assaybench_resources_server
       agent_server:
         name: assaybench_assaybench_simple_agent

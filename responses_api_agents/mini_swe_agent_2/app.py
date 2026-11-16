@@ -31,11 +31,11 @@ from fastapi import Body, FastAPI
 from minisweagent.config import builtin_config_dir, get_config_path
 from pydantic import ConfigDict
 
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config import TASK_INDEX_KEY_NAME, ModelServerRef
+from nemo_gym.config import TASK_INDEX_KEY_NAME, ModelServerRef, get_first_server_config_dict
 from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -47,9 +47,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.server_utils import (
-    get_first_server_config_dict,
-)
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 OPENSANDBOX_PROVIDER_NAME = "opensandbox"
@@ -940,3 +938,6 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     MiniSWEAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = MiniSWEAgent.run_webserver()  # noqa: F401
