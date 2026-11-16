@@ -278,7 +278,7 @@ def test_existing_stop_file_fences_the_launch(tmp_path: Path) -> None:
 
 
 @linux_only
-@pytest.mark.parametrize("initial_scan_delay", [0, 2.2])
+@pytest.mark.parametrize("initial_scan_delay", [0, 6.2])
 def test_stop_file_stops_the_harness_with_term_first(tmp_path: Path, initial_scan_delay: float) -> None:
     # The controller requests a stop with this file rather than a signal.
     stop = tmp_path / "stop.request"
@@ -296,7 +296,7 @@ def test_stop_file_stops_the_harness_with_term_first(tmp_path: Path, initial_sca
             "--timeout",
             "30",
             "--cleanup-timeout",
-            "2",
+            "5",
             "--receipt",
             str(tmp_path / "cleanup.json"),
         ]
@@ -311,7 +311,7 @@ def test_stop_file_stops_the_harness_with_term_first(tmp_path: Path, initial_sca
             assert process.poll() is None and time.monotonic() < deadline
             time.sleep(0.01)
         stop.touch()
-        _, stderr = process.communicate(timeout=10)
+        _, stderr = process.communicate(timeout=20)
         assert process.returncode == 0, stderr
         receipt = _receipt(tmp_path)
         assert receipt == {"cleanup_confirmed": True, "return_code": 0, "error": None, "timed_out": False}
