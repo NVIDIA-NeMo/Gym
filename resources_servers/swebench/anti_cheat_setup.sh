@@ -10,16 +10,22 @@ _PACK_B=$(git count-objects -v 2>/dev/null | sed -n 's/^in-pack: //p')
 mkdir -p .git/refs/heads
 echo "$_BASE" > .git/refs/heads/_nel_work
 git symbolic-ref HEAD refs/heads/_nel_work 2>/dev/null
+# Keep tags that point at ancestors of HEAD (they reveal nothing newer, and
+# versioneer / setuptools-scm / `git describe` need them for the version string).
+# Ancestry comes from the real history: replace refs are deleted below.
+_KEEP_TAGS=$(git --no-replace-objects for-each-ref --merged="$_BASE" --format='%(refname) %(objectname)' refs/tags 2>/dev/null)
 rm -f .git/packed-refs .git/ORIG_HEAD .git/FETCH_HEAD .git/MERGE_HEAD
 find .git/refs -type f ! -path '*/heads/_nel_work' -delete 2>/dev/null
 rm -rf .git/refs/tags .git/refs/remotes .git/logs
 for _r in $(git remote 2>/dev/null); do git remote remove "$_r" 2>/dev/null; done
+printf '%s\n' "$_KEEP_TAGS" | while read -r _t _o; do [ -n "$_t" ] && git update-ref "$_t" "$_o" 2>/dev/null; done
 git reflog expire --expire=now --expire-unreachable=now --all 2>/dev/null
 git gc --prune=now --quiet 2>/dev/null
 _GC_RC=$?
 _AFTER=$(git rev-list --all --count 2>/dev/null || echo '?')
 _LEFT=$(git rev-list --all --not "$_BASE" --count 2>/dev/null || echo '?')
+_TAGS_KEPT=$(git for-each-ref refs/tags 2>/dev/null | wc -l | tr -d ' ')
 _LOOSE_A=$(git count-objects -v 2>/dev/null | sed -n 's/^count: //p')
 _PACK_A=$(git count-objects -v 2>/dev/null | sed -n 's/^in-pack: //p')
 _ELAPSED=$(( $(date +%s 2>/dev/null || echo 0) - _T0 ))
-echo "GIT_CLEANUP base=$_BASE commits_before=$_BEFORE commits_after=$_AFTER non_ancestor_left=$_LEFT gc_rc=$_GC_RC objects_before=$_LOOSE_B+$_PACK_B objects_after=$_LOOSE_A+$_PACK_A elapsed_s=$_ELAPSED"
+echo "GIT_CLEANUP base=$_BASE tags_kept=$_TAGS_KEPT commits_before=$_BEFORE commits_after=$_AFTER non_ancestor_left=$_LEFT gc_rc=$_GC_RC objects_before=$_LOOSE_B+$_PACK_B objects_after=$_LOOSE_A+$_PACK_A elapsed_s=$_ELAPSED"

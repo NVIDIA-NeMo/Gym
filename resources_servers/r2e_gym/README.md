@@ -37,8 +37,9 @@ written into it. Before the agent gets control:
    `parsed_commit.json`, `syn_issue.json`, ...) are deleted. They describe the hidden tests and the
    fix. This step is not best-effort: if it fails the rollout is refused.
 2. The shared anti-cheat scrub (`resources_servers/swebench/anti_cheat.py`) drops every git ref but
-   HEAD, removes remotes, tags and reflogs, and prunes unreachable objects. The images keep
-   `origin/master` and thousands of later commits in `.git`, and the fix commit is among them.
+   HEAD and the tags on its ancestors, removes remotes and reflogs, and prunes unreachable objects.
+   The images keep `origin/master` and thousands of later commits in `.git`, and the fix commit is
+   among them.
 
 Grading happens in a **second** sandbox created from the same image, where the tests and the runner
 are intact, seeded with the candidate patch. The golden patch and the expected statuses live in the
