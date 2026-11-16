@@ -69,7 +69,7 @@ For external benchmarks, reproduce the original reported numbers outside Gym bef
 
 ## Benchmark Categories
 
-NeMo Gym includes 80+ benchmarks across six categories. Use `gym list benchmarks` to browse the full list with domains and descriptions.
+NeMo Gym includes 80+ benchmarks across seven categories. Use `gym list benchmarks` to browse the full list with domains and descriptions.
 
 **Math & Science**
 AIME, IMO, formal proofs (Lean4), physics (critpt, ugphysics), chemistry (ether0, BunsenBench), FrontierScience, and multilingual math. Verification ranges from exact match and math-verify to LLM judges for open-ended proofs.
@@ -87,6 +87,9 @@ MM-BrowseComp is the multimodal version of BrowseComp: 400 web-research question
 
 **Instruction Following & Safety**
 IFEval, IFBench, inverse instruction following, VerifIF, jailbreak resistance, over-refusal calibration (XSTest), and structured output validation.
+
+**Speech & Audio**
+Independent speech and audio evaluations that differ in task, data, language coverage, metric and license: ASR, speech translation, language identification, spoken question answering, and audio understanding. Each has its own README with the source data, pinned revisions, license, the metric names and the narrowing arguments, and prepares every language and subset by default.
 
 **Other**
 ASR (LibriSpeech, WER), machine translation (WMT, FLORES-200), VLM benchmarks, Arena Hard pairwise judging, and speculative-decoding throughput.
