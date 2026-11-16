@@ -1169,6 +1169,7 @@ def build_sbatch_script(
         gym_cmd = ""
         driver_env |= _command_env(benchmark, remote_bench_dir)
     exports = effective_exports(config, benchmark_name)
+    node_local = benchmark.node_local_config
     export_tail = (
         render_export_tail(
             remote_bench_dir,
@@ -1187,6 +1188,7 @@ def build_sbatch_script(
                 )
                 for name, settings in exports.items()
             ],
+            archive_wait_seconds=node_local_script.archive_wait_seconds(node_local) if node_local else None,
         )
         if exports
         else None
@@ -1234,12 +1236,11 @@ def build_sbatch_script(
     # the host, which is what makes the loss so easy to miss.
     driver_mounts = [*config.driver.mounts, f"{remote_bench_dir}:{remote_bench_dir}"]
     driver_mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in driver_mounts)}"
-    node_local = benchmark.node_local_config
     # Empty when the batch shell runs on the driver's node, which is node 0.
     node_local_flags = driver_node_flags if driver_node else ""
     driver_srun = (
         f"{driver_env_prefix}{failure_file}"
-        f"{node_local_script.driver_env_prefix(remote_bench_dir) if node_local else ''}"
+        f"{node_local_script.driver_env_prefix(remote_bench_dir, exports=export_tail is not None) if node_local else ''}"
         f"srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
         f"{',' + node_local_script.driver_mount(remote_bench_dir) if node_local else ''}"
         f" --container-image={shlex.quote(config.driver.container)} "
@@ -1288,11 +1289,13 @@ def build_sbatch_script(
     driver_command = (
         marker_definition
         + (f"{gym_cmd}\n" if gym_cmd else "")
-        + _render_watched_driver(driver_srun, watched, node_local_script.DEADLINE_CHECK if node_local else "")
+        + _render_watched_driver(driver_srun, watched, node_local_script.WATCH_CHECK if node_local else "")
     )
     if node_local:
         driver_command = (
-            node_local_script.render_setup(node_local, remote_bench_dir, node_local_flags)
+            node_local_script.render_setup(
+                node_local, remote_bench_dir, node_local_flags, exports=export_tail is not None
+            )
             + "\n"
             + driver_command
             + "\n"

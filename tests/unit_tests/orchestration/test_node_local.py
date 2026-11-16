@@ -28,7 +28,7 @@ import pytest
 import nemo_gym.orchestration.submit as submit_module
 from nemo_gym.orchestration.api import BenchmarkRunConfig, NodeLocalConfig, SlurmComputeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
-from nemo_gym.orchestration.executors.node_local import DEADLINE_CHECK, NODE_LOCAL_DIR_ENV
+from nemo_gym.orchestration.executors.node_local import NODE_LOCAL_DIR_ENV, WATCH_CHECK
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord
@@ -161,7 +161,10 @@ def test_the_dir_is_set_up_before_the_driver_and_archived_after_it():
     script = _script(_config(True))
     restore = script.index('"$_gym_nl_dir" "$_gym_nl_archives" 1 || exit $?\n')
     driver = script.index(_driver_line(script))
-    after = script.index('\n_gym_run_driver\n_gym_nl_rc=$?\n_gym_nl_archive\ntrap - TERM\n(exit "$_gym_nl_rc")')
+    # The dir goes only once the driver step has ended: exports may read it until then.
+    after = script.index(
+        '\n_gym_run_driver\n_gym_nl_rc=$?\n_gym_nl_archive\n_gym_nl_cleanup\ntrap - TERM\n(exit "$_gym_nl_rc")'
+    )
     assert restore < driver < after
     # The trailing 1: with restore on, the archive step prunes superseded archives.
     assert '"$_gym_nl_dir" "$_gym_nl_archives" "$SLURM_JOB_ID" 120 1\n' in script
@@ -176,7 +179,7 @@ def test_restore_can_be_turned_off_and_then_no_archive_is_pruned():
 def test_the_watch_loop_stops_the_driver_before_the_time_limit():
     script = _script(_config({"stop_before_walltime_seconds": 400}))
     loop = script[script.index("_gym_run_driver() {") : script.index("\n_gym_run_driver\n")]
-    assert DEADLINE_CHECK in loop
+    assert WATCH_CHECK in loop
     assert "_gym_nl_deadline=$((BASH_REMATCH[2] - 400))" in script
 
 
@@ -184,14 +187,14 @@ def test_a_zero_stop_window_never_stops_the_driver_early():
     script = _script(_config({"stop_before_walltime_seconds": 0}))
     assert "scontrol show job" not in script and "_gym_nl_stop_for_walltime()" not in script
     # The loop still runs the check, which an empty deadline turns off; the driver is still backgrounded.
-    assert '_gym_nl_deadline=""' in script and DEADLINE_CHECK in script
+    assert '_gym_nl_deadline=""' in script and WATCH_CHECK in script
 
 
 def test_a_driver_with_no_service_is_still_watched_so_it_can_be_stopped():
     script = _script(_config(True, services={}))
     loop = script[script.index("_gym_run_driver() {") : script.index("\n_gym_run_driver\n")]
     assert "_gym_service_exited" not in loop.split("_gym_run_driver() {")[1]
-    assert DEADLINE_CHECK in loop
+    assert WATCH_CHECK in loop
 
 
 def test_on_the_batch_node_the_dir_is_handled_in_the_batch_shell_and_a_term_archives_it():
@@ -304,6 +307,10 @@ def _start_job(
             env={"PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin", "SLURM_JOB_ID": job_id, "COPYFILE_DISABLE": "1"},
             start_new_session=True,
         )
+
+
+# As the fake srun's driver: run the rendered entrypoint itself (the export tail), on the host.
+_REAL_DRIVER = 'while [[ "$1" != --output=logs/driver-* ]]; do shift; done; shift; exec "$@"'
 
 
 def _finish(process: subprocess.Popen, timeout: float = 60) -> int:
@@ -508,7 +515,7 @@ def test_before_the_time_limit_the_driver_is_stopped_archived_and_the_job_waits_
     assert _archive(tmp_path) == {"ev/1.json": "row1\n"}
 
 
-def test_after_the_evaluation_succeeded_the_deadline_archives_and_leaves_the_exports_running(tmp_path):
+def test_after_the_evaluation_succeeded_the_deadline_leaves_the_exports_running(tmp_path):
     # The evaluation is done at once; the exports run past the deadline (3 s) and the poll that finds it (5 s).
     driver = f'{_WRITE_EVIDENCE}; : > "$GYM_EVAL_SUCCEEDED_MARKER"; sleep 7; echo exports done'
     process = _start_job(
@@ -519,7 +526,7 @@ def test_after_the_evaluation_succeeded_the_deadline_archives_and_leaves_the_exp
 
     output = (tmp_path / "job.out").read_text()
     assert returncode == 0
-    assert "the evaluation has finished: archiving the node-local dir" in output
+    assert "The evaluation succeeded: archiving the node-local dir" in output
     assert "stopping the driver" not in output and "exports done" in output
     assert output.count("Archived the node-local dir") == 1
     assert _archive(tmp_path) == {"ev/1.json": "row1\n"}
@@ -552,6 +559,57 @@ def test_a_service_lost_after_the_evaluation_succeeded_still_lets_the_deadline_a
     assert "driver got TERM" not in output and "stopping the driver" not in output
     assert output.count("Archived the node-local dir") == 1
     assert _archive(tmp_path) == {"ev/1.json": "row1\n"}
+
+
+def _real_driver_fakes(tmp_path: Path, gym_exit: int) -> dict[str, str]:
+    """`gym eval run` writes the evidence; the exporter (`python3 -m ...export_step`) reports what the job dir holds."""
+    archive = tmp_path / "run" / "b" / "node-local" / "11.tar.gz"
+    return {
+        "gym": f"{_WRITE_EVIDENCE}; exit {gym_exit}",
+        "python3": (
+            f"if tar -tzf {archive} 2>/dev/null | grep -q ev/1.json; then echo 'exporter found the evidence archive'; "
+            "else echo 'exporter found no evidence archive'; fi"
+        ),
+    }
+
+
+def test_the_evidence_is_archived_before_the_exports_read_the_job_dir(tmp_path):
+    returncode = _finish(
+        _start_job(tmp_path, driver=_REAL_DRIVER, fakes=_real_driver_fakes(tmp_path, 0), exports=True)
+    )
+
+    output = (tmp_path / "job.out").read_text()
+    assert returncode == 0
+    assert "The evaluation succeeded: archiving the node-local dir before the exports" in output
+    assert "exporter found the evidence archive" in output
+    assert output.count("Archived the node-local dir") == 1
+    assert _archive_names(tmp_path) == ["11.tar.gz"]
+    assert not (tmp_path / "host" / "gym-node-local-11").exists()
+
+
+def test_a_failed_evaluation_exports_nothing_and_is_archived_after_the_driver(tmp_path):
+    returncode = _finish(
+        _start_job(tmp_path, driver=_REAL_DRIVER, fakes=_real_driver_fakes(tmp_path, 3), exports=True)
+    )
+
+    output = (tmp_path / "job.out").read_text()
+    assert returncode == 3
+    assert "exporter" not in output and "The evaluation succeeded" not in output
+    assert output.count("Archived the node-local dir") == 1
+    assert _archive(tmp_path) == {"ev/1.json": "row1\n"}
+
+
+def test_the_exports_wait_for_the_archive_only_with_node_local(tmp_path):
+    with_node_local = _script(_config(True, exports=True))
+    without = _script(_config(exports=True))
+    assert 'GYM_NODE_LOCAL_ARCHIVED=/jobs/20261116_run/b/.gym_node_local_archived."$SLURM_JOB_ID" ' in (
+        _driver_line(with_node_local)
+    )
+    # The bound: archive_timeout_seconds (120) plus the margin for the 5 s poll and the step that archives.
+    assert "_gym_i < 180" in with_node_local and "_gym_i <" not in without
+    assert ': > /jobs/20261116_run/b/.gym_node_local_archived."$SLURM_JOB_ID"' in with_node_local
+    assert "GYM_NODE_LOCAL_ARCHIVED" not in without
+    assert "GYM_NODE_LOCAL_ARCHIVED" not in _script(_config(True))
 
 
 def _wait_for_text(path: Path, text: str, timeout: float = 30) -> None:
