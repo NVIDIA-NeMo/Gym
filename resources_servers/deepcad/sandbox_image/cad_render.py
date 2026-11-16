@@ -36,19 +36,29 @@ def render_model(model: Path, output: Path, *, view_mode: str, color: str) -> li
     return list(images.values())
 
 
-if __name__ == "__main__":
+def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("model", type=Path)
     parser.add_argument("--output", type=Path, default=Path("/workspace/previews"))
     args = parser.parse_args()
+    preview_path = args.output / "preview.png"
+    preview_path.unlink(missing_ok=True)
     settings = json.loads(Path(__file__).with_name("settings.json").read_text())
-    print(
-        json.dumps(
-            [
-                str(p)
-                for p in render_model(
-                    args.model, args.output, view_mode=settings["view_mode"], color=settings["color"]
-                )
-            ]
-        )
-    )
+    from PIL import Image
+
+    paths = render_model(args.model, args.output, view_mode=settings["view_mode"], color=settings["color"])
+    images = []
+    for path in paths:
+        with Image.open(path) as image:
+            images.append(image.convert("RGB"))
+    preview = Image.new("RGB", (sum(image.width for image in images), max(image.height for image in images)), "white")
+    left = 0
+    for image in images:
+        preview.paste(image, (left, 0))
+        left += image.width
+    preview.save(preview_path)
+    print(json.dumps({"preview": str(preview_path)}))
+
+
+if __name__ == "__main__":
+    main()
