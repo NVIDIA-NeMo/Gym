@@ -1,6 +1,11 @@
-# Terminal-Bench 4.0
+# Terminal-Bench 4.1
 
-[Official Terminal-Bench 4.0 benchmark](https://www.tbench.ai/news/terminal-bench-4-0) (66 tasks).
+[Official Terminal-Bench 4.1 benchmark](https://www.tbench.ai/news/terminal-bench-4-1) (66 tasks).
+Terminal-Bench 4.1 keeps the 66 tasks of
+[Terminal-Bench 4.0](https://www.tbench.ai/news/terminal-bench-4-0) and replaces their verifiers.
+
+Terminal-Bench 4.1 scores and `partial_credit` are not comparable with 4.0: the new
+verifiers use harbor-rewardkit criteria, which changes the meaning of test counts.
 
 ## Profiles
 
@@ -17,9 +22,10 @@
 
 ## Artificial Analysis comparison
 
-The version, prompts, 500-step limit, and 30-second command timeout follow
+The prompts, 500-step limit, and 30-second command timeout follow
 [Artificial Analysis's Terminal-Bench 4.0 methodology](https://artificialanalysis.ai/methodology/intelligence-benchmarking)
-(checked September 16, 2026). Prompts and command environment defaults are loaded
+(checked September 16, 2026). That methodology names Terminal-Bench 4.0; this profile runs 4.1, which keeps the
+4.0 tasks and agent environments and changes only the verifiers. Prompts and command environment defaults are loaded
 from the pinned package's `mini.yaml`, not copied into this repository.
 
 The following choices remain intentional differences:
@@ -170,8 +176,9 @@ failure, and an uncertain command submission is not replayed.
 
 ### Dataset and deployment
 
-The dataset is `terminal-bench/terminal-bench@4.0.0`, pinned to
-`sha256:39d9f44b40420cde8fdcc087579c0d72a7e14fa3656d603c3f0d22fb35e27732`.
+The dataset is `terminal-bench/terminal-bench@4.1.0`, pinned to
+`sha256:5881c1b1c74a96f07baef00a7c869e09802704bc0dc912c870e7acccc11440da`
+(upstream tag `v4.1.0`, commit `4070d6cef56a7d20cb5dc98d5e10ada88a6b9440`).
 `manifest.json` retains all 52 CPU, 11 CPU Compose, and 3 H100 tasks and their
 individual package digests. Preparation writes identities only; the resources
 server validates the dataset and task digests before allocation.
@@ -195,7 +202,7 @@ process while leaving the sandbox available for subsequent commands. The agent
 itself can still be selected as the OOM victim. Set this metadata value to `pod`
 to restore whole-sandbox OOM handling.
 
-Compose uses the existing digest-verified `compose-images.json`. It preserves
+Compose uses the digest-verified `compose-images.json`, recorded from the 4.1.0 images. It preserves
 startup commands, users, dependency health checks, shared-memory requirements,
 and sidecar artifact collection. Declared-port TCP forwarding for shared-network
 mode is not full Linux namespace sharing. Required capabilities and privileged
