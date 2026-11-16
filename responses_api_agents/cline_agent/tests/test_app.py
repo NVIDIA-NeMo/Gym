@@ -132,17 +132,19 @@ def _tool_end(name: str, call_id: str, output=None, error: str | None = None) ->
     return _agent_event(event)
 
 
-def _usage(total_in: int, total_out: int, reasoning: int = 0) -> dict:
-    return _agent_event(
-        {
-            "type": "usage",
-            "inputTokens": total_in,
-            "outputTokens": total_out,
-            "totalInputTokens": total_in,
-            "totalOutputTokens": total_out,
-            "totalReasoningTokens": reasoning,
-        }
-    )
+def _usage(total_in: int, total_out: int, reasoning: int = 0, cache_read: int | None = None) -> dict:
+    event = {
+        "type": "usage",
+        "inputTokens": total_in,
+        "outputTokens": total_out,
+        "totalInputTokens": total_in,
+        "totalOutputTokens": total_out,
+        "totalReasoningTokens": reasoning,
+    }
+    if cache_read is not None:
+        event["cacheReadTokens"] = cache_read
+        event["totalCacheReadTokens"] = cache_read
+    return _agent_event(event)
 
 
 def _run_result(**kwargs) -> dict:
@@ -335,7 +337,7 @@ class TestParseClineEvents:
 
     def test_usage_from_run_result_aggregate(self) -> None:
         stream = _lines(
-            _usage(50, 10, 2),
+            _usage(50, 10, 2, cache_read=5),
             _run_result(
                 aggregateUsage={
                     "inputTokens": 100,
@@ -383,6 +385,26 @@ class TestParseClineEvents:
             usage["cacheReadTokens"] = cache_read
         _, metadata = parse_cline_events(_lines(_run_result(aggregateUsage=usage)))
         assert metadata["cached_tokens"] == expected
+
+    @pytest.mark.parametrize(
+        ("per_call", "expected"),
+        [
+            ([17920, 18944, 19456], 56320),
+            ([None, 17920, 18944, None, 19456], None),  # Cline counts the two unreported calls as 0
+            ([None], None),
+            ([0, 0], 0),
+        ],
+    )
+    def test_the_aggregate_cache_reads_count_only_when_every_call_reported_them(self, per_call, expected) -> None:
+        total = sum(value or 0 for value in per_call)
+        events = [_usage(10, 2, cache_read=value) for value in per_call]
+        aggregate = {"inputTokens": 100, "outputTokens": 20, "cacheReadTokens": total}
+        _, metadata = parse_cline_events(_lines(*events, _run_result(aggregateUsage=aggregate)))
+        assert metadata["cached_tokens"] == expected
+        _, separate = parse_cline_events(
+            _lines(*events, _run_result(aggregateUsage=aggregate)), cache_reads_in_input=False
+        )
+        assert separate["input_tokens"] == (None if expected is None else 100 + expected)
 
     def test_reasoning_usage_falls_back_to_output_details(self) -> None:
         _, metadata = parse_cline_events(
