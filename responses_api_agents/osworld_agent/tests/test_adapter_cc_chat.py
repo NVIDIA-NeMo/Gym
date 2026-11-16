@@ -149,6 +149,7 @@ def test_cc_chat_prompt_guard_is_off_by_default() -> None:
         {"context_overflow_policy": "shrink"},
         {"assistant_history_replay": "normalized"},
         {"cc_keep_last_groups": 10, "cc_max_active_images": 10},
+        {"cc_keep_last_groups": 0},
     ],
 )
 def test_cc_chat_rejects_incompatible_options(overrides: Dict[str, Any]) -> None:

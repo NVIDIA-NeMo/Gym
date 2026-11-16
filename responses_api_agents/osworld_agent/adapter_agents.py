@@ -604,7 +604,7 @@ def normalize_nemotron_agent_options(options: Mapping[str, Any]) -> Dict[str, An
             raise ValueError("history_layout='cc_chat' requires context_overflow_policy='stop'")
         result["history_layout"] = history_layout
         for field, default, minimum in (
-            ("cc_keep_last_groups", 2, 0),
+            ("cc_keep_last_groups", 2, 1),
             ("cc_max_active_images", 10, 1),
             ("cc_actions_per_chunk", 100, 1),
         ):
