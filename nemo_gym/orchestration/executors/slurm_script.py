@@ -36,6 +36,7 @@ from nemo_gym.orchestration.api import (
     VllmServiceConfig,  # used in _BUILDERS dispatch table
     effective_ray_serve,
 )
+from nemo_gym.orchestration.executors import node_local as node_local_script
 from nemo_gym.orchestration.executors.otel import (
     COLLECTOR_HEALTH_PORT,
     COLLECTOR_SERVICE_NAME,
@@ -819,7 +820,7 @@ _gym_run_driver() {{
 _gym_run_driver"""
 
 
-def _render_watched_driver(driver: str, services: list[str]) -> str:
+def _render_watched_driver(driver: str, services: list[str], extra_check: str = "") -> str:
     """The driver step, ended with TERM if a service it depends on exits first.
 
     A dead service would otherwise leave the driver retrying it until the walltime. The job exits
@@ -829,12 +830,16 @@ def _render_watched_driver(driver: str, services: list[str]) -> str:
     `GYM_EVAL_SUCCEEDED_MARKER` as soon as the evaluation succeeds, and from then on a lost service no
     longer ends the driver: the exports do not use it, and a requeue would reload the model for nothing.
     The driver's PID is kept in a lowercase variable, which no service's uppercase <NAME>_PID can overwrite.
+    `extra_check` is one more line the loop runs on every poll.
     """
-    if not services:
+    if not services and not extra_check:
         return driver
     checks = "\n".join(
-        f"        kill -0 ${bash_var(name)}_PID 2>/dev/null || {{ _gym_service_exited {name} ${bash_var(name)}_PID; return; }}"
-        for name in services
+        [
+            f"        kill -0 ${bash_var(name)}_PID 2>/dev/null || {{ _gym_service_exited {name} ${bash_var(name)}_PID; return; }}"
+            for name in services
+        ]
+        + ([f"        {extra_check}"] if extra_check else [])
     )
     return _WATCHED_DRIVER_TEMPLATE.format(driver=driver, checks=checks)
 
@@ -1220,8 +1225,14 @@ def build_sbatch_script(
     # the host, which is what makes the loss so easy to miss.
     driver_mounts = [*config.driver.mounts, f"{remote_bench_dir}:{remote_bench_dir}"]
     driver_mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in driver_mounts)}"
+    node_local = benchmark.node_local_config
+    # Empty when the batch shell runs on the driver's node, which is node 0.
+    node_local_flags = driver_node_flags if driver_node else ""
     driver_srun = (
-        f"{driver_env_prefix}{failure_file}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
+        f"{driver_env_prefix}{failure_file}"
+        f"{node_local_script.driver_env_prefix(remote_bench_dir) if node_local else ''}"
+        f"srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
+        f"{',' + node_local_script.driver_mount(remote_bench_dir) if node_local else ''}"
         f" --container-image={shlex.quote(config.driver.container)} "
         f"--output={LOGS_DIRNAME}/driver-$SLURM_JOB_ID.log {entrypoint}"
     )
@@ -1266,8 +1277,18 @@ def build_sbatch_script(
         else ""
     )
     driver_command = (
-        marker_definition + (f"{gym_cmd}\n" if gym_cmd else "") + _render_watched_driver(driver_srun, watched)
+        marker_definition
+        + (f"{gym_cmd}\n" if gym_cmd else "")
+        + _render_watched_driver(driver_srun, watched, node_local_script.DEADLINE_CHECK if node_local else "")
     )
+    if node_local:
+        driver_command = (
+            node_local_script.render_setup(node_local, remote_bench_dir, node_local_flags)
+            + "\n"
+            + driver_command
+            + "\n"
+            + node_local_script.render_after_driver(node_local_flags)
+        )
     if resume:
         # A job that finished the run cancels the follow-up and sentinel it queued; its status stays the driver's.
         driver_command += "\n" + render_resume_epilogue()

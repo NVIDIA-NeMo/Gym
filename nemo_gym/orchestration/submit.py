@@ -69,6 +69,12 @@ def submit(config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord |
                 f"Benchmark(s) {', '.join(unsupported)} set `resumable`, but {executor_cls.__name__} "
                 "does not support resumable runs."
             )
+    node_local = [name for name, b in config.driver.benchmarks.items() if b.node_local_config is not None]
+    if node_local and not executor_cls.supports_node_local:
+        raise ValueError(
+            f"Benchmark(s) {', '.join(node_local)} set `node_local`, but {executor_cls.__name__} "
+            "does not support a node-local directory."
+        )
 
     return executor_cls().run(config, dry_run=dry_run)
 
