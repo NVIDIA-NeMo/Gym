@@ -17,6 +17,7 @@ from resources_servers.nl2repobench.app import (
     NL2RepoBenchSeedSessionRequest,
     NL2RepoBenchVerifyRequest,
     VerifierResult,
+    _bounded_output,
     _compute_reward,
     _parse_pytest_summary,
     _resolve_task,
@@ -375,7 +376,10 @@ async def test_upstream_protocol_runs_every_command_and_scores_pytest(task_asset
 
     commands = [call.args[0] for call in sandbox.exec.await_args_list]
     assert "find " in commands[1] and "-name pyproject.toml" in commands[1]
-    assert all(command.startswith("export PYTHONPATH=/workspace") for command in commands[2:])
+    assert all(
+        command.startswith("bash -o pipefail -c ") and "export PYTHONPATH=/workspace" in command
+        for command in commands[2:]
+    )
     assert result.verifier_error is None
     assert (result.tests_passed, result.tests_failed) == (3, 2)
     assert result.reward == 3 / 5
@@ -537,3 +541,25 @@ async def test_verify_image_registry_template_picks_the_grading_image(
     specs = [call.args[0] for call in sandbox.start.await_args_list]
     assert specs[0].image == "registry.example/twins/example-task@sha256:abc"
     assert specs[1].image == UPSTREAM_IMAGE
+
+
+def test_bounded_output_keeps_the_tail_and_the_exit_code() -> None:
+    command = (
+        'i=0; while [ $i -lt 2000 ]; do echo "progress line $i"; i=$((i+1)); done; '
+        'echo "oops" >&2; echo "== 4 passed in 1s =="; exit 3'
+    )
+    result = subprocess.run(["bash", "-c", _bounded_output(command, max_bytes=200)], capture_output=True, text=True)
+
+    assert result.returncode == 3  # the test run's own exit code survives the pipe
+    assert len(result.stdout.encode()) <= 200
+    assert result.stdout.rstrip().endswith("== 4 passed in 1s ==")  # the summary line is last, so it is kept
+    assert "progress line 0\n" not in result.stdout  # the head was dropped
+    assert result.stderr == ""  # stderr was merged into the captured stream
+
+
+def test_bounded_output_runs_multi_statement_commands_with_a_trailing_comment() -> None:
+    result = subprocess.run(
+        ["bash", "-c", _bounded_output("export A=1; echo $A  # done")], capture_output=True, text=True
+    )
+
+    assert result.returncode == 0 and result.stdout == "1\n"

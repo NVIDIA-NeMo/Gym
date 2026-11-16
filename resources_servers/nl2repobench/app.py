@@ -323,6 +323,17 @@ WORKSPACE_COLLECT_TIMEOUT_S = 300.0
 TEST_COMMAND_TIMEOUT_S = 1800.0
 # Combined stdout+stderr for all test commands is capped to keep JSONL rows reasonably sized.
 TEST_OUTPUT_MAX_CHARS = 50_000
+# A test command's output is read back through the sandbox API into this server's memory before it is capped, so one runaway solution
+# (a progress bar printed in a loop wrote 449 MB in a minute, 2026-10-31) keeps the server's event loop busy for hours and stalls every
+# rollout of the eval. The tail of the output (pytest's summary line is last) is all that is kept, inside the sandbox.
+TEST_OUTPUT_CAPTURE_BYTES = 20_000_000
+
+
+def _bounded_output(command: str, max_bytes: int = TEST_OUTPUT_CAPTURE_BYTES) -> str:
+    """Run `command` in a subshell with stderr merged into stdout and only the last `max_bytes` of the output kept (exit code preserved)."""
+    inner = f"({command}\n) 2>&1 | tail -c {max_bytes}"
+    return f"bash -o pipefail -c {shlex.quote(inner)}"
+
 
 _WORKSPACE_EXCLUDES = "--exclude=.git --exclude=__pycache__ --exclude=.venv --exclude=node_modules"
 # GNU tar treats --exclude as positional once it appears after other
@@ -1138,7 +1149,9 @@ class NL2RepoBenchResourcesServer(SimpleResourcesServer):
             run_command = (
                 f"export PYTHONPATH=/workspace${{PYTHONPATH:+:$PYTHONPATH}}; {command}" if upstream else command
             )
-            command_result = await sandbox.exec(run_command, cwd="/workspace", timeout_s=TEST_COMMAND_TIMEOUT_S)
+            command_result = await sandbox.exec(
+                _bounded_output(run_command), cwd="/workspace", timeout_s=TEST_COMMAND_TIMEOUT_S
+            )
             last_exit_code = command_result.return_code
             command_output = f"{command_result.stdout or ''}{command_result.stderr or ''}"
             output_parts.append(f"$ {command}\n{command_output}\n[exit code: {command_result.return_code}]\n")
