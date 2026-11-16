@@ -337,7 +337,7 @@ sandbox = [
 
     # Daytona SDK: used by the Daytona sandbox provider for create/exec/delete and file operations.
     # License: Apache 2.0 https://pypi.org/project/daytona/
-    "daytona>=0.179.0",
+    "daytona>=0.179.0,<1",
 
     # E2B SDK: used by the E2B sandbox provider for create/exec/kill and file operations.
     # Also drives any e2b-compatible gateway via connection.api_url/sandbox_url.
