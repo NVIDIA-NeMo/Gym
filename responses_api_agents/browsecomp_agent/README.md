@@ -36,8 +36,8 @@ Each completed response carries `stop_reason`, the reason the loop ended:
 | `answered` | The model returned an assistant message with no tool calls. |
 | `max_steps` | The loop reached `max_steps`. |
 | `timeout` | The rollout passed `rollout_timeout_s`. |
-| `max_output_tokens` | The model response was cut after using the whole `max_output_tokens` the request set: the model's own failure. |
-| `context_full` | The model response was cut with reason `max_output_tokens` before using that budget, or the request set none. The model server reports a context overflow this way. |
+| `max_output_tokens` | The model response was cut after using the whole output budget the model server reports (the request's, or a smaller training-framework cap): the model's own failure. |
+| `context_full` | The model response was cut with reason `max_output_tokens` before using that budget, or no budget was set. The model server reports a context overflow this way. |
 
 A training filter can mask `context_full` and still score `max_output_tokens`. A response built from a failed model
 request carries no `stop_reason`. Nothing in Gym reads the field.

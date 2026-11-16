@@ -909,7 +909,9 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             if model_response.incomplete_details and model_response.incomplete_details.reason == "max_output_tokens":
                 # The cut is the model's own when it used the whole requested output budget. Otherwise the context
                 # window filled: the model server answers a context overflow with an empty, length-cut response.
-                output_budget = new_body.max_output_tokens
+                # The model server echoes the budget it applied, which a training framework's per-call cap
+                # (`_ng_model_sampling`) can lower or set when the request has none.
+                output_budget = model_response.max_output_tokens or new_body.max_output_tokens
                 output_tokens = model_response.usage.output_tokens if model_response.usage else None
                 if output_budget and output_tokens is not None and output_tokens >= output_budget:
                     stop_reason = "max_output_tokens"

@@ -116,6 +116,57 @@ class TestSearchHitsFollowTheCurrentRequest:
         assert "[Deep Answer]: SYNTHESIS" in miss
         assert hit == miss
 
+    async def test_tavily_hit_on_a_deep_exa_entry_shows_no_deep_answer(self, tmp_path) -> None:
+        root = str(tmp_path / "c")
+        deep = _server(root, provider="exa", exa_search_type="deep")
+        response = {
+            "results": [{"title": "T", "url": "https://a.example/1", "highlights": ["h"]}],
+            "output": {"content": "SYNTHESIS"},
+        }
+        deep._exa_clients = [MagicMock(search=AsyncMock(return_value=response))]
+        await deep.search(_req(), TavilySearchRequest(queries=["q"]))
+
+        tavily = _server(root)
+        unused = MagicMock(search=AsyncMock())
+        tavily._async_tavily_clients = [unused]
+        out = (await tavily.search(_req(), TavilySearchRequest(queries=["q"]))).results_string
+
+        unused.search.assert_not_awaited()
+        assert "https://a.example/1" in out
+        assert "[Deep Answer]" not in out and "SYNTHESIS" not in out
+
+    async def test_tavily_workspace_run_skips_an_exa_entry_without_page_text(self, tmp_path) -> None:
+        root = str(tmp_path / "c")
+        exa = _server(root, provider="exa")
+        exa_hit = {"results": [{"title": "E", "url": "https://e.example/1", "highlights": ["hl"]}]}
+        exa._exa_clients = [MagicMock(search=AsyncMock(return_value=exa_hit))]
+        await exa.search(_req(), TavilySearchRequest(queries=["q"]))
+
+        ws_root = tmp_path / "ws"
+        tavily = _server(root, workspace="per_session", workspace_root=str(ws_root))
+        client = MagicMock(search=AsyncMock(return_value={"results": [_result(1)]}))
+        tavily._async_tavily_clients = [client]
+        out = (await tavily.search(_req(), TavilySearchRequest(queries=["q"]))).results_string
+
+        client.search.assert_awaited_once()
+        assert "[Saved to]:" in out
+        pages = list((ws_root / "s" / "pages").glob("*search*"))
+        assert len(pages) == 1 and "BODY1" in pages[0].read_text()
+
+    async def test_tavily_workspace_run_takes_an_exa_entry_with_page_text(self, tmp_path) -> None:
+        root = str(tmp_path / "c")
+        SearchCache(root).put_search(
+            "q", [{"title": "E", "url": "https://e.example/1", "highlights": ["hl"], "text": "TEXT"}], provider="exa"
+        )
+        ws_root = tmp_path / "ws"
+        tavily = _server(root, workspace="per_session", workspace_root=str(ws_root))
+        client = MagicMock(search=AsyncMock())
+        tavily._async_tavily_clients = [client]
+        out = (await tavily.search(_req(), TavilySearchRequest(queries=["q"]))).results_string
+
+        client.search.assert_not_awaited()
+        assert "[Saved to]:" in out
+
     async def test_exa_entry_of_another_search_type_is_a_miss(self, tmp_path) -> None:
         root = str(tmp_path / "c")
         auto = {"results": [{"title": "T", "url": "https://a.example/1", "highlights": ["auto"]}]}
@@ -162,6 +213,63 @@ class TestBrowseHitsFollowTheExaBudget:
         client.get_contents.assert_not_awaited()
         assert "y" * 1000 in out and "y" * 1001 not in out
         assert "[truncated]" not in out  # a live exa page of this budget would not be cut again
+
+    async def test_an_exa_page_cached_without_its_budget_misses_a_larger_budget(self, tmp_path) -> None:
+        # The source branch stored exa pages without max_characters, cut at the 5-URL budget of 6000.
+        root = str(tmp_path / "c")
+        SearchCache(root).put_extract("https://a.example/p", "x" * 6000, provider="exa")
+        server = _server(root, provider="exa")
+        client = MagicMock(
+            get_contents=AsyncMock(return_value={"results": [{"url": "https://a.example/p", "text": "FULL"}]})
+        )
+        server._exa_clients = [client]
+
+        out = (await server.browse(_req(), BrowseRequest(urls=["https://a.example/p"]))).results_string
+
+        client.get_contents.assert_awaited_once()
+        assert "FULL" in out
+
+    async def test_an_exa_page_cached_without_its_budget_answers_a_budget_it_covers(self, tmp_path) -> None:
+        root = str(tmp_path / "c")
+        SearchCache(root).put_extract("https://a.example/p", "x" * 6000, provider="exa")
+        server = _server(root, provider="exa")
+        client = MagicMock(get_contents=AsyncMock())
+        server._exa_clients = [client]
+
+        await server.browse(_req(), BrowseRequest(urls=["https://a.example/p"], max_total_length=5000))
+
+        client.get_contents.assert_not_awaited()
+
+    @pytest.mark.parametrize("workspace", ["none", "per_session"])
+    async def test_a_tavily_run_refetches_an_exa_page_cut_at_its_budget(self, tmp_path, workspace: str) -> None:
+        root = str(tmp_path / "c")
+        SearchCache(root).put_extract("https://a.example/p", "x" * 30000, provider="exa", max_characters=30000)
+        server = _server(root, workspace=workspace, workspace_root=str(tmp_path / "ws"))
+        full = "y" * 100025
+        client = MagicMock(
+            extract=AsyncMock(return_value={"results": [{"url": "https://a.example/p", "raw_content": full}]})
+        )
+        server._async_tavily_clients = [client]
+
+        out = (await server.browse(_req(), BrowseRequest(urls=["https://a.example/p"]))).results_string
+
+        client.extract.assert_awaited_once()
+        if workspace == "per_session":
+            assert "(100025 bytes)" in out
+        else:
+            assert "... [truncated]" in out
+
+    async def test_a_tavily_run_takes_a_complete_exa_page(self, tmp_path) -> None:
+        root = str(tmp_path / "c")
+        SearchCache(root).put_extract("https://a.example/p", "short page", provider="exa", max_characters=30000)
+        server = _server(root)
+        client = MagicMock(extract=AsyncMock())
+        server._async_tavily_clients = [client]
+
+        out = (await server.browse(_req(), BrowseRequest(urls=["https://a.example/p"]))).results_string
+
+        client.extract.assert_not_awaited()
+        assert "short page" in out
 
     def test_a_tavily_page_replaces_a_capped_exa_page_but_not_a_complete_one(self, tmp_path) -> None:
         cache = SearchCache(str(tmp_path))

@@ -1027,6 +1027,14 @@ _WORKSPACE_SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _SHELL_FAILURE_OUTPUT = "[bash error: the sandbox could not run the command]\n[exit_code=-2]"
 
 
+def _entry_has_page_text(entry: dict) -> bool:
+    """Whether a cached search entry can save pages: a tavily entry always holds raw content, an exa
+    entry only when it was fetched with page text."""
+    if entry.get("provider", "tavily") != "exa":
+        return True
+    return any(isinstance(r, dict) and r.get("text") for r in entry["results"])
+
+
 def _remove_workspace(workspace: Path) -> None:
     """Remove a session workspace, raising on any failure other than the directory already being gone."""
 
@@ -1589,7 +1597,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 return False
         elif search_type != self.config.exa_search_type:
             return False
-        return not write_pages or any(isinstance(r, dict) and r.get("text") for r in entry["results"])
+        return not write_pages or _entry_has_page_text(entry)
 
     def _format_search_hit(
         self, entry: dict, query: str, max_length: int, page_writer: Optional["_PageWriter"]
@@ -1611,7 +1619,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         result_list = result_list[: self.config.max_results]
         if provider == "exa":
             response: dict = {"results": result_list}
-            if entry.get("output") is not None:
+            # A live tavily search returns no synthesis, so only an exa run keeps a stored deep answer.
+            if entry.get("output") is not None and self.config.search_provider == "exa":
                 response["output"] = entry["output"]
             return self._format_exa_search(query, response, max_length, page_writer)[0]
         if page_writer is not None:
@@ -1788,7 +1797,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         """Terminal mode: run one search, write each result's raw content to disk, return
         title/url/snippet/[Saved to] metadata. Mirrors the reference harness tavily_search
         (disk mode) formatting exactly."""
-        cached = await self._cache_get_search(query)
+        # A live call here saves every page, so an exa entry without page text is a miss.
+        cached = await self._cache_get_search(query, _entry_has_page_text)
         if cached is not None:
             self._record_call(metrics, "search", cached.get("provider", "tavily"), "cache_hit", time())
             return self._format_search_hit(cached, query, max_per_query, page_writer)
@@ -1925,14 +1935,23 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         # cache: serve hits from the shared flat-file cache, send ONLY the
         # missed URLs to the provider. Hits keep input order and come first.
-        # Exa cuts each page to max_per_url_length, so a page stored under a smaller
-        # cap misses, and an exa run cuts a longer hit to what its miss would return.
+        # A hit must be as long as this run's live call would keep: exa cuts each page to
+        # max_per_url_length; tavily returns the whole page, which the workspace keeps up to
+        # max_page_bytes and inline mode cuts past max_per_url_length with a truncation marker.
+        # A page stored under a smaller cap misses, and an exa run cuts a longer hit to what
+        # its miss would return.
         cached_entries: List[dict] = []
         fetch_urls = urls
         if self._search_cache.enabled:
+            if self.config.search_provider == "exa":
+                min_characters = max_per_url_length
+            elif self.config.workspace == "per_session":
+                min_characters = self.config.max_page_bytes
+            else:
+                min_characters = max_per_url_length + 1
             fetch_urls = []
             for u in urls:
-                hit = await self._cache_get_extract(u, min_characters=max_per_url_length)
+                hit = await self._cache_get_extract(u, min_characters=min_characters)
                 if hit is not None:
                     hit_provider, content = hit
                     if self.config.search_provider == "exa":

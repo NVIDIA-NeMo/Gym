@@ -474,16 +474,22 @@ class SearchCache:
     def get_extract(self, url: str, *, min_characters: int | None = None) -> tuple[CacheProvider, str] | None:
         """Return (provider, page content), or None on miss/disabled.
 
-        `min_characters`: the page length the caller would request from a provider
-        that caps pages (exa's maxCharacters). A page stored under a smaller cap
-        that it filled is a miss, so a short copy never stands in for a longer fetch."""
+        `min_characters`: the page length the caller's live call would keep (exa's
+        maxCharacters, or what a tavily run keeps of a whole page). A page stored under
+        a smaller cap that it filled is a miss, so a short copy never stands in for a
+        longer fetch. An exa page stored without a cap counts as cut at its own length."""
         if not self.enabled:
             return None
         _t0 = perf_counter()
         try:
             obj = self._read("browse", normalize_url(url))
-            if obj is not None and min_characters is not None and _page_was_capped(obj):
-                if obj["max_characters"] < min_characters:
+            if obj is not None and min_characters is not None:
+                cap = obj.get("max_characters")
+                # An exa page written without its cap (the source branch stored none) may have been
+                # cut at its own length, so it answers only budgets up to that length.
+                if cap is None and obj.get("provider") == "exa":
+                    cap = len(obj["content"])
+                if isinstance(cap, int) and len(obj["content"]) >= cap and cap < min_characters:
                     obj = None
             if obj is None:
                 self._bump("browse_misses")

@@ -91,6 +91,21 @@ async def test_cut_at_the_output_budget_sets_max_output_tokens() -> None:
     assert result.stop_reason == "max_output_tokens"
 
 
+async def test_cut_at_the_model_servers_applied_budget_sets_max_output_tokens() -> None:
+    # A training framework's per-call cap reaches the model server through _ng_model_sampling, not the request;
+    # the model server echoes the budget it applied.
+    turn = _length_cut(64)
+    turn["max_output_tokens"] = 64
+    assert (await _run({}, turn)).stop_reason == "max_output_tokens"
+    assert (await _run({}, turn, max_output_tokens=128)).stop_reason == "max_output_tokens"
+
+
+async def test_cut_before_the_model_servers_applied_budget_sets_context_full() -> None:
+    turn = _length_cut(40)
+    turn["max_output_tokens"] = 64
+    assert (await _run({}, turn, max_output_tokens=128)).stop_reason == "context_full"
+
+
 async def test_cut_without_usage_or_budget_sets_context_full() -> None:
     assert (await _run({}, _length_cut(None), max_output_tokens=100)).stop_reason == "context_full"
     assert (await _run({}, _length_cut(100))).stop_reason == "context_full"
