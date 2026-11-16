@@ -112,6 +112,7 @@ def test_split_accepts_text_parts_and_reads_a_missing_text_as_empty() -> None:
         ({"type": "input_image", "image_url": "data:image/tiff;base64,AAAA"}, "Unsupported media type"),
         ({"type": "input_image", "image_url": "data:image/png,AAAA"}, "base64 data URI"),
         ({"type": "input_image", "image_url": "data:image/png;base64,@@@"}, "invalid base64"),
+        ({"type": "input_image", "image_url": "data:image/png;base64,é"}, "invalid base64"),
         ({"type": "input_file", "file_data": "AAAA"}, "input_file"),
         ({"type": "input_audio"}, "input_audio"),
     ],
