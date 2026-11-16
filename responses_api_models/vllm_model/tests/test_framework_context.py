@@ -1689,15 +1689,18 @@ def test_messages_replay_keeps_continuations_and_roots_edited_history(monkeypatc
 
     first = post(body)
     feedback = [{"type": "tool_result", "tool_use_id": "call-1", "content": "solved"}] if tool else "continue"
+    # Messages clients drop blank text blocks when they echo history.
+    echoed = [block for block in first["content"] if block["type"] != "text" or block["text"].strip()]
     continued = {
         **body,
         "messages": body["messages"]
-        + [{"role": "assistant", "content": first["content"]}, {"role": "user", "content": feedback}],
+        + [{"role": "assistant", "content": echoed}, {"role": "user", "content": feedback}],
     }
     post(continued)
     manifest = harness.manifest("attempt")
     if tool:
-        assert not any(block["type"] == "text" and not block["text"].strip() for block in first["content"])
+        assert any(block["type"] == "text" and not block["text"].strip() for block in first["content"])
+        assert "call-1" in [item.id for item in manifest.records[0].output_items]
     if reasoning:
         assert any(block["type"] == "thinking" for block in first["content"])
     assert harness.worker_calls[1][0].mode == "candidate"

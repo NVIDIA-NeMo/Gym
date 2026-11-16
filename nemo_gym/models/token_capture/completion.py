@@ -18,16 +18,20 @@ def completion_replay_items(response: dict[str, Any]) -> list[dict]:
     """Return the served completion as the request items its echo converts to at ingress.
 
     Messages ingress uses the shared Anthropic converter, so the served assistant
-    turn goes through the same converter. Other dialects use token-free Responses
-    output items. Replay digests match the next request's prefix when the client
-    echoes the served turn unchanged, apart from fields ignored by the converter.
+    turn goes through the same converter. Messages clients drop blank text blocks
+    when they echo history (the Messages API rejects them), so they are left out;
+    an all-blank turn is kept as served. Other dialects use their token-free served
+    items. Replay digests match the next request's prefix when the client echoes
+    the served turn, apart from fields ignored by the converter.
     """
     if response.get("type") == "message" and response.get("role") == "assistant":
+        content = response.get("content") or []
+        echoed = [block for block in content if block.get("type") != "text" or block.get("text", "").strip()]
         params = AnthropicConverter().anthropic_request_to_responses(
             {
                 "model": response.get("model", ""),
                 "max_tokens": 1,
-                "messages": [{"role": "assistant", "content": response.get("content") or []}],
+                "messages": [{"role": "assistant", "content": echoed or content}],
             }
         )
         assert isinstance(params.input, list)
@@ -50,6 +54,15 @@ def completion_items(response: dict[str, Any]) -> list[dict]:
                     item.pop("id", None)
                 items.append(item)
         return strip_token_fields(items)[0]
+    if response.get("type") == "message" and response.get("role") == "assistant":
+        # Describe a Messages turn by the items its echo converts to, so served tool-call ids and
+        # per-item fingerprints match the Responses items a harness returns. Detectors read text parts.
+        return [
+            {**item, "content": [{"type": "output_text", "text": item["content"]}]}
+            if item.get("type") == "message" and isinstance(item.get("content"), str)
+            else item
+            for item in completion_replay_items(response)
+        ]
     return strip_token_fields(response_to_output_items(response))[0]
 
 

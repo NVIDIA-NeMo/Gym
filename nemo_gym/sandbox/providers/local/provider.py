@@ -103,7 +103,9 @@ class LocalProvider:
             raise ValueError("The local sandbox provider cannot run commands as another user")
         inst = handle.raw
         exec_cwd = Path(cwd) if cwd else inst["workspace"]
-        if cwd and not exec_cwd.is_absolute():
+        # A relative cwd stays inside a workspace this provider allocated. A caller's workdir is a host
+        # path, and the sandbox facade passes it as the default cwd, so it is not joined again.
+        if cwd and inst["owned"] and not exec_cwd.is_absolute():
             exec_cwd = inst["workspace"] / exec_cwd
         timeout = timeout_s if timeout_s is not None else self._default_timeout_s
         async with self._semaphore:

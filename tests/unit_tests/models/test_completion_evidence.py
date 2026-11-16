@@ -173,3 +173,35 @@ def test_messages_replay_matches_echoed_prefix():
     generic = summarize_replay(replay_context(items[:1] + strip_token_fields(response_to_output_items(served))[0]))
     assert completion.source_digest == prefix.source_digest
     assert generic.source_digest != prefix.source_digest
+
+
+def test_messages_evidence_matches_the_items_its_echo_converts_to():
+    served = {
+        "type": "message",
+        "role": "assistant",
+        "model": "test-model",
+        "content": [
+            {"type": "thinking", "thinking": "plan", "signature": ""},
+            {"type": "text", "text": " \n"},
+            {"type": "text", "text": "  keep this text\n"},
+            {"type": "tool_use", "id": "call-1", "name": "Agent", "input": {"prompt": "solve"}},
+        ],
+    }
+    # A harness returns the call as separate Responses items, with the tool call under its served id.
+    returned = [
+        {"type": "reasoning", "summary": [{"type": "summary_text", "text": "plan"}]},
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "  keep this text\n"}]},
+        {"type": "function_call", "call_id": "call-1", "name": "Agent", "arguments": '{"prompt": "solve"}'},
+    ]
+    evidence = completion_items(served)
+    assert [output_item_fingerprint(item) for item in evidence] == [output_item_fingerprint(item) for item in returned]
+    assert [item.get("id") for item in evidence] == [None, None, "call-1"]
+    assert output_validation_item(evidence[1]) == {"type": "message", "content": [{"text": "  keep this text\n"}]}
+
+    # Clients drop the blank block when they echo the turn; the replay reads it the same way.
+    echoed = [block for block in served["content"] if block is not served["content"][1]]
+    items = AnthropicConverter().anthropic_request_to_responses(
+        {"model": "test-model", "max_tokens": 64, "messages": [{"role": "assistant", "content": echoed}]}
+    )
+    expected = summarize_replay(replay_context([item.model_dump(mode="json") for item in items.input]))
+    assert summarize_replay(replay_context(completion_replay_items(served))) == expected

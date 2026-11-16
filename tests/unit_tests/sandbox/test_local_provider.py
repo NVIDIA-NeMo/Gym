@@ -318,3 +318,16 @@ async def test_exec_uses_requested_sandbox_work_directory(tmp_path: Path, absolu
         assert result.stdout == "sandbox runner directory"
     finally:
         await provider.close(handle)
+
+
+async def test_relative_caller_workdir_is_the_default_exec_directory(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    sandbox = AsyncSandbox(LocalProvider())
+    await sandbox.start(SandboxSpec(workdir="repo"))
+    try:
+        result = await sandbox.exec("pwd")
+        assert result.return_code == 0, result.stderr
+        assert Path(result.stdout.strip()).resolve() == (tmp_path / "repo").resolve()
+    finally:
+        await sandbox.stop()
+    assert (tmp_path / "repo").is_dir()
