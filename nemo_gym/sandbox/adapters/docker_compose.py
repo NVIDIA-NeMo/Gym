@@ -41,6 +41,7 @@ from nemo_gym.sandbox.compose_fields import (
     service_resources,
 )
 from nemo_gym.sandbox.compose_volumes import LOGS_TREE, first_link, lexical_target
+from nemo_gym.sandbox.observability import span_attributes
 from nemo_gym.sandbox.providers import SandboxSpec, create_provider
 from nemo_gym.sandbox.providers.base import (
     COMPOSE_SERVICE_OPTION_FIELDS,
@@ -52,6 +53,9 @@ from nemo_gym.sandbox.providers.base import (
     SupportsSandboxServiceOptions,
     SupportsSandboxSharedStorage,
 )
+from nemo_gym.sandbox.resource_telemetry import record_request
+from nemo_gym.telemetry._fallbacks import is_span_group_enabled
+from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
 LOGGER = logging.getLogger(__name__)
@@ -953,6 +957,18 @@ class AsyncSandboxCompose:
                 self.document = self._load()
                 order = self._validate()
                 await self._prepare()
+                resource_requests = {}
+                if is_span_group_enabled(GymSpanGroup.SANDBOX):
+                    for name in order:
+                        resource_requests[name] = record_request(
+                            self._plans[name]["spec"],
+                            {
+                                **span_attributes(),
+                                "nemo.gym.sandbox.provider": self._provider_for(name).name,
+                                "nemo.gym.sandbox.service": name,
+                                "nemo.gym.sandbox.collection": self.project,
+                            },
+                        )
                 if any(service.get("volumes") for service in self.document["services"].values()):
                     await self._prepare_volumes()
                 for name in order:
@@ -962,7 +978,7 @@ class AsyncSandboxCompose:
                     # or our bootstrap create the final WORKDIR as root before a Dockerfile's RUN lines.
                     creation_spec = replace(spec, workdir=None) if name in self.service_setup else spec
                     self.services[name] = AsyncSandbox(provider, creation_spec, owns_provider=False)
-                    await self.services[name].start()
+                    await self.services[name].start(span_attributes=resource_requests.get(name))
                     if name not in self.service_setup:
                         await self._create_workdir(name)
                     service = self.document["services"][name]

@@ -396,6 +396,9 @@ def _cookie_keyed_server(
             self, request: Request, body: ResourcesCloseSessionRequest
         ) -> ResourcesCloseSessionResponse:
             async with self._locks.locked(body.resources_session_id):
+                active_episode = self._episodes.get(body.resources_session_id)
+                if active_episode is not None and active_episode != body.episode_id:
+                    raise ResourcesSessionConflictError("episode_id does not match the active resources session")
                 fenced_episode = self._fences.get(body.resources_session_id)
                 if fences_close and fenced_episode not in (None, body.episode_id):
                     raise ResourcesSessionConflictError("episode_id does not match the closed resources session")

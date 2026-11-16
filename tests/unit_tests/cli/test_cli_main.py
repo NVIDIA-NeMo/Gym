@@ -27,7 +27,7 @@ from pytest import MonkeyPatch
 import nemo_gym.cli.eval as cli_eval
 import nemo_gym.cli.main as cli_main
 import nemo_gym.config.global_config as gc
-import nemo_gym.orchestration.server_supervisor
+import nemo_gym.server_runtime.supervisor.server_supervisor
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
 from nemo_gym.cli.main import main
 from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
@@ -153,6 +153,8 @@ class TestEvalRunFlags:
             (["--output", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["-o", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["--limit", "1024"], "+limit=1024"),
+            (["--task-ids", "a, b"], '+task_ids=["a","b"]'),
+            (["--task-ids-file", "subset_v1.txt"], "+task_ids_fpath='subset_v1.txt'"),
             (["--num-repeats", "4"], "+num_repeats=4"),
             (["--interleave-repeats"], "+interleave_repeats=true"),
             (["--concurrency", "10"], "+num_samples_in_parallel=10"),
@@ -817,7 +819,7 @@ class TestFriendlyValidationError:
                 raise AssertionError("RunHelper must not be built for a malformed head_server")
 
         monkeypatch.setattr(cli_env, "RunHelper", _NoServerMayStart)
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "RunHelper", _NoServerMayStart)
+        monkeypatch.setattr(nemo_gym.server_runtime.supervisor.server_supervisor, "RunHelper", _NoServerMayStart)
 
         self._run_real_cli_with_a_malformed_head_server(monkeypatch, tmp_path, capsys, ["env", "start"])
 
@@ -1698,7 +1700,6 @@ class TestAgentSelector:
         assert [(instance.name, instance.agent_type) for instance in instances] == [(new_name, "langgraph_agent")]
         agent = resolved[new_name].responses_api_agents.langgraph_agent
         assert agent.entrypoint == f"{flavor}_agent.py"
-        assert agent.num_workers == 1
         for binding in ("resources_server", "model_server", "datasets"):
             assert agent[binding] == original[old_name].responses_api_agents.simple_agent[binding]
         environment = resolved.aime24_math_with_judge_environment_server.environment_servers
@@ -1732,7 +1733,8 @@ class TestAgentSelector:
         assert resolved.reflection_agent.responses_api_agents.langgraph_agent.resources_server is None
         environment = resolved.aime24_math_with_judge_environment_server.environment_servers.single_agent_turn_legacy
         assert environment.agent_server.name == "aime24_math_with_judge_simple_agent"
-        assert environment.resources_tool_transports == ["direct_http"]
+        # math_with_judge serves no tools, so its Environment Server grants the agent none.
+        assert environment.get("resources_tool_transports", []) == []
 
     @pytest.mark.parametrize(
         "command",

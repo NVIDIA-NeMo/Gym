@@ -17,18 +17,21 @@ import json
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import (
+    JUDGE_FAILED,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NgFailureEvent,
 )
+from nemo_gym.verification import judge_failsafe
 from resources_servers.gdpval import persisted_layout
 from resources_servers.gdpval.app import (
     GDPValResourcesServer,
@@ -360,8 +363,9 @@ class TestStrictComparisonTrials:
             assert response.model_dump()["_ng_failure_terminal"] is True
             assert "manual_imputation" not in response.judge_response
         else:
-            with pytest.raises(RuntimeError, match="all 1 judge matchup"):
+            with pytest.raises(NgFailureEvent, match="all 1 judge matchup") as raised:
                 await self._verify_with_trials(server, body, [RuntimeError("judge API unavailable")])
+            assert raised.value.failure_kind == JUDGE_FAILED
 
     @pytest.mark.asyncio
     async def test_a_permanent_judge_error_is_a_masked_terminal_failure(self, tmp_path) -> None:
@@ -498,6 +502,57 @@ class TestApp:
             # Both the eval and the reference report reach the judge as the rendered PDF.
             assert json.dumps(call.kwargs["messages"]).count(render) == 2
         assert (eval_dir / "report.pdf").is_file() and (ref_dir / "report.pdf").is_file()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("reference_has_pdf", [False, True])
+    async def test_verify_comparison_with_sandbox_rendering_never_converts_on_the_host(
+        self, tmp_path, monkeypatch, reference_has_pdf
+    ) -> None:
+        import fitz
+
+        eval_dir = tmp_path / "eval" / "task_task-1" / "repeat_0"
+        ref_root = tmp_path / "ref"
+        ref_dir = ref_root / "task_task-1" / "repeat_0"
+        for directory in (eval_dir, ref_dir):
+            directory.mkdir(parents=True)
+            (directory / "finish_params.json").write_text("{}")
+            (directory / "report.docx").write_bytes(b"office source")
+        # The sandbox rendered the eval submission; the reference carries its PDF or not.
+        renders = [eval_dir / "report.docx.pdf"] + ([ref_dir / "report.pdf"] if reference_has_pdf else [])
+        for render in renders:
+            document = fitz.open()
+            document.new_page().insert_text((72, 72), "render")
+            document.save(render)
+            document.close()
+        host_convert = AsyncMock(return_value=(0, 0, []))
+        monkeypatch.setattr("resources_servers.gdpval.preconvert.preconvert_dir_async", host_convert)
+        with patch("resources_servers.gdpval.setup_libreoffice.ensure_libreoffice", return_value=True):
+            server = _server(
+                reward_mode="comparison",
+                reference_deliverables_dir=str(ref_root),
+                preconvert_office_to_pdf=True,
+                sandbox_libreoffice_command=["libreoffice"],
+                persist_deliverables_dir=str(tmp_path / "persist"),
+            )
+        client = MagicMock()
+        client.chat.completions.create.return_value.choices = [MagicMock(message=MagicMock(content="BOXED[B]"))]
+        monkeypatch.setattr("resources_servers.gdpval.app.get_server_url", lambda _: "http://localhost:9999")
+        monkeypatch.setattr("openai.OpenAI", lambda **_: client)
+
+        response = await server.verify(_NO_SESSION, _verify_request(deliverables_dir=str(eval_dir)))
+
+        host_convert.assert_not_called()
+        if reference_has_pdf:
+            assert response.judge_response["total_judged"] == 4
+        else:
+            # Judging would have shown the judge an empty reference.
+            client.chat.completions.create.assert_not_called()
+            assert response.judge_response == {
+                "error": "reference_unrendered",
+                "unrendered": [str(ref_dir / "report.docx")],
+            }
+            dumped = response.model_dump()
+            assert (dumped["_ng_failure_class"], dumped["_ng_failure_terminal"]) == ("reference_unrendered", True)
 
     @pytest.mark.asyncio
     async def test_verify_rubric_renders_office_with_configured_command(self, tmp_path, monkeypatch) -> None:
@@ -1609,7 +1664,7 @@ class TestMultiReference:
     @pytest.mark.asyncio
     async def test_verify_all_references_fail_raises(self, tmp_path) -> None:
         """When every matchup fails the rollout is genuinely unjudgeable and
-        verify raises (surfacing as a failure) rather than faking a reward."""
+        verify raises a judge_failed event rather than faking a reward."""
         server, body = self._two_ref_server_and_body(tmp_path)
 
         def always_fail(**_kwargs):
@@ -1621,11 +1676,40 @@ class TestMultiReference:
             patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
             patch("openai.OpenAI", return_value=MagicMock()),
         ):
-            with pytest.raises(RuntimeError, match="all .* judge matchup"):
+            with pytest.raises(NgFailureEvent, match="all .* judge matchup") as raised:
                 await server.verify(_NO_SESSION, body)
+        assert raised.value.failure_kind == JUDGE_FAILED
 
     @pytest.mark.asyncio
-    async def test_a_permanent_and_a_transient_matchup_error_together_stay_retryable(self, tmp_path) -> None:
+    async def test_a_judge_outage_is_a_masked_judge_failed_row_that_keeps_the_answer(self, tmp_path) -> None:
+        """Through the failsafe every verify call runs under, the row is typed and masked, so recovery grades
+        the saved answer again instead of an HTTP 500 that reruns the whole episode."""
+        server, body = self._two_ref_server_and_body(tmp_path)
+
+        def timed_out(**_kwargs):
+            raise TimeoutError("Request timed out.")
+
+        with (
+            patch("resources_servers.gdpval.comparison.run_trials", side_effect=timed_out),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+            patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
+            patch("openai.OpenAI", return_value=MagicMock()),
+        ):
+            reply = await judge_failsafe(server.verify)(_NO_SESSION, body=body)
+
+        row = json.loads(reply.body)
+        assert reply.status_code == 200
+        assert (row["_ng_failure_class"], row["failure_kind"], row["mask_sample"]) == (
+            JUDGE_FAILED,
+            JUDGE_FAILED,
+            True,
+        )
+        assert row["reward"] == 0.0
+        assert row["response"] == body.response.model_dump(mode="json")
+        assert "all 2 judge matchup(s) failed" in row["failure_reason"]
+
+    @pytest.mark.asyncio
+    async def test_a_permanent_and_a_transient_matchup_error_together_are_a_judge_failure(self, tmp_path) -> None:
         server, body = self._two_ref_server_and_body(tmp_path)
         errors = iter([RuntimeError("Error code: 413 - payload too large"), RuntimeError("500 Internal Server Error")])
 
@@ -1638,8 +1722,11 @@ class TestMultiReference:
             patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
             patch("openai.OpenAI", return_value=MagicMock()),
         ):
-            with pytest.raises(RuntimeError, match=r"all 2 judge matchup\(s\) failed .*500 Internal Server Error"):
+            with pytest.raises(
+                NgFailureEvent, match=r"all 2 judge matchup\(s\) failed .*500 Internal Server Error"
+            ) as raised:
                 await server.verify(_NO_SESSION, body)
+        assert raised.value.failure_kind == JUDGE_FAILED
 
     def test_aggregate_metrics_mle_and_per_reference_stats(self) -> None:
         from nemo_gym.config import AggregateMetricsRequest

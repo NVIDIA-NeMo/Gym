@@ -102,6 +102,7 @@ _ENV_FIELD_MAP = {
     "run_id": f"{_OTEL_PREFIX}_RUN_ID",
     # Gym-owned flag, read back by init_telemetry rather than by lens.
     "service_name_per_server": f"{_OTEL_PREFIX}_SERVICE_NAME_PER_SERVER",
+    "sandbox_resource_sample_interval_seconds": f"{_OTEL_PREFIX}_SANDBOX_RESOURCE_SAMPLE_INTERVAL_SECONDS",
 }
 
 #: The ``_ENV_FIELD_MAP`` fields that nemo-lens itself reads, each with a ``NEMO_LENS_<KEY>`` fallback.
@@ -633,6 +634,20 @@ def is_metrics_exporter_active() -> bool:
     :func:`is_telemetry_metrics_enabled`, this stays false until telemetry is set up.
     """
     return _METRICS_EXPORTING
+
+
+def is_span_group_or_metrics_active(group: str) -> bool:
+    """Whether a site that both spans ``group`` and records metrics should take its instrumented path.
+
+    Spans follow ``span_groups`` and metrics follow the metrics exporter, independently, so a
+    site instruments when either is on. ``managed_span`` still checks the span group itself.
+    """
+    if _METRICS_EXPORTING:
+        return True
+    # Function-local, like every lens import in this module.
+    from nemo_gym.telemetry._fallbacks import is_span_group_enabled
+
+    return is_span_group_enabled(group)
 
 
 def is_trace_exporter_active() -> bool:

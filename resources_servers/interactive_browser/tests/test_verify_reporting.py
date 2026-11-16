@@ -132,6 +132,7 @@ def test_a_browser_that_died_before_scoring_does_not_abort_the_run():
 
     assert dumped["reward"] == 0.0
     assert "browser unreachable while scoring" in dumped["failure_reason"]
+    assert (dumped["failure_kind"], dumped["mask_sample"]) == ("verifier_error", False)
     assert backend.closed == 1
     assert "rollout-1" not in server._session_id_to_state
 

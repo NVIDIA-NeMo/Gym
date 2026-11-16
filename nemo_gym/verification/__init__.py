@@ -34,8 +34,10 @@ if TYPE_CHECKING:
         call_judge,
         is_judge_failure,
         judge_failsafe,
+        judge_provider_stopped,
         normalize_math_judge_verdict,
         record_parsed_judge_verdict,
+        record_rejected_judge_reply,
         reraise_judge_errors,
     )
     from nemo_gym.verification.sandbox_verification import (
@@ -65,9 +67,11 @@ _PUBLIC_API = {
     "exercise_verifier_fixture": "verifier_fixture",
     "is_judge_failure": "judge",
     "judge_failsafe": "judge",
+    "judge_provider_stopped": "judge",
     "load_verifier_fixture": "verifier_fixture",
     "normalize_math_judge_verdict": "judge",
     "record_parsed_judge_verdict": "judge",
+    "record_rejected_judge_reply": "judge",
     "reraise_judge_errors": "judge",
     "run_verification_sandbox": "sandbox_verification",
 }

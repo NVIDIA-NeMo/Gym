@@ -116,6 +116,7 @@ from nemo_gym.core import (
     NgFailureEvent,
     TaskId,
     failure_kinds,
+    model_sampling_path_segment,
     sdk_error_details,
 )
 from nemo_gym.data.tasks.harbor import (
@@ -535,6 +536,7 @@ class HarborEnvironmentServer(
     config: HarborEnvironmentServerConfig
     request_model = HarborEpisodeRequest
     response_model = HarborEpisodeResponse
+    applies_model_sampling = True
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -1994,6 +1996,10 @@ class HarborEnvironmentServer(
             # Compose group the adapter already created the /logs paths main bound, before its command; this mkdir
             # is idempotent there and still makes the whole tree.
             session.workdir = await self._prepare_workdir(sandbox, task, task.workdir)
+            # The task's skills are in place before its entrypoint, healthcheck and agent, as a Dockerfile `COPY`
+            # would leave them. A Compose group's main was already started by the adapter (command and image
+            # healthcheck included), so there they reach the agent only.
+            await self._upload_task_skills(sandbox, task, session.workdir)
             # A Compose group's main was started by the adapter, its entrypoint run and its image healthcheck waited.
             managed = compose is not None
             launch = session.entrypoint = await self._start_entrypoint(
@@ -2004,7 +2010,7 @@ class HarborEnvironmentServer(
             await self._wait_healthy(
                 sandbox, task, launch, user=image_user, workdir=session.workdir, compose_managed=managed
             )
-            await self._write_task_context(sandbox, task)
+            await self._write_task_context(sandbox, task, session.workdir)
             if launch is not None:
                 # The last look before the hand-over: an entrypoint that died during the seed's remaining steps
                 # (a setup script failing after its first lines) is a seed failure, not a rollout on an empty task.
@@ -2075,11 +2081,16 @@ class HarborEnvironmentServer(
             self.server_client.global_config_dict,
             self.config.agent_server.name,
         )
-        token_capture = bool(block.get("enabled", False)) and (
-            bool(block.get("all_agents", False)) or bool(agent_config.get("token_id_capture", False))
+        # A request whose rollout skips capture (a validation rollout) activates the agent without the tag.
+        token_capture = (
+            not request.skip_token_capture
+            and bool(block.get("enabled", False))
+            and (bool(block.get("all_agents", False)) or bool(agent_config.get("token_id_capture", False)))
         )
         capture_segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if token_capture else ""
-        return f"/ng-rollout/{request.episode_id.capture_key}{capture_segment}/v1/responses"
+        # The agent is the one the training framework trains, so its model calls carry the episode's values.
+        sampling_segment = model_sampling_path_segment(self.model_sampling_segment(request, trained=True))
+        return f"/ng-rollout/{request.episode_id.capture_key}{capture_segment}{sampling_segment}/v1/responses"
 
     @staticmethod
     def _failure(

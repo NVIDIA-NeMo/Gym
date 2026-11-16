@@ -56,7 +56,7 @@ class _StartsWith:
 
 
 # A report without run.stats.responses leaves the response gate unknown, and the trial count is a lower bound.
-HEALTH_UNKNOWN = _StartsWith('response/trial health unknown: ["trial: UNOBSERVED')
+HEALTH_UNKNOWN = _StartsWith("response/trial health unknown: ['")
 
 
 # The saved answer a judge failure keeps beside its row; re-verification re-judges it.
@@ -166,6 +166,34 @@ def test_stored_infra_retry_budget_is_consumed_not_guessed(tmp_path, used, actio
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[], retries=used)
     d = decide_from_collected(collect(job), max_infra_retries=3, max_walltime_s=None, live_job=False)
     assert d.action == action
+
+
+PROTOCOL_VIOLATION = dict(
+    failure_kind="environment_protocol_violation",
+    _ng_failure_terminal=True,
+    _ng_failure_events={
+        "e": {
+            "boundary": "collection",
+            "operation": "collection.run",
+            "operation_id": "op",
+            "attempt_id": "a1",
+            "cause_id": None,
+        }
+    },
+)
+
+
+def test_only_protocol_violations_stop_with_the_producer_hint_and_never_recover(tmp_path) -> None:
+    job = write_job_dir(
+        tmp_path / "job",
+        n=2,
+        results=[],
+        failures=[ident(0, **PROTOCOL_VIOLATION), ident(1, **PROTOCOL_VIOLATION)],
+    )
+    d = decide_from_collected(collect(job), max_infra_retries=3, max_walltime_s=None, live_job=False)
+    assert d.action == RecoveryAction.STOP
+    assert "environment_protocol_violation" in d.reason and "producer bug" in d.reason
+    assert "gym eval submit" in d.reason and "--recover" not in d.reason
 
 
 def test_walltime_cap_and_unknown_cap_both_stop(tmp_path) -> None:
@@ -664,7 +692,7 @@ def test_cli_recover_emits_the_gate_task_and_dispatches_nothing_for_a_complete_r
     assert code == 1 and out["dispatched"] is None and fake_executor.calls == ["decide"]
     assert out["gate_task"]["status"] == "UNVERIFIED" and out["gate_task"]["score"] == 0.5
     assert out["gate_task"]["errors"] == [] and out["gate_task"]["warnings"][0] == HEALTH_UNKNOWN
-    assert out["gate_task"]["warnings"][1].startswith("per-rollout health not judged against the configured criterion")
+    assert out["gate_task"]["warnings"][1].startswith("rollout quality not judged against the configured criterion")
     assert "2 unobserved" in out["gate_task"]["warnings"][1]
 
 
@@ -775,7 +803,9 @@ def test_stopped_incomplete_chain_is_named_in_the_gate_errors(tmp_path, fake_exe
     fake_executor.job_dir = job
     out = submit.recover("gym-job-q", "bench")
     assert out.decision.action == RecoveryAction.STOP and fake_executor.calls == ["decide"]
-    assert any("chain stopped" in e for e in out.gate_task["errors"])
+    assert any(
+        "the job chain stopped with 1 of 2 rollouts unsettled (1 missing)" in e for e in out.gate_task["errors"]
+    )
 
 
 def mlflow_job(tmp_path: Path, *, mode: str) -> Path:
@@ -1142,7 +1172,7 @@ def test_named_health_facts_below_the_criterion_reach_the_gate_warnings(tmp_path
         d, collected, max_unhealthy_fraction=0.5, mlflow_status="FINISHED", mlflow_run_id="postrun-run"
     )
     assert task["status"] == "UNVERIFIED"
-    assert task["warnings"][-4].startswith("per-rollout health within the configured criterion")
+    assert task["warnings"][-4].startswith("rollout quality within the configured criterion")
     assert task["warnings"][-3:-1] == [
         "health-check issues (nonzero): model_call_runaway_generation 1, task_consistently_unhealthy 1",
         "health checks not fully evaluated: run_excessive_failures (evaluated 0, unobserved 1, ignored 0)",
@@ -1262,6 +1292,7 @@ def test_known_trial_failures_fail_at_two_percent_and_are_only_a_lower_bound_bel
     assert task["status"] == ("FAILED" if failed else "UNVERIFIED")
     assert task["scored_samples"] == 100 and task["score"] == 0.5
     [health] = [e for e in task["errors"] + task["warnings"] if e.startswith("response/trial health")]
+    health += " " + ((task["evaluation_health"] or {}).get("detail") or "")
     rate = f"evaluation-side faults: {final_zeros} of 100 ({final_zeros / 100:.2%}) is not below 2%"
     if failed:
         assert health.startswith("response/trial health failed") and f"trial: {rate}" in health
@@ -1296,6 +1327,7 @@ def test_the_response_gate_reads_the_reported_population_strictly_below_two_perc
     )
     assert d.action == RecoveryAction.NOOP and task["status"] == "UNVERIFIED"
     [health] = [w for w in task["warnings"] if w.startswith("response/trial health")]
+    health += " " + ((task["evaluation_health"] or {}).get("detail") or "")
     # Whatever the reported response population, it never decides health: only the unobserved trials do.
     assert health.startswith("response/trial health unknown") and "response:" not in health, state
     assert not any("response:" in w for w in task["warnings"])
@@ -1305,6 +1337,7 @@ def test_the_trial_gate_is_not_evaluated_on_an_incomplete_run(tmp_path) -> None:
     d, task = gate_of(gate_job(tmp_path, expected=100, final_zeros=0, missing=1))
     assert d.action == RecoveryAction.RESUBMIT and not d.complete
     [health] = [w for w in task["warnings"] if w.startswith("response/trial health")]
+    health += " " + ((task["evaluation_health"] or {}).get("detail") or "")
     assert "trial: not evaluated, the run is not complete" in health
 
 
@@ -1329,6 +1362,7 @@ def test_the_trial_boundary_names_the_run_provenance_and_the_open_protocol_quest
     )
     d, task = gate_of(job, quality=quality)
     [health] = [w for w in task["warnings"] if w.startswith("response/trial health")]
+    health += " " + ((task["evaluation_health"] or {}).get("detail") or "")
     assert d.action == RecoveryAction.NOOP and health.startswith("response/trial health unknown")
     assert "trial: UNOBSERVED 99 of 100 expected trials" in health and "route_failures_to_sidecar None" in health
     assert "('scicode_agent', 'r', None)" in health and "rollouts ended on a failed model call at least 0" in health
@@ -1373,6 +1407,7 @@ def test_a_context_window_signal_is_reported_and_stays_unknown_without_changing_
     job = gate_job(tmp_path, expected=100, final_zeros=0)
     d, task = gate_of(job, quality=unit_quality(expected=100, context_window_exceeded=counts))
     [health] = [w for w in task["warnings"] if w.startswith("response/trial health")]
+    health += " " + ((task["evaluation_health"] or {}).get("detail") or "")
     assert d.action == RecoveryAction.NOOP and task["score"] == 0.5 and task["status"] == "UNVERIFIED"
     # A context-window signal is never read as proven clipping: the trial gate stays unknown, not failed.
     assert health.startswith("response/trial health unknown")
@@ -2640,7 +2675,13 @@ def _graded(task: int) -> dict:
     """A scored row whose verifier recorded one programmatic grading operation bound to its saved answer and score."""
     from nemo_gym.trajectory.trajectory_record import grading_result_binding
 
-    row = ident(task, reward=1.0, response={"id": f"resp-{task}", "status": "completed", "output": []})
+    row = ident(
+        task,
+        _ng_environment_server="environment",
+        _ng_result_type="single_agent_turn",
+        reward=1.0,
+        response={"id": f"resp-{task}", "status": "completed", "output": []},
+    )
     operation = {"operation_id": f"grade-{task}", "kind": "programmatic", "outcome": "completed"}
     operation["result_binding_sha256"] = grading_result_binding(row)
     verifier = {"invocation_id": f"verify-{task}", "status": "completed", "grading_operations": [operation]}
@@ -2649,9 +2690,19 @@ def _graded(task: int) -> dict:
 
 def _quality_naming(server: str, expected: int) -> dict:
     agent = {"kind": "responses_api_agents", "implementation": "demo_agent", "resources_server": server}
+    environment = {
+        "kind": "environment_servers",
+        "implementation": "single_agent_turn",
+        "agent_server": "agent",
+        "resources_server": server,
+    }
     return unit_quality(
         expected=expected,
-        provenance={"resolved_config": "read", "route_failures_to_sidecar": None, "servers": {"agent": agent}},
+        provenance={
+            "resolved_config": "read",
+            "route_failures_to_sidecar": None,
+            "servers": {"environment": environment, "agent": agent, server: {"kind": "resources_servers"}},
+        },
     )
 
 
@@ -2669,6 +2720,7 @@ def test_a_run_whose_verifier_records_no_grading_is_unobserved_with_a_count_and_
         "unobserved_reason": "no completed grading operation or grading record was recorded by the verifier (demo_verifier)",
     }
     [health] = [w for w in task["warnings"] if w.startswith("response/trial health")]
+    health += " " + ((task["evaluation_health"] or {}).get("detail") or "")
     assert health.startswith("response/trial health unknown")
     assert (
         "trial: UNOBSERVED 6 of 6 expected trials: no completed grading operation or grading record was recorded "
@@ -2692,8 +2744,25 @@ def test_a_mixed_run_reports_observed_healthy_unhealthy_and_unobserved_trials(tm
         "unobserved": 50,
     }
     [health] = [w for w in task["warnings"] if w.startswith("response/trial health")]
+    health += " " + ((task["evaluation_health"] or {}).get("detail") or "")
     assert "trial: UNOBSERVED 50 of 100 expected trials" in health
     assert "observed healthy 49, unhealthy 1" in health
+
+    # A grading binding alone cannot establish ownership when the environment provenance is missing.
+    quality = _quality_naming("demo_verifier", 100)
+    del quality["provenance"]["servers"]["environment"]
+    _, unowned = gate_of(job, quality=quality)
+    assert {key: unowned["trial_counts"][key] for key in ("observed_healthy", "unhealthy", "unobserved")} == {
+        "observed_healthy": 0,
+        "unhealthy": 1,
+        "unobserved": 99,
+    }
+    [health] = [w for w in unowned["warnings"] if w.startswith("response/trial health")]
+    # The warning names the cause; the full trial reason stays in the health detail.
+    assert "99 of 100 rows have no recorded grading" in health
+    detail = unowned["evaluation_health"]["detail"]
+    assert "trial: UNOBSERVED 99 of 100 expected trials" in detail
+    assert "observed healthy 0, unhealthy 1" in detail
 
 
 _CURRENT_RECEIPT = {
@@ -3075,3 +3144,74 @@ def test_a_failed_status_query_never_shows_a_password_from_the_error_url(tmp_pat
     reasons = task["mlflow_delivery"]["reasons"]
     assert task["mlflow_delivery"]["state"] == "unverified" and reasons
     assert "SECRETPW" not in json.dumps(task) and "tracking.example" in reasons[0]
+
+
+# ---------------------------------------------------------------------------
+# Verification skipped by configuration (judge_skipped): complete, unverified by construction
+# ---------------------------------------------------------------------------
+
+_SKIP_REASON = "CritPt smoke mode (fire_after): the batch was not sent to the grading API"
+
+
+def _skipped_job(tmp_path, kind: str = "judge_skipped", n: int = 5):
+    rows = [
+        ident(t, mask_sample=True, reward=0.0, failure_kind=kind, failure_reason=_SKIP_REASON, response=SAVED_ANSWER)
+        for t in range(n)
+    ]
+    return write_job_dir(tmp_path / "job", n=n, results=rows, failures=[])
+
+
+def test_an_all_skipped_run_is_a_complete_noop_and_the_gate_reads_unverified(tmp_path) -> None:
+    from nemo_gym.orchestration.recovery import gate_summary_from_collected
+
+    collected = collect(_skipped_job(tmp_path))
+    decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+    assert decision.action == RecoveryAction.NOOP and decision.complete and decision.unverified
+    assert "5 result(s) not graded by configuration (judge_skipped)" in decision.reason
+    assert _SKIP_REASON in decision.reason
+
+    task = gate_summary_from_collected(decision, collected, max_unhealthy_fraction=0.02)
+    assert task["status"] == "UNVERIFIED" and task["score"] is None and task["errors"] == []
+    assert task["scored_samples"] == 0 and decision.reason in task["warnings"]
+
+
+def test_resubmit_recover_on_an_all_skipped_run_dispatches_nothing(tmp_path, fake_executor) -> None:
+    fake_executor.job_dir = _skipped_job(tmp_path)
+    out = submit.recover("gym-job-skip", "bench")
+    assert out.ok and out.dispatched is None and out.decision.action == RecoveryAction.NOOP
+    assert fake_executor.calls == ["decide"]
+
+
+def test_inspect_prints_the_unverified_reading_of_an_all_skipped_run(tmp_path, fake_executor) -> None:
+    fake_executor.job_dir = _skipped_job(tmp_path)
+    out = submit.inspect_recovery("gym-job-skip2", "bench")
+    assert out.gate_task["status"] == "UNVERIFIED" and out.gate_task["score"] is None
+    assert any("not graded by configuration (judge_skipped)" in w for w in out.gate_task["warnings"])
+    assert out.gate_task["errors"] == [] and out.dispatched is None
+
+
+def test_the_verdict_of_an_all_skipped_run_reports_it_unverified_by_configuration_and_its_delivery_state(
+    tmp_path, fake_executor
+) -> None:
+    fake_executor.job_dir = _skipped_job(tmp_path)
+    out = submit.inspect_recovery("gym-job-skip3", "bench")
+    assert out.gate_task["status"] == "UNVERIFIED"
+    assert out.operator_verdict == {
+        "state": "unknown",
+        "reason": "unverified by configuration: 5 of 5 rows were not verified (verification skipped by configuration)",
+        # Nothing to recover; its provenance does not say MLflow was configured, so a recovery would not export it.
+        "action": "none: report the run as unverified by configuration; report the MLflow delivery as not evidenced: "
+        "the run's saved provenance does not say MLflow was configured (provenance.mlflow.configured), so a recovery "
+        "does not export it and its results stand without an export; if MLflow was meant to be used, export them "
+        "with the tracking tooling and inspect again with --mlflow-run-id and --mlflow-status",
+    }
+
+
+def test_a_masked_result_of_any_other_kind_still_stops_the_run(tmp_path) -> None:
+    from nemo_gym.orchestration.recovery import gate_summary_from_collected
+
+    collected = collect(_skipped_job(tmp_path, kind="provider_unavailable", n=2))
+    decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+    assert not decision.unverified and not decision.complete
+    task = gate_summary_from_collected(decision, collected, max_unhealthy_fraction=0.02)
+    assert task["status"] != "UNVERIFIED"

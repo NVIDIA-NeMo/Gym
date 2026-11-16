@@ -1,0 +1,32 @@
+config_paths:
+  - responses_api_agents/collab_intel_agent/configs/collab_intel_agent.yaml
+
+collab_intel_resources_server:
+  resources_servers:
+    collab_intel:
+      allowed_agents: [collab_intel_agent]
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Collaborative Intelligence (AI agents as teammates), reward from the upstream harness checkers
+      value: Evaluate how a model works in a team when a scripted teammate creates a problem
+
+collab_intel_agent:
+  responses_api_agents:
+    collab_intel_agent:
+      resources_server:
+        name: collab_intel_resources_server
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/collab_intel/data/example.jsonl
+          num_repeats: 1
+          license: Creative Commons Attribution 4.0 International
+
+collab_intel_agent_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: collab_intel_agent

@@ -363,6 +363,8 @@ async def test_export_failure_is_a_gap_that_keeps_the_result_and_release(setup, 
 
 async def test_hanging_export_is_bounded_by_the_collection_budget(setup, tmp_path):
     agent, sandbox = setup
+    # The close budget bounds the collection; keep it short so the hanging export exhausts it.
+    agent.config.session_close_timeout_seconds = 1
     agent.config.export_dir = EXPORT_DIR
     capture_observations(sandbox, tmp_path)
     never = asyncio.Event()

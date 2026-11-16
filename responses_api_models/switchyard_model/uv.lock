@@ -1758,7 +1758,7 @@ requires-dist = [
     { name = "nemo-gym", extras = ["dev", "mlflow", "ray", "sandbox", "wandb"], marker = "extra == 'all'" },
     { name = "nemo-lens", extras = ["sdk"], marker = "extra == 'telemetry'", git = "https://github.com/NVIDIA-NeMo/Lens.git?rev=4d045c03186b90afdc815db46b671f6a21bc7e98" },
     { name = "omegaconf" },
-    { name = "openai", specifier = "==2.44.0" },
+    { name = "openai", specifier = "==2.45.0" },
     { name = "opensandbox", marker = "extra == 'sandbox'", specifier = ">=0.1.15" },
     { name = "openshell", marker = "extra == 'openshell'", specifier = ">=0.1.6,<0.2" },
     { name = "opentelemetry-instrumentation-fastapi", marker = "extra == 'telemetry'", specifier = ">=0.60b0" },
@@ -1824,22 +1824,16 @@ sdk = [
 
 [[package]]
 name = "nemo-switchyard"
-version = "0.2.0"
+version = "0.3.0"
 source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "anthropic" },
-    { name = "httpx" },
-    { name = "openai" },
-    { name = "pydantic" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/4b/4c/eb1a95385482bff5b7c3f7fd1eceac81dc23b307ed4516cf813bee70a70c/nemo_switchyard-0.2.0.tar.gz", hash = "sha256:da76a59ea88563d12828a439ae51475b4ffef2f231a6f44bde47eb2eda5e3648", size = 644540, upload-time = "2026-08-10T20:08:49.886Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/29/2b/60bba54499585dad82fb37643577ffde2cc6de0ea283ddaefe4c2f73ab9a/nemo_switchyard-0.3.0.tar.gz", hash = "sha256:8eb5cf8ff9cb51d50aa9b1927559d4add807eef5041de9c27ab51ccf111d7b4c", size = 579981, upload-time = "2026-09-22T18:06:55.156Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/fe/81/c3d406fb179aab2e346e0adc439cd52555c2dea26d36a5fd5e27990a88fb/nemo_switchyard-0.2.0-cp312-abi3-macosx_10_12_x86_64.whl", hash = "sha256:746d4307011a29e1b0a8126b3e615cea2d1c1493dbd0c5fcf36db4538c737203", size = 9059353, upload-time = "2026-08-10T20:08:35.6Z" },
-    { url = "https://files.pythonhosted.org/packages/18/ad/04cf19af4f3c45a39b99790aaea2ee385f9ebda493f9ce044489ffb6de82/nemo_switchyard-0.2.0-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:46afd9b3df91cdc91b8544572cf3ec7106a0d5c75a785ee0677f0e45ac2461f1", size = 8672629, upload-time = "2026-08-10T20:08:38.555Z" },
-    { url = "https://files.pythonhosted.org/packages/df/7a/aff8f78e7bde4e570bb23e17708df3e3b136538be4f793fea8ef4599146e/nemo_switchyard-0.2.0-cp312-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:18ec104d044161a15979f562cfdc4a132543e882d051ed80d052219d78333378", size = 9418712, upload-time = "2026-08-10T20:08:41.409Z" },
-    { url = "https://files.pythonhosted.org/packages/78/26/032cbf416191affb9aba17bd23c45a1c71b492ae18243707c29823db3fc1/nemo_switchyard-0.2.0-cp312-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:5691b5df6573ac21a2f2fb76050d957e99340536b0536a1c85278892a5808e76", size = 9499981, upload-time = "2026-08-10T20:08:43.869Z" },
-    { url = "https://files.pythonhosted.org/packages/f2/ff/0b8768d5301738ba0cbee76040d9ff8b761a3e0d18588b713718ea9b0c17/nemo_switchyard-0.2.0-cp312-abi3-win_amd64.whl", hash = "sha256:4641d19c6e7fd6d64d05bd8354f409e9f6a80a1472f7f0518a5ecc9c4347dbb1", size = 8030594, upload-time = "2026-08-10T20:08:46.305Z" },
-    { url = "https://files.pythonhosted.org/packages/48/96/74d281167bc1d0ab43b0f620dcd9e2d616612a83cd9f79ad58cb65778a7b/nemo_switchyard-0.2.0-cp312-abi3-win_arm64.whl", hash = "sha256:5ea9e65a751da540e7231d39f28ecf66af06e90ffccec36a05ca755875430c05", size = 7620395, upload-time = "2026-08-10T20:08:48.523Z" },
+    { url = "https://files.pythonhosted.org/packages/62/bc/8c413bc9df00a0972934d6ea1265982360ad9ece2b15df67a3374eff66f3/nemo_switchyard-0.3.0-cp310-abi3-macosx_10_12_x86_64.whl", hash = "sha256:6b265e2cc399d487706140a8d949f5c6bab2ec2d4da9216fc06046df2a5e26d6", size = 8575163, upload-time = "2026-09-22T18:06:42.224Z" },
+    { url = "https://files.pythonhosted.org/packages/50/de/e6a812c444b897f091649bf83ca60f483abab7fec92b30ce289f1a968101/nemo_switchyard-0.3.0-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:cdc64503e427095c73e7840f0de093f0ee35fc3e306825e522050cd6e6825039", size = 8251239, upload-time = "2026-09-22T18:06:44.842Z" },
+    { url = "https://files.pythonhosted.org/packages/af/26/2424b9987c82917146d0533627eb7cd59819487dd86abc35dc8671039514/nemo_switchyard-0.3.0-cp310-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:bb40a39da460cc28d0c2143044233fef69b2c113813c511255f813ef0ac5bf1b", size = 8964907, upload-time = "2026-09-22T18:06:47.152Z" },
+    { url = "https://files.pythonhosted.org/packages/37/5e/013e2ca5b866d6235b4be482a3ef78e49ad571e6a6c1972f8c89686f32ee/nemo_switchyard-0.3.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:f0c3728517a7015d87bbdf6a21303a344c9d886ae98d910dee6a01c67f8657d3", size = 9058284, upload-time = "2026-09-22T18:06:49.477Z" },
+    { url = "https://files.pythonhosted.org/packages/d2/3c/f47e0d133205c07b4c56035a898c9a19d7a9e5bc1b23ba32fa701a931693/nemo_switchyard-0.3.0-cp310-abi3-win_amd64.whl", hash = "sha256:45b76e1e5caa0e08fdb15a2ae97646ab901672a78e743c2a055629d393762070", size = 7623515, upload-time = "2026-09-22T18:06:51.82Z" },
+    { url = "https://files.pythonhosted.org/packages/bc/f0/7999e147c5646e57bb8d1f38fe6e7d32dd8c7f26026e0f8a9ca7e9be9c87/nemo_switchyard-0.3.0-cp310-abi3-win_arm64.whl", hash = "sha256:d363408274523c804033ae470420379370db5e8b73e953dc880143591ad24283", size = 7304384, upload-time = "2026-09-22T18:06:53.702Z" },
 ]
 
 [[package]]
@@ -1928,7 +1922,7 @@ wheels = [
 
 [[package]]
 name = "openai"
-version = "2.44.0"
+version = "2.45.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -1940,9 +1934,9 @@ dependencies = [
     { name = "tqdm" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/49/f5/7c7cb955305cb41f7f3c5fd7e0e38bf6bbf2658468863d4b7b868a5cb8df/openai-2.44.0.tar.gz", hash = "sha256:68a5a5ffad82b8ff7d451c437529fb64f7c3b8123aaf0c021966a882d9e3947d", size = 988753, upload-time = "2026-06-24T20:56:02.293Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/78/60/d4219875289b11d2c2f7da93c36283da224a2e55865ed865ab64e0ce9217/openai-2.45.0.tar.gz", hash = "sha256:10d34ca9c5643bce775852fddbfc172505cb1d4de1ccd101696c3ecff358765d", size = 1109653, upload-time = "2026-07-09T18:02:44.091Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ae/f4/561ed79fd94876160018a5e75254cfcb9b0e62d4dded9dcb20072e86d623/openai-2.44.0-py3-none-any.whl", hash = "sha256:0a2a3ab2e29aeda368700f662ff9ba0f9df17ba4c54577a64e08b8115a3cc0ad", size = 1366216, upload-time = "2026-06-24T20:55:58.882Z" },
+    { url = "https://files.pythonhosted.org/packages/f1/b0/2291689e3ec4723fbf5bbf3b54afcd7b160f9ddc98ca7aedfd0132af5677/openai-2.45.0-py3-none-any.whl", hash = "sha256:5df105f5f8c9b711fcb9d06d2d3888cebc82506db216484c14a4e53cdf651777", size = 1629470, upload-time = "2026-07-09T18:02:42.21Z" },
 ]
 
 [[package]]
@@ -3120,7 +3114,7 @@ telemetry = [
 requires-dist = [
     { name = "nemo-gym", extras = ["dev"], editable = "../../" },
     { name = "nemo-gym", extras = ["telemetry"], marker = "extra == 'telemetry'", editable = "../../" },
-    { name = "nemo-switchyard", specifier = "==0.2.0" },
+    { name = "nemo-switchyard", specifier = "==0.3.0" },
 ]
 provides-extras = ["telemetry"]
 
