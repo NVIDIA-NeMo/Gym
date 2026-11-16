@@ -106,9 +106,18 @@ exit; no seed starts a sandbox from then on (503). The sandboxed configs set tha
 since Gym's default of 1 s cannot stop a collection's sandboxes; it is run-wide, so every server
 of the run gets it. Any sandbox that may still run is logged at ERROR with its session, for a
 reaper. Gym cancels the requests in flight first, and a request whose client gives up: a seed
-cancelled so still finishes starting its sandbox (within 30 minutes), then stops it, and a close
-or a verification cancelled while it stops its sandbox still stops it. A sandbox whose stop
-failed after its seed failed is stopped again at its session's close.
+cancelled so still finishes starting its sandbox (within its start limit, below), then stops it,
+and a close or a verification cancelled while it stops its sandbox still stops it. A sandbox whose
+stop failed after its seed failed is stopped again at its session's close.
+
+A sandbox's start (the provider's create, the files the seed delivers and the sandbox's setup)
+may take `sandbox_config.start_timeout_s`, 1800 s by default; a start cut at that limit fails its
+seed. A create cut before the provider returned the sandbox's id leaves a sandbox the server
+cannot stop: the cut is logged at ERROR with the session, task, provider, image and labels, for a
+reaper, and the sandbox otherwise runs until its TTL (`sandbox_config.ttl_s`). Raise the limit
+above the time the provider's creates can take, so it cuts only a create that hangs: on a busy
+OpenSandbox cell, where a create holds its request while the cell places the sandbox and then
+waits for it to be ready (`sandbox.opensandbox.create`), creates have taken up to 2,430 s.
 
 ### Instance names
 
@@ -292,15 +301,20 @@ loopback, which a container cannot reach (and a host firewall may drop connectio
 other addresses): set `sandbox_config.host_relay` to a host alias that reaches the host's
 loopback (colima: `host.lima.internal`; Docker Desktop: `host.docker.internal`), and each sandbox
 runs `sandbox/relay.py`, which forwards this server's and the model servers' ports. Relayed
-connections arrive from the host's loopback, so the caller check above admits them; the signed
-tokens still apply. Use the relay on a workstation only.
+connections arrive from the host's loopback, which the caller check above takes for Gym's own
+servers: code in a sandbox can then call the routes kept for Gym (seeding, closing, verification,
+the task state, the tools outside its grant) for any session, though the signed tokens still bind
+its own routes to its episode. The server therefore refuses `host_relay` without
+`sandbox_config.trusted_workstation: true`, which accepts that: set it only on a single-user
+workstation.
 
 ```bash
 docker build -t officeenv-sandbox:pilot resources_servers/officeenv_sandbox/sandbox
 gym env start --config resources_servers/officeenv_sandbox/configs/officeenv_sandbox.yaml \
   --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
   --model-type inference_provider --model <model> --model-url <url> '+policy_api_key=...' \
-  ++officeenv_sandbox_resources_server.resources_servers.officeenv_sandbox.sandbox_config.host_relay=host.lima.internal
+  ++officeenv_sandbox_resources_server.resources_servers.officeenv_sandbox.sandbox_config.host_relay=host.lima.internal \
+  ++officeenv_sandbox_resources_server.resources_servers.officeenv_sandbox.sandbox_config.trusted_workstation=true
 gym eval run --no-serve <the same --config, --model and ++ arguments> --agent officeenv_sandbox_pi_agent \
   --input resources_servers/officeenv_sandbox/data/sandbox_pilot.jsonl --output results/sandbox_rollouts.jsonl
 ```

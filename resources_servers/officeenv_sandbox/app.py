@@ -200,10 +200,27 @@ class OfficeEnvSandboxConfig(SandboxConfig):
         "(400 unsupported_needs)",
     )
     workdir: str = "/workspace"
+    start_timeout_s: float = Field(
+        default=1800,
+        gt=0,
+        allow_inf_nan=False,
+        description="Seconds a sandbox's start may take (the provider's create, the files the seed delivers and the "
+        "sandbox's setup) before its seed fails (LentSandboxes' start_timeout_s). A create cut at this limit before "
+        "the provider returned the sandbox's id is logged at ERROR for a reaper. Keep it above the time the "
+        "provider's creates can take: on a busy OpenSandbox cell they have taken up to 2,430 s",
+    )
     host_relay: str | None = Field(
         default=None,
         description="Host alias the sandbox forwards this server's and the model servers' loopback ports to "
-        "(colima: host.lima.internal), for servers that bind loopback on a workstation; off by default",
+        "(colima: host.lima.internal), for servers that bind loopback on a workstation; off by default. Needs "
+        "trusted_workstation",
+    )
+    trusted_workstation: bool = Field(
+        default=False,
+        description="Accept host_relay, knowing what it lets a sandbox do: relayed connections reach this server from "
+        "the host's loopback, which the caller check takes for Gym's own servers, so code in a sandbox can call the "
+        "routes kept for Gym (seeding, closing, verification, the task state, the tools outside its grant) for any "
+        "session. Set it only on a single-user workstation",
     )
     block_internet: bool = Field(
         default=False,
@@ -232,6 +249,16 @@ class OfficeEnvSandboxConfig(SandboxConfig):
             raise ValueError("block_internet sets provider_options.network_policy; set one or the other")
         if self.block_internet and self.host_relay:
             raise ValueError("block_internet is OpenSandbox's egress policy; host_relay serves a workstation's Docker")
+        return self
+
+    @model_validator(mode="after")
+    def _relay_on_a_trusted_workstation(self) -> "OfficeEnvSandboxConfig":
+        if self.host_relay and not self.trusted_workstation:
+            raise ValueError(
+                "host_relay lets code in a sandbox call the routes kept for Gym (its connections reach this server "
+                "from the host's loopback): set trusted_workstation: true to accept that, on a single-user "
+                "workstation only"
+            )
         return self
 
     def image_for(self, needs: list[str]) -> SandboxImage | None:
@@ -803,7 +830,9 @@ class OfficeEnvSandboxResourcesServer(OfficeEnvResourcesServer):
 
         A caller on this node calls from one of the node's own addresses (``is_own_address``), whatever its hostname
         resolves to: Debian and Ubuntu map it to 127.0.1.1, and a run with ``+default_host`` (a Docker bridge's
-        address, say) is reached from the node's primary address. A sandbox calls from its own network."""
+        address, say) is reached from the node's primary address. A sandbox calls from its own network, except through
+        ``host_relay``, whose connections arrive from this node's loopback: a config accepts the relay only with
+        ``trusted_workstation``."""
         host = request.client.host if request.client else None
         trusted = is_trusted_caller(
             host, local=self._node_addresses, networks=self._trusted_networks, own_addresses=self._own_addresses
@@ -1088,10 +1117,10 @@ class OfficeEnvSandboxResourcesServer(OfficeEnvResourcesServer):
         return (self.config.files_api_url or f"http://{self.config.host}:{self.config.port}").rstrip("/")
 
     def _lending(self) -> LentSandboxes:
-        """The sandboxes lent to this server's episodes (Gym's ``LentSandboxes``), made at the first lend. With
-        ``block_internet`` each starts with an egress policy that allows only this server and the model servers; a
-        provider without network policies, or a server no sandbox can reach, fails the lend, and a later one tries
-        again."""
+        """The sandboxes lent to this server's episodes (Gym's ``LentSandboxes``), made at the first lend, each start
+        bounded by ``start_timeout_s``. With ``block_internet`` each starts with an egress policy that allows only this
+        server and the model servers; a provider without network policies, or a server no sandbox can reach, fails the
+        lend, and a later one tries again."""
         if self._lent is None:
             self._admit()  # no lending begins once shutdown has: it would not stop what it lent
             config = self.config.sandbox_config
@@ -1103,7 +1132,13 @@ class OfficeEnvSandboxResourcesServer(OfficeEnvResourcesServer):
                 config = config.model_copy(
                     update={"provider_options": {**config.provider_options, "network_policy": policy}}
                 )
-            self._lent = LentSandboxes(self.config.sandbox_provider, config, image=None, workdir=config.workdir)
+            self._lent = LentSandboxes(
+                self.config.sandbox_provider,
+                config,
+                image=None,
+                workdir=config.workdir,
+                start_timeout_s=config.start_timeout_s,
+            )
         return self._lent
 
     async def _prepare_sandbox(self, sandbox: AsyncSandbox, episode: _SandboxEpisode, named_configs: Mapping) -> None:
