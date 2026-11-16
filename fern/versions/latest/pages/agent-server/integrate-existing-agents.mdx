@@ -393,6 +393,23 @@ continued with `SIGCONT`. The Resources Server snapshots the sandbox. Two agent 
 See [Partial-rollout checkpoints](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/opencode_agent/README.md#partial-rollout-checkpoints)
 in the `opencode_agent` README for the relaunch rules, interrupted tool calls and the reply metadata.
 
+## Sessions driven one step at a time
+
+An Environment Server that drives an agent session one step per activation
+(`single_agent_turn` with `max_episode_steps`) sends `x-ng-agent-episode-step-limit`,
+the episode's step limit, with each activation, next to `x-ng-agent-activation`,
+which numbers the steps from 1. Each activation carries the whole conversation so
+far, not only what is new. An agent that supports this takes one step per such
+activation, one model call and the tool calls it makes, whatever its own step limit,
+and reports the step as completed while its index is below the limit, and as
+incomplete at the limit, as its own loop stops at its step limit. It keeps one
+invocation for the episode, which each step extends, instead of one per activation.
+Only the agent types in `STEP_DRIVEN_AGENT_TYPES` (`nemo_gym.config`; today
+`simple_agent`) do this, and the Environment Server refuses at startup to drive any
+other type, since keeping an agent session is not enough.
+A continuation session (seeded with `continuation`) runs a whole turn on new input
+each activation, so `simple_agent` answers the step-limit header on one with 422.
+
 ## NOOA worker checkpoints
 
 The [NOOA sandbox worker](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/nooa_agent/sandbox_entrypoint.py)
