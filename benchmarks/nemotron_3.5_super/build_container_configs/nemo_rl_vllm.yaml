@@ -5,6 +5,9 @@
 config_paths:
   - benchmarks/nemotron_3.5_super/build_container_configs/current_sota.yaml
 
+slurm:
+  qos: interactive
+
 # Need to override these
 input_container_fpath: null
 output_container_fpath: null
