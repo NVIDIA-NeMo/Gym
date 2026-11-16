@@ -152,7 +152,7 @@ Use `SESSION_ID_KEY` from the request session middleware to maintain per-episode
 2. Read the session ID with `request.session[SESSION_ID_KEY]`
 3. Store state in an instance-level dictionary keyed by session ID
 
-State that needs files, such as a per-session workspace, goes in a folder the server owns and removes when the session closes, under the configured `temp_dir`, never in a relative path. See [Files Written at Runtime](/main/reference/configuration#files-written-at-runtime).
+State that needs files, such as a per-session workspace, goes in a folder from `open_temp_folder`, which the server removes with `remove_temp_folder` when the session closes, never in a relative path. See [Files Written at Runtime](/main/reference/configuration#files-written-at-runtime).
 
 <Note>
 In `seed_session`, use direct assignment (`self.session_id_to_counter[session_id] = body.initial_count`) rather than `setdefault`. Using `setdefault` would silently ignore re-seed attempts if the session already exists, which can cause subtle bugs when the same session ID is reused across episodes. Note: the current `example_session_state_mgmt` implementation still uses `setdefault` in `seed_session` — the direct assignment shown here is the preferred pattern.

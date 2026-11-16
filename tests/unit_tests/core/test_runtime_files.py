@@ -15,6 +15,7 @@
 import asyncio
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -28,12 +29,14 @@ from omegaconf import DictConfig
 
 import nemo_gym.config.global_config as global_config
 import nemo_gym.core.runtime_files as runtime_files
-from nemo_gym.config.config_types import BaseRunServerInstanceConfig
 from nemo_gym.core.episode_context import rollout_context
 from nemo_gym.core.runtime_files import (
     async_temp_folder,
-    debug_folder,
+    open_temp_folder,
     remove_stale_temp_folders,
+    remove_temp_folder,
+    run_temp_folder,
+    save_folder,
     temp_folder,
 )
 
@@ -52,109 +55,289 @@ def set_global_config(monkeypatch: pytest.MonkeyPatch):
     return set_
 
 
-class TestDebugFolder:
-    def test_off_unless_the_global_or_server_switch_is_on(self, set_global_config, tmp_path: Path) -> None:
-        set_global_config({"debug_files": False, "results_dir": str(tmp_path)})
-        assert debug_folder(server_name="swebench", kind="verification") is None
-        assert debug_folder(server_name="swebench", kind="verification", debug_files=False) is None
+@pytest.fixture(autouse=True)
+def system_temp(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point the system temporary directory at a test folder, so no test writes into the host's own /tmp."""
+    folder = tmp_path_factory.mktemp("system-temp")
+    monkeypatch.setattr(tempfile, "tempdir", str(folder))
+    monkeypatch.setattr(runtime_files, "_checked_temp_parents", set())
+    monkeypatch.setattr(runtime_files, "_default_temp_dirs", {})
+    monkeypatch.setattr(runtime_files, "_run_folders", {})
+    return folder
 
+
+class TestDefaultTempDir:
+    def test_is_a_private_folder_per_user_under_a_folder_shared_like_tmp(self, set_global_config, system_temp) -> None:
         set_global_config(None)
-        assert debug_folder(server_name="swebench", kind="verification") is None
 
-    def test_lands_under_the_server_results_by_kind_and_rollout(self, set_global_config, tmp_path: Path) -> None:
-        set_global_config({"debug_files": True, "results_dir": str(tmp_path)})
+        with temp_folder("workspace") as path:
+            user_folder = system_temp / "nemo_gym" / str(os.getuid())
+            assert path.parent.parent == user_folder
 
-        with rollout_context("4-2-a1"):
-            path = debug_folder(server_name="swebench", kind="verification", label="astropy__astropy-1")
-
-        assert path is not None
-        assert path.parent == tmp_path / "swebench" / "debug" / "verification" / "4-2-a1"
-        assert "-astropy__astropy-1-" in path.name
-        # Nothing is created until the server writes into the folder.
+        assert stat.S_IMODE(os.lstat(system_temp / "nemo_gym").st_mode) == 0o1777
+        assert stat.S_IMODE(os.lstat(user_folder).st_mode) == 0o700
         assert not path.exists()
 
-    def test_outside_a_rollout_uses_a_fixed_segment(self, set_global_config, tmp_path: Path) -> None:
-        set_global_config({"debug_files": True, "results_dir": str(tmp_path)})
+    @pytest.mark.parametrize("problem", ["symlink", "not-sticky"])
+    def test_an_unsafe_shared_folder_falls_back_to_one_per_user(
+        self, set_global_config, system_temp, tmp_path: Path, caplog, problem: str
+    ) -> None:
+        set_global_config(None)
+        shared = system_temp / "nemo_gym"
+        if problem == "symlink":
+            (tmp_path / "elsewhere").mkdir()
+            shared.symlink_to(tmp_path / "elsewhere")
+        else:
+            shared.mkdir()
+            os.chmod(shared, 0o777)
 
-        path = debug_folder(server_name="vision2code", kind="render")
+        with caplog.at_level("WARNING"), temp_folder("workspace") as path:
+            assert path.parent.parent == system_temp / f"nemo_gym-{os.getuid()}"
 
-        assert path is not None
-        assert path.parent == tmp_path / "vision2code" / "debug" / "render" / "no-rollout"
+        assert "Not using" in caplog.text
+        assert not any((tmp_path / "elsewhere").iterdir()) if problem == "symlink" else True
 
-    def test_repeated_calls_in_one_rollout_get_separate_folders(self, set_global_config, tmp_path: Path) -> None:
-        set_global_config({"debug_files": True, "results_dir": str(tmp_path)})
+    def test_a_user_folder_that_is_a_symlink_is_refused_with_the_setting_named(
+        self, set_global_config, system_temp, tmp_path: Path
+    ) -> None:
+        set_global_config(None)
+        (tmp_path / "elsewhere").mkdir()
+        shared = system_temp / "nemo_gym"
+        shared.mkdir()
+        os.chmod(shared, 0o1777)
+        (shared / str(os.getuid())).symlink_to(tmp_path / "elsewhere")
 
-        with rollout_context("0-0"):
-            first = debug_folder(server_name="swebench", kind="verification", label="same")
-            second = debug_folder(server_name="swebench", kind="verification", label="same")
+        with pytest.raises(PermissionError, match="default temp_dir"):
+            with temp_folder("workspace"):
+                pass
+
+    def test_a_temp_dir_that_cannot_be_created_names_the_folder_and_the_setting(
+        self, set_global_config, tmp_path: Path
+    ) -> None:
+        blocker = tmp_path / "a-file"
+        blocker.write_text("")
+        set_global_config({"temp_dir": str(blocker / "temp")})
+
+        with pytest.raises(OSError, match="chosen by the temp_dir setting"):
+            with temp_folder("workspace"):
+                pass
+
+
+class TestSessionAndRunFolders:
+    def test_a_session_folder_lasts_until_it_is_removed_and_removing_twice_is_fine(
+        self, set_global_config, tmp_path: Path
+    ) -> None:
+        set_global_config({"temp_dir": str(tmp_path / "temp")})
+
+        folder = open_temp_folder("session")
+        (folder / "state.json").write_text("{}")
+        assert folder.exists()
+
+        assert remove_temp_folder(folder) is True
+        assert not folder.exists()
+        assert remove_temp_folder(folder) is True
+
+    def test_a_failed_removal_is_reported_and_a_later_removal_retries(
+        self, set_global_config, tmp_path: Path, monkeypatch
+    ) -> None:
+        set_global_config({"temp_dir": str(tmp_path / "temp")})
+        folder = open_temp_folder("session")
+        real_rmtree = shutil.rmtree
+
+        def failing(path, *args, **kwargs):
+            raise PermissionError(13, "busy")
+
+        monkeypatch.setattr(shutil, "rmtree", failing)
+        assert remove_temp_folder(folder) is False
+        assert folder.exists()
+
+        monkeypatch.setattr(shutil, "rmtree", real_rmtree)
+        assert remove_temp_folder(folder) is True
+        assert not folder.exists()
+
+    def test_a_run_folder_is_the_same_for_every_call_with_its_name(self, set_global_config, tmp_path: Path) -> None:
+        set_global_config({"temp_dir": str(tmp_path / "temp")})
+
+        first = run_temp_folder("image-cache")
+        assert run_temp_folder("image-cache") == first
+        assert run_temp_folder("venvs") != first
+        assert first.is_dir() and first.name.startswith("image-cache-")
+
+    def test_a_forked_child_gets_run_folders_of_its_own(self, set_global_config, tmp_path: Path, monkeypatch) -> None:
+        set_global_config({"temp_dir": str(tmp_path / "temp")})
+        monkeypatch.setattr(runtime_files, "_process_folders", {})
+        parent_folder = run_temp_folder("image-cache")
+        real_pid = os.getpid()
+
+        # A forked child has a new process id and inherits the parent's tables.
+        monkeypatch.setattr(os, "getpid", lambda: real_pid + 1)
+        child_folder = run_temp_folder("image-cache")
+
+        assert child_folder != parent_folder
+        assert child_folder.parent != parent_folder.parent
+
+    def test_the_exit_handler_removes_run_folders(self, set_global_config, tmp_path: Path, monkeypatch) -> None:
+        set_global_config({"temp_dir": str(tmp_path / "temp")})
+        monkeypatch.setattr(runtime_files, "_process_folders", {})
+        folder = run_temp_folder("image-cache")
+        (folder / "a.txt").write_text("x")
+
+        runtime_files._remove_own_process_folders(os.getpid())
+
+        assert not folder.parent.exists()
+
+
+class TestSaveFolder:
+    @staticmethod
+    def _logs(tmp_path: Path) -> Path:
+        logs = tmp_path / "logs"
+        (logs / "sub").mkdir(parents=True)
+        (logs / "report.json").write_text("{}")
+        (logs / "sub" / "test_output.txt").write_text("ok")
+        return logs
+
+    async def test_copies_into_the_server_results_by_name_and_rollout(self, set_global_config, tmp_path: Path) -> None:
+        set_global_config({"results_dir": str(tmp_path / "results")})
+        logs = self._logs(tmp_path)
+
+        with rollout_context("4-2-a1"):
+            kept = await save_folder(logs, server_name="swebench", name="verification", label="astropy-1-attempt0")
+
+        assert kept is not None
+        assert kept.parent == tmp_path / "results" / "swebench" / "verification" / "4-2-a1"
+        assert "-astropy-1-attempt0-" in kept.name
+        assert (kept / "report.json").read_text() == "{}"
+        assert (kept / "sub" / "test_output.txt").read_text() == "ok"
+        # The source is left as it was; the temporary folder's own block removes it.
+        assert (logs / "report.json").exists()
+
+    async def test_copies_contents_only_not_permissions_or_times(self, set_global_config, tmp_path: Path) -> None:
+        set_global_config({"results_dir": str(tmp_path / "results")})
+        logs = self._logs(tmp_path)
+        os.utime(logs / "report.json", (1, 1))
+        os.chmod(logs / "report.json", 0o600)
+
+        kept = await save_folder(logs, server_name="swebench", name="verification")
+
+        umask = os.umask(0)
+        os.umask(umask)
+        assert (kept / "report.json").stat().st_mtime != 1
+        assert stat.S_IMODE((kept / "report.json").stat().st_mode) == 0o666 & ~umask
+
+    async def test_outside_a_rollout_and_on_repeat_each_copy_gets_its_own_folder(
+        self, set_global_config, tmp_path: Path
+    ) -> None:
+        set_global_config({"results_dir": str(tmp_path / "results")})
+        logs = self._logs(tmp_path)
+
+        first = await save_folder(logs, server_name="swebench", name="verification", label="same")
+        second = await save_folder(logs, server_name="swebench", name="verification", label="same")
 
         assert first != second
-        assert first.parent == second.parent
+        assert first.parent == second.parent == tmp_path / "results" / "swebench" / "verification" / "no-rollout"
 
-    def test_label_with_slashes_stays_one_folder(self, set_global_config, tmp_path: Path) -> None:
-        set_global_config({"debug_files": True, "results_dir": str(tmp_path)})
+    async def test_the_server_output_dir_replaces_the_default(self, set_global_config, tmp_path: Path) -> None:
+        set_global_config({"results_dir": str(tmp_path / "results")})
 
-        path = debug_folder(server_name="swebench", kind="verification", label="../../org/repo")
-
-        assert path is not None
-        assert path.parent == tmp_path / "swebench" / "debug" / "verification" / "no-rollout"
-        assert "/" not in path.name
-
-    def test_server_switch_overrides_the_global_one(self, set_global_config, tmp_path: Path) -> None:
-        set_global_config({"debug_files": False, "results_dir": str(tmp_path)})
-        path = debug_folder(server_name="swebench", kind="verification", debug_files=True)
-        assert path is not None
-        assert path.is_relative_to(tmp_path / "swebench" / "debug")
-
-        set_global_config({"debug_files": True, "results_dir": str(tmp_path)})
-        assert debug_folder(server_name="swebench", kind="verification", debug_files=False) is None
-
-    def test_every_server_config_carries_its_own_switch(self, set_global_config, tmp_path: Path) -> None:
-        set_global_config({"debug_files": False, "results_dir": str(tmp_path)})
-        server = {"host": "127.0.0.1", "port": 8000, "entrypoint": "app.py", "name": "swebench"}
-
-        follows_global = BaseRunServerInstanceConfig(**server)
-        assert follows_global.debug_files is None
-        assert (
-            debug_folder(server_name="swebench", kind="verification", debug_files=follows_global.debug_files) is None
+        kept = await save_folder(
+            self._logs(tmp_path), server_name="swebench", name="verification", output_dir=str(tmp_path / "mine")
         )
 
-        turned_on = BaseRunServerInstanceConfig(**server, debug_files=True)
-        path = debug_folder(server_name="swebench", kind="verification", debug_files=turned_on.debug_files)
-        assert path is not None and path.is_relative_to(tmp_path / "swebench" / "debug")
+        assert kept is not None and kept.parent == tmp_path / "mine" / "verification" / "no-rollout"
 
-    def test_server_output_dir_replaces_the_default_output(self, set_global_config, tmp_path: Path) -> None:
-        set_global_config({"debug_files": True, "results_dir": str(tmp_path / "results")})
-
-        path = debug_folder(server_name="swebench", kind="verification", output_dir=tmp_path / "mine")
-
-        assert path is not None
-        assert path.parent == tmp_path / "mine" / "debug" / "verification" / "no-rollout"
-
-    def test_relative_output_dir_turns_debug_files_off_with_one_warning(
+    async def test_a_relative_output_dir_keeps_nothing_with_one_warning(
         self, set_global_config, tmp_path: Path, monkeypatch, caplog
     ) -> None:
-        # A relative path would land in the server's source folder; debug files never fail a request instead.
         monkeypatch.setattr(runtime_files, "_warned_relative_output_dirs", set())
-        set_global_config({"debug_files": True, "results_dir": str(tmp_path)})
+        set_global_config({"results_dir": str(tmp_path / "results")})
+        logs = self._logs(tmp_path)
 
         with caplog.at_level("WARNING"):
-            assert debug_folder(server_name="swebench", kind="verification", output_dir=Path("out")) is None
-            assert debug_folder(server_name="swebench", kind="verification", output_dir="out") is None
+            assert await save_folder(logs, server_name="swebench", name="verification", output_dir="out") is None
+            assert await save_folder(logs, server_name="swebench", name="verification", output_dir="out") is None
 
         assert caplog.text.count("is not an absolute path") == 1
 
-    def test_a_process_without_gym_configuration_writes_nothing(self, set_global_config) -> None:
-        # A Ray task or helper process sees no results_dir; it gets its folder from the server instead.
+    async def test_a_process_without_gym_configuration_keeps_nothing(self, set_global_config, tmp_path: Path) -> None:
         set_global_config(None)
 
-        assert debug_folder(server_name="swebench", kind="verification", debug_files=True) is None
+        assert await save_folder(self._logs(tmp_path), server_name="swebench", name="verification") is None
 
-    def test_kind_must_be_one_safe_segment(self, set_global_config, tmp_path: Path) -> None:
-        set_global_config({"debug_files": True, "results_dir": str(tmp_path)})
+    async def test_a_failed_copy_returns_none_and_leaves_no_partial_folder(
+        self, set_global_config, tmp_path: Path, monkeypatch
+    ) -> None:
+        set_global_config({"results_dir": str(tmp_path / "results")})
 
-        with pytest.raises(ValueError, match="kind"):
-            debug_folder(server_name="swebench", kind="../escape")
+        def failing_copy(*args, **kwargs):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(shutil, "copyfile", failing_copy)
+        kept = await save_folder(self._logs(tmp_path), server_name="swebench", name="verification")
+
+        assert kept is None
+        assert not any((tmp_path / "results" / "swebench" / "verification" / "no-rollout").iterdir())
+
+    async def test_a_failed_request_keeps_its_files_from_a_finally(self, set_global_config, tmp_path: Path) -> None:
+        set_global_config({"results_dir": str(tmp_path / "results"), "temp_dir": str(tmp_path / "temp")})
+        kept = None
+
+        with pytest.raises(RuntimeError):
+            async with async_temp_folder("verification") as logs:
+                try:
+                    (logs / "test_output.txt").write_text("FAILED")
+                    raise RuntimeError("harness failed")
+                finally:
+                    kept = await save_folder(logs, server_name="swebench", name="verification")
+
+        assert kept is not None and (kept / "test_output.txt").read_text() == "FAILED"
+        assert not logs.exists()
+
+    async def test_nothing_is_copied_while_the_task_is_being_cancelled(
+        self, set_global_config, tmp_path: Path
+    ) -> None:
+        set_global_config({"results_dir": str(tmp_path / "results")})
+        logs = self._logs(tmp_path)
+        started = asyncio.Event()
+        kept: list[Path | None] = []
+
+        async def request() -> None:
+            try:
+                started.set()
+                await asyncio.sleep(3600)
+            finally:
+                kept.append(await save_folder(logs, server_name="swebench", name="verification"))
+
+        task = asyncio.create_task(request())
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert kept == [None]
+        assert not (tmp_path / "results").exists()
+
+    async def test_names_and_labels_stay_one_folder_under_the_root(self, set_global_config, tmp_path: Path) -> None:
+        set_global_config({"results_dir": str(tmp_path / "results")})
+        logs = self._logs(tmp_path)
+
+        with rollout_context("../escape"):
+            kept = await save_folder(logs, server_name="../server", name="verification", label="../../org/repo")
+
+        assert kept is not None
+        assert kept.relative_to(tmp_path / "results").parts[0] == "..%2Fserver"
+        assert ".." not in kept.parts
+
+    async def test_a_name_must_be_one_safe_part_and_a_server_name_must_name_a_server(
+        self, set_global_config, tmp_path: Path
+    ) -> None:
+        set_global_config({"results_dir": str(tmp_path / "results")})
+        logs = self._logs(tmp_path)
+
+        with pytest.raises(ValueError, match="name"):
+            await save_folder(logs, server_name="swebench", name="../escape")
+        for server_name in ("", ".", ".."):
+            with pytest.raises(ValueError, match="server_name"):
+                await save_folder(logs, server_name=server_name, name="verification")
 
 
 class TestTempFolder:
@@ -166,16 +349,16 @@ class TestTempFolder:
         monkeypatch.setattr(runtime_files, "_checked_temp_parents", set())
         set_global_config(None)
 
-        with temp_folder(kind="workspace") as path:
+        with temp_folder(name="workspace") as path:
             (path / "file.txt").write_text("x")
-            assert path.parent.parent == Path(tempfile.gettempdir())
+            assert path.parent.parent == Path(tempfile.gettempdir()) / "nemo_gym" / str(os.getuid())
 
         assert not path.exists()
 
     def test_folder_is_under_temp_dir_when_set(self, set_global_config, tmp_path: Path) -> None:
         set_global_config({"temp_dir": str(tmp_path / "temp")})
 
-        with temp_folder(kind="workspace") as path:
+        with temp_folder(name="workspace") as path:
             assert path.parent.parent == tmp_path / "temp"
 
         assert _request_folders(tmp_path / "temp") == []
@@ -184,29 +367,9 @@ class TestTempFolder:
         set_global_config(None)
 
         with pytest.raises(RuntimeError):
-            with temp_folder(kind="workspace") as path:
+            with temp_folder(name="workspace") as path:
                 (path / "file.txt").write_text("x")
                 raise RuntimeError("boom")
-
-        assert not path.exists()
-
-    def test_keep_as_moves_the_folder_to_debug_files(self, set_global_config, tmp_path: Path) -> None:
-        set_global_config(None)
-        keep_as = tmp_path / "debug" / "verification" / "leaf"
-
-        with temp_folder(kind="verification", keep_as=keep_as) as path:
-            (path / "report.json").write_text("{}")
-
-        assert not path.exists()
-        assert (keep_as / "report.json").read_text() == "{}"
-
-    def test_failing_to_keep_does_not_fail_the_block(self, set_global_config, tmp_path: Path) -> None:
-        set_global_config(None)
-        blocker = tmp_path / "not-a-folder"
-        blocker.write_text("")
-
-        with temp_folder(kind="verification", keep_as=blocker / "leaf") as path:
-            (path / "report.json").write_text("{}")
 
         assert not path.exists()
 
@@ -217,9 +380,9 @@ def test_temp_dir_is_checked_once_on_the_writing_node(set_global_config, tmp_pat
     monkeypatch.setattr(runtime_files, "_checked_temp_parents", set())
     set_global_config({"temp_dir": str(tmp_path / "temp")})
 
-    with temp_folder(kind="workspace"):
+    with temp_folder(name="workspace"):
         pass
-    with temp_folder(kind="workspace"):
+    with temp_folder(name="workspace"):
         pass
 
     assert checked == [("temp_dir", tmp_path / "temp")]
@@ -259,13 +422,17 @@ class TestStaleTempFolders:
             p.name for p in (live, other_namespace, other_host, unrelated)
         )
 
+        # On storage private to this host, a folder from another boot id is from an earlier boot: no process of it runs.
+        assert remove_stale_temp_folders(tmp_path, private_to_host=True) == [other_host]
+        assert sorted(p.name for p in tmp_path.iterdir()) == sorted(p.name for p in (live, other_namespace, unrelated))
+
     def test_first_folder_in_a_temp_dir_clears_leftovers(self, set_global_config, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.setattr(runtime_files, "_checked_temp_parents", set())
         leftover = tmp_path / self._name(self._dead_pid())
         leftover.mkdir()
         set_global_config({"temp_dir": str(tmp_path)})
 
-        with temp_folder(kind="workspace") as path:
+        with temp_folder(name="workspace") as path:
             assert path.parent.name == self._name(os.getpid())
 
         assert not leftover.exists()
@@ -280,7 +447,7 @@ class TestStaleTempFolders:
         leftover.mkdir()
         set_global_config({"temp_dir": str(tmp_path)})
 
-        with temp_folder(kind="workspace"):
+        with temp_folder(name="workspace"):
             pass
 
         assert not leftover.exists()
@@ -293,7 +460,7 @@ class TestStaleTempFolders:
         crafted.mkdir()
         set_global_config({"temp_dir": str(tmp_path)})
 
-        with temp_folder(kind="workspace") as path:
+        with temp_folder(name="workspace") as path:
             assert path.exists()
 
         assert crafted.exists()
@@ -307,7 +474,7 @@ class TestStaleTempFolders:
         monkeypatch.setattr(runtime_files, "remove_stale_temp_folders", broken)
         set_global_config({"temp_dir": str(tmp_path)})
 
-        with temp_folder(kind="workspace") as path:
+        with temp_folder(name="workspace") as path:
             assert path.exists()
 
     def test_another_users_folders_stay(self, tmp_path: Path, monkeypatch) -> None:
@@ -343,7 +510,7 @@ class TestStaleTempFolders:
 def test_request_folders_share_one_folder_per_process(set_global_config, tmp_path: Path) -> None:
     set_global_config({"temp_dir": str(tmp_path)})
 
-    with temp_folder(kind="workspace") as first, temp_folder(kind="harness") as second:
+    with temp_folder(name="workspace") as first, temp_folder(name="harness") as second:
         assert first.parent == second.parent
         assert first.parent.parent == tmp_path
         assert first.name.startswith("workspace-") and second.name.startswith("harness-")
@@ -356,7 +523,7 @@ def test_exit_removes_this_process_folder_and_a_forked_child_does_not(
 ) -> None:
     monkeypatch.setattr(runtime_files, "_process_folders", {})
     set_global_config({"temp_dir": str(tmp_path)})
-    with temp_folder(kind="workspace") as path:
+    with temp_folder(name="workspace") as path:
         (path / "file.txt").write_text("x")
         process_folder = path.parent
 
@@ -381,16 +548,18 @@ def test_a_stale_folder_with_this_process_name_is_cleared_before_use(
     (stale / "workspace-old").mkdir(parents=True)
     set_global_config({"temp_dir": str(tmp_path)})
 
-    with temp_folder(kind="workspace") as path:
+    with temp_folder(name="workspace") as path:
         assert path.parent == stale
 
     assert not (stale / "workspace-old").exists()
 
 
-def test_parent_replaces_temp_dir_for_code_without_gym_configuration(set_global_config, tmp_path: Path) -> None:
+def test_a_temp_dir_argument_replaces_the_setting_for_code_without_gym_configuration(
+    set_global_config, tmp_path: Path
+) -> None:
     set_global_config(None)
 
-    with temp_folder(kind="harbor-job", parent=tmp_path / "from-server") as path:
+    with temp_folder(name="harbor-job", temp_dir=tmp_path / "from-server") as path:
         assert path.parent.parent == tmp_path / "from-server"
 
     assert not path.exists()
@@ -403,7 +572,7 @@ class TestAsyncTempFolder:
         entered = asyncio.Event()
 
         async def work() -> None:
-            async with async_temp_folder(kind="workspace") as path:
+            async with async_temp_folder(name="workspace") as path:
                 created.append(path)
                 (path / "file.txt").write_text("x")
                 entered.set()
@@ -436,7 +605,7 @@ async def test_folder_is_removed_when_cancelled_while_it_is_created(
     monkeypatch.setattr(runtime_files, "_create_temp_folder", slow_create)
 
     async def work() -> None:
-        async with async_temp_folder(kind="workspace"):
+        async with async_temp_folder(name="workspace"):
             pass
 
     task = asyncio.create_task(work())
@@ -456,24 +625,13 @@ async def test_folder_is_removed_when_cancelled_while_it_is_created(
     assert _request_folders(tmp_path) == []
 
 
-def test_debug_folder_segments_are_quoted(set_global_config, tmp_path: Path) -> None:
-    set_global_config({"debug_files": True, "results_dir": str(tmp_path)})
-
-    with rollout_context("../escape"):
-        path = debug_folder(server_name="swebench", kind="verification")
-
-    assert path is not None
-    assert path.is_relative_to(tmp_path / "swebench" / "debug" / "verification")
-    assert ".." not in path.parts
-
-
 async def test_folder_is_removed_when_an_anyio_cancel_scope_fires(set_global_config, tmp_path: Path) -> None:
     import anyio
 
     set_global_config({"temp_dir": str(tmp_path)})
 
     with anyio.move_on_after(0.05):
-        async with async_temp_folder(kind="workspace"):
+        async with async_temp_folder(name="workspace"):
             await anyio.sleep(3600)
 
     for _ in range(100):
@@ -481,22 +639,6 @@ async def test_folder_is_removed_when_an_anyio_cancel_scope_fires(set_global_con
             break
         await asyncio.sleep(0.01)
     assert _request_folders(tmp_path) == []
-
-
-def test_debug_folder_rejects_a_server_name_that_leaves_the_root(set_global_config, tmp_path: Path) -> None:
-    set_global_config({"debug_files": True, "results_dir": str(tmp_path)})
-
-    for name in ("", ".", ".."):
-        with pytest.raises(ValueError, match="server_name"):
-            debug_folder(server_name=name, kind="verification")
-
-
-def test_debug_folder_accepts_a_string_output_dir(set_global_config, tmp_path: Path) -> None:
-    set_global_config({"debug_files": True})
-
-    path = debug_folder(server_name="swebench", kind="verification", output_dir=str(tmp_path))
-
-    assert path is not None and path.is_relative_to(tmp_path / "debug")
 
 
 def _cleanup_left_after_a_repeated_cancellation(cancel_kind: str) -> list[Path]:
@@ -513,7 +655,7 @@ def _cleanup_left_after_a_repeated_cancellation(cancel_kind: str) -> list[Path]:
         async def work() -> None:
             with anyio.CancelScope() as scope:
                 scopes.append(scope)
-                async with async_temp_folder(kind="workspace") as path:
+                async with async_temp_folder(name="workspace") as path:
                     created.append(path)
                     entered.set()
                     await asyncio.sleep(3600)
@@ -552,15 +694,6 @@ def test_cleanup_survives_a_repeated_cancellation_while_queued(
     assert _request_folders(tmp_path / "temp") == []
 
 
-def test_a_server_name_with_a_slash_stays_one_segment(set_global_config, tmp_path: Path) -> None:
-    set_global_config({"debug_files": True, "results_dir": str(tmp_path)})
-
-    path = debug_folder(server_name="../escape", kind="verification")
-
-    assert path is not None
-    assert path.relative_to(tmp_path).parts[0] == "..%2Fescape"
-
-
 def test_concurrent_first_use_of_a_parent_loses_no_request(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(runtime_files, "_process_folders", {})
     monkeypatch.setattr(runtime_files, "_checked_temp_parents", set())
@@ -572,7 +705,7 @@ def test_concurrent_first_use_of_a_parent_loses_no_request(tmp_path: Path, monke
     def request(index: int) -> None:
         try:
             start.wait(5)
-            with temp_folder(kind="workspace", parent=tmp_path) as path:
+            with temp_folder(name="workspace", temp_dir=tmp_path) as path:
                 (path / f"{index}.txt").write_text("x")
                 # Every request holds its folder open until all have written, so a lost file shows here.
                 written.wait(5)
@@ -594,20 +727,12 @@ def test_concurrent_first_use_of_a_parent_loses_no_request(tmp_path: Path, monke
 def test_a_process_folder_removed_from_outside_is_made_again(set_global_config, tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(runtime_files, "_process_folders", {})
     set_global_config({"temp_dir": str(tmp_path)})
-    with temp_folder(kind="workspace") as first:
+    with temp_folder(name="workspace") as first:
         pass
     shutil.rmtree(first.parent)
 
-    with temp_folder(kind="workspace") as second:
+    with temp_folder(name="workspace") as second:
         assert second.parent == first.parent
-
-
-def test_the_server_name_is_checked_only_where_it_is_used(set_global_config, tmp_path: Path) -> None:
-    set_global_config({"debug_files": False, "results_dir": str(tmp_path)})
-    assert debug_folder(server_name="", kind="verification") is None
-
-    path = debug_folder(server_name="", kind="verification", debug_files=True, output_dir=tmp_path)
-    assert path is not None and path.is_relative_to(tmp_path)
 
 
 def test_a_forked_child_gets_a_free_first_use_lock(monkeypatch) -> None:
@@ -616,7 +741,7 @@ def test_a_forked_child_gets_a_free_first_use_lock(monkeypatch) -> None:
     monkeypatch.setattr(runtime_files, "_first_use_lock", held)
 
     # What os.register_at_fork runs in the child after a fork.
-    runtime_files._reset_first_use_lock()
+    runtime_files._reset_locks_after_fork()
 
     assert runtime_files._first_use_lock is not held
     assert runtime_files._first_use_lock.acquire(blocking=False)
