@@ -41,7 +41,7 @@ def materialize_task(
         if not isinstance(index, int) or isinstance(index, bool) or index < 0:
             raise ValueError("A flat row without a task ID requires a non-negative task_index")
         task_id = str(index)
-    excluded = {AGENT_REF_KEY_NAME, TASK_SOURCE_KEY_NAME, SKILLS_REF_KEY_NAME}
+    excluded = {AGENT_REF_KEY_NAME, TASK_SOURCE_KEY_NAME, SKILLS_REF_KEY_NAME, "_rowidx"}
     return {
         "task_id": TaskId(taskset=taskset, task_id=task_id).model_dump(mode="json"),
         "task_input": {key: value for key, value in row.items() if key not in excluded and not key.startswith("_ng_")},

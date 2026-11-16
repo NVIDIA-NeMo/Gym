@@ -59,6 +59,7 @@ from nemo_gym.core import (
 from nemo_gym.metrics import compute_pass_majority_metrics
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.telemetry import init_telemetry
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.utils.exception_inspection import sandbox_failure_prefix
 
 
@@ -664,7 +665,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
                     usage={
                         "input_tokens": n_input_tokens or 0,
                         "input_tokens_details": {
-                            "cached_tokens": n_cache_tokens or 0,
+                            "cached_tokens": n_cache_tokens,
                             "cache_write_tokens": 0,
                         },
                         "output_tokens": n_output_tokens or 0,
@@ -787,3 +788,6 @@ class HarborAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     HarborAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = HarborAgent.run_webserver()  # noqa: F401

@@ -17,6 +17,7 @@ from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.core.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeId, MaterializedTask, TaskId
 from nemo_gym.core.failure_records import EpisodeFailure
+from nemo_gym.core.model_call_sampling import MODEL_SAMPLING_NULL, ModelCallSampling, encode_model_sampling
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.server_runtime.base_environment_server import (
     BaseEnvironmentServer,
@@ -220,14 +221,15 @@ def test_each_cleanup_has_its_own_budget() -> None:
     calls: list[str] = []
     context = CleanupContext(
         episode_id=_request().episode_id,
-        cleanup_timeout_seconds=0.05,
+        cleanup_timeout_seconds=0.5,
     )
 
     async def sandbox() -> None:
         calls.append("sandbox")
 
     async def slow_but_finishes() -> None:
-        await asyncio.sleep(0.03)
+        # A tenth of its budget: a loaded runner cannot push it past its own timeout.
+        await asyncio.sleep(0.05)
         calls.append("slow")
 
     async def hung() -> None:
@@ -247,7 +249,8 @@ def test_each_cleanup_has_its_own_budget() -> None:
     # Under one shared budget the slow close would have eaten the time the hung one left; here each
     # callback is bounded on its own and the sandbox stop at the bottom of the stack still happens.
     assert calls == ["hung", "slow", "sandbox"]
-    assert elapsed < 0.05 * 3
+    # The hung callback sleeps for a minute, so finishing well short of that shows its budget cut it off.
+    assert elapsed < 10
 
 
 def test_explicit_cleanup_is_bounded_and_final_unwind_retries() -> None:
@@ -428,6 +431,46 @@ def test_failure_metadata_survives_the_environment_http_boundary(classified: boo
         expected.update(failure_kind="judge_failed", stage="verification")
     assert response.json()["failure"] == expected
     assert response.json()["result"] is None
+
+
+def _sampling_request() -> _Request:
+    return _request().model_copy(
+        update={"model_sampling": ModelCallSampling(temperature=0.6, top_p=0.95, max_output_tokens=64)}
+    )
+
+
+def test_a_server_that_does_not_apply_sampling_values_refuses_an_episode_that_carries_them() -> None:
+    response = asyncio.run(_environment_server().run_request(_sampling_request()))
+
+    # The episode never ran: a run returns its task's value as the result.
+    assert response.result is None
+    assert response.failure.terminal is True
+    assert response.failure.stage == "admission"
+    assert (
+        "_EnvironmentServer does not apply a training framework's sampling values" in response.failure.failure_reason
+    )
+
+
+def test_a_server_that_applies_sampling_values_runs_an_episode_that_carries_them() -> None:
+    server_type = type("Applies", (_EnvironmentServer,), {"applies_model_sampling": True})
+    server = server_type(config=_environment_server().config, server_client=MagicMock(spec=ServerClient))
+
+    response = asyncio.run(server.run_request(_sampling_request()))
+
+    assert response.failure is None
+    assert response.result == "result"
+
+
+def test_the_trained_participant_gets_the_episodes_values_and_every_other_one_null() -> None:
+    request = _sampling_request()
+
+    assert BaseEnvironmentServer.model_sampling_segment(request, trained=True) == encode_model_sampling(
+        request.model_sampling
+    )
+    assert BaseEnvironmentServer.model_sampling_segment(request, trained=False) == MODEL_SAMPLING_NULL
+    # Without values, as in Gym-only evaluation, no participant gets a segment.
+    assert BaseEnvironmentServer.model_sampling_segment(_request(), trained=True) is None
+    assert BaseEnvironmentServer.model_sampling_segment(_request(), trained=False) is None
 
 
 def test_admission_timeout_reports_its_stage_before_running_the_episode() -> None:

@@ -56,11 +56,13 @@ from nemo_gym.orchestration.executors.connection import (
 from nemo_gym.orchestration.executors.git_ref import validate_gym_install_ref
 from nemo_gym.orchestration.executors.judge_profile import (
     JUDGE_POOL_NAME,
+    NO_CPU_PARTITION,
     JudgeProfileUnsupported,
     choose_judge_partition,
     is_cpu_only_submission,
     judge_execution_profile,
     judge_job_config,
+    placement_refusal,
     served_judge_placement,
     served_judge_profile,
 )
@@ -93,6 +95,7 @@ from nemo_gym.orchestration.executors.resume_script import (
 )
 from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint
 from nemo_gym.orchestration.executors.slurm_script import (
+    COLLECTOR_LOCAL_DIR_MARKER,
     _resolve_env,
     _with_default_capture_dir,
     build_sbatch_script,
@@ -104,7 +107,6 @@ from nemo_gym.orchestration.jobs import (
     ROLLOUTS_FILENAME,
     BenchmarkJob,
     SubmissionRecord,
-    installed_gym_commit,
     new_gym_job_id,
     utc_now,
     utc_timestamp,
@@ -133,7 +135,6 @@ from nemo_gym.orchestration.recovery import (
     RecoveryOutcomePolicyConfig,
     _managed_trial_metadata,
     accounted_chain_walltime,
-    allocation_cut_from_accounting,
     chain_accounting,
     decide_from_collected,
     effective_outcome_policy,
@@ -144,7 +145,9 @@ from nemo_gym.orchestration.recovery import (
     requeue_note,
     select_managed_evidence,
     stopped_followup,
+    store_writer_cut_from_accounting,
 )
+from nemo_gym.utils.gym_commit import installed_gym_commit
 from nemo_gym.utils.path_utils import attempt_extension_path_for
 
 
@@ -1171,6 +1174,7 @@ def _remote_managed_evidence(
         host_owned = (
             "accounting_snapshot",
             "coverage_allocation_id",
+            "coverage_writer_unrecorded",
             "accounting_unknown_reason",
             "counter_states",
             *READER_PLACEMENT_FIELDS,
@@ -1578,7 +1582,7 @@ class SlurmExecutor(BaseExecutor):
                 live_job_name = judge_live
             if collected.job_chain and workdirs is not None and str(job_dir) not in workdirs and live_job_name is None:
                 if rows is not None:
-                    allocation_cut = allocation_cut_from_accounting(rows, collected.coverage_allocation_id)
+                    allocation_cut = store_writer_cut_from_accounting(rows, collected)
                     collected = reconcile_requeued_chain(collected, rows)
                 if resume.max_walltime is not None and not collected.accounting_reconciled:
                     # Unavailable accounting cannot grant fresh walltime; a requeued id has two rows and stays unknown.
@@ -1839,7 +1843,7 @@ class SlurmExecutor(BaseExecutor):
                 "|| fail 'cannot stage judge driver'",
                 "_gym_submit_started=1",
                 _sbatch_command(benchmark, script_path).replace("sbatch --parsable", "sbatch --no-requeue --parsable"),
-                'if [ "$rc" != 0 ]; then fail "judge allocation not admitted"; fi',
+                'if [ "$rc" != 0 ]; then fail "judge allocation not admitted: $out"; fi',
                 "jid=$(printf '%s' \"$out\" | awk '{print $NF}' | cut -d';' -f1); [[ $jid =~ ^[0-9]+$ ]] || { printf '%s\\n' 'GYM_ACCOUNTING_UNKNOWN: rejudge submission acknowledgement unknown' > .gym_chain_incomplete; fail 'unknown job identity'; }",
                 'printf "%s\\n" "$jid" >> .gym_job_chain || fail "cannot preserve judge allocation accounting"',
                 "_gym_submit_confirmed=1",
@@ -1923,9 +1927,11 @@ class SlurmExecutor(BaseExecutor):
         """
         from nemo_gym.orchestration.executors.utils import flatten_run_args
 
-        def stopped(reason: str) -> RecoveryOutcome:
+        def stopped(reason: str, refusal: str | None = None) -> RecoveryOutcome:
             return RecoveryOutcome(
-                decision=decision.model_copy(update={"action": RecoveryAction.STOP, "reason": reason}),
+                decision=decision.model_copy(
+                    update={"action": RecoveryAction.STOP, "reason": reason, "judge_refusal": refusal}
+                ),
                 ok=False,
                 dispatched=None,
                 unsupported=reason,
@@ -1957,7 +1963,9 @@ class SlurmExecutor(BaseExecutor):
                     config, record.cluster, partition=judge_partition, reader_srun=os.environ.get(READER_SRUN_ENV)
                 )
         except JudgeProfileUnsupported as error:
-            return stopped(str(error))
+            return stopped(
+                str(error), "cpu_partition_unknown" if NO_CPU_PARTITION in str(error) else "unsupported_profile"
+            )
         install = config.driver.gym_install
         ref = repin if repin is not None else (install.ref if install is not None else None)
         if install is None or ref is None or ref != installed_gym_commit() or not re.fullmatch(r"[0-9a-f]{40}", ref):
@@ -2101,7 +2109,7 @@ class SlurmExecutor(BaseExecutor):
             f"(umask 077; printf %s {shlex.quote(script)} > {shlex.quote(str(script_path))}) "
             "|| fail 'cannot stage the judge driver'",
             _sbatch_command(benchmark, script_path).replace("sbatch --parsable", "sbatch --no-requeue --parsable"),
-            'if [ "$rc" != 0 ]; then fail "judge allocation not admitted"; fi',
+            'if [ "$rc" != 0 ]; then fail "judge allocation not admitted: $out"; fi',
             "jid=$(printf '%s' \"$out\" | awk '{print $NF}' | cut -d';' -f1)",
             # The queued job is journaled by id; an acknowledgement without one is journaled as such, so inspect
             # reports it and the next recovery's scheduler check finds the job by its working directory.
@@ -2112,10 +2120,13 @@ class SlurmExecutor(BaseExecutor):
             results = _parse_sbatch_results(conn.run(commands))
         except (RuntimeError, OSError) as error:
             text = str(error).strip()
-            return stopped(f"judge-only job was not queued: {text.splitlines()[-1] if text else type(error).__name__}")
+            text = text.splitlines()[-1] if text else type(error).__name__
+            return stopped(f"judge-only job was not queued: {text}", placement_refusal(text, placement is not None))
         job_id, error = results.get(benchmark, (None, "no scheduler acknowledgement"))
         if job_id is None:
-            return stopped(f"judge-only job was not admitted: {error}")
+            return stopped(
+                f"judge-only job was not admitted: {error}", placement_refusal(str(error), placement is not None)
+            )
         updated = job.model_copy(update={"job_id": job_id, "error": None})
         self.persist_record(record.with_benchmark(updated), conn.write_text)
         return RecoveryOutcome(
@@ -2305,10 +2316,16 @@ class SlurmExecutor(BaseExecutor):
             # collector config, inside the lock and after refusing any active job in its dir.
             collector_update = []
             if otel_active(config):
-                collector_yaml = render_collector_config(config, benchmark, job_dir)
                 collector_path = shlex.quote(str(collector_config_path(job_dir)))
+
+                def write_collector_config(node_local: bool) -> str:
+                    collector_yaml = render_collector_config(config, benchmark, job_dir, node_local=node_local)
+                    return f"printf %s {shlex.quote(collector_yaml)} > {collector_path} || fail 'cannot update collector config'"
+
+                # An older job.sh never copies node-local jsonl into the job dir, so its collector writes there.
                 collector_update = [
-                    f"printf %s {shlex.quote(collector_yaml)} > {collector_path} || fail 'cannot update collector config'"
+                    f"if grep -qF -- {shlex.quote(COLLECTOR_LOCAL_DIR_MARKER)} job.sh; "
+                    f"then {write_collector_config(True)}; else {write_collector_config(False)}; fi"
                 ]
             snapshot_check = []
             reconciled = keep_budget and accounting_reconciled and accounted_walltime_s is not None
@@ -2837,6 +2854,19 @@ class SlurmExecutor(BaseExecutor):
             for kind in kinds
         ]
         restore = f"mv -f {kept[0][0]} job.sh 2>/dev/null; mv -f {kept[0][1]} {old_config} 2>/dev/null"
+        # The collector config's exporter paths must match the job.sh they run under, so it is restored with it.
+        # A job dir without one (staged with OTel off) gets none back.
+        collector_backup = []
+        if otel_active(config):
+            collector = shlex.quote(str(collector_config_path(job_dir)))
+            kept_collector = shlex.quote(f"{collector_config_path(job_dir)}.pre-{kinds[0]}-{stamp}")
+            collector_backup = [
+                f"if [ -e {collector} ]; then cp -p {collector} {kept_collector} "
+                "|| fail 'cannot keep the collector config before it is rendered again'; fi"
+            ]
+            restore += (
+                f"; if [ -e {kept_collector} ]; then mv -f {kept_collector} {collector}; else rm -f {collector}; fi"
+            )
         commands = [
             *(
                 command
@@ -2846,6 +2876,7 @@ class SlurmExecutor(BaseExecutor):
                     f"cp -p {old_config} {kept_config} || fail 'cannot keep the resolved config before it is rendered again'",
                 )
             ),
+            *collector_backup,
             # Restored by the exit trap below unless sbatch confirms the queued job.
             f'_gym_restore_repin() {{ [[ "$_gym_submit_confirmed" == 1 ]] || {{ {restore}; }}; }}',
             f"(umask 077; printf %s {shlex.quote(script)} > job.sh.repin) && mv -f job.sh.repin job.sh "

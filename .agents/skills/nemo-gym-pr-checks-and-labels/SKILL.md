@@ -156,6 +156,10 @@ where `<full-sha>` is the full 40-character head SHA from `git rev-parse HEAD`
 it merely because a check is missing; do so only when the user explicitly asks
 and has the needed maintainer authority.
 
+The same mirror push runs `suggest-reviewers.yml`, which requests reviewers from
+the `# suggest:` lines in `.github/CODEOWNERS` (advisory, drafts skipped). If a
+PR has no suggested reviewers, check the `/ok to test` gate first.
+
 Check DCO separately. Every commit must contain a `Signed-off-by` trailer;
 cryptographic signing is optional.
 

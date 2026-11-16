@@ -46,6 +46,8 @@ Humans: see [Development Setup → Use of AI and LLM Tools](https://docs.nvidia.
   must comment `/ok to test <full 40-character commit SHA>` on the PR (get it with `git rev-parse HEAD`; a short SHA
   is not enough). After the head changes, the new full SHA needs a new comment. If CI checks are missing, check this
   first. That comment authorizes CI to run contributor code, so never post it yourself unless the user explicitly asks.
+  The same approval also triggers suggested reviewers (`# suggest:` lines in `.github/CODEOWNERS`): they are requested
+  only after the `pull-request/<n>` mirror is pushed, so a PR with no suggested reviewers may just be waiting on it.
   Details: [CONTRIBUTING.md](CONTRIBUTING.md#continuous-integration-ci).
 - Keep incomplete work as a draft. Mark it ready for review only after reviewing the final diff and recording the
   applicable local checks. Use the `nemo-gym-pr-checks-and-labels` skill for CI routing and label selection.
@@ -89,6 +91,12 @@ import-linter contract in `pyproject.toml` enforces the order; its `ignore_impor
 which are removed as the code moves and must not grow. `nemo_gym/verifiers/` sits outside the layers: it runs inside
 Harbor verifier sandboxes and uses only the standard library. Each package's `__init__.py` docstring says what it holds. Old flat paths such as `nemo_gym.server_utils` still import, with a deprecation warning, until 0.10.0
 (`nemo_gym/_moved_paths.py`). For a summary of each package, see `fern/versions/latest/pages/api-reference/index.mdx`.
+
+`nemo_gym.orchestration` is a Gym-aware orchestrator (submit, Slurm/Kubernetes executors, job tracking). It provides no
+core functionality. No module in `nemo_gym/` outside `nemo_gym/orchestration/`, and no server, benchmark or script built on it, may import it, except `nemo_gym/cli/main.py`, which wires the
+orchestration entrypoint into the CLI. If another package needs something that lives there, move that code into the
+package that owns it. Deleting `orchestration/` should leave only the CLI wiring to change.
+`tests/unit_tests/test_orchestration_boundary.py` enforces this.
 
 For full architecture and concepts (environments, training approaches, verification), see `fern/versions/latest/pages/about/`.
 
@@ -179,7 +187,7 @@ gym env start \
     --model-type vllm_model
 
 # Run tests for a specific server (creates .venv per server, installs deps, runs pytest)
-# First run is slow. Use skip_venv_if_present config or place a .venv to skip venv creation.
+# First run is slow. Use skip_venv_if_present to reuse a .venv that has the .nemo-gym-setup-complete marker.
 gym env test --resources-server example_single_tool_call
 
 # Run all server tests (slow: one venv per server, so it needs an explicit opt-in)

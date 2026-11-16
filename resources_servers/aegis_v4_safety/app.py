@@ -32,6 +32,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import VerifierFixture, call_judge
 from resources_servers.aegis_v4_safety.verifier_fixture import (
     create_aegis_v4_safety_server,
@@ -432,3 +433,6 @@ VERIFIER_FIXTURE = VerifierFixture(
 
 if __name__ == "__main__":
     AegisV4SafetyResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = AegisV4SafetyResourcesServer.run_webserver()  # noqa: F401

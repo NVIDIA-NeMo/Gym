@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+opencode_math_tool_rewards:
+  resources_servers:
+    opencode_math_tool_rewards:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: math_with_judge training verification with configurable OpenCode tool penalties
+      should_use_judge: false
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params:
+        input: []

@@ -43,6 +43,7 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_FAILED,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
+    HARNESS_STEP_LIMIT_METADATA_KEY,
     AgentCloseSessionResponse,
     AgentContinuationCapabilities,
     AgentOutcome,
@@ -59,7 +60,6 @@ from nemo_gym.agents import (
     restrict_sandbox_network,
     verification_failure_fields,
 )
-from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
     AGENT_ROUTE_FAILED,
@@ -99,7 +99,6 @@ from nemo_gym.trajectory import (
     AgentObservationBundle,
     ObservationGap,
     SandboxObservation,
-    ToolCallObservation,
     TrajectoryRecord,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -110,7 +109,12 @@ from responses_api_agents.opencode_agent.artifacts import (
     parse_opencode_session,
 )
 from responses_api_agents.opencode_agent.continuation import OpenCodeRunOutcome, classify_opencode_run
-from responses_api_agents.opencode_agent.observability import scope_opencode_trajectory
+from responses_api_agents.opencode_agent.opencode2 import LABEL_FILE as OPENCODE2_LABEL_FILE
+from responses_api_agents.opencode_agent.opencode2 import PLUGIN_DIRECTORY as OPENCODE2_PLUGIN_DIRECTORY
+from responses_api_agents.opencode_agent.opencode2 import PLUGIN_SOURCE as OPENCODE2_PLUGIN_SOURCE
+from responses_api_agents.opencode_agent.opencode2 import config as opencode2_config
+from responses_api_agents.opencode_agent.opencode2.store import message_labels, translate_store
+from responses_api_agents.opencode_agent.opencode2.store import reached_step_limit as opencode2_reached_step_limit
 from responses_api_agents.opencode_agent.pinned import (
     COPY_PINNED,
     REJECTED,
@@ -122,6 +126,8 @@ from responses_api_agents.opencode_agent.runtime import (
     ASSISTANT_MESSAGE_PLUGIN_FILE,
     ASSISTANT_MESSAGE_PLUGIN_SOURCE,
     IMAGE_INPUT_MODEL_OPTIONS,
+    OPENCODE_RELEASE_SHA256,
+    OPENCODE_V2_VERSION,
     OPENCODE_VERSION,
     REQUIRED_MCP_PLUGIN_FILE,
     RUNTIME_INSTALLER_FILE,
@@ -131,9 +137,10 @@ from responses_api_agents.opencode_agent.runtime import (
     UNRESTRICTED_IMAGE_ATTACHMENT,
     apply_observability_patch,
     command_failure_reason,
+    opencode_major,
 )
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession, cli_environment, format_error_message
-from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode
+from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode, ensure_opencode2
 from responses_api_agents.opencode_agent.snapshot import stored_message_ids, stored_sessions
 
 
@@ -141,6 +148,8 @@ LOG = logging.getLogger(__name__)
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 _TESTED_OUTCOME_VERSION = "1.17.11"
+# Error classification of OpenCode 2 (its errors translated by opencode2.store) is validated on this release.
+_TESTED_OPENCODE2_OUTCOME_VERSION = OPENCODE_V2_VERSION
 _API_ERROR = "APIError"
 _CONTEXT_OVERFLOW_ERROR = "ContextOverflowError"
 
@@ -243,6 +252,8 @@ for path in "$@"; do
 done
 [ -z "$missing" ] || exit {_INPUT_REJECTED}
 """
+# The same check for OpenCode 2, which loads a plugin from a directory (its index.js or server.js).
+_CHECK_PLUGIN_DIRECTORIES = _CHECK_PLUGIN_FILES.replace('[ -f "$path" ]', '[ -d "$path" ]')
 # Runs after the prepare step's path checks, whose resolve() and workdir it uses: exits non-zero when the owner's export
 # directory "$1" resolves to the task workdir, a folder inside it, or one above it.
 _CHECK_EXPORT_DIR = """export_dir=$(resolve "$1")
@@ -321,6 +332,97 @@ def _serialize_replacement_config(config: dict[str, Any]) -> str:
     return _dump_with_serialized_member(config, "agent", agent_json)
 
 
+def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | None:
+    """Return why a sandbox session cannot use ``opencode_config``, or ``None``.
+
+    The adapter owns the model, provider, prompt and plugins of a sandbox session, so it accepts only:
+
+    - ``permission`` and ``tools``, OpenCode's tool access.
+    - ``attachment``, OpenCode's image limits. A session that declares image input lifts them, and this restores them
+      for an endpoint with image limits.
+    - ``compaction.auto`` (a boolean). Automatic compaction summarizes the session and continues from the
+      summary, in model calls that do not extend the scored call's prefix. With it off, a run that fills the
+      context ends with OpenCode's context-overflow error, which the adapter reports as a context limit.
+    - ``agent.build.steps`` (a positive integer): the step limit of OpenCode's ``build`` agent, which the session
+      runs, for each prompt. From the call at the limit on, OpenCode adds an assistant message to each request that
+      asks for a text answer. It still offers the tools, so a model that keeps calling them runs past the limit.
+      Other agent fields would replace the adapter's prompt, model or sampling. Token capture recognizes that
+      message (``nemo_gym.models.token_capture.harness_notes``) and keeps the calls after it chained.
+    """
+    unsupported = sorted(opencode_config.keys() - {"permission", "tools", "attachment", "compaction", "agent"})
+    if unsupported:
+        return (
+            "supports permission, tools, attachment, compaction.auto and agent.build.steps only; "
+            f"unsupported: {unsupported}"
+        )
+    compaction = opencode_config.get("compaction", {})
+    if not isinstance(compaction, Mapping) or compaction.keys() - {"auto"}:
+        return "compaction supports only auto"
+    if "auto" in compaction and not isinstance(compaction["auto"], bool):
+        return "compaction.auto must be true or false"
+    agent = opencode_config.get("agent", {})
+    if not isinstance(agent, Mapping) or agent.keys() - {"build"}:
+        return "agent supports only build, the agent a session runs"
+    build = agent.get("build", {})
+    if not isinstance(build, Mapping) or build.keys() - {"steps"}:
+        return "agent.build supports only steps"
+    if "steps" in build and (type(build["steps"]) is not int or build["steps"] <= 0):
+        return "agent.build.steps must be a positive integer"
+    return None
+
+
+def _build_step_limit(opencode_config: Mapping[str, Any]) -> int | None:
+    """The configured ``agent.build.steps``, or None when OpenCode runs without a step limit."""
+    agent = opencode_config.get("agent")
+    build = agent.get("build") if isinstance(agent, Mapping) else None
+    steps = build.get("steps") if isinstance(build, Mapping) else None
+    return steps if type(steps) is int and steps > 0 else None
+
+
+def _continues_the_prompt(messages: Sequence[Mapping[str, Any]], index: int) -> bool:
+    """Whether the user message at ``index`` is one that OpenCode's compaction adds, not a new prompt."""
+    if any(part.get("type") == "compaction" for part in messages[index].get("parts") or []):
+        return True
+    # After an automatic compaction's summary, OpenCode continues the prompt with a user message: a synthetic
+    # "Continue if you have next steps" text, or a replay of the prompt when the compaction was for an overflow.
+    return index > 0 and messages[index - 1]["info"].get("summary") is True
+
+
+def reached_step_limit(export: Mapping[str, Any], steps: int | None) -> bool:
+    """Whether the last prompt of an OpenCode export reached the step limit that ``steps`` sets.
+
+    OpenCode 1.17.11's ``opencode run`` runs the session loop in packages/opencode/src/session/prompt.ts. Its counter
+    ``step`` grows by one on each pass of the loop, and ``isLastStep = step >= maxSteps``: from that pass on, each
+    build call appends MAX_STEPS_PROMPT as an assistant message but still offers the tools and leaves toolChoice
+    unset. So the note asks for a final answer and does not force one, and the model may keep calling tools.
+
+    Compaction does not reset the counter, and its passes count too (packages/opencode/src/session/compaction.ts).
+    A build call and a compaction's summary call each take a pass and save an assistant message. A pass can also
+    only start a compaction, when the last finished call overflowed; it saves a user message with a compaction part
+    and no ``overflow`` field. A compaction that a build call starts sets ``overflow`` and takes no pass of its own.
+    The user messages that compaction adds are not new prompts (``_continues_the_prompt``).
+    """
+    if steps is None:
+        return False
+    messages = export.get("messages") or []
+    prompt = max(
+        (
+            index
+            for index, message in enumerate(messages)
+            if message["info"].get("role") == "user" and not _continues_the_prompt(messages, index)
+        ),
+        default=-1,
+    )
+    passes = 0
+    for message in messages[prompt + 1 :]:
+        parts = message.get("parts") or []
+        if message["info"].get("role") == "assistant" or any(
+            part.get("type") == "compaction" and "overflow" not in part for part in parts
+        ):
+            passes += 1
+    return passes >= steps
+
+
 class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
     model_server: Optional[ModelServerRef] = None
@@ -373,7 +475,8 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     )
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     report_agent_sandbox_oom: bool = False
-    # Connection and per-call timeout of a sandbox session's MCP tool grants; OpenCode's default is 30 s.
+    # Connection and per-call timeout of a sandbox session's MCP tool grants. Unset, OpenCode connects within 30 s
+    # and each call gets the MCP SDK's 60 s.
     mcp_tool_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
     # Sandbox sessions only. Absolute sandbox paths of OpenCode plugin files that the sandbox owner staged,
@@ -394,9 +497,16 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # exists at seed, it is imported and the first activation continues that session; its messages stay history.
     session_import_path: str | None = None
     # Sandbox sessions only. Close also returns an ordinary session's own turns (one per saved assistant reply,
-    # compaction summaries left out), as continuation sessions always do. Without them, rollout collection builds one
-    # turn per captured call, so the summary call of a compaction is counted as a step too.
-    return_session_trajectory: bool = False
+    # compaction summaries left out), as continuation sessions always do, so rollout collection joins each captured
+    # call to its step and the harness evidence checks can match them. Without them, collection builds one turn per
+    # captured call with no message ID, every call is reported as an unmatched assistant message, and the summary call
+    # of a compaction is counted as a step too.
+    return_session_trajectory: bool = True
+    # Sandbox sessions only. Let OpenCode's run load the task repository's project config and instruction files
+    # (AGENTS.md or CLAUDE.md, opencode.json, .opencode/), as it does when started in that repository. The configuration
+    # Gym passes is merged last and still wins. Off by default, so a repository cannot add instructions, agents, plugins
+    # or tools.
+    session_project_config: bool = False
 
     @model_validator(mode="after")
     def _validate_prompt_agent(self) -> Self:
@@ -415,10 +525,14 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
 
 
 class OpenCodeAgentRunRequest(BaseRunRequest):
+    """Request for the deprecated local episode entry point in ``legacy_app.py``."""
+
     model_config = ConfigDict(extra="allow")
 
 
 class OpenCodeAgentVerifyResponse(BaseVerifyResponse):
+    """Result from the deprecated local episode entry point in ``legacy_app.py``."""
+
     model_config = ConfigDict(extra="allow")
     turns_used: int = 0
     finished_naturally: bool = False
@@ -471,7 +585,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     config: OpenCodeAgentConfig
     # Sandbox sessions run the CLI inside the task sandbox, which calls the model server from there.
     calls_model_from_sandbox: ClassVar[bool] = True
-    _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
+    _local_setup_task: asyncio.Task[str | None] | None = PrivateAttr(default=None)
     sem: Semaphore = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -479,15 +593,29 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         super().model_post_init(__context)
         self.sem = Semaphore(self.config.concurrency)
 
-    async def _ensure_local_runtime(self) -> None:
+    @property
+    def _opencode2(self) -> bool:
+        """Whether ``opencode_version`` selects OpenCode 2, whose interfaces the ``opencode2`` package covers."""
+        try:
+            return opencode_major(self.config.opencode_version) >= 2
+        except (AttributeError, ValueError):
+            return False
+
+    async def _ensure_local_runtime(self) -> str | None:
+        """Install the local runtime once; for OpenCode 2, return the pinned release binary to run."""
         if self._local_setup_task is None:
-            self._local_setup_task = asyncio.create_task(
-                asyncio.to_thread(ensure_opencode, self.config.opencode_version)
-            )
+            if self._opencode2 and self.config.command == "opencode":
+                install = asyncio.to_thread(ensure_opencode2, self.config.opencode_version)
+            elif self._opencode2:
+                # A configured command is the OpenCode 2 binary to run; nothing is installed.
+                install = asyncio.sleep(0)
+            else:
+                install = asyncio.to_thread(ensure_opencode, self.config.opencode_version)
+            self._local_setup_task = asyncio.create_task(install)
             self._local_setup_task.add_done_callback(self._clear_failed_local_setup)
         setup = self._local_setup_task
         try:
-            await asyncio.shield(setup)
+            return await asyncio.shield(setup)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -558,8 +686,23 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 },
             )
             nemo["models"] = {self.config.model: model}
-        if self._model_call_capture_enabled():
+        if self._model_call_capture_enabled() and not self._opencode2:
             apply_observability_patch(config)
+        return config
+
+    def _build_opencode2_local_config(self, rollout_id: Optional[str], label_file: Path) -> dict[str, Any]:
+        """A local OpenCode 2 call's configuration: the OpenCode 1 form above, which OpenCode 2 migrates, without Code
+        Mode (``opencode2.config.code_mode_off``), and the Gym plugin, which loads from a directory and labels model
+        calls when capture is on."""
+        config = self._build_opencode_config(rollout_id)
+        config["permission"] = opencode2_config.code_mode_off(config.get("permission"))
+        for model in ((config.get("provider") or {}).get("nemo") or {}).get("models", {}).values():
+            # OpenCode 2 assumes image input for a model it does not know; OpenCode 1 assumed text only.
+            model.setdefault("modalities", {"input": ["text"], "output": ["text"]})
+        options = {"labelFile": str(label_file)} if self._model_call_capture_enabled() else {}
+        config.setdefault("plugins", []).append(
+            {"package": OPENCODE2_PLUGIN_SOURCE.parent.as_uri(), "options": options}
+        )
         return config
 
     def _write_opencode_config(self, work_dir: Path, rollout_id: Optional[str] = None) -> None:
@@ -600,14 +743,22 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         except ValueError as error:
             raise HTTPException(422, str(error)) from error
         timeout = self.config.timeout if timeout is None else timeout
-        await self._ensure_local_runtime()
+        binary = await self._ensure_local_runtime()
         prompt = instruction if not system_prompt else f"{system_prompt}\n\n{instruction}"
         work_dir = self._workspace_root()
         project_dir = self._repo_dir(work_dir)
         data_home = work_dir / ".opencode-data"
         data_home.mkdir(parents=True, exist_ok=True)
-        self._write_opencode_config(project_dir, rollout_id)
+        label_file = work_dir / OPENCODE2_LABEL_FILE
+        if not self._opencode2:
+            self._write_opencode_config(project_dir, rollout_id)
         env = self._env(str(data_home), rollout_id)
+        if self._opencode2:
+            # OpenCode 2 takes its configuration from the environment, which keeps it out of a persistent repo, and
+            # its directory from PWD. The sandbox sessions' isolation keeps its hosted free models out of the run.
+            env["OPENCODE_CONFIG_CONTENT"] = json.dumps(self._build_opencode2_local_config(rollout_id, label_file))
+            env["PWD"] = str(project_dir)
+            env.update(opencode2_config.ISOLATION)
         if system_prompt and self.config.system_prompt_mode == "replace":
             # Keep request-specific instructions out of a persistent repo's config file.
             overrides = json.loads(env.get("OPENCODE_CONFIG_CONTENT", "{}"))
@@ -615,7 +766,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             env["OPENCODE_CONFIG_CONTENT"] = _serialize_replacement_config(overrides)
             prompt = instruction
 
-        cmd = [*self.config.command_parts, "run", "-m", self._effective_model(), "--dir", str(project_dir)]
+        if self._opencode2:
+            # `--standalone`: never run inside a background OpenCode service started with another configuration.
+            command = [binary] if binary is not None else self.config.command_parts
+            # A fixed title: OpenCode 2 would otherwise generate one with a model call outside the rollout.
+            cmd = [*command, "run", "--standalone", "--title", "NeMo Gym", "-m", self._effective_model()]
+        else:
+            cmd = [*self.config.command_parts, "run", "-m", self._effective_model(), "--dir", str(project_dir)]
         if self.config.system_prompt_mode == "replace":
             cmd.extend(["--agent", "build"])
         if self.config.thinking:
@@ -644,23 +801,37 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 LOG.warning("opencode exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
 
             db_path = data_home / "opencode" / "opencode.db"
+            untranslated: list[str] = []
+            if self._opencode2 and db_path.is_file():
+                translated = data_home / "opencode" / "sessions.db"
+                labels = message_labels(label_file.read_text()) if label_file.is_file() else {}
+                untranslated = await asyncio.to_thread(translate_store, db_path, translated, labels=labels)
+                db_path = translated
             invocation_id = rollout_id or f"opencode-{uuid4().hex}"
             output_items, usage = (
-                ([], {"input_tokens": 0, "output_tokens": 0})
+                ([], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None})
                 if timed_out
                 else parse_opencode_session(db_path, gym_reasoning=self.config.model_server is not None)
             )
-            observations = AgentObservationBundle(source="opencode")
+            observations = AgentObservationBundle(schema_version="2.0", source="opencode")
             if collect_observations:
                 try:
                     observations = _parse_opencode_session(
-                        db_path, invocation_id, trajectory, model_ref=self.config.model_server
+                        db_path,
+                        invocation_id,
+                        trajectory,
+                        model_ref=self.config.model_server,
+                        # This fresh local database is written by one OpenCode launch.
+                        clock_domain=f"opencode-wall:{uuid4().hex}",
+                        agent_instance=f"opencode-agent:{uuid4().hex}",
+                        observation_schema_version="2.0",
                     )
                 except Exception:
                     LOG.exception("failed to read OpenCode session artifact")
                     if trajectory is not None:
                         trajectory.gaps.append(ObservationGap(code="turns_unavailable"))
                     observations = AgentObservationBundle(
+                        schema_version="2.0",
                         source="opencode",
                         records=[AgentInvocation(invocation_id=invocation_id)],
                         gaps=[
@@ -677,6 +848,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     invocation.status = run_status
             if timed_out:
                 observations.gaps.append(ObservationGap(code="agent_run_timeout"))
+            if untranslated:
+                LOG.warning("OpenCode 2 store records were not translated: %s", untranslated)
+                observations.gaps.append(
+                    ObservationGap(code="harness_records_untranslated", detail="; ".join(untranslated)[:2500])
+                )
             return output_items, usage, self.config.model, observations
         finally:
             shutil.rmtree(work_dir, ignore_errors=True)
@@ -769,7 +945,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
             usage=NeMoGymResponseUsage(
                 input_tokens=input_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=usage.get("cached_tokens")),
                 output_tokens=output_tokens,
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(
                     reasoning_tokens=usage.get("reasoning_tokens", 0)
@@ -825,73 +1001,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             update={_INTERNAL_OBSERVATIONS_KEY: episode.observations.model_dump(mode="json")}
         )
 
-    async def run(self, request: Request, body: OpenCodeAgentRunRequest) -> OpenCodeAgentVerifyResponse:
-        if self._agent_session_id_from_request(request) is not None:
-            raise HTTPException(409, "OpenCode sandbox sessions must use EnvironmentServer /run")
-        if self.config.resources_server is None:
-            raise HTTPException(422, "Local OpenCode /run requires resources_server")
-        async with self.sem:
-            cookies = request.cookies
-
-            seed_resp = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/seed_session",
-                json=body.model_dump(),
-                cookies=cookies,
-            )
-            await raise_for_status(seed_resp)
-            cookies = seed_resp.cookies
-
-            rollout_id = self.rollout_id_from_run(body)
-            agent_resp = await self.server_client.post(
-                server_name=self.config.name,
-                url_path=self.url_path_for_run("/v1/responses", body),
-                json=body.responses_create_params,
-                cookies=cookies,
-            )
-            await raise_for_status(agent_resp)
-            cookies = agent_resp.cookies
-            agent_resp_json = await get_response_json(agent_resp)
-            raw_trajectory = agent_resp_json.pop(_INTERNAL_TRAJECTORY_KEY, None)
-            trajectory = (
-                scope_opencode_trajectory(TrajectoryRecord.model_validate(raw_trajectory), body, rollout_id)
-                if isinstance(raw_trajectory, dict) and rollout_id is not None
-                else None
-            )
-            raw_observations = (
-                agent_resp_json.pop(_INTERNAL_OBSERVATIONS_KEY, None) if rollout_id is not None else None
-            )
-            observations = (
-                AgentObservationBundle.model_validate(raw_observations) if isinstance(raw_observations, dict) else None
-            )
-
-            verify_resp = await self.server_client.post(
-                server_name=self.config.resources_server.name,
-                url_path="/verify",
-                json=body.model_dump()
-                | {"response": agent_resp_json}
-                | verification_failure_fields(NeMoGymResponse.model_validate(agent_resp_json)),
-                cookies=cookies,
-            )
-            await raise_for_status(verify_resp)
-            verify_json = await get_response_json(verify_resp)
-
-            gym_resp = NeMoGymResponse.model_validate(agent_resp_json)
-            turns = sum(
-                1
-                for item in gym_resp.output
-                if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
-            )
-            last = gym_resp.output[-1] if gym_resp.output else None
-            naturally = getattr(last, "type", None) == "message" and getattr(last, "role", None) == "assistant"
-
-            return OpenCodeAgentVerifyResponse.model_validate(
-                verify_json
-                | {"turns_used": turns, "finished_naturally": naturally}
-                | ({"ng_agent_observations": observations} if observations is not None else {})
-                | ({"ng_trajectory": trajectory.model_dump(mode="json")} if trajectory is not None else {})
-            )
-
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> OpenCodeSandboxSession:
         """Prepare only the harness runtime; Resources owns borrowed task setup."""
         if self.config.model_server is None:
@@ -940,24 +1049,35 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             r"\d+\.\d+\.\d+", self.config.opencode_version
         ):
             raise HTTPException(422, "OpenCode sandbox execution requires an exact opencode_version")
-        if self.config.opencode_version != _TESTED_OUTCOME_VERSION:
+        tested = _TESTED_OPENCODE2_OUTCOME_VERSION if self._opencode2 else _TESTED_OUTCOME_VERSION
+        if self.config.opencode_version != tested:
             LOG.warning(
                 "OpenCode %s is untested: error classification is validated on %s",
                 self.config.opencode_version,
-                _TESTED_OUTCOME_VERSION,
+                tested,
             )
+        if self._opencode2:
+            if self.config.sandbox_plugin_dependencies_path or self.config.sandbox_plugin_dependencies_sha256:
+                raise AgentSeedRejectedError(
+                    "OpenCode 2 installs no plugin dependencies; unset sandbox_plugin_dependencies_path and _sha256"
+                )
+            if (
+                self.config.opencode_version not in OPENCODE_RELEASE_SHA256
+                and self.config.sandbox_executable_path is None
+            ):
+                raise AgentSeedRejectedError(
+                    f"OpenCode {self.config.opencode_version} has no pinned release digest; pin a binary with "
+                    "sandbox_executable_path and sandbox_executable_sha256"
+                )
         if self.config.context_window <= 0 or self.config.timeout <= 0:
             raise HTTPException(422, "OpenCode context window and execution timeout must be positive")
         if not 0 < self.config.max_output_tokens <= self.config.context_window:
             raise HTTPException(
                 422, "OpenCode sandbox max_output_tokens must be positive and not exceed context_window"
             )
-        unsupported = self.config.opencode_config.keys() - {"permission", "tools", "attachment"}
-        if unsupported:
-            raise HTTPException(
-                422,
-                f"OpenCode sandbox config supports permission/tools/attachment only; unsupported: {sorted(unsupported)}",
-            )
+        config_error = _session_opencode_config_error(self.config.opencode_config)
+        if config_error is not None:
+            raise HTTPException(422, f"OpenCode sandbox config: {config_error}")
         if self.config.env or self.config.extra_args or self.config.command != "opencode":
             raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")
         if not all(_is_sandbox_path(path) for path in self.config.plugins):
@@ -1026,9 +1146,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             export_dir=self.config.export_dir,
             opencode_environment=cli_environment(
                 workdir=workdir,
-                env={**_private_directories(directory), **_OPENCODE_ISOLATION},
+                env={
+                    **_private_directories(directory),
+                    **(opencode2_config.ISOLATION if self._opencode2 else _OPENCODE_ISOLATION),
+                },
                 path_prefix=self.config.sandbox_path_prefix,
             ),
+            opencode2=self._opencode2,
+            model_call_labels=self._opencode2 and self._model_call_capture_enabled(),
         )
         prepared_directory = False
         try:
@@ -1058,12 +1183,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             self._check_sandbox_setup(command, result)
             prepared_directory = True
             if self.config.plugins:
-                # Owner-staged plugins are checked before installation.
-                command = f"set -- {' '.join(map(quote, self.config.plugins))}\n{_CHECK_PLUGIN_FILES}"
+                # Owner-staged plugins are checked before installation. OpenCode 2 loads a plugin from a directory.
+                check = _CHECK_PLUGIN_DIRECTORIES if self._opencode2 else _CHECK_PLUGIN_FILES
+                command = f"set -- {' '.join(map(quote, self.config.plugins))}\n{check}"
                 result = await sandbox.exec(command, cwd="/", timeout_s=30)
                 if result.return_code == _INPUT_REJECTED and result.error_type is None:
                     raise AgentSeedRejectedError(
-                        f"OpenCode plugin files are missing from the sandbox: {(result.stdout or '').strip()}"
+                        f"OpenCode plugin {'directories' if self._opencode2 else 'files'} are missing from the "
+                        f"sandbox: {(result.stdout or '').strip()}"
                     )
                 self._check_sandbox_setup(command, result)
             installer = f"{directory}/{RUNTIME_INSTALLER_FILE}"
@@ -1079,6 +1206,19 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     self.config.sandbox_executable_path or "",
                     self.config.sandbox_executable_sha256 or "",
                     ":".join(self.config.sandbox_path_prefix),
+                    # OpenCode 2 downloads are checked against the release's pinned SHA-256 digests.
+                    *(
+                        [
+                            " ".join(
+                                f"{arch}={digest}"
+                                for arch, digest in OPENCODE_RELEASE_SHA256.get(
+                                    self.config.opencode_version, {}
+                                ).items()
+                            )
+                        ]
+                        if self._opencode2
+                        else []
+                    ),
                 )
             )
             result = await sandbox.exec(command, cwd=workdir, timeout_s=self.config.sandbox_install_timeout_seconds)
@@ -1102,9 +1242,17 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     target=f"{state.persistent_directory}/config/opencode",
                     what="plugin dependency archive",
                 )
-            await sandbox.upload(TASK_ENVIRONMENT_PLUGIN_SOURCE, f"{directory}/{TASK_ENVIRONMENT_PLUGIN_FILE}")
-            if self._model_call_capture_enabled():
-                await sandbox.upload(ASSISTANT_MESSAGE_PLUGIN_SOURCE, f"{directory}/{ASSISTANT_MESSAGE_PLUGIN_FILE}")
+            if self._opencode2:
+                plugin = f"{directory}/{OPENCODE2_PLUGIN_DIRECTORY}"
+                command = f"mkdir -p -- {quote(plugin)}"
+                self._check_sandbox_setup(command, await sandbox.exec(command, cwd="/", timeout_s=30))
+                await sandbox.upload(OPENCODE2_PLUGIN_SOURCE, f"{plugin}/{OPENCODE2_PLUGIN_SOURCE.name}")
+            else:
+                await sandbox.upload(TASK_ENVIRONMENT_PLUGIN_SOURCE, f"{directory}/{TASK_ENVIRONMENT_PLUGIN_FILE}")
+                if self._model_call_capture_enabled():
+                    await sandbox.upload(
+                        ASSISTANT_MESSAGE_PLUGIN_SOURCE, f"{directory}/{ASSISTANT_MESSAGE_PLUGIN_FILE}"
+                    )
             if self.config.session_import_path is not None:
                 await self._import_session(state)
         except BaseException as error:
@@ -1182,10 +1330,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             return
         self._check_sandbox_setup(command, staged)
         private = _private_directories(state.persistent_directory).values()
+        # OpenCode 2 imports with `session import`, into the directory it is given.
+        subcommand = (
+            f"session import --standalone --directory {quote(state.session.workdir)}" if self._opencode2 else "import"
+        )
         command = (
             f"mkdir -p -- {' '.join(map(quote, private))} || exit {HARNESS_RUNNER_FAILED}\n"
             + state.opencode_environment
-            + f"exec {quote(f'{state.runtime}/opencode')} import {quote(path)} </dev/null"
+            + f"exec {quote(f'{state.runtime}/opencode')} {subcommand} {quote(path)} </dev/null"
         )
         result = await sandbox.exec(command, cwd="/", timeout_s=timeout)
         code = result.return_code
@@ -1207,7 +1359,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 if "opencode.db" not in names:
                     raise RuntimeError("OpenCode import left no session store")
                 await state.download_store(names, Path(directory))
-            database = Path(directory) / "opencode.db"
+                database = await state.readable_store(Path(directory))
             sessions = await asyncio.to_thread(stored_sessions, database)
             roots = [session["id"] for session in sessions if session["parent_id"] is None]
             if len(roots) != 1:
@@ -1300,7 +1452,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         assert isinstance(state, OpenCodeSandboxSession)
         await state.close(self.config.session_close_timeout_seconds)
         observations = state.observations or AgentObservationBundle(
-            source="opencode", gaps=[ObservationGap(code="agent_activation_interrupted")]
+            schema_version="2.0", source="opencode", gaps=[ObservationGap(code="agent_activation_interrupted")]
         )
         # A capture that close finished after the activation returned reports its export failure here.
         observations.gaps.extend(state.take_export_gaps())
@@ -1319,7 +1471,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         for name in sampled:
             if not math.isfinite(getattr(body, name)):
                 raise HTTPException(422, f"OpenCode sandbox execution requires a finite {name}")
-        if sampled and self.config.opencode_version not in _OPENCODE_AGENTS:
+        # OpenCode 2 sessions apply request sampling to every model call through the Gym plugin.
+        if sampled and not self._opencode2 and self.config.opencode_version not in _OPENCODE_AGENTS:
             raise HTTPException(
                 422,
                 f"OpenCode sandbox execution applies request {' and '.join(sampled)} only with OpenCode "
@@ -1332,6 +1485,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if key in ("stream", "background") and value is False:
                 continue
             if key == "metadata" and value and set(value) <= {AGENT_TIMEOUT_METADATA_KEY}:
+                continue
+            # Gym agents read a request's max_output_tokens as the limit for each model call (simple_agent copies it
+            # into every call), and NeMo RL sets it on every row as its generation limit. OpenCode's own limit for
+            # each call (config.max_output_tokens) already stays within a value at least that large. A tighter one is
+            # refused below. Nothing limits the sum over a session's calls, as in simple_agent.
+            if key == "max_output_tokens" and value is not None and value >= self.config.max_output_tokens:
                 continue
             if value != field.get_default(call_default_factory=True):
                 raise HTTPException(
@@ -1518,7 +1677,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 stop_reason="timeout",
                 duration_ms=(monotonic() - started) * 1000,
             )
-            state.activation_observations = AgentObservationBundle(source="opencode", records=[invocation])
+            state.activation_observations = AgentObservationBundle(
+                schema_version="2.0", source="opencode", records=[invocation]
+            )
             state.activation_trajectory = TrajectoryRecord(
                 task_id=state.request.task_id.task_id,
                 rollout_id=state.request.episode_id.capture_key,
@@ -1538,7 +1699,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if failure is not None:
                 observations = state.activation_observations
                 if observations is None:
-                    observations = AgentObservationBundle(source="opencode")
+                    observations = AgentObservationBundle(schema_version="2.0", source="opencode")
                     state.activation_observations = observations
                 if not any(
                     isinstance(r, AgentInvocation) and r.parent_invocation_id is None for r in observations.records
@@ -1608,24 +1769,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         fields = verification_failure_fields()
         return response.model_copy(update=fields) if fields["failure_report"] is not None else response
 
-    async def _session_response(
-        self,
-        state: OpenCodeSandboxSession,
-        body: NeMoGymResponseCreateParamsNonStreaming,
-        *,
-        prompt: str,
-        system: str,
-        media: Sequence[MediaFile] = (),
-        timeout: float | None = None,
-        deadline: float | None = None,
-    ) -> NeMoGymResponse:
-        timeout = timeout if timeout is not None else resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
-        started = monotonic()
-        # A text-only deployment rejects a request that carries an image, so image input is declared only for prompt
-        # images or when the configuration asks for it. A resumed session keeps declaring it, because OpenCode resends
-        # earlier images with the history and would otherwise replace them with its error text.
-        state.declares_image_input = state.declares_image_input or bool(media) or self.config.image_input
-        previous_session_id = state.harness_session_id
+    def _opencode1_launch(
+        self, state: OpenCodeSandboxSession, body: NeMoGymResponseCreateParamsNonStreaming, *, prompt: str, system: str
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, list[str]]]:
+        """The OpenCode 1 configuration, the runner payload and the MCP grants of one activation."""
         base_url = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
         config = {
             "model": "nemo_gym/" + self.config.sandbox_model_id,
@@ -1662,11 +1809,16 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     },
                 }
             },
-            **_without_empty_tools(self.config.opencode_config),
+            # A copy: the replacement prompt and the request sampling below are per session and must not reach
+            # the shared configuration.
+            **copy.deepcopy(_without_empty_tools(self.config.opencode_config)),
         }
         sampling = {name: value for name in ("temperature", "top_p") if (value := getattr(body, name)) is not None}
         if sampling:
-            config["agent"] = {agent: dict(sampling) for agent in _OPENCODE_AGENTS[self.config.opencode_version]}
+            # Merged into each agent, so a configured agent.build.steps stays.
+            agents = config.setdefault("agent", {})
+            for agent in _OPENCODE_AGENTS[self.config.opencode_version]:
+                agents.setdefault(agent, {}).update(sampling)
             if "temperature" in sampling:
                 # OpenCode sends temperature only for models that declare the capability.
                 config["provider"]["nemo_gym"]["models"][self.config.sandbox_model_id]["temperature"] = True
@@ -1676,7 +1828,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         # System instructions are separate from the user's task and applied to every OpenCode model turn.
         if system:
             if self.config.system_prompt_mode == "replace":
-                # Added to the build agent, which keeps the request sampling set above.
+                # Added to the build agent, beside the request sampling and a configured agent.build.steps.
                 config.setdefault("agent", {}).setdefault("build", {})["prompt"] = system
             else:
                 config["instructions"] = [f"{state.session.session_dir}/instructions.md"]
@@ -1717,6 +1869,105 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 "OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(self.config.max_output_tokens),
             },
         }
+        if self.config.session_project_config:
+            del payload["env"]["OPENCODE_DISABLE_PROJECT_CONFIG"]
+        return config, payload, mcp_servers, mcp_grants
+
+    def _opencode2_launch(
+        self, state: OpenCodeSandboxSession, body: NeMoGymResponseCreateParamsNonStreaming, *, prompt: str, system: str
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, list[str]]]:
+        """The OpenCode 2 configuration, the runner payload and the MCP grants of one activation.
+
+        The Gym plugin (``opencode2/plugin``) reads its settings from the plugin options: the activation's task
+        environment and receipt files, the request sampling, the MCP grants to check, the activation that prefixes
+        ``X-Session-Id`` in continuation sessions, and, with model-call capture on, the file for its call labels.
+        """
+        base_url = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
+        directory = state.session.session_dir
+        mcp_servers: dict[str, Any] = {}
+        mcp_grants: dict[str, list[str]] = {"required": [], "optional": []}
+        timeout_ms = (
+            round(self.config.mcp_tool_timeout_seconds * 1000) if self.config.mcp_tool_timeout_seconds else None
+        )
+        for access in self.effective_tool_accesses(state.request):
+            if not isinstance(access, MCPToolAccess):
+                continue
+            mcp_servers[access.name] = opencode2_config.mcp_server(
+                str(access.connection.url), access.connection.headers, timeout_ms
+            )
+            mcp_grants["required" if access.required else "optional"].append(access.name)
+        sampling = {name: value for name in ("temperature", "top_p") if (value := getattr(body, name)) is not None}
+        options: dict[str, Any] = {
+            "taskEnvironmentFile": f"{directory}/task-env.json",
+            "readyFile": f"{directory}/task-environment.ready",
+        }
+        if sampling:
+            options["sampling"] = sampling
+        if mcp_servers:
+            options["mcpGrants"] = mcp_grants
+            options["mcpStatusFile"] = f"{directory}/mcp-status.json"
+            # OpenCode 2 waits this long for an MCP server to connect, 30 s unless configured.
+            options["mcpStartupMs"] = timeout_ms or 30000
+        if state.is_continuation:
+            options["activation"] = state.invocation_prefix
+        if self._model_call_capture_enabled():
+            options["labelFile"] = f"{state.persistent_directory}/{OPENCODE2_LABEL_FILE}"
+        replace = bool(system) and self.config.system_prompt_mode == "replace"
+        config = opencode2_config.session_config(
+            model_id=self.config.sandbox_model_id,
+            base_url=base_url,
+            thinking=self.config.thinking,
+            context_window=self.config.context_window,
+            max_output_tokens=self.config.max_output_tokens,
+            image_input=state.declares_image_input,
+            temperature="temperature" in sampling,
+            opencode_config=_without_empty_tools(self.config.opencode_config),
+            mcp_servers=mcp_servers,
+            instructions_file=f"{directory}/instructions.md" if system and not replace else None,
+            replace_prompt=system if replace else None,
+            plugin_directory=f"{state.persistent_directory}/{OPENCODE2_PLUGIN_DIRECTORY}",
+            plugin_options=options,
+            owner_plugins=self.config.plugins,
+        )
+        payload = {
+            "instructions": system if self.config.system_prompt_mode == "append" else "",
+            "path_prefix": self.config.sandbox_path_prefix,
+            "cwd": state.session.workdir,
+            "command": opencode2_config.run_command(
+                f"{state.runtime}/opencode", session_id=state.harness_session_id, thinking=self.config.thinking
+            ),
+            "prompt": prompt,
+            "mcp_grants": mcp_grants if mcp_servers else None,
+            "env": {
+                **_private_directories(state.persistent_directory),
+                "OPENCODE_CONFIG_CONTENT": _serialize_replacement_config(config) if replace else json.dumps(config),
+                **opencode2_config.ISOLATION,
+            },
+        }
+        if self.config.session_project_config:
+            del payload["env"]["OPENCODE_DISABLE_PROJECT_CONFIG"]
+        return config, payload, mcp_servers, mcp_grants
+
+    async def _session_response(
+        self,
+        state: OpenCodeSandboxSession,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        prompt: str,
+        system: str,
+        media: Sequence[MediaFile] = (),
+        timeout: float | None = None,
+        deadline: float | None = None,
+    ) -> NeMoGymResponse:
+        timeout = timeout if timeout is not None else resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
+        started = monotonic()
+        # A text-only deployment rejects a request that carries an image, so image input is declared only for prompt
+        # images or when the configuration asks for it. A resumed session keeps declaring it, because OpenCode resends
+        # earlier images with the history and would otherwise replace them with its error text.
+        state.declares_image_input = state.declares_image_input or bool(media) or self.config.image_input
+        previous_session_id = state.harness_session_id
+        launch = self._opencode2_launch if self._opencode2 else self._opencode1_launch
+        config, payload, mcp_servers, mcp_grants = launch(state, body, prompt=prompt, system=system)
         error = None
         export = {}
         failure = None
@@ -1750,6 +2001,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if state.is_continuation and state.harness_session_id is not None:
                 invocation_id += f":{state.harness_session_id}"
             observations = AgentObservationBundle(
+                schema_version="2.0",
                 source="opencode",
                 records=(
                     [
@@ -1859,13 +2111,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     record.error_type = "server_error"
         cancelled = isinstance(failure, asyncio.CancelledError)
         timed_out = result is not None and result["timed_out"]
-        if cancelled or timed_out:
-            # Gym stopped the process, so a tool OpenCode left running ended with that stop.
-            termination = "timeout" if timed_out else "cancelled"
-            for record in observations.records:
-                if isinstance(record, ToolCallObservation) and record.status == "incomplete":
-                    record.status = termination
-                    record.error_type = f"invocation_{termination}"
+        # The enclosing process deadline does not establish a tool's own terminal outcome.
+        # Persisted starts without native completion remain incomplete through normalization.
         if result is not None:
             sandbox_outcome = (
                 "timeout" if timed_out else "cancelled" if cancelled else "failed" if error or failure else "completed"
@@ -1948,6 +2195,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             usage=usage,
             error_message=reported_message,
         )
+        step_limit = opencode2_reached_step_limit if self._opencode2 else reached_step_limit
+        if step_limit(export, _build_step_limit(config)):
+            # The environment decides whether an answer given at or after the step limit is scored.
+            response = response.model_copy(
+                update={"metadata": {**(response.metadata or {}), HARNESS_STEP_LIMIT_METADATA_KEY: "true"}}
+            )
         return self.report_outcome(response, native_result)
 
 
