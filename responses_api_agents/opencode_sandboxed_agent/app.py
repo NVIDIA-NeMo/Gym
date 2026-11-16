@@ -24,8 +24,8 @@ import sqlite3
 import sys
 import tempfile
 from asyncio import Semaphore
-from collections.abc import Iterator
-from contextlib import contextmanager, nullcontext
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, nullcontext
 from copy import deepcopy
 from functools import cache
 from pathlib import Path
@@ -84,6 +84,7 @@ from nemo_gym.core import (
     observe_failure,
 )
 from nemo_gym.core.failure_kinds import PROVIDER_COMMAND_OUTCOME_UNKNOWN
+from nemo_gym.core.runtime_files import async_temp_folder
 from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -654,20 +655,21 @@ def _extract_opencode_session_id(session_list_stdout: str) -> str:
     return session_id
 
 
-@contextmanager
-def _opencode_results_dir(artifacts_dir: Optional[str], session_id: str) -> Iterator[Path]:
+@asynccontextmanager
+async def _opencode_results_dir(artifacts_dir: Optional[str], session_id: str) -> AsyncIterator[Path]:
     """Yield the folder for one session's OpenCode export and database snapshot.
 
     With ``artifacts_dir`` the folder is ``<artifacts_dir>/<session_id>`` and is kept.
-    Without it the folder is a new temporary one, removed on exit, so nothing is written next to this module.
+    Without it the folder is a new temporary one under ``temp_dir``, removed on exit.
+    Either way nothing is written next to this module.
     """
     if artifacts_dir:
         results_dir = Path(artifacts_dir) / session_id
         results_dir.mkdir(parents=True, exist_ok=True)
         yield results_dir
     else:
-        with TemporaryDirectory(prefix="opencode-results-") as tmp:
-            yield Path(tmp)
+        async with async_temp_folder(kind="opencode-results") as tmp:
+            yield tmp
 
 
 def _read_opencode_child_messages(db_path: Path, root_session_id: str) -> list[dict[str, Any]]:
@@ -1566,7 +1568,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # diff`, which would sweep this transcript into the patch.
         export_remote_fpath = f"/tmp/opencode_{export_fname}"
         # Without artifacts_dir the export and snapshot go to a temporary folder, removed once they are parsed.
-        with _opencode_results_dir(self.config.artifacts_dir, request.session[SESSION_ID_KEY]) as results_dir:
+        async with _opencode_results_dir(self.config.artifacts_dir, request.session[SESSION_ID_KEY]) as results_dir:
             results_local_fpath = results_dir / export_fname
             # A previous attempt's transcript must never stand in for this run's export.
             results_local_fpath.unlink(missing_ok=True)

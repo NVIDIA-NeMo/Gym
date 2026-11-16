@@ -109,7 +109,7 @@ def check_swe_resource_episode(
             sandbox_provider="docker",
             sandbox_config={},
             apply_anti_cheating=False,
-            verification_log_dir=None if scenario == "logs_disabled" else tmp_path,
+            debug_dir=None if scenario == "logs_disabled" else tmp_path,
         ),
         server_client=MagicMock(spec=ServerClient),
     )
@@ -170,7 +170,8 @@ def check_swe_resource_episode(
                 assert not list(tmp_path.iterdir())
             else:
                 logs = Path(body["verification_log_dir"])
-                assert logs.parent == tmp_path / f"instance-{quote(row['instance_id'], safe='')}"
+                assert logs.relative_to(tmp_path).parts[0] == "verification"
+                assert f"-{quote(row['instance_id'], safe='')}-" in logs.name
                 assert grade.call_args.kwargs["log_dir"].parent == logs
             assert body["evaluation_completed"] is completed
             assert body["reward"] == float(resolved)
@@ -244,7 +245,7 @@ def check_swe_session_config(module_name: str) -> None:
     assert resources["allowed_agents"] == ["opencode_agent"]
     assert resources["datasets"][0]["taskset"] == module_name
     assert (root / resources["datasets"][0]["jsonl_fpath"]).is_file()
-    assert resources["verification_log_dir"] is None
+    assert resources["debug_dir"] is None
     assert agent["resources_server"] is None
     assert environment["resources_tool_transports"] == []
     assert environment["default_episode_timeout_seconds"] <= resources["sandbox_config"]["ttl_s"]

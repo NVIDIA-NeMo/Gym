@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Verification logs stay out of the server's source folder unless verification_log_dir names a folder."""
+"""Verification logs stay out of the server's source folder unless debug_dir names a folder."""
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +21,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.config.global_config import DEBUG_DIR_KEY_NAME
+from nemo_gym.core import runtime_files
 from resources_servers.swe_next import app as swe_next_app
 from resources_servers.swe_next.app import (
     SWENextResourcesServer,
@@ -43,7 +45,7 @@ async def _verify_log_dir(monkeypatch: pytest.MonkeyPatch, log_root: Path | None
         sandbox_provider="docker",
         sandbox_config={},
         is_verifying_golden_patch=True,
-        verification_log_dir=log_root,
+        debug_dir=log_root,
     )
     server = SWENextResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
     monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=MagicMock()))
@@ -83,5 +85,18 @@ async def test_no_log_folder_by_default(monkeypatch: pytest.MonkeyPatch) -> None
 async def test_logs_go_under_the_configured_folder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     log_dir = await _verify_log_dir(monkeypatch, tmp_path)
 
-    assert log_dir.parent.parent == tmp_path / "instance-owner%2Frepo-1"
+    # <debug_dir>/verification/<rollout>/<agent instance>/<time>-<instance id>-<random>/attempt-1
+    assert log_dir.relative_to(tmp_path).parts[0] == "verification"
+    assert "-owner%2Frepo-1-" in log_dir.parent.name
     assert log_dir.name == "attempt-1"
+
+
+@pytest.mark.asyncio
+async def test_the_global_debug_dir_applies_under_the_server_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(runtime_files, "maybe_get_global_config_dict", lambda: {DEBUG_DIR_KEY_NAME: str(tmp_path)})
+
+    log_dir = await _verify_log_dir(monkeypatch, None)
+
+    assert log_dir.relative_to(tmp_path).parts[:2] == ("swe_next", "verification")

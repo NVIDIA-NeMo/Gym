@@ -154,7 +154,7 @@ def test_verification_logs_are_written_only_under_the_configured_folder(
 ) -> None:
     server, _ = _server(monkeypatch)
     if configured:
-        server.config.verification_log_dir = tmp_path
+        server.config.debug_dir = tmp_path
     with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
         assert client.post("/seed_session", json=_seed().model_dump(mode="json")).status_code == 200
         assert client.post("/verify", json=_VERIFY).status_code == 200

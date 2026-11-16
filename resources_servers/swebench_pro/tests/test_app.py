@@ -183,7 +183,7 @@ def test_golden_patch_verify_and_cleanup(monkeypatch: MonkeyPatch) -> None:
 def test_verification_logs_are_written_only_under_the_configured_folder(
     monkeypatch: MonkeyPatch, tmp_path: Path, configured: bool
 ) -> None:
-    server = make_server(golden=True, verification_log_dir=tmp_path if configured else None)
+    server = make_server(golden=True, debug_dir=tmp_path if configured else None)
     monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=SimpleNamespace(stop=AsyncMock())))
     verify = AsyncMock(
         return_value=VerificationResult(completed=True, resolved=True, patch_applied=True, test_results={"tests": []})
