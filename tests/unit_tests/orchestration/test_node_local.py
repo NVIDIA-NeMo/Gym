@@ -675,6 +675,37 @@ def test_a_term_to_the_job_archives_the_dir_first(tmp_path):
     assert _archive(tmp_path) == {"ev/1.json": "row1\n"}
 
 
+def test_a_term_that_lands_while_the_archive_runs_does_not_cut_it_short(tmp_path):
+    # Slurm's TERM reaches the whole job, the archive's tar included, while the archive after the driver step runs.
+    started = tmp_path / "tar-started"
+    slow_tar = f'case "$*" in *-czf*) : > {started}; sleep 3 ;; esac; exec /usr/bin/tar "$@"'
+    process = _start_job(tmp_path, driver=_WRITE_EVIDENCE, fakes={"tar": slow_tar})
+    try:
+        _wait_for(started)
+        os.killpg(process.pid, signal.SIGTERM)
+        returncode = _finish(process, timeout=30)
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
+
+    output = (tmp_path / "job.out").read_text()
+    assert returncode == 143, output
+    assert "archiving the node-local dir failed" not in output
+    assert _archive(tmp_path) == {"ev/1.json": "row1\n"}
+
+
+@pytest.mark.parametrize(("tar_exit", "kept"), [(1, True), (2, False)])
+def test_a_tar_that_exits_1_keeps_the_archive_and_any_other_failure_drops_it(tmp_path, tar_exit, kept):
+    # GNU tar exits 1 when a file changed while it was read; the archive it wrote is still complete.
+    tar = f'case "$*" in *-czf*) /usr/bin/tar "$@" && exit {tar_exit} ;; esac; exec /usr/bin/tar "$@"'
+
+    returncode = _finish(_start_job(tmp_path, driver=_WRITE_EVIDENCE, fakes={"tar": tar}))
+
+    assert returncode == 0
+    assert _archive_names(tmp_path) == (["11.0.tar.gz"] if kept else [])
+    assert ("archiving the node-local dir failed" in (tmp_path / "job.out").read_text()) is not kept
+
+
 def test_an_archive_that_overruns_its_bound_is_dropped_whole(tmp_path):
     # tar never finishes; the 5 s bound kills it, and no partial archive takes the final name.
     returncode = _finish(_start_job(tmp_path, driver=_WRITE_EVIDENCE, fakes={"tar": _HANGING_TAR}))
