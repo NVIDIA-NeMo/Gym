@@ -133,17 +133,21 @@ shows the records, not a training batch.
 A NeMo RL smoke (main 0.8.0, `run_grpo_single_controller.py`, five nodes: one vLLM generation node at TP8/EP8 and
 four Megatron training nodes at TP8/EP16/CP2, Gym from this branch, the eight generated tasks with two generations
 each, token capture with `parent_resolution: source_history` and vLLM-worker external staging as NeMo RL configures
-it) launched end to end on this entry: the three Gym servers started under NeMo RL, sixteen episodes ran through the
-harbor server, `opencode_agent` and the Podman sandboxes (13 to 124 model calls each, 26k to 46k cumulative tokens),
-and the ledger chained every call to its parent up to OpenCode's automatic compaction. In eleven of the sixteen
-episodes the chain breaks at 41k to 46k cumulative tokens, where OpenCode compacts (the 49,152-token context minus
-the 8,192-token output reserve): every call from the compaction summary on is `unresolved_parent`, the reassembler
-rejected those rollouts, and it accepted the five that never compacted. The training step then failed inside NeMo RL's
-loss diagnostics (`clipped_pg_diagnostic_metrics` takes `.min()` over an empty valid mask) before a weight update.
-Both open items are NeMo RL's, not this entry's: reconstruction across OpenCode compaction (Gym's capture docs route it
-to the framework), and a batch whose rejected rollouts are placeholders. One more NeMo RL main gap met on the way: a
-harbor row's `task_input` is a single-step `turns` list, which main's `_build_inputs` rejects (the smoke read
-`turns[0].responses_create_params` through a local patch).
+it) trained one GRPO step on this entry: the three Gym servers started under NeMo RL, sixteen episodes ran through the
+harbor server, `opencode_agent` and the Podman sandboxes (16 to 49 model calls each, 33 calls per rollout on average,
+27k to 65k cumulative tokens), the ledger chained every served call to its parent (no poisoned rollout, invalid-row
+rate 0), the environment scored all sixteen (reward mean 0.318, four at 1.0, median 0), and the step ran on 13 valid
+sequences and 225k tokens (loss -0.131, grad norm 0.18, token multiplicative probability error 1.06); the three
+sequences left out had filled the 65,536-token window (`finish_reason: length`, masked by NeMo RL's overlong filter).
+Two settings made that possible, both in the run's config rather than this entry: OpenCode was told the engine's
+real window (`agentic_vbench_context_tokens: 65536`) and automatic compaction was off (`compaction.auto: false`). With
+the entry's defaults (49,152 tokens, compaction on), a first attempt had every chain break where OpenCode compacted
+(41k to 46k cumulative tokens; every call from the compaction summary on was `unresolved_parent`, 11 of 16 rollouts
+rejected) and the step then failed in NeMo RL's loss diagnostics on an empty valid mask. Reconstruction across OpenCode
+compaction is the training framework's (Gym's capture docs route it there), and NeMo RL main does not have it yet; a
+run with compaction on needs that first. One more NeMo RL main gap met on the way: a harbor row's `task_input` is a
+single-step `turns` list, which main's `_build_inputs` rejects (the smoke read `turns[0].responses_create_params`
+through a local patch).
 
 Subagents (`subagents.yaml`), `gym eval run` on one generated task per family with Gemini 4 through
 `inference_provider` and token capture off: the sequencing episode ran three OpenCode sessions, the primary agent made
