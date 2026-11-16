@@ -23,16 +23,12 @@ directory is written to `<job dir>/node-local/<SLURM_JOB_ID>.tar.gz` (one file, 
 removed. With exports, the archive is written as soon as the evaluation has succeeded instead, and the exports wait for
 it, so an exporter of the job dir finds it. With restore each archive holds the whole directory, so only it and the
 archive it was restored from are kept.
-
-A step at its time limit is killed within moments (its `srun` gets TERM and kills the step), too fast to archive. So
-the watch loop stops the driver `stop_before_walltime_seconds` before the job's end time, archives, and then waits
-for the limit, so the job still ends TIMEOUT and the auto-resume chain reads it as it reads any segment.
 """
 
 import shlex
 from pathlib import Path
 
-from nemo_gym.orchestration.api import NODE_LOCAL_STOP_WAIT_SECONDS, NodeLocalConfig
+from nemo_gym.orchestration.api import NodeLocalConfig
 from nemo_gym.orchestration.executors.script_templates import NODE_LOCAL_ARCHIVED_ENV
 
 
@@ -115,7 +111,6 @@ _SETUP_TEMPLATE = """\
 _gym_nl_dir={host_dir}
 _gym_nl_archives={archives}
 _gym_nl_done=""
-_gym_nl_deadline=""
 _gym_nl_run() {{ {on_driver_node}bash -c "$1" _gym_node_local "${{@:2}}"; }}
 _gym_nl_archive() {{
     [[ -z "$_gym_nl_done" ]] || return 0
@@ -123,37 +118,14 @@ _gym_nl_archive() {{
     _gym_nl_run {archive_script} "$_gym_nl_dir" "$_gym_nl_archives" "$SLURM_JOB_ID" {archive_timeout} {restore}{release}
 }}
 _gym_nl_cleanup() {{ _gym_nl_run {cleanup_script} "$_gym_nl_dir"; }}
-# Once the evaluation has succeeded, archive before the exports read the job dir; then the deadline.
+# Once the evaluation has succeeded, archive before the exports read the job dir.
 _gym_nl_watch() {{
     if [[ -z "$_gym_nl_done" && -e "${{GYM_EVAL_SUCCEEDED_MARKER:-}}" ]]; then
         echo "The evaluation succeeded: archiving the node-local dir before the exports read the job dir."
         _gym_nl_archive
     fi
-    [[ -z "$_gym_nl_deadline" ]] || (( $(date +%s) < _gym_nl_deadline )) || _gym_nl_stop_for_walltime
 }}
 _gym_nl_run {restore_script} "$_gym_nl_dir" "$_gym_nl_archives" {restore} || exit $?"""
-
-_DEADLINE_TEMPLATE = """\
-_gym_nl_job=$(SLURM_TIME_FORMAT=%s scontrol show job "$SLURM_JOB_ID" -o 2>/dev/null) || _gym_nl_job=""
-if [[ ! "$_gym_nl_job" =~ (^|[[:space:]])EndTime=([0-9]{{1,15}})([[:space:]]|$) ]]; then
-    echo "WARNING: the job's end time is unknown: the driver is not stopped before the time limit, and the node-local dir is archived only if the driver step ends first."
-elif (( BASH_REMATCH[2] - {stop} <= $(date +%s) )); then
-    echo "WARNING: less than {stop}s remain: the driver is not stopped before the time limit, and the node-local dir is archived only if the driver step ends first."
-else
-    _gym_nl_deadline=$((BASH_REMATCH[2] - {stop}))
-fi
-_gym_nl_stop_for_walltime() {{
-    _gym_nl_deadline=""
-    # A finished evaluation was archived when it succeeded (_gym_nl_watch): the exports keep their time.
-    [ ! -e "${{GYM_EVAL_SUCCEEDED_MARKER:-}}" ] || return 0
-    echo "The time limit is {stop}s away: stopping the driver and archiving the node-local dir."
-    kill -TERM "$_gym_driver_pid" 2>/dev/null
-    for _i in $(seq 1 {stop_wait}); do kill -0 "$_gym_driver_pid" 2>/dev/null || break; sleep 1; done
-    _gym_nl_archive
-    _gym_nl_cleanup
-    echo "Waiting for the time limit: the job ends TIMEOUT, as a segment that ran to its limit does."
-    while :; do sleep 60 & wait $!; done
-}}"""
 
 # Only where the batch shell runs on the driver's node: a step can no longer start once the job is ending.
 _TERM_TRAP = """\
@@ -168,7 +140,8 @@ _gym_nl_on_term() {
 }
 trap _gym_nl_on_term TERM"""
 
-# Watch-loop line: archive once the evaluation succeeded, and stop the driver at the deadline (_DEADLINE_TEMPLATE).
+# Watch-loop line: archive once the evaluation succeeded. It also keeps the driver in the background, so a TERM to
+# the batch shell runs its trap at once.
 WATCH_CHECK = "_gym_nl_watch"
 
 
@@ -217,10 +190,6 @@ def render_setup(config: NodeLocalConfig, remote_bench_dir: Path, driver_node_fl
             cleanup_script=shlex.quote(_CLEANUP_SCRIPT),
         )
     ]
-    if config.stop_before_walltime_seconds:
-        blocks.append(
-            _DEADLINE_TEMPLATE.format(stop=config.stop_before_walltime_seconds, stop_wait=NODE_LOCAL_STOP_WAIT_SECONDS)
-        )
     if not driver_node_flags:
         blocks.append(_TERM_TRAP)
     return "\n".join(blocks)

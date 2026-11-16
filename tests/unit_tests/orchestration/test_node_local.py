@@ -116,13 +116,6 @@ def test_a_valid_base_dir_renders_one_per_job_directory_under_it(base_dir, rende
     assert f'_gym_nl_dir={rendered}/gym-node-local-"$SLURM_JOB_ID"\n' in _script(_config({"base_dir": base_dir}))
 
 
-def test_the_stop_window_must_leave_time_to_stop_the_driver_and_archive():
-    with pytest.raises(ValueError, match=r"at least archive_timeout_seconds \+ 60 \(160\)"):
-        NodeLocalConfig(archive_timeout_seconds=100, stop_before_walltime_seconds=120)
-    assert NodeLocalConfig(archive_timeout_seconds=100, stop_before_walltime_seconds=160)
-    assert NodeLocalConfig(archive_timeout_seconds=100, stop_before_walltime_seconds=0)
-
-
 def test_a_run_without_node_local_saves_the_same_config_as_before():
     assert "node_local" not in BenchmarkRunConfig().model_dump()
     assert BenchmarkRunConfig(node_local=True).model_dump()["node_local"] is True
@@ -197,21 +190,7 @@ def test_restore_can_be_turned_off_and_then_no_archive_is_pruned():
     assert '"$_gym_nl_dir" "$_gym_nl_archives" "$SLURM_JOB_ID" 120 0\n' in script
 
 
-def test_the_watch_loop_stops_the_driver_before_the_time_limit():
-    script = _script(_config({"stop_before_walltime_seconds": 400}))
-    loop = script[script.index("_gym_run_driver() {") : script.index("\n_gym_run_driver\n")]
-    assert WATCH_CHECK in loop
-    assert "_gym_nl_deadline=$((BASH_REMATCH[2] - 400))" in script
-
-
-def test_a_zero_stop_window_never_stops_the_driver_early():
-    script = _script(_config({"stop_before_walltime_seconds": 0}))
-    assert "scontrol show job" not in script and "_gym_nl_stop_for_walltime()" not in script
-    # The loop still runs the check, which an empty deadline turns off; the driver is still backgrounded.
-    assert '_gym_nl_deadline=""' in script and WATCH_CHECK in script
-
-
-def test_a_driver_with_no_service_is_still_watched_so_it_can_be_stopped():
+def test_a_driver_with_no_service_is_still_watched():
     script = _script(_config(True, services={}))
     loop = script[script.index("_gym_run_driver() {") : script.index("\n_gym_run_driver\n")]
     assert "_gym_service_exited" not in loop.split("_gym_run_driver() {")[1]
@@ -245,7 +224,7 @@ def test_a_multi_node_driver_on_node_0_is_handled_in_the_batch_shell():
     assert "trap _gym_nl_on_term TERM" in script
 
 
-@pytest.mark.parametrize("node_local", [True, {"restore": False, "stop_before_walltime_seconds": 0}])
+@pytest.mark.parametrize("node_local", [True, {"restore": False}])
 def test_the_script_is_valid_bash(node_local):
     result = subprocess.run(["bash", "-n"], input=_script(_config(node_local)), text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
@@ -278,13 +257,12 @@ def _start_job(
     driver: str,
     service: str = "exec sleep 600",
     node_local: dict | None = None,
-    end_in: int | None = None,
     fakes: dict[str, str] | None = None,
     exports: bool = False,
     job_id: str = "11",
     off_batch: bool = False,
 ) -> subprocess.Popen:
-    """Start the rendered job.sh in its own process group; `end_in`: scontrol reports the job's end that many s on.
+    """Start the rendered job.sh in its own process group.
 
     `off_batch` pins the policy, and so the driver, to the second of two nodes: node-local steps then go through srun.
     """
@@ -305,15 +283,8 @@ def _start_job(
     bench.mkdir(parents=True, exist_ok=True)
     (tmp_path / "bin").mkdir(exist_ok=True)
     all_fakes = {"srun": _FAKE_SRUN % {"driver": driver, "service": service}, "curl": "exit 0", **(fakes or {})}
-    job_line = (
-        f'echo "JobId=1 TimeLimit=04:00:00 EndTime=$(($(date +%s) + {end_in})) Partition=b"'
-        if end_in is not None
-        else "exit 1"
-    )
     if off_batch:
-        all_fakes["scontrol"] = f"case \"$2\" in hostnames) printf 'n0\\nn1\\n' ;; *) {job_line} ;; esac"
-    elif end_in is not None:
-        all_fakes["scontrol"] = job_line
+        all_fakes["scontrol"] = "case \"$2\" in hostnames) printf 'n0\\nn1\\n' ;; *) exit 1 ;; esac"
     for name, body in all_fakes.items():
         (tmp_path / "bin" / name).write_text(f"#!/bin/bash\n{body}\n")
         (tmp_path / "bin" / name).chmod(0o755)
@@ -513,71 +484,23 @@ def test_a_lost_service_still_leaves_the_archive(tmp_path):
     assert _archive(tmp_path) == {"ev/1.json": "row1\n"}
 
 
-def test_before_the_time_limit_the_driver_is_stopped_archived_and_the_job_waits_for_the_limit(tmp_path):
-    # The stop window is 65 s and the job ends 68 s after the script asks: the first poll after 3 s stops the driver.
-    driver = f"{_WRITE_EVIDENCE}; trap 'echo driver got TERM; exit 143' TERM; sleep 600 & wait"
-    process = _start_job(tmp_path, driver=driver, node_local={"stop_before_walltime_seconds": 65}, end_in=68)
-    try:
-        _wait_for(tmp_path / "run" / "b" / "node-local" / "11.tar.gz")
-        _wait_for_text(tmp_path / "job.out", "Waiting for the time limit")
-        assert process.poll() is None
-        # The time limit: Slurm signals the whole job.
-        os.killpg(process.pid, signal.SIGTERM)
-        returncode = _finish(process, timeout=30)
-    finally:
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(process.pid, signal.SIGKILL)
-
-    output = (tmp_path / "job.out").read_text()
-    assert "stopping the driver and archiving the node-local dir" in output
-    assert "driver got TERM" in output
-    assert "The job got TERM" not in output and output.count("Archived the node-local dir") == 1
-    assert returncode == 143
-    assert _archive(tmp_path) == {"ev/1.json": "row1\n"}
-
-
-def test_after_the_evaluation_succeeded_the_deadline_leaves_the_exports_running(tmp_path):
-    # The evaluation is done at once; the exports run past the deadline (3 s) and the poll that finds it (5 s).
-    driver = f'{_WRITE_EVIDENCE}; : > "$GYM_EVAL_SUCCEEDED_MARKER"; sleep 7; echo exports done'
-    process = _start_job(
-        tmp_path, driver=driver, node_local={"stop_before_walltime_seconds": 65}, end_in=68, exports=True
-    )
-
-    returncode = _finish(process)
-
-    output = (tmp_path / "job.out").read_text()
-    assert returncode == 0
-    assert "The evaluation succeeded: archiving the node-local dir" in output
-    assert "stopping the driver" not in output and "exports done" in output
-    assert output.count("Archived the node-local dir") == 1
-    assert _archive(tmp_path) == {"ev/1.json": "row1\n"}
-
-
 @pytest.mark.parametrize("off_batch", [False, True], ids=["batch_node", "off_batch_node"])
-def test_a_service_lost_after_the_evaluation_succeeded_still_lets_the_deadline_archive(tmp_path, off_batch):
-    # The service dies once the evaluation has succeeded and before the poll that reaches the deadline (3 s on); the
-    # exports then run on, so only a watch that keeps polling archives before the driver step ends.
+def test_a_service_lost_after_the_evaluation_succeeded_still_lets_the_watch_archive(tmp_path, off_batch):
+    # The service dies once the evaluation has succeeded, before the watch's next poll; the exports then run on, so
+    # only a watch that keeps polling after the lost service archives before the driver step ends.
     bench = tmp_path / "run" / "b"
     service = f"until [ -e {bench / 'eval.succeeded.11'} ]; do sleep 0.1; done; exit 3"
     driver = (
         f"trap 'echo driver got TERM; exit 143' TERM; {_WRITE_EVIDENCE}; : > \"$GYM_EVAL_SUCCEEDED_MARKER\"; "
         f"for _ in $(seq 300); do [ -e {bench / 'node-local' / '11.tar.gz'} ] && exit 5; sleep 0.1; done; exit 9"
     )
-    process = _start_job(
-        tmp_path,
-        driver=driver,
-        service=service,
-        node_local={"stop_before_walltime_seconds": 65},
-        end_in=68,
-        exports=True,
-        off_batch=off_batch,
-    )
+    process = _start_job(tmp_path, driver=driver, service=service, exports=True, off_batch=off_batch)
 
     returncode = _finish(process)
 
     output = (tmp_path / "job.out").read_text()
     assert returncode == 5, output
-    assert "driver got TERM" not in output and "stopping the driver" not in output
+    assert "driver got TERM" not in output
     assert output.count("Archived the node-local dir") == 1
     assert _archive(tmp_path) == {"ev/1.json": "row1\n"}
 
@@ -633,33 +556,10 @@ def test_the_exports_wait_for_the_archive_only_with_node_local(tmp_path):
     assert "GYM_NODE_LOCAL_ARCHIVED" not in _script(_config(True))
 
 
-def _wait_for_text(path: Path, text: str, timeout: float = 30) -> None:
-    deadline = time.monotonic() + timeout
-    while text not in path.read_text():
-        assert time.monotonic() < deadline, f"{text!r} never appeared in {path}"
-        time.sleep(0.1)
-
-
-def test_an_unknown_end_time_is_reported_and_the_driver_runs_on(tmp_path):
-    returncode = _finish(_start_job(tmp_path, driver=_WRITE_EVIDENCE, fakes={"scontrol": "exit 1"}))
-
-    assert returncode == 0
-    assert "the job's end time is unknown" in (tmp_path / "job.out").read_text()
-    assert _archive(tmp_path) == {"ev/1.json": "row1\n"}
-
-
-def test_a_window_already_past_is_reported_and_the_driver_runs_on(tmp_path):
-    returncode = _finish(_start_job(tmp_path, driver=_WRITE_EVIDENCE, end_in=10))
-
-    assert returncode == 0
-    assert "less than 300s remain" in (tmp_path / "job.out").read_text()
-    assert _archive(tmp_path) == {"ev/1.json": "row1\n"}
-
-
 def test_a_term_to_the_job_archives_the_dir_first(tmp_path):
     # The driver outlives the TERM, as a step does until Slurm kills it: only the job's own trap can archive.
     driver = f"trap '' TERM; {_WRITE_EVIDENCE}; : > \"$GYM_NODE_LOCAL_DIR/../written\"; sleep 600 & wait"
-    process = _start_job(tmp_path, driver=driver, fakes={"scontrol": "exit 1"})
+    process = _start_job(tmp_path, driver=driver)
     try:
         _wait_for(tmp_path / "host" / "written")
         os.killpg(process.pid, signal.SIGTERM)

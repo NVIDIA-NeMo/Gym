@@ -461,8 +461,6 @@ class ResumeConfig(_StrictModel):
         return data
 
 
-# How long the job waits for a driver step it stopped before the time limit to end, before it archives anyway.
-NODE_LOCAL_STOP_WAIT_SECONDS = 60
 # A host path that is safe in a pyxis mount list (no comma or colon) and in an unquoted shell word.
 _NODE_LOCAL_BASE_DIR_RE = re.compile(r"/[A-Za-z0-9._/-]+")
 
@@ -481,9 +479,6 @@ class NodeLocalConfig(_StrictModel):
     restore: bool = True
     # Bound on writing one archive.
     archive_timeout_seconds: int = Field(default=120, gt=0)
-    # Stop the driver this long before the time limit and archive then: a step at its time limit is killed too
-    # quickly to archive. The job then waits for the limit, so it still ends TIMEOUT. 0 never stops it early.
-    stop_before_walltime_seconds: int = Field(default=300, ge=0)
 
     @field_validator("base_dir")
     @classmethod
@@ -494,17 +489,6 @@ class NodeLocalConfig(_StrictModel):
                 f"node_local.base_dir must be an absolute path of letters, digits, '.', '_', '-' and '/', got {value!r}"
             )
         return value.rstrip("/") or "/"
-
-    @model_validator(mode="after")
-    def _validate_stop_window(self) -> "NodeLocalConfig":
-        needed = self.archive_timeout_seconds + NODE_LOCAL_STOP_WAIT_SECONDS
-        if 0 < self.stop_before_walltime_seconds < needed:
-            raise ValueError(
-                f"node_local.stop_before_walltime_seconds ({self.stop_before_walltime_seconds}) leaves no time to "
-                f"stop the driver and archive: set it to 0 or at least archive_timeout_seconds + "
-                f"{NODE_LOCAL_STOP_WAIT_SECONDS} ({needed})."
-            )
-        return self
 
 
 _COMMAND_AND_RUN = (
