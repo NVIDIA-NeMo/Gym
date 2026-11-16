@@ -93,6 +93,8 @@ if [ "$restore" = 1 ]; then
 fi
 # Extraction set the ctime of every restored file before this: the archive step takes what changes after it.
 touch -- "$dir.stamp" || { rm -rf -- "$dir"; echo "ERROR: cannot create $dir.stamp"; exit 1; }
+# File times tick coarsely (up to 1 s on some file systems): a file written in the stamp's tick would not be newer.
+sleep 1
 """
 )
 
