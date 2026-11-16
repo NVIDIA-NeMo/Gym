@@ -463,7 +463,7 @@ def test_script_runs_the_collector_on_the_node_by_default():
     line = _collector_line(_script(_config()))
     assert "--container" not in line
     assert line.startswith("env ")
-    assert " srun --overlap --output=logs/otel_collector-$SLURM_JOB_ID.log sh -c " in line
+    assert " srun --overlap --account=acct --output=logs/otel_collector-$SLURM_JOB_ID.log sh -c " in line
     # A node-local copy of the binary runs, with its jsonl written beside it.
     assert "src=$(command -v otelcol-contrib)" in line
     assert 'dir=$(mktemp -d "/tmp/gym-otel-$SLURM_JOB_ID.XXXXXX") && cp "$src" "$dir"/otelcol-contrib' in line
