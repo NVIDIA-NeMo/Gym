@@ -110,7 +110,6 @@ class TestGlobalConfig:
             "uv_venv_dir": str(WORKING_DIR),
             "results_dir": str(RESULTS_DIR.expanduser().resolve()),
             "cache_dir": str(CACHE_DIR.expanduser().resolve()),
-            "debug_files": False,
             "temp_dir": None,
         }
 
@@ -370,13 +369,6 @@ class TestGlobalConfig:
 
         # A server resolves a relative path against its own source folder, so the parser hands it an absolute one.
         assert get_global_config_dict()["temp_dir"] == os.path.join(os.path.expanduser("~"), "gym-temp")
-
-    def test_debug_files_must_be_a_boolean(self, monkeypatch: MonkeyPatch) -> None:
-        self._mock_versions_for_testing(monkeypatch)
-        self._mock_parse_environment(monkeypatch, DictConfig({"debug_files": "/some/folder"}))
-
-        with raises(ConfigError, match="debug_files must be a boolean"):
-            get_global_config_dict()
 
     def test_runtime_file_roots_keep_symlinks_for_each_node_to_follow(
         self, monkeypatch: MonkeyPatch, tmp_path

@@ -138,10 +138,7 @@ UV_LOCK_TIMEOUT_KEY_NAME = "uv_lock_timeout_seconds"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
 RESULTS_DIR_KEY_NAME = "results_dir"
 CACHE_DIR_KEY_NAME = "cache_dir"
-# Whether servers write debug files: verification logs, screenshots, trajectories, failure records.
-# They go under each server's results; a server's own `debug_files` overrides this.
-DEBUG_FILES_KEY_NAME = "debug_files"
-# Each request's or session's temporary folder. Null means the node's own temporary directory.
+# Where temporary folders go. Null means <system temp>/nemo_gym/<user id>/ on each node.
 TEMP_DIR_KEY_NAME = "temp_dir"
 INHERIT_FROM_KEY_NAME = "_inherit_from"
 COPY_KEY_NAME = "_copy"
@@ -206,7 +203,6 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     UV_VENV_DIR_KEY_NAME,
     RESULTS_DIR_KEY_NAME,
     CACHE_DIR_KEY_NAME,
-    DEBUG_FILES_KEY_NAME,
     TEMP_DIR_KEY_NAME,
     INHERIT_FROM_KEY_NAME,
     COPY_KEY_NAME,
@@ -2096,9 +2092,6 @@ Set the keys individually, in a config or as overrides, e.g.:
                 global_config_dict[dir_key_name] = str(Path(dir_value).expanduser().resolve())
 
             # Runtime files; see nemo_gym/core/runtime_files.py.
-            debug_files = global_config_dict.setdefault(DEBUG_FILES_KEY_NAME, False)
-            if not isinstance(debug_files, bool):
-                raise ConfigError(f"{DEBUG_FILES_KEY_NAME} must be a boolean (true/false), got {debug_files!r}.")
             # An unset temp_dir is resolved by each process on its own node, never here.
             temp_dir = global_config_dict.setdefault(TEMP_DIR_KEY_NAME, None)
             if temp_dir is not None:
