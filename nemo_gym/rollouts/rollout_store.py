@@ -579,7 +579,7 @@ class RolloutStore:
             next_attempt[identity] = attempt + 1
         manifest = self.manifest.model_copy(update={"next_attempt": next_attempt})
         # A reservation leaves the configuration identity as opening the store saved it.
-        manifest.write(manifest_path_for(self.output), identity=False)
+        manifest.write(manifest_path_for(self.output), write_config_identity=False)
         # Publish in memory only after all reservations are durable.
         self.manifest = self._state.manifest = manifest
         for row, identity, attempt in reservations:
