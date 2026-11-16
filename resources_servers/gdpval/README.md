@@ -65,6 +65,27 @@ default the server runs `libreoffice` from `PATH`, and with `preconvert_office_t
 Java runtime with `apt-get` on Linux when they are missing or broken. Startup then converts a small workbook with a
 formula and a chart, and fails in comparison mode if that conversion fails.
 
+To render in the task sandbox instead, set `sandbox_libreoffice_command: [libreoffice]`. The sandbox image built from
+`containers/Dockerfile` has LibreOffice and the fonts. Before `/verify` stops the sandbox, it renders every collected
+Office file, submitted or a task input under `reference_files/`, to a `<name>.pdf` sidecar there. The server then
+needs no LibreOffice: startup skips the install and its check, and both modes judge the sidecars. A file that fails to
+render, or whose render does not finish cleanly, gets no sidecar and is judged as it would be without LibreOffice.
+Rendering one rollout's files takes at most `sandbox_render_budget_s` (default 600) in all, and one LibreOffice run at
+most 150 s; files left when the budget runs out are judged without a render too. Use
+this when the server runs without root, or should not open model-written Office files with LibreOffice itself.
+
+In comparison mode the server then converts nothing, even when the host has LibreOffice. Comparison references are
+judged only from the PDFs they carry, so a reference set must ship a PDF for every Office deliverable, as one made by a
+run with `persist_deliverables_dir` does. A task whose reference deliverable has an Office file without a PDF is not
+judged: it fails as `gdpval:reference_unrendered` instead of being scored against an empty reference. Rubric mode still
+renders a file without a sidecar on the host, if the host has LibreOffice.
+
+The render is only as trustworthy as the agent's sandbox. LibreOffice runs in the sandbox the agent just worked in,
+where the agent is root and can replace the `libreoffice` executable, so an agent that does so chooses the PDF the judge
+sees for its own Office files. An agent can also submit its own `<name>.pdf` beside an Office file, as with host
+conversion. Use sandbox rendering where that risk is acceptable, such as evaluating a fixed checkpoint, and not as a
+grading boundary for a policy under training.
+
 To run LibreOffice from a container or a wrapper script instead, set `libreoffice_command` to the command that replaces
 `libreoffice`. For example, to use Apptainer, set it like this in `configs/gdpval.yaml`, next to
 `persist_deliverables_dir`:

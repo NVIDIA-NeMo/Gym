@@ -4,7 +4,12 @@ Runs OpenClaw CLI (`openclaw agent --local --json`).
 OpenClaw runs its own tools internally.
 Resources server is used for verifier.
 
-Minimal, meant to be extended, and currently eval-only. 
+Training token-ID capture is off by default. With `model_server`, model calls go to the Gym Model Server under
+the rollout's prefix. Run-level `token_id_capture.enabled: true` and either the agent's `token_id_capture: true`
+or run-level `token_id_capture.all_agents: true` route those calls through capture. Capture also needs a capture
+store and a model backend that returns token IDs (see
+[Training on External Agent Harnesses](https://docs.nvidia.com/nemo/gym/main/tutorials/training-tutorials/external-agent-harnesses)).
+No training capture run has validated this agent.
 
 ## Quick start
 
@@ -54,6 +59,8 @@ Session install/close timeouts default to 600/60 seconds.
 - `max_output_tokens`: most output tokens OpenClaw requests per call for a generated model entry; it
   requests less when its estimate of the input leaves less room in `context_window`. When unset,
   OpenClaw 2026.6.11 uses 8,192.
+- `image_input`: declare image support in sandbox sessions without prompt images (default `false`);
+  prompt images declare it automatically.
 - `workspace_root`: where per-request workspaces are created and deleted
 - `openclaw_agent_id`: passed to `--agent`
 - `thinking`: passed to `--thinking` (off, low, medium, high, ...)
@@ -214,7 +221,15 @@ Sandbox request support is deliberately explicit:
   without the original cookie; reusing its ID for different inputs is rejected. Close accepts the
   explicit ID and episode without a cookie, including after a lost seed response. Closing an
   unknown ID prevents a delayed seed from creating it. Filesystem paths use independent random IDs.
-- A text user prompt, optionally preceded by one system message. Text-part arrays are accepted.
+- One user prompt, optionally preceded by one system message. Text-part arrays are accepted. Sandbox sessions
+  also accept base64 data-URI `input_image` parts, with or without text; local execution rejects images with HTTP 422.
+  Each image occurrence gets a separate file under `<session>/home/.openclaw/media/`, removed on close, so repeated
+  images remain repeated. The adapter appends one `[Image: source: <path>]` line per file after the prompt text.
+  These session-specific paths remain visible to the model. Image order is preserved, but text/image interleaving
+  and the requested `detail` are not. For image-capable sessions, the adapter disables OpenClaw's configurable
+  1200 px resize. OpenClaw 2026.6.11 can still resize or re-encode large images in its native file-loading and
+  byte-limit processing. Exported conversations retain images as data URIs. Completed and output-limit replies
+  must retain every supplied image occurrence; wall-time limits keep their existing behavior.
   Configured `system_prompt`, request `instructions`, and the optional system message are joined
   and prepended to OpenClaw's user prompt. The harness retains its own system prompt.
 - The request `model`, when supplied, must match the configured model.
@@ -289,7 +304,6 @@ Missing evidence or failed release
 retains the session for retry. Releasing a final failed activation does not make it gradable.
 Cached runtime files and preserved task services remain until Resources destroys the sandbox.
 
-This path is eval-only. Working inference does not establish training token-ID/logprob support.
 A tool-and-verifier smoke is required for the actual image/model configuration before review;
 unit tests alone do not establish runtime compatibility or benchmark accuracy. Process/memory/setup
 and close-latency overhead have not been benchmarked at scale.

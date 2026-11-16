@@ -12,6 +12,7 @@ from pydantic import (
     ConfigDict,
     Field,
     SerializerFunctionWrapHandler,
+    StrictBool,
     field_validator,
     model_serializer,
     model_validator,
@@ -67,6 +68,9 @@ class TaskId(BaseModel):
     task_id: str = Field(min_length=1)
 
 
+from nemo_gym.core.model_call_sampling import ModelCallSampling
+
+
 def is_materialized_task_row(row: Mapping[str, object]) -> bool:
     """Return whether a row has a materialized-task envelope.
 
@@ -97,6 +101,13 @@ class BaseEpisodeRequest(BaseModel, Generic[TaskInputT]):
 
     episode_id: EpisodeId
     task: MaterializedTask[TaskInputT]
+    # The training framework's sampling values for the agents it trains in this episode; ``None`` outside training.
+    # The environment server puts them in those agents' model URLs.
+    model_sampling: ModelCallSampling | None = None
+    # True when the training framework does not want this episode's model calls captured, as for a validation
+    # rollout: the environment server then activates no agent with the training tag. False leaves capture to the
+    # run's token_id_capture block, and is left out of the serialized request.
+    skip_token_capture: StrictBool = Field(default=False, exclude_if=lambda value: not value)
 
 
 class BaseEpisodeResponse(BaseModel, Generic[EpisodeResultT]):

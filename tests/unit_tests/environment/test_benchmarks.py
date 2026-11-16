@@ -307,8 +307,8 @@ class TestDiscoverBenchmarksInDir:
             pytest.param(
                 "swebench_verified_multilingual.yaml",
                 [
-                    "benchmarks/swebench/verified/opencode.yaml",
-                    "benchmarks/swebench/multilingual/opencode.yaml",
+                    "benchmarks/swebench/verified/opencode_legacy_agent.yaml",
+                    "benchmarks/swebench/multilingual/opencode_legacy_agent.yaml",
                 ],
                 1024,
                 id="swebench_verified_multilingual",
@@ -328,7 +328,7 @@ class TestDiscoverBenchmarksInDir:
             "config_paths": expected_config_paths,
             "num_samples_in_parallel": expected_concurrency,
         }
-        assert "benchmarks/swebench/pro/opencode.yaml" not in suite["config_paths"]
+        assert "benchmarks/swebench/pro/opencode_legacy_agent.yaml" not in suite["config_paths"]
 
     @pytest.mark.parametrize(
         ("suite_name", "expected_benchmark_count"),
@@ -519,7 +519,7 @@ class TestPrepareBenchmark:
                     {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
                 ),
             ),
-            patch("nemo_gym.cli._prepare_worker.load_preparer", return_value=mock_module),
+            patch("nemo_gym.server_runtime.supervisor._prepare_worker.load_preparer", return_value=mock_module),
         ):
             prepare_benchmark()
             mock_module.prepare.assert_called_once_with()
@@ -549,7 +549,7 @@ class TestPrepareBenchmark:
                     {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
                 ),
             ),
-            patch("nemo_gym.cli._prepare_worker.load_preparer", return_value=mock_module),
+            patch("nemo_gym.server_runtime.supervisor._prepare_worker.load_preparer", return_value=mock_module),
         ):
             prepare_benchmark()
 
@@ -595,7 +595,7 @@ class TestPrepareBenchmark:
 
         with (
             patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config(config)),
-            patch("nemo_gym.cli._prepare_worker.load_preparer", side_effect=import_prepare),
+            patch("nemo_gym.server_runtime.supervisor._prepare_worker.load_preparer", side_effect=import_prepare),
         ):
             prepare_benchmark()
 
@@ -624,7 +624,7 @@ class TestPrepareBenchmark:
                     }
                 ),
             ),
-            patch("nemo_gym.cli._prepare_worker.load_preparer", return_value=mock_module),
+            patch("nemo_gym.server_runtime.supervisor._prepare_worker.load_preparer", return_value=mock_module),
         ):
             prepare_benchmark()
 
@@ -660,7 +660,7 @@ class TestPrepareBenchmark:
                     {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
                 ),
             ),
-            patch("nemo_gym.cli._prepare_worker.load_preparer", return_value=mock_module),
+            patch("nemo_gym.server_runtime.supervisor._prepare_worker.load_preparer", return_value=mock_module),
         ):
             with pytest.raises(SystemExit) as exc_info:
                 prepare_benchmark()
@@ -712,7 +712,7 @@ class TestPrepareBenchmark:
                     {"config_paths": [str(config_path)], **safe_load(config_path.read_text())}
                 ),
             ),
-            patch("nemo_gym.cli._prepare_worker.load_preparer", return_value=mock_module),
+            patch("nemo_gym.server_runtime.supervisor._prepare_worker.load_preparer", return_value=mock_module),
         ):
             prepare_benchmark()
 
@@ -736,7 +736,7 @@ class TestPrepareBenchmark:
                     }
                 ),
             ),
-            patch("nemo_gym.cli._prepare_worker.load_preparer", return_value=mock_module),
+            patch("nemo_gym.server_runtime.supervisor._prepare_worker.load_preparer", return_value=mock_module),
         ):
             prepare_benchmark()
 
@@ -750,7 +750,7 @@ class TestPrepareBenchmark:
             config["use_cached_prepared_benchmarks"] = True
         with (
             patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config(config)),
-            patch("nemo_gym.cli._prepare_worker.load_preparer", return_value=module),
+            patch("nemo_gym.server_runtime.supervisor._prepare_worker.load_preparer", return_value=module),
         ):
             prepare_benchmark()
 
@@ -877,7 +877,7 @@ class TestPrepareBenchmark:
 
         with (
             patch("nemo_gym.cli.eval.get_global_config_dict", return_value=_mock_global_config(config)),
-            patch("nemo_gym.cli._prepare_worker.load_preparer", side_effect=fake_import),
+            patch("nemo_gym.server_runtime.supervisor._prepare_worker.load_preparer", side_effect=fake_import),
         ):
             prepare_benchmark()
 
@@ -1100,7 +1100,7 @@ class TestMaterializedTasksetBenchmark:
         module = MagicMock()
         module.prepare.side_effect = prepare
         monkeypatch.setattr("nemo_gym.cli.eval.get_global_config_dict", lambda **_: config)
-        with patch("nemo_gym.cli._prepare_worker.load_preparer", return_value=module):
+        with patch("nemo_gym.server_runtime.supervisor._prepare_worker.load_preparer", return_value=module):
             prepare_benchmark()
         module.prepare.assert_called_once_with()
         original = source.read_bytes()

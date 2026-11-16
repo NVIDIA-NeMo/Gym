@@ -336,7 +336,7 @@ async def test_exported_server_can_inherit_retirement_from_the_state_hooks() -> 
     class ExportedResourceServer(AsyncResourceServer):
         checkpoint_mode: ClassVar[str] = "exported"
 
-        async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+        async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
             raise AssertionError("export is outside this test")
 
         async def restore_session_states(self, states: dict[str, JsonValue]) -> None:

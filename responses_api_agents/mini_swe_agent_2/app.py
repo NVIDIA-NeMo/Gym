@@ -47,6 +47,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     BaseVerifyResponse,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 OPENSANDBOX_PROVIDER_NAME = "opensandbox"
@@ -397,7 +398,8 @@ def _default_response_object() -> dict[str, Any]:
         "truncation": "disabled",
         "usage": {
             "input_tokens": 0,
-            "input_tokens_details": {"cached_tokens": 0},
+            # Unknown unless a model response's usage replaces this placeholder.
+            "input_tokens_details": {"cached_tokens": None},
             "output_tokens": 0,
             "output_tokens_details": {"reasoning_tokens": 0},
             "total_tokens": 0,
@@ -937,3 +939,6 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     MiniSWEAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = MiniSWEAgent.run_webserver()  # noqa: F401
