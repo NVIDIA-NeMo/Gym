@@ -137,6 +137,13 @@ _CLAIMS_SUFFIX = ".capture.claims"
 _CLAIM_APPEND_ATTEMPTS = 5
 
 
+def _pending_marker_rollout_id(name: str) -> Optional[str]:
+    """The rollout id an older release's pending marker names; its call token has no dot."""
+    if not name.endswith(_PENDING_SUFFIX):
+        return None
+    return name.removesuffix(_PENDING_SUFFIX).rsplit(".", 1)[0]
+
+
 def _is_live(handle: Any, path: Path) -> bool:
     """Whether a locked claims file is still the one at ``path``, not one a reader has retired."""
     opened = os.fstat(handle.fileno())
@@ -275,6 +282,13 @@ class CaptureStore:
 
     def clear_all_pending(self, rollout_id: str) -> None:
         self.claims_path_for(rollout_id).unlink(missing_ok=True)
+
+    def remove_pending_markers(self, rollout_ids: set[str]) -> None:
+        """Remove older releases' per-call pending markers of these rollouts, listing the dir once."""
+        with os.scandir(self._root) as entries:
+            stale = [entry.path for entry in entries if _pending_marker_rollout_id(entry.name) in rollout_ids]
+        for marker in stale:
+            Path(marker).unlink(missing_ok=True)
 
     def record(self, rollout_id: str, exchange: dict[str, Any]) -> None:
         """Append one exchange and fsync (durable across a killed box).

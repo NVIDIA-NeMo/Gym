@@ -977,7 +977,7 @@ def _with_captured_calls(rows: Iterable[dict[str, Any]], capture_dirs: Sequence[
         return
     # Lazy: the capture store pulls in the model-server stack, which health workers do not need.
     from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
-    from nemo_gym.models.model_call_capture import _PENDING_SUFFIX, CaptureStore
+    from nemo_gym.models.model_call_capture import CaptureStore, _pending_marker_rollout_id
     from nemo_gym.rollouts.model_calls import read_available_model_call_records
 
     listings = []
@@ -991,10 +991,8 @@ def _with_captured_calls(rows: Iterable[dict[str, Any]], capture_dirs: Sequence[
                 stacklevel=2,
             )
             continue
-        # Older runs name a claimed write `<rollout id>.<call token>.capture.pending`; the token has no dot.
-        pending = {
-            name.removesuffix(_PENDING_SUFFIX).rsplit(".", 1)[0] for name in names if name.endswith(_PENDING_SUFFIX)
-        }
+        # Older releases claimed each write with its own pending marker.
+        pending = {rollout_id for name in names if (rollout_id := _pending_marker_rollout_id(name)) is not None}
         listings.append((CaptureStore(directory, create=False), names, pending))
     for row in rows:
         calls = None

@@ -409,8 +409,11 @@ async def test_capture_reads_never_list_the_capture_dir(tmp_path, monkeypatch):
     assert await await_model_call_capture_quiescence("10-0", [tmp_path]) is True
     merge_model_call_capture_into_record(record, [tmp_path])
     clear_model_call_captures_for_rollouts([record], [tmp_path], before_dispatch=False)
-    clear_model_call_captures_for_rollouts([record, {"_ng_task_index": 10, "_ng_rollout_index": 1}], [tmp_path])
     assert scans == []
+
+    # Before dispatch, each dir is listed once per call for older releases' markers, however many rows it clears.
+    clear_model_call_captures_for_rollouts([record, {"_ng_task_index": 10, "_ng_rollout_index": 1}], [tmp_path])
+    assert scans == [tmp_path]
     assert len(record["ng_model_call_capture"]["calls"]) == 1
     assert not store.path_for("10-0").exists()
 
@@ -587,9 +590,32 @@ def test_clearing_after_a_snapshot_keeps_an_outstanding_claim(tmp_path):
         store.mark_pending(f"14-{rollout_index}", "call-1")
         store.record(f"14-{rollout_index}", {"model_call_id": "call-1"})
     store.clear_pending("14-0", "call-1")
+    (tmp_path / "14-0.old.capture.pending").touch()
 
     rows = [{"_ng_task_index": 14, "_ng_rollout_index": rollout_index} for rollout_index in (0, 1)]
     clear_model_call_captures_for_rollouts(rows, [tmp_path], before_dispatch=False)
 
     assert not store.path_for("14-0").exists() and not store.claims_path_for("14-0").exists()
     assert store.has_pending("14-1") is True
+    # Older releases' markers are a pre-dispatch concern.
+    assert (tmp_path / "14-0.old.capture.pending").exists()
+
+
+def test_clearing_before_dispatch_removes_only_the_cleared_keys_older_markers(tmp_path):
+    from nemo_gym.rollouts.model_calls import clear_model_call_captures_for_rollouts
+
+    store = CaptureStore(tmp_path)
+    for name in (
+        "0-0.aa.capture.pending",
+        "0-0.bb.capture.pending",
+        "0-0-a1.cc.capture.pending",
+        "1-0.dd.capture.pending",
+    ):
+        (tmp_path / name).touch()
+    store.record("0-0", {"model_call_id": "stale"})
+    store.mark_incomplete("0-0")
+    store.mark_pending("0-0", "stale")
+
+    clear_model_call_captures_for_rollouts([{"_ng_task_index": 0, "_ng_rollout_index": 0}], [tmp_path])
+
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["0-0-a1.cc.capture.pending", "1-0.dd.capture.pending"]

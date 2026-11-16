@@ -152,8 +152,9 @@ def clear_model_call_captures_for_rollouts(
     Capture files are keyed by a deterministic rollout id (task-rollout-attempt), so without this a
     fresh run or a kill-shaped retry would append onto the previous attempt's capture for the same
     id. The caller passes only rows about to be dispatched, after assigning any retry suffix.
-    Before dispatch, claims of these ids go too. After a snapshot (``before_dispatch=False``) claims go
-    only once settled.
+    Before dispatch, claims and older releases' pending markers of these ids go too, with one listing of
+    each dir per call. After a snapshot (``before_dispatch=False``) claims go only once settled, and
+    nothing is listed.
     """
     if not capture_dirs:
         return
@@ -167,6 +168,8 @@ def clear_model_call_captures_for_rollouts(
                 store.clear_all_pending(rollout_id)
             else:
                 store.retire_claims_if_settled(rollout_id)
+        if before_dispatch and rollout_ids:
+            store.remove_pending_markers(rollout_ids)
 
 
 def merge_model_call_capture_into_record(
