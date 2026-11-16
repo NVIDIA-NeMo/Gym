@@ -245,6 +245,22 @@ def test_capture_store_rejects_unsafe_rollout_ids(tmp_path, rollout_id):
         store.path_for(rollout_id)
 
 
+def test_capture_store_checks_its_folder_once_on_the_writing_node(tmp_path, monkeypatch):
+    import nemo_gym.models.model_call_capture as model_call_capture
+
+    checked = []
+    monkeypatch.setattr(
+        model_call_capture, "warn_if_unsuitable", lambda setting, path: checked.append((setting, path))
+    )
+    monkeypatch.setattr(model_call_capture, "_checked_capture_dirs", set())
+
+    CaptureStore(tmp_path)
+    CaptureStore(tmp_path)
+    CaptureStore(tmp_path / "other", create=False)
+
+    assert checked == [("model_call_capture_dir", tmp_path)]
+
+
 def test_capture_store_preserves_valid_rollout_id(tmp_path):
     store = CaptureStore(tmp_path)
 

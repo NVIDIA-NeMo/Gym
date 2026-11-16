@@ -264,8 +264,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{allowlist_path}: '{file} {rule} {scope}' no longer matches any code; remove it from the list.")
     if new:
         print(
-            "\nUse nemo_gym/core/runtime_files.py: scratch_dir for files needed only during a request, "
-            "debug_artifact_dir for debug output, cache_dir for caches and results_dir for run output.",
+            "\nUse nemo_gym/core/runtime_files.py: temp_folder for files needed only during a request, "
+            "debug_folder for debug files, cache_dir for caches and results_dir for run output.",
             file=sys.stderr,
         )
     return 1 if new or stale else 0

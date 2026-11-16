@@ -40,9 +40,11 @@ from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, model_validator
 
+from nemo_gym.config.global_config import MODEL_CALL_CAPTURE_DIR_KEY_NAME
 from nemo_gym.core.correlation import CorrelationPathError, client_session_id, resolve
 from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER, rollout_context
 from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
+from nemo_gym.core.filesystems import warn_if_unsuitable
 from nemo_gym.core.responses_api_types import SSE_KEEPALIVE
 from nemo_gym.models._checkpoint import (
     attach_capture_context,
@@ -146,6 +148,16 @@ def _validate_rollout_id(rollout_id: str) -> str:
     return rollout_id
 
 
+_checked_capture_dirs: set[Path] = set()
+
+
+def _warn_once_about_capture_dir(root: Path) -> None:
+    """Warn once per process and folder when capture writes to shared or memory-backed storage on this node."""
+    if root not in _checked_capture_dirs:
+        _checked_capture_dirs.add(root)
+        warn_if_unsuitable(MODEL_CALL_CAPTURE_DIR_KEY_NAME, root)
+
+
 class CaptureStore:
     """Append-only, rollout-keyed JSONL sink for model exchanges."""
 
@@ -153,6 +165,7 @@ class CaptureStore:
         self._root = Path(root)
         if create:
             self._root.mkdir(parents=True, exist_ok=True)
+            _warn_once_about_capture_dir(self._root)
 
     @property
     def root(self) -> Path:
