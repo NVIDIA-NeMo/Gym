@@ -100,6 +100,13 @@ built with the runtime at that path skips the download (the harness README, "Pre
 ## Validation status
 
 Unit tests cover the prepare script's task-root path, the staged plugins (node tests), the model server's summary
-recovery and the verifier-only multiplier. Not recorded yet: an oracle `gym dataset validate` of a generated task
-root through this entry, and a training-shaped rollout with token capture on against a vLLM policy; both will be
-added to this section before the entry is used for a reported run.
+recovery and the verifier-only multiplier.
+
+`gym dataset validate agentic_vbench_train --sandbox docker` with `harbor_train.yaml` (judge protocol
+`nvinference-hybrid`) on a root of eight generated tasks, two per family, from the internal curriculum: 8/8 scored,
+0 masked; assembly, repair and sequencing at 1.0, the two repurpose reference edits at 0.956 and 0.953 (the
+rubric judge scores the generated reference edit itself below 1; `gym dataset validate` exits non-zero for them,
+as it does for any reference solution below 1). Verification ran separately for the repurpose tasks and in the
+agent's sandbox for the rest, with the task images prebuilt on a rootless Podman backend and the generated tasks'
+shared base image present on it. Not recorded yet: a training-shaped rollout with token capture on against a vLLM
+policy; it will be added here before the entry is used for a reported run.
