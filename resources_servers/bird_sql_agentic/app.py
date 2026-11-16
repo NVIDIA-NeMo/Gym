@@ -98,7 +98,10 @@ class BirdSqlAgenticResourcesServer(BirdSqlResourcesServer):
         if isinstance(body, ResourcesSeedSessionRequest):
             # Environment Server path: task fields arrive under task_data.
             request.session[SESSION_ID_KEY] = body.resources_session_id
-            self._bind_db(body.resources_session_id, str(body.task_data["db_id"]))
+            db_id = body.task_data.get("db_id")
+            if not isinstance(db_id, str):
+                raise ResourcesSeedRejectedError("task_data must include a string db_id")
+            self._bind_db(body.resources_session_id, db_id)
             return ResourcesSeedSessionResponse(resources_session_id=body.resources_session_id)
 
         self._bind_db(request.session[SESSION_ID_KEY], body.db_id)

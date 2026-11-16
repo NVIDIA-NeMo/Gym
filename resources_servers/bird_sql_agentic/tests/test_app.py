@@ -248,6 +248,18 @@ class TestExecuteSqlEndpoint:
         assert "Invalid db_id" in response.text
 
 
+    def test_rejects_task_data_without_db_id(self, client) -> None:
+        body = {
+            "resources_session_id": "session-1",
+            "episode_id": {"rollout_id": "rollout-1"},
+            "task_id": {"taskset": "example", "task_id": "0"},
+            "task_data": {"question": "q", "gt_sql": "SELECT 1"},
+        }
+        response = client.post("/seed_session", json=body)
+        assert response.status_code == 422
+        assert "db_id" in response.text
+
+
 # ---------------------------------------------------------------------------
 # verify: bird_sql scoring + tool-use counts
 # ---------------------------------------------------------------------------
