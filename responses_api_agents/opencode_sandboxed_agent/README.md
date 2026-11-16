@@ -49,6 +49,18 @@ aws s3 cp opencode /path/to/folder/opencode/$APP-$target
 aws s3 ls /path/to/folder/opencode/
 ```
 
+## Optional uploaded OpenCode binary
+
+Without a mounted binary or `preinstalled_opencode`, each sandbox downloads OpenCode from
+`https://opencode.ai/install`, which fails in a sandbox without internet access. When no mount is available, set
+`local_opencode_binary_path` to an OpenCode executable on the agent-server host and `local_opencode_binary_sha256` to
+its SHA-256, for example `package/bin/opencode` of
+https://registry.npmjs.org/opencode-linux-x64/-/opencode-linux-x64-1.17.11.tgz for Linux x86_64 with glibc. Its
+version must equal `opencode_version`. Gym checks the digest at startup, uploads the binary through the sandbox file
+API, and installs it only if the uploaded copy has the same SHA-256 and answers `--version`; the sandbox needs
+`sha256sum`. The two fields replace `remote_opencode_binary_path` and `preinstalled_opencode`, and setting both
+ways is refused.
+
 ## Optional offline ripgrep
 
 OpenCode's `glob` and `grep` tools also need ripgrep (`rg`). Without it, OpenCode

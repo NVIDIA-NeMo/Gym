@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -102,6 +103,7 @@ class TestOpenCodeSandboxedAgent:
             "assert {name for name in sys.modules if name == 'responses_api_agents.opencode_agent' "
             "or name.startswith('responses_api_agents.opencode_agent.')} == "
             "{'responses_api_agents.opencode_agent', 'responses_api_agents.opencode_agent.observability', "
+            "'responses_api_agents.opencode_agent.pinned', "
             "'responses_api_agents.opencode_agent.runtime'}"
         )
         subprocess.run([sys.executable, "-c", code], check=True, timeout=30)
@@ -804,6 +806,110 @@ class TestOpenCodeSandboxedAgent:
                 self._create_config().model_dump() | {"local_ripgrep_binary_path": str(tmp_path / "missing-rg")}
             )
 
+    def _local_opencode_config(self, binary: Path, **overrides: Any) -> OpenCodeSandboxedAgentConfig:
+        digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+        return OpenCodeSandboxedAgentConfig.model_validate(
+            self._create_config().model_dump()
+            | {
+                "local_opencode_binary_path": str(binary),
+                "local_opencode_binary_sha256": digest,
+                "opencode_version": "test",
+            }
+            | overrides
+        )
+
+    @mark.parametrize(
+        ("overrides", "message"),
+        [
+            ({"local_opencode_binary_sha256": None}, "local_opencode_binary_path needs local_opencode_binary_sha256"),
+            ({"local_opencode_binary_sha256": "0" * 64}, "has SHA-256"),
+            ({"preinstalled_opencode": True}, "Set one way to install OpenCode"),
+            ({"remote_opencode_binary_path": "/mnt/opencode"}, "Set one way to install OpenCode"),
+        ],
+    )
+    def test_local_opencode_binary_config_is_refused(
+        self, tmp_path: Path, overrides: dict[str, Any], message: str
+    ) -> None:
+        binary = tmp_path / "opencode"
+        binary.write_bytes(b"#!/bin/sh\necho test\n")
+        with raises(ValidationError, match=message):
+            self._local_opencode_config(binary, **overrides)
+
+    def test_local_opencode_binary_sha256_needs_the_binary(self) -> None:
+        with raises(ValidationError, match="local_opencode_binary_sha256 needs local_opencode_binary_path"):
+            OpenCodeSandboxedAgentConfig.model_validate(
+                self._create_config().model_dump() | {"local_opencode_binary_sha256": "0" * 64}
+            )
+
+    def test_local_opencode_binary_sha256_is_case_insensitive(self, tmp_path: Path) -> None:
+        binary = tmp_path / "opencode"
+        binary.write_bytes(b"#!/bin/sh\necho test\n")
+        digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+        config = self._local_opencode_config(binary, local_opencode_binary_sha256=digest.upper())
+        assert config.local_opencode_binary_sha256 == digest
+
+    @mark.skipif(shutil.which("sha256sum") is None, reason="the staging script needs sha256sum")
+    async def test_local_opencode_binary_is_uploaded_checked_and_installed(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The binary is uploaded instead of downloaded, and the launch command installs it only if the
+        uploaded bytes have the pinned SHA-256."""
+        binary = tmp_path / "opencode with spaces"
+        binary.write_text('#!/bin/sh\nif [ "$1" = --version ]; then echo test; else touch "$HOME/agent-started"; fi\n')
+        config = self._local_opencode_config(binary)
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        sandbox_mock = self._mock_sandbox(monkeypatch, server)
+
+        await server.responses(
+            request=self._responses_request(),
+            body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}]),
+        )
+
+        assert sandbox_mock.upload.await_count == 1
+        source, staged = sandbox_mock.upload.await_args.args
+        assert source == binary
+        assert staged.startswith("/tmp/nemo-gym-opencode-binary-")
+        assert [mock_call[0] for mock_call in sandbox_mock.mock_calls[:2]] == ["upload", "exec"]
+        command = sandbox_mock.exec.await_args_list[0].kwargs["command"]
+        assert "opencode.ai" not in command
+
+        def run_launch_command(uploaded_bytes: bytes, root: Path) -> subprocess.CompletedProcess:
+            # Uploads may land read-only and root-owned, so the copy is made from a read-only folder.
+            upload_dir = root / "uploads"
+            upload_dir.mkdir(parents=True)
+            uploaded = upload_dir / "opencode"
+            uploaded.write_bytes(uploaded_bytes)
+            uploaded.chmod(0o444)
+            upload_dir.chmod(0o555)
+            (root / "agent home").mkdir()
+            local_command = command.replace(staged, shlex.quote(str(uploaded))).replace(
+                "/tmp/nemo-gym-mcp-setup-error", shlex.quote(str(root / "mcp-error"))
+            )
+            try:
+                return subprocess.run(
+                    ["sh", "-c", local_command],
+                    env={"HOME": str(root / "agent home"), "PATH": os.defpath},
+                    capture_output=True,
+                    text=True,
+                    errors="replace",
+                    timeout=10,
+                )
+            finally:
+                upload_dir.chmod(0o755)
+
+        completed = run_launch_command(binary.read_bytes(), tmp_path / "pinned")
+        assert completed.returncode == 0, completed.stderr
+        installed = tmp_path / "pinned/agent home/.opencode/bin/opencode"
+        assert installed.read_bytes() == binary.read_bytes()
+        assert installed.stat().st_mode & 0o777 == 0o755
+        assert (tmp_path / "pinned/agent home/agent-started").is_file()
+
+        tampered = run_launch_command(binary.read_bytes().replace(b"echo test", b"echo evil"), tmp_path / "tampered")
+        assert tampered.returncode != 0
+        assert "SHA-256 mismatch" in tampered.stderr
+        assert not (tmp_path / "tampered/agent home/.opencode/bin/opencode").exists()
+        assert not (tmp_path / "tampered/agent home/agent-started").exists()
+
     @mark.parametrize("error_type", [TimeoutError, sandbox_io_timeout])
     async def test_ripgrep_upload_timeout_retries_at_new_path_before_agent_execution(
         self,
@@ -907,7 +1013,7 @@ class TestOpenCodeSandboxedAgent:
         sandbox = MagicMock(upload=AsyncMock(side_effect=upload))
         sandbox._handle = SandboxHandle(sandbox_id="concurrency-test-sandbox", provider_name="opensandbox", raw=None)
         sandbox.sandbox_id = "concurrency-test-sandbox"
-        tasks = [asyncio.create_task(server._stage_ripgrep(sandbox, binary)) for _ in range(3)]
+        tasks = [asyncio.create_task(server._stage_binary(sandbox, binary, name="ripgrep")) for _ in range(3)]
         try:
             await asyncio.wait_for(two_uploads_started.wait(), timeout=1)
             await asyncio.sleep(0)
@@ -2901,14 +3007,14 @@ async def test_ripgrep_queue_shares_the_existing_setup_budget(tmp_path, monkeypa
     config = TestOpenCodeSandboxedAgent()._create_config()
     config.sandbox_timeout = 60
     server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
-    server._ripgrep_upload_sem = asyncio.Semaphore(0)
+    server._binary_upload_sem = asyncio.Semaphore(0)
     sandbox = SimpleNamespace(sandbox_id="queued-sandbox", upload=AsyncMock())
     loop = asyncio.get_running_loop()
     real_time = loop.time
     elapsed = 0.0
     with monkeypatch.context() as patch:
         patch.setattr(loop, "time", lambda: real_time() + elapsed)
-        task = asyncio.create_task(server._stage_ripgrep(sandbox, binary))
+        task = asyncio.create_task(server._stage_binary(sandbox, binary, name="ripgrep"))
         await asyncio.sleep(0)
         elapsed = 61.0
         with raises(NgFailureEvent, match="setup budget") as caught:
