@@ -311,6 +311,20 @@ def test_rejects_unsafe_or_unknown_requests_without_writes(tmp_path: Path, kwarg
     assert not (tmp_path / "benchmarks").exists()
 
 
+def test_refuses_a_name_that_a_moved_manifest_still_declares(tmp_path: Path) -> None:
+    scaffold_environment(root=tmp_path, kind="benchmark", name="sample")
+    # Running it again for the manifest in its own folder is still allowed.
+    assert scaffold_environment(root=tmp_path, kind="benchmark", name="sample").existing
+    moved = tmp_path / "benchmarks" / "group" / "moved"
+    moved.parent.mkdir()
+    (tmp_path / "benchmarks" / "sample").rename(moved)
+
+    with pytest.raises(ScaffoldError, match="already declares the name 'sample'"):
+        scaffold_environment(root=tmp_path, kind="benchmark", name="sample")
+
+    assert not (tmp_path / "benchmarks" / "sample").exists()
+
+
 def test_rejects_unsafe_root_paths(tmp_path: Path) -> None:
     root_file = tmp_path / "root-file"
     root_file.write_text("occupied\n", encoding="utf-8")

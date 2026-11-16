@@ -31,6 +31,7 @@ from nemo_gym.environment.manifest import (
     Reward,
     dump_manifest,
 )
+from nemo_gym.environment.registry import declared_manifests
 
 
 _NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
@@ -148,8 +149,23 @@ def scaffold_environment(
         reused=reused,
         reward=reward,
     )
+    _require_unclaimed_name(composition.asset_dir, name)
     files = _render_manifest_composition(scaffold_root, composition)
     return _write_files(scaffold_root, composition.asset_dir, files)
+
+
+def _require_unclaimed_name(asset_dir: Path, name: str) -> None:
+    """Refuse a name that a manifest in another folder of the same catalog tree already declares.
+
+    A manifest's name is its ID and stays the same when its folder moves, so a free folder does not mean a free
+    name. Running the scaffold again for the manifest in ``asset_dir`` itself is still allowed.
+    """
+    for manifest_path, manifest in declared_manifests(asset_dir.parent):
+        if manifest.name == name and manifest_path.parent.resolve() != asset_dir.resolve():
+            raise ScaffoldError(
+                f"{manifest_path} already declares the name '{name}'. A manifest's name is its ID, "
+                "so choose another name."
+            )
 
 
 def scaffold_resources_server(

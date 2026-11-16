@@ -22,6 +22,43 @@ ASSETS = {
     "model-type": ("responses_api_models", "configs", None),
     "agent-type": ("responses_api_agents", "configs", None),
 }
+# Benchmarks and environments are catalog entries: their selectors resolve a name the way the catalog does.
+_CATALOG_FLAGS = frozenset({"benchmark", "environment"})
+
+
+def _path_candidates(tree: Path, value: str) -> list[Path]:
+    """The configs a benchmark or environment name points to as a path under one catalog tree, in lookup order."""
+    server_name, _, config_flavor = value.partition("/")
+    nested = [tree / value / "config.yaml"] if "/" in value else []
+    return [*nested, tree / server_name / f"{config_flavor or 'config'}.yaml"]
+
+
+def _catalog_configs_in_tree(tree: Path, value: str, kind: str) -> tuple[Path | None, Path | None]:
+    """The config one catalog tree resolves a name to as a catalog entry, and otherwise by its old path.
+
+    The catalog entry is what the catalog lists under the name: the manifest that declares it, or else a config the
+    catalog lists under that name and no manifest claims. Any other config at that path, such as an environment
+    flavor file, a nested benchmark config or a config that a manifest claims under another name, is returned
+    separately: it is used only when no root has a catalog entry, which keeps such paths working.
+    """
+    # Imported here so that commands that never select a benchmark or environment, such as --help, stay fast.
+    from nemo_gym.environment.manifest import ManifestError, resolve_manifest_config_path
+    from nemo_gym.environment.registry import _legacy_config_name, declared_manifests
+
+    claimed: set[Path] = set()
+    for manifest_path, manifest in declared_manifests(tree):
+        try:
+            config_path = resolve_manifest_config_path(manifest_path, manifest)
+        except ManifestError:
+            continue
+        if manifest.name == value:
+            return config_path, None
+        claimed.add(config_path)
+    candidates = [candidate for candidate in _path_candidates(tree, value) if candidate.is_file()]
+    for candidate in candidates:
+        if candidate.resolve() not in claimed and _legacy_config_name(tree, candidate, kind) == value:
+            return candidate.resolve(), None
+    return None, (candidates[0].resolve() if candidates else None)
 
 
 def asset_config_path(flag: str, value: str) -> str:
@@ -43,28 +80,23 @@ def asset_config_path(flag: str, value: str) -> str:
     roots = component_search_roots()
     matches: list[Path] = []
 
-    if "/" in value and flag in {"benchmark", "environment"}:
-        nested_matches: list[Path] = []
+    if flag in _CATALOG_FLAGS:
+        # The catalog's rule, root by root: the highest-priority root with a catalog entry for the name wins.
+        old_paths: list[Path] = []
         for root in roots:
-            candidate = root / parent / value / "config.yaml"
-            resolved = candidate.resolve()
-            if candidate.is_file() and resolved not in nested_matches:
-                nested_matches.append(resolved)
-        if nested_matches:
-            if len(nested_matches) > 1:
-                shadowed = ", ".join(f"`{path}`" for path in nested_matches[1:])
-                logger.warning(
-                    f"`--{flag} {value}` matches multiple configs; using `{nested_matches[0]}` from the "
-                    f"highest-priority root and ignoring {shadowed}. Pass `--config <path>` to select a different one."
-                )
-            return str(nested_matches[0])
-
-    for root in roots:
-        candidate = root / path
-        if candidate.exists():
-            resolved = candidate.resolve()
-            if resolved not in matches:
-                matches.append(resolved)
+            entry, old_path = _catalog_configs_in_tree(root / parent, value, flag)
+            if entry is not None and entry not in matches:
+                matches.append(entry)
+            if old_path is not None and old_path not in old_paths:
+                old_paths.append(old_path)
+        matches = matches or old_paths
+    else:
+        for root in roots:
+            candidate = root / path
+            if candidate.exists():
+                resolved = candidate.resolve()
+                if resolved not in matches:
+                    matches.append(resolved)
 
     if len(matches) > 1:
         shadowed = ", ".join(f"`{m}`" for m in matches[1:])
@@ -76,17 +108,26 @@ def asset_config_path(flag: str, value: str) -> str:
         return str(matches[0])
 
     # No match: build a "did you mean?" hint and the roots searched
-    if flag == "benchmark":
-        # Benchmarks need special handling because some use non-standard config paths (arbitrary nesting), so
-        # the generic one-level flavor/sibling search below can't see them.
-        # Enumerate their real config names (the same values `gym list benchmarks` prints) instead.
-        from nemo_gym.environment.benchmarks import _benchmark_config_name, _benchmark_config_paths
+    if flag in _CATALOG_FLAGS:
+        from nemo_gym.environment.registry import _legacy_config_paths, declared_manifests
 
-        config_names = {
-            _benchmark_config_name(p.relative_to(root / parent))
-            for root in roots
-            for p in _benchmark_config_paths(root / parent)
-        }
+        # Suggest declared IDs as well as the folder/flavor aliases that remain selectable.
+        config_names: set[str] = set()
+        for root in roots:
+            tree = root / parent
+            if not tree.is_dir():
+                continue
+            config_names.update(manifest.name for _, manifest in declared_manifests(tree))
+            config_names.update(
+                name for name, _ in _legacy_config_paths(tree, "benchmark" if flag == "benchmark" else "environment")
+            )
+            if flag == "environment":
+                # Flavor files next to an environment's config select as `<folder>/<flavor>` but are not listed.
+                config_names.update(
+                    f"{server_name}/{candidate.stem}"
+                    for candidate in (tree / server_name).glob("*.yaml")
+                    if candidate.name != "manifest.yaml"
+                )
         # A bare directory that only groups benchmarks (e.g. `livecodebench`) is not itself selectable, so point
         # at the config names under it; otherwise fall back to a fuzzy match across every token.
         under_dir = sorted(config_name for config_name in config_names if config_name.startswith(f"{value}/"))
