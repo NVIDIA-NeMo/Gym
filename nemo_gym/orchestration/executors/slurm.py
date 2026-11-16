@@ -2853,6 +2853,15 @@ class SlurmExecutor(BaseExecutor):
             for kind in kinds
         ]
         restore = f"mv -f {kept[0][0]} job.sh 2>/dev/null; mv -f {kept[0][1]} {old_config} 2>/dev/null"
+        # The collector config's exporter paths must match the job.sh they run under, so it is restored with it.
+        collector_backup = []
+        if otel_active(config):
+            collector = shlex.quote(str(collector_config_path(job_dir)))
+            kept_collector = shlex.quote(f"{collector_config_path(job_dir)}.pre-{kinds[0]}-{stamp}")
+            collector_backup = [
+                f"cp -p {collector} {kept_collector} || fail 'cannot keep the collector config before it is rendered again'"
+            ]
+            restore += f"; mv -f {kept_collector} {collector} 2>/dev/null"
         commands = [
             *(
                 command
@@ -2862,6 +2871,7 @@ class SlurmExecutor(BaseExecutor):
                     f"cp -p {old_config} {kept_config} || fail 'cannot keep the resolved config before it is rendered again'",
                 )
             ),
+            *collector_backup,
             # Restored by the exit trap below unless sbatch confirms the queued job.
             f'_gym_restore_repin() {{ [[ "$_gym_submit_confirmed" == 1 ]] || {{ {restore}; }}; }}',
             f"(umask 077; printf %s {shlex.quote(script)} > job.sh.repin) && mv -f job.sh.repin job.sh "

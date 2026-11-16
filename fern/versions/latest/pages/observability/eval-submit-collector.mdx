@@ -111,7 +111,8 @@ defaults), and the node scrapes carry `dcgm` and `node`.
 
 Telemetry is always written to `<job dir>/otel/{metrics,traces,logs}.jsonl` while the collector is enabled, so a run can be
 inspected without backend access. The collector writes them node-local and its step appends them to the job directory
-when it stops, once per Slurm job, so a resumed run's segments follow one another in the same files. The rendered
+when it stops, once per Slurm job, so a resumed run's segments follow one another in the same files. Node `/tmp` must
+hold a whole job's files: in one measured run `metrics.jsonl` alone grew by about 23 MB a minute. The rendered
 collector configuration is at `<job dir>/otel/collector.yaml`; `gym eval submit --dry-run` prints it without submitting.
 
 ## The token
