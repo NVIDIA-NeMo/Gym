@@ -24,10 +24,13 @@ from nemo_gym._public_api import lazy_exports
 if TYPE_CHECKING:
     from nemo_gym.core.episode_context import (
         current_rollout_id,
+        current_rollout_skips_token_capture,
         current_session_key,
         current_verifier_invocation_id,
         maybe_rollout_id_from_run_body,
         rollout_context,
+        skip_token_capture_context,
+        skips_token_capture,
         verifier_invocation_context,
     )
     from nemo_gym.core.episode_types import (
@@ -38,6 +41,7 @@ if TYPE_CHECKING:
         TaskId,
     )
     from nemo_gym.core.failure_kinds import (
+        AGENT_COMMAND_NOT_ALLOWED,
         AGENT_INVALID_OUTPUT,
         AGENT_LIMIT,
         AGENT_ROUTE_FAILED,
@@ -51,6 +55,7 @@ if TYPE_CHECKING:
         MODEL_CONTEXT_LIMIT,
         MODEL_POLICY_RESPONSE_TIMEOUT,
         MODEL_REQUEST_ERROR,
+        MODEL_SERVER_QUEUE_TIMEOUT,
         MODEL_TRANSPORT_ERROR,
         PROVIDER_IO_TIMEOUT,
         PROVIDER_OOM_KILLED,
@@ -176,6 +181,7 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "AGENT_COMMAND_NOT_ALLOWED": "failure_kinds",
     "MediaFile": "media",
     "UnsupportedContentError": "media",
     "split_text_and_media": "media",
@@ -216,6 +222,7 @@ _PUBLIC_API = {
     "JUDGE_UNPARSEABLE": "failure_kinds",
     "MODEL_CONTEXT_LIMIT": "failure_kinds",
     "MODEL_POLICY_RESPONSE_TIMEOUT": "failure_kinds",
+    "MODEL_SERVER_QUEUE_TIMEOUT": "failure_kinds",
     "MODEL_REQUEST_ERROR": "failure_kinds",
     "MODEL_SAMPLING_HEADER": "model_call_sampling",
     "MODEL_SAMPLING_NULL": "model_call_sampling",
@@ -292,6 +299,7 @@ _PUBLIC_API = {
     "choose_action": "outcome_policy",
     "current_model_sampling_segment": "model_call_sampling",
     "current_rollout_id": "episode_context",
+    "current_rollout_skips_token_capture": "episode_context",
     "current_session_key": "episode_context",
     "current_verifier_invocation_id": "episode_context",
     "encode_model_sampling": "model_call_sampling",
@@ -309,6 +317,8 @@ _PUBLIC_API = {
     "report_for_current_request": "failure_transport",
     "rollout_context": "episode_context",
     "sdk_error_details": "typed_exceptions",
+    "skip_token_capture_context": "episode_context",
+    "skips_token_capture": "episode_context",
     "split_tool_output_images": "tool_output_images",
     "validate_failure_kind": "failure_kinds",
     "verifier_invocation_context": "episode_context",
