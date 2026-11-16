@@ -1,0 +1,105 @@
+# Agentic-VBench training tasks on the Harbor task shape
+
+The training counterpart of [`agentic_vbench`](../agentic_vbench/README.md): generated video-editing tasks of the
+four benchmark families (Repair, Assembly, Sequencing, Repurpose) as plain Harbor task folders for the generic
+[`harbor` environment server](../../../environment_servers/harbor/README.md), run and trained with Gym's
+`opencode_agent` inside each task's own image. The entry is `type = "train"`: its rows enter a training split, and
+the 100 pinned benchmark tasks, the evaluation set, never do. The tasks themselves are not committed: the prepare
+script writes them into this folder from a task root you give it.
+
+```sh
+python -m benchmarks.agentic_vbench.prepare_harbor_env --tasks-root <root>      # writes the tasks into this folder
+gym dataset validate agentic_vbench_train --sandbox docker \
+  --config environments/harbor/agentic_vbench_train/harbor_train.yaml           # plays each task's solution/
+gym eval run agentic_vbench_train --agent opencode_agent --sandbox docker \
+  --config environments/harbor/agentic_vbench_train/harbor_train.yaml \
+  --model-type vllm_model --model <model> --model-url <url> --model-api-key <key>
+```
+
+## The task root
+
+A task root has the pinned checkout's layout: `tasks/agentic_vbench_<family>/<task>/`, each task a Harbor task
+folder of the benchmark's shape (`task.toml` with one `solve` step, `environment/Dockerfile` working in
+`/workspace`, `steps/solve/{instruction.md,tests,solution,workdir}`). Task folder names must be unique across
+families; a family folder may hold links to the tasks' real folders, which the prepare script resolves. Nothing
+pins the count or revision: `--families` selects families, and the records of what changed land under
+`.records/<task>/` as for the benchmark entry. A task whose Dockerfile starts `FROM` an image that is not on a
+registry (generated tasks share a local base such as `localhost/avb-sdg-base:1`) needs that image on the sandbox
+provider's daemon before the run builds the task images.
+
+Each task is written with the benchmark entry's adjustments (Hub judge routing for Repurpose, the assembly judge
+guard, bounded golden-asset retries and exit 75 for verifier-side outages, `/workspace/output` and
+`/workspace/materials` as the judged and repair steps' artifacts), plus `task_data.json` naming its family (typed
+by `task_data.py` beside this README) and the OpenCode compaction plugins under the step's `workdir/`.
+
+`dataset.toml` gives the verifiers the published 3x allowance (`[gym.defaults] verifier_timeout_multiplier = 3.0`,
+5400 s for a task that declares 1800 s) and leaves the agent budgets as the tasks declare them.
+
+## Training
+
+[`harbor_train.yaml`](harbor_train.yaml) is the benchmark entry's deployment overlay (the judge key as a
+verifier-only secret, separate verification of the judged and repair tasks, the episode cap, `image_input`) plus
+what training needs: training-token capture of OpenCode's model calls (the run-wide `token_id_capture` store and
+the harness's `token_id_capture: true`; see
+[Train with external agent harnesses](../../../fern/versions/latest/pages/training-tutorials/external-agent-harnesses.mdx)),
+the agent's time ceiling, and the context and output budgets OpenCode is told (`agentic_vbench_context_tokens`,
+`agentic_vbench_output_tokens`; the defaults are the Super 3.5 recipe's 49,152 and 8,192) with automatic
+compaction on. The model server must return token ids: `vllm_model_for_training.yaml`, or the training
+framework's.
+
+A NeMo RL run lists the rows and the server blocks a run of the entry generates, then this overlay:
+
+```sh
+# Once: materialize the rows and the run config (one episode runs; `--limit 0` is not a prepare).
+gym eval run agentic_vbench_train --agent opencode_agent --sandbox docker \
+  --config environments/harbor/agentic_vbench_train/harbor_train.yaml --limit 1 \
+  --model-type vllm_model --model <model> --model-url <url> --model-api-key <key>
+# results/harbor/agentic_vbench_train/tasks.jsonl and run_config_opencode_agent.yaml are written.
+```
+
+```yaml
+env:
+  should_use_nemo_gym: true
+  nemo_gym:
+    config_paths:
+      - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+      - results/harbor/agentic_vbench_train/run_config_opencode_agent.yaml
+      - environments/harbor/agentic_vbench_train/harbor_train.yaml
+      # optional: environments/harbor/agentic_vbench_train/compaction_plugins.yaml
+    sandbox: docker   # or the provider the run config names; the sandbox provider block goes in the overlay
+```
+
+NeMo RL carries its sampling values into every model call the trained agent makes and configures the capture
+store itself; the overlay's `token_id_capture` values are the local-run defaults. The harbor server resolves each
+row's task folder through the run config's taskset mapping, so the entry folder must stay where it was prepared.
+
+Per-family numbers for a run of the entry: `python -m benchmarks.agentic_vbench.family_metrics
+results/harbor/agentic_vbench_train/rollouts.jsonl --entry environments/harbor/agentic_vbench_train`.
+
+## Long episodes
+
+Two things long video-editing episodes need were validated on the internal training path and are provided here
+without new code where upstream already has them:
+
+- **Stopping the agent at its time limit.** The shared sandbox supervisor
+  (`nemo_gym/agents/utils/process_supervisor.sh`, used by every sandboxed harness session) stops the harness's
+  process group and every descendant it can reach, including OpenCode subagents and tools that detached, and
+  confirms termination before the server captures artifacts or verifies; unconfirmed termination fails the
+  episode instead of racing the verifier. The verifier therefore grades what the agent had delivered when its
+  budget ran out, never a workspace still being written.
+- **Compaction continuity**, opt-in through [`compaction_plugins.yaml`](compaction_plugins.yaml): the staged
+  OpenCode plugins put each compaction summary before the retained messages and keep the task prompt verbatim
+  across compactions, and `vllm_model` bounds the summary call's output and retries a summary it cannot use
+  (`compaction_summary_max_tokens`, `compaction_summary_max_attempts`). See
+  [`benchmarks/agentic_vbench/opencode_plugins/`](../../../benchmarks/agentic_vbench/opencode_plugins/README.md).
+
+Images with OpenCode baked in: `opencode_agent` installs OpenCode into the sandbox at session start unless
+`sandbox_executable_path` (with `sandbox_executable_sha256`) names a binary the image already holds; a task image
+built with the runtime at that path skips the download (the harness README, "Preinstalled runtime").
+
+## Validation status
+
+Unit tests cover the prepare script's task-root path, the staged plugins (node tests), the model server's summary
+recovery and the verifier-only multiplier. Not recorded yet: an oracle `gym dataset validate` of a generated task
+root through this entry, and a training-shaped rollout with token capture on against a vLLM policy; both will be
+added to this section before the entry is used for a reported run.
