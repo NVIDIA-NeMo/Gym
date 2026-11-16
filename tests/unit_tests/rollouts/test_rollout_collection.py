@@ -17,6 +17,7 @@ import gc
 import json
 import os
 import pickle
+import re
 import shutil
 import signal
 import sys
@@ -12878,6 +12879,62 @@ class TestEnvironmentServerRouting:
         with pytest.raises(ValueError, match=r"reserved for rollout collection: \['_ng_failure_terminal'\]"):
             nemo_gym.rollouts.rollout_collection._episode_record(self._episode_identity("a") | {"result": rerouted})
 
+    def test_masked_episode_result_keeps_its_failure_class_and_final_flag(self) -> None:
+        """A masked verify result may name its class and mark it final, as a flat /run reply does."""
+        result = {
+            "reward": 0.0,
+            "mask_sample": True,
+            "failure_kind": "gdpval:reference_missing",
+            NG_FAILURE_CLASS_KEY: "reference_missing",
+            NG_TERMINAL_KEY: True,
+            **_JUDGE_429_REPORT,
+        }
+
+        record = nemo_gym.rollouts.rollout_collection._episode_record(self._episode_identity("a") | {"result": result})
+
+        assert record == result | {
+            nemo_gym.rollouts.rollout_collection.NG_TASK_ID_KEY: {"taskset": "swe_pro", "task_id": "a"}
+        }
+
+    @pytest.mark.parametrize(
+        "result,reserved",
+        [
+            # Unscored is not masked: the class needs the mask.
+            (
+                {"reward": 0.0, NG_FAILURE_CLASS_KEY: "reference_missing", NG_TERMINAL_KEY: True},
+                ["_ng_failure_class", "_ng_failure_terminal"],
+            ),
+            # A mask with no class names no failure to route.
+            ({"reward": 0.0, "mask_sample": True, NG_TERMINAL_KEY: True}, ["_ng_failure_terminal"]),
+            ({"reward": 0.0, "mask_sample": "true", NG_FAILURE_CLASS_KEY: "reference_missing"}, ["_ng_failure_class"]),
+            # A judge class keeps needing the judge form, whose kind names a judge failure.
+            (
+                {
+                    "reward": 0.0,
+                    "mask_sample": True,
+                    "failure_kind": "provider_unavailable",
+                    NG_FAILURE_CLASS_KEY: "judge_failed",
+                    NG_TERMINAL_KEY: True,
+                },
+                ["_ng_failure_class", "_ng_failure_terminal"],
+            ),
+            # The mask opens only the failure keys, never other collector keys.
+            (
+                {
+                    "reward": 0.0,
+                    "mask_sample": True,
+                    NG_FAILURE_CLASS_KEY: "reference_missing",
+                    NG_NO_PERSIST_KEY: True,
+                },
+                [NG_NO_PERSIST_KEY],
+            ),
+        ],
+        ids=["unmasked", "no class", "mask not a bool", "judge class", "other collector key"],
+    )
+    def test_masked_failure_form_needs_a_mask_and_a_class(self, result: dict, reserved: list[str]) -> None:
+        with pytest.raises(ValueError, match=re.escape(f"reserved for rollout collection: {reserved}")):
+            nemo_gym.rollouts.rollout_collection._episode_record(self._episode_identity("a") | {"result": result})
+
     def test_episode_failure_with_a_kind_keeps_its_legacy_class(self) -> None:
         """The kind is the class; environment_server_failed stays as the legacy class selectors already match."""
         failure = {"failure_reason": "Seed failed", "terminal": False, "failure_kind": "provider_unavailable"}
@@ -13452,6 +13509,82 @@ class TestEnvironmentServerRouting:
         await RolloutCollectionHelper().run_from_config(config(resume=True))
         # A judge failure has no agent regeneration path, even when its answer is absent.
         assert sorted(dispatched) == [("seed", 1)]
+
+    @pytest.mark.parametrize("route_failures", [False, True])
+    async def test_masked_episode_result_is_routed_by_its_class_and_final_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route_failures: bool
+    ) -> None:
+        """A verifier's masked failure collects from a typed episode as it does from a flat /run reply.
+
+        GDPVal reports a task it cannot judge this way. Both rows keep their class in the failures file; resume
+        runs the nonfinal one again and leaves the final one.
+        """
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_bytes(
+            b"".join(
+                orjson.dumps(self._materialized_row() | {"task_id": {"taskset": "swe_pro", "task_id": task}}) + b"\n"
+                for task in ("final", "retry", "ok")
+            )
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        dispatched: list[tuple[str, int]] = []
+
+        def masked(failure_class: str, **final: bool) -> dict:
+            return {
+                "reward": 0.0,
+                "mask_sample": True,
+                "failure_kind": f"gdpval:{failure_class}",
+                "response": {"id": "resp-1", "output": []},
+                NG_FAILURE_CLASS_KEY: failure_class,
+                **final,
+            }
+
+        async def post(server_name: str, url_path: str, json, **kwargs):
+            if url_path == "/run":
+                task, attempt = json["task"]["task_id"]["task_id"], json["episode_id"]["attempt"]
+                dispatched.append((task, attempt))
+                identity = {"episode_id": json["episode_id"], "task_id": json["task"]["task_id"]}
+                if (task, attempt) == ("final", 0):
+                    result = masked("reference_missing", **{NG_TERMINAL_KEY: True})
+                elif (task, attempt) == ("retry", 0):
+                    result = masked("eval_missing")
+                else:
+                    result = {"reward": 1.0, "response": {}}
+                return FakeResponse(200, identity | {"failure": None, "result": result})
+            assert url_path == "/aggregate_metrics"
+            return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
+
+        client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        client.global_config_dict = self._mixed_batch_config()
+
+        def config(resume: bool) -> RolloutCollectionConfig:
+            return RolloutCollectionConfig(
+                input_jsonl_fpath=str(input_jsonl_fpath),
+                output_jsonl_fpath=str(output_jsonl_fpath),
+                environment_server_routes={"swe_pro": "environment"},
+                resume_from_cache=resume,
+                disable_health_check=True,
+                route_failures_to_sidecar=route_failures,
+            )
+
+        await RolloutCollectionHelper().run_from_config(config(resume=False))
+
+        failures = {
+            row[nemo_gym.rollouts.rollout_collection.NG_TASK_ID_KEY]["task_id"]: row
+            for row in map(orjson.loads, _failures_path_for(output_jsonl_fpath).read_bytes().splitlines())
+        }
+        assert set(failures) == {"final", "retry"}
+        for task, failure_class in (("final", "reference_missing"), ("retry", "eval_missing")):
+            # As from a flat reply: the kind becomes the class, and selectors still match the producer's class.
+            assert failures[task][NG_FAILURE_CLASS_KEY] == f"gdpval:{failure_class}"
+            assert failures[task]["_ng_failure_legacy_class"] == failure_class
+            assert matches_failure_class(failures[task], [failure_class])
+        assert failures["final"]["_ng_failure_record"]["failure"]["terminal"] is True
+        assert failures["retry"]["_ng_failure_record"]["failure"]["terminal"] is False
+
+        dispatched.clear()
+        await RolloutCollectionHelper().run_from_config(config(resume=True))
+        assert dispatched == [("retry", 1)]
 
 
 class TestMultiAgentEnvironmentServers:
