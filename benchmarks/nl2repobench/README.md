@@ -32,6 +32,9 @@ Four targets ship vendored inside pip or setuptools in their images (six, tenaci
 
 On vahid_1016 tasks the guard identifiers come from the clone URL in `test_commands.json`; upstream tasks have no clone URL, so `block_target_v2` falls back to the task id there (the egress deny rules still apply).
 
+## Long runs: client timeout
+The shared aiohttp client has no total or read timeout by default, so a peer that accepts a connection and never answers (a stuck proxy hop) hangs the caller. For long NL2RepoBench runs, bound it by adding `+global_aiohttp_client_timeout_s=7200` to the launch command (or `global_aiohttp_client_timeout_s: 7200` to `env.yaml`). Under heavy load per-request generation can drop to ~11-30 tok/s, so 600 s cut off healthy long generations; 7200 s has worked.
+
 ## Combinations and status (what has actually been run)
 - **Verified-50** x {opencode, OpenHands} x {`block_target_v2`, `no_internet_preinstalled`}: full runs (Lightning final, 4 SFT checkpoints, Qwen3.8-27B); `block_target_v2` results were regraded with the final verifier.
 - **75-task legacy** testset: opencode and OpenHands under `block_target` / `block_target_v2` / `no_internet_preinstalled` (graded with the old verifier; superseded).

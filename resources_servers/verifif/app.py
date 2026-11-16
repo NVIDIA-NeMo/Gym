@@ -34,15 +34,16 @@ from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple
 from fastapi import FastAPI
 from pydantic import BaseModel, Field, ValidationError
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import NeMoGymAsyncOpenAI
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.judge import JudgeError
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import JudgeError
 
 
 # Per-request collector for judge failures. A ContextVar is shared by reference
@@ -299,8 +300,6 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
     fast rule-based validators and async LLM-as-a-judge validators.
     """
 
-    ray_enabled = False
-
     config: TuringVIFResourcesServerConfig
     _judge_client: Optional[NeMoGymAsyncOpenAI] = None
     _definition_cache: Dict[Tuple[str, str], Tuple[str, bool]] = {}
@@ -336,7 +335,7 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
             api_key = self.config.judge_api_key or getattr(self.config, "policy_api_key", "")
 
             if self.config.judge_server_name:
-                from nemo_gym.server_utils import get_server_url
+                from nemo_gym.client import get_server_url
 
                 base_url = get_server_url(self.config.judge_server_name) + "/v1"
             else:
@@ -941,3 +940,6 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     TuringVIFResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = TuringVIFResourcesServer.run_webserver()  # noqa: F401

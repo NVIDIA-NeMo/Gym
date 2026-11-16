@@ -1,0 +1,54 @@
+# EnterpriseOps-Gym resources server: starts each task's gym servers in sandboxes, serves the task's tools and runs
+# its SQL verifiers. benchmarks/enterpriseops_gym/config.yaml pairs it with the Stirrup agent; see its README.
+enterpriseops_gym_resources_server:
+  resources_servers:
+    enterpriseops_gym:
+      # The agent runs in the task's first sandbox, which only a sandboxed harness can use.
+      allowed_agents: [stirrup_agent]
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      # Names a top-level provider block such as nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml.
+      sandbox_provider: sandbox
+      sandbox_config:
+        # Covers the agent's episode, which runs in the task's first sandbox. Without a TTL the OpenSandbox SDK
+        # expires a sandbox 10 minutes after creation.
+        ttl_s: 14400
+        env:
+          # execd otherwise waits 1 s after every command.
+          EXECD_API_GRACE_SHUTDOWN: 50ms
+        resources: {cpu: 2, memory_mib: 4096}
+      # Task database dumps from ServiceNow/EnterpriseOps-Gym (Apache-2.0), unchanged since its first commit.
+      seed_archive_url: https://raw.githubusercontent.com/ServiceNow/EnterpriseOps-Gym/271f2c357f763376997dfd16807fcde2474ae41b/gym_dbs.zip
+      seed_archive_sha256: d947543d4fba1aabc4aade73d3df955114187b7a94da7ac825c4c31169ddab47  # pragma: allowlist secret
+      # The upstream gym server images (amd64), pinned by digest. A deployment that mirrors them maps the names with
+      # the sandbox provider's image rewrites.
+      gym_images:
+        gym-calendar:
+          image: docker.io/shivakrishnareddyma225/enterpriseops-gym-mcp-calendar@sha256:994c5421a6dd065861bc7f813a177f6d408875e9df60fe8d012959bc4510da02  # pragma: allowlist secret
+          command: [python, -m, uvicorn, --app-dir, /app, main:app, --host, 0.0.0.0, --port, "8003"]
+          port: 8003
+        sn-csm-server:
+          image: docker.io/shivakrishnareddyma225/enterpriseops-gym-mcp-csm@sha256:eaa456ac9aa85728426e7d3813a0bbca0949d6a8695be30e26f03894e6e6b189  # pragma: allowlist secret
+          command: [python, -m, uvicorn, --app-dir, /app, main:app, --host, 0.0.0.0, --port, "8005"]
+          port: 8005
+        gym-google-drive-mcp:
+          image: docker.io/shivakrishnareddyma225/enterpriseops-gym-mcp-drive@sha256:3475962fcf6da7675e194dbf138de01fa3e96134a302ad47316e4111a5e63f32  # pragma: allowlist secret
+          command: [python, -m, uvicorn, --app-dir, /app, app.main:app, --host, 0.0.0.0, --port, "8005"]
+          port: 8005
+        gym-email-mcp:
+          image: docker.io/shivakrishnareddyma225/enterpriseops-gym-mcp-email@sha256:69c2081fe4ab0962b86233f9fb52b307b8ad0019f6746ba64ce75851036201cd  # pragma: allowlist secret
+          command: [python, -m, uvicorn, --app-dir, /app, main:app, --host, 0.0.0.0, --port, "8005"]
+          port: 8005
+        sn-hr-internal:
+          image: docker.io/shivakrishnareddyma225/enterpriseops-gym-mcp-hr@sha256:1ea1c1d64d4be35e8062e56f00b8318e9e6c09289cfa56bcfd0595bfa59ac64d  # pragma: allowlist secret
+          command: [python, -m, uvicorn, --app-dir, /app, main:app, --host, 0.0.0.0, --port, "8005"]
+          port: 8005
+        gym-itsm-mcp:
+          image: docker.io/shivakrishnareddyma225/enterpriseops-gym-mcp-itsm@sha256:a234ae3fb7cee196ba25e6b9957969dea829919b6e8271dddae128f065aaf39f  # pragma: allowlist secret
+          command: [python, -m, uvicorn, --app-dir, /app, main:app, --host, 0.0.0.0, --port, "8005"]
+          port: 8005
+        gym-teams-mcp:
+          image: docker.io/shivakrishnareddyma225/enterpriseops-gym-mcp-teams@sha256:602655e46f6501885540c36dc9b12114cb173c75063d7f25c17ed0652695fa78  # pragma: allowlist secret
+          command: [python, -m, uvicorn, --app-dir, /app, main:app, --host, 0.0.0.0, --port, "8005"]
+          port: 8005

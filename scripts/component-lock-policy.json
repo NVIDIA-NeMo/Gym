@@ -1,0 +1,192 @@
+{
+  "environment_servers/nemo_user_sim": {
+    "override-dependencies": [
+      "pyarrow>=25.0.1,<26"
+    ]
+  },
+  "resources_servers/code_fim": {
+    "override-dependencies": [
+      "pathspec"
+    ]
+  },
+  "resources_servers/conversational_tool_use_simulation": {
+    "override-dependencies": [
+      "pathspec"
+    ]
+  },
+  "resources_servers/gdpval": {
+    "include-dependencies": [
+      "cryptography"
+    ]
+  },
+  "resources_servers/longmt_eval": {
+    "constraint-dependencies": [
+      "transformers>=4.17,<5"
+    ],
+    "override-dependencies": [
+      "torchvision==0.27.0",
+      "protobuf==6.33.6"
+    ]
+  },
+  "resources_servers/nemo_user_sim": {
+    "override-dependencies": [
+      "pyarrow>=25.0.1,<26"
+    ]
+  },
+  "resources_servers/osworld": {
+    "exclude-dependencies": [
+      "opencv-python",
+      "opencv-contrib-python",
+      "agp-client"
+    ],
+    "include-dependencies": [
+      "cryptography",
+      "flask",
+      "blinker",
+      "werkzeug"
+    ],
+    "override-dependencies": [
+      "opencv-python-headless~=4.10.0.84",
+      "Pillow>=12,<13",
+      "matplotlib>=3.10,<3.11",
+      "torch>=2.11,<2.12",
+      "pathspec",
+      "transformers>=5.17.0,<6",
+      "torchvision==0.26.0"
+    ]
+  },
+  "resources_servers/terminal_bench_4": {
+    "override-dependencies": [
+      "pathspec"
+    ]
+  },
+  "resources_servers/toolsandbox": {
+    "override-dependencies": [
+      "pycountry"
+    ]
+  },
+  "resources_servers/vlm_eval_kit": {
+    "override-dependencies": [
+      "opencv-python>=4.7.0.72",
+      "decord2>=3.0.0",
+      "torchvision",
+      "pathspec"
+    ]
+  },
+  "resources_servers/wmt_translation": {
+    "constraint-dependencies": [
+      "transformers>=4.17,<5"
+    ],
+    "override-dependencies": [
+      "torchvision==0.27.0",
+      "protobuf==6.33.6"
+    ]
+  },
+  "responses_api_agents/agentic_mme_agent": {
+    "override-dependencies": [
+      "opencv-python-headless>=4.10"
+    ]
+  },
+  "responses_api_agents/harbor_agent": {
+    "override-dependencies": [
+      "pathspec"
+    ]
+  },
+  "responses_api_agents/harbor_agent_general": {
+    "override-dependencies": [
+      "pathspec",
+      "litellm<1.106",
+      "cryptography>=45,<51"
+    ]
+  },
+  "responses_api_agents/miniswe_sandboxed_agent": {
+    "override-dependencies": [
+      "wcwidth>=0.2.13",
+      "pathspec"
+    ]
+  },
+  "responses_api_agents/nemo_fabric_agent": {
+    "override-dependencies": [
+      "openai==2.45.0",
+      "pyjwt==2.15.1",
+      "certifi>=2026.10.19"
+    ]
+  },
+  "responses_api_agents/nooa_agent": {
+    "override-dependencies": [
+      "openai==2.45.0"
+    ]
+  },
+  "responses_api_agents/osworld_agent": {
+    "exclude-dependencies": [
+      "agp-client",
+      "azure-identity",
+      "azure-mgmt-compute",
+      "azure-mgmt-network",
+      "alibabacloud-ecs20140526",
+      "alibabacloud-tea-openapi",
+      "alibabacloud-tea-util",
+      "volcengine-python-sdk",
+      "paddleocr",
+      "paddlepaddle"
+    ],
+    "override-dependencies": [
+      "grpcio-status==1.71.2",
+      "protobuf==5.29.6",
+      "torch==2.11.0",
+      "matplotlib==3.10.6",
+      "pillow==12.3.0",
+      "opencv-python; sys_platform == 'never'",
+      "opencv-contrib-python; sys_platform == 'never'",
+      "transformers>=5.17.0,<6"
+    ]
+  },
+  "responses_api_agents/simple_strands_agent": {
+    "override-dependencies": [
+      "numpy==2.3.2",
+      "openai==2.45.0",
+      "pyarrow>=25.0.1"
+    ]
+  },
+  "responses_api_agents/stirrup_agent": {
+    "override-dependencies": [
+      "pillow==12.3.0"
+    ]
+  },
+  "responses_api_agents/swe_agents": {
+    "override-dependencies": [
+      "gprof2dot"
+    ]
+  },
+  "responses_api_models/genrm_model": {
+    "constraint-dependencies": [
+      "prometheus-fastapi-instrumentator>=8.0.2"
+    ],
+    "override-dependencies": [
+      "pathspec"
+    ]
+  },
+  "responses_api_models/local_vllm_model": {
+    "constraint-dependencies": [
+      "prometheus-fastapi-instrumentator>=8.0.2"
+    ],
+    "override-dependencies": [
+      "pathspec"
+    ]
+  },
+  "responses_api_models/switchyard_model": {
+    "override-dependencies": [
+      "pathspec"
+    ]
+  },
+  "responses_api_models/vllm_model": {
+    "override-dependencies": [
+      "pathspec"
+    ]
+  },
+  "responses_api_models/vllm_model_with_compaction": {
+    "override-dependencies": [
+      "pathspec"
+    ]
+  }
+}

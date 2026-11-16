@@ -4,16 +4,20 @@ description: "Evaluate an agent service you host yourself — a composition of O
 position: 3
 ---
 
-# Drive a Remote Agent
-
 The `remote_agent` server lets an agent that runs as **its own HTTP service** — in your repo, on
 your infrastructure — be driven by standard rollout collection. Your service implements an
 endpoint **compliant with the OpenAI `/v1/responses` contract**, and the two servers compose as
 Responses-speaking agents: each call your service receives the conversation so far and returns
 what it wants to do next. Gym runs the loop, executes environment tools, holds the session, and
 verifies.
-Your results land in the standard artifacts (`gym eval profile`, aggregation, and training
-pipelines all work unchanged).
+Your results land in the standard rollout artifacts, so `gym eval profile` and aggregation work unchanged.
+
+<Info>
+**Use Remote Agent to score an agent that you already run, without rewriting it.** Gym treats the service as a black box: it sees what each `/v1/responses` call returns, not the model calls or tool executions inside it.
+
+- **You get:** rewards from the benchmark's verifier, Gym-hosted environment tools, and the standard rollout artifacts.
+- **You do not get:** model-call capture, a task sandbox (your service cannot reach one), Harbor task folders (they need a harness that works in the task's sandbox), or policy training, which needs the token IDs and logprobs of every model call. To get these, [build an Agent Server adapter](/main/agent-server/add-or-update-a-harness). See [Choose a Path](/main/agent-server#choose-a-path) to compare the options.
+</Info>
 
 ```
 collector ──/run──▶ remote_agent (Gym) ──POST /v1/responses──▶ your service ⟲ your model,
@@ -274,7 +278,7 @@ knob involved.
   metrics are then empty, with a warning).
 - **A previous run's output can be reused as the input dataset** (for example, re-running the
   tasks in a failures sidecar). Output rows carry the old run's results (`reward`, `response`,
-  `error`, internal `_ng_*` flags); those fields are stripped from each row on the way in, so a
+  `error`, `timeouts`, internal `_ng_*` flags); those fields are stripped from each row on the way in, so a
   stale result can't collide with or leak into the new run's output.
 - **Exposing your service on the public internet needs network-level trust.** Gym sends no
   credential on the `/v1/responses` call (`agent_base_url` rejects embedded credentials), so an

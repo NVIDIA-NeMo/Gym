@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.client import SESSION_ID_KEY
 from resources_servers.swebench_pro.app import SWEBenchProInstanceRequest, SWEBenchProSeedSessionRequest
 from resources_servers.swebench_pro.tests.test_app import make_server, request_body
 from resources_servers.swebench_pro.verification import VerificationResult, inconclusive_reason
@@ -39,7 +39,7 @@ async def test_close_and_reseed_do_not_forget_failed_cleanup():
     server._create_sandbox = AsyncMock()
     request = SimpleNamespace(session={SESSION_ID_KEY: "session"})
     for operation in (
-        lambda: server.close_session(request),
+        lambda: server.close_resources_session(request),
         lambda: server.seed_session(request, SWEBenchProSeedSessionRequest.model_validate(request_body())),
     ):
         with pytest.raises(OSError, match="stop failed"):
@@ -47,7 +47,7 @@ async def test_close_and_reseed_do_not_forget_failed_cleanup():
         assert server._session_id_to_sandbox["session"] is sandbox
         server._create_sandbox.assert_not_awaited()
     sandbox.stop.side_effect = None
-    assert await server.close_session(request) == {"closed": True}
+    assert await server.close_resources_session(request) == {"closed": True}
     assert not server._session_id_to_sandbox
 
 

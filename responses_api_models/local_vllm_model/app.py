@@ -13,69 +13,49 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import os
-import sys
 from argparse import Namespace
 from pathlib import Path
 from time import sleep
-from typing import Any, ClassVar, Dict, List, Optional, Tuple, Union
+from typing import ClassVar, Dict, Tuple
 
 import ray
 import requests
-from pydantic import BaseModel, Field
 from ray import available_resources, cluster_resources
 from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from requests.exceptions import ConnectionError
-from vllm.entrypoints.openai.api_server import (
-    FlexibleArgumentParser,
-    cli_env_setup,
-    make_arg_parser,
-    validate_parsed_serve_args,
-)
 
-from nemo_gym.global_config import (
+
+try:
+    # vLLM 0.29 moved the OpenAI server entry points from vllm.entrypoints.openai.api_server to
+    # vllm.entrypoints.launchers; the old module is a deprecated shim that no longer exports these.
+    from vllm.entrypoints.launchers.cli_args import make_arg_parser, validate_parsed_serve_args
+    from vllm.entrypoints.serve.utils.api_utils import cli_env_setup
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+except ImportError:  # Older vLLM, such as the macOS pin in setup.py.
+    from vllm.entrypoints.openai.api_server import (
+        FlexibleArgumentParser,
+        cli_env_setup,
+        make_arg_parser,
+        validate_parsed_serve_args,
+    )
+
+from nemo_gym.config import (
     DISALLOWED_PORTS_KEY_NAME,
     find_open_port,
     get_global_config_dict,
     get_hf_token,
 )
 from responses_api_models.local_vllm_model.local_vllm_model_actor import LocalVLLMModelActor
-from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
-
-
-class LocalVLLMModelConfig(VLLMModelConfig):
-    # We inherit these configs from VLLMModelConfig, but they are set to optional since they will be set later on after we spin up a model endpoint.
-    base_url: Union[str, List[str]] = Field(default_factory=list)
-    # Not used on local deployments
-    api_key: str = "dummy"  # pragma: allowlist secret
-
-    hf_home: Optional[str] = None
-    vllm_serve_kwargs: Dict[str, Any]
-    vllm_serve_env_vars: Dict[str, str]
-
-    ray_worker_py_executable: str = sys.executable
-
-    show_vllm_engine_stats: bool = False
-    debug: bool = False
-
-    def model_post_init(self, context):
-        # Default to the .cache/huggingface in this directory.
-        if not self.hf_home:
-            current_directory = Path.cwd()
-            self.hf_home = str(current_directory / ".cache" / "huggingface")
-
-        return super().model_post_init(context)
-
-
-class GetInnerVLLMConfigResponse(BaseModel):
-    base_url: List[str]
-    api_key: str
-    model: str
+from responses_api_models.local_vllm_model.server_config import GetInnerVLLMConfigResponse, LocalVLLMModelConfig
+from responses_api_models.vllm_model.app import VLLMModel
 
 
 class LocalVLLMModel(VLLMModel):
     ray_enabled = True
-    non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset({("GET", "/get_inner_vllm_config")})
+    non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = VLLMModel.non_generating_model_routes | {
+        ("GET", "/get_inner_vllm_config")
+    }
     config: LocalVLLMModelConfig
 
     _local_vllm_model_actor: LocalVLLMModelActor
@@ -207,7 +187,9 @@ Environment variables: {env_vars_to_print}""")
         return head_node_placement_group
 
     def start_vllm_server(self) -> None:
-        # If base_url is already set, skip local launch — connect to external server.
+        # If base_url is already set, skip the local launch and connect to the external server.
+        # This process still joins Ray, because Gym decides from the class's ray_enabled, not from base_url.
+        # external_app.py serves this case without Ray.
         if self.config.base_url:
             print(f"External base_url configured: {self.config.base_url}. Skipping local vLLM launch.")
             self._post_init()

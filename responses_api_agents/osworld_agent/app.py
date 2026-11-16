@@ -35,25 +35,34 @@ from typing import Any, Callable, Dict, List, Literal, Mapping, Optional
 
 import ray
 from fastapi import Body
-from pydantic import ConfigDict, Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from nemo_gym.base_resources_server import (
-    BaseRunRequest,
-    BaseVerifyResponse,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_first_server_config_dict
+from nemo_gym.core import (
+    MODEL_CONTEXT_LIMIT,
+    MODEL_POLICY_RESPONSE_TIMEOUT,
+    MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
+    FailureReportRow,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseUsage,
+    NgFailureEvent,
+    accumulate_response_usage,
+    failure_report_for,
 )
+from nemo_gym.core.failure_kinds import INFRASTRUCTURE_ERROR
+from nemo_gym.models import chat_completion_usage_to_response_usage
 from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.server_utils import (
-    get_first_server_config_dict,
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyResponse,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.osworld_agent.agent_contract import (
     ResolvedAgentContract,
     assert_train_eval_parity,
@@ -372,7 +381,7 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     ray_task_resources: Dict[str, float] = Field(default_factory=dict)
     docker_port_lock_timeout: float = Field(default=300.0, gt=0)  # concurrent Docker VM port allocation
     evaluator_disable_gpu: bool = True
-    reward_mode: Literal["binary", "raw"] = "binary"
+    reward_mode: Literal["binary", "raw", "signed_v1"] = "binary"  # see reward_modes.py
     runner_name: str = DEFAULT_RUNNER_NAME
     action_space: Optional[str] = None
     observation_type: Optional[str] = None
@@ -567,6 +576,32 @@ def _build_policy_openai_client(*, base_url: str, api_key: str):
     )
 
 
+class _PolicyUsage:
+    """Sum of the usage on the policy-model responses that Gym's own model callers receive.
+
+    A finished response whose usage is missing or malformed makes the sum unknown: a subtotal of the other calls must
+    not read as the rollout's total (rollout-evidence.mdx).
+    """
+
+    def __init__(self) -> None:
+        self.total: Optional[NeMoGymResponseUsage] = None
+        self.complete = True
+
+    def add(self, response: Any) -> None:
+        try:
+            usage = chat_completion_usage_to_response_usage(getattr(response, "usage", None))
+        except ValidationError:
+            # A malformed usage block is unknown usage, not a reason to fail the policy call.
+            usage = None
+        if usage is None:
+            self.complete = False
+        self.total = accumulate_response_usage(self.total, usage)
+
+    def reported(self) -> Optional[NeMoGymResponseUsage]:
+        """The summed usage, or ``None`` when any finished response's usage was lost or no call was seen."""
+        return self.total if self.complete else None
+
+
 # Imported lazily by ``_run_osworld_task_remote`` so this module imports
 # cleanly without OSWorld installed.
 def _build_model_fn(
@@ -579,6 +614,7 @@ def _build_model_fn(
     top_p: Optional[float],
     model_timeout_s: float = 900.0,
     log_context: Optional[Mapping[str, Any]] = None,
+    policy_usage: Optional[_PolicyUsage] = None,
 ) -> Callable[[str, str, List[Dict[str, Any]]], str]:
     """Return a sync ``model_fn`` that hits a Gym vLLM/OpenAI-compatible model.
 
@@ -658,6 +694,8 @@ def _build_model_fn(
             if isinstance(exc, APITimeoutError):
                 raise OSWorldModelTimeoutError(f"policy model call exceeded {model_timeout_s:g}s") from exc
             raise
+        if policy_usage is not None:
+            policy_usage.add(resp)
         return resp.choices[0].message.content or ""
 
     return _call
@@ -671,6 +709,7 @@ def _build_messages_model_fn(
     model_timeout_s: float = 900.0,
     log_context: Optional[Mapping[str, Any]] = None,
     rollout_purpose: Optional[Literal["training", "evaluation"]] = None,
+    policy_usage: Optional[_PolicyUsage] = None,
 ):
     """Return a sync model caller for native OSWorld agents.
 
@@ -767,6 +806,9 @@ def _build_messages_model_fn(
             if isinstance(exc, APITimeoutError):
                 raise OSWorldModelTimeoutError(f"policy model call exceeded {model_timeout_s:g}s") from exc
             raise
+        # The response finished, so its tokens count even if it is rejected below.
+        if policy_usage is not None:
+            policy_usage.add(resp)
         choice = resp.choices[0]
         finish_reason_error = None
         if payload.get("_nemo_gym_require_stop") and choice.finish_reason not in {"stop", "tool_calls"}:
@@ -783,6 +825,7 @@ def _build_messages_model_fn(
             )
             if structured_response and isinstance(normalized, dict):
                 normalized["finish_reason"] = choice.finish_reason
+                _record_served_response_id(normalized, resp)
             return normalized
 
         normalization_error = None
@@ -795,6 +838,7 @@ def _build_messages_model_fn(
             )
             if structured_response and isinstance(normalized, dict):
                 normalized["finish_reason"] = choice.finish_reason
+                _record_served_response_id(normalized, resp)
         except Exception as exc:  # noqa: BLE001 - log raw output before preserving the original error.
             normalization_exc = exc
             normalization_error = {"type": type(exc).__name__, "message": repr(exc)}
@@ -826,6 +870,19 @@ def _build_messages_model_fn(
         return normalized
 
     return _call
+
+
+def _record_served_response_id(normalized: Dict[str, Any], resp: Any) -> None:
+    """Keep the served Chat envelope id beside one structured model response.
+
+    Token capture keys each captured call by this id. Returning it lets the
+    agent name its scored call (``terminal_response_id``) without inventing
+    an identity the model server never served.
+    """
+
+    response_id = getattr(resp, "id", None)
+    if isinstance(response_id, str) and response_id:
+        normalized["response_id"] = response_id
 
 
 def _recover_first_fenced_action(content: str) -> str | None:
@@ -1098,6 +1155,7 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
     rollout_purpose = runner_kwargs.pop("rollout_purpose", None)
     log_context = _normalize_log_context(runner_kwargs.pop("log_context", None))
     print(f"OSWORLD_CHILD_PURPOSE|purpose={rollout_purpose}|temperature={temperature}|top_p={top_p}", flush=True)
+    policy_usage = _PolicyUsage()
     model_fn = _build_model_fn(
         base_url=base_url,
         model_name=model_name,
@@ -1107,6 +1165,7 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
         top_p=top_p,
         model_timeout_s=model_timeout,
         log_context=log_context,
+        policy_usage=policy_usage,
     )
     messages_model_fn = _build_messages_model_fn(
         base_url=base_url,
@@ -1115,6 +1174,7 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
         model_timeout_s=model_timeout,
         log_context=log_context,
         rollout_purpose=rollout_purpose,
+        policy_usage=policy_usage,
     )
     result = run_osworld_task(
         task_config,
@@ -1143,6 +1203,11 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
         "artifact_dir": result.artifact_dir,
         "termination_reason": result.termination_reason,
         "agent_contract": result.agent_contract,
+        # Set only by the built-in rollout; a runner's own result type need not have it.
+        "sandbox_start_failure": getattr(result, "sandbox_start_failure", None),
+        # Only Gym's model callers see usage. m3_agent and pointer_agent call models through their own clients, so
+        # their usage stays unknown (None).
+        "usage": usage.model_dump(mode="json") if (usage := policy_usage.reported()) is not None else None,
         "steps": [
             {
                 "step": s.step,
@@ -1301,7 +1366,12 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
             metadata = body.verifier_metadata or {}
             task_config = metadata.get("osworld_task") or (body.model_extra or {}).get("osworld_task")
             if not task_config:
-                return _empty_response(body, error="No 'osworld_task' provided in verifier_metadata.")
+                # A row without a task spec is a configuration refusal, not an infrastructure failure to retry.
+                return _empty_response(
+                    body,
+                    error="No 'osworld_task' provided in verifier_metadata.",
+                    termination_reason="task_configuration_error",
+                )
 
             try:
                 requires_proxy = task_requires_proxy(task_config)
@@ -1574,6 +1644,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                         LOG.exception("Failed to cancel timed-out OSWorld Ray task")
                 error = f"task_timeout exceeded ({self.config.task_timeout}s) during end-to-end rollout"
                 LOG.error("OSWorld rollout timed out: %s", error)
+                # The child's usage never comes back, so the row's usage stays unknown (None), not zero.
                 return _empty_response(
                     body,
                     error=error,
@@ -1584,6 +1655,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 )
             except Exception as exc:  # noqa: BLE001
                 LOG.exception("OSWorld rollout failed")
+                # As for a timeout: the failed worker's usage is lost, so the row's usage stays unknown (None).
                 return _empty_response(body, error=f"{type(exc).__name__}: {exc}")
 
             # These values are owned by the current request, not the Ray
@@ -1602,6 +1674,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 max_trajectory_length=self.config.max_trajectory_length,
                 max_output_tokens=max_tokens,
                 exact_trace_transport_version=self.config.exact_trace_transport_version,
+                served_call_output=self._token_id_capture_enabled(),
             )
 
 
@@ -1669,8 +1742,16 @@ def _build_response(
     max_trajectory_length: Optional[int] = None,
     max_output_tokens: Optional[int] = None,
     exact_trace_transport_version: Literal[2, 3] = 2,
+    served_call_output: bool = False,
 ) -> OSWorldVerifyResponse:
-    """Pack one run without changing its prompt policy for training consumers."""
+    """Pack one run without changing its prompt policy for training consumers.
+
+    ``served_call_output`` is set when training-token capture owns the token
+    evidence. The model server then withholds token arrays from the agent, so
+    exact-trace output is unavailable; the returned history instead carries
+    accepted generations verbatim. Complete call evidence still includes
+    rejected attempts, independently of training selection.
+    """
 
     steps = result.get("steps", [])
     if not isinstance(steps, list):
@@ -1749,6 +1830,11 @@ def _build_response(
             # training evidence. The full projected prompts and their duplicate
             # generation arrays are validation/debug data, not transport data.
             trajectory_fields.pop("trajectory_model_calls", None)
+    terminal_response_id: Optional[str] = None
+    if served_call_output and not capabilities["exact_model_call_evidence"] and model_calls:
+        # An empty accepted history is meaningful; never replace it with
+        # parser-normalized step text that cannot identify captured calls.
+        output, terminal_response_id = _served_model_call_output(model_calls)
 
     response_dict: Dict[str, Any] = {
         "id": f"osworld-{(body.verifier_metadata or {}).get('task_id', 'unknown')}",
@@ -1761,6 +1847,7 @@ def _build_response(
         "tools": [],
         "temperature": temperature,
         "top_p": top_p,
+        "usage": result.get("usage"),
         **trajectory_fields,
         **exact_fields,
     }
@@ -1808,7 +1895,199 @@ def _build_response(
         "verifier_metadata": metadata,
         **runtime_admission,
     }
+    if terminal_response_id is not None:
+        # Names the scored (last) generation by the id the model server served.
+        response_fields["terminal_response_id"] = terminal_response_id
+    # A refused rollout is a typed failure row: an infrastructure cause retries, a failed policy call is the model's.
+    response_fields |= _admission_failure_fields(result, runtime_admission)
+    sandbox_start_failure = result.get("sandbox_start_failure")
+    if isinstance(sandbox_start_failure, Mapping):
+        response_fields |= _sandbox_start_failure_fields(result.get("error"), sandbox_start_failure)
     return OSWorldVerifyResponse(**response_fields)
+
+
+def _served_model_call_output(
+    model_calls: List[Dict[str, Any]],
+) -> tuple[List[Dict[str, Any]], Optional[str]]:
+    """Return accepted served generations and the last observed served call ID.
+
+    Capture fingerprints the content the model server served, which keeps the
+    reasoning inline as ``<think>...</think>``. Step text strips that reasoning
+    and omits parser-retry calls, so it cannot identify captured calls.
+
+    Missing responses and empty served content (such as a local context-overflow
+    reply) provide no usable returned-content witness. Both are skipped; the
+    capture ledger independently records what ran. Rejected calls remain in
+    trajectory evidence but not in accepted history. The terminal still names
+    the last observed non-empty served response,
+    even when rejected. A returned-history consumer must reject an absent
+    terminal or missing selected parent, not silently select another call;
+    an explicit all-captured policy may include rejected calls.
+    """
+
+    output: List[Dict[str, Any]] = []
+    terminal_response_id: Optional[str] = None
+    terminal_accepted = True
+    for model_call in model_calls:
+        response = model_call.get("response")
+        if not isinstance(response, Mapping):
+            continue
+        raw_content = response.get("raw_content")
+        if not isinstance(raw_content, str) or not raw_content:
+            continue
+        response_id = response.get("response_id")
+        terminal_response_id = response_id if isinstance(response_id, str) and response_id else None
+        terminal_accepted = model_call.get("accepted") is True
+        if not terminal_accepted:
+            continue
+        output.append(
+            {
+                "id": f"msg-call-{model_call['turn_id']}",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "annotations": [], "text": raw_content}],
+            }
+        )
+    if not terminal_accepted and terminal_response_id is None:
+        raise ValueError("Rejected terminal call has no served response_id; cannot attribute the captured reward")
+    return output, terminal_response_id
+
+
+# Runtime-admission reasons the policy did not cause: the row is a retryable ``infrastructure_error``. A sandbox guest
+# that never became ready has its own typed fields (``_sandbox_start_failure_fields``); a configuration refusal (a
+# task without a spec, a proxy that is required but disabled or misconfigured) is typed ``CONFIGURATION_ERROR``
+# without a failure event, since a retry would meet the same configuration.
+_INFRASTRUCTURE_ADMISSION_REASONS = frozenset(
+    {
+        "timeout",
+        "task_timeout",
+        "action_timeout",
+        "evaluator_error",
+        "proxy_setup_error",
+        "rollout_error",
+        "rollout_state_incomplete",
+        "evaluation_incomplete",
+    }
+)
+# Runtime-admission reasons that refuse a rollout because its configuration is wrong. They are typed, but not as an
+# ``infrastructure_error``: a retry would meet the same configuration.
+_CONFIGURATION_ADMISSION_REASONS = frozenset(
+    {"task_configuration_error", "proxy_configuration_error", "proxy_required_but_disabled"}
+)
+CONFIGURATION_ERROR = "osworld_agent:configuration_error"
+# Runtime-admission reasons a failed policy call caused: the row is a model failure of the kind the call shows.
+_MODEL_ADMISSION_REASONS = frozenset({"model_call_failed", "model_timeout"})
+_HTTP_STATUS_IN_ERROR = re.compile(r"(?:Error code|status(?:_code)?)[:= ]+\s*(\d{3})\b")
+
+
+def _model_failure_kind(reason: str, error: str) -> tuple[str, Optional[int]]:
+    """The failure kind of the policy call the runtime refused a rollout for, and the HTTP status it recorded.
+
+    A call that exceeded the agent's model timeout is the policy's response timeout; a request the server rejected
+    for its length is a context-window limit; any other HTTP reply is a request error with its status; a call that
+    never got a reply is a transport error.
+    """
+    from responses_api_agents.osworld_agent.adapter_agents import classify_model_failure  # noqa: PLC0415
+
+    if reason == "model_timeout":
+        return MODEL_POLICY_RESPONSE_TIMEOUT, None
+    match = _HTTP_STATUS_IN_ERROR.search(error)
+    status = int(match.group(1)) if match is not None and 100 <= int(match.group(1)) <= 599 else None
+    if classify_model_failure(RuntimeError(error), model_call_completed=False) == "context_overflow":
+        return MODEL_CONTEXT_LIMIT, status
+    return (MODEL_REQUEST_ERROR if status is not None else MODEL_TRANSPORT_ERROR), status
+
+
+def _admission_failure_fields(result: Mapping[str, Any], runtime_admission: Mapping[str, Any]) -> Dict[str, Any]:
+    """The typed failure of a rollout that runtime admission refused for an infrastructure or policy-call cause.
+
+    The reason used to live only in ``verifier_metadata``, so the row was a masked result that nothing graded again
+    or retried. An infrastructure cause (a task or action timeout, a failed evaluator, a proxy that did not come up,
+    a crashed or errored rollout, a runner that recorded no terminal state) is an ``infrastructure_error`` with an
+    agent failure event, so the row reaches the failures sidecar and the default retry; a failed policy call is a
+    model failure of the kind the call shows (``_model_failure_kind``). Reward and mask stay as they are, so no score
+    changes. A configuration refusal is typed ``osworld_agent:configuration_error`` without a failure event, so it is
+    not retried. Legacy results are left as they were.
+    """
+    if (
+        runtime_admission["runtime_eligible"]
+        or runtime_admission["runtime_admission_policy_id"] == LEGACY_RUNTIME_ADMISSION_POLICY_ID
+    ):
+        return {}
+    reason = str(runtime_admission["runtime_admission_reason"])
+    error = str(result.get("error") or "").strip()
+    detail = error.splitlines()[0][:1500] if error else "no error recorded"
+    if reason in _MODEL_ADMISSION_REASONS:
+        kind, http_status = _model_failure_kind(reason, error)
+        event = NgFailureEvent(
+            boundary="agent",
+            failure_kind=kind,
+            failure_reason=f"OSWorld policy call failed ({reason}): {detail}"[:2000],
+            http_status=http_status,
+            operation="agent.policy_request",
+            stage="agent",
+        )
+    elif reason in _INFRASTRUCTURE_ADMISSION_REASONS:
+        event = NgFailureEvent(
+            boundary="agent",
+            failure_kind=INFRASTRUCTURE_ERROR,
+            failure_reason=f"OSWorld runtime admission refused the rollout ({reason}): {detail}"[:2000],
+            operation=f"osworld.{reason}",
+            stage="agent",
+        )
+    elif reason in _CONFIGURATION_ADMISSION_REASONS:
+        # No failure event and no failure class: the row stays out of the failures sidecar and its retry.
+        return {
+            "failure_kind": CONFIGURATION_ERROR,
+            "failure_reason": f"OSWorld refused the rollout ({reason}): {detail}"[:2000],
+        }
+    else:
+        return {}
+    return {
+        "failure_kind": event.failure_kind,
+        "failure_reason": event.failure_reason,
+        "_ng_failure_class": event.failure_kind,
+        **FailureReportRow.fields(failure_report_for(event)),
+    }
+
+
+def _sandbox_start_failure_fields(error: Optional[str], failure: Mapping[str, Any]) -> Dict[str, Any]:
+    """Report a sandbox guest that never became ready as a retryable ``infrastructure_error``.
+
+    The row goes to the failures sidecar, so recovery runs the task again within the run's retry budget. Its reward
+    stays 0.0 and it stays masked, so no score changes. The event carries the guest's last HTTP status and the
+    sandbox id (its operation id), and the reason names the sandbox provider.
+    """
+    provider = str(failure.get("provider") or "unknown")
+    status = failure.get("http_status")
+    http_status = status if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599 else None
+    message = failure.get("message")
+    lines = (error or "").strip().splitlines()
+    if isinstance(message, str) and message.strip():
+        cause = f"TimeoutError: {message.strip()}"
+    else:
+        cause = lines[0] if lines else "the guest did not become ready"
+    reason = f"OSWorld sandbox start failed on provider={provider}: {cause}"[:2000]
+    sandbox_id = failure.get("sandbox_id") if isinstance(failure.get("sandbox_id"), str) else None
+    event = NgFailureEvent(
+        boundary="agent",
+        failure_kind="infrastructure_error",
+        failure_reason=reason,
+        http_status=http_status,
+        operation="osworld.sandbox_start",
+        operation_id=sandbox_id[:128] if sandbox_id else None,
+        stage="agent",
+    )
+    return {
+        "failure_kind": "infrastructure_error",
+        "failure_reason": reason,
+        "sandbox_provider": provider,
+        "sandbox_http_status": http_status,
+        "sandbox_id": sandbox_id,
+        "_ng_failure_class": "infrastructure_error",
+        **FailureReportRow.fields(failure_report_for(event)),
+    }
 
 
 def _empty_response(
@@ -1863,11 +2142,44 @@ def _empty_response(
         "runtime_admission_policy_id": outcome.runtime_admission_policy_id,
         "mask_sample": outcome.mask_sample,
     }
+    response_fields |= _admission_failure_fields(
+        {"error": error},
+        {
+            "runtime_eligible": outcome.runtime_eligible,
+            "runtime_admission_reason": outcome.runtime_admission_reason,
+            "runtime_admission_policy_id": outcome.runtime_admission_policy_id,
+        },
+    )
     return OSWorldVerifyResponse(**response_fields)
 
 
 if __name__ == "__main__":
-    from responses_api_agents.osworld_agent.runtime_dependencies import require_optional_runtime_dependencies
+    import subprocess
+
+    from responses_api_agents.osworld_agent.runtime_dependencies import (
+        require_optional_runtime_dependencies,
+        validate_optional_runtime_dependencies,
+    )
+
+    # Opt-in: with OSWORLD_AGENT_INSTALL_OPTIONAL_RUNTIME_DEPS=1 the agent runs its own
+    # explicit installer once when the optional runtime dependencies are missing, then
+    # re-executes itself so the fresh packages are imported. Without the opt-in the
+    # behaviour is unchanged: a missing dependency fails startup with the remediation
+    # command. The marker env var prevents a loop if the installer leaves a gap.
+    _install_flag = "OSWORLD_AGENT_INSTALL_OPTIONAL_RUNTIME_DEPS"
+    _attempt_marker = "_OSWORLD_AGENT_OPTIONAL_RUNTIME_DEPS_ATTEMPTED"
+    if os.environ.get(_install_flag) == "1" and os.environ.get(_attempt_marker) != "1":
+        if validate_optional_runtime_dependencies():
+            installer = Path(__file__).resolve().with_name("install_optional_runtime_deps.sh")
+            print(
+                f"[osworld_agent] optional runtime dependencies missing; running {installer} on {sys.prefix}",
+                flush=True,
+            )
+            subprocess.run(["bash", str(installer), sys.prefix], check=True)
+            os.execve(sys.executable, [sys.executable, *sys.argv], {**os.environ, _attempt_marker: "1"})
 
     require_optional_runtime_dependencies()
     OSWorldAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = OSWorldAgent.run_webserver()  # noqa: F401

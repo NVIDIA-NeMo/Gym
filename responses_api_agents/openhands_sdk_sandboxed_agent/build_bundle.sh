@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 # Build the offline OpenHands bundle (standalone Python 3.12.14 + openhands-sdk/tools 1.50.0 + static tmux 3.7b) used by
 # openhands_sdk_sandboxed_agent when `bundle_path` is set. Needed for agent_network_mode=no_internet_preinstalled (the per-task images are
 # python:3.11-slim without tmux and have no egress) AND for block_target_v2 (that guard blocks `python -m venv`, which the pip-install path needs).

@@ -1,13 +1,13 @@
 name: litmus-bench
-version: 0.1.0
+version: 0.2.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
 domain: knowledge
-description: Pinned Litmus-Bench v0.1 test split with rendered chemistry questions
-  and exact-answer verification.
+description: Litmus-Bench held-out molecular-property and ADME questions, scored
+  with per-question answer extraction and comparison rules.
 modality: text
-licensing: CC-BY-4.0
+licensing: CC-BY-SA-4.0 AND LicenseRef-OpenMDW-1.1
 authors:
 - Dane
 reward:

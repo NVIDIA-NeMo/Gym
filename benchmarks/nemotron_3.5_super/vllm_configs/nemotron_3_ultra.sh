@@ -1,78 +1,53 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
 
-# Nemotron 3 Ultra BF16 configuration for disaggregated prefill/decode on
-# 4-GPU GB200 nodes. Each tier uses four coupled data-parallel ranks so expert
-# parallelism can shard the 512 experts over 16 GPUs. Launch this config with
-# VLLM_PD_DEPLOYMENT_MODE=coupled and VLLM_SLURM_SEGMENT=4.
+GYM_MODEL_PARAMS=(
+    "++model_endpoint_readiness_timeout_seconds=1200"
+    "++policy_model.responses_api_models.vllm_model.sampling_overrides.temperature=1.0"
+    "++policy_model.responses_api_models.vllm_model.sampling_overrides.top_p=0.95"
+)
 
-# Both tiers use piecewise CUDA graphs with graph-owned inputs and MTP3.
-# Settings are fixed in this recipe; asynchronous scheduling is prefill-only.
-
-# Mamba state transfers require the dimension-sequence layout.
+# Nemotron's three-read Mamba SSM state must use the dimension-sequence layout when KV transfer is enabled.
+# Not used when the model has no Mamba layers.
 export VLLM_SSM_CONV_STATE_LAYOUT=DS
-# The V1 model runner provides higher decode throughput for Ultra.
+
+# @bxyu-nvidia: V2 model runner is the new default in vLLM 0.29.0, but it has quite a large speed regression
 export VLLM_USE_V2_MODEL_RUNNER=0
 
-# Ultra uses the GB200 InfiniBand interface and NCCL's default configuration.
-# Recipe settings override the shared launcher's communication defaults.
-export UCX_TLS=rc_x,rc,cuda_copy,cuda_ipc
-export UCX_NET_DEVICES=mlx5_0:1
-export UCX_IB_ADDR_TYPE=eth
-unset NCCL_CUMEM_ENABLE NCCL_MNNVL_ENABLE NCCL_NVLS_ENABLE
-
-# Standard safetensors loading avoided the InstantTensor io_uring failures seen
-# against the Lustre-hosted checkpoint.
-export SAFETENSORS_FAST_GPU=1
-
+# @bxyu-nvidia: `--skip-mm-profiling` Is needed to get Super VL checkpoint working, even with text benchmarks
 VLLM_COMMON_ARGS=(
-    --disable-uvicorn-access-log
     --trust-remote-code
-    --dtype bfloat16
+    --disable-uvicorn-access-log
+    --gpu-memory-utilization 0.85
     --distributed-executor-backend mp
     --data-parallel-backend mp
-    --max-model-len 262144
     --enable-auto-tool-choice
     --tool-call-parser qwen3_coder
     --reasoning-parser nemotron_v3
     --enable-chunked-prefill
+    --enable-prefix-caching
+    --max-model-len 262144
     --kv-cache-dtype fp8
     --no-disable-hybrid-kv-cache-manager
     --block-size 128
     --mamba-cache-mode align
-    --mamba-ssm-cache-dtype float16
-    --mamba-backend flashinfer
-    --enable-mamba-cache-stochastic-rounding
-    --mamba-cache-philox-rounds 5
+    --mamba-ssm-cache-dtype float32
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'
-    --load-format safetensors
     --enable-expert-parallel
-    --distributed-timeout-seconds 3600
-    --enable-prefix-caching
-    # Both tiers need the same speculative width for compatible cache layouts.
-    --speculative-config '{"method":"mtp","num_speculative_tokens":3}'
+    --skip-mm-profiling
+    --data-parallel-size 1
+    --data-parallel-size-local 1
+    --tensor-parallel-size 4
+    --api-server-count 1
 )
-
 VLLM_PREFILL_ARGS=(
-    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
-    --gpu-memory-utilization 0.90
-    --max-num-batched-tokens 16384
-    --max-num-seqs 64
-    --data-parallel-size-local 1
-    --tensor-parallel-size 4
-    --async-scheduling
-    --compilation-config '{"cudagraph_mode":"PIECEWISE","cudagraph_copy_inputs":true,"pass_config":{"fuse_allreduce_rms":false}}'
+    --max-cudagraph-capture-size 1200
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"kv_lease_duration":180}}'
+    --max-num-batched-tokens 33920
+    --max-num-seqs 128
 )
-
 VLLM_DECODE_ARGS=(
-    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}'
-    --compilation-config '{"cudagraph_mode":"PIECEWISE","cudagraph_copy_inputs":true,"cudagraph_capture_sizes":
-      [1,2,3,4,5,8,10,12,15,16,20,24,25,28,30,32,35,40,45,50,55,60,65,70,75,80,128,256,512],"pass_config":{"fuse_allreduce_rms":false}}'
-    --gpu-memory-utilization 0.95
-    --max-num-batched-tokens 8192
-    --max-num-seqs 64
-    --data-parallel-size-local 1
-    --tensor-parallel-size 4
-    --no-async-scheduling
+    --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail","kv_connector_extra_config":{"kv_lease_duration":180}}'
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+    --max-num-batched-tokens 33920
+    --max-num-seqs 128
 )

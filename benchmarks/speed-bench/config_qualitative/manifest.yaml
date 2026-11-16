@@ -24,7 +24,7 @@ datasets:
 - name: speed_bench_qualitative
   type: benchmark
   jsonl_fpath: benchmarks/speed-bench/data/speed_bench_qualitative_benchmark.jsonl
-  prepare_script: benchmarks/speed-bench/prepare.py
+  prepare_script: benchmarks/speed-bench/prepare_qualitative.py
   num_repeats: 1
 model_server: policy_model
 canonical_split: test

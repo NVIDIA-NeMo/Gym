@@ -1,5 +1,20 @@
 # Harbor Terminus 2 Agent
 
+> [!WARNING]
+> **The legacy `/run` path is deprecated.** With `resources_server` set, as in the benchmark presets
+> (for example [`benchmarks/terminal_bench_2_1/terminus_2.yaml`](../../benchmarks/terminal_bench_2_1/terminus_2.yaml)),
+> this agent runs each episode through its own `/run` behind a `legacy_agent` environment server.
+> That path will be removed after the environment-server migration, and the agent logs a deprecation
+> warning when it starts with a `resources_server`. Do not build new benchmarks, agents or configs on it.
+>
+> Episode sessions under an environment server are not deprecated: Harbor task folders run this agent
+> that way (`gym eval run <tasks> --agent terminus_2_sandboxed_agent`; see the
+> [`harbor` environment server](../../environment_servers/harbor/README.md)). Terminal Bench 2.1 runs that way from
+> its Harbor task folders (`gym eval run terminal_bench_2_1 --agent terminus_2_sandboxed_agent`; see
+> [`environments/harbor/terminal_bench_2_1`](../../environments/harbor/terminal_bench_2_1/README.md)). For other benchmarks, use a
+> session-capable harness such as `pi_agent`, `codex_agent`, `opencode_agent` or `openclaw_agent`; see
+> [Choose a harness](../../benchmarks/terminal_bench_2_1/README.md#choose-a-harness).
+
 This agent runs Harbor's `Terminus2` control loop in the task sandbox supplied by
 the NeMo Gym resources server. It adapts the small Harbor environment interface
 that Terminus uses (`exec` and `is_dir`) to `AsyncSandbox`; task state therefore
@@ -30,6 +45,19 @@ The agent calls the configured model server exclusively through the Responses
 API. Its returned response contains every model request and response from the
 Terminus trajectory. Set `dump_trajectory: true` to also have Harbor write its
 per-turn JSON trajectory files; it is `false` by default.
+
+Use standalone tmux key names such as `C-c` for control keys. The agent accepts
+an accidental trailing newline on a standalone key and reports the correction.
+On Linux terminals with signal handling enabled, Ctrl-C drains pending input
+until it becomes quiet before delivering the interrupt, allowing cancellation
+behind a long queued paste. The drain fails explicitly if input remains busy
+for five seconds. Raw applications retain their own Ctrl-C handling.
+
+If the interactive shell exits, the agent preserves its final output and starts
+a fresh shell. Files remain, while shell variables, options, and the working
+directory reset. The model receives a notice before continuing; pending input
+and the rest of the previous command batch are discarded. A missing tmux session
+is reported as a failure.
 
 ## Tmux binary: online or pre-staged
 

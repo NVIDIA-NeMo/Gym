@@ -25,11 +25,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
-from nemo_gym.rollout_correlation import rollout_context
+from nemo_gym.core.episode_context import rollout_context
 from nemo_gym.telemetry import metrics as telemetry_metrics
 from nemo_gym.telemetry import setup as telemetry_setup
 from nemo_gym.telemetry.endpoints import (
     ROLLOUT_ID_ATTRIBUTE,
+    ROLLOUT_REWARD_ATTRIBUTE,
     traced_endpoint,
     traced_rollout_endpoint,
     traced_verify_endpoint,
@@ -65,10 +66,10 @@ def recorded_spans(monkeypatch, enabled_groups):
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     tracer = provider.get_tracer("test")
 
-    # managed_span falls back to the *global* tracer, so point it at ours for the duration.
+    # managed_span falls back to Lens's cached default tracer, so point that lookup at ours.
     import nemo.lens.helpers as lens_helpers
 
-    monkeypatch.setattr(lens_helpers.trace, "get_tracer", lambda *a, **k: tracer)
+    monkeypatch.setattr(lens_helpers, "get_tracer", lambda *a, **k: tracer)
     return exporter.get_finished_spans
 
 
@@ -258,7 +259,7 @@ async def test_verify_records_a_failure_when_the_handler_raises(enabled_groups, 
     assert recorded_metrics == [("verify", False)]
 
 
-async def test_verify_records_nothing_when_the_group_is_disabled(recorded_metrics):
+async def test_verify_records_nothing_without_the_group_or_a_metrics_exporter(recorded_metrics):
     async def verify():
         return {}
 
@@ -286,7 +287,7 @@ async def test_rollout_duration_is_recorded_even_when_the_rollout_fails(enabled_
     assert [name for name, _ in recorded_metrics] == ["rollout"]
 
 
-async def test_rollout_endpoint_records_nothing_when_disabled(recorded_metrics):
+async def test_rollout_endpoint_records_nothing_without_the_group_or_a_metrics_exporter(recorded_metrics):
     async def run():
         return {}
 
@@ -294,6 +295,71 @@ async def test_rollout_endpoint_records_nothing_when_disabled(recorded_metrics):
     assert recorded_metrics == []
 
 
+async def test_metrics_follow_the_exporter_when_every_span_group_is_off(recorded_metrics, monkeypatch):
+    """Span groups choose spans only.
+
+    The default preset leaves `verify` off, and verification is still measured.
+    """
+    from nemo.lens.state import is_span_group_enabled as lens_is_span_group_enabled
+
+    monkeypatch.setattr(telemetry_setup, "_METRICS_EXPORTING", True)
+    assert not lens_is_span_group_enabled(GymSpanGroup.VERIFY)
+
+    async def verify():
+        return {"reward": 1.0}
+
+    async def run():
+        return {}
+
+    await traced_verify_endpoint(verify)()
+    await traced_rollout_endpoint(run)()
+    assert [name for name, _ in recorded_metrics] == ["verify", "rollout"]
+
+
 def test_telemetry_handle_is_not_required(recorded_metrics):
     """The wrappers must be safe on a process that never initialised telemetry."""
     assert telemetry_setup.get_telemetry() is None
+
+
+# --------------------------------------------------------------------------- #
+# Reward on the verify span
+# --------------------------------------------------------------------------- #
+
+
+class _VerifyResponse(BaseModel):
+    reward: float
+    mask_sample: bool = False
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        pytest.param(_VerifyResponse(reward=0.25), 0.25, id="response model"),
+        pytest.param({"reward": 1}, 1.0, id="mapping"),
+        pytest.param(_VerifyResponse(reward=0.0), 0.0, id="a zero is a measured reward"),
+        pytest.param(_VerifyResponse(reward=0.0, mask_sample=True), None, id="masked"),
+        pytest.param({"reward": True}, None, id="boolean"),
+        pytest.param({"reward": float("nan")}, None, id="not finite"),
+        pytest.param({"passed": False}, None, id="no reward"),
+    ],
+)
+async def test_verify_span_carries_a_measured_reward_only(recorded_spans, result, expected):
+    async def verify():
+        return result
+
+    assert await traced_verify_endpoint(verify)() is result
+
+    (span,) = recorded_spans()
+    assert span.attributes.get(ROLLOUT_REWARD_ATTRIBUTE) == expected
+
+
+async def test_verify_span_has_no_reward_for_the_judge_failsafe_response(recorded_spans):
+    from fastapi.responses import JSONResponse
+
+    async def verify():
+        return JSONResponse(content={"reward": 0.0, "mask_sample": True})
+
+    await traced_verify_endpoint(verify)()
+
+    (span,) = recorded_spans()
+    assert ROLLOUT_REWARD_ATTRIBUTE not in span.attributes

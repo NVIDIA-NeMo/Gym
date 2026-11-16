@@ -62,22 +62,23 @@ import regex  # noqa: F401
 from fastapi import FastAPI
 from pydantic import ConfigDict, PrivateAttr
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
-)
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, call_judge
-from nemo_gym.openai_utils import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.server_runtime import (
+    BaseResourcesServerConfig,
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+)
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import JUDGE_FAILURES, JudgeError, call_judge, is_judge_failure
 
 
 LOG = logging.getLogger(__name__)
@@ -664,7 +665,6 @@ class RoleMRCVerifyResponse(BaseVerifyResponse):
 
 
 class RoleMRCResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: RoleMRCResourcesServerConfig
 
     _judge_semaphore: Any = PrivateAttr(default=None)
@@ -761,11 +761,14 @@ class RoleMRCResourcesServer(SimpleResourcesServer):
         aspect_scores: Dict[str, int] = {}
         bad: List[str] = []
         errors: List[str] = []
+        causes: List[Exception] = []
         text: Optional[str] = None
         for aspect_name, prompt in prompts:
             text, error = await self._call_judge(aspect_name, prompt)
             if error is not None:
                 errors.append(f"{aspect_name} ({error})")
+                if isinstance(error, Exception):
+                    causes.append(error)
                 aspect_scores[aspect_name] = 0
                 bad.append(aspect_name)
                 continue
@@ -797,7 +800,10 @@ class RoleMRCResourcesServer(SimpleResourcesServer):
         )
         # A judge call error is a judge failure, not a low score from averaging unscored aspects as 0.
         if errors:
-            raise JudgeError(f"judge call failed for aspect(s): {'; '.join(errors)}")
+            failure = JudgeError(f"judge call failed for aspect(s): {'; '.join(errors)}")
+            if causes:
+                raise failure from causes[0]
+            raise failure
         return result
 
     def _judge_payload(self, prompt: str) -> Dict[str, Any]:
@@ -817,10 +823,10 @@ class RoleMRCResourcesServer(SimpleResourcesServer):
         payload = params.model_dump(exclude_unset=True, mode="json")
         return {k: v for k, v in payload.items() if v is not None}
 
-    async def _call_judge(self, aspect_name: str, prompt: str) -> Tuple[Optional[str], Optional[str]]:
+    async def _call_judge(self, aspect_name: str, prompt: str) -> Tuple[Optional[str], Optional[str | Exception]]:
         """One judge call for a single aspect.
 
-        Returns ``(text, error)``; exactly one is set. The error string is
+        Returns ``(text, error)``; exactly one is set. The error is
         propagated to the caller rather than only logged, so a judge outage says
         *why* in the row's failure record instead of just naming the aspect.
         """
@@ -837,9 +843,11 @@ class RoleMRCResourcesServer(SimpleResourcesServer):
                     json=self._judge_payload(prompt),
                     response_model=response_model,
                 )
-        except JudgeError as exc:  # retry-by-aspect is intentional
+        except JUDGE_FAILURES as exc:  # retry-by-aspect is intentional
+            if not is_judge_failure(exc):
+                raise
             LOG.warning("RoleMRC judge[%s] call failed: %s", aspect_name, exc, exc_info=True)
-            return None, str(exc)
+            return None, exc
         if isinstance(judge_response, NeMoGymChatCompletion):
             choices = judge_response.choices or []
             raw = (choices[0].message.content if choices else None) or ""
@@ -913,3 +921,6 @@ class RoleMRCResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     RoleMRCResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = RoleMRCResourcesServer.run_webserver()  # noqa: F401

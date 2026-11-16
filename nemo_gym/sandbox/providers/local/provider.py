@@ -98,7 +98,7 @@ class LocalProvider:
         timeout_s: int | float | None = None,
         user: str | int | None = None,
     ) -> SandboxExecResult:
-        """Own session, so a timeout kills the whole process tree."""
+        """Kill the process group on timeout or cancellation."""
         if user is not None:
             raise ValueError("The local sandbox provider cannot run commands as another user")
         inst = handle.raw
@@ -116,11 +116,14 @@ class LocalProvider:
             )
             try:
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-            except (TimeoutError, asyncio.TimeoutError):
+            except (TimeoutError, asyncio.TimeoutError, asyncio.CancelledError) as exc:
                 with contextlib.suppress(ProcessLookupError):
-                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                    # start_new_session makes the PID the group ID, even after the shell exits.
+                    os.killpg(process.pid, signal.SIGKILL)
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(process.wait(), timeout=REAP_TIMEOUT_S)
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
                 return SandboxExecResult(
                     stdout=None,
                     stderr=f"local command timed out after {timeout:g}s",
@@ -133,6 +136,10 @@ class LocalProvider:
             return_code=process.returncode,
             error_type=None,
         )
+
+    def uploads_independent_of_execs(self) -> bool:
+        # Uploads copy in a worker thread; only commands take the exec semaphore.
+        return True
 
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
         target = Path(target_path)

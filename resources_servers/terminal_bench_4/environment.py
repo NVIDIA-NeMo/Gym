@@ -9,31 +9,92 @@ import math
 import os
 import shlex
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path, PurePosixPath
+from string import Formatter
 from time import monotonic
 from typing import Any, Literal
+from uuid import uuid4
 
 import yaml
-from pydantic import Field
+from pydantic import Field, PositiveFloat, PositiveInt, model_validator
 
+from nemo_gym.config import get_global_config_dict
 from nemo_gym.sandbox import (
+    PLACEMENT_GROUP_KEY,
     AsyncSandbox,
     AsyncSandboxCompose,
     SandboxResources,
     SandboxSpec,
+    SupportsSandboxNetwork,
+    get_provider_class,
     resolve_provider_config,
     resolve_provider_metadata,
     rewrite_image,
 )
-from resources_servers.terminal_bench_4.compose_config import resolve_compose
-from resources_servers.terminal_bench_4.task import Settings, resolve_env
+from resources_servers.terminal_bench_4.compose_config import merge_patch, prebuilt_compose, resolve_compose
+from resources_servers.terminal_bench_4.task import Settings, Task, resolve_env
+
+
+ImageRole = Literal["agent", "verifier", "service"]
+
+
+class TaskImageMap(Settings):
+    agent: str | None = None
+    verifier: str | None = None
+    # Compose services that the package builds from a Dockerfile, by service name.
+    services: dict[str, str] = Field(default_factory=dict)
+
+
+class TaskImages(Settings):
+    """Prebuilt images for packages that declare no ``docker_image`` for a role.
+
+    Templates accept ``{org}``, ``{task}`` (short task name), and ``{digest}``
+    (the task package's SHA256 without its prefix), with optional format specs
+    such as ``{digest:.12}``. The ``service`` template, for Compose services
+    built from a Dockerfile, also accepts ``{service}``. ``by_task`` maps short
+    task names to explicit per-role images (``services`` by service name) and
+    takes precedence over the templates. An image declared by the package
+    itself always wins.
+    """
+
+    agent: str | None = None
+    verifier: str | None = None
+    service: str | None = None
+    by_task: dict[str, TaskImageMap] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_templates(self) -> "TaskImages":
+        for role in ("agent", "verifier", "service"):
+            template = getattr(self, role)
+            if template is None:
+                continue
+            allowed = {"org", "task", "digest"} | ({"service"} if role == "service" else set())
+            try:
+                fields = {field for _, field, _, _ in Formatter().parse(template) if field is not None}
+                if fields - allowed:
+                    raise ValueError(f"unsupported fields {sorted(fields - allowed)}")
+                template.format(org="org", task="task", digest="0" * 64, service="service")
+            except ValueError as exc:
+                raise ValueError(f"Invalid task image template {template!r}: {exc}") from exc
+        return self
+
+    def resolve(self, task: Task, role: ImageRole, service: str | None = None) -> str | None:
+        org, _, short_name = task.name.partition("/")
+        images = self.by_task.get(short_name, TaskImageMap())
+        explicit = images.services.get(service) if role == "service" else getattr(images, role)
+        template = getattr(self, role)
+        if explicit is not None or template is None:
+            return explicit
+        return template.format(org=org, task=short_name, digest=task.ref.removeprefix("sha256:"), service=service)
 
 
 class EnvironmentConfig(Settings):
     cpu_enforcement_policy: Literal["limit"]
     memory_enforcement_policy: Literal["limit"]
-    sandbox_provider: dict[str, Any]
+    # An inline single-key provider block, or the name of a top-level sandbox block that a provider config defines,
+    # as in DeepSWE's "sandbox_provider: sandbox".
+    sandbox_provider: str | dict[str, Any]
     sandbox_metadata: dict[str, str]
     sandbox_provider_options: dict[str, Any]
     sandbox_env: dict[str, str]
@@ -41,6 +102,12 @@ class EnvironmentConfig(Settings):
     sandbox_request_gpu_type: bool
     sandbox_split_endpoints: bool
     compose_image_configs: Path | None
+    # Compose service settings (or ``networks``) that the deployment cannot
+    # enforce and that are removed instead of rejected.
+    compose_ignored_settings: list[str] = Field(default_factory=list)
+    # Short task name -> Compose service -> JSON merge patch (RFC 7396) for that service in the agent
+    # environment's generated Compose YAML: mappings merge and a null value removes the setting.
+    compose_service_overrides: dict[str, dict[str, dict[str, Any]]] = Field(default_factory=dict)
     sandbox_ttl_s: float = Field(gt=0)
     sandbox_ready_timeout_s: float = Field(gt=0)
     default_exec_timeout_s: float = Field(gt=0)
@@ -49,6 +116,59 @@ class EnvironmentConfig(Settings):
     workdir: str | None
     efs_logs_host_path: str | None
     efs_logs_init_image: str
+    task_images: TaskImages = Field(default_factory=TaskImages)
+    # A separate verifier environment that declares no cpus/memory_mb gets the agent environment's
+    # values instead of the provider default. Harbor leaves them unset (no limit on Docker).
+    verifier_resources_from_agent: bool = False
+    # Short task name -> verifier timeout (seconds) replacing the package's [verifier].timeout_sec.
+    verifier_timeout_overrides: dict[str, PositiveFloat] = Field(default_factory=dict)
+    # Raises a role's disk limit (ephemeral-storage) to at least this many GiB; the declared
+    # storage_mb stays its request. Docker, where Harbor runs, enforces no storage limit, while
+    # OpenSandbox evicts the whole sandbox once it writes past its limit.
+    sandbox_min_disk_gib: PositiveInt | None = None
+
+    def verifier_timeout_sec(self, task: Task) -> float:
+        return self.verifier_timeout_overrides.get(task.name.split("/")[-1], task.config.verifier.timeout_sec)
+
+    def require_exec_limit_covers(self, task_name: str, verifier_timeout_sec: float) -> None:
+        """Reject a verifier budget longer than the per-command limit that ``test.sh`` runs under.
+
+        Otherwise the sandbox could end the verifier command inside its budget, and the sandbox reports no evidence of
+        that, so the missing reward would read as the task's own zero. An equal limit is supported: the verifier's
+        budget starts before ``test.sh`` is submitted, so it always expires first.
+        """
+        if self.default_exec_timeout_s < verifier_timeout_sec:
+            raise ExecLimitConfigurationError(
+                f"{task_name}: environment.default_exec_timeout_s ({self.default_exec_timeout_s:g} s) is shorter than "
+                f"the verifier budget ({verifier_timeout_sec:g} s) and could end the verifier command early. Set "
+                f"environment.default_exec_timeout_s to at least {verifier_timeout_sec:g}."
+            )
+
+
+class ExecLimitConfigurationError(ValueError):
+    """A configuration that cannot verify a task within its official verifier budget."""
+
+
+class ProviderCapabilityError(ValueError):
+    """A task needs something the selected sandbox provider cannot offer.
+
+    Retrying cannot help, so the attempt ends as a final infrastructure failure, never as a model zero, before any
+    sandbox starts under the wrong policy.
+    """
+
+
+def resolve_environment_provider(sandbox_provider: str | dict[str, Any]) -> dict[str, Any]:
+    """The provider block of an environment: an inline block as is, a named reference from the global config.
+
+    A reference keeps the block's default_metadata, so the result reads like an inline block.
+    """
+    if not isinstance(sandbox_provider, str):
+        return deepcopy(sandbox_provider)
+    named = get_global_config_dict()
+    return deepcopy(
+        resolve_provider_config(sandbox_provider, named)
+        | {"default_metadata": resolve_provider_metadata(sandbox_provider, named)}
+    )
 
 
 class HealthcheckError(RuntimeError):
@@ -56,14 +176,41 @@ class HealthcheckError(RuntimeError):
 
 
 class Environment:
-    def __init__(self, task, config: EnvironmentConfig, session_id, directory, *, verifier=False):
+    def __init__(
+        self,
+        task,
+        config: EnvironmentConfig,
+        session_id,
+        directory,
+        *,
+        verifier=False,
+        placement_group: str | None = None,
+    ):
         self.task = task
         self.config = config
         self.session_id = session_id
+        self.placement_group = placement_group or "tb4-" + uuid4().hex
         self.directory = Path(directory)
         self.settings = task.config.verifier_environment if verifier else task.config.environment
+        if verifier and config.verifier_resources_from_agent:
+            agent = task.config.environment
+            self.settings = self.settings.model_copy(
+                update={
+                    field: getattr(agent, field)
+                    for field in ("cpus", "memory_mb")
+                    if getattr(self.settings, field) is None
+                }
+            )
         self.environment_dir = task.path / ("tests" if verifier else "environment")
-        self.provider_config = deepcopy(config.sandbox_provider)
+        # Like Harbor, a separate verifier without its own environment reuses the task image.
+        role = "verifier" if verifier and task.config.verifier.environment is not None else "agent"
+        self.image = self.settings.docker_image or config.task_images.resolve(task, role)
+        if self.image is None:
+            raise ValueError(
+                f"{task.name} declares no prebuilt {role} image; configure environment.task_images.{role} "
+                f"or environment.task_images.by_task with an image built from its {self.environment_dir.name}/"
+            )
+        self.provider_config = resolve_environment_provider(config.sandbox_provider)
         self.pool = "default"
         self.main = None
         self.compose = None
@@ -99,13 +246,21 @@ class Environment:
             self.provider_config["opensandbox"].setdefault("connection", {}).setdefault(
                 "api_key", os.environ["OPENSANDBOX_API_KEY"]
             )
-        resolve_provider_config(self.provider_config)
+        provider_name = next(iter(resolve_provider_config(self.provider_config)))
         if config.efs_logs_host_path and "opensandbox" not in self.provider_config:
-            raise ValueError("EFS logs require OpenSandbox")
+            raise ValueError("EFS logs require OpenSandbox; set environment.efs_logs_host_path to null")
         if self.settings.network_mode == "no-network" and (
-            self.uses_compose or "opensandbox" not in self.provider_config
+            self.uses_compose or not {"opensandbox", "docker"} & self.provider_config.keys()
         ):
-            raise ValueError("Offline verification requires a single OpenSandbox environment")
+            raise ProviderCapabilityError(
+                "Offline verification requires a single OpenSandbox or local Docker environment; "
+                f"{task.name} cannot run on the {provider_name!r} provider"
+            )
+        if self.uses_compose and not issubclass(get_provider_class(provider_name), SupportsSandboxNetwork):
+            raise ProviderCapabilityError(
+                f"{task.name}: Compose needs direct networking between sandboxes, which the {provider_name!r} "
+                "provider does not offer"
+            )
         if self.uses_compose and config.compose_image_configs is None:
             raise ValueError("Compose requires verified image startup metadata")
 
@@ -116,6 +271,7 @@ class Environment:
             "tb4-task": self.task.name.split("/")[-1],
             **resolve_provider_metadata(self.provider_config),
             **config.sandbox_metadata,
+            PLACEMENT_GROUP_KEY: self.placement_group,
         }
         if self.pool != "default":
             metadata["nemo-gym.nvidia.com/resource-pool"] = self.pool
@@ -133,17 +289,28 @@ class Environment:
                     raise ValueError("EFS logs conflict with a configured /logs mount")
             volumes.append(self.shared_logs.volume(self.log_role))
             options["volumes"] = volumes
-        if settings.network_mode == "no-network":
+        if settings.network_mode == "no-network" and "docker" in self.provider_config:
+            # Local workstation runs, such as oracle checks of task images.
+            run_args = options.get("run_args") or []
+            options["run_args"] = [*([run_args] if isinstance(run_args, str) else run_args), "--network", "none"]
+        elif settings.network_mode == "no-network":
             options["network_policy"] = {"defaultAction": "deny", "egress": []}
+        resources = SandboxResources(
+            cpu=settings.cpus,
+            memory_mib=settings.memory_mb,
+            disk_gib=math.ceil(settings.storage_mb / 1024) if settings.storage_mb else None,
+            gpu=settings.gpus or None,
+            gpu_type=settings.gpu_types[0] if settings.gpu_types and config.sandbox_request_gpu_type else None,
+        )
+        # A role without storage_mb has no disk limit, so there is nothing to raise.
+        if resources.disk_gib is not None and resources.disk_gib < (config.sandbox_min_disk_gib or 0):
+            if options.get("resource_requests") == "limits":
+                # Reserve only the declared disk on the node; the higher limit is headroom.
+                options["resource_requests"] = {k: v for k, v in asdict(resources).items() if v is not None}
+            resources = replace(resources, disk_gib=config.sandbox_min_disk_gib)
         return SandboxSpec(
-            image=rewrite_image(settings.docker_image, config.image_rewrites),
-            resources=SandboxResources(
-                cpu=settings.cpus,
-                memory_mib=settings.memory_mb,
-                disk_gib=math.ceil(settings.storage_mb / 1024) if settings.storage_mb else None,
-                gpu=settings.gpus or None,
-                gpu_type=settings.gpu_types[0] if settings.gpu_types and config.sandbox_request_gpu_type else None,
-            ),
+            image=rewrite_image(self.image, config.image_rewrites),
+            resources=resources,
             ttl_s=config.sandbox_ttl_s,
             ready_timeout_s=config.sandbox_ready_timeout_s,
             workdir=config.workdir,
@@ -158,27 +325,32 @@ class Environment:
             image_path = self.config.compose_image_configs
             if not image_path.is_absolute():
                 image_path = Path(__file__).resolve().parents[2] / image_path
+            source = yaml.safe_load((self.environment_dir / "docker-compose.yaml").read_text())
+            services = source.get("services") if isinstance(source, dict) else None
+            images = {}
+            for name in services if isinstance(services, dict) else ():
+                if (image := self.config.task_images.resolve(self.task, "service", name)) is not None:
+                    images[name] = image
+            # Harbor sets these Compose variables from the task's resources.
+            variables = {}
+            if self.settings.cpus:
+                variables["CPUS"] = str(self.settings.cpus)
+            if self.settings.memory_mb:
+                variables["MEMORY"] = f"{self.settings.memory_mb}M"
             document = resolve_compose(
-                yaml.safe_load((self.environment_dir / "docker-compose.yaml").read_text()),
-                self.settings.docker_image,
+                prebuilt_compose(source, images, variables, self.config.compose_ignored_settings),
+                self.image,
                 json.loads(image_path.read_text()),
+                task=self.task.name.split("/")[-1],
             )
             if self.log_role == "agent":
-                if self.task.name == "terminal-bench/medical-claims-processing":
-                    # pwuser cannot edit /etc/hosts; its only peer URL is the
-                    # browser's initial workspace page (which uses relative URLs).
-                    document["services"]["playwright-mcp"]["x-sandbox"] = {
-                        "hosts": [],
-                        "resolve_environment": ["BROWSER_URL"],
-                    }
-                    # Use the image's default pwuser without an explicit su.
-                    document["services"]["playwright-mcp"].pop("user", None)
-                elif self.task.name == "terminal-bench/payments-pipeline-fix":
-                    # This single broker uses localhost for its controller.
-                    # Clients still resolve its advertised kafka:9092 address.
-                    document["services"]["kafka"]["x-sandbox"] = {"hosts": []}
-                    # Use the image's default appuser without an explicit su.
-                    document["services"]["kafka"].pop("user", None)
+                overrides = self.config.compose_service_overrides.get(self.task.name.split("/")[-1], {})
+                if missing := sorted(overrides.keys() - document["services"].keys()):
+                    raise ValueError(
+                        f"environment.compose_service_overrides names services that {self.task.name} lacks: {missing}"
+                    )
+                for name, patch in overrides.items():
+                    document["services"][name] = merge_patch(document["services"][name], patch)
             if "opensandbox" in self.provider_config:
                 for service in document["services"].values():
                     if service.get("shm_size") is not None:
@@ -194,6 +366,7 @@ class Environment:
             self.compose = AsyncSandboxCompose(
                 resolve_provider_config(self.provider_config),
                 path,
+                placement_group=self.placement_group,
                 service_specs={
                     name: spec
                     if name == "main"
@@ -319,7 +492,8 @@ class Environment:
         return result
 
     async def stop(self):
-        if self._cleanup_task is None:
+        # Callers share a pending or successful teardown; a failed one is retried.
+        if self._cleanup_task is None or (self._cleanup_task.done() and not self.closed):
             self._cleanup_task = asyncio.create_task(self._stop())
         await asyncio.shield(self._cleanup_task)
 

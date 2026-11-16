@@ -1,32 +1,39 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
+import io
 import json
+import tarfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TypeVar
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from nemo_gym.base_responses_api_model import (
-    CaptureStore,
-    ModelCallRecord,
-    merge_model_call_capture_into_record,
-)
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymFunctionCallOutput
-from nemo_gym.rollout_observability import (
+from nemo_gym.agents import AgentSeedSessionRequest
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import NeMoGymFunctionCallOutput, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.models import CaptureStore
+from nemo_gym.rollouts import merge_model_call_capture_into_record
+from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
+from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
     ContextCompactionObservation,
+    ModelCallRecord,
     ModelCallRef,
     ObservationGap,
     ToolCallObservation,
 )
+from responses_api_agents.claude_code_agent.app import ClaudeCodeAgent, ClaudeCodeAgentConfig
 from responses_api_agents.claude_code_agent.observability import (
     associate_claude_code_compaction_calls,
     extract_claude_code_observations,
 )
+from responses_api_agents.claude_code_agent.sandbox import ClaudeCodeArtifacts, ClaudeCodeSandboxSession
 
 
 MODEL_REF = ModelServerRef(type="responses_api_models", name="policy")
@@ -422,6 +429,7 @@ def _captured_call(call_id: str, response_id: str, *, compact: bool = False) -> 
         },
         "response": {
             "id": response_id,
+            "usage": {"input_tokens": 10, "output_tokens": 2},
             "content": [
                 {
                     "type": "text",
@@ -443,15 +451,72 @@ def _rollout_record(tmp_path: Path, *calls: dict) -> dict:
     }
 
 
-def test_merge_correlates_unique_compaction_call_into_rollout(tmp_path: Path) -> None:
+def _agent(capture_dir: Path) -> ClaudeCodeAgent:
+    return ClaudeCodeAgent(
+        config=ClaudeCodeAgentConfig(
+            name="claude", host="127.0.0.1", port=8080, entrypoint="app.py", model_server=MODEL_REF
+        ),
+        server_client=MagicMock(
+            spec=ServerClient,
+            global_config_dict={"observability_enabled": True, "model_call_capture_dir": str(capture_dir)},
+        ),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("execution", ["local", "sandbox"])
+async def test_adapter_associates_compaction_before_collection(tmp_path: Path, monkeypatch, execution: str) -> None:
     record = _rollout_record(
         tmp_path,
         _captured_call("call-before", "msg-before"),
         _captured_call("call-compact", "msg-compact", compact=True),
         _captured_call("call-after", "msg-after"),
     )
+    summary = _records(_compaction_bundle(), ContextCompactionObservation)[0].summary
+    transcript = tmp_path / "projects" / "work" / "session.jsonl"
+    _write(
+        transcript,
+        _assistant("root", "2026-07-22T09:59:59Z", "msg-before", {"type": "text", "text": "before"}),
+        _event("root", "system", "2026-07-22T10:00:00Z", "", subtype="compact_boundary"),
+        _event("root", "user", "2026-07-22T10:00:01Z", summary, isCompactSummary=True),
+        _assistant("root", "2026-07-22T10:00:02Z", "msg-after", {"type": "text", "text": "after"}),
+    )
+    instance = _agent(tmp_path)
+    body = NeMoGymResponseCreateParamsNonStreaming(input="Continue")
+    if execution == "local":
 
-    merge_model_call_capture_into_record(record, [tmp_path])
+        async def run(self, prompt, *, observation_collector, **kwargs):
+            observation_collector(tmp_path, {"status": "completed"})
+            return [], "fixture", {}
+
+        monkeypatch.setattr(ClaudeCodeAgent, "_run_claude_code", run)
+        observations = (await instance._create_episode(body, rollout_id="0-0")).observations
+    else:
+        archive_bytes = io.BytesIO()
+        with tarfile.open(fileobj=archive_bytes, mode="w:gz") as archive:
+            archive.add(transcript, arcname="projects/work/session.jsonl")
+        artifacts = ClaudeCodeArtifacts(
+            '{"type":"result","subtype":"success","is_error":false}', archive_bytes.getvalue()
+        )
+        state = ClaudeCodeSandboxSession(
+            request=AgentSeedSessionRequest(
+                agent_session_id="session",
+                episode_id={"rollout_id": "0-0"},
+                task_id={"taskset": "fixture", "task_id": "task"},
+            ),
+            runtime="/runtime",
+            session=SimpleNamespace(session_dir="/tmp/session", workdir="/app", cleanup=None),
+        )
+        monkeypatch.setattr(ClaudeCodeSandboxSession, "execute", AsyncMock(return_value=artifacts))
+        monkeypatch.setattr(ClaudeCodeAgent, "_resolve_call_base_url", lambda *args: None)
+        await instance._sandbox_response(state, body, prompt="Continue", system=None)
+        observations = state.observations
+
+    [compaction] = _records(observations, ContextCompactionObservation)
+    assert [reference.model_call_id for reference in compaction.model_calls] == ["call-compact"]
+    record["ng_agent_observations"] = observations.model_dump(mode="json")
+
+    merge_model_call_capture_into_record(record, [tmp_path], include_payloads=True)
 
     observations = AgentObservationBundle.model_validate(record["ng_agent_observations"])
     [invocation] = _records(observations, AgentInvocation)
@@ -463,9 +528,16 @@ def test_merge_correlates_unique_compaction_call_into_rollout(tmp_path: Path) ->
     ]
     assert [reference.model_call_id for reference in compaction.model_calls] == ["call-compact"]
     assert "compaction_model_call_reference_unavailable" not in {gap.code for gap in observations.gaps}
+    trajectory = _build_trajectory_record(record, record)
+    assert [reference.model_call_id for turn in trajectory.turns for reference in turn.model_calls] == [
+        "call-before",
+        "call-after",
+    ]
+    assert record["ng_model_call_capture"]["metrics"]["tokens_in"] == 30
 
 
-def test_compaction_resolver_failure_preserves_generic_model_call_join(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_compaction_resolver_failure_preserves_generic_model_call_join(tmp_path: Path) -> None:
     record = _rollout_record(
         tmp_path,
         _captured_call("call-before", "msg-before"),
@@ -473,15 +545,90 @@ def test_compaction_resolver_failure_preserves_generic_model_call_join(tmp_path:
     )
 
     with patch(
-        "responses_api_agents.claude_code_agent.observability.associate_claude_code_compaction_calls",
+        "responses_api_agents.claude_code_agent.app.read_available_model_call_records",
         side_effect=RuntimeError,
     ):
-        merge_model_call_capture_into_record(record, [tmp_path])
+        observations = await _agent(tmp_path)._associate_compaction_calls(_compaction_bundle(), rollout_id="0-0")
+    record["ng_agent_observations"] = observations.model_dump(mode="json")
+    merge_model_call_capture_into_record(record, [tmp_path])
 
     observations = AgentObservationBundle.model_validate(record["ng_agent_observations"])
     [invocation] = _records(observations, AgentInvocation)
     assert [reference.model_call_id for reference in invocation.model_calls] == ["call-before", "call-after"]
     assert "compaction_model_call_join_failed" in {gap.code for gap in observations.gaps}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["disabled", "missing", "other_rollout", "other_model"])
+async def test_adapter_requires_its_own_capture(tmp_path: Path, case: str) -> None:
+    instance = _agent(tmp_path)
+    if case == "disabled":
+        instance.server_client.global_config_dict = {}
+    call = _captured_call("call-compact", "msg-compact", compact=True)
+    if case == "other_model":
+        call["model_ref"] = {"type": "responses_api_models", "name": "other"}
+    if case != "missing":
+        store = CaptureStore(tmp_path)
+        for captured in (_captured_call("call-before", "msg-before"), call, _captured_call("call-after", "msg-after")):
+            store.record("other" if case == "other_rollout" else "0-0", captured)
+    bundle = _compaction_bundle()
+    associated = await instance._associate_compaction_calls(bundle, rollout_id="0-0")
+    assert associated == bundle
+
+
+@pytest.mark.asyncio
+async def test_adapter_waits_for_claimed_capture_write(tmp_path: Path) -> None:
+    store = CaptureStore(tmp_path)
+    store.mark_pending("0-0", "call-compact")
+
+    async def finish_capture():
+        await asyncio.sleep(0.01)
+        for call in (
+            _captured_call("call-before", "msg-before"),
+            _captured_call("call-compact", "msg-compact", compact=True),
+            _captured_call("call-after", "msg-after"),
+        ):
+            store.record("0-0", call)
+        store.clear_pending("0-0", "call-compact")
+
+    associated, _ = await asyncio.gather(
+        _agent(tmp_path)._associate_compaction_calls(_compaction_bundle(), rollout_id="0-0"), finish_capture()
+    )
+    [compaction] = _records(associated, ContextCompactionObservation)
+    assert [reference.model_call_id for reference in compaction.model_calls] == ["call-compact"]
+
+
+@pytest.mark.parametrize("separator", ["\n", "\n\n", "\nunexpected content\n"])
+def test_compaction_matches_native_continuation_suffix(separator: str) -> None:
+    bundle = _compaction_bundle()
+    [compaction] = _records(bundle, ContextCompactionObservation)
+    compaction.summary = (
+        "This session is being continued from a previous conversation that ran out of context. "
+        "The summary below covers the earlier portion of the conversation.\n\nSummary:\nKeep this."
+        "\n\nIf you need specific details from before compaction "
+        "(like exact code snippets, error messages, or content you generated), "
+        "read the full transcript at: /config/projects/work/session.jsonl"
+        + separator
+        + "Continue the conversation from where it left off without asking the user "
+        "any further questions. Resume directly — do not acknowledge the summary, do not recap "
+        'what was happening, do not preface with "I\'ll continue" or similar. '
+        "Pick up the last task as if the break never happened."
+    )
+    calls = [
+        ModelCallRecord.model_validate(call | {"call_index": index})
+        for index, call in enumerate(
+            [
+                _captured_call("call-before", "msg-before"),
+                _captured_call("call-compact", "msg-compact", compact=True),
+                _captured_call("call-after", "msg-after"),
+            ]
+        )
+    ]
+    associated = associate_claude_code_compaction_calls(bundle, calls)
+    [compaction] = _records(associated, ContextCompactionObservation)
+    assert [ref.model_call_id for ref in compaction.model_calls] == (
+        [] if "unexpected content" in separator else ["call-compact"]
+    )
 
 
 def test_compaction_call_correlation_rejects_ambiguous_matches() -> None:

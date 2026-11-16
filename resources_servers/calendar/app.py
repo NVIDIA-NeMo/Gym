@@ -18,13 +18,14 @@ from typing import Any
 from fastapi import FastAPI
 from utils import grade_assistant_response
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 class CalendarRunRequest(BaseRunRequest):
@@ -40,7 +41,10 @@ class CalendarResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class CalendarResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
+    # Each verification checks the response against the request alone: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: CalendarResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
@@ -80,3 +84,6 @@ class CalendarResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     CalendarResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = CalendarResourcesServer.run_webserver()  # noqa: F401

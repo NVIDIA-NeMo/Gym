@@ -91,18 +91,53 @@ that never solves the task.
 
 ## Session lifetime
 
-A browser is released when the rollout is scored (`verify`) or when the same
-`session_id` is re-seeded. There is no independent episode TTL and no
-client-side cap on concurrent sessions, so:
+A browser is released when the rollout is scored (`verify`), when the same
+`session_id` is re-seeded, or when an Environment Server closes the session
+through `/close_session`. An Environment Server assigns the session id and
+registers that close before it seeds, so an episode that ends before `verify`
+still gets its browser released. A seed that arrives after its close is refused
+with 409 and opens nothing, but only while the server holds the session's fence:
+for `session_close_retry_window_seconds` (300 seconds by default) and not across a restart
+(`tests/test_resources_sessions.py`). The server keeps browsers in process; with
+`num_workers` above 1, Gym routes each session's requests to the worker that
+holds its browser.
 
-- a rollout abandoned without either (trainer crash, client disconnect) leaves
-  its browser open until the process exits (local) or the provider reclaims it;
+A rollout whose browser is gone (never seeded, already verified, closed, or lost
+to a restart) is not scored as a zero. A tool call gets HTTP 404 with
+`failure_kind: session_lost`, and `verify` returns a masked sample
+(`mask_sample: true`, `failure_kind: session_lost`).
+
+There is no independent episode TTL and no client-side cap on concurrent
+sessions, so:
+
+- a rollout run through an Agent's `/run` and abandoned without `verify` or a
+  re-seed (trainer crash, client disconnect) leaves its browser open until the
+  server shuts down;
 - with a metered provider, size the account quota **above** the rollout
   concurrency, with headroom for sessions still being torn down.
+
+When the server shuts down, its lifespan closes every browser the process still
+holds, all at once. Each step of a close has a limit: 10 seconds for each of the
+page, context and browser closes and for stopping Playwright, then the provider's
+own release (`lexmount` allows up to 30 seconds for each of its two calls). A
+remote close can therefore take up to about 100 seconds when the provider is
+slow. Gym's launcher gives a server `server_shutdown_timeout_seconds` (default
+`1`) after SIGINT before it kills it, and a process killed mid-close leaves its
+remote browsers for the provider to reclaim. With a remote backend, set it above
+that worst case:
+
+```yaml
+server_shutdown_timeout_seconds: 110
+```
 
 Every acquired provider session is released exactly once — including when the
 CDP connect fails after the session was created, and however often `close()` is
 called (`tests/test_registry_and_sessions.py`).
+
+A session seeded by an Environment Server carries its episode (`rollout_id`,
+`attempt`) to the provider as session metadata, and `remote_cdp` logs the
+provider's session id next to it when the session is acquired. That log line is
+the join between a provider-side session and the rollout record that held it.
 
 ## Run
 
@@ -192,7 +227,7 @@ environment runs without its SDK installed.
 - [x] `site/` — bundled offline test site (deterministic tasks/CI)
 - [x] `generate_data.py` + `data/example.jsonl` (offline) + `data/example_remote.jsonl` (live web)
 - [x] `tests/` — backend contract (both backends) + selection/session bookkeeping
-- [x] `requirements.txt`, `README.md`
+- [x] `pyproject.toml`, `uv.lock`, `README.md`
 - [x] `data/example_rollouts.jsonl` — 5 rollouts collected against a Responses-API endpoint (reward 1.0 on the offline site; reward wiring exercised end-to-end)
 - [ ] GRPO training-signal run (train via NeMo-RL's `examples/nemo_gym/run_grpo_nemo_gym.py`)
 

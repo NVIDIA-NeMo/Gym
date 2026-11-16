@@ -16,13 +16,14 @@ from typing import Any
 
 from fastapi import FastAPI
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.terminal_multi_harness.common.response_utils import extract_action
 from resources_servers.terminal_multi_harness.common.verification_utils import (
     ActionComparator,
@@ -57,7 +58,6 @@ class TerminalMultiHarnessVerifyResponse(BaseVerifyResponse):
 
 
 class TerminalMultiHarnessResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: TerminalMultiHarnessResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
@@ -105,3 +105,6 @@ class TerminalMultiHarnessResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     TerminalMultiHarnessResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = TerminalMultiHarnessResourcesServer.run_webserver()  # noqa: F401

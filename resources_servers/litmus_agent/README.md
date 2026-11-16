@@ -16,6 +16,13 @@ It does three things:
 Reward is `1.0` on match, `0.0` otherwise (including when no value can be
 extracted).
 
+The [Litmus-Bench benchmark](../../benchmarks/litmus-bench/README.md) selects
+the released evaluation data and documents its licenses. Its rows use
+`output_regex`, `answer_type`, and optional `match` rules; the verifier keeps
+release selection in the benchmark configuration and preparation code.
+Both server configs register the full training split under
+`data/litmus-bench/train.jsonl` with its combined dataset license.
+
 ### What it deliberately is *not*
 
 - **Not tied to any domain.** Domain-context fields ride along as *pass-through*
@@ -85,24 +92,6 @@ Register a custom rule by adding an entry to `REWARD_RULES` (name → callable
 taking `(predicted, expected, **params)` and returning a float in `[0.0, 1.0]`).
 Rows then reference it by name in `match`.
 
-### Numeric `property_type` compatibility
-
-Rows without an explicit `answer_type` may carry `property_type` instead. These
-values are mapped to the answer-type taxonomy for reporting:
-
-| `property_type` | → `answer_type` |
-|---|---|
-| `float`, `count`, `fragment` | `float` |
-| `bool`, `presence` | `bool` |
-
-Compatibility rows retain their numeric scoring policy: `count`, `fragment`,
-`bool`, and `presence` are parsed as numbers and default to rounded `exact`
-matching, while `float` defaults to `isclose`. An explicit `answer_type` selects
-the modern parsing policy, and an explicit `match` overrides either default.
-
-A row with neither a supported `answer_type` nor a mappable `property_type`
-fails loudly rather than silently scoring `0.0`.
-
 ## Answer Extraction
 
 When present, `output_regex` is the preferred extractor and must contain exactly
@@ -112,9 +101,7 @@ registered regex used to locate the final answer (e.g. `fmt_00` → `((answer))`
 `<final_answer>answer</final_answer>`). The last match in the text wins, so a
 self-correcting model's final value is the one scored.
 
-Legacy rows without `answer_format` fall back to `use_box_format`:
-`use_box_format: true` → boxed (`fmt_07`), `use_box_format: false` → double
-parentheses (`fmt_00`). When `answer_format` is present it takes precedence.
+When neither extractor is specified, double parentheses (`fmt_00`) are used.
 
 > **Prefer delimited formats for numeric answers.** When the captured text is
 > not a clean float, extraction falls back to the *last* number-like token in the
@@ -138,14 +125,12 @@ Each JSONL row:
 - `responses_create_params.tools`: `[]` for direct answering; a tool spec when
   the optional code-execution route is enabled
 - `expected_answer`: ground-truth value (string, int, or float)
-- `answer_type`: one of `float`, `bool`, `string` (optional if a mappable legacy
-  `property_type` is present)
+- `answer_type`: required; one of `float`, `bool`, `string`
 - `output_regex`: optional row-specific regex with exactly one capture group;
   takes precedence over `answer_format`
 - `answer_format`: optional key `fmt_00`–`fmt_30` selecting the extraction regex
 - `match`: optional reward-rule override `{"rule": <name>, **params}`; defaults
   to the rule for the resolved `answer_type`
-- `use_box_format`: optional legacy fallback when `answer_format` is absent
 - any number of **pass-through** domain fields (e.g. `method`, `source_id`,
   `smiles`, `property`) — preserved and echoed back, never interpreted
 
@@ -191,9 +176,27 @@ the same name the dataset rows advertise in `responses_create_params.tools`. Whe
 `sandbox_provider` is unset the server is a pure verifier and serves no tool.
 
 **Lifecycle.** A sandbox is created **lazily** on a session's first tool call and
-reaped when that rollout's `/verify` runs (and any stragglers on server
-shutdown). Direct (no-tool) rows never create a sandbox, so a run with no
-tool-using rows works even without provider credentials.
+reaped when that rollout's `/verify` runs. At server shutdown the server stops the
+remaining sandboxes concurrently, but only those it can stop within the shutdown
+grace; a sandbox it does not stop is left to the provider's `ttl_s` expiry, where
+the provider supports one. Direct (no-tool) rows never create a sandbox, so a run
+with no tool-using rows works even without provider credentials.
+
+Under an Environment Server, such as `litmus_agent_environment_server`
+(`single_agent_turn_legacy`), `/seed_session` binds the session cookie to the
+`resources_session_id`, and `/close_session` stops the session's sandbox even
+when `/verify` never ran. Close and verify wait for a sandbox that is still
+starting or running a cell before they stop it. A stop that fails makes the close
+fail, and the sandbox stays registered until a later close, verify, retirement or server shutdown stops it; a provider
+that only queues the delete, such as OpenShell, logs its failures instead. A failed stop at `/verify`
+preserves the computed score and reports the cleanup failure separately. The sandbox stays registered and
+checkpoint ownership is retained until a later verify, close, or retirement successfully releases it. A verify
+retry recomputes the score. A close or verify waits for a sandbox that is still starting; if its caller gives up
+first, the sandbox is left to the next close, to shutdown, or to the provider's `ttl_s` expiry. Closing an unknown or already closed session
+succeeds, and a seed that arrives after its session closed is refused with 409
+for `session_close_retry_window_seconds`. A tool call for a closed session gets
+404 with `failure_kind: session_lost`, and a `/verify` for one returns a masked
+sample with reward 0.
 
 **Statefulness (replay model).** The sandbox runs one-shot commands, not a live
 Python kernel. Statefulness across calls within a session is emulated by

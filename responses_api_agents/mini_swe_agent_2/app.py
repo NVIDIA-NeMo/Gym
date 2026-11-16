@@ -31,26 +31,23 @@ from fastapi import Body, FastAPI
 from minisweagent.config import builtin_config_dir, get_config_path
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.agents import (
+    BaseResponsesAPIAgentConfig,
+    SimpleResponsesAPIAgent,
+)
+from nemo_gym.config import TASK_INDEX_KEY_NAME, ModelServerRef, get_first_server_config_dict
+from nemo_gym.core import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.base_responses_api_agent import (
-    BaseResponsesAPIAgentConfig,
-    SimpleResponsesAPIAgent,
-)
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import TASK_INDEX_KEY_NAME
-from nemo_gym.openai_utils import (
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
-from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
-from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.server_utils import (
-    get_first_server_config_dict,
-)
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 OPENSANDBOX_PROVIDER_NAME = "opensandbox"
@@ -852,7 +849,11 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 config_output_dir = Path(output_file_dir) / "_configs"
                 config_output_dir.mkdir(parents=True, exist_ok=True)
                 config_path = config_output_dir / f"{instance_id}.sandbox.yaml"
-                config_path.write_text(yaml.safe_dump(config, sort_keys=False))
+                # Repeats of one instance share this path and rewrite it per
+                # rollout; replace atomically so a reader never sees it empty.
+                tmp_path = config_path.with_name(f"{config_path.name}.{uuid4().hex}.tmp")
+                tmp_path.write_text(yaml.safe_dump(config, sort_keys=False))
+                os.replace(tmp_path, config_path)
 
             if self.config.skip_if_exists:
                 if Path(f"{output_file_dir}/{instance_id}/{instance_id}.json").exists():
@@ -937,3 +938,6 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     MiniSWEAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = MiniSWEAgent.run_webserver()  # noqa: F401

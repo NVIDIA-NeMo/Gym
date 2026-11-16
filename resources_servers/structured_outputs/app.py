@@ -26,12 +26,13 @@ import yaml
 from fastapi import FastAPI
 from openapi_schema_validator import validate as validate_against_schema_openapi
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 class StructuredOutputsResourcesServerConfig(BaseResourcesServerConfig):
@@ -101,7 +102,10 @@ class StructuredOutputsVerifyResponse(BaseVerifyResponse):
 
 
 class StructuredOutputsResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
+    # Each verification validates the response against the request's schema: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: StructuredOutputsResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
@@ -464,3 +468,6 @@ class StructuredOutputsResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     StructuredOutputsResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = StructuredOutputsResourcesServer.run_webserver()  # noqa: F401

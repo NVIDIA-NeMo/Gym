@@ -1,0 +1,188 @@
+{
+ "case": "derived-stream-number-and-text-fidelity",
+ "kind": "gateway",
+ "notes": "",
+ "spec": {
+  "schema_version": 1,
+  "harness": "opencode",
+  "task_backend": "swe",
+  "tools": {
+   "tool_names": {
+    "read": "read"
+   },
+   "tool_descriptions": {},
+   "tool_parameter_descriptions": {},
+   "tool_interfaces": {}
+  },
+  "workspace_files": {},
+  "events": [],
+  "checks": [],
+  "provenance": {}
+ },
+ "params": {
+  "input": [
+   {
+    "content": "Fix it",
+    "role": "user",
+    "type": "message"
+   }
+  ],
+  "parallel_tool_calls": true,
+  "tool_choice": "auto",
+  "tools": []
+ },
+ "calls": [
+  {
+   "headers": {
+    "x-session-id": "root",
+    "x-opencode-assistant-message-id": "a1"
+   },
+   "opencode_request": {
+    "stream": true,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "upstream_reply": {
+    "sse_events": [
+     {
+      "id": "n1",
+      "object": "chat.completion.chunk",
+      "created": 1729600000,
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "role": "assistant",
+         "content": "é ✓ 😀   \"quoted\" \\ \t\u0001",
+         "tool_calls": null
+        },
+        "logprobs": {
+         "content": [
+          {
+           "token": "x",
+           "logprob": -1e-05,
+           "top": [
+            1.0,
+            0.1,
+            1e+16,
+            1e-07,
+            123456789.125,
+            -0.0,
+            2.5e-300,
+            1e+22
+           ]
+          }
+         ]
+        },
+        "finish_reason": null
+       }
+      ],
+      "big": 12345678901234567890123,
+      "neg": -7
+     },
+     {
+      "id": "n1",
+      "object": "chat.completion.chunk",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {},
+        "finish_reason": "stop",
+        "stop_reason": null
+       }
+      ]
+     }
+    ],
+    "sse_wire": "data: {\"id\": \"n1\", \"object\": \"chat.completion.chunk\", \"created\": 1729600000, \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"\\u00e9 \\u2713 \\ud83d\\ude00 \\u2028 \\\"quoted\\\" \\\\ \\t\\u0001\", \"tool_calls\": null}, \"logprobs\": {\"content\": [{\"token\": \"x\", \"logprob\": -1e-05, \"top\": [1.0, 0.1, 1e+16, 1e-07, 123456789.125, -0.0, 2.5e-300, 1e+22]}]}, \"finish_reason\": null}], \"big\": 12345678901234567890123, \"neg\": -7}\r\n\r\ndata: {\"id\": \"n1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\", \"stop_reason\": null}]}\r\n\r\ndata: [DONE]\r\n\r\n"
+   },
+   "returned": {
+    "sse_text": "data: {\"id\": \"n1\", \"object\": \"chat.completion.chunk\", \"created\": 1729600000, \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"é ✓ 😀   \\\"quoted\\\" \\\\ \\t\\u0001\"}, \"logprobs\": {\"content\": [{\"token\": \"x\", \"logprob\": -1e-05, \"top\": [1.0, 0.1, 1e+16, 1e-07, 123456789.125, -0.0, 2.5e-300, 1e+22]}]}, \"finish_reason\": null}], \"big\": 12345678901234567890123, \"neg\": -7}\n\ndata: {\"id\": \"n1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\", \"stop_reason\": null}]}\n\ndata: [DONE]\n\n"
+   },
+   "error": null,
+   "outgoing_request": {
+    "stream": true,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "opencode_request_unchanged": true
+  }
+ ],
+ "observations": [
+  {
+   "source": "model",
+   "session_id": "root",
+   "assistant_message_id": "a1",
+   "request": {
+    "stream": true,
+    "messages": [
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "parameters": {
+        "type": "object"
+       }
+      }
+     }
+    ]
+   },
+   "execution_tools": {
+    "read": "read"
+   },
+   "response": {
+    "id": "n1",
+    "object": "chat.completion",
+    "created": 1729600000,
+    "big": 12345678901234567890123,
+    "neg": -7,
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "é ✓ 😀   \"quoted\" \\ \t\u0001"
+      },
+      "finish_reason": "stop"
+     }
+    ]
+   }
+  }
+ ],
+ "issues": []
+}

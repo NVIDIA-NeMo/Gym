@@ -128,6 +128,22 @@ async def test_session_is_released_once_however_often_close_is_called(cdp_endpoi
 
 
 @pytest.mark.asyncio
+async def test_acquiring_a_session_logs_which_rollout_holds_it(cdp_endpoint, caplog):
+    """The provider's session id and the rollout share one log line, so a leaked cloud
+    session can be traced to its rollout without matching timestamps."""
+    provider = FakeProvider(cdp_endpoint)
+    backend = RemoteCDPBackend(provider, session_metadata={"rollout_id": "rollout-7", "attempt": "0"})
+
+    with caplog.at_level("INFO", logger="browser.remote_cdp"):
+        await backend.open("about:blank")
+    await backend.close()
+
+    acquired = [r.getMessage() for r in caplog.records if "acquired for" in r.getMessage()]
+    assert len(acquired) == 1
+    assert "s1" in acquired[0] and "rollout-7" in acquired[0]
+
+
+@pytest.mark.asyncio
 async def test_session_is_released_when_the_cdp_connect_fails():
     # Port 1 refuses connections: the session was acquired but is unusable, and
     # an unreleased session here is exactly how a run walks into its quota.
@@ -137,6 +153,28 @@ async def test_session_is_released_when_the_cdp_connect_fails():
         await backend.open("about:blank")
     assert len(provider.acquired) == 1
     assert len(provider.released) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_hung_cdp_close_does_not_stop_the_provider_release(monkeypatch):
+    """A dead CDP endpoint must not keep the close from ending the provider session."""
+    import browser.page as page_module
+
+    monkeypatch.setattr(page_module, "_CLOSE_STEP_TIMEOUT_S", 0.1)
+
+    class _HungBrowser:
+        async def close(self):
+            await asyncio.Event().wait()
+
+    provider = FakeProvider("ws://unused")
+    backend = RemoteCDPBackend(provider)
+    backend._handle = await provider.acquire(BrowserSessionSpec())
+    backend._browser = _HungBrowser()
+
+    # The outer bound only turns a regression into a failure instead of a hung test run.
+    await asyncio.wait_for(backend.close(), timeout=5)
+
+    assert [handle.session_id for handle in provider.released] == ["s1"]
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,185 @@
+---
+title: "Evaluate Terminal-Bench 2.1 on the Harbor Path"
+description: "Run the 89 Terminal-Bench 2.1 task folders as published through the harbor Environment Server, then read the results."
+position: 6
+---
+
+Terminal-Bench 2.1 is published as task folders in the Harbor format. This tutorial runs those folders exactly as
+published through the [`harbor` Environment Server](/main/agent-interactions/harbor), with no Gym-side patching of
+`tests/test.sh` or `solution/solve.sh` and no Resources Server: each task's own verifier grades it. You fetch the
+tasks, check their reference solutions, run a model on two tasks, read the results, and then run all 89.
+
+Results on this path are compared with Harbor's own numbers for the dataset, not one to one with the
+[`terminal_bench_2_1` Resources Server](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/terminal_bench_2_1/README.md),
+whose run-time fixes apply on its own path only (its benchmark folder is
+[`benchmarks/terminal_bench_2_1`](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/terminal_bench_2_1/README.md)).
+Tasks whose published tests or solutions need those fixes score here as they do in Harbor. To learn the task folder
+format itself, see [Author Task Folders](/main/data/task-folders/harbor-tasks).
+
+## Before you start
+
+You need:
+
+- **A Gym checkout** with the sandbox extra installed (`uv sync --extra sandbox`). Run every command from its root.
+- **OpenSandbox access.** Follow [OpenSandbox setup](/main/infrastructure/sandbox/opensandbox#setup) and export the
+  two variables the shipped provider config reads:
+
+  ```bash
+  export OPENSANDBOX_DOMAIN='<domain>'
+  export OPENSANDBOX_API_KEY='<opensandbox-key>'
+  ```
+
+- **A model endpoint** that serves the OpenAI API.
+
+Each task names a prebuilt image in its `task.toml` (`[environment].docker_image`), so this tutorial builds no
+images. For datasets that do need builds, see [Dockerfile modes](/main/data/task-folders/task-folder-format#dockerfile-modes) and
+[Harbor image builds](/main/reference/configuration#harbor-image-builds).
+
+## Get the tasks
+
+The committed entry `environments/harbor/terminal_bench_2_1/` pins the copy of the dataset in Harbor's package store
+by content hash, since the store tags it `latest` only. Pull it:
+
+```bash
+gym dataset pull terminal_bench_2_1
+```
+
+The pull downloads the 89 task folders into `environments/harbor/terminal_bench_2_1/` (or
+`$NEMO_GYM_DATASETS_DIR/terminal_bench_2_1/` when that variable is set), checks every task archive against the
+content hash Harbor published for it, and prints the folder, the task count and the dataset digest. A second pull
+downloads nothing while the folders still match. The validate and run commands below take the entry name
+`terminal_bench_2_1` as their target. See [Pulled datasets](/main/reference/task-folder-storage#pulled-datasets) for
+where pulls land and how to move them.
+
+### Compare with the Resources Server path
+
+To compare with the `terminal_bench_2_1` Resources Server instead, clone the dataset's repository at the commit that
+benchmark runs from, so both paths grade the same task files:
+
+```bash
+git clone https://github.com/harbor-framework/terminal-bench-2-1
+git -C terminal-bench-2-1 checkout --detach 7131e4375048a0e408a8fb404b5f499d726b695b
+```
+
+Then use `terminal-bench-2-1/tasks` as the target in place of `terminal_bench_2_1`. Results land under
+`results/harbor/tasks/`, named after the folder. The store copy holds the same 89 tasks and differs from this commit
+in one file, `sanitize-git-repo/tests/test_outputs.py`.
+
+## Check the reference solutions
+
+```bash
+gym dataset validate terminal_bench_2_1 --sandbox opensandbox
+```
+
+Each task's `solution/solve.sh` runs through its own verifier with an oracle harness. Every solution must score 1,
+and the command exits non-zero otherwise. The oracle's results land in `results/harbor/validation/terminal_bench_2_1/`,
+apart from the model runs below, and `--concurrency N` caps the episodes run in parallel. On the package as
+published, the two tasks listed under [Known upstream noise](#known-upstream-noise) fail their own reference
+solutions, so this command exits non-zero and names them in its report. That is the expected result, not a broken
+setup. Every other task should score 1, though a solution that downloads at run time or nears its time budget can
+fail for reasons outside Gym; read that task's `test-stdout.txt` before suspecting the setup.
+
+## Run a model on two tasks
+
+Start with two tasks to check the setup end to end:
+
+```bash
+gym eval run terminal_bench_2_1 --only-tasks 'fix-git,regex-log' \
+  --agent terminus_2_sandboxed_agent --sandbox opensandbox \
+  --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
+```
+
+- `--only-tasks` takes a comma-separated list of task folder names or globs. `--exclude-tasks` leaves tasks out the
+  same way, and `--limit N` runs the first N tasks.
+- `<model>` is the model name the endpoint serves, `<url>` its base URL, and `<key>` its API key. For a vLLM
+  endpoint, use `--model-type vllm_model`.
+
+The command prepares the selected tasks, starts the Model Server, the Terminus 2 Agent Server and one `harbor`
+Environment Server, and runs one episode per task. The Environment Server starts the task's image as a sandbox,
+Terminus 2 drives it, and the Environment Server then runs the task's `tests/test.sh` and reads the reward it
+writes. Resource settings (CPUs, memory, storage) come from each task's `task.toml`.
+
+## Read the results
+
+The run's results are under `results/harbor/terminal_bench_2_1/`:
+
+| File | What it holds |
+| --- | --- |
+| `rollouts.jsonl` | One line per episode that produced a result, with `reward`, `failure_kind` and `mask_sample`. |
+| `rollouts_run_summary.json` | Start here: the command, the dataset digests, every file of the run, and per task its status, reward, failure kind and verifier log paths. |
+| `rollouts_aggregate_metrics.json` | The mean reward and the other aggregate metrics. |
+| `rollouts_failures.jsonl` | One line per failed attempt, including attempts a retry later replaced. The run summary's `status` says how each task ended. |
+| `quality_summary.json`, `rollout_verdicts.jsonl` | The health check's verdict on the run and on each rollout. |
+| `verifier/session-<id>/` | One folder per verification, with `test-stdout.txt`, the reward file and `trajectory.json`. |
+
+Print one line per task from the run summary:
+
+```bash
+python3 -c 'import json; s = json.load(open("results/harbor/terminal_bench_2_1/rollouts_run_summary.json")); [print(t["task_id"], t["status"], t["reward"], t["mask_sample"], t["failure_kind"]) for t in s["tasks"]]'
+```
+
+`status` is `result` for an episode that produced a result row (masked or not), `failed` for an episode that ended in
+a failure, and `missing` for a task with no row. A rollout with `mask_sample: true` was not scored: Gym's side failed
+(a lost sandbox, a failed transfer) or the task's image did (such as an `ENTRYPOINT` that exited non-zero during the
+rollout), and its `failure_kind` says which. It is left out of the mean reward and the other reward metrics; the
+aggregate metrics count it under `coverage/masked_rollouts`. The summary's file and log paths are relative to its
+folder, so the results folder can move as a whole; `dataset.folder` and `summary_dir` stay absolute. See
+[The run summary](/main/reference/task-folder-storage#the-run-summary) for every field, and
+[Task Folders troubleshooting](/main/troubleshooting/task-folders) for failure kinds that start with `harbor:`.
+
+`gym eval run` runs the health check when collection ends. To run it again on the two-task results (it rewrites
+`quality_summary.json` and `rollout_verdicts.jsonl`; add `--rollouts-file rollouts_full.jsonl` for the full run
+below):
+
+```bash
+gym eval health-check results/harbor/terminal_bench_2_1
+```
+
+See [Rollout Health](/main/evaluation/rollout-health) for what its verdicts mean.
+
+## Run all 89 tasks
+
+Drop `--only-tasks` and give the full run its own output file, so the two-task rollouts, failures, run summary and
+aggregate metrics stay in place. The rows file, the run config, `quality_summary.json` and `rollout_verdicts.jsonl`
+are rewritten for the full run.
+
+```bash
+gym eval run terminal_bench_2_1 --agent terminus_2_sandboxed_agent --sandbox opensandbox \
+  --output results/harbor/terminal_bench_2_1/rollouts_full.jsonl --concurrency 16 \
+  --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
+```
+
+The run summary and aggregate metrics take the output file's name (`rollouts_full_run_summary.json` and so on).
+`--concurrency` caps the episodes in flight, `--num-repeats N` takes N rollouts per task, and the same command with
+`--resume` continues a run that stopped. `gym eval aggregate` expects shards from `gym eval run --no-serve`, which
+a task-folder target refuses.
+
+To match the `terminal_bench_2_1` Resources Server's sandbox limits and scheduling requests for a like-for-like
+comparison, pass a `--config` file that sets both on the generated Environment Server instance. Its name spells each
+`_` of the taskset name as `_5f`; copy it from
+`results/harbor/terminal_bench_2_1/run_config_terminus_2_sandboxed_agent.yaml`:
+
+```yaml
+harbor_terminal_5fbench_5f2_5f1_environment:
+  environment_servers:
+    harbor:
+      sandbox_resources_override: {cpu: 4, memory_mib: 16384, disk_gib: 30}
+      sandbox_provider_options:
+        resource_requests: {cpu: 0.5, memory_mib: 512, disk_gib: 30}
+```
+
+On the clone target from [Compare with the Resources Server path](#compare-with-the-resources-server-path), the taskset
+is `tasks`, so the instance is `harbor_tasks_environment`. The override replaces the CPUs, memory and storage each
+task's `task.toml` declares. See [Configure the server](/main/agent-interactions/harbor#configure-the-server).
+
+## Known upstream noise
+
+Two tasks are broken as published and fail on Harbor and on Gym alike until their images are fixed upstream:
+
+- `qemu-startup`
+- `qemu-alpine-ssh`
+
+Both images are Debian Bullseye, and their tests install packages from the Bullseye security repository, which the
+live Debian mirror no longer serves. Gym runs the tasks as published and does not repair them, so count these two
+as expected noise when comparing with Harbor's numbers. The `terminal_bench_2_1` Resources Server applies a
+security-snapshot repair on its own path only; that repair is not part of this one.

@@ -33,3 +33,11 @@ wordle_gymnasium_agent:
           license: Apache 2.0
       # Lookup tools also use steps, so leave room for all 6 guesses.
       max_steps: 30
+
+wordle_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: wordle_gymnasium_agent

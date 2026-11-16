@@ -33,20 +33,21 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, call_judge
-from nemo_gym.openai_utils import (
-    NeMoGymEasyInputMessage,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
-from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import JUDGE_FAILURES, call_judge, is_judge_failure
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +144,6 @@ def _extract_generated_answer(response: NeMoGymResponse) -> str:
 
 
 class LabbenchVLMResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: LabbenchVLMConfig
 
     def model_post_init(self, __context: Any) -> None:
@@ -219,7 +219,9 @@ class LabbenchVLMResourcesServer(SimpleResourcesServer):
                     json=params,
                     response_model=NeMoGymResponse,
                 )
-            except JudgeError as e:
+            except JUDGE_FAILURES as e:
+                if not is_judge_failure(e):
+                    raise
                 print(f"[labbench2_vlm] judge HTTP error: {e}", flush=True)
                 raise
 
@@ -293,3 +295,6 @@ class LabbenchVLMResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     LabbenchVLMResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = LabbenchVLMResourcesServer.run_webserver()  # noqa: F401

@@ -9,11 +9,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.anthropic_converter import AnthropicConverter
-from nemo_gym.base_responses_api_model import _CaptureMiddleware
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.token_id_capture import (
+from nemo_gym.client import NeMoGymAsyncOpenAI, ServerClient
+from nemo_gym.models import AnthropicConverter, VLLMWorkerCaptureHandler
+from nemo_gym.models.model_call_capture import _CaptureMiddleware
+from nemo_gym.models.token_capture import (
+    NG_CAPTURE_FIELD,
+    NG_COMMIT_COORDS_FIELD,
+    UNCOMMITTED_CALL_REASON,
     CaptureContext,
     FileLineageStore,
     InMemoryLineageStore,
@@ -28,11 +30,8 @@ from nemo_gym.token_id_capture import (
     set_token_sink,
     trajectories_from_source,
 )
-from nemo_gym.token_id_capture.external_capture import VLLMWorkerCaptureHandler
-from nemo_gym.token_id_capture.records import UNCOMMITTED_CALL_REASON
-from nemo_gym.token_id_capture.sink import NG_CAPTURE_FIELD, NG_COMMIT_COORDS_FIELD
-from nemo_gym.token_id_capture.staging.capture import RolloutTokenCapture
-from nemo_gym.token_id_capture.staging.records import CaptureAdmission, StageResult
+from nemo_gym.models.token_capture.harness_notes.opencode import OPENCODE_MAX_STEPS_PROMPT
+from nemo_gym.models.token_capture.staging import CaptureAdmission, RolloutTokenCapture, StageResult
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
@@ -57,28 +56,39 @@ def _model(client: NeMoGymAsyncOpenAI, **config_overrides: Any) -> VLLMModel:
 
 
 @pytest.mark.parametrize(
-    "endpoint,reasoning_field",
+    "endpoint,reasoning_field,tool_call,last_turn_edit",
     [
-        (endpoint, field)
-        for endpoint in ("responses", "chat/completions", "messages")
-        for field in (None, "reasoning", "reasoning_content", "inline")
+        (endpoint, field, tool_call, "text")
+        for endpoint, field in [
+            (endpoint, field)
+            for endpoint in ("responses", "chat/completions", "messages")
+            for field in (None, "reasoning", "reasoning_content", "inline")
+        ]
+        + [("responses", "refusal"), ("messages", "refusal")]
+        for tool_call in (False, True)
     ]
-    + [("responses", "refusal"), ("messages", "refusal")],
+    + [
+        ("responses", field, True, edit)
+        for field in (None, "reasoning", "reasoning_content", "inline", "refusal")
+        for edit in ("arguments", "name", "id", "add", "remove")
+    ],
 )
-@pytest.mark.parametrize("tool_call", [False, True])
-def test_external_staging_resolves_served_reasoning_history(tmp_path, endpoint, reasoning_field, tool_call) -> None:
+def test_external_staging_resolves_served_reasoning_history(
+    tmp_path, endpoint, reasoning_field, tool_call, last_turn_edit
+) -> None:
     """Echoing served output must preserve capture ancestry across API conversion."""
     records = {}
 
     class Sink:
         def stage(self, record, *, attachments=None):
             assert attachments is None
-            key = f"{record.rollout_id}/{record.model_call_id}"
+            key = f"{record.capture_key}/{record.model_call_id}"
             records[key] = record
             return StageResult(ok=True, staging_key=key)
 
     capture = RolloutTokenCapture(sink=Sink(), weight_version_fn=lambda: 7)
     admissions = []
+    consumed_prefixes = []
 
     async def complete(**body):
         admission = CaptureAdmission.model_validate(body[NG_CAPTURE_FIELD]) if NG_CAPTURE_FIELD in body else None
@@ -99,6 +109,7 @@ def test_external_staging_resolves_served_reasoning_history(tmp_path, endpoint, 
         if admission is not None:
             prefix = [token for key in admission.staging_chain for token in records[key].token_ids_delta]
             active = capture.begin_call(admission, prefix_token_ids=prefix)
+            consumed_prefixes.append(prefix)
             coords = capture.complete_call(
                 active,
                 prompt_token_ids=prefix + [10 * index],
@@ -180,20 +191,48 @@ def test_external_staging_resolves_served_reasoning_history(tmp_path, endpoint, 
         manifest = asyncio.run(ledger.manifest("reasoning-rollout"))
         assert len(manifest["records"]) == 3
         assert not manifest["failures"]
-        # Parent verification must still reject edits to the last served answer.
+        # Only argument rewrites may reuse the last served turn's original tokens.
         last_answer = history[-3 if tool_call else -2]
-        if last_answer.get("type") == "function_call":
+        if last_turn_edit == "arguments":
             last_answer["arguments"] = '{"changed": true}'
+        elif last_turn_edit == "name":
+            last_answer["name"] = "different_tool"
+        elif last_turn_edit == "id":
+            last_answer["call_id"] = "different_id"
+        elif last_turn_edit == "add":
+            history.insert(-2, {"role": "assistant", "content": "uncaptured answer"})
+        elif last_turn_edit == "remove":
+            history.remove(last_answer)
+        elif endpoint == "responses":
+            # Edit the text/refusal item even when the response ends in a tool call.
+            last_message = next(item for item in reversed(history) if item.get("role") == "assistant")
+            last_message["content"] = [{"type": "output_text", "text": "different answer"}]
         else:
             last_answer["content"] = "different answer"
+        original_parent = admissions[-1].model_call_id
+        original_keys = tuple(records)
         with TestClient(app) as client:
             response = client.post(f"/ng-rollout/reasoning-rollout/training-token-capture/v1/{endpoint}", json=body)
         assert response.status_code == 200, response.text
-        assert admissions[-1] is None
         manifest = asyncio.run(ledger.manifest("reasoning-rollout"))
-        assert len(manifest["records"]) == 3
-        assert manifest["failures"]
-        assert ledger.record.await_count == 3
+        if last_turn_edit == "arguments":
+            assert admissions[-1] is not None
+            assert admissions[-1].mode == "token_in"
+            assert admissions[-1].parent_call_id == original_parent
+            assert tuple(admissions[-1].staging_chain) == original_keys
+            assert admissions[-1].prev_len == 6
+            # The worker used all three original staged segments as the prompt prefix;
+            # no tokens reconstructed from the rewritten arguments replaced them.
+            assert consumed_prefixes[-1] == [10, 101, 20, 102, 30, 103]
+            assert [token for key in original_keys for token in records[key].token_ids_delta] == consumed_prefixes[-1]
+            assert records[f"reasoning-rollout/{admissions[-1].model_call_id}"].token_ids_delta == [40, 104]
+            assert len(manifest["records"]) == 4
+            assert not manifest["failures"]
+        else:
+            assert admissions[-1] is None
+            assert len(consumed_prefixes) == 3
+            assert len(manifest["records"]) == 3
+            assert manifest["failures"]
     finally:
         asyncio.run(ledger.close())
 
@@ -211,7 +250,7 @@ def test_external_staging_conversion_failure_does_not_commit(tmp_path, monkeypat
         def stage(self, record, *, attachments=None):
             assert attachments is None
             staged.append(record)
-            return StageResult(ok=True, staging_key=f"{record.rollout_id}/{record.model_call_id}")
+            return StageResult(ok=True, staging_key=f"{record.capture_key}/{record.model_call_id}")
 
     capture = RolloutTokenCapture(sink=Sink(), weight_version_fn=lambda: 7)
 
@@ -236,7 +275,7 @@ def test_external_staging_conversion_failure_does_not_commit(tmp_path, monkeypat
         raise ValueError("injected final conversion failure")
 
     if failure == "serialization":
-        monkeypatch.setattr("nemo_gym.base_responses_api_model._orjson_dispatch_response", fail_conversion)
+        monkeypatch.setattr("nemo_gym.models.base_responses_api_model._orjson_dispatch_response", fail_conversion)
     elif endpoint == "responses":
         monkeypatch.setattr(type(model._converter), "chat_completion_to_response", fail_conversion)
     else:
@@ -267,6 +306,138 @@ def test_external_staging_conversion_failure_does_not_commit(tmp_path, monkeypat
         assert not manifest["records"]
         assert any(row["reason"] == UNCOMMITTED_CALL_REASON for row in manifest["failures"])
         assert NG_COMMIT_COORDS_FIELD not in response.text
+    finally:
+        asyncio.run(ledger.close())
+
+
+@pytest.mark.parametrize("note_content", ["string", "text_parts"])
+def test_external_staging_chains_calls_across_opencode_max_steps_notes(tmp_path, note_content) -> None:
+    """OpenCode's step-limit note is harness text: the model reads it as a user message, and every call chains.
+
+    OpenCode 1.17.11 adds the note as a final assistant message to each request from the limit on, and drops
+    it again from the next request. Here the model keeps calling tools after the limit, so two requests carry it.
+    """
+    records = {}
+
+    class Sink:
+        def stage(self, record, *, attachments=None):
+            key = f"{record.capture_key}/{record.model_call_id}"
+            records[key] = record
+            return StageResult(ok=True, staging_key=key)
+
+    capture = RolloutTokenCapture(sink=Sink(), weight_version_fn=lambda: 7)
+    admissions = []
+    forwarded = []
+    consumed_prefixes = []
+
+    async def complete(**body):
+        # A call capture refused (a poisoned call) reaches the worker without an admission.
+        admission = CaptureAdmission.model_validate(body[NG_CAPTURE_FIELD]) if NG_CAPTURE_FIELD in body else None
+        admissions.append(admission)
+        forwarded.append(body["messages"])
+        index = len(admissions)
+        payload = _completion([], [], f"answer {index}")
+        payload["choices"][0]["message"]["tool_calls"] = [
+            {"id": f"tool-{index}", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}
+        ]
+        if admission is None:
+            return payload
+        prefix = [token for key in admission.staging_chain for token in records[key].token_ids_delta]
+        consumed_prefixes.append(prefix)
+        active = capture.begin_call(admission, prefix_token_ids=prefix)
+        coords = capture.complete_call(
+            active,
+            prompt_token_ids=prefix + [10 * index],
+            generated_token_ids=[100 + index],
+            generated_logprobs=[-0.1],
+        )
+        payload[NG_COMMIT_COORDS_FIELD] = coords.model_dump(mode="json")
+        return payload
+
+    backend = MagicMock(spec=NeMoGymAsyncOpenAI)
+    backend.create_chat_completion = AsyncMock(side_effect=complete)
+    model = _model(backend, return_token_id_information=False, supply_prefix_token_ids=False)
+    model._external_capture_handler = VLLMWorkerCaptureHandler()
+    ledger = FileLineageStore(tmp_path)
+    app = _CaptureMiddleware(
+        model.setup_webserver(),
+        store=None,
+        model_server_name="vllm_model",
+        lineage_store=ledger,
+        external_staging=True,
+        token_capture_enabled=True,
+    )
+    note = (
+        OPENCODE_MAX_STEPS_PROMPT
+        if note_content == "string"
+        else [
+            {"type": "text", "text": OPENCODE_MAX_STEPS_PROMPT[:40]},
+            {"type": "text", "text": OPENCODE_MAX_STEPS_PROMPT[40:]},
+        ]
+    )
+    history = [{"role": "user", "content": "question"}]
+    try:
+        with TestClient(app) as client:
+            for index in range(1, 4):
+                # Calls 2 and 3 are past the step limit: each request ends with the note, which the next one drops.
+                messages = history + ([{"role": "assistant", "content": note}] if index > 1 else [])
+                response = client.post(
+                    "/ng-rollout/opencode-rollout/training-token-capture/v1/chat/completions",
+                    json={"messages": messages},
+                )
+                assert response.status_code == 200, response.text
+                manifest = asyncio.run(ledger.manifest("opencode-rollout"))
+                assert not manifest["failures"], manifest
+                assert admissions[-1] is not None
+                assert admissions[-1].parent_call_id == (None if index == 1 else admissions[-2].model_call_id)
+                assert admissions[-1].mode == ("text" if index == 1 else "token_in")
+                served = response.json()["choices"][0]["message"]
+                history.append({key: value for key, value in served.items() if value is not None})
+                history.append({"role": "tool", "tool_call_id": f"tool-{index}", "content": "result"})
+        # The worker reads the note as the last user turn, so it splices the parent's tokens at the parent's own
+        # output, and the tool result before the note stays in the prompt.
+        for messages in forwarded[1:]:
+            assert messages[-1] == {"role": "user", "content": OPENCODE_MAX_STEPS_PROMPT}
+            assert [message["role"] for message in messages[-2:]] == ["tool", "user"]
+            assert all(message.get("content") != note for message in messages if message["role"] == "assistant")
+        # Call 3 extends call 2's tokens, which include the first note, although its own request dropped that note.
+        assert consumed_prefixes == [[], [10, 101], [10, 101, 20, 102]]
+    finally:
+        asyncio.run(ledger.close())
+
+
+def test_an_assistant_message_that_only_resembles_the_note_stays_model_output(tmp_path) -> None:
+    """Only the exact note text is harness text. Any other final assistant message keeps the old handling."""
+    admissions = []
+
+    async def complete(**body):
+        admissions.append(body.get(NG_CAPTURE_FIELD))
+        return _completion([], [], "answer")
+
+    backend = MagicMock(spec=NeMoGymAsyncOpenAI)
+    backend.create_chat_completion = AsyncMock(side_effect=complete)
+    model = _model(backend, return_token_id_information=False, supply_prefix_token_ids=False)
+    model._external_capture_handler = VLLMWorkerCaptureHandler()
+    ledger = FileLineageStore(tmp_path)
+    app = _CaptureMiddleware(
+        model.setup_webserver(),
+        store=None,
+        model_server_name="vllm_model",
+        lineage_store=ledger,
+        external_staging=True,
+        token_capture_enabled=True,
+    )
+    messages = [
+        {"role": "user", "content": "question"},
+        {"role": "assistant", "content": OPENCODE_MAX_STEPS_PROMPT + " "},
+    ]
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/ng-rollout/prefill-rollout/training-token-capture/v1/chat/completions", json={"messages": messages}
+            )
+        assert response.status_code == 200, response.text
+        assert backend.create_chat_completion.await_args.kwargs["messages"][-1]["role"] == "assistant"
     finally:
         asyncio.run(ledger.close())
 
@@ -309,16 +480,16 @@ class _ExternalBackend:
         self.lineage = InMemoryLineageStore()
 
     async def commit(self, entry: TokenEntry) -> None:
-        if entry.rollout_id in self.frozen:
-            raise RuntimeError(f"Token capture for rollout {entry.rollout_id} is already frozen")
-        rollout = self.entries.setdefault(entry.rollout_id, {})
+        if entry.capture_key in self.frozen:
+            raise RuntimeError(f"Token capture for rollout {entry.capture_key} is already frozen")
+        rollout = self.entries.setdefault(entry.capture_key, {})
         previous = rollout.get(entry.model_call_id)
         if previous is not None and previous != entry:
             raise ValueError(f"Conflicting model call {entry.model_call_id}")
         if previous is None:
             rollout[entry.model_call_id] = entry
             await self.lineage.put(entry)
-            self.versions[entry.rollout_id] = self.versions.get(entry.rollout_id, 0) + 1
+            self.versions[entry.capture_key] = self.versions.get(entry.capture_key, 0) + 1
 
 
 class _ExternalSink:
@@ -356,7 +527,7 @@ class _ExternalSource:
     async def freeze(self, rollout_id: str) -> TokenCaptureSnapshot:
         self.backend.frozen.add(rollout_id)
         return TokenCaptureSnapshot(
-            rollout_id=rollout_id,
+            capture_key=rollout_id,
             entries=tuple(self.backend.entries.get(rollout_id, {}).values()),
             incomplete=rollout_id in self.backend.incomplete,
             snapshot_id=f"snapshot-{rollout_id}",
@@ -401,7 +572,7 @@ def _simulate_two_workers(
 
     def serve(client: TestClient, call_id: str, messages: list[dict]) -> tuple[dict, CaptureContext]:
         context = CaptureContext(
-            rollout_id=rollout_id,
+            capture_key=rollout_id,
             model_call_id=call_id,
             token_sink=sink_factory(),
             lineage_store=lineage_factory(),
@@ -431,6 +602,8 @@ def _simulate_two_workers(
     assert entries[1].parent_call_id == entries[0].model_call_id
     assert entries[1].prefix_requested is True
     assert entries[1].prefix_supplied is True
+    # The engine's chat finish reason survives the vLLM chat path into the record.
+    assert [entry.finish_reason for entry in entries] == ["stop", "stop"]
 
     assert first_context.parent_resolution is not None
     assert first_context.parent_resolution.status == ParentResolutionStatus.ROOT

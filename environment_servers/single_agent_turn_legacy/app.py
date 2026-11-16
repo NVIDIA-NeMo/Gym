@@ -5,64 +5,89 @@
 
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.exceptions import RequestValidationError
+from pydantic import ConfigDict, PositiveFloat, ValidationError
 
 from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
 )
-from nemo_gym.episode_types import (
-    EpisodeId,
-    MaterializedTask,
-    TaskId,
-)
-from nemo_gym.global_config import (
+from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
-    RESPONSES_CREATE_PARAMS_KEY_NAME,
-    ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
-    SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
-from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.single_agent_turn_types import (
+from nemo_gym.core import (
+    ENVIRONMENT_SERVER_FAILED,
+    EpisodeId,
+    FailureReportRow,
+    maybe_rollout_id_from_run_body,
+    model_sampling_from_run_body,
+    skips_token_capture,
+)
+from nemo_gym.data import materialize_task
+from nemo_gym.server_runtime import (
     SingleAgentTurnRequest,
     SingleAgentTurnResponse,
-    SingleAgentTurnTaskInput,
 )
+from nemo_gym.trajectory import NG_AGENT_OBSERVATIONS_KEY, NG_TRAJECTORY_KEY, NG_VERIFIER_INVOCATIONS_KEY
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+
+
+class SingleAgentTurnLegacyEnvironmentServerConfig(SingleAgentTurnEnvironmentServerConfig):
+    """Keep the migrated relay's timeout defaults for flat-row episodes."""
+
+    # Existing callers can still pass a typed SingleAgentTurnEnvironmentServerConfig, including its explicit limits.
+    model_config = ConfigDict(from_attributes=True)
+
+    default_episode_timeout_seconds: PositiveFloat | None = 21600
+    cleanup_timeout_seconds: PositiveFloat = 180
 
 
 class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
     """Expose the old flat `/run` contract for one migrated pairing."""
 
-    config: SingleAgentTurnEnvironmentServerConfig
+    config: SingleAgentTurnLegacyEnvironmentServerConfig
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
+        # Flat rows still run the episode protocol through run_request, so its episodes checkpoint too.
+        self.setup_environment_checkpoint(app)
         app.post("/run")(self.run_legacy)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
         return app
 
     async def run_legacy(self, row: dict[str, Any]) -> dict[str, Any]:
-        request = (
-            SingleAgentTurnRequest.model_validate(row)
-            if "episode_id" in row and "task" in row
-            else self._native_request(row)
-        )
+        is_episode_request = "episode_id" in row and "task" in row
+        try:
+            request = (
+                SingleAgentTurnRequest.model_validate(row)
+                if is_episode_request
+                else self._episode_request_from_row(row)
+            )
+        except ValidationError as error:
+            # A row that fails the episode request model, such as a malformed agent_context, gets a terminal 422, as on
+            # the episode request route, instead of a 500 that a caller retries.
+            raise RequestValidationError(error.errors(include_url=False)) from None
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from None
         response = await self.run_request(request)
-        return self._legacy_result(response)
+        # An episode request is answered with the episode reply it asks for; only a flat row gets a flat result.
+        return response.model_dump(mode="json") if is_episode_request else self._legacy_result(response)
 
-    def _native_request(self, row: dict[str, Any]) -> SingleAgentTurnRequest:
+    def _episode_request_from_row(self, row: dict[str, Any]) -> SingleAgentTurnRequest:
         task_source = row.get(TASK_SOURCE_KEY_NAME, self.config.resources_server.name)
         if not isinstance(task_source, str) or not task_source:
             raise ValueError("task_source must be a non-empty string when provided")
-        if task_source != self.config.resources_server.name:
+        # Collation sets task_source to the instance that declares the dataset: usually the agent,
+        # sometimes the Resources Server, and possibly this Environment Server.
+        bound = (self.config.resources_server.name, self.config.agent_server.name, self.config.name)
+        if task_source not in bound:
             raise ValueError(
-                f"Row task_source {task_source!r} does not match configured resources server "
-                f"{self.config.resources_server.name!r}"
+                f"Row task_source {task_source!r} names none of this Environment Server's instances: {list(bound)}"
             )
         agent_ref = row.get(AGENT_REF_KEY_NAME)
         if agent_ref is not None and (
@@ -72,62 +97,54 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
             raise ValueError(
                 f"Row agent_ref {row_agent!r} does not match configured agent server {self.config.agent_server.name!r}"
             )
-        task_id = next(
-            (str(row[key]) for key in ("task_id", "problem_id", "instance_id") if row.get(key) is not None),
-            None,
-        )
-        if task_id is None:
-            task_id = str(row[TASK_INDEX_KEY_NAME])
         attempt = row.get(ATTEMPT_INDEX_KEY_NAME, 0)
         if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 0:
             raise ValueError(f"Invalid episode attempt: {attempt!r}")
-        base_identity_row = dict(row)
-        base_identity_row[ATTEMPT_INDEX_KEY_NAME] = 0
-        rollout_id = maybe_rollout_id_from_run_body(base_identity_row) or (
+        # Decode the identity the way the agent does.
+        # An explicit id may carry the attempt suffix itself, as a restored attempt does.
+        capture_key = maybe_rollout_id_from_run_body(row) or (
             f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
         )
-        excluded = {
-            RESPONSES_CREATE_PARAMS_KEY_NAME,
-            AGENT_REF_KEY_NAME,
-            TASK_SOURCE_KEY_NAME,
-            SKILLS_REF_KEY_NAME,
-            ROLLOUT_ID_KEY_NAME,
-            TASK_INDEX_KEY_NAME,
-            ROLLOUT_INDEX_KEY_NAME,
-            ATTEMPT_INDEX_KEY_NAME,
-        }
         return SingleAgentTurnRequest(
-            episode_id=EpisodeId(rollout_id=rollout_id, attempt=attempt),
-            task=MaterializedTask(
-                task_id=TaskId(taskset=task_source, task_id=task_id),
-                task_input=SingleAgentTurnTaskInput(
-                    responses_create_params=row[RESPONSES_CREATE_PARAMS_KEY_NAME],
-                    task_data={
-                        key: value for key, value in row.items() if key not in excluded and not key.startswith("_ng_")
-                    },
-                ),
-            ),
+            episode_id=EpisodeId.from_capture_key(capture_key),
+            task=materialize_task(row, taskset=task_source),
+            model_sampling=model_sampling_from_run_body(row),
+            skip_token_capture=skips_token_capture(row),
         )
 
     def _legacy_result(self, response: SingleAgentTurnResponse) -> dict[str, Any]:
         agent_ref = {"name": self.config.agent_server.name}
         if response.failure is not None:
             failure = {
-                "_ng_failure_class": "environment_server_failed",
+                "_ng_failure_class": response.failure.failure_kind or ENVIRONMENT_SERVER_FAILED,
+                "_ng_failure_kind": response.failure.failure_kind,
                 "_ng_failure_terminal": response.failure.terminal,
-                "_ng_failure_message": response.failure.message,
+                "_ng_failure_message": response.failure.failure_reason,
                 "_ng_failure_stage": response.failure.stage,
                 "agent_ref": agent_ref,
             }
             if response.failure.partial_response is not None:
                 failure["_ng_failure_partial_response"] = response.failure.partial_response.model_dump(mode="json")
+            if response.failure.agent_observations is not None:
+                failure[NG_AGENT_OBSERVATIONS_KEY] = response.failure.agent_observations.model_dump(mode="json")
+            if response.failure.trajectory is not None:
+                failure[NG_TRAJECTORY_KEY] = response.failure.trajectory.model_dump(mode="json")
+            if response.failure.verifier_invocations is not None:
+                failure[NG_VERIFIER_INVOCATIONS_KEY] = [
+                    invocation.model_dump(mode="json") for invocation in response.failure.verifier_invocations
+                ]
+            # The flat reply keeps the typed reply's events, omission flag and selected failure.
+            if response.failure_report is not None:
+                FailureReportRow.merged_into(failure, response.failure_report)
             return failure
         if response.result is None:
             raise ValueError("Successful episode response has no result")
         result = response.result.model_dump(mode="json")
-        if result.get("ng_agent_observations") is None:
-            result.pop("ng_agent_observations", None)
+        if result.get(NG_AGENT_OBSERVATIONS_KEY) is None:
+            result.pop(NG_AGENT_OBSERVATIONS_KEY, None)
         result["agent_ref"] = agent_ref
+        if response.failure_report is not None:
+            FailureReportRow.merged_into(result, response.failure_report)
         return result
 
 

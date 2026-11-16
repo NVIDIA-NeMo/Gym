@@ -14,12 +14,23 @@
 
 """Provider-facing sandbox protocol."""
 
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlsplit
+
+from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED, FailureStage
+from nemo_gym.core.failure_records import FailureBoundary, SandboxFailureDetails
+from nemo_gym.core.typed_exceptions import NgFailureEvent, sdk_error_details
+from nemo_gym.utils.exception_inspection import error_to_http_status
+
+
+# How long a provider may spend finding and deleting the sandbox a timed-out create left behind (one list
+# and one delete per orphan). A caller that puts its own deadline on a create leaves at least this much room
+# above the provider's budget, so the provider can report what it found before the caller gives up.
+ORPHAN_REAP_TIMEOUT_S = 60.0
 
 
 class SandboxStatus(str, Enum):
@@ -63,14 +74,26 @@ class SandboxEndpoint:
 
 
 @dataclass(frozen=True)
-class SandboxResources:
-    """Provider-neutral resource request."""
+class SandboxResourceAmounts:
+    """Provider-neutral quantities: CPU cores, MiB, GiB and GPU count.
+
+    Missing values are unspecified/unknown, never zero. Fractional memory and disk
+    preserve observed allocations; gpu_type is a selector rather than an amount.
+    """
 
     cpu: float | None = None
-    memory_mib: int | None = None
-    disk_gib: int | None = None
+    memory_mib: float | None = None
+    disk_gib: float | None = None
     gpu: int | None = None
     gpu_type: str | None = None
+
+
+@dataclass(frozen=True)
+class SandboxResources(SandboxResourceAmounts):
+    """Provider-neutral creation request, retaining integer memory/disk inputs."""
+
+    memory_mib: int | None = None
+    disk_gib: int | None = None
 
     @classmethod
     def from_mapping(cls, resources: Mapping[str, Any] | None) -> "SandboxResources":
@@ -91,6 +114,55 @@ class SandboxResources:
         )
 
 
+# The resources a scheduler compares request against limit for; ``gpu_type`` is a selector, not a quantity.
+SCHEDULABLE_RESOURCE_KEYS = ("cpu", "memory_mib", "disk_gib", "gpu")
+
+
+def clamp_resource_requests(
+    requests: Mapping[str, Any] | SandboxResources,
+    limits: Mapping[str, Any] | SandboxResources,
+) -> tuple[dict[str, Any], dict[str, tuple[Any, Any]]]:
+    """Cap each scheduling request at the limit the spec declares for the same key.
+
+    Kubernetes never schedules a pod whose request exceeds its limit, and OpenSandbox reports such a
+    sandbox only as "pending allocation", so a request above a task's declared limit must not reach the
+    create call. Returns the requests with the offending keys set to their limit, and
+    ``{key: (request, limit)}`` for the keys that changed so the caller can log a warning naming them.
+    Keys the limits do not declare pass through untouched.
+    """
+    requested = requests if isinstance(requests, SandboxResources) else SandboxResources.from_mapping(requests)
+    limited = limits if isinstance(limits, SandboxResources) else SandboxResources.from_mapping(limits)
+    clamped = dict(requests.__dict__ if isinstance(requests, SandboxResources) else requests)
+    changed: dict[str, tuple[Any, Any]] = {}
+    for key in SCHEDULABLE_RESOURCE_KEYS:
+        request, limit = getattr(requested, key), getattr(limited, key)
+        if request is None or limit is None or request <= limit:
+            continue
+        changed[key] = (clamped[key], limit)
+        clamped[key] = limit
+    return clamped, changed
+
+
+@dataclass(frozen=True)
+class SandboxSidecarSpec:
+    """An extra container started with the sandbox from its own image.
+
+    The sidecar has its own filesystem. Start services in it with ``AsyncSandbox.sidecar(name).exec``.
+    How the sandbox reaches a sidecar over the network is provider-specific.
+    """
+
+    name: str
+    image: str
+    env: dict[str, str] = field(default_factory=dict)
+    resources: SandboxResources | Mapping[str, Any] = field(default_factory=SandboxResources)
+
+    def __post_init__(self) -> None:
+        if not self.name or not self.image:
+            raise ValueError("A sandbox sidecar needs a name and an image")
+        if not isinstance(self.resources, SandboxResources):
+            object.__setattr__(self, "resources", SandboxResources.from_mapping(self.resources))
+
+
 @dataclass(frozen=True)
 class SandboxSpec:
     """Sandbox creation request."""
@@ -100,16 +172,35 @@ class SandboxSpec:
     ready_timeout_s: int | float | None = None
     workdir: str | None = None
     env: dict[str, str] = field(default_factory=dict)
-    files: dict[str, str] = field(default_factory=dict)
+    # Uploaded at startup, keyed by remote path.
+    # A str is written as UTF-8 text and bytes are written unchanged, so binary files such as images fit too.
+    files: dict[str, str | bytes] = field(default_factory=dict)
     metadata: dict[str, str] = field(default_factory=dict)
     resources: SandboxResources | Mapping[str, Any] = field(default_factory=SandboxResources)
     entrypoint: list[str] | None = None
     provider_options: dict[str, Any] = field(default_factory=dict)
     ports: tuple[int, ...] | list[int] = field(default_factory=tuple)
+    # Extra containers started with the sandbox (mappings are accepted); needs a provider that
+    # implements `SupportsSandboxSidecars`.
+    sidecars: tuple[SandboxSidecarSpec, ...] | list[SandboxSidecarSpec | Mapping[str, Any]] = field(
+        default_factory=tuple
+    )
+    # The user commands run as when an exec names none (a Dockerfile's final ``USER``). Providers that
+    # cannot set a container default apply it per exec through the sandbox facade.
+    user: str | int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.resources, SandboxResources):
             object.__setattr__(self, "resources", SandboxResources.from_mapping(self.resources))
+        if not isinstance(self.sidecars, (list, tuple)):
+            raise TypeError("Sandbox sidecars must be a list or tuple of sidecar specs or mappings")
+        sidecars = tuple(
+            sidecar if isinstance(sidecar, SandboxSidecarSpec) else SandboxSidecarSpec(**sidecar)
+            for sidecar in self.sidecars
+        )
+        if len({sidecar.name for sidecar in sidecars}) != len(sidecars):
+            raise ValueError("Sandbox sidecar names must be unique")
+        object.__setattr__(self, "sidecars", sidecars)
         if not isinstance(self.ports, (list, tuple)):
             raise TypeError("Sandbox ports must be a list or tuple of TCP port numbers")
         normalized_ports: list[int] = []
@@ -152,6 +243,10 @@ class SandboxExecResult:
     command. Providers may use a non-process sentinel with ``error_type`` set
     when the sandbox runtime reports an execution failure without a process
     exit code.
+
+    ``error_type="user_switch_unavailable"`` means the provider confirmed that
+    credential switching prevented process launch. Helpers that allow the image's
+    default user can choose that branch without reporting a failure event.
     """
 
     stdout: str | None
@@ -190,6 +285,36 @@ class SandboxPtyError(RuntimeError):
     """Raised when a PTY session fails outside normal process exit."""
 
 
+def sandbox_credentials_rejected(
+    error: BaseException,
+    *,
+    operation: str,
+    details: SandboxFailureDetails | None = None,
+    stage: FailureStage | None = None,
+    sdk_message: str | None = None,
+) -> NgFailureEvent | None:
+    """A sandbox-boundary failure for an observed HTTP 401/403, caused by ``error``; else ``None``.
+
+    The kind comes from the status only, never from the error's text. ``sdk_message`` is the diagnostic
+    the caller selected for the provider's SDK (see ``sdk_error_details``).
+    """
+    status = error_to_http_status(error)
+    if status not in (401, 403):
+        return None
+    rejected = NgFailureEvent(
+        boundary=FailureBoundary.SANDBOX,
+        failure_kind=PROVIDER_CREDENTIALS_REJECTED,
+        details=details,
+        failure_reason=f"Sandbox provider refused the credentials (HTTP {status})",
+        operation=operation,
+        stage=stage,
+        http_status=status,
+        foreign_error=sdk_error_details(error, message=sdk_message),
+    )
+    rejected.__cause__ = error
+    return rejected
+
+
 class SandboxCreateError(RuntimeError):
     """Raised when a provider cannot create a sandbox."""
 
@@ -207,9 +332,10 @@ class SandboxProvider(Protocol):
         """Create a ready sandbox and return a provider-neutral handle.
 
         Providers must return only after the sandbox is healthy enough to run
-        commands and transfer files. If the sandbox cannot become ready before
-        the configured timeout, providers should raise ``SandboxCreateError``
-        or a provider-specific subclass.
+        commands and transfer files. New and migrated providers must report allocation
+        and readiness failures as ``NgFailureEvent`` with ``boundary="sandbox"`` and a registered kind.
+        Providers awaiting migration still expose creation exceptions; see the
+        sandbox documentation's required provider migrations.
         """
         ...
 
@@ -257,7 +383,9 @@ class SupportsSandboxBackgroundServices(Protocol):
         command: str,
         *,
         cwd: str | None = None,
+        env: dict[str, str] | None = None,
         timeout_s: int | float | None = None,
+        user: str | int | None = None,
     ) -> SandboxExecResult: ...
 
 
@@ -313,12 +441,90 @@ class SupportsSandboxSharedStorage(Protocol):
     def shared_volume_metadata(self) -> dict[str, str]: ...
 
 
+# The per-service container settings a Compose file may declare behind ``SupportsSandboxServiceOptions``.
+COMPOSE_SERVICE_OPTION_FIELDS = frozenset({"tmpfs", "ulimits", "sysctls", "security_opt"})
+
+
+@runtime_checkable
+class SupportsSandboxServiceOptions(Protocol):
+    """Optional container settings a Compose service declares: ``tmpfs``, ``ulimits``, ``sysctls``, ``security_opt``.
+
+    ``SERVICE_OPTION_FIELDS`` names the subset the provider can apply; it is a class attribute so prepare
+    can check a task against a provider by name, without instantiating it. ``service_options`` returns
+    the ``provider_options`` that apply the given values at create time (an empty mapping when none are
+    given) and raises ``ValueError`` for a value it cannot express.
+    """
+
+    SERVICE_OPTION_FIELDS: frozenset[str]
+
+    def service_options(
+        self,
+        *,
+        tmpfs: tuple[str, ...] = (),
+        ulimits: Mapping[str, Any] | None = None,
+        sysctls: Mapping[str, str] | None = None,
+        security_opt: tuple[str, ...] = (),
+    ) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class SupportsSandboxPullPolicy(Protocol):
+    """Optional per-sandbox image pull policy: ``always``, ``missing`` or ``never`` (Compose's ``pull_policy``).
+
+    ``pull_policy_options`` returns the ``provider_options`` that apply it at create time. A provider
+    without this capability leaves the pull behaviour to the deployment's default.
+    """
+
+    def pull_policy_options(self, policy: str) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class SupportsSandboxIndependentUploads(Protocol):
+    """Optional provider capability: a file upload never waits for capacity that running commands hold.
+
+    A provider that bounds its concurrent operations with one limit shared by commands and file transfers
+    (CLI slots, worker threads, pooled connections) cannot promise this: once long-running commands hold every
+    slot, an upload waits until one of them ends. ``SandboxSession.expire`` needs it to stop a running harness,
+    because the stop is a file the harness's supervisor watches for. The answer may depend on configuration.
+    """
+
+    def uploads_independent_of_execs(self) -> bool: ...
+
+
 @runtime_checkable
 class SupportsSandboxEndpoint(Protocol):
     """Optional provider capability for resolving declared service ports."""
 
     async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
         """Resolve a declared service port to a caller-reachable endpoint."""
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxSidecars(Protocol):
+    """Optional provider capability to run sidecar containers next to the sandbox.
+
+    The provider creates the sidecars declared in ``SandboxSpec.sidecars`` together with the sandbox, then runs
+    commands in them and reads files from them through these calls. Commands run as an argv without a shell,
+    because sidecar images can be distroless.
+    """
+
+    async def sidecar_exec(
+        self,
+        handle: SandboxHandle,
+        sidecar: str,
+        argv: list[str],
+        *,
+        timeout_s: int | float,
+        on_stdout: Callable[[str], None] | None = None,
+    ) -> SandboxExecResult:
+        """Run ``argv`` in ``sidecar``; ``on_stdout`` receives stdout text as it arrives, for long-running services."""
+        ...
+
+    async def download_sidecar_file(
+        self, handle: SandboxHandle, sidecar: str, source_path: str, target_path: Path
+    ) -> None:
+        """Download one file from ``sidecar`` to the local filesystem."""
         ...
 
 
@@ -356,8 +562,9 @@ class SandboxPtySession(Protocol):
     async def read(self, *, timeout_s: float | None = None) -> bytes:
         """Return the next output chunk (all terminal output in PTY mode;
         stdout only in pipe mode). ``b""`` means the process exited and the
-        stream is drained. Raises ``TimeoutError`` on timeout and
-        ``SandboxPtyError`` if the session died without exiting.
+        stream is drained. Raises ``TimeoutError`` when this wait expires;
+        that alone does not mean the command failed. Report session death as
+        ``NgFailureEvent``; providers awaiting migration use ``SandboxPtyError``.
         """
         ...
 
@@ -391,7 +598,11 @@ class SandboxPtySession(Protocol):
         ...
 
     async def wait_exit(self, *, timeout_s: float | None = None) -> int:
-        """Block until the process exits and return its exit code."""
+        """Block until the process exits and return its exit code.
+
+        Raises ``TimeoutError`` when this wait expires; that alone does not mean
+        the command failed. Session failures follow the same contract as ``read``.
+        """
         ...
 
     async def run_detached(self, command: str, *, poll_interval_s: float = 15.0) -> tuple[bytes, int | None]:

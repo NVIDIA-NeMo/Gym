@@ -18,34 +18,42 @@ from __future__ import annotations
 import asyncio
 import copy
 import inspect
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from threading import Lock
 from typing import Any, Protocol
 from uuid import uuid4
 
+from aiohttp import ClientResponseError
 from nooa.runtime.hooks import hooks_scope
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentEpisode, TrajectoryRecord
-from nemo_gym.server_utils import ServerClient
-from responses_api_agents.nooa_agent.config import NOOAInvocationConfig, validate_invocation
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import DirectHTTPToolAccess
+from nemo_gym.trajectory import AgentEpisode, TrajectoryRecord
 from responses_api_agents.nooa_agent.gym_llm import (
+    GymModelClient,
     GymResponsesLLM,
-    InvalidPolicyOutputError,
-    PolicyCallBudgetExceeded,
     RolloutLLMState,
 )
+from responses_api_agents.nooa_agent.invocation import NOOAInvocationConfig, validate_invocation
 from responses_api_agents.nooa_agent.observability import GymTraceHooks
 from responses_api_agents.nooa_agent.resource_tools import (
     ResourceToolDispatcher,
     create_agent_class_with_resource_methods,
     validate_agent_resource_method_bindings,
 )
+from responses_api_agents.nooa_agent.termination import NOOATerminationReason, cleanup_errors, policy_termination
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
 class NOOARunRequest:
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     model_url_path: str
+    tool_access: DirectHTTPToolAccess | None = None
     model_cookies: dict[str, str] = field(default_factory=dict)
     resource_cookies: dict[str, str] = field(default_factory=dict)
     task_id: str = "unknown"
@@ -58,16 +66,25 @@ class NOOARunResult:
     return_value: Any
     model_cookies: dict[str, str]
     resource_cookies: dict[str, str]
-    termination_reason: str | None = None
+    termination_reason: NOOATerminationReason | None = None
     termination_error: str | None = None
     trajectory: TrajectoryRecord | None = None
+    model_status_code: int | None = None
 
 
 class NOOARunFailure(RuntimeError):
     """A failure carrying the same episode representation as a successful run."""
 
     def __init__(self, error: BaseException, result: NOOARunResult) -> None:
-        super().__init__(str(error))
+        message = str(error)
+        retained = cleanup_errors(error)
+        if retained:
+            # Bound each cleanup detail so both stages fit in the worker's 2,000-character diagnostic.
+            details = "; ".join(f"{type(cleanup).__name__}: {str(cleanup)[:500]}" for cleanup in retained)
+            message = f"Cleanup failed: {details}"
+            if all(cleanup is not error for cleanup in retained):
+                message += f". Original task failure: {error}"
+        super().__init__(message)
         self.result = result
 
 
@@ -91,31 +108,64 @@ def _validate_agent_llm_bindings(agent_class: type) -> None:
         )
 
 
-class EmbeddedNOOARunner:
+class InProcessNOOARunner:
     """Construct and invoke one isolated NOOA agent instance per Gym rollout."""
 
     def __init__(
         self,
         *,
         invocation: NOOAInvocationConfig,
-        server_client: ServerClient,
+        server_client: GymModelClient,
         model_server_name: str,
-        resources_server_name: str,
-        max_policy_calls: int,
+        max_policy_calls: int | None,
+        on_progress: Callable[[NOOARunResult], None] | None = None,
+        context_window: int | None = None,
     ) -> None:
-        if invocation.execution_mode == "sandboxed":
-            raise NotImplementedError("NOOA sandboxed execution is not implemented")
         self._invocation = invocation
         self._server_client = server_client
         self._model_server_name = model_server_name
-        self._resources_server_name = resources_server_name
         self._max_policy_calls = max_policy_calls
+        self._on_progress = on_progress
+        self._context_window = context_window
         self._agent_class, self._invocation_adapter = validate_invocation(invocation)
         _validate_agent_llm_bindings(self._agent_class)
 
     async def run(self, request: NOOARunRequest) -> NOOARunResult:
         state = RolloutLLMState(max_policy_calls=self._max_policy_calls)
-        trace = GymTraceHooks()
+        progress_lock = Lock()
+
+        def checkpoint() -> None:
+            if self._on_progress is None:
+                return
+            # NOOA's synchronous callbacks do not yield to sibling async calls.
+            # Capture a consistent projection before sibling calls resume. The
+            # sandbox callback detaches it on this loop, then queues serialization
+            # and persistence; a writer thread must never inspect the live trace.
+            with progress_lock:
+                try:
+                    episode, trajectory = trace.project(
+                        create_params=request.responses_create_params,
+                        state=state,
+                        task_id=request.task_id,
+                        rollout_id=request.rollout_id,
+                        default_model=self._model_server_name,
+                        partial=True,
+                    )
+                    self._on_progress(
+                        NOOARunResult(
+                            episode=episode,
+                            return_value=None,
+                            model_cookies=dict(request.model_cookies),
+                            resource_cookies=dict(request.resource_cookies),
+                            trajectory=trajectory,
+                        )
+                    )
+                except Exception:
+                    # Evidence persistence is best effort. NOOA swallows tool
+                    # hook errors, so report all checkpoint failures consistently.
+                    logger.exception("Failed to persist NOOA partial checkpoint")
+
+        trace = GymTraceHooks(on_progress=checkpoint)
         sampling_overrides = request.responses_create_params.model_dump(
             include={"temperature", "top_p", "max_output_tokens"}, exclude_unset=True, exclude_none=True
         )
@@ -126,11 +176,12 @@ class EmbeddedNOOARunner:
             state=state,
             cookies=request.model_cookies,
             on_call=trace.on_model_call,
+            on_response=checkpoint,
             sampling_overrides=sampling_overrides,
+            context_window=self._context_window,
         )
         dispatcher = ResourceToolDispatcher(
-            server_client=self._server_client,
-            resources_server_name=self._resources_server_name,
+            tool_access=request.tool_access,
             cookies=request.resource_cookies,
             trace_hooks=trace,
         )
@@ -151,20 +202,20 @@ class EmbeddedNOOARunner:
                 return_value = await self._invocation_adapter(agent, request.responses_create_params)
         except BaseException as error:
             failure = error
-            # NOOA may wrap a model error after its strategy retry loop.
-            cause: BaseException | None = error
-            seen: set[int] = set()
-            while cause is not None and id(cause) not in seen:
-                seen.add(id(cause))
-                if isinstance(cause, (PolicyCallBudgetExceeded, InvalidPolicyOutputError)):
-                    termination_reason = (
-                        "policy_budget_exceeded"
-                        if isinstance(cause, PolicyCallBudgetExceeded)
-                        else "invalid_policy_output"
-                    )
-                    termination_error = str(cause)
-                    break
-                cause = cause.__cause__ or cause.__context__
+            termination_reason, termination_error = policy_termination(error, model_error=state.fatal_error)
+
+        fatal_error = dispatcher.fatal_error
+        if state.fatal_error is not None and termination_reason is not NOOATerminationReason.MODEL_REJECTED:
+            # A budget or output error after an unrecovered transport failure
+            # still lacks a valid rollout to grade. Keep the terminal cause.
+            termination_reason = None
+            termination_error = None
+        if fatal_error is None and failure is None:
+            fatal_error = state.fatal_error
+        if fatal_error is not None and not isinstance(failure, asyncio.CancelledError):
+            failure = fatal_error
+            termination_reason = None
+            termination_error = None
 
         episode, trajectory = trace.project(
             create_params=request.responses_create_params,
@@ -172,6 +223,12 @@ class EmbeddedNOOARunner:
             task_id=request.task_id,
             rollout_id=request.rollout_id,
             default_model=self._model_server_name,
+            root_status="incomplete"
+            if termination_reason is not None and termination_reason is not NOOATerminationReason.MODEL_REJECTED
+            else "failed"
+            if failure is not None
+            else "completed",
+            root_error_type=type(failure).__name__ if failure is not None else None,
         )
         result = NOOARunResult(
             episode=episode,
@@ -181,6 +238,12 @@ class EmbeddedNOOARunner:
             termination_reason=termination_reason,
             termination_error=termination_error,
             trajectory=trajectory,
+            # Retain the upstream status only after the model identity and cleanup
+            # guards established a terminal rejection; do not parse diagnostics.
+            model_status_code=state.fatal_error.status
+            if termination_reason is NOOATerminationReason.MODEL_REJECTED
+            and isinstance(state.fatal_error, ClientResponseError)
+            else None,
         )
         if failure is not None and termination_reason is None:
             if isinstance(failure, asyncio.CancelledError):

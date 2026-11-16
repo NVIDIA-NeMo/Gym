@@ -32,16 +32,27 @@ import ray
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import get_first_server_config_dict
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.providers.apptainer import ApptainerProvider
-from nemo_gym.sandbox.providers.docker import DockerCreateConfig, DockerProvider
-from nemo_gym.server_utils import apply_rollout_prefix
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.client import apply_rollout_prefix
+from nemo_gym.config import ModelServerRef, get_first_server_config_dict
+from nemo_gym.core import (
+    AGENT_TIMEOUT,
+    PROVIDER_UNAVAILABLE,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+)
+from nemo_gym.sandbox import (
+    ApptainerProvider,
+    AsyncSandbox,
+    DockerCreateConfig,
+    DockerProvider,
+    SandboxSpec,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 def _format_container(container_formatter: str | list[str], task_name: str, docker_image: str) -> str:
@@ -107,6 +118,8 @@ class TerminalBenchMetrics(BaseModel):
     container_timed_out: bool = False
     sandbox_failed: bool = False
     mask_sample: bool = False
+    failure_kind: Optional[str] = None
+    failure_reason: Optional[str] = None
 
     ray_queue_time: Optional[float] = None
     agent_run_time: Optional[float] = None
@@ -220,9 +233,18 @@ openclaw_defaults = AGENT_KWARGS.get("openclaw_config", {{}}).get("agents", {{}}
 if openclaw_defaults.get("workspace") == ".":
     openclaw_defaults["workspace"] = str(Path.cwd())
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymEasyInputMessage
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.server_utils import ServerClient
+try:
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NeMoGymEasyInputMessage
+    from nemo_gym.config import ModelServerRef, ResourcesServerRef
+    from nemo_gym.client import ServerClient
+except ModuleNotFoundError as exc:
+    # This runs against the nemo-gym the sandbox image installed, which can predate the package
+    # reorganization (#5166). A missing dependency other than nemo_gym still fails here.
+    if not (exc.name or "").startswith("nemo_gym."):
+        raise
+    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymEasyInputMessage  # path before nemo_gym 0.8.0
+    from nemo_gym.config_types import ModelServerRef, ResourcesServerRef  # path before nemo_gym 0.8.0
+    from nemo_gym.server_utils import ServerClient  # path before nemo_gym 0.8.0
 from {agent_module} import {agent_class}, {agent_cfg_class}
 
 _mock_client = ServerClient.model_construct(global_config_dict={{}})
@@ -286,9 +308,17 @@ class GymAgentHarnessProcessor(BaseModel):
         sentinel = deps_dir / ".installed"
         script = agent_dir / "scripts" / f"{self._agent_key}_deps.sh"
         shared = self._parent / "setup_scripts" / "_portable_python.sh"
-        reqs = agent_dir / "requirements.txt"
-
-        recipe_src = b"".join(p.read_bytes() for p in (script, shared, reqs) if p.exists()) or b"no-script"
+        sources = (
+            script,
+            shared,
+            agent_dir / "pyproject.toml",
+            agent_dir / "uv.lock",
+            # The portable helper installs Gym and its dependencies from this checkout.
+            PARENT_DIR / "pyproject.toml",
+            PARENT_DIR / "uv.lock",
+            PARENT_DIR / "setup.py",
+        )
+        recipe_src = b"".join(p.read_bytes() for p in sources if p.exists()) or b"no-script"
         recipe = hashlib.sha256(recipe_src).hexdigest()
         if sentinel.exists() and sentinel.read_text().strip() == recipe:
             print(f"Agent deps already at {deps_dir}", flush=True)
@@ -399,6 +429,57 @@ class AnyTerminalInstanceConfig(AnyTerminalAgentConfig, AnyTerminalServerConfig)
 
 class AnyTerminalVerifyResponse(TerminalBenchMetrics, BaseVerifyResponse):
     instance_config: Dict[str, Any]
+
+
+SETUP_FAILED = "anyterminal_agent:setup_failed"
+
+
+class _SetupError(RuntimeError):
+    """A run cannot start because its local inputs are wrong (missing runtime or task tests), not the provider."""
+
+
+def _setup_command_failed(result: Any) -> bool:
+    """Whether a setup ``exec`` completed and reported a failure.
+
+    An ``error_type`` (timeout, sandbox) means the command did not complete, so its exit code says nothing about
+    the setup; that is a sandbox failure, raised as a plain error that keeps the ``provider_unavailable`` default.
+    """
+    if result.error_type is not None:
+        raise RuntimeError(f"the sandbox could not run the setup command ({result.error_type})")
+    return result.return_code != 0
+
+
+def _masked_failure(
+    agent_error_type: Optional[str],
+    eval_error_type: Optional[str],
+    sandbox_error: Optional[str],
+    sandbox_error_kind: Optional[str] = None,
+) -> tuple[Optional[str], Optional[str]]:
+    """The ``failure_kind`` and ``failure_reason`` of a masked run, or ``(None, None)`` when nothing masks it.
+
+    ``*_error_type`` is the ``error_type`` of the agent or eval ``exec`` result (``"timeout"`` or ``"sandbox"``);
+    ``sandbox_error`` is the message of an exception raised around the sandbox and ``sandbox_error_kind`` the kind
+    that exception carried, if any. The stages run in order, so a recorded ``exec`` error happened before any later
+    exception and names the run; an exception names it only when no ``exec`` reported an error.
+    """
+    for stage, error_type in (("agent", agent_error_type), ("eval", eval_error_type)):
+        if error_type == "sandbox":
+            return PROVIDER_UNAVAILABLE, f"the sandbox failed during the {stage} command"
+        if error_type == "timeout":
+            kind = AGENT_TIMEOUT if stage == "agent" else "anyterminal_agent:eval_timeout"
+            return kind, f"the {stage} command timed out"
+    if sandbox_error is not None:
+        return sandbox_error_kind or PROVIDER_UNAVAILABLE, sandbox_error
+    return None, None
+
+
+def _exception_kind(exc: Exception) -> Optional[str]:
+    """The kind a sandbox-side exception carries; None means the default ``provider_unavailable``."""
+    if isinstance(exc, NgFailureEvent):
+        return exc.failure_kind
+    if isinstance(exc, _SetupError):
+        return SETUP_FAILED
+    return None
 
 
 ### Sandbox provider selection
@@ -525,8 +606,8 @@ class RunTerminalAgent(BaseModel):
                 raise RuntimeError(result.stderr or "failed to fetch agent runtime")
         else:
             result = await sandbox.exec("test -x /agent_deps_mount/bin/python", timeout_s=30, user="root")
-            if result.return_code != 0:
-                raise RuntimeError("task image does not contain /agent_deps_mount/bin/python")
+            if _setup_command_failed(result):
+                raise _SetupError("task image does not contain /agent_deps_mount/bin/python")
         if external_runtime:
             result = await sandbox.exec(
                 "tar -xzf /tmp/anyterminal-agent-deps.tar.gz -C /agent_deps_mount && "
@@ -534,8 +615,8 @@ class RunTerminalAgent(BaseModel):
                 timeout_s=900,
                 user="root",
             )
-            if result.return_code != 0:
-                raise RuntimeError(result.stderr or "failed to extract agent runtime")
+            if _setup_command_failed(result):
+                raise _SetupError(result.stderr or "failed to extract agent runtime")
 
     async def _stage_remote_tests(self, sandbox: AsyncSandbox, cfg: AnyTerminalInstanceConfig) -> None:
         archive = await asyncio.to_thread(self._archive, cfg.persistent_dir / "staging" / "tests")
@@ -578,7 +659,7 @@ class RunTerminalAgent(BaseModel):
             env["NGTB_MODEL_URL"] = cfg.model_server_url
         return env
 
-    async def _run_agent(self, sandbox: AsyncSandbox, cfg: AnyTerminalInstanceConfig) -> tuple[float, bool]:
+    async def _run_agent(self, sandbox: AsyncSandbox, cfg: AnyTerminalInstanceConfig) -> tuple[float, Optional[str]]:
         t0 = time.time()
         result = await sandbox.exec(
             _apt_root_sandbox(cfg) + (cfg.agent_command_str or ""),
@@ -599,7 +680,7 @@ class RunTerminalAgent(BaseModel):
         if result.return_code != 0:
             detail = result.stderr or result.stdout or ""
             print(f"[{cfg.task_name}] agent exit {result.return_code}: {detail[-2000:]}", flush=True)
-        return time.time() - t0, result.error_type in ("timeout", "sandbox")
+        return time.time() - t0, result.error_type if result.error_type in ("timeout", "sandbox") else None
 
     async def _stage_tests(self, cfg: AnyTerminalInstanceConfig) -> None:
         """Copy the task's test files into the staging dir, visible to the sandbox at /tests."""
@@ -607,9 +688,12 @@ class RunTerminalAgent(BaseModel):
         staging_tests = cfg.persistent_dir / "staging" / "tests"
         if staging_tests.exists():
             shutil.rmtree(staging_tests)
-        shutil.copytree(src, staging_tests)
+        try:
+            shutil.copytree(src, staging_tests)
+        except FileNotFoundError as e:
+            raise _SetupError(f"task tests directory not found: {src}") from e
 
-    async def _run_eval(self, sandbox: AsyncSandbox, cfg: AnyTerminalInstanceConfig) -> tuple[float, bool]:
+    async def _run_eval(self, sandbox: AsyncSandbox, cfg: AnyTerminalInstanceConfig) -> tuple[float, Optional[str]]:
         t0 = time.time()
         test_cmd = (
             "rm -rf /tests && ln -s /trajectories_mount/staging/tests /tests && "
@@ -621,7 +705,7 @@ class RunTerminalAgent(BaseModel):
         result = await sandbox.exec(_apt_root_sandbox(cfg) + test_cmd, timeout_s=cfg.tb_eval_timeout, user="root")
         if result.return_code != 0:
             print(f"[{cfg.task_name}] eval exit {result.return_code}: {(result.stderr or '')[-2000:]}", flush=True)
-        return time.time() - t0, result.error_type in ("timeout", "sandbox")
+        return time.time() - t0, result.error_type if result.error_type in ("timeout", "sandbox") else None
 
     async def process_single_datapoint(self) -> bool:
         cfg = self.config
@@ -638,28 +722,32 @@ class RunTerminalAgent(BaseModel):
                 metadata=cfg.sandbox_default_metadata,
             ),
         )
-        agent_timed_out = container_timed_out = False
+        agent_error_type = eval_error_type = sandbox_error = sandbox_error_kind = None
         sandbox_failed = False
         agent_run_time = eval_run_time = None
         try:
             await sandbox.start()
             if not self._uses_bind_mounts(cfg):
                 await self._stage_remote_runtime(sandbox, cfg)
-            agent_run_time, agent_timed_out = await self._run_agent(sandbox, cfg)
+            agent_run_time, agent_error_type = await self._run_agent(sandbox, cfg)
             await self._stage_tests(cfg)
             if not self._uses_bind_mounts(cfg):
                 await self._stage_remote_tests(sandbox, cfg)
-            eval_run_time, container_timed_out = await self._run_eval(sandbox, cfg)
+            eval_run_time, eval_error_type = await self._run_eval(sandbox, cfg)
             if not self._uses_bind_mounts(cfg):
                 await self._collect_remote_outputs(sandbox, cfg)
         except Exception as e:
             sandbox_failed = True
+            sandbox_error = repr(e)
+            sandbox_error_kind = _exception_kind(e)
             print(f"[{cfg.task_name}] sandbox run failed: {e}", flush=True)
         finally:
             try:
                 await sandbox.stop()
             except Exception as e:
                 sandbox_failed = True
+                if sandbox_error is None:
+                    sandbox_error, sandbox_error_kind = repr(e), _exception_kind(e)
                 print(f"[{cfg.task_name}] sandbox cleanup failed: {e}", flush=True)
             shutil.rmtree(cfg.persistent_dir / "staging", ignore_errors=True)
 
@@ -673,6 +761,11 @@ class RunTerminalAgent(BaseModel):
             except (ValueError, OSError):
                 pass
 
+        agent_timed_out = agent_error_type is not None
+        container_timed_out = eval_error_type is not None
+        failure_kind, failure_reason = _masked_failure(
+            agent_error_type, eval_error_type, sandbox_error, sandbox_error_kind
+        )
         metrics = TerminalBenchMetrics(
             ray_queue_time=time.time() - cfg.ray_queue_timestamp,
             resolved=resolved,
@@ -680,6 +773,8 @@ class RunTerminalAgent(BaseModel):
             container_timed_out=container_timed_out,
             sandbox_failed=sandbox_failed,
             mask_sample=bool(container_timed_out or agent_timed_out or sandbox_failed),
+            failure_kind=failure_kind,
+            failure_reason=failure_reason,
             agent_run_time=agent_run_time,
             eval_run_time=eval_run_time,
             total_run_time=total_run_time,
@@ -755,6 +850,9 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
         if remote_provider and runtime_source == "auto":
             agent_deps_archive = workspace / f".{agent_deps_dir.name}.tar.gz"
             sentinel = agent_deps_dir / ".installed"
+            # Packing takes no lock across processes and writes through one fixed temporary file name.
+            # With num_workers > 1, the main process builds this server before uvicorn starts the workers,
+            # so the archive is already newer than the sentinel when the workers get here, and they skip packing.
             if not agent_deps_archive.exists() or agent_deps_archive.stat().st_mtime < sentinel.stat().st_mtime:
                 temporary = agent_deps_archive.with_suffix(".tmp")
                 with tarfile.open(temporary, "w:gz", compresslevel=1) as archive:
@@ -847,9 +945,13 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
             config_overrides["tb_sandbox_ttl"] = required_ttl
 
         server_config = self._server.model_dump()
-        if not self.config.sandbox_model_base_url and rollout_id and server_config["model_server_url"]:
+        # A sandbox_model_base_url relays to the same model server, so it keeps the rollout path that attributes calls.
+        # The rollout path goes before /v1, which the in-box runner adds back, so a relay URL given with /v1 drops it.
+        if self.config.model_server is not None and server_config["model_server_url"]:
             server_config["model_server_url"] = apply_rollout_prefix(
-                server_config["model_server_url"], rollout_id, token_capture=self._token_id_capture_enabled()
+                server_config["model_server_url"].rstrip("/").removesuffix("/v1"),
+                rollout_id,
+                token_capture=self._token_id_capture_enabled(),
             )
 
         params = AnyTerminalInstanceConfig(
@@ -904,7 +1006,7 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
         update_metrics(params.metrics_fpath, {"mask_sample": mask_sample})
 
         response_path = params.persistent_dir / "response.json"
-        output_items, tools = [], []
+        output_items, tools, usage = [], [], None
         if response_path.exists():
             try:
                 data = json.loads(response_path.read_text())
@@ -912,6 +1014,7 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
                 saved = NeMoGymResponse.model_validate(data)
                 output_items = saved.output
                 tools = saved.tools or []
+                usage = saved.usage
             except (json.JSONDecodeError, ValueError) as e:
                 print(f"[{params.task_name}] response.json unreadable ({e}), treating as empty response", flush=True)
 
@@ -924,6 +1027,7 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=params.body.parallel_tool_calls,
             tool_choice=params.body.tool_choice,
             tools=tools,
+            usage=usage,
             metadata={
                 "input": json.dumps(params.body.model_dump(mode="json").get("input") or []),
                 "metrics": params.metrics_fpath.read_text(),
@@ -956,3 +1060,6 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     AnyTerminalAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = AnyTerminalAgent.run_webserver()  # noqa: F401

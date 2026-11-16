@@ -7,7 +7,9 @@ from typing import Any, ClassVar
 
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
@@ -15,9 +17,8 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import call_judge
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import call_judge
 
 
 class DeepSearchQAConfig(BaseResourcesServerConfig):
@@ -78,7 +79,6 @@ def parse_judge(text: str) -> dict[str, Any]:
 
 
 class DeepSearchQAServer(SimpleResourcesServer):
-    ray_enabled = False
     config: DeepSearchQAConfig
 
     def model_post_init(self, context: Any) -> None:
@@ -139,3 +139,6 @@ class DeepSearchQAServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     DeepSearchQAServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = DeepSearchQAServer.run_webserver()  # noqa: F401

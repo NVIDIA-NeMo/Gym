@@ -6,14 +6,12 @@ Launch with the dedicated runtime's ``python -I runner.py request.json`` from
 outside the task repository. TERMINAL_CWD independently selects the tool cwd.
 """
 
-import ctypes
 import json
 import logging
 import os
 import signal
 import subprocess
 import sys
-import time
 import traceback
 from pathlib import Path
 from shlex import quote
@@ -278,84 +276,9 @@ def _run_worker():
     return 1 if result.get("failed") or result.get("error") else 0
 
 
-def _drain_children(timeout: float) -> None:
-    """Reap tool descendants, including processes that detached with setsid()."""
-    children = Path(f"/proc/self/task/{os.getpid()}/children")
-    deadline = time.monotonic() + timeout
-    while True:
-        for child in children.read_text().split():
-            try:
-                os.kill(int(child), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        try:
-            while os.waitpid(-1, os.WNOHANG)[0]:
-                pass
-        except ChildProcessError:
-            return
-        if time.monotonic() >= deadline:
-            raise TimeoutError("Hermes tool processes remain alive")
-        time.sleep(0.01)
-
-
-def _supervise(command: list[str], *, timeout: float, cleanup_timeout: float = 10) -> dict[str, object]:
-    """Keep a cleanup receipt separate from the harness result and its exit status."""
-    process = None
-    stopping = False
-    receipt = {"cleanup_confirmed": False, "return_code": None, "error": None, "timed_out": False}
-
-    def interrupt(*_: object) -> None:
-        nonlocal stopping
-        # A signal between Popen and handle assignment must not lose the child.
-        stopping = True
-
-    signal.signal(signal.SIGTERM, interrupt)
-    try:
-        if sys.platform != "linux":
-            raise RuntimeError("Sandboxed Hermes requires a Linux task container")
-        if ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
-            raise OSError(ctypes.get_errno(), "Cannot supervise Hermes tool processes")
-        process = subprocess.Popen(command, start_new_session=True)
-        deadline = time.monotonic() + timeout
-        while process.poll() is None and not stopping and time.monotonic() < deadline:
-            time.sleep(0.05)
-        if process.poll() is None:
-            receipt["timed_out"] = True
-            # Let the worker checkpoint before the bounded hard cleanup.
-            process.send_signal(signal.SIGTERM)
-            try:
-                process.wait(timeout=cleanup_timeout)
-            except subprocess.TimeoutExpired:
-                pass
-    except Exception as exc:
-        receipt["error"] = str(exc)
-    finally:
-        signal.signal(signal.SIGTERM, signal.SIG_IGN)
-        try:
-            if process is not None:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                receipt["return_code"] = process.wait(timeout=cleanup_timeout)
-                _drain_children(cleanup_timeout)
-            receipt["cleanup_confirmed"] = True
-        except Exception as exc:
-            receipt["error"] = f"cleanup: {exc}"
-    return receipt
-
-
 def main() -> int:
-    if len(sys.argv) == 3 and sys.argv[1] == "--worker":
-        sys.argv.pop(1)
-        return _run_worker()
-    params = json.loads(Path(sys.argv[1]).read_text())
-    receipt = _supervise(
-        [sys.executable, "-I", str(Path(__file__).resolve()), "--worker", sys.argv[1]],
-        timeout=params["sandbox_timeout"],
-    )
-    write_json(Path(params["run_dir"]) / "cleanup.json", receipt)
-    return 0 if receipt["cleanup_confirmed"] and receipt["error"] is None else 1
+    """Run the Hermes worker; the uploaded process supervisor owns its lifetime."""
+    return _run_worker()
 
 
 if __name__ == "__main__":

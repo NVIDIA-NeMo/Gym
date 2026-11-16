@@ -27,7 +27,15 @@ from fastapi import FastAPI, HTTPException, Request
 from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY, get_response_json, raise_for_status, rollout_path_prefix
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
+    JUDGE_FAILED,
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
@@ -35,17 +43,21 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
-    NeMoGymEasyInputMessage,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
-from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status, rollout_path_prefix
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
+
+# Environment-prefixed failure kinds for masked results; see nemo_gym.core.failure_kinds.
+SIMULATOR_CALL_FAILED = "conversational_tool_use:simulator_call_failed"
+USER_VERDICT_FAILED = "conversational_tool_use:user_message_failed_verification"
+TOOL_VERDICT_FAILED = "conversational_tool_use:tool_result_failed_verification"
+USER_CHECK_FAILED = "conversational_tool_use:user_message_failed_check"
+TOOL_CHECK_FAILED = "conversational_tool_use:tool_result_failed_check"
+TRAJECTORY_INCOMPLETE = "conversational_tool_use:trajectory_incomplete"
+FAILURE_REASON_MAX_CHARS = 2000
 
 TRAJECTORY_COMPLETE_INDICATOR = "###STOP###"
 AGENT_TRANSFER_INDICATOR = "###TRANSFER###"
+DEFAULT_FIRST_USER_MESSAGE = "I need help with my account."
 
 
 class JudgeProviderError(Exception):
@@ -129,6 +141,12 @@ class ConversationalToolUseSimulationConfig(BaseResourcesServerConfig):
     enable_termination: bool = True
     verification_type: VerificationType = VerificationType.MESSAGE
     enforce_transfer_ground_truth: bool = False
+    # When the simulator cannot produce a usable opening user message (generation
+    # error, or a first message that already carries a stop/transfer indicator), fall
+    # back to the scenario's reason_for_contact instead of ending the trajectory before
+    # the agent has spoken. A trajectory with no agent turn has no trainable tokens,
+    # so downstream trainers cannot represent it.
+    fallback_first_user_message: bool = True
 
 
 class CustomerScenario(BaseModel):
@@ -432,7 +450,6 @@ class ConversationalToolUseVerifyRequest(BaseVerifyRequest):
 class ConversationalToolUseVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
-    instance_config: Dict[str, Any] = Field(default_factory=lambda: {"mask_sample": False})
     terminal_state: Optional[str] = None
     result: ConversationalToolUseResult
     trajectory_invalid_reasons: List[str] = Field(default_factory=list)
@@ -455,7 +472,6 @@ class ConversationalToolUseVerifyResponse(BaseVerifyResponse):
 
 
 class ConversationalToolUseSimulationServer(SimpleResourcesServer):
-    ray_enabled = False
     USER_RESPONSE_PREFIX_PATTERN: ClassVar[re.Pattern[str]] = re.compile(r"^\s*Customer:\s*", flags=re.IGNORECASE)
 
     USER_SIMULATOR_SYSTEM_MESSAGE_TEMPLATE: ClassVar[str] = """# Instructions
@@ -1070,6 +1086,10 @@ Return type in JSON Schema format: {return_type}
         if state.terminal_state:
             return NextUserMessageResponse(message="", should_continue=False, terminal_state=state.terminal_state)
 
+        use_first_message_fallback = self.config.fallback_first_user_message and not any(
+            existing.source == Source.USER for existing in state.messages
+        )
+
         user_message = ""
         message = None
         invalid = None
@@ -1086,19 +1106,29 @@ Return type in JSON Schema format: {return_type}
                 if invalid is None:
                     break
         except Exception as exc:
-            self._record_generation_failure(
-                state,
-                TrajectoryInvalidReason.MESSAGE_GENERATION_ERROR,
-                VerificationFailureLabel.USER_FAILURE,
-                f"{exc}",
-            )
-            return NextUserMessageResponse(
-                message="",
-                should_continue=False,
-                terminal_state=state.terminal_state,
-            )
+            if use_first_message_fallback:
+                user_message, message = self._fallback_first_user_message(
+                    state, f"{TrajectoryInvalidReason.MESSAGE_GENERATION_ERROR}: {exc}"
+                )
+                invalid = None
+            else:
+                self._record_generation_failure(
+                    state,
+                    TrajectoryInvalidReason.MESSAGE_GENERATION_ERROR,
+                    VerificationFailureLabel.USER_FAILURE,
+                    f"{exc}",
+                )
+                return NextUserMessageResponse(
+                    message="",
+                    should_continue=False,
+                    terminal_state=state.terminal_state,
+                )
 
         assert message is not None
+        if invalid is not None and use_first_message_fallback:
+            invalid_reason, error = invalid
+            user_message, message = self._fallback_first_user_message(state, f"{invalid_reason}: {error}")
+            invalid = None
         state.messages.append(message)
         if invalid is not None:
             invalid_reason, error = invalid
@@ -1374,10 +1404,13 @@ Return type in JSON Schema format: {return_type}
                 "failure_labels": state.failure_labels,
                 "judge_generation_error": state.judge_generation_error,
                 "judge_diagnostics": state.judge_diagnostics,
-                "instance_config": {"mask_sample": self._should_mask_sample(state)},
+                "mask_sample": self._should_mask_sample(state),
                 "result": self._trajectory_result(state),
             }
         )
+        failure_kind, failure_reason = self._masked_failure(state)
+        if failure_kind is not None:
+            response_payload.update(failure_kind=failure_kind, failure_reason=failure_reason)
         verified_response = ConversationalToolUseVerifyResponse.model_validate(response_payload)
         self.session_id_to_state.pop(session_id, None)
         return verified_response
@@ -1418,6 +1451,26 @@ Return type in JSON Schema format: {return_type}
 
     def _next_tool_call_index(self, state: ConversationSessionState) -> int:
         return 1 + sum(1 for message in state.messages if message.type == MessageType.TOOL_CALL)
+
+    def _fallback_first_user_message(
+        self, state: ConversationSessionState, reason: str
+    ) -> tuple[str, ConversationMessage]:
+        """Return a usable opening user message when the simulator could not produce one.
+
+        Prefers the scenario's ``reason_for_contact`` and falls back to a generic
+        request. The reason is recorded in ``source_artifacts`` so each fallback
+        stays visible in the rollout result without invalidating the trajectory.
+        """
+        text = (state.customer_scenario.reason_for_contact or "").strip()
+        if not text or TRAJECTORY_COMPLETE_INDICATOR in text or AGENT_TRANSFER_INDICATOR in text:
+            text = DEFAULT_FIRST_USER_MESSAGE
+        state.source_artifacts.setdefault("first_user_message_fallbacks", []).append(reason)
+        print(
+            f"[conversational-tool-use-simulation] rollout={state.rollout_id} first user message fallback: {reason}",
+            flush=True,
+        )
+        message = ConversationMessage(type=MessageType.TEXT, source=Source.USER, content=text)
+        return text, message
 
     def _record_generation_failure(
         self,
@@ -1479,7 +1532,7 @@ Return type in JSON Schema format: {return_type}
         model_server = self.config.user_model_server or self.config.simulator_model_server
         if model_server is None:
             if not any(message.source == Source.USER for message in state.messages):
-                return state.customer_scenario.reason_for_contact or "I need help with my account.", None
+                return state.customer_scenario.reason_for_contact or DEFAULT_FIRST_USER_MESSAGE, None
             return "Thanks. Please continue helping me with this request.", None
 
         response = await self._call_model(
@@ -1885,7 +1938,7 @@ Return type in JSON Schema format: {return_type}
             try:
                 response = await self._call_judge_model(
                     model_server=self.config.judge_model_server,
-                    params=self.config.judge_responses_create_params,
+                    params=self._judge_params(Evaluation),
                     messages=[
                         NeMoGymEasyInputMessage(role="system", content=system_message),
                         NeMoGymEasyInputMessage(role="user", content=user_message),
@@ -1922,7 +1975,7 @@ Return type in JSON Schema format: {return_type}
             try:
                 response = await self._call_judge_model(
                     model_server=self.config.judge_model_server,
-                    params=self.config.judge_responses_create_params,
+                    params=self._judge_params(UserAgentEnvironmentEvaluation),
                     messages=[
                         NeMoGymEasyInputMessage(role="system", content=system_message),
                         NeMoGymEasyInputMessage(role="user", content=user_message),
@@ -1956,6 +2009,22 @@ Return type in JSON Schema format: {return_type}
             responses=response_objects,
         )
         return None, agent_verification_result, None
+
+    def _judge_params(self, output_model: type[BaseModel]) -> NeMoGymResponseCreateParamsNonStreaming:
+        """Constrain the judge reply to ``output_model``'s JSON schema unless the config sets ``text`` itself.
+
+        The prompt also shows the schema, but without a decoding constraint some judges answer with the
+        instance wrapped in ``{"properties": ...}`` or with unquoted strings, which fail validation.
+        """
+        params = self.config.judge_responses_create_params
+        if params.text is not None:
+            return params
+        schema_format = {
+            "type": "json_schema",
+            "name": output_model.__name__,
+            "schema": output_model.model_json_schema(),
+        }
+        return params.model_copy(update={"text": {"format": schema_format}})
 
     def _system_messages(self, state: ConversationSessionState) -> Dict[Source | TrajectoryEvaluationType, str]:
         domain_policy = state.policy
@@ -2346,6 +2415,39 @@ Return type in JSON Schema format: {return_type}
             and state.generation_invalid_reason == TrajectoryInvalidReason.MESSAGE_GENERATION_ERROR
         )
 
+    def _masked_failure(self, state: ConversationSessionState) -> tuple[Optional[str], Optional[str]]:
+        """Name why a masked sample was masked, from evidence already on the state.
+
+        Mirrors ``_should_mask_sample`` and never changes its decision. A simulator call that
+        failed is told apart from a local check failure, a judge failure, a judge verdict that blamed
+        the user or tool simulation, and a trajectory that never completed.
+        """
+        if not self._should_mask_sample(state):
+            return None, None
+        failure_labels = set(state.failure_labels)
+        tool_blamed = VerificationFailureLabel.TOOL_FAILURE in failure_labels
+        user_or_tool_blamed = tool_blamed or VerificationFailureLabel.USER_FAILURE in failure_labels
+        if VerificationFailureLabel.VERIFICATION_GENERATION_ERROR in failure_labels:
+            detail = f"Judge call failed: {state.judge_generation_error or 'no error text recorded'}"
+            return JUDGE_FAILED, detail[:FAILURE_REASON_MAX_CHARS]
+        if not user_or_tool_blamed:
+            # Only a trajectory that reached verification without a terminal state is masked on
+            # the trajectory label alone; no simulator or judge call failed.
+            detail = f"Trajectory incomplete: {state.terminal_error or 'no error text recorded'}"
+            return TRAJECTORY_INCOMPLETE, detail[:FAILURE_REASON_MAX_CHARS]
+        simulated = "tool result" if tool_blamed else "user message"
+        if state.generation_invalid_reason == TrajectoryInvalidReason.MESSAGE_GENERATION_ERROR:
+            simulator = "tool" if tool_blamed else "user"
+            detail = f"{simulator} simulator call failed: {state.terminal_error or 'no error text recorded'}"
+            return SIMULATOR_CALL_FAILED, detail[:FAILURE_REASON_MAX_CHARS]
+        reasons = ", ".join(state.invalid_reasons) or "no invalid reason recorded"
+        if state.generation_invalid_reason is not None:
+            # A generated message failed the local check; the judge did not run.
+            kind = TOOL_CHECK_FAILED if tool_blamed else USER_CHECK_FAILED
+            return kind, f"The simulated {simulated} failed the local check: {reasons}"[:FAILURE_REASON_MAX_CHARS]
+        kind = TOOL_VERDICT_FAILED if tool_blamed else USER_VERDICT_FAILED
+        return kind, f"Judge marked the simulated {simulated} invalid: {reasons}"[:FAILURE_REASON_MAX_CHARS]
+
     def _dedupe_strings(self, values: List[Any]) -> List[str]:
         deduped = []
         for value in values:
@@ -2407,3 +2509,6 @@ Return type in JSON Schema format: {return_type}
 
 if __name__ == "__main__":
     ConversationalToolUseSimulationServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ConversationalToolUseSimulationServer.run_webserver()  # noqa: F401

@@ -1,0 +1,10 @@
+name: sage
+channels:
+  - conda-forge
+dependencies:
+  # Do not specialize the sandbox image to the build host's AVX level.
+  - _x86_64-microarch-level=1
+  - sage=10.8
+  - python=3.13.14
+  - cpython=3.13.14
+  - python-gil=3.13.14

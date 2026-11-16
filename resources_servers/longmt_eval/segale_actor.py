@@ -23,7 +23,7 @@ from typing import Dict, List, Optional
 import ray
 
 from nemo_gym import CACHE_DIR
-from nemo_gym.global_config import CACHE_DIR_KEY_NAME, maybe_get_global_config_dict
+from nemo_gym.config import CACHE_DIR_KEY_NAME, maybe_get_global_config_dict
 
 
 LOG = logging.getLogger(__name__)

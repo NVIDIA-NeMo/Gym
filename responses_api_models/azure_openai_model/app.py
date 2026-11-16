@@ -19,18 +19,13 @@ from uuid import uuid4
 from fastapi import Request
 from openai import AsyncAzureOpenAI
 
-from nemo_gym.base_responses_api_model import (
-    BaseResponsesAPIModelConfig,
-    Body,
-    SimpleResponsesAPIModel,
-)
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from responses_api_models.vllm_model.app import VLLMConverter
+from nemo_gym.models import BaseResponsesAPIModelConfig, Body, ChatCompletionsConverter, SimpleResponsesAPIModel
 
 
 class AzureOpenAIModelServerConfig(BaseResponsesAPIModelConfig):
@@ -42,7 +37,6 @@ class AzureOpenAIModelServerConfig(BaseResponsesAPIModelConfig):
 
 
 class AzureOpenAIModelServer(SimpleResponsesAPIModel):
-    ray_enabled = False
     config: AzureOpenAIModelServerConfig
 
     def model_post_init(self, context):
@@ -51,9 +45,16 @@ class AzureOpenAIModelServer(SimpleResponsesAPIModel):
             api_key=self.config.openai_api_key,
             api_version=self.config.default_query.get("api-version"),
         )
-        self._converter = VLLMConverter(return_token_id_information=False)
+        self._converter = ChatCompletionsConverter(
+            return_token_id_information=False,
+            custom_tool_strategy=self.config.custom_tool_strategy,
+        )
         self._semaphore: Semaphore = Semaphore(self.config.num_concurrent_requests)
         return super().model_post_init(context)
+
+    def _mints_response_ids(self) -> bool:
+        # responses() builds each response from a chat completion.
+        return True
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
@@ -84,7 +85,7 @@ class AzureOpenAIModelServer(SimpleResponsesAPIModel):
             previous_response_id=body.previous_response_id,
             prompt=body.prompt,
             reasoning=body.reasoning,
-            service_tier=body.service_tier,
+            service_tier=chat_completion_response.service_tier or body.service_tier,
             text=body.text,
             top_logprobs=body.top_logprobs,
             truncation=body.truncation,

@@ -19,12 +19,13 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 class CircleClickConfig(BaseResourcesServerConfig):
@@ -53,7 +54,6 @@ class CircleClickVerifyResponse(BaseVerifyResponse):
 
 
 class CircleClickResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: CircleClickConfig
 
     def setup_webserver(self) -> FastAPI:
@@ -105,3 +105,6 @@ class CircleClickResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     CircleClickResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = CircleClickResourcesServer.run_webserver()  # noqa: F401

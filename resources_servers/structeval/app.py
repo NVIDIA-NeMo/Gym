@@ -31,12 +31,13 @@ import xmltodict
 import yaml
 from fastapi import FastAPI
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 class StructEvalResourcesServerConfig(BaseResourcesServerConfig):
@@ -75,7 +76,6 @@ class StructEvalVerifyResponse(BaseVerifyResponse):
 
 
 class StructEvalResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: StructEvalResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:
@@ -377,3 +377,6 @@ def _path_exists(data: Any, path: str) -> bool:
 
 if __name__ == "__main__":
     StructEvalResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = StructEvalResourcesServer.run_webserver()  # noqa: F401

@@ -39,13 +39,14 @@ from enum import Enum
 
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 class OverlapMetricRule(str, Enum):
@@ -135,7 +136,6 @@ def _extract_input_text(responses_create_params) -> str:
 
 
 class LCNIAHResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: LCNIAHResourcesServerConfig
 
     async def verify(self, body: LCNIAHVerifyRequest) -> LCNIAHVerifyResponse:
@@ -278,3 +278,6 @@ class LCNIAHResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     LCNIAHResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = LCNIAHResourcesServer.run_webserver()  # noqa: F401

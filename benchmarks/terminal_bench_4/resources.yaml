@@ -22,11 +22,26 @@ terminal_bench_4:
         sandbox_provider_options:
           resource_requests: limits
         compose_image_configs: benchmarks/terminal_bench_4/compose-images.json
+        # Non-root services cannot edit /etc/hosts or su; null drops the image's
+        # explicit user. See the resources server README.
+        compose_service_overrides:
+          medical-claims-processing:
+            # Its only peer URL is the browser's initial workspace page (which uses relative URLs).
+            playwright-mcp:
+              x-sandbox: {hosts: [], resolve_environment: [BROWSER_URL]}
+              user: null
+          payments-pipeline-fix:
+            # This single broker uses localhost for its controller.
+            # Clients still resolve its advertised kafka:9092 address.
+            kafka:
+              x-sandbox: {hosts: []}
+              user: null
         sandbox_provider:
           opensandbox:
             connection:
               domain: ${oc.env:OPENSANDBOX_DOMAIN,localhost}
               protocol: http
+              request_timeout_s: 300
               use_server_proxy: true
               transport_backend: aiohttp
               tls_verify: false
@@ -34,9 +49,9 @@ terminal_bench_4:
               retries: 5
               retry_delay_s: 5
               retry_max_delay_s: 60
-              request_timeout_s: 120
-              timeout_s: 150
-              connect_attempt_timeout_s: 150
+              request_timeout_s: 300
+              timeout_s: 300
+              connect_attempt_timeout_s: 300
               renew_interval_s: 1800
             operations:
               background_exec: true
@@ -59,6 +74,7 @@ terminal_bench_4:
                   << 19))) -ne 0; }
         sandbox_metadata:
           nemo.nvidia.com/resources: custom
+          nemo.nvidia.com/oom-kill: process
         sandbox_ttl_s: 28800
         sandbox_ready_timeout_s: 1200
         default_exec_timeout_s: 64800

@@ -52,15 +52,16 @@ from typing import List, Optional
 
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.core import NeMoGymResponse
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +206,6 @@ class ImoGradingBenchVerifyResponse(BaseVerifyResponse):
 
 
 class ImoGradingBenchResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: ImoGradingBenchConfig
 
     # --- verify ------------------------------------------------------------
@@ -335,3 +335,6 @@ class ImoGradingBenchResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     ImoGradingBenchResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ImoGradingBenchResourcesServer.run_webserver()  # noqa: F401

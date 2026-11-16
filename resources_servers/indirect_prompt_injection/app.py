@@ -20,7 +20,8 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
@@ -28,7 +29,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.indirect_prompt_injection.ecommerce_tools import TOOL_HANDLERS as ECOMMERCE_HANDLERS
 from resources_servers.indirect_prompt_injection.education_tools import TOOL_HANDLERS as EDUCATION_HANDLERS
 from resources_servers.indirect_prompt_injection.healthcare_tools import TOOL_HANDLERS as HEALTHCARE_HANDLERS
@@ -108,7 +109,6 @@ class IPIVerifyResponse(BaseVerifyResponse):
 
 
 class IPIResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: IPIResourcesServerConfig
     session_id_to_env: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
 
@@ -251,3 +251,6 @@ class IPIResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     IPIResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = IPIResourcesServer.run_webserver()  # noqa: F401
