@@ -314,6 +314,64 @@ def test_clear_captures_for_rollouts_drops_stale_pending_claims(tmp_path):
     assert store.has_pending("5-0") is False
 
 
+@pytest.mark.asyncio
+async def test_await_quiescence_waits_for_a_detached_write_to_land(tmp_path):
+    import asyncio
+
+    from nemo_gym.rollouts.model_calls import await_model_call_capture_quiescence
+
+    store = CaptureStore(tmp_path)
+    store.mark_pending("2-0", "call-1")
+
+    async def late_write():
+        await asyncio.sleep(0.2)
+        store.record("2-0", _capture_exchange("responses", "A", {}, {"id": "resp-A"}))
+        store.clear_pending("2-0", "call-1")
+
+    task = asyncio.create_task(late_write())
+    # The race is real at this point: snapshotting now would miss the row.
+    assert store.read("2-0") == []
+
+    quiesced = await await_model_call_capture_quiescence("2-0", [tmp_path])
+    await task
+
+    assert quiesced is True
+    assert len(store.read("2-0")) == 1
+
+
+@pytest.mark.asyncio
+async def test_await_quiescence_gives_up_on_a_stranded_claim(tmp_path):
+    from nemo_gym.rollouts.model_calls import await_model_call_capture_quiescence
+
+    CaptureStore(tmp_path).mark_pending("3-0", "call-1")
+
+    assert await await_model_call_capture_quiescence("3-0", [tmp_path], timeout_s=0.05, poll_s=0.01) is False
+
+
+def test_merge_capture_flags_a_claim_that_never_landed(tmp_path):
+    from nemo_gym.rollouts.model_calls import merge_model_call_capture_into_record
+
+    store = CaptureStore(tmp_path)
+    store.record("4-0", _capture_exchange("responses", "A", {}, {"id": "resp-A"}))
+    store.mark_pending("4-0", "call-2")
+
+    record = {"_ng_task_index": 4, "_ng_rollout_index": 0}
+    merge_model_call_capture_into_record(record, [tmp_path])
+
+    assert "model_call_capture_pending" in [gap["code"] for gap in record["ng_model_call_capture"]["gaps"]]
+
+
+def test_clear_captures_for_rollouts_drops_stale_pending_claims(tmp_path):
+    from nemo_gym.rollouts.model_calls import clear_model_call_captures_for_rollouts
+
+    store = CaptureStore(tmp_path)
+    store.mark_pending("5-0", "call-1")
+
+    clear_model_call_captures_for_rollouts([{"_ng_task_index": 5, "_ng_rollout_index": 0}], [tmp_path])
+
+    assert store.has_pending("5-0") is False
+
+
 def _cancelled_exchange(response_raw, *, status_code=200, dialect="responses"):
     """A call the capture recorded as cancelled: no parsed response, the body only as raw text."""
     return {
@@ -463,6 +521,116 @@ def test_merge_capture_binds_a_cancelled_call_with_a_complete_body_to_its_agent_
     assert record["ng_agent_observations"]["gaps"] == []
 
 
+def _covered_record():
+    return {
+        "ng_model_call_capture": {
+            "rollout_id": "0-0",
+            "metrics": {},
+            "calls": [{"model_call_id": "c1"}, {"model_call_id": "c2"}],
+        },
+        "ng_trajectory": {
+            "model_calls": [
+                {"model_call_id": "c1", "request": {"input": "hi"}, "response": {"id": "r1"}},
+                # A raw body kept as text still counts as a response.
+                {"model_call_id": "c2", "request": {"input": "again"}, "response": '{"id": "r2"'},
+            ],
+            "gaps": [],
+        },
+    }
+
+
+def _redact_payloads(record):
+    record["ng_trajectory"]["gaps"].append({"code": "multimodal_history_redacted"})
+    for call in record["ng_trajectory"]["model_calls"]:
+        call["request"] = call["response"] = None
+
+
+def test_uncovered_reasons_is_empty_when_every_call_has_its_payload():
+    from nemo_gym.rollouts.model_calls import model_call_capture_uncovered_reasons
+
+    assert model_call_capture_uncovered_reasons(_covered_record()) == []
+
+
+@pytest.mark.parametrize(
+    "mutate, expected",
+    [
+        pytest.param(lambda r: r.pop("ng_model_call_capture"), ["no_capture_attachment"], id="no capture attachment"),
+        pytest.param(
+            lambda r: r["ng_model_call_capture"].update(gaps=[{"code": "model_call_capture_pending"}]),
+            ["capture_gap:model_call_capture_pending"],
+            id="capture gap",
+        ),
+        pytest.param(lambda r: r.pop("ng_trajectory"), ["no_trajectory"], id="no trajectory"),
+        pytest.param(
+            lambda r: r["ng_trajectory"]["gaps"].append({"code": "multimodal_history_redacted"}),
+            ["payload_gap:multimodal_history_redacted"],
+            id="redacted history in the trajectory",
+        ),
+        pytest.param(
+            lambda r: _redact_payloads(r),
+            ["payload_gap:multimodal_history_redacted"],
+            id="redacted history leaves no payloads, reported once",
+        ),
+        pytest.param(
+            lambda r: r.update(ng_agent_observations={"gaps": [{"code": "multimodal_history_redacted"}]}),
+            ["payload_gap:multimodal_history_redacted"],
+            id="redacted history in the agent observations",
+        ),
+        pytest.param(
+            lambda r: r["ng_trajectory"]["model_calls"].pop(),
+            ["call_without_payload:c2"],
+            id="call missing from the trajectory",
+        ),
+        pytest.param(
+            lambda r: r["ng_trajectory"]["model_calls"][0].update(response=None),
+            ["call_without_payload:c1"],
+            id="call without a response",
+        ),
+        pytest.param(
+            lambda r: r["ng_trajectory"]["model_calls"][1].update(request=None),
+            ["call_without_payload:c2"],
+            id="call without a request",
+        ),
+        pytest.param(
+            lambda r: r["ng_model_call_capture"]["calls"].append({"model_call_id": None}),
+            ["call_without_id"],
+            id="call without an id",
+        ),
+    ],
+)
+def test_uncovered_reasons_names_what_the_rollout_lacks(mutate, expected):
+    from nemo_gym.rollouts.model_calls import model_call_capture_uncovered_reasons
+
+    record = _covered_record()
+    mutate(record)
+
+    assert model_call_capture_uncovered_reasons(record) == expected
+
+
+def test_uncovered_reasons_covers_a_merged_capture_once_the_trajectory_is_attached(tmp_path):
+    from nemo_gym.rollouts.model_calls import (
+        merge_model_call_capture_into_record,
+        model_call_capture_uncovered_reasons,
+    )
+    from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
+
+    row = {"_ng_task_index": 0, "_ng_rollout_index": 0}
+    store = CaptureStore(tmp_path)
+    store.record("0-0", _cancelled_exchange(orjson.dumps(_COMPLETE_RESPONSES_BODY).decode()))
+    record = dict(row)
+    merge_model_call_capture_into_record(record, [tmp_path], include_payloads=True)
+    _attach_trajectory_record(row, record)
+
+    assert model_call_capture_uncovered_reasons(record) == []
+
+    store.mark_pending("0-0", "call-late")
+    pending = dict(row)
+    merge_model_call_capture_into_record(pending, [tmp_path], include_payloads=True)
+    _attach_trajectory_record(row, pending)
+
+    assert model_call_capture_uncovered_reasons(pending) == ["capture_gap:model_call_capture_pending"]
+
+
 def _sse(*events):
     """Server-sent events: each is (event name or None, payload as a dict or a literal string)."""
     blocks = []
@@ -542,6 +710,421 @@ def test_cancelled_streamed_call_without_a_complete_stream_keeps_its_raw_body(ra
     assert record.tokens_out is None
 
 
+def _covered_capture(tmp_path, rollout_id="0-0"):
+    """A capture file of one complete call, and a rollout that holds that call with its payload."""
+    store = CaptureStore(tmp_path)
+    exchange = _capture_exchange("responses", "A", {"input_tokens": 3, "output_tokens": 2}, {"id": "resp-A"})
+    store.record(rollout_id, exchange)
+    record = {"_ng_task_index": 0, "_ng_rollout_index": 0}
+    return store, record
+
+
+def _merge_and_attach(tmp_path, record):
+    """Collect the capture into the record the way rollout collection does."""
+    from nemo_gym.rollouts.model_calls import merge_model_call_capture_into_record
+    from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
+
+    merge_model_call_capture_into_record(record, [tmp_path], include_payloads=True)
+    _attach_trajectory_record({"_ng_task_index": 0, "_ng_rollout_index": 0}, record)
+    return record
+
+
+def test_capture_store_size_is_none_without_a_file(tmp_path):
+    store = CaptureStore(tmp_path)
+
+    assert store.size("0-0") is None
+    store.record("0-0", {"model_call_id": "c"})
+    assert store.size("0-0") == store.path_for("0-0").stat().st_size > 0
+
+
+def test_delete_if_unchanged_deletes_a_file_that_has_not_grown(tmp_path):
+    store = CaptureStore(tmp_path)
+    store.record("0-0", {"model_call_id": "c"})
+
+    assert store.delete_if_unchanged("0-0", store.size("0-0")) is None
+    assert not store.path_for("0-0").exists()
+
+
+@pytest.mark.parametrize(
+    "setup, reason",
+    [
+        pytest.param(lambda store: store.record("0-0", {"model_call_id": "late"}), "capture_file_changed", id="grown"),
+        pytest.param(lambda store: store.mark_pending("0-0", "late"), "write_pending", id="pending write"),
+    ],
+)
+def test_delete_if_unchanged_keeps_a_file_that_may_hold_unread_calls(tmp_path, setup, reason):
+    store = CaptureStore(tmp_path)
+    store.record("0-0", {"model_call_id": "c"})
+    size = store.size("0-0")
+    setup(store)
+
+    assert store.delete_if_unchanged("0-0", size) == reason
+    assert store.path_for("0-0").exists()
+
+
+def test_pending_rollout_ids_lists_every_rollout_with_a_claimed_write(tmp_path):
+    store = CaptureStore(tmp_path)
+    store.record("9-0", {"model_call_id": "not pending"})
+    store.mark_pending("0-0", "call-a")
+    store.mark_pending("0-0", "call-b")
+    store.mark_pending("1-0-a1", "call-c")
+    # A rollout id may contain dots; the claim token after the last dot does not.
+    store.mark_pending("step7.0-0", "call-d")
+
+    assert store.pending_rollout_ids() == {"0-0", "1-0-a1", "step7.0-0"}
+
+    store.clear_pending("0-0", "call-a")
+    assert "0-0" in store.pending_rollout_ids()
+    store.clear_pending("0-0", "call-b")
+    assert "0-0" not in store.pending_rollout_ids()
+
+
+def test_pending_rollout_ids_agrees_with_has_pending_for_rollouts_whose_ids_share_a_prefix(tmp_path):
+    store = CaptureStore(tmp_path)
+    store.mark_pending("1-0-a1", "call")
+
+    pending = store.pending_rollout_ids()
+
+    for rollout_id in ("1-0", "1-0-a1", "1-0-a11", "1", "2-0"):
+        assert (rollout_id in pending) is store.has_pending(rollout_id)
+
+
+def test_delete_if_unchanged_uses_the_pending_ids_it_is_given_instead_of_scanning(tmp_path, monkeypatch):
+    store = CaptureStore(tmp_path)
+    store.record("0-0", {"model_call_id": "c"})
+    size = store.size("0-0")
+    monkeypatch.setattr(CaptureStore, "has_pending", lambda self, rollout_id: pytest.fail("scanned the directory"))
+
+    assert store.delete_if_unchanged("0-0", size, pending_rollout_ids={"0-0"}) == "write_pending"
+    assert store.path_for("0-0").exists()
+    assert store.delete_if_unchanged("0-0", size, pending_rollout_ids={"1-0"}) is None
+    assert not store.path_for("0-0").exists()
+
+
+class _GateOnTheDelete(set):
+    """A pending-id snapshot taken before the late claim; membership is read while the delete holds the lock."""
+
+    def __init__(self, holding_the_lock, release):
+        super().__init__()
+        self._holding_the_lock = holding_the_lock
+        self._release = release
+
+    def __contains__(self, item):
+        self._holding_the_lock.set()
+        assert self._release.wait(timeout=10)
+        return False
+
+
+def test_a_write_admitted_after_the_pending_scan_is_not_lost_to_the_delete(tmp_path, monkeypatch):
+    """The writer opened the capture file, then the delete unlinked it before the writer got the lock."""
+    import threading
+    from types import SimpleNamespace
+
+    import nemo_gym.models.model_call_capture as module
+
+    store = CaptureStore(tmp_path)
+    store.record("0-0", {"model_call_id": "covered"})
+    size = store.size("0-0")
+    holding_the_lock, release, writer_waits = threading.Event(), threading.Event(), threading.Event()
+    writer = {}
+    real_fcntl = module.fcntl
+
+    def flock(fd, operation):
+        if threading.get_ident() == writer.get("ident") and operation == real_fcntl.LOCK_EX:
+            writer_waits.set()  # the file is already open; the delete holds the lock
+        return real_fcntl.flock(fd, operation)
+
+    monkeypatch.setattr(module, "fcntl", SimpleNamespace(**{**vars(real_fcntl), "flock": flock}))
+    outcome = []
+    deleter = threading.Thread(
+        target=lambda: outcome.append(
+            store.delete_if_unchanged("0-0", size, pending_rollout_ids=_GateOnTheDelete(holding_the_lock, release))
+        )
+    )
+
+    def late_write():
+        writer["ident"] = threading.get_ident()
+        store.mark_pending("0-0", "late")
+        store.record("0-0", {"model_call_id": "late"})
+        store.clear_pending("0-0", "late")
+
+    deleter.start()
+    assert holding_the_lock.wait(timeout=10)
+    late = threading.Thread(target=late_write)
+    late.start()
+    assert writer_waits.wait(timeout=10)
+    release.set()
+    deleter.join(timeout=10)
+    late.join(timeout=10)
+
+    assert outcome == [None]  # the delete judged the file it had, and deleted it
+    assert [exchange["model_call_id"] for exchange in store.read("0-0")] == ["late"]
+
+
+def test_delete_if_unchanged_leaves_a_file_that_replaced_the_one_it_judged(tmp_path):
+    """After a delete and a new append, an equal-sized file at the same path is not the file that was judged."""
+    store = CaptureStore(tmp_path)
+    store.record("0-0", {"model_call_id": "x"})
+    size = store.size("0-0")
+
+    class _Replace(set):
+        def __contains__(self, item):
+            store.path_for("0-0").unlink()
+            store.record("0-0", {"model_call_id": "x"})  # same size, different file
+            return False
+
+    assert store.delete_if_unchanged("0-0", size, pending_rollout_ids=_Replace()) == "capture_file_changed"
+    assert [exchange["model_call_id"] for exchange in store.read("0-0")] == ["x"]
+
+
+def test_delete_if_unchanged_reports_a_missing_file(tmp_path):
+    assert CaptureStore(tmp_path).delete_if_unchanged("0-0", 0) == "capture_file_missing"
+
+
+def _retire(rollout_id, record, snapshot):
+    """Queue one persisted rollout and flush, as rollout collection does; return the batch."""
+    from nemo_gym.rollouts.model_calls import CaptureRetirementBatch
+
+    batch = CaptureRetirementBatch()
+    batch.add(rollout_id, record, snapshot)
+    batch.flush(lambda: None)
+    return batch
+
+
+def test_retirement_deletes_a_capture_file_that_the_persisted_rollout_covers(tmp_path):
+    from nemo_gym.rollouts.model_calls import snapshot_model_call_capture
+
+    store, record = _covered_capture(tmp_path)
+    snapshot = snapshot_model_call_capture("0-0", [tmp_path])
+    _merge_and_attach(tmp_path, record)
+
+    batch = _retire("0-0", record, snapshot)
+
+    assert (batch.retired, dict(batch.kept)) == (1, {})
+    assert not store.path_for("0-0").exists()
+
+
+def test_retirement_judges_coverage_from_the_rollout_it_is_given(tmp_path):
+    from nemo_gym.rollouts.model_calls import snapshot_model_call_capture
+
+    store, record = _covered_capture(tmp_path)
+    snapshot = snapshot_model_call_capture("0-0", [tmp_path])
+    _merge_and_attach(tmp_path, record)
+    record["ng_trajectory"]["gaps"].append({"code": "multimodal_history_redacted"})
+    record["ng_trajectory"]["model_calls"][0]["request"] = None
+
+    batch = _retire("0-0", record, snapshot)
+
+    assert (batch.retired, dict(batch.kept)) == (0, {"payload_gap": 1})
+    assert store.path_for("0-0").exists()
+
+
+def test_retirement_keeps_a_capture_file_that_grew_after_the_snapshot(tmp_path):
+    from nemo_gym.rollouts.model_calls import snapshot_model_call_capture
+
+    store, record = _covered_capture(tmp_path)
+    snapshot = snapshot_model_call_capture("0-0", [tmp_path])
+    store.record("0-0", _capture_exchange("responses", "B", {}, {"id": "resp-B"}))
+    _merge_and_attach(tmp_path, record)
+
+    batch = _retire("0-0", record, snapshot)
+
+    assert dict(batch.kept) == {"capture_file_changed": 1}
+    assert store.path_for("0-0").exists()
+
+
+def test_retirement_without_a_snapshot_has_no_file_to_delete():
+    batch = _retire("0-0", {}, None)
+
+    assert dict(batch.kept) == {"no_capture_attachment": 1, "no_capture_file": 1}
+
+
+def test_retirement_only_touches_the_rollout_attempt_it_was_given(tmp_path):
+    from nemo_gym.rollouts.model_calls import snapshot_model_call_capture
+
+    store = CaptureStore(tmp_path)
+    store.record("0-0", _capture_exchange("responses", "A", {}, {"id": "resp-A"}))
+    store.record("0-0-a1", _capture_exchange("responses", "B", {}, {"id": "resp-B"}))
+    snapshot = snapshot_model_call_capture("0-0-a1", [tmp_path])
+    record = {
+        "ng_model_call_capture": {"calls": [{"model_call_id": "call-B"}]},
+        "ng_trajectory": {"model_calls": [{"model_call_id": "call-B", "request": {}, "response": {}}]},
+    }
+
+    batch = _retire("0-0-a1", record, snapshot)
+
+    assert batch.retired == 1
+    assert store.path_for("0-0").exists() and not store.path_for("0-0-a1").exists()
+
+
+def test_a_capture_file_that_cannot_be_deleted_is_left_in_place_without_failing_the_run(tmp_path, monkeypatch):
+    from nemo_gym.rollouts.model_calls import snapshot_model_call_capture
+
+    store, record = _covered_capture(tmp_path)
+    snapshot = snapshot_model_call_capture("0-0", [tmp_path])
+    _merge_and_attach(tmp_path, record)
+
+    def fail(self, rollout_id, expected_size, **kwargs):
+        raise PermissionError("read-only capture directory")
+
+    monkeypatch.setattr(CaptureStore, "delete_if_unchanged", fail)
+
+    batch = _retire("0-0", record, snapshot)
+
+    assert (batch.retired, dict(batch.kept)) == (0, {"delete_failed": 1})
+    assert store.path_for("0-0").exists()
+
+
+def test_retiring_covered_captures_is_opt_in_and_needs_observability():
+    from nemo_gym.rollouts.model_calls import retire_covered_model_call_captures_from_config
+
+    base = {"observability_enabled": True, "model_call_capture_dir": "/captures"}
+    assert retire_covered_model_call_captures_from_config(base) is False
+    assert retire_covered_model_call_captures_from_config({**base, "retire_covered_model_call_captures": True}) is True
+    assert retire_covered_model_call_captures_from_config({"retire_covered_model_call_captures": True}) is False
+
+
+_COVERED_ROLLOUT = {
+    "ng_model_call_capture": {"calls": [{"model_call_id": "a"}]},
+    "ng_trajectory": {"model_calls": [{"model_call_id": "a", "request": {}, "response": {}}]},
+}
+
+
+def test_retirement_batch_makes_rollouts_durable_before_deleting_any_capture_file(tmp_path):
+    from nemo_gym.rollouts.model_calls import CaptureRetirementBatch, snapshot_model_call_capture
+
+    store = CaptureStore(tmp_path)
+    batch = CaptureRetirementBatch()
+    for rollout_id in ("0-0", "1-0"):
+        store.record(rollout_id, {"model_call_id": rollout_id})
+        batch.add(rollout_id, _COVERED_ROLLOUT, snapshot_model_call_capture(rollout_id, [tmp_path]))
+    files_present_when_durable = []
+
+    batch.flush(lambda: files_present_when_durable.append([store.path_for(r).exists() for r in ("0-0", "1-0")]))
+
+    assert files_present_when_durable == [[True, True]]
+    assert not store.path_for("0-0").exists() and not store.path_for("1-0").exists()
+
+
+def test_retirement_batch_deletes_nothing_when_making_rollouts_durable_fails(tmp_path):
+    from nemo_gym.rollouts.model_calls import CaptureRetirementBatch, snapshot_model_call_capture
+
+    store = CaptureStore(tmp_path)
+    store.record("0-0", {"model_call_id": "0-0"})
+    batch = CaptureRetirementBatch()
+    batch.add("0-0", _COVERED_ROLLOUT, snapshot_model_call_capture("0-0", [tmp_path]))
+
+    def fail():
+        raise OSError("fsync failed")
+
+    with pytest.raises(OSError, match="fsync failed"):
+        batch.flush(fail)
+
+    assert store.path_for("0-0").exists()
+    assert batch.retired == 0
+
+
+def test_retirement_batch_counts_a_rollout_once_under_each_distinct_kept_reason(tmp_path):
+    from nemo_gym.rollouts.model_calls import CaptureRetirementBatch, snapshot_model_call_capture
+
+    store = CaptureStore(tmp_path)
+    store.record("0-0", {"model_call_id": "0-0"})
+    # Two calls lack a payload and a write is still pending: three reasons, two distinct kinds.
+    rollout = {
+        "ng_model_call_capture": {
+            "calls": [{"model_call_id": "a"}, {"model_call_id": "b"}],
+            "gaps": [{"code": "model_call_capture_pending"}],
+        },
+        "ng_trajectory": {"model_calls": []},
+    }
+    batch = CaptureRetirementBatch()
+    batch.add("0-0", rollout, snapshot_model_call_capture("0-0", [tmp_path]))
+
+    batch.flush(lambda: None)
+
+    assert batch.kept == {"call_without_payload": 1, "capture_gap": 1}
+    assert batch.retired == 0
+    assert store.path_for("0-0").exists()
+
+
+def test_retirement_batch_does_not_make_anything_durable_when_nothing_is_queued():
+    from nemo_gym.rollouts.model_calls import CaptureRetirementBatch
+
+    calls = []
+
+    CaptureRetirementBatch().flush(lambda: calls.append("durable"))
+
+    assert calls == []
+
+
+def test_retirement_batch_scans_for_pending_writes_once_per_directory_not_once_per_file(tmp_path, monkeypatch):
+    from nemo_gym.rollouts.model_calls import CaptureRetirementBatch, snapshot_model_call_capture
+
+    store = CaptureStore(tmp_path)
+    batch = CaptureRetirementBatch()
+    for rollout_id in ("0-0", "1-0", "2-0"):
+        store.record(rollout_id, {"model_call_id": rollout_id})
+        batch.add(rollout_id, _COVERED_ROLLOUT, snapshot_model_call_capture(rollout_id, [tmp_path]))
+    scans = []
+    original = CaptureStore.pending_rollout_ids
+    monkeypatch.setattr(CaptureStore, "pending_rollout_ids", lambda self: scans.append(self._root) or original(self))
+
+    batch.flush(lambda: None)
+
+    assert scans == [tmp_path]
+    assert batch.retired == 3
+
+
+def test_retirement_batch_does_not_scan_when_every_file_is_kept_anyway(tmp_path, monkeypatch):
+    from nemo_gym.rollouts.model_calls import CaptureRetirementBatch, snapshot_model_call_capture
+
+    store = CaptureStore(tmp_path)
+    store.record("0-0", {"model_call_id": "c"})
+    batch = CaptureRetirementBatch()
+    batch.add("0-0", {}, snapshot_model_call_capture("0-0", [tmp_path]))
+    monkeypatch.setattr(CaptureStore, "pending_rollout_ids", lambda self: pytest.fail("scanned for nothing"))
+
+    batch.flush(lambda: None)
+
+    assert dict(batch.kept) == {"no_capture_attachment": 1}
+
+
+def test_retirement_batch_keeps_only_the_file_whose_rollout_has_a_pending_write(tmp_path):
+    from nemo_gym.rollouts.model_calls import CaptureRetirementBatch, snapshot_model_call_capture
+
+    store = CaptureStore(tmp_path)
+    batch = CaptureRetirementBatch()
+    for rollout_id in ("0-0", "1-0", "2-0"):
+        store.record(rollout_id, {"model_call_id": rollout_id})
+        batch.add(rollout_id, _COVERED_ROLLOUT, snapshot_model_call_capture(rollout_id, [tmp_path]))
+    store.mark_pending("1-0", "late-call")
+
+    batch.flush(lambda: None)
+
+    assert [store.path_for(r).exists() for r in ("0-0", "1-0", "2-0")] == [False, True, False]
+    assert (batch.retired, dict(batch.kept)) == (2, {"write_pending": 1})
+
+
+def test_retirement_batch_is_due_when_full_or_old(monkeypatch):
+    from nemo_gym.rollouts import model_calls
+    from nemo_gym.rollouts.model_calls import CaptureRetirementBatch
+
+    now = [1000.0]
+    monkeypatch.setattr(model_calls.time, "monotonic", lambda: now[0])
+    batch = CaptureRetirementBatch(max_size=3, max_age_s=5.0)
+
+    assert batch.due() is False, "nothing is waiting"
+    batch.add("0-0", {}, None)
+    assert batch.due() is False
+    now[0] += 5.0
+    assert batch.due() is True, "old enough"
+    batch.flush(lambda: None)
+    assert batch.due() is False
+    for rollout_id in ("1-0", "2-0", "3-0"):
+        batch.add(rollout_id, {}, None)
+    assert batch.due() is True, "full"
+
+
 def test_recovering_a_complete_cancelled_stream_keeps_its_failure_report(tmp_path):
     from nemo_gym.core.failure_records import FailureReport
     from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
@@ -568,3 +1151,60 @@ def test_recovering_a_complete_cancelled_stream_keeps_its_failure_report(tmp_pat
     [call] = record["ng_model_call_capture"]["calls"]
     assert call["response"] == _COMPLETE_RESPONSES_BODY
     assert call["response_raw"] is None
+
+
+@pytest.mark.parametrize("cancel_count", [1, 2])
+async def test_retirement_async_flush_finishes_before_propagating_cancellation(tmp_path, cancel_count):
+    import asyncio
+    import threading
+
+    from nemo_gym.rollouts.model_calls import CaptureRetirementBatch, snapshot_model_call_capture
+
+    store = CaptureStore(tmp_path)
+    store.record("0-0", {"model_call_id": "a"})
+    batch = CaptureRetirementBatch()
+    batch.add("0-0", _COVERED_ROLLOUT, snapshot_model_call_capture("0-0", [tmp_path]))
+    loop = asyncio.get_running_loop()
+    started = asyncio.Event()
+    release = threading.Event()
+    durable = []
+
+    def sync():
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(5), "event loop could not release the disk worker"
+        durable.append(True)
+
+    task = asyncio.create_task(batch.flush_async(sync))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        for _ in range(cancel_count):
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done(), "cleanup returned while the worker still needed the output files"
+            assert store.path_for("0-0").exists()
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert durable == [True]
+    assert batch.retired == 1
+    assert not store.path_for("0-0").exists()
+
+
+async def test_retirement_async_flush_preserves_captures_on_sync_failure(tmp_path):
+    from nemo_gym.rollouts.model_calls import CaptureRetirementBatch, snapshot_model_call_capture
+
+    store = CaptureStore(tmp_path)
+    store.record("0-0", {"model_call_id": "a"})
+    batch = CaptureRetirementBatch()
+    batch.add("0-0", _COVERED_ROLLOUT, snapshot_model_call_capture("0-0", [tmp_path]))
+
+    def fail():
+        raise OSError("fsync failed")
+
+    with pytest.raises(OSError, match="fsync failed"):
+        await batch.flush_async(fail)
+
+    assert store.path_for("0-0").exists()
+    assert batch.retired == 0

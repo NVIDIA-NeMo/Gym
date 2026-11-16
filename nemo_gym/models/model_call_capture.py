@@ -31,7 +31,7 @@ import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Literal, NotRequired, Optional, TypedDict
+from typing import Any, Collection, Literal, NotRequired, Optional, TypedDict
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -119,6 +119,8 @@ class ModelCallCaptureConfig(BaseModel):
     observability_enabled: bool = False
     trajectory_schema_version: Literal["1.0", "2.0"] = "1.0"
     model_call_capture_dir: Optional[Path] = None
+    # Delete a rollout's capture file once the persisted rollout fully covers it.
+    retire_covered_model_call_captures: bool = False
 
     @model_validator(mode="after")
     def validate_capture_dir(self) -> "ModelCallCaptureConfig":
@@ -144,6 +146,20 @@ def _validate_rollout_id(rollout_id: str) -> str:
     if not rollout_id or any(not (char.isascii() and (char.isalnum() or char in "._-")) for char in rollout_id):
         raise ValueError(f"Invalid rollout id: {rollout_id!r}")
     return rollout_id
+
+
+# A write retries when the file it opened was deleted while it waited for the lock; each retry needs another delete.
+_RECORD_ATTEMPTS = 5
+
+
+def _path_names_open_file(path: Path, handle: Any) -> bool:
+    """Whether the path still names the file this handle opened, rather than a deleted or replaced one."""
+    try:
+        current = os.stat(path)
+    except FileNotFoundError:
+        return False
+    opened = os.fstat(handle.fileno())
+    return (current.st_dev, current.st_ino) == (opened.st_dev, opened.st_ino)
 
 
 class CaptureStore:
@@ -194,6 +210,67 @@ class CaptureStore:
         pattern = f"{_validate_rollout_id(rollout_id)}.*{_PENDING_SUFFIX}"
         return any(self._root.glob(pattern))
 
+    def size(self, rollout_id: str) -> Optional[int]:
+        """Byte size of the rollout's capture file, or None when there is none."""
+        try:
+            return self.path_for(rollout_id).stat().st_size
+        except FileNotFoundError:
+            return None
+
+    def pending_rollout_ids(self) -> set[str]:
+        """The rollouts with a claimed write outstanding, from a single scan of the directory.
+
+        Answers for every rollout what ``has_pending`` answers for one, which globs the whole directory
+        each time; use it when checking many rollouts.
+        """
+        rollout_ids: set[str] = set()
+        with os.scandir(self._root) as entries:
+            for entry in entries:
+                if entry.name.endswith(_PENDING_SUFFIX):
+                    # The token after the last dot has no dots; the rollout id may.
+                    rollout_id = entry.name[: -len(_PENDING_SUFFIX)].rpartition(".")[0]
+                    if rollout_id:
+                        rollout_ids.add(rollout_id)
+        return rollout_ids
+
+    def delete_if_unchanged(
+        self, rollout_id: str, expected_size: int, *, pending_rollout_ids: Optional[Collection[str]] = None
+    ) -> Optional[str]:
+        """Delete the rollout's capture file unless it grew or a claimed write is outstanding.
+
+        Returns None once deleted, or the reason the file was kept. The append lock is held across the
+        check and the delete, so a writer that has not yet appended waits instead of racing it. A caller
+        deleting many files passes ``pending_rollout_ids`` from one scan instead of globbing per file.
+
+        A claim made after that scan is not seen here, and need not be: a writer that opened the file
+        before the delete notices under the lock that the path no longer names its file, and appends to a
+        new file instead (see ``record``), so an admitted write is never lost to this delete.
+        """
+        path = self.path_for(rollout_id)
+        try:
+            handle = path.open("rb")
+        except FileNotFoundError:
+            return "capture_file_missing"
+        with handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                has_pending = (
+                    rollout_id in pending_rollout_ids
+                    if pending_rollout_ids is not None
+                    else self.has_pending(rollout_id)
+                )
+                if has_pending:
+                    return "write_pending"
+                if not _path_names_open_file(path, handle):
+                    # Another delete and a new append got here first; the file at the path is not the one judged.
+                    return "capture_file_changed"
+                if os.fstat(handle.fileno()).st_size != expected_size:
+                    return "capture_file_changed"
+                path.unlink()
+                return None
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
     def clear_all_pending(self, rollout_id: str) -> None:
         pattern = f"{_validate_rollout_id(rollout_id)}.*{_PENDING_SUFFIX}"
         for marker in self._root.glob(pattern):
@@ -205,17 +282,26 @@ class CaptureStore:
         ``flock`` serializes appends to the same rollout across worker processes and threads while
         allowing independent rollouts to write concurrently. This does blocking file IO + fsync,
         so callers run it off the event loop (the capture middleware uses ``asyncio.to_thread``).
+
+        The file is opened before the lock is taken, so a delete (``delete_if_unchanged``) can unlink it
+        while this writer waits. The lock holder checks that the path still names the file it opened and
+        otherwise opens the path again, which creates a new file, so the exchange is never written to a
+        file nothing can reach.
         """
         line = orjson.dumps(exchange, default=str, option=orjson.OPT_APPEND_NEWLINE)
         path = self.path_for(rollout_id)
-        with path.open("ab") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                handle.write(line)
-                handle.flush()
-                os.fsync(handle.fileno())
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        for _ in range(_RECORD_ATTEMPTS):
+            with path.open("ab") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    if _path_names_open_file(path, handle):
+                        handle.write(line)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                        return
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        raise OSError(f"The capture file for rollout {rollout_id} was removed {_RECORD_ATTEMPTS} times while writing.")
 
     def read(self, rollout_id: str) -> list[dict[str, Any]]:
         path = self.path_for(rollout_id)
