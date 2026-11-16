@@ -14,7 +14,7 @@ SDK in any benchmark's task sandbox, and the benchmark's Resources Server verifi
 | Python in the sandbox | Standalone CPython 3.13.14 with the harness installed, built on the Agent Server host and uploaded |
 | Execution | Agent sessions only, in a borrowed task sandbox or an agent-owned one (`sandbox_provider`). No host path, no `/run` |
 | Model API | Chat Completions through the rollout-prefixed Gym Model Server URL |
-| Tools | OpenHands' terminal, file editor, task tracker, `finish` and `think`. No Resources Server tool grants |
+| Tools | OpenHands' terminal, file editor, task tracker, `finish` and `think`, plus the tools of the episode's MCP grants. Direct HTTP grants are not supported |
 | Capability level | Evaluation. Observability records are returned (invocation, model-call references, tool calls with timing and status, context compactions), but harness conformance has not been run |
 | Token IDs | Not captured; evaluation only |
 
@@ -54,8 +54,10 @@ Terminal-Bench 2.1 does not list `openhands_agent` in `allowed_agents` yet; star
 | `condenser` | OpenHands' default `LLMSummarizingCondenser`. Its summaries use a copy of the agent's LLM, so they go to the same Model Server. |
 | `system_prompt` | Text appended to OpenHands' own system prompt, before the request's `instructions` and system message. |
 | `llm_settings` | OpenHands SDK `LLM` settings, limited to the names in `SUPPORTED_LLM_SETTINGS` in `app.py`. |
+| `finish_tool_names` | Tools from the episode's MCP grants whose successful call ends the run, such as a benchmark's `finish`. When set, OpenHands' own `finish` is not offered, so the run cannot end without submitting through one of them. |
+| `mcp_tool_timeout_seconds` | Per call to a tool from an MCP grant (default 900). |
 | `sandbox_provider`, `sandbox_config` | Only for an agent-owned sandbox, when Resources supplies no `sandbox_access`. `ttl_s` defaults to `sandbox_install_timeout_seconds + timeout + 600`. `metadata` is the provider block's `default_metadata`, then `sandbox_config.metadata`, then the adapter's `gym-agent`, `gym-session` and `gym-rollout` labels. |
-| `network_access` | `inherit` (default), `model_only` or `model_and_tools`: egress of an agent-owned sandbox. `inherit` keeps the provider's network; the other two allow only the Model Server's host, because OpenHands keeps no tool grants. OpenSandbox only; a session that borrows a sandbox rejects any value other than `inherit`, as does one whose `sandbox_config.provider_options` sets its own `network_policy`. The Agent Server builds the runtime and uploads it, so a restricted sandbox needs no network for setup. |
+| `network_access` | `inherit` (default), `model_only` or `model_and_tools`: egress of an agent-owned sandbox. `inherit` keeps the provider's network; `model_only` allows only the Model Server's host, and `model_and_tools` also the hosts of the episode's MCP grants. OpenSandbox only; a session that borrows a sandbox rejects any value other than `inherit`, as does one whose `sandbox_config.provider_options` sets its own `network_policy`. The Agent Server builds the runtime and uploads it, so a restricted sandbox needs no network for setup. |
 | `sandbox_install_timeout_seconds` | Budget for runtime installation at seed. |
 | `session_close_timeout_seconds` | Budget for each phase of close: stopping the harness, copying its artifacts, and releasing the sandbox. |
 
@@ -75,16 +77,21 @@ Server.
 ## Requests
 
 An activation accepts one user text message with an optional leading system message, `instructions`,
-`model` (the configured one), and `metadata` that is empty or holds only `agent_timeout_sec`. Every other
-request field, including `temperature`, `top_p`, `max_output_tokens` and `tools`, is refused with HTTP 422.
+`model` (the configured one), and `metadata` that is empty or holds only `agent_timeout_sec`. `temperature`,
+`top_p` and `max_output_tokens` become the run's OpenHands `LLM` settings, over `llm_settings` (training
+frameworks send them on every request); `max_output_tokens` limits each model call, not the whole run. Every
+other request field, including `tools`, is refused with HTTP 422.
 
 ## Session lifecycle
 
-**Seed** refuses, with a final 422, a required tool grant (OpenHands uses its own tools), a non-direct
+**Seed** refuses, with a final 422, a required tool grant that is not MCP, a non-direct
 sandbox connection, a seed with neither `sandbox_access` nor `sandbox_provider`, an invalid
 `sandbox_provider` or `sandbox_config`, a workdir that is relative or overlaps the adapter's own directories,
 and a loopback Model Server URL for a remote sandbox (start the servers with `++use_absolute_ip=true`).
-Optional grants are ignored. Seed then installs the runtime, or reuses a healthy one, and uploads the runner.
+MCP grants are passed to OpenHands by grant name with their headers, and the runner connects to each required one
+before the conversation starts, since OpenHands itself skips a server it cannot reach. A tool name that two
+sources share (for example a benchmark's `finish` without `finish_tool_names`) makes OpenHands fail.
+Seed then installs the runtime, or reuses a healthy one, and uploads the runner.
 
 **Runtime installation** uses Gym's `SandboxPythonRuntime`. The Agent Server host builds the runtime with `uv`:
 a pinned python-build-standalone CPython 3.13.14 and the OpenHands packages for the sandbox's platform, at the
@@ -132,7 +139,7 @@ Status follows OpenHands' own rule at 1.59.0: `conversation.run()` raises only f
 
 | OpenHands outcome | Response | Verified |
 | --- | --- | --- |
-| `finished` | `completed` | Yes |
+| `finished`, including a successful call to a tool in `finish_tool_names` | `completed` | Yes |
 | `MaxIterationsReached`, `MaxBudgetReached`, stuck detection, a rollout stop, or Gym's deadline after a model call returned | `incomplete`; `stop_reason` names it | Yes |
 | Context window exceeded | `incomplete`, `stop_reason` `context_limit` | Yes |
 | Gym's deadline before any model call returned | `failed`, `stop_reason` `timeout`, with `ng_agent_outcome` `unknown` | No: the outcome policy retries it by default |
@@ -170,7 +177,7 @@ invocation. Gaps name what the events do not show, such as token counts around a
 
 ## Limits
 
-- Resources Server tool grants (MCP or direct HTTP) are not supported; required grants are refused.
+- Only MCP tool grants are supported; a required direct HTTP grant is refused.
 - `network_access` restricts only an agent-owned OpenSandbox sandbox. With the default `inherit`, an owned
   sandbox's egress is open unless its provider limits it. A borrowed sandbox keeps the network its Resources
   Server gave it.

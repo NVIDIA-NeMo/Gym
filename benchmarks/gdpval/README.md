@@ -564,38 +564,35 @@ Replace `opencode` with `openclaw` for OpenClaw.
 - Change a harness setting with `++gdpval_opencode_agent.responses_api_agents.opencode_agent.<key>=<value>` or
   `++gdpval_openclaw_agent.responses_api_agents.openclaw_agent.<key>=<value>`.
 
-`benchmarks/gdpval/openhands_codeact.yaml` runs
-[OpenHands CodeAct](../../responses_api_agents/openhands_codeact_agent/README.md) (the OpenHands 0.62 controller)
-the same way:
+`benchmarks/gdpval/openhands.yaml` runs [OpenHands](../../responses_api_agents/openhands_agent/README.md) (the
+OpenHands Software Agent SDK) the same way:
 
 ```bash
-export PERSIST_DELIVERABLES_DIR=$PWD/output/gdpval_openhands_codeact/deliverables
-export OPENHANDS_CODEACT_INSTALL_SCRIPT=/staged/install.sh OPENHANDS_CODEACT_ARCHIVE=/staged/runtime.tar.gz
-gym eval prepare --benchmark gdpval/openhands_codeact
+export PERSIST_DELIVERABLES_DIR=$PWD/output/gdpval_openhands/deliverables
+gym eval prepare --benchmark gdpval/openhands
 gym eval run \
     --model-type vllm_model \
-    --benchmark gdpval/openhands_codeact \
+    --benchmark gdpval/openhands \
     --split benchmark \
-    --output results/gdpval_openhands_codeact.jsonl \
+    --output results/gdpval_openhands.jsonl \
     --model-url <vllm_base_url> \
     --model-api-key <vllm_api_key> \
     --model <served_model_name>
 ```
 
 - The rows, the task tools and the deliverables directory work as for Pi. The model sees the task tools as
-  `gdpval_resources_server_<tool>`, next to CodeAct's own `execute_bash`, `str_replace_editor` and `think`.
-- The adapter does not download its runtime: build it with `runtime/build_runtime.sh` and make its `staged/`
-  directory readable in the task sandbox at the two paths above, for example as a read-only mount or in
-  `GDPVAL_SANDBOX_IMAGE`. The install needs no egress.
-- The request's `temperature`, `top_p` and `max_output_tokens` reach the controller, so `gym eval run` may set them;
-  otherwise the agent's own settings (1.0, 1.0 and 32,768 per call) apply.
-- A successful `finish` or `abandon_task_finish` ends the run (`finish_tool_names`), and CodeAct's own `finish` is
+  `finish`, `abandon_task_finish`, `web_search` and `fetch_web_page`, next to OpenHands' own `terminal`,
+  `file_editor`, `task_tracker` and `think`.
+- A successful `finish` or `abandon_task_finish` ends the run (`finish_tool_names`), and OpenHands' own `finish` is
   not offered, so the run cannot end without submitting. The files are collected when the run ends.
+- The agent server builds the OpenHands runtime with uv on its own host at the first seed and uploads it, so the task
+  sandbox needs no egress for the install.
+- The request's `temperature`, `top_p` and `max_output_tokens` reach OpenHands (the last as a per-call limit), so
+  `gym eval run` may set them; otherwise the model server's settings apply.
 - A run that reaches its `timeout` reports `stop_reason: wall_time`, so GDPVal treats it as `agent_timeout`, as for
-  Stirrup and Pi. A run that reaches `max_iterations` (250 here) or the context limit ends as incomplete and is
-  judged on its last `finish`, or as an empty submission without one.
-- Change a harness setting with
-  `++gdpval_openhands_codeact_agent.responses_api_agents.openhands_codeact_agent.<key>=<value>`.
+  Stirrup and Pi. A run that reaches `max_iterations` (250 here) ends as incomplete and is judged on its last
+  `finish`, or as an empty submission without one.
+- Change a harness setting with `++gdpval_openhands_agent.responses_api_agents.openhands_agent.<key>=<value>`.
 
 ## Multi-judge panel
 

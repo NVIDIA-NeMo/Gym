@@ -80,6 +80,41 @@ def write_inputrc(state_dir: str) -> str:
     return path
 
 
+def mcp_config(servers: dict[str, dict[str, object]]) -> dict[str, dict[str, object]]:
+    """OpenHands MCP server settings for the episode's grants, by grant name."""
+    return {
+        name: {
+            "url": server["url"],
+            "transport": "http",
+            "headers": dict(server.get("headers") or {}),
+            "timeout": server.get("timeout"),
+        }
+        for name, server in servers.items()
+    }
+
+
+def check_required_mcp(servers: dict[str, dict[str, object]]) -> None:
+    """Connect to every required grant once; OpenHands itself skips a server it cannot reach, with a warning."""
+    from openhands.sdk.mcp import create_mcp_tools
+
+    for name, server in mcp_config({n: s for n, s in servers.items() if s.get("required")}).items():
+        try:
+            with create_mcp_tools({name: server}, timeout=60) as client:
+                if not client.tools:
+                    raise RuntimeError("it offers no tools")
+        except Exception as error:
+            raise RuntimeError(f"Required MCP server {name} did not connect: {error}") from error
+
+
+def finished_by_task_tool(event: object, finish_tool_names: list[str]) -> bool:
+    """Whether ``event`` is a successful result of one of the task's finish tools."""
+    return (
+        getattr(event, "kind", None) == "ObservationEvent"
+        and getattr(event, "tool_name", None) in finish_tool_names
+        and not getattr(getattr(event, "observation", None), "is_error", True)
+    )
+
+
 def _write_json(path: str, payload: dict[str, object]) -> None:
     temporary = f"{path}.tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
@@ -121,6 +156,15 @@ def main(argv: list[str]) -> int:
             events.flush()
 
     conversation = None
+    finish_tool_names = list(config.get("finish_tool_names") or [])
+
+    def end_on_task_finish(event: object) -> None:
+        # A successful task finish ends the run, as OpenHands' own finish would.
+        if conversation is not None and finished_by_task_tool(event, finish_tool_names):
+            from openhands.sdk.conversation.state import ConversationExecutionStatus
+
+            conversation.state.execution_status = ConversationExecutionStatus.FINISHED
+
     exit_code = 1
     try:
         import openhands.sdk
@@ -149,9 +193,14 @@ def main(argv: list[str]) -> int:
         condenser = (
             get_default_condenser(llm.model_copy(update={"usage_id": "condenser"})) if config["condenser"] else None
         )
+        servers = config.get("mcp_servers") or {}
+        check_required_mcp(servers)
         agent = Agent(
             llm=llm,
             tools=tools,
+            mcp_config=mcp_config(servers),
+            # With task finish tools, OpenHands' own finish would end the run without submitting the work.
+            include_default_tools=["ThinkTool"] if finish_tool_names else ["FinishTool", "ThinkTool"],
             agent_context=AgentContext(system_message_suffix=config.get("system_message_suffix")),
             system_prompt_kwargs={"cli_mode": True},
             condenser=condenser,
@@ -160,7 +209,7 @@ def main(argv: list[str]) -> int:
             agent=agent,
             workspace=config["workdir"],
             persistence_dir=config["state_dir"],
-            callbacks=[record],
+            callbacks=[record, end_on_task_finish],
             max_iteration_per_run=config["max_iterations"],
             visualizer=None,
             delete_on_close=False,

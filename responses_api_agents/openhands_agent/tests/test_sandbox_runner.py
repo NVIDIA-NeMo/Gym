@@ -60,7 +60,14 @@ class AgentContext:
 
 class Agent:
     def __init__(self, **fields):
-        note(agent={"tools": [tool.spec for tool in fields["tools"]], "condenser": fields["condenser"] is not None})
+        note(
+            agent={
+                "tools": [tool.spec for tool in fields["tools"]],
+                "condenser": fields["condenser"] is not None,
+                "mcp_config": fields["mcp_config"],
+                "include_default_tools": fields["include_default_tools"],
+            }
+        )
 
 class Tool:
     def __init__(self, name, params=None):
@@ -68,6 +75,20 @@ class Tool:
 
 class _Status:
     value = "running"
+
+class _TaskObservation:
+    def __init__(self, is_error):
+        self.is_error = is_error
+
+class _TaskResult:
+    kind = "ObservationEvent"
+    tool_name = "finish"
+    def __init__(self, is_error):
+        self.observation = _TaskObservation(is_error)
+    def model_dump_json(self):
+        return json.dumps({"kind": self.kind, "tool_name": self.tool_name})
+    def to_llm_message(self):
+        return _Message()
 
 class _State:
     execution_status = _Status()
@@ -94,6 +115,13 @@ class Conversation:
             for callback in self.callbacks:
                 callback(Observation("ObservationEvent", tool_call_id="c1", observation={"content": "out"}))
             _State.execution_status.value = "finished"
+        elif mode == "task_finish":
+            # The task's finish tool (over MCP) answers; a failed call first must not end the run.
+            for is_error in (True, False):
+                result = _TaskResult(is_error)
+                for callback in self.callbacks:
+                    callback(result)
+                note(status_after_task_finish=str(getattr(self.state.execution_status, "value", self.state.execution_status)))
         elif mode == "error":
             try:
                 error = RuntimeError("upstream said no")
@@ -118,6 +146,23 @@ class Conversation:
 """
 
 
+# Records each required-server probe; STUB_MCP_DOWN names a server that does not connect.
+MCP_STUB = """
+import contextlib, json, os
+
+@contextlib.contextmanager
+def create_mcp_tools(config, timeout):
+    (name,) = config
+    with open(os.environ["STUB_LOG"], "a") as handle:
+        handle.write(json.dumps({"mcp_probe": config, "timeout": timeout}) + "\\n")
+    if name == os.environ.get("STUB_MCP_DOWN"):
+        raise ConnectionError("refused")
+    class Client:
+        tools = ["finish"]
+    yield Client()
+"""
+
+
 @pytest.fixture
 def stub(tmp_path: Path) -> Path:
     root = tmp_path / "stub"
@@ -130,6 +175,11 @@ def stub(tmp_path: Path) -> Path:
         "openhands/tools/terminal.py": "class TerminalTool:\n    name = 'terminal'\n",
         "openhands/tools/preset/__init__.py": "",
         "openhands/tools/preset/default.py": "def get_default_condenser(llm):\n    return llm\n",
+        "openhands/sdk/conversation/__init__.py": "",
+        "openhands/sdk/conversation/state.py": (
+            "import enum\nclass ConversationExecutionStatus(str, enum.Enum):\n    FINISHED = 'finished'\n"
+        ),
+        "openhands/sdk/mcp/__init__.py": MCP_STUB,
     }
     for name, source in modules.items():
         (root / name).parent.mkdir(parents=True, exist_ok=True)
@@ -137,7 +187,7 @@ def stub(tmp_path: Path) -> Path:
     return root
 
 
-def start(tmp_path: Path, stub: Path, mode: str) -> tuple[subprocess.Popen, Path]:
+def start(tmp_path: Path, stub: Path, mode: str, **extra: object) -> tuple[subprocess.Popen, Path]:
     session = tmp_path / "session"
     (session / "state").mkdir(parents=True)
     (tmp_path / "work").mkdir()
@@ -151,9 +201,12 @@ def start(tmp_path: Path, stub: Path, mode: str) -> tuple[subprocess.Popen, Path
         "state_dir": str(session / "state"),
         "events_path": str(session / "events.jsonl"),
         "result_path": str(session / "result.json"),
+        **{key: value for key, value in extra.items() if key != "mcp_down"},
     }
     (session / "input.json").write_text(json.dumps(runner_input))
     env = {"PYTHONPATH": str(stub), "STUB_MODE": mode, "STUB_LOG": str(tmp_path / "stub.log"), "PATH": "/usr/bin:/bin"}
+    if extra.get("mcp_down"):
+        env["STUB_MCP_DOWN"] = str(extra["mcp_down"])
     with (tmp_path / "stderr.log").open("w") as stderr:
         process = subprocess.Popen(
             [sys.executable, str(RUNNER_SOURCE), str(session / "input.json")], env=env, stderr=stderr
@@ -266,3 +319,53 @@ def test_inputrc_keeps_the_task_readline_file_and_turns_bracketed_paste_off(tmp_
     (home / ".inputrc").write_text("set bell-style none\n")
     path = write_inputrc(str(tmp_path))
     assert Path(path).read_text() == f"$include {home / '.inputrc'}\nset enable-bracketed-paste off\n"
+
+
+GRANTS = {
+    "gdpval_resources_server": {
+        "url": "http://resources:8080/mcp",
+        "headers": {"x-nemo-gym-mcp-session": "token"},
+        "required": True,
+        "timeout": 300,
+    },
+    "search": {"url": "http://search:8080/mcp", "headers": {}, "required": False, "timeout": 300},
+}
+
+
+def test_mcp_grants_reach_openhands_and_required_ones_are_probed_first(tmp_path, stub):
+    process, _ = start(tmp_path, stub, "finish", mcp_servers=GRANTS)
+    assert process.wait(timeout=60) == 0
+    log = notes(tmp_path)
+    agent = next(entry["agent"] for entry in log if "agent" in entry)
+    assert agent["mcp_config"]["gdpval_resources_server"] == {
+        "url": "http://resources:8080/mcp",
+        "transport": "http",
+        "headers": {"x-nemo-gym-mcp-session": "token"},
+        "timeout": 300,
+    }
+    assert set(agent["mcp_config"]) == {"gdpval_resources_server", "search"}
+    # Without finish tools, OpenHands keeps its own finish.
+    assert agent["include_default_tools"] == ["FinishTool", "ThinkTool"]
+    probes = [entry["mcp_probe"] for entry in log if "mcp_probe" in entry]
+    assert [list(probe) for probe in probes] == [["gdpval_resources_server"]]
+
+
+def test_a_required_mcp_server_that_does_not_connect_fails_before_the_conversation(tmp_path, stub):
+    process, session = start(tmp_path, stub, "finish", mcp_servers=GRANTS, mcp_down="gdpval_resources_server")
+    assert process.wait(timeout=60) == 1
+    result = json.loads((session / "result.json").read_text())
+    assert result["status"] == "error"
+    assert not any("conversation" in entry for entry in notes(tmp_path))
+
+
+def test_a_successful_task_finish_ends_the_run_and_hides_openhands_finish(tmp_path, stub):
+    process, _ = start(tmp_path, stub, "task_finish", mcp_servers=GRANTS, finish_tool_names=["finish"])
+    assert process.wait(timeout=60) == 0
+    log = notes(tmp_path)
+    agent = next(entry["agent"] for entry in log if "agent" in entry)
+    assert agent["include_default_tools"] == ["ThinkTool"]
+    # The failed call leaves the run going; the successful one marks it finished.
+    assert [entry["status_after_task_finish"] for entry in log if "status_after_task_finish" in entry] == [
+        "running",
+        "finished",
+    ]
