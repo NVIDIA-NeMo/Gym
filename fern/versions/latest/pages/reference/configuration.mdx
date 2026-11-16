@@ -37,7 +37,7 @@ A server runs with its own source folder as its working directory. A relative pa
 | Kind of file | Where it goes | Who removes it |
 |--------------|---------------|----------------|
 | Needed only while a request, a session or the run is going: workspaces, payloads, logs that are parsed and thrown away | A temporary folder under `temp_dir` | The process that made it, when that work ends |
-| Kept after the job: logs and screenshots someone may read later | Written in a temporary folder, then copied once under `<results_dir>/<server name>/` with `save_folder` | Whoever owns the run |
+| Kept after the job: logs and screenshots someone may read later | Written in a temporary folder, then copied once under `<results_dir>/<server name>/` with `save_dir` | Whoever owns the run |
 | State a later run reads back, or generated media handed to another process | The server's `output_dir`, by default `<results_dir>/<server name>/`, written once as whole files | Whoever owns the run |
 | Reused across runs: downloads, installs, model weights | `cache_dir` | Unchanged |
 
@@ -53,23 +53,23 @@ A server runs with its own source folder as its working directory. A relative pa
 
 | Helper | Lifetime | Notes |
 |--------|----------|-------|
-| `temp_folder(name, *, temp_dir=None)` / `async_temp_folder(...)` | One request | A context manager; the folder is always removed when the block exits, also on errors and cancellation |
-| `open_temp_folder(name, *, temp_dir=None)` and `remove_temp_folder(path)` | One session | Keep the folder on the session; remove it after the session's in-flight requests finish, under the session's lock, and remove what remains when the server shuts down. `remove_temp_folder` returns whether the folder is gone and can be called again after a failure |
-| `run_temp_folder(name, *, temp_dir=None)` | The server process | The same folder for every call with the same `name`; removed when the process exits |
-| `await save_folder(src, *, server_name, name, label=None, output_dir=None)` | Kept | Copies a finished folder once into `<results_dir>/<server name>/<name>/<rollout>/<UTC time>-[<label>-]<random>/`, or under the server's `output_dir`; returns that folder, or `None` |
+| `request_temp_dir(name, *, temp_dir=None)` / `async_request_temp_dir(...)` | One request | A context manager; the folder is always removed when the block exits, also on errors and cancellation |
+| `session_temp_dir(name, *, temp_dir=None)` and `remove_temp_dir(path)` | One session | Keep the folder on the session; remove it after the session's in-flight requests finish, under the session's lock, and remove what remains when the server shuts down. `remove_temp_dir` returns whether the folder is gone and can be called again after a failure |
+| `process_temp_dir(name, *, temp_dir=None)` | The server process | The same folder for every call with the same `name`; removed when the process exits |
+| `await save_dir(src, *, server_name, name, label=None, output_dir=None)` | Kept | Copies a finished folder once into `<results_dir>/<server name>/<name>/<rollout>/<UTC time>-[<label>-]<random>/`, or under the server's `output_dir`; returns that folder, or `None` |
 
-`name` says what a folder holds, such as `verification`. For a temporary folder it starts the folder's name; for `run_temp_folder` it picks the folder; for `save_folder` it groups kept files in the results.
+`name` says what a folder holds, such as `verification`. For a temporary folder it starts the folder's name; for `process_temp_dir` it picks the folder; for `save_dir` it groups kept files in the results.
 
-`save_folder` copies file contents only, in a worker thread, with a few copies at most running at once in a process. It never fails the request: a failed copy is logged and returns `None`, and it returns `None` without copying when the server's `output_dir` is relative, when no `results_dir` is set, and while the calling task is being cancelled. Call it in a `finally`, so a failed request's files are kept too:
+`save_dir` copies file contents only, in a worker thread, with a few copies at most running at once in a process. It never fails the request: a failed copy is logged and returns `None`, and it returns `None` without copying when the server's `output_dir` is relative, when no `results_dir` is set, and while the calling task is being cancelled. Call it in a `finally`, so a failed request's files are kept too:
 
 ```python
 kept = None
-async with async_temp_folder("verification") as logs:
+async with async_request_temp_dir("verification") as logs:
     try:
         result = await run_harness(log_dir=logs)  # writes on the node's own disk
     finally:
         if self.config.keep_verification_logs:  # the server's own setting, off by default
-            kept = await save_folder(
+            kept = await save_dir(
                 logs, server_name=self.config.name, name="verification", label=f"{instance_id}-attempt{attempt}"
             )
 return make_response(result, kept_logs=kept)
@@ -83,7 +83,7 @@ A temporary folder is private to its process: a server passes data to another pr
 
 | When | What removes a temporary folder |
 |------|---------------------------------|
-| The block exits, or `remove_temp_folder` is called | The helper |
+| The block exits, or `remove_temp_dir` is called | The helper |
 | The process exits normally, including a SIGTERM the server handles | An exit handler removes the process's own folder, run folders included. SIGKILL, an out-of-memory kill and `ray.kill` skip it |
 | The process was killed | The next Gym process on that node that uses the same `temp_dir` removes the folders of processes that are no longer running; on storage private to the node, folders from an earlier boot too. Best effort: only if such a process starts |
 | The job ends | The launcher removes the job's own `temp_dir`. This is the real bound |

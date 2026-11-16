@@ -21,10 +21,10 @@ On a cluster that checkout is on a shared filesystem, and every such write loads
 Runtime files go to one of three places:
 
 - ``temp_dir``: temporary folders, deleted when their work ends. By default ``<system temp>/nemo_gym/<user id>/``.
-  :func:`temp_folder` and :func:`async_temp_folder` last one request, :func:`open_temp_folder` one session,
-  and :func:`run_temp_folder` the whole server process.
+  :func:`request_temp_dir` and :func:`async_request_temp_dir` last one request, :func:`session_temp_dir` one session,
+  and :func:`process_temp_dir` the whole server process.
 - ``results_dir``: everything kept after the job. A server keeps a finished temporary folder with
-  :func:`save_folder`, which copies it once under ``<results_dir>/<server name>/`` or the server's ``output_dir``.
+  :func:`save_dir`, which copies it once under ``<results_dir>/<server name>/`` or the server's ``output_dir``.
   State a later run reads back goes in the server's ``output_dir``, written as whole files.
 - ``cache_dir``: files reused across runs.
 
@@ -67,13 +67,13 @@ _MAX_LABEL_LENGTH = 100
 NO_ROLLOUT_SEGMENT = "no-rollout"
 # The folder under the system temporary directory that holds each user's default temp_dir.
 DEFAULT_TEMP_ROOT_NAME = "nemo_gym"
-# How many save_folder copies one process runs at once; the rest wait in their worker threads.
+# How many save_dir copies one process runs at once; the rest wait in their worker threads.
 SAVE_FOLDER_CONCURRENCY = 4
 # Each process keeps its temporary folders in one folder of its own under a parent, named for the process:
 # nemo-gym-<host boot id>-<pid namespace>-<pid>. Folders inside it carry no process data.
 # PID namespace numbers repeat across hosts (every host's initial namespace has the same one), so the boot id is
 # what tells hosts apart when two of them share a directory.
-_PROCESS_FOLDER = re.compile(r"^nemo-gym-(?P<host>[0-9a-f]{12})-(?P<namespace>\d+)-(?P<pid>\d+)$")
+_PROCESS_DIR = re.compile(r"^nemo-gym-(?P<host>[0-9a-f]{12})-(?P<namespace>\d+)-(?P<pid>\d+)$")
 _BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 _UNKNOWN_HOST = "unknown"
 # Parents this process has already checked and cleared of folders left by dead processes.
@@ -81,23 +81,23 @@ _checked_temp_parents: set[Path] = set()
 # This process's default temp_dir, keyed by process id so a forked child resolves its own.
 _default_temp_dirs: dict[int, Path] = {}
 # This process's own folder under each parent, keyed by process id so a forked child makes its own.
-_process_folders: dict[tuple[int, Path], Path] = {}
+_process_dirs: dict[tuple[int, Path], Path] = {}
 # Folders that last the whole process, keyed by process id, parent and name.
-_run_folders: dict[tuple[int, Path, str], Path] = {}
+_process_temp_dirs: dict[tuple[int, Path, str], Path] = {}
 # Relative output folders this process has already warned about, so each is reported once.
 _warned_relative_output_dirs: set[Path] = set()
 # Guards the first use of a parent: its check and cleanup, and creating this process's folder in it.
 # Requests start their temporary folders in worker threads, so a burst of first requests arrives together.
 _first_use_lock = threading.Lock()
-_run_folder_lock = threading.Lock()
+_process_temp_dir_lock = threading.Lock()
 _save_slots = threading.BoundedSemaphore(SAVE_FOLDER_CONCURRENCY)
 
 
 def _reset_locks_after_fork() -> None:
     """Give a forked child its own locks: a thread of the parent may have held the inherited ones at the fork."""
-    global _first_use_lock, _run_folder_lock, _save_slots
+    global _first_use_lock, _process_temp_dir_lock, _save_slots
     _first_use_lock = threading.Lock()
-    _run_folder_lock = threading.Lock()
+    _process_temp_dir_lock = threading.Lock()
     _save_slots = threading.BoundedSemaphore(SAVE_FOLDER_CONCURRENCY)
 
 
@@ -120,11 +120,11 @@ def _pid_namespace() -> int | None:
         return None
 
 
-def _process_folder_name() -> str:
+def _process_dir_name() -> str:
     return f"nemo-gym-{_host_id()}-{_pid_namespace() or 0}-{os.getpid()}"
 
 
-def remove_stale_temp_folders(parent: Path, *, private_to_host: bool = False) -> list[Path]:
+def remove_stale_temp_dirs(parent: Path, *, private_to_host: bool = False) -> list[Path]:
     """Remove this user's process folders under ``parent`` whose process is gone, with everything inside.
 
     A killed process cannot remove its own folder.
@@ -145,7 +145,7 @@ def remove_stale_temp_folders(parent: Path, *, private_to_host: bool = False) ->
     except OSError:
         return []
     for entry in entries:
-        match = _PROCESS_FOLDER.fullmatch(entry.name)
+        match = _PROCESS_DIR.fullmatch(entry.name)
         if match is None:
             continue
         earlier_boot = match["host"] != host
@@ -165,36 +165,36 @@ def remove_stale_temp_folders(parent: Path, *, private_to_host: bool = False) ->
     return removed
 
 
-def _remove_own_process_folders(pid: int) -> None:
+def _remove_own_process_dirs(pid: int) -> None:
     """Remove the folders this process made, at its exit; a forked child that inherited the handler does nothing."""
     if os.getpid() != pid:
         return
-    for (owner, _), folder in list(_process_folders.items()):
+    for (owner, _), folder in list(_process_dirs.items()):
         if owner == pid:
             shutil.rmtree(folder, ignore_errors=True)
 
 
-def _process_folder(parent: Path, *, recreate: bool = False) -> Path:
+def _process_dir(parent: Path, *, recreate: bool = False) -> Path:
     """This process's own folder under ``parent``, created once and removed when the process exits.
 
     ``recreate`` makes it again after something outside the process removed it, keeping any files that remain.
     """
     pid = os.getpid()
-    folder = _process_folders.get((pid, parent))
+    folder = _process_dirs.get((pid, parent))
     if folder is not None and not recreate:
         return folder
     with _first_use_lock:
-        folder = _process_folders.get((pid, parent))
+        folder = _process_dirs.get((pid, parent))
         if folder is not None:
             folder.mkdir(parents=True, exist_ok=True)
             return folder
-        folder = parent / _process_folder_name()
+        folder = parent / _process_dir_name()
         # Before this process records it, a folder with this name can only be one a dead process of the same id left.
         shutil.rmtree(folder, ignore_errors=True)
         folder.mkdir()
-        if not any(owner == pid for owner, _ in _process_folders):
-            atexit.register(_remove_own_process_folders, pid)
-        _process_folders[(pid, parent)] = folder
+        if not any(owner == pid for owner, _ in _process_dirs):
+            atexit.register(_remove_own_process_dirs, pid)
+        _process_dirs[(pid, parent)] = folder
     return folder
 
 
@@ -227,7 +227,7 @@ def _shared_root_problem(root: Path) -> str | None:
     return None
 
 
-def _make_private_folder(folder: Path) -> None:
+def _make_private_dir(folder: Path) -> None:
     """Create ``folder`` for this user only, or check that an existing one is this user's own real folder."""
     try:
         folder.mkdir(mode=0o700)
@@ -264,7 +264,7 @@ def _default_temp_dir() -> Path:
     else:
         folder = system_temp / f"{DEFAULT_TEMP_ROOT_NAME}-{uid}"
         logger.warning("Not using %s for temporary folders because %s; using %s instead.", root, problem, folder)
-    _make_private_folder(folder)
+    _make_private_dir(folder)
     _default_temp_dirs[pid] = folder
     return folder
 
@@ -295,7 +295,7 @@ def _temp_parent(temp_dir: str | Path | None) -> Path:
         shared = warn_if_unsuitable(TEMP_DIR_KEY_NAME, parent) in SHARED_FILESYSTEM_TYPES
         # Removing leftovers is housekeeping: it must never fail the request that triggered it.
         try:
-            remove_stale_temp_folders(parent, private_to_host=not shared)
+            remove_stale_temp_dirs(parent, private_to_host=not shared)
         except Exception:
             logger.warning("Could not remove leftover temporary folders under %s", parent, exc_info=True)
         _checked_temp_parents.add(parent)
@@ -307,18 +307,18 @@ def _check_name(name: str) -> None:
         raise ValueError(f"name must be lowercase letters, digits, '-' and '_', got {name!r}")
 
 
-def _create_temp_folder(name: str, temp_dir: str | Path | None) -> Path:
+def _create_temp_dir(name: str, temp_dir: str | Path | None) -> Path:
     _check_name(name)
     parent = _temp_parent(temp_dir)
     try:
-        return Path(tempfile.mkdtemp(prefix=f"{name}-", dir=_process_folder(parent)))
+        return Path(tempfile.mkdtemp(prefix=f"{name}-", dir=_process_dir(parent)))
     except FileNotFoundError:
         # Something outside this process removed its folder, such as a cleaner of old temporary files.
-        return Path(tempfile.mkdtemp(prefix=f"{name}-", dir=_process_folder(parent, recreate=True)))
+        return Path(tempfile.mkdtemp(prefix=f"{name}-", dir=_process_dir(parent, recreate=True)))
 
 
 @contextmanager
-def temp_folder(name: str = "tmp", *, temp_dir: str | Path | None = None) -> Iterator[Path]:
+def request_temp_dir(name: str = "tmp", *, temp_dir: str | Path | None = None) -> Iterator[Path]:
     """Create a temporary folder for one request and always remove it when the block exits.
 
     ``name`` says what the folder holds; it starts the folder's name, so a reader of ``temp_dir`` can tell folders apart.
@@ -327,11 +327,11 @@ def temp_folder(name: str = "tmp", *, temp_dir: str | Path | None = None) -> Ite
     ``<system temp>/nemo_gym/<user id>/``. Pass ``temp_dir`` from a server's own setting, or into a Ray task that
     does not see Gym's configuration.
     The folder is private to this process: pass its content to another process, never its path.
-    To keep what is in it, call :func:`save_folder` before the block exits.
+    To keep what is in it, call :func:`save_dir` before the block exits.
 
-    This blocks on filesystem calls; use :func:`async_temp_folder` in a coroutine.
+    This blocks on filesystem calls; use :func:`async_request_temp_dir` in a coroutine.
     """
-    path = _create_temp_folder(name, temp_dir)
+    path = _create_temp_dir(name, temp_dir)
     try:
         yield path
     finally:
@@ -339,19 +339,19 @@ def temp_folder(name: str = "tmp", *, temp_dir: str | Path | None = None) -> Ite
 
 
 @asynccontextmanager
-async def async_temp_folder(name: str = "tmp", *, temp_dir: str | Path | None = None) -> AsyncIterator[Path]:
-    """:func:`temp_folder` for a coroutine: creating and removing the folder run in a worker thread.
+async def async_request_temp_dir(name: str = "tmp", *, temp_dir: str | Path | None = None) -> AsyncIterator[Path]:
+    """:func:`request_temp_dir` for a coroutine: creating and removing the folder run in a worker thread.
 
     The removal is shielded from cancellation.
     Under an anyio cancel scope, which cancels again at every await, the block can exit before the folder is gone;
     the removal then finishes in the background.
     """
-    creating = asyncio.ensure_future(asyncio.to_thread(_create_temp_folder, name, temp_dir))
+    creating = asyncio.ensure_future(asyncio.to_thread(_create_temp_dir, name, temp_dir))
     try:
         path = await asyncio.shield(creating)
     except asyncio.CancelledError:
         # The thread may still create the folder after this task is cancelled; remove it once it does.
-        creating.add_done_callback(_remove_created_folder)
+        creating.add_done_callback(_remove_created_dir)
         raise
     try:
         yield path
@@ -360,23 +360,23 @@ async def async_temp_folder(name: str = "tmp", *, temp_dir: str | Path | None = 
         await asyncio.shield(asyncio.to_thread(shutil.rmtree, path, True))
 
 
-def _remove_created_folder(creating: asyncio.Future[Path]) -> None:
+def _remove_created_dir(creating: asyncio.Future[Path]) -> None:
     if not creating.cancelled() and creating.exception() is None:
         shutil.rmtree(creating.result(), ignore_errors=True)
 
 
-def open_temp_folder(name: str = "tmp", *, temp_dir: str | Path | None = None) -> Path:
-    """Create a temporary folder for one session, under ``temp_dir`` as :func:`temp_folder` places it.
+def session_temp_dir(name: str = "tmp", *, temp_dir: str | Path | None = None) -> Path:
+    """Create a temporary folder for one session, under ``temp_dir`` as :func:`request_temp_dir` places it.
 
-    Keep it on the session and remove it with :func:`remove_temp_folder` after the session's in-flight requests
+    Keep it on the session and remove it with :func:`remove_temp_dir` after the session's in-flight requests
     finish, under the session's lock. Remove what remains when the server shuts down; the process exit removes
     anything left after that.
     """
-    return _create_temp_folder(name, temp_dir)
+    return _create_temp_dir(name, temp_dir)
 
 
-def remove_temp_folder(path: Path) -> bool:
-    """Remove a folder from :func:`open_temp_folder`; return whether it is gone.
+def remove_temp_dir(path: Path) -> bool:
+    """Remove a folder from :func:`session_temp_dir`; return whether it is gone.
 
     A failure is logged, never raised, so a caller can try again later. A folder that is already gone counts as removed.
     """
@@ -390,7 +390,7 @@ def remove_temp_folder(path: Path) -> bool:
     return True
 
 
-def run_temp_folder(name: str, *, temp_dir: str | Path | None = None) -> Path:
+def process_temp_dir(name: str, *, temp_dir: str | Path | None = None) -> Path:
     """Return the temporary folder called ``name`` that lasts as long as this process, creating it on first use.
 
     Every call with the same ``name`` and ``temp_dir`` gets the same folder, for state shared across sessions,
@@ -399,18 +399,18 @@ def run_temp_folder(name: str, *, temp_dir: str | Path | None = None) -> Path:
     """
     parent = _temp_parent(temp_dir)
     key = (os.getpid(), parent, name)
-    folder = _run_folders.get(key)
+    folder = _process_temp_dirs.get(key)
     if folder is not None:
         return folder
-    with _run_folder_lock:
-        folder = _run_folders.get(key)
+    with _process_temp_dir_lock:
+        folder = _process_temp_dirs.get(key)
         if folder is None:
-            folder = _create_temp_folder(name, parent)
-            _run_folders[key] = folder
+            folder = _create_temp_dir(name, parent)
+            _process_temp_dirs[key] = folder
     return folder
 
 
-def _kept_folder(server_name: str, name: str, label: str | None, output_dir: str | Path | None) -> Path | None:
+def _kept_dir(server_name: str, name: str, label: str | None, output_dir: str | Path | None) -> Path | None:
     """A new folder path for kept files: ``<output>/<name>/<rollout>/<UTC time>-[<label>-]<random>``."""
     if output_dir is not None:
         output = Path(output_dir)
@@ -441,7 +441,7 @@ def _kept_folder(server_name: str, name: str, label: str | None, output_dir: str
     return output / name / rollout / leaf
 
 
-def _copy_folder(src: Path, dest: Path) -> Path:
+def _copy_dir(src: Path, dest: Path) -> Path:
     """Copy ``src`` to the new folder ``dest``, at most a few copies at once in this process.
 
     Files are copied by contents only: copying their permissions and times would add a chmod and a utime per file,
@@ -456,7 +456,7 @@ def _copy_folder(src: Path, dest: Path) -> Path:
     return dest
 
 
-async def save_folder(
+async def save_dir(
     src: str | Path,
     *,
     server_name: str,
@@ -483,11 +483,11 @@ async def save_folder(
     if task is not None and task.cancelling():
         logger.info("Not keeping %s for %s: the request is being cancelled.", src, server_name)
         return None
-    dest = _kept_folder(server_name, name, label, output_dir)
+    dest = _kept_dir(server_name, name, label, output_dir)
     if dest is None:
         return None
     try:
-        return await asyncio.to_thread(_copy_folder, Path(src), dest)
+        return await asyncio.to_thread(_copy_dir, Path(src), dest)
     except asyncio.CancelledError:
         raise
     except Exception:
