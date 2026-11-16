@@ -3257,9 +3257,7 @@ _HTTP_ERROR_STATUS_MIN = 400
 _HTTP_ERROR_STATUS_MAX = 599
 _FAILED_OPERATION_OUTCOME = "failed"
 _COMPLETED_GRADE_OUTCOME = "completed"
-_MODEL_BOUNDARY = "model"
 _MODEL_REQUEST_OPERATION = "model_request"
-_MODEL_REQUEST_ERROR_KIND = "model_request_error"
 
 
 def _observed_trial_operations(
@@ -3411,9 +3409,9 @@ def _observed_trial_operations(
     def is_model_request_error(event, status):
         """The event is a failed model request with no cause, and its HTTP status (if any) is an error status."""
         is_model_request = (
-            event.get("boundary") == _MODEL_BOUNDARY
+            event.get("boundary") == FailureBoundary.MODEL
             and event.get("operation") == _MODEL_REQUEST_OPERATION
-            and event.get("failure_kind") == _MODEL_REQUEST_ERROR_KIND
+            and event.get("failure_kind") == MODEL_REQUEST_ERROR
         )
         return is_model_request and event.get("cause_id") is None and (status is None or is_http_error_status(status))
 
