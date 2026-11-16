@@ -24,6 +24,7 @@ from pathlib import Path
 import anyio
 import pytest
 from omegaconf import DictConfig
+from pydantic import BaseModel, ValidationError
 
 import nemo_gym.config.global_config as global_config
 import nemo_gym.core.runtime_files as runtime_files
@@ -530,3 +531,16 @@ def test_a_server_name_with_a_slash_stays_one_segment(set_global_config, tmp_pat
 
     assert path is not None
     assert path.relative_to(tmp_path).parts[0] == "..%2Fescape"
+
+
+class TestDebugDirSetting:
+    class _ServerConfig(BaseModel):
+        debug_dir: runtime_files.DebugDir = None
+
+    def test_a_relative_debug_dir_fails_when_the_configuration_loads(self) -> None:
+        with pytest.raises(ValidationError, match="must be an absolute path"):
+            self._ServerConfig(debug_dir="logs")
+
+    def test_an_absolute_or_unset_debug_dir_loads(self, tmp_path: Path) -> None:
+        assert self._ServerConfig(debug_dir=str(tmp_path)).debug_dir == tmp_path
+        assert self._ServerConfig().debug_dir is None
