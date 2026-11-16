@@ -22,6 +22,25 @@ def test_training_references_grade_correctly(reference):
     assert not wrong["semantic_correct"]
 
 
+@pytest.mark.parametrize(
+    "index,before,after,semantic",
+    [
+        (0, "1125", "1125.0", True),
+        (1, "0.932", "0.9320", True),
+        (1, "0.932", "0.9324", False),
+        (2, "1.60", "1.6", True),
+        (2, "1.60", "1.6000", True),
+        (2, "1.60", "1.604", False),
+    ],
+)
+def test_decimal_places_constrain_value_but_not_trailing_zeros(index, before, after, semantic):
+    reference = PdfAnalystQaTask.model_validate(REFERENCES[index])
+    candidate = reference.final_answer.replace(before, after, 1)
+    grade = grade_task_answer(reference, candidate)
+    assert grade["semantic_correct"] is semantic
+    assert grade["format_compliant"] is True
+
+
 def task(contract="bare_value", answer="210", units=None, question="fixture"):
     return PdfAnalystQaTask(
         task_id="task_" + "1" * 24,

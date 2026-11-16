@@ -29,6 +29,7 @@ from resources_servers.pdf_analyst_qa.app import (
     _SessionState,
 )
 from resources_servers.pdf_analyst_qa.documents import MountedDocumentsConfig
+from resources_servers.pdf_analyst_qa.task_data import PdfAnalystQaTask
 
 
 ROOT = Path(__file__).resolve().parents[1] / "data/example_bundle"
@@ -156,6 +157,27 @@ async def test_correct_wrong_and_retry_verification(server):
     assert (wrong.reward, wrong.evaluation_completed, wrong.mask_sample) == (0.0, True, False)
     missing = await resource.verify(request(), verify_body("23"))
     assert (missing.reward, missing.evaluation_completed, missing.mask_sample) == (0.0, False, True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "index,before,after,reward",
+    [(0, "1125", "1125.0", 1.0), (2, "1.60", "1.6", 1.0), (2, "1.60", "1.604", 0.0)],
+)
+async def test_numeric_precision_policy_determines_reward(server, monkeypatch, index, before, after, reward):
+    resource, _ = server
+    references = json.loads(Path(__file__).with_name("answer_references.json").read_text())
+    reference = PdfAnalystQaTask.model_validate(references[index]).model_copy(
+        update={"task_id": TASK_ID, "workspace_id": WORKSPACE_ID}
+    )
+    monkeypatch.setattr(PdfAnalystQaResourcesServer, "_load_task", lambda *_args: reference)
+    req = request()
+    await resource.seed_session(req, seed())
+    result = await resource.verify(req, verify_body(reference.final_answer.replace(before, after, 1)))
+    assert result.reward == reward
+    assert result.semantic_correct is bool(reward)
+    assert result.format_compliant is True
+    assert result.evaluation_completed and not result.mask_sample
 
 
 @pytest.mark.asyncio

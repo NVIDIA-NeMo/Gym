@@ -81,6 +81,10 @@ Add `--node-cache-host-path` if using a worker cache.
 
 Answers receive 1 when the answer value is correct and the requested format is satisfied, including units and citations. Other measured answers receive 0. The response reports value correctness as `semantic_correct` and format compliance as `format_compliant`. Infrastructure and verifier failures have `evaluation_completed=false` and `mask_sample=true`.
 
+Decimal-place instructions specify numerical rounding, rather than a fixed number of printed digits. Numerically equivalent answers may add or omit trailing fractional zeros: `1.6` and `1.60` are equivalent, as are `23` and `23.0`. This does not introduce a numerical tolerance: `1.604` does not match a reference value of `1.60`.
+
+Dataset authors should state the required rounding and make trailing fractional zeros optional in task questions. Fixed-width decimal formatting is not enforced. Keep each row's question consistent with its trusted task record, and update `prompt_version` when revising published questions; existing external datasets are not rewritten by the environment.
+
 [answer_formats.py](verifiers/answer_formats.py) parses answers; [verifier.py](verifiers/verifier.py) grades them. Offline reverification is unsupported.
 
 ## Tests
