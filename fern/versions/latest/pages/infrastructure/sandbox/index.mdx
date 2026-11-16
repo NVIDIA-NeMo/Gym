@@ -451,7 +451,7 @@ reported only on its span.
 | Provider | Source | Scope |
 | --- | --- | --- |
 | Docker | the container's cgroup v2, on the host when the daemon is local, otherwise read from inside the container | `container` |
-| Apptainer | the instance's cgroup when Apptainer created one; otherwise as Enroot | `container` |
+| Apptainer | the instance's cgroup when Apptainer created one; otherwise its namespace processes and the cgroup it shares with Gym | `container`, else `process_tree`, `shared_step` |
 | Enroot | the live processes in the container's PID or mount namespace; the CPU of each completed `exec`; the cgroup it shares with Gym | `process_tree`, `shared_step` |
 
 Other providers, including OpenSandbox, report no usage yet.

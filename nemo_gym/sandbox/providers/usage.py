@@ -188,10 +188,10 @@ class ProcfsUsageReader:
             self._scans[self.proc_root] = _NamespaceScan(now, members)
             return members
 
-    def members(self, init_pid: int) -> tuple[list[int], tuple[str, ...]] | None:
-        """PIDs in the sandbox's namespaces and the namespace kinds that matched them (``pid``, ``mnt``), or None
-        when no namespace separates the sandbox from this process. Enroot nested in another container keeps this
-        process's PID namespace, so only its mount namespace identifies it."""
+    def members(self, init_pid: int) -> tuple[list[int], tuple[tuple[str, str], ...]] | None:
+        """PIDs in the sandbox's namespaces and the ``(kind, namespace)`` pairs that selected them (kinds ``pid``
+        and ``mnt``), or None when no namespace separates the sandbox from this process. Enroot nested in another
+        container keeps this process's PID namespace, so only its mount namespace identifies it."""
         keys = []
         for kind in ("pid", "mnt"):
             namespace = self._namespace(init_pid, kind)
@@ -211,7 +211,7 @@ class ProcfsUsageReader:
             }
             | {init_pid}
         )
-        return pids, tuple(kind for kind, _ in keys)
+        return pids, tuple(keys)
 
     def _stat(self, pid: int) -> tuple[int, int] | None:
         """(utime + stime ticks, start time) from /proc/<pid>/stat; the command name may hold spaces."""
@@ -246,19 +246,26 @@ class ProcfsUsageReader:
         matched = self.members(init_pid)
         if matched is None:
             return None
-        members, kinds = matched
+        members, keys = matched
         sampled_at = time.time()
         rss = anon = file = 0
         seen = 0
         for pid in members:
+            # Read, then check that the PID still is the same process (start time) and still in the sandbox:
+            # a PID that exited and was reused by a host process after ``members()`` is never charged.
             stat = self._stat(pid)
             if stat is None:
+                continue
+            memory = self._memory(pid)
+            if not any(self._namespace(pid, kind) == namespace for kind, namespace in keys):
+                continue
+            recheck = self._stat(pid)
+            if recheck is None or recheck[1] != stat[1]:
                 continue
             seen += 1
             ticks, started = stat
             key = (pid, started)
             state.cpu_ticks[key] = max(ticks, state.cpu_ticks.get(key, 0))
-            memory = self._memory(pid)
             rss += memory.get("VmRSS", 0)
             anon += memory.get("RssAnon", 0)
             file += memory.get("RssFile", 0)
@@ -266,7 +273,7 @@ class ProcfsUsageReader:
             return None
         return SandboxUsageSample(
             # procfs_pidns, procfs_mntns or procfs_pidns_mntns: the namespaces that selected the processes.
-            source="procfs_" + "_".join(kind + "ns" for kind in kinds),
+            source="procfs_" + "_".join(kind + "ns" for kind, _ in keys),
             scope="process_tree",
             sampled_at=sampled_at,
             cpu_usage_usec_total=sum(state.cpu_ticks.values()) * 1_000_000 // self.clock_ticks,

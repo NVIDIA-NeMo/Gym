@@ -99,8 +99,9 @@ DOCKER_HUB_HOSTS = frozenset({"docker.io", "index.docker.io", "registry-1.docker
 # Runs ``enroot exec`` under a host shell that writes, to the report file named by its first argument, the CPU its
 # reaped children used: the exec's whole foreground process tree, which ``times`` reads from the kernel's rusage
 # of waited-for children. A command that starts and exits between two usage samples is otherwise missing from the
-# process tree. The report never touches the command's stdout or stderr.
-EXEC_TIMES_SCRIPT = 'report=$1; shift; "$@"; rc=$?; times >"$report"; exit $rc'
+# process tree. The report never touches the command's stdout, stderr or exit status: the braces keep ``times`` in
+# this shell, and a report that cannot be written loses only the sample.
+EXEC_TIMES_SCRIPT = 'report=$1; shift; "$@"; rc=$?; { times; } 2>/dev/null >"$report"; exit "$rc"'
 
 
 def _exec_cpu_usec(report: str) -> int | None:
@@ -886,19 +887,23 @@ class EnrootProvider:
         ]
         effective_timeout = timeout_s if timeout_s is not None else self._exec_config.default_timeout_s
 
-        descriptor, report_path = tempfile.mkstemp(prefix="nemo-gym-exec-cpu-")
-        os.close(descriptor)
+        # CPU accounting is best effort: without a report file (no space or inodes) the command runs unwrapped.
+        report_path: str | None = None
+        run_argv = argv
         try:
-            code, out, err = await self._run(
-                ["/bin/sh", "-c", EXEC_TIMES_SCRIPT, "sh", report_path, *argv],
-                timeout_s=effective_timeout,
-                stdin=stdin,
-            )
+            descriptor, report_path = tempfile.mkstemp(prefix="nemo-gym-exec-cpu-")
+        except OSError:
+            pass
+        else:
+            os.close(descriptor)
+            run_argv = ["/bin/sh", "-c", EXEC_TIMES_SCRIPT, "sh", report_path, *argv]
+        cpu_usec = None
+        try:
+            code, out, err = await self._run(run_argv, timeout_s=effective_timeout, stdin=stdin)
             # A killed shell (timeout) leaves the report empty, so an unfinished exec counts no CPU.
-            try:
-                cpu_usec = _exec_cpu_usec(Path(report_path).read_text(errors="replace"))
-            except OSError:
-                cpu_usec = None
+            if report_path is not None:
+                with contextlib.suppress(OSError):
+                    cpu_usec = _exec_cpu_usec(Path(report_path).read_text(errors="replace"))
         except TimeoutError as e:
             return SandboxExecResult(
                 stdout=None,
@@ -907,8 +912,9 @@ class EnrootProvider:
                 error_type="timeout",
             )
         finally:
-            with contextlib.suppress(OSError):
-                os.unlink(report_path)
+            if report_path is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(report_path)
 
         if cpu_usec is not None:
             instance.exec_cpu_usec += cpu_usec

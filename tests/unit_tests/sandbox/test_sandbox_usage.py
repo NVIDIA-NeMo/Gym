@@ -182,6 +182,46 @@ def test_a_host_process_reusing_a_cached_sandbox_pid_is_not_charged(proc: FakePr
     assert later.cpu_usage_usec_total == (15 + 300) * 10_000  # the exited process keeps what it was seen to use
 
 
+def test_a_pid_replaced_after_selection_or_between_reads_is_not_charged(proc: FakeProc, tmp_path: Path) -> None:
+    proc.add(100, pidns="B", mntns="M1", ticks=(10, 5), rss_kb=(1000, 0))
+    proc.add(101, pidns="B", mntns="M1", ticks=(200, 100), start=7, rss_kb=(30000, 0))
+    reader = _reader(proc, tmp_path)
+    state = ProcessTreeState()
+    assert reader.process_tree_sample(100, state).process_count == 2
+    selected = ProcfsUsageReader.members
+
+    def select_then_replace(self: ProcfsUsageReader, init_pid: int) -> tuple:
+        # 101 exits after selection and a host process takes its PID before it is read.
+        matched = selected(self, init_pid)
+        proc.remove(101)
+        proc.add(101, pidns="A", mntns="M0", ticks=(99999, 0), start=50, rss_kb=(900000, 0))
+        return matched
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(ProcfsUsageReader, "members", select_then_replace)
+        later = reader.process_tree_sample(100, state)
+    assert later.process_count == 1 and later.memory_current_bytes == 1000 * 1024
+    assert later.cpu_usage_usec_total == (15 + 300) * 10_000
+
+    # A PID replaced between its stat and memory reads, even by a process in the sandbox, is a mixed read: skipped.
+    proc.remove(101)
+    proc.add(101, pidns="B", mntns="M1", ticks=(1, 0), start=60, rss_kb=(10, 0))
+    read_memory = ProcfsUsageReader._memory
+
+    def replace_then_read(self: ProcfsUsageReader, pid: int) -> dict[str, int]:
+        if pid == 101:
+            proc.remove(101)
+            proc.add(101, pidns="B", mntns="M1", ticks=(7, 0), start=61, rss_kb=(800000, 0))
+        return read_memory(self, pid)
+
+    ProcfsUsageReader._scans.clear()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(ProcfsUsageReader, "_memory", replace_then_read)
+        mixed = reader.process_tree_sample(100, state)
+    assert mixed.process_count == 1 and mixed.memory_current_bytes == 1000 * 1024
+    assert mixed.cpu_usage_usec_total == (15 + 300) * 10_000
+
+
 def test_a_container_in_gyms_pid_namespace_is_found_by_its_mount_namespace(proc: FakeProc, tmp_path: Path) -> None:
     # Enroot nested in another container cannot unshare the PID namespace: only the mount namespace is its own.
     proc.add(100, pidns="A", mntns="M1", ticks=(10, 5), rss_kb=(1000, 0))
