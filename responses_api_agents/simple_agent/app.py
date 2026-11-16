@@ -19,6 +19,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
+from functools import partial
 from time import monotonic, perf_counter, time
 from typing import Any, ClassVar
 from uuid import uuid4
@@ -603,7 +604,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     forwarded = FailureHeader.decode(error.headers)
                     if forwarded is not None:
                         report = report.merged(forwarded)
-                    reported_kind = MODEL_POLICY_RESPONSE_TIMEOUT if failure is not None else MODEL_REQUEST_ERROR
+                    reported_kind = failure.failure_kind if failure is not None else MODEL_REQUEST_ERROR
                     # Return the cause and partial work; the Environment Server owns grading and retry policy.
                     content = getattr(error, "response_content", b"")
                     detail = content.decode(errors="replace") if isinstance(content, bytes) else str(content)
@@ -900,7 +901,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     trajectory,
                     model_server_cookies,
                     resources_server_cookies,
-                ) = await self._create_episode(
+                ) = await (self._create_episode if state is None else partial(self._create_session_episode, state))(
                     body,
                     model_url_path=self.url_path_for_request("/v1/responses", request),
                     resources_server_cookies=state.resources_cookies if state is not None else request.cookies,
@@ -966,6 +967,13 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     else None
                 )
         return model_response
+
+    async def _create_session_episode(
+        self, state: SimpleAgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming, **kwargs: Any
+    ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
+        """Create a session activation's episode. A subclass whose task context lives in its session state, such as
+        a document to put in the request, overrides this; the agent loop stays ``_create_episode``'s."""
+        return await self._create_episode(body, **kwargs)
 
     @staticmethod
     def _saved_reply(loop: SimpleAgentSessionState | _LegacyLoopReply, session_key: str) -> JSONResponse:

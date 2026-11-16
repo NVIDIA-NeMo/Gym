@@ -6,10 +6,22 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import (
+    HARNESS_TERMINATION_UNCONFIRMED,
+    FailureBoundary,
+    FailureReportRow,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+    report_for_current_request,
+)
 from resources_servers.terminal_bench_4 import lifecycle
 from resources_servers.terminal_bench_4.app import TerminalBench4ResourcesServer
 from resources_servers.terminal_bench_4.models import AgentTermination, SandboxedVerifyRequest, SandboxedVerifyResponse
+from resources_servers.terminal_bench_4.tests.test_resource_limits import (
+    CONTAINER_EXIT_CLEANUP,
+    STORAGE_EVICTION_CLEANUP,
+)
 
 
 def _verified(tmp_path, result, termination, diagnostics=(), *, legacy=True, harness_metadata=None):
@@ -104,7 +116,23 @@ def test_an_agent_infrastructure_failure_stays_one_whatever_its_verifier_did(tmp
     assert verified["_ng_failure_class"] == "infrastructure_error"
     assert verified["_ng_failure_type"] == "AgentInfrastructureError"
     assert verified["infrastructure_error"] == "AgentInfrastructureError"
-    assert verified["failure_kind"] is None
+    assert verified["failure_kind"] == "infrastructure_error"
+
+
+def test_a_sidecar_setup_failure_has_a_kind_recovery_can_retry(tmp_path):
+    """A task environment that failed to start (here a Compose service) is routed to the failures sidecar; without a
+    kind, recovery stops the run instead of retrying the rollout."""
+    verified = _verified(
+        tmp_path,
+        {"exception_info": {"exception_type": "RuntimeError"}},
+        AgentTermination(
+            reason="infrastructure_error", detail="RuntimeError: Compose service 'loadgen' unhealthy: exit status 1"
+        ),
+    )
+
+    assert verified["_ng_failure_class"] == "infrastructure_error"
+    assert verified["mask_sample"] is False
+    assert verified["failure_kind"] == "infrastructure_error"
 
 
 @pytest.mark.parametrize("exception_type", ["TimeoutError", "RuntimeError", "VerifierStatusUnknownError"])
@@ -288,6 +316,71 @@ async def test_a_killed_agent_scores_zero_without_its_verifier(tmp_path, monkeyp
     assert (verified["reward"], verified["evaluation_completed"]) == (0.0, True)
     assert verified["infrastructure_error"] is None and verified["failure_reason"] is None
     assert "_ng_failure_class" not in verified
+
+
+def _cleanup_failure_metadata(error):
+    """The harness metadata mini-SWE returns when its process cleanup failed: the cleanup event, selected."""
+    failure = NgFailureEvent(
+        boundary=FailureBoundary.HARNESS,
+        failure_kind=HARNESS_TERMINATION_UNCONFIRMED,
+        failure_reason="mini-SWE harness termination was not confirmed",
+        operation="harness.terminate",
+    )
+    failure.__cause__ = RuntimeError(error)
+    return {"harness_version": "test", **FailureReportRow.fields(report_for_current_request(failure))}
+
+
+@pytest.mark.parametrize("detail", [STORAGE_EVICTION_CLEANUP, CONTAINER_EXIT_CLEANUP], ids=["storage", "exit_143"])
+async def test_a_storage_eviction_found_by_process_cleanup_scores_zero_without_its_verifier(
+    tmp_path, monkeypatch, detail
+):
+    """The agent's failed cleanup reports the sandbox's eviction for its own storage limit: a graded zero, with the
+    cleanup kept as an unselected observation. Without that limit evidence (exit 143) it stays the row's failure."""
+    for step in ("download_dir", "collect", "run_verifier", "cleanup"):
+        monkeypatch.setattr(lifecycle, step, AsyncMock())
+    termination = AgentTermination(reason="infrastructure_error", detail=detail)
+    # The sandbox is gone, so quiescing it fails with the provider's report of the loss.
+    lost = RuntimeError(detail.removeprefix("Process cleanup failed: "))
+    environment = SimpleNamespace(
+        main=object(), closed=False, quiesce_agent=AsyncMock(side_effect=lost), stop=AsyncMock()
+    )
+    session = SimpleNamespace(
+        termination=termination,
+        environment=environment,
+        result={},
+        diagnostics=[],
+        phase="verifying",
+        subphase=None,
+        persist=lambda: None,
+        session_id="session-1",
+    )
+    metadata = _cleanup_failure_metadata(detail)
+
+    await lifecycle.finalize_session(session, grade=True)
+    verified = _verified(tmp_path, session.result, termination, session.diagnostics, harness_metadata=metadata)
+
+    lifecycle.run_verifier.assert_not_awaited()
+    lifecycle.collect.assert_not_awaited()
+    lifecycle.cleanup.assert_awaited_once_with(session)
+    assert "verifier" not in session.result
+    # The harness's cleanup event stays on the row either way.
+    assert verified[FailureReportRow.EVENTS] == metadata[FailureReportRow.EVENTS]
+    assert verified["termination"] == termination.model_dump()
+    if detail == CONTAINER_EXIT_CLEANUP:
+        environment.quiesce_agent.assert_awaited_once()
+        assert "verifier_result" not in session.result and verified["sandbox_resource_limit"] is None
+        assert (verified["evaluation_completed"], verified["_ng_failure_class"]) == (False, "infrastructure_error")
+        assert verified[FailureReportRow.FAILURE_ID] == metadata[FailureReportRow.FAILURE_ID]
+        assert verified["failure_kind"] == HARNESS_TERMINATION_UNCONFIRMED
+        return
+    environment.quiesce_agent.assert_not_awaited()
+    assert session.result["verifier_result"] == {"rewards": {"reward": 0.0}, "source": "sandbox_resource_limit"}
+    assert verified["sandbox_resource_limit"] == {"resource": "storage", "detail": detail}
+    assert (verified["reward"], verified["partial_credit"], verified["evaluation_completed"]) == (0.0, 0.0, True)
+    assert verified["infrastructure_error"] is None and verified["failure_reason"] is None
+    assert verified["failure_kind"] is None and verified["mask_sample"] is False
+    assert "_ng_failure_class" not in verified and FailureReportRow.FAILURE_ID not in verified
+    assert verified["num_tests_total"] is None
 
 
 @pytest.mark.parametrize("status", [401, 403])

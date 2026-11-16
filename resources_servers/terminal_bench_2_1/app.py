@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+import re
 from collections import OrderedDict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, contextmanager
@@ -109,6 +110,11 @@ class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_config: Dict[str, Any]
 
     debug: bool = False
+    # Many task test.sh files run pytest under set -e, so failing tests end the script before it writes
+    # reward.txt. With this on, such a run (non-zero exit, no readable reward.txt, a pytest summary counting
+    # failures or errors) is graded 0 instead of left ungraded; exits without a pytest summary stay ungraded.
+    # Agentic IF masks a tb21 task result that is not completed, so there such a row becomes a scored 0.
+    score_pytest_failures_without_reward: bool = True
 
     outcome_policy: TerminalBench21OutcomePolicyConfig = Field(
         default_factory=TerminalBench21OutcomePolicyConfig,
@@ -151,6 +157,21 @@ def _verifier_failure_reason(cause: BaseException) -> str:
     return bounded_text(f"Verifier sandbox error: {detail}", _MAX_FAILURE_REASON_CHARS)
 
 
+# pytest's closing line, e.g. "==== 17 failed, 3 passed in 12.34s ====" or "== 1 error in 0.50s (0:00:00) ==".
+# pytest -q prints it without the "=" borders: "1 failed, 2 passed in 0.10s".
+_PYTEST_SUMMARY = re.compile(
+    r"^(?:=+ )?(?P<counts>\d+ \w+(?:, \d+ \w+)*|no tests ran) in [\d.]+s(?: \([^)\n]*\))?(?: =+)?[ \t]*$",
+    re.MULTILINE,
+)
+_TERMINAL_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def pytest_reported_failure(output: str) -> bool:
+    """Whether the last pytest summary line in ``output`` counts failed tests or errors."""
+    summaries = _PYTEST_SUMMARY.findall(_TERMINAL_ESCAPE.sub("", output).replace("\r", ""))
+    return bool(summaries) and re.search(r"\b\d+ (failed|errors?)\b", summaries[-1]) is not None
+
+
 class _VerifierDirError(RuntimeError):
     """/logs/verifier or an upload directory could not be created: the task state the model left behind."""
 
@@ -163,6 +184,8 @@ class TerminalBench21VerifyResponse(BaseVerifyResponse):
 
     task_name: str
     test_output: str
+    # True when the reward came from pytest's summary because test.sh exited without a readable reward.txt.
+    reward_from_pytest_summary: bool = False
     golden_patch_output: Optional[str]
 
 
@@ -700,6 +723,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             print(f"Test output for {body.task_name}: {test_output}", file=stderr)
 
         evaluation_completed = False
+        reward_from_pytest_summary = False
         reward = 0.0
         if eval_result is not None:
             try:
@@ -720,6 +744,18 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             except Exception:
                 if self.config.debug:
                     print(f"Hit an exception downloading and converting reward: {format_exc()}", file=stderr)
+                # test.sh exited without a readable reward.txt, typically because a failing pytest ended it under
+                # set -e before it wrote one. A failing pytest summary is a verdict on the model: grade 0. A timed-out
+                # run did not exit, so its partial output says nothing about the test run and it stays ungraded.
+                if (
+                    failure_cause is None
+                    and self.config.score_pytest_failures_without_reward
+                    and eval_result.return_code != 0
+                    and getattr(eval_result, "error_type", None) is None
+                    and pytest_reported_failure(test_output)
+                ):
+                    evaluation_completed = True
+                    reward_from_pytest_summary = True
 
         failure_reason: str | None = None
         counts_as_zero = False
@@ -758,6 +794,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             reward=reward,
             verification_time_taken=verification_time_taken,
             test_output=test_output,
+            reward_from_pytest_summary=reward_from_pytest_summary,
             golden_patch_output=golden_patch_output,
             mask_sample=failure_reason is not None and not counts_as_zero,
             failure_kind=failure_kind if failure_reason is not None else None,

@@ -54,6 +54,11 @@ if TYPE_CHECKING:
         seed_verify_step_type,
     )
     from nemo_gym.server_runtime._checkpoint.store import write_participant_state
+    from nemo_gym.server_runtime.agent_context import (
+        AGENT_CONTEXT_KEY_NAME,
+        AgentContext,
+        AgentContextArtifact,
+    )
     from nemo_gym.server_runtime.base_environment_server import (
         BaseEnvironmentServer,
         BaseEnvironmentServerConfig,
@@ -110,6 +115,7 @@ if TYPE_CHECKING:
     from nemo_gym.server_runtime.request_handling.session_routing import SESSION_OWNER_HEADER, install_session_routing
     from nemo_gym.server_runtime.sandbox_lending import LentSandboxes
     from nemo_gym.server_runtime.single_agent_turn_types import (
+        SingleAgentTurnAgentContext,
         SingleAgentTurnFailure,
         SingleAgentTurnRequest,
         SingleAgentTurnResponse,
@@ -137,8 +143,11 @@ _PUBLIC_API = {
     "async_rollout_prefix_hook": "base_server",
     "rollout_prefix_hook": "base_server",
     "with_rollout_prefix": "base_server",
+    "AGENT_CONTEXT_KEY_NAME": "agent_context",
     "Activation": "_checkpoint.agent",
     "ActivationOutOfOrderError": "_checkpoint.agent",
+    "AgentContext": "agent_context",
+    "AgentContextArtifact": "agent_context",
     "AgentSessionParticipant": "_checkpoint.agent",
     "AgentSessionRecord": "_checkpoint.agent",
     "BaseEnvironmentServer": "base_environment_server",
@@ -191,6 +200,7 @@ _PUBLIC_API = {
     "SESSION_OWNER_HEADER": "request_handling.session_routing",
     "SimpleResourcesServer": "base_resources_server",
     "SimpleServer": "base_server",
+    "SingleAgentTurnAgentContext": "single_agent_turn_types",
     "SingleAgentTurnFailure": "single_agent_turn_types",
     "SingleAgentTurnRequest": "single_agent_turn_types",
     "SingleAgentTurnResponse": "single_agent_turn_types",

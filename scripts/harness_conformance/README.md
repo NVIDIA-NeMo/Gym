@@ -29,8 +29,9 @@ Counts include execution errors and count each scenario once, rather than counti
 cascading evidence failures separately. Only the
 reporting job receives `checks: write`; probe jobs keep read-only permissions.
 Download the `harness-conformance-*` artifacts for test/setup logs and probe evidence.
-The reporter only uses artifacts from the current run attempt; rerun all jobs to
-refresh results for all selected harnesses.
+The reporter matches each selected job to its actual execution, retaining uploads
+from successful jobs that a partial retry did not rerun. A rerun that produces no
+evidence remains unavailable; an older upload cannot replace it.
 
 After publishing the result, **Harness conformance (non-blocking) / Publish check**
 also fails if P0 fails or any probe job fails or is cancelled, making the result
@@ -77,7 +78,7 @@ Run predetermined model replies and failures through real Gym harnesses, collect
 their rollouts, and apply the scenario and evidence checks:
 
 ```bash
-python scripts/run_harness_conformance.py \
+python -m scripts.run_harness_conformance \
     --harness codex --harness pi --harness opencode --harness hermes \
     --output results/conformance
 ```
@@ -125,8 +126,8 @@ remote sandbox deployment.
 ## Scenarios
 
 ```bash
-python scripts/run_harness_conformance.py --list-scenarios
-python scripts/run_harness_conformance.py --harness codex \
+python -m scripts.run_harness_conformance --list-scenarios
+python -m scripts.run_harness_conformance --harness codex \
     --scenario tool_failure --timeout 60 --output results/codex-tool-failure
 ```
 

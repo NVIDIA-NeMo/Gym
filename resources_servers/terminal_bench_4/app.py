@@ -713,6 +713,10 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 failure_type = failure
         elif session.termination.reason == "infrastructure_error" and not result.get("sandbox_resource_limit"):
             failure = session.termination.detail or "Agent infrastructure failure"
+        if result.get("sandbox_resource_limit"):
+            # The sandbox's limit death is the graded result: the harness's failure events (a cleanup the dead
+            # sandbox could not confirm) stay as observations, and none is selected as the row's failure.
+            extra = {key: value for key, value in extra.items() if key != FailureReportRow.FAILURE_ID}
         legacy = getattr(session, "resources_request", None) is None
         ungraded_verifier = bool(failure) and not completed and session.termination.reason != "infrastructure_error"
         legacy_failure = {}
@@ -741,7 +745,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             failure_kind=(
                 VERIFIER_ERROR
                 if verifier_failure or ungraded_verifier
-                else _agent_failure_kind(session.termination, extra, masked=not legacy)
+                else _agent_failure_kind(session.termination, extra)
                 if failure
                 else None
             ),
@@ -939,11 +943,11 @@ def _termination_from_response(response: NeMoGymResponse) -> AgentTermination:
     return AgentTermination(reason="nonzero_exit", detail=f"Agent response status: {response.status}")
 
 
-def _agent_failure_kind(termination: AgentTermination, harness_metadata: dict, *, masked: bool) -> str | None:
-    """The kind of an agent infrastructure failure: the one the server typed, else the harness's, else, for a masked
-    result, ``infrastructure_error`` so the row is never masked without a kind."""
-    kind = termination.failure_kind or _selected_failure_kind(harness_metadata)
-    return kind or (failure_kinds.INFRASTRUCTURE_ERROR if masked else None)
+def _agent_failure_kind(termination: AgentTermination, harness_metadata: dict) -> str | None:
+    """The kind of an agent infrastructure failure: the one the server typed, else the harness's, else
+    ``infrastructure_error``. A masked result and a row routed to the failures sidecar both need a kind: recovery
+    stops a run on a failure without one instead of retrying it."""
+    return termination.failure_kind or _selected_failure_kind(harness_metadata) or failure_kinds.INFRASTRUCTURE_ERROR
 
 
 def _selected_failure_kind(harness_metadata: dict) -> str | None:

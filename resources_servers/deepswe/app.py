@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
+import shlex
 import sys
 import tempfile
 import uuid
@@ -21,6 +23,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from math import ceil
 from pathlib import Path
+from random import uniform
 from shutil import rmtree
 from time import monotonic
 from traceback import format_exc
@@ -33,6 +36,7 @@ from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef, get_first_server_config_dict, get_global_config_dict
 from nemo_gym.core import (
     ENVIRONMENT_SERVER_FAILED,
+    PROVIDER_IO_TIMEOUT,
     PROVIDER_OOM_KILLED,
     SESSION_LOST,
     VERIFIER_ERROR,
@@ -89,6 +93,11 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 NEMO_GYM_ROOT = PACKAGE_DIR.parents[1]
 # The task repository in every DeepSWE image; the agent works and commits here.
 AGENT_WORKDIR = "/app"
+# Where agent_ripgrep_path lands in the agent sandbox, readable and executable by every user.
+AGENT_RUNTIME_DIR = "/tmp/nemo-gym-deepswe"
+AGENT_RIPGREP = f"{AGENT_RUNTIME_DIR}/rg"
+_RIPGREP_UPLOAD_MAX_ATTEMPTS = 2
+LOGGER = logging.getLogger(__name__)
 
 
 def _resolve_repo_path(path: Path) -> Path:
@@ -118,6 +127,10 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_config: dict[str, Any]
     enforce_agent_no_network: bool = True
     sandbox_model_server: ModelServerRef | None = None
+    # A host ripgrep copied into every agent sandbox as AGENT_RIPGREP; a relative path is under the Gym root.
+    # benchmarks/deepswe/opencode.yaml stages OpenCode's ripgrep this way, since the agent sandbox has no network, and
+    # opencode_agent checks the copy against its pinned digest.
+    agent_ripgrep_path: Path | None = None
 
     logs_dir: Path = Path("resources_servers/deepswe/logs")
     clear_verifier_logs: bool = False
@@ -290,6 +303,15 @@ class DeepSWEResourcesServer(SandboxSessionResourcesServer):
         )
         self._agent_sessions: dict[str, AgentSandboxSession] = {}
         self._episode_agent_sandboxes: dict[str, AgentSandboxSession] = {}
+        self._ripgrep_upload_sem = asyncio.Semaphore(2)
+        self._agent_ripgrep = (
+            _resolve_repo_path(self.config.agent_ripgrep_path) if self.config.agent_ripgrep_path else None
+        )
+        if self._agent_ripgrep is not None and not self._agent_ripgrep.is_file():
+            raise ValueError(
+                f"agent_ripgrep_path is missing: {self._agent_ripgrep}; for the benchmark, run "
+                "`gym eval prepare --benchmark deepswe/opencode`"
+            )
 
     def _provider_options(self, *, phase: str) -> dict[str, Any]:
         options = deepcopy(self.config.sandbox_config.get("provider_options", {}))
@@ -387,9 +409,61 @@ class DeepSWEResourcesServer(SandboxSessionResourcesServer):
                     f"DeepSWE agent git setup failed with code {setup_result.return_code}, "
                     f"error_type={setup_result.error_type!r}: {setup_result.stderr or ''}"
                 )
+            if self._agent_ripgrep is not None:
+                await self._stage_agent_ripgrep(started, self._agent_ripgrep)
 
         await sandbox.start_with_setup(spec, _run_setup)
         return sandbox
+
+    async def _stage_agent_ripgrep(self, sandbox: AsyncSandbox, ripgrep: Path) -> None:
+        """Publish executable ripgrep after a bounded upload; ambiguous timeouts never reuse a remote path."""
+        mkdir_result = await sandbox.exec(shlex.join(["mkdir", "-p", AGENT_RUNTIME_DIR]), timeout_s=60)
+        if mkdir_result.return_code != 0 or mkdir_result.error_type is not None:
+            raise RuntimeError(
+                f"DeepSWE could not create {AGENT_RUNTIME_DIR}: return_code={mkdir_result.return_code}, "
+                f"error_type={mkdir_result.error_type!r}: {mkdir_result.stderr or ''}"
+            )
+        for attempt in range(1, _RIPGREP_UPLOAD_MAX_ATTEMPTS + 1):
+            remote_path = f"{AGENT_RUNTIME_DIR}/.rg-{uuid.uuid4().hex}"
+            started = monotonic()
+            try:
+                async with self._ripgrep_upload_sem:
+                    await sandbox.upload(ripgrep, remote_path)
+            except (TimeoutError, NgFailureEvent) as error:
+                if isinstance(error, NgFailureEvent):
+                    if error.boundary != FailureBoundary.SANDBOX or error.failure_kind != PROVIDER_IO_TIMEOUT:
+                        raise
+                    observe_failure(error)
+                LOGGER.warning(
+                    "DeepSWE ripgrep upload timed out; remote_path=%s attempt=%d/%d duration_s=%.1f",
+                    remote_path,
+                    attempt,
+                    _RIPGREP_UPLOAD_MAX_ATTEMPTS,
+                    monotonic() - started,
+                )
+                if attempt == _RIPGREP_UPLOAD_MAX_ATTEMPTS:
+                    raise
+                await asyncio.sleep(uniform(15.0, 30.0))
+            else:
+                LOGGER.info(
+                    "DeepSWE ripgrep upload completed; remote_path=%s attempt=%d/%d duration_s=%.1f",
+                    remote_path,
+                    attempt,
+                    _RIPGREP_UPLOAD_MAX_ATTEMPTS,
+                    monotonic() - started,
+                )
+                promote_result = await sandbox.exec(
+                    shlex.join(["chmod", "0755", AGENT_RUNTIME_DIR, remote_path])
+                    + " && "
+                    + shlex.join(["mv", "-f", "--", remote_path, AGENT_RIPGREP]),
+                    timeout_s=60,
+                )
+                if promote_result.return_code != 0 or promote_result.error_type is not None:
+                    raise RuntimeError(
+                        f"DeepSWE could not stage ripgrep: return_code={promote_result.return_code}, "
+                        f"error_type={promote_result.error_type!r}: {promote_result.stderr or ''}"
+                    )
+                return
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox, *, task_id: str, phase: str) -> None:
         try:
