@@ -109,8 +109,8 @@ class TestGlobalConfig:
             "uv_venv_dir": str(WORKING_DIR),
             "results_dir": str(RESULTS_DIR.expanduser().resolve()),
             "cache_dir": str(CACHE_DIR.expanduser().resolve()),
-            "debug_artifacts_dir": None,
-            "shared_scratch_dir": str(RESULTS_DIR.expanduser().resolve() / "scratch"),
+            "debug_dir": None,
+            "temp_dir": None,
         }
 
     def test_get_global_config_dict_sanity(self, monkeypatch: MonkeyPatch) -> None:
@@ -363,24 +363,16 @@ class TestGlobalConfig:
         with raises(ConfigError, match="results_dir must be a non-empty path string"):
             get_global_config_dict()
 
-    def test_runtime_file_roots_follow_results_dir_and_resolve(self, monkeypatch: MonkeyPatch) -> None:
+    def test_runtime_file_roots_resolve_to_absolute_paths(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
         self._mock_parse_environment(
-            monkeypatch, DictConfig({"results_dir": "/shared/results", "debug_artifacts_dir": "relative/debug"})
+            monkeypatch, DictConfig({"debug_dir": "relative/debug", "temp_dir": "~/gym-temp"})
         )
 
         global_config_dict = get_global_config_dict()
-        # Shared scratch lives under the run's results, which every node already sees.
-        assert global_config_dict["shared_scratch_dir"] == "/shared/results/scratch"
         # A server resolves a relative path against its own source folder, so the parser hands it an absolute one.
-        assert global_config_dict["debug_artifacts_dir"] == str((Path.cwd() / "relative/debug").resolve())
-
-    def test_shared_scratch_dir_cannot_be_null(self, monkeypatch: MonkeyPatch) -> None:
-        self._mock_versions_for_testing(monkeypatch)
-        self._mock_parse_environment(monkeypatch, DictConfig({"shared_scratch_dir": None}))
-
-        with raises(ConfigError, match="shared_scratch_dir must be a non-empty path string"):
-            get_global_config_dict()
+        assert global_config_dict["debug_dir"] == str((Path.cwd() / "relative/debug").resolve())
+        assert global_config_dict["temp_dir"] == str((Path.home() / "gym-temp").resolve())
 
     def test_get_global_config_dict_global_exists(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
