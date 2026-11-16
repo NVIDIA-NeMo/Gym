@@ -74,4 +74,4 @@ python -m pytest resources_servers/deepcad/tests -q
 
 Image-rendering tests require a functioning VTK/OpenGL runtime. The OpenCode
 multi-turn integration is documented in
-[`responses_api_agents/deepcad_opencode`](../../responses_api_agents/deepcad_opencode/README.md).
+[`OpenCode workspace setting`](OPENCODE.md).
