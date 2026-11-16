@@ -32,7 +32,7 @@ The additional review note is addressed by adding VisualWebArena's 908-task row,
 | Managed component locks | 304 checked, zero failed; no lock updates |
 | All-files pre-commit | Passed |
 | Fern check | Zero errors; one warning: redirect checking requires Fern authentication, which was not configured |
-| Rebase secret-baseline preservation | All 1332 main hash records preserved byte-for-byte; only the two original VisualWebArena source-lock records remain added, for 1334 total |
+| Rebase secret-baseline preservation | Parsed records: 1280 on main → 1282 with exactly two VisualWebArena source-lock additions. Raw literal `hashed_secret` occurrences: 1332 → 1334 because main already contains duplicate JSON object keys. Removing only the VWA block reproduces every original main byte, including metadata and duplicate keys. |
 
 The negative-control run required explicit source imports before pytest startup: the component's editable-install/plugin setup initially selected the fixed source. That incorrectly green attempt is retained but excluded from the comparison. The subsequent runs assert the resolved old scorer path and reproduce the defects.
 

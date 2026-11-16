@@ -14,6 +14,7 @@ From the repository root:
 ```bash
 gym eval prepare --benchmark visualwebarena
 python benchmarks/visualwebarena/prepare.py
+gym env validate visualwebarena
 ```
 
 The prepare command downloads the public
@@ -32,6 +33,10 @@ existing generated file intentionally:
 ```bash
 python benchmarks/visualwebarena/prepare.py --force-env
 ```
+
+The named validation command reads `manifest.yaml`, checks the prepared rows
+and verifies the component composition. This benchmark uses agent-generated
+prompts and remains `experimental: true`; the manifest does not certify scores.
 
 To reuse an offline or shared checkout, set the root containing both
 `visualwebarena.jsonl` and the `visualwebarena/` image tree:
@@ -138,3 +143,8 @@ the current PR head.
 The [2026-11-16 review-fix report](validation-2026-11-16.md) records the scorer
 corrections, complete regression comparison and separate synthetic model smoke.
 It does not replace the historical full-population result with a new score.
+
+The [second review follow-up](validation-2026-11-16-followup.md) records combined
+predicate, complete image capture, empty-image-delta and semantic-freshness
+repairs, the benchmark manifest, inspectable native-judge smoke and the
+remaining onboarding/reference decisions.

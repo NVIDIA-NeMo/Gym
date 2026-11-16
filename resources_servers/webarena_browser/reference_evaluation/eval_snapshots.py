@@ -39,6 +39,23 @@ _SNAPSHOT_LOGIN_FORM = """() => document.querySelector(
     'form#login-form input[type="password"], form#new_user input[type="password"], '
     + 'form[action$="/login"] input[type="password"], form[action$="/sign_in"] input[type="password"]'
 ) !== null"""
+_IMAGE_URLS = """(selector) => {
+    let roots = Array.from(document.querySelectorAll(selector));
+    if (!roots.length && selector === '.products-grid .wishlist .product-image-photo') {
+        roots = Array.from(document.querySelectorAll('.products-grid.wishlist .product-image-photo'));
+    }
+    if (!roots.length && selector === '.submission__image') {
+        roots = Array.from(document.querySelectorAll('.submission__link'));
+    }
+    const elements = new Set();
+    for (const root of roots) {
+        if (root.matches('img,a')) elements.add(root);
+        for (const child of root.querySelectorAll('img,a')) elements.add(child);
+    }
+    return Array.from(new Set(Array.from(elements, el =>
+        el.tagName.toLowerCase() === 'a' ? el.href : (el.currentSrc || el.src)
+    ).filter(Boolean)));
+}"""
 
 
 def _same_snapshot_origin(requested: SplitResult, landed: SplitResult) -> bool:
@@ -446,23 +463,7 @@ async def _collect_image_urls(page, locator: str) -> list[str]:
     else:
         selector = locator
     try:
-        return (
-            await page.evaluate(
-                """
-            (selector) => {
-                const root = selector ? document.querySelector(selector) : document;
-                if (!root) return [];
-                const elements = root.matches && root.matches('img,a') ? [root] : Array.from(root.querySelectorAll('img,a'));
-                return elements.map((el) => {
-                    if (el.tagName.toLowerCase() === 'a') return el.href || '';
-                    return el.currentSrc || el.src || '';
-                }).filter(Boolean);
-            }
-            """,
-                selector,
-            )
-            or []
-        )
+        return await page.evaluate(_IMAGE_URLS, selector) or []
     except Exception as exc:
         raise EvaluatorInfrastructureError("Browser snapshot capture failed") from exc
 
@@ -692,23 +693,7 @@ def _collect_program_html_snapshots_sync(page, targets: list[dict[str, Any]]) ->
 def _collect_image_urls_sync(page, locator: str) -> list[str]:
     selector = "img" if not locator.strip() else locator
     try:
-        return (
-            page.evaluate(
-                """
-            (selector) => {
-                const root = selector ? document.querySelector(selector) : document;
-                if (!root) return [];
-                const elements = root.matches && root.matches('img,a') ? [root] : Array.from(root.querySelectorAll('img,a'));
-                return elements.map((el) => {
-                    if (el.tagName.toLowerCase() === 'a') return el.href || '';
-                    return el.currentSrc || el.src || '';
-                }).filter(Boolean);
-            }
-            """,
-                selector,
-            )
-            or []
-        )
+        return page.evaluate(_IMAGE_URLS, selector) or []
     except Exception as exc:
         raise EvaluatorInfrastructureError("Browser snapshot capture failed") from exc
 

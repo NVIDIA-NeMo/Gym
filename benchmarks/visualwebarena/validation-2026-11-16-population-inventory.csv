@@ -1,0 +1,909 @@
+runtime_task_id,source_task_id,eval_types,program_predicates,planned_program_target_count,image_query_count,planned_image_query_count,image_selectors,combined_program_predicates,fuzzy_dom_targets,fuzzy_dom_planned_targets
+0,visualwebarena-0,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+1,visualwebarena-1,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+2,visualwebarena-2,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+3,visualwebarena-3,"[""url_match""]",[],0,0,0,[],False,0,0
+4,visualwebarena-4,"[""url_match""]",[],0,0,0,[],False,0,0
+5,visualwebarena-5,"[""url_match""]",[],0,0,0,[],False,0,0
+6,visualwebarena-6,"[""string_match""]",[],0,0,0,[],False,0,0
+7,visualwebarena-7,"[""string_match""]",[],0,0,0,[],False,0,0
+8,visualwebarena-8,"[""string_match""]",[],0,0,0,[],False,0,0
+9,visualwebarena-9,"[""url_match""]",[],0,0,0,[],False,0,0
+10,visualwebarena-10,"[""url_match""]",[],0,0,0,[],False,0,0
+11,visualwebarena-11,"[""url_match""]",[],0,0,0,[],False,0,0
+12,visualwebarena-12,"[""url_match""]",[],0,0,0,[],False,0,0
+13,visualwebarena-13,"[""string_match""]",[],0,0,0,[],False,0,0
+14,visualwebarena-14,"[""string_match""]",[],0,0,0,[],False,0,0
+15,visualwebarena-15,"[""string_match""]",[],0,0,0,[],False,0,0
+16,visualwebarena-16,"[""string_match""]",[],0,0,0,[],False,0,0
+17,visualwebarena-17,"[""string_match""]",[],0,0,0,[],False,0,0
+18,visualwebarena-18,"[""string_match""]",[],0,0,0,[],False,0,0
+19,visualwebarena-19,"[""string_match""]",[],0,0,0,[],False,0,0
+20,visualwebarena-20,"[""string_match""]",[],0,0,0,[],False,0,0
+21,visualwebarena-21,"[""string_match""]",[],0,0,0,[],False,0,0
+22,visualwebarena-22,"[""string_match""]",[],0,0,0,[],False,0,0
+23,visualwebarena-23,"[""string_match""]",[],0,0,0,[],False,0,0
+24,visualwebarena-24,"[""url_match""]",[],0,0,0,[],False,0,0
+25,visualwebarena-25,"[""url_match""]",[],0,0,0,[],False,0,0
+26,visualwebarena-26,"[""url_match""]",[],0,0,0,[],False,0,0
+27,visualwebarena-27,"[""url_match""]",[],0,0,0,[],False,0,0
+28,visualwebarena-28,"[""url_match""]",[],0,0,0,[],False,0,0
+29,visualwebarena-29,"[""url_match""]",[],0,0,0,[],False,0,0
+30,visualwebarena-30,"[""url_match""]",[],0,0,0,[],False,0,0
+31,visualwebarena-31,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+32,visualwebarena-32,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+33,visualwebarena-33,"[""string_match""]",[],0,0,0,[],False,0,0
+34,visualwebarena-34,"[""string_match""]",[],0,0,0,[],False,0,0
+35,visualwebarena-35,"[""string_match""]",[],0,0,0,[],False,0,0
+36,visualwebarena-36,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+37,visualwebarena-37,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+38,visualwebarena-38,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+39,visualwebarena-39,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+40,visualwebarena-40,"[""string_match""]",[],0,0,0,[],False,0,0
+41,visualwebarena-41,"[""string_match""]",[],0,0,0,[],False,0,0
+42,visualwebarena-42,"[""string_match""]",[],0,0,0,[],False,0,0
+43,visualwebarena-43,"[""url_match""]",[],0,0,0,[],False,0,0
+44,visualwebarena-44,"[""url_match""]",[],0,0,0,[],False,0,0
+45,visualwebarena-45,"[""url_match""]",[],0,0,0,[],False,0,0
+46,visualwebarena-46,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+47,visualwebarena-47,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+48,visualwebarena-48,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+49,visualwebarena-49,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+50,visualwebarena-50,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+51,visualwebarena-51,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+52,visualwebarena-52,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+53,visualwebarena-53,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+54,visualwebarena-54,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+55,visualwebarena-55,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+56,visualwebarena-56,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+57,visualwebarena-57,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+58,visualwebarena-58,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+59,visualwebarena-59,"[""string_match""]",[],0,0,0,[],False,0,0
+60,visualwebarena-60,"[""string_match""]",[],0,0,0,[],False,0,0
+61,visualwebarena-61,"[""string_match""]",[],0,0,0,[],False,0,0
+62,visualwebarena-62,"[""string_match""]",[],0,0,0,[],False,0,0
+63,visualwebarena-63,"[""string_match""]",[],0,0,0,[],False,0,0
+64,visualwebarena-64,"[""string_match""]",[],0,0,0,[],False,0,0
+65,visualwebarena-65,"[""string_match""]",[],0,0,0,[],False,0,0
+66,visualwebarena-66,"[""string_match""]",[],0,0,0,[],False,0,0
+67,visualwebarena-67,"[""string_match""]",[],0,0,0,[],False,0,0
+68,visualwebarena-68,"[""string_match""]",[],0,0,0,[],False,0,0
+69,visualwebarena-69,"[""string_match""]",[],0,0,0,[],False,0,0
+70,visualwebarena-70,"[""string_match""]",[],0,0,0,[],False,0,0
+71,visualwebarena-71,"[""string_match""]",[],0,0,0,[],False,0,0
+72,visualwebarena-72,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+73,visualwebarena-73,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+74,visualwebarena-74,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+75,visualwebarena-75,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+76,visualwebarena-76,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+77,visualwebarena-77,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+78,visualwebarena-78,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+79,visualwebarena-79,"[""string_match""]",[],0,0,0,[],False,0,0
+80,visualwebarena-80,"[""string_match""]",[],0,0,0,[],False,0,0
+81,visualwebarena-81,"[""string_match""]",[],0,0,0,[],False,0,0
+82,visualwebarena-82,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+83,visualwebarena-83,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+84,visualwebarena-84,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+85,visualwebarena-85,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+86,visualwebarena-86,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+87,visualwebarena-87,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+88,visualwebarena-88,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+89,visualwebarena-89,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+90,visualwebarena-90,"[""string_match""]",[],0,0,0,[],False,0,0
+91,visualwebarena-91,"[""string_match""]",[],0,0,0,[],False,0,0
+92,visualwebarena-92,"[""string_match""]",[],0,0,0,[],False,0,0
+93,visualwebarena-93,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+94,visualwebarena-94,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+95,visualwebarena-95,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+96,visualwebarena-96,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+97,visualwebarena-97,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+98,visualwebarena-98,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+99,visualwebarena-99,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+100,visualwebarena-100,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+101,visualwebarena-101,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+102,visualwebarena-102,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+103,visualwebarena-103,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+104,visualwebarena-104,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+105,visualwebarena-105,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+106,visualwebarena-106,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+107,visualwebarena-107,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+108,visualwebarena-108,"[""page_image_query""]",[],0,1,1,"["".products-grid .wishlist .product-image-photo""]",False,0,0
+109,visualwebarena-109,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+110,visualwebarena-110,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+111,visualwebarena-111,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+112,visualwebarena-112,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+113,visualwebarena-113,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+114,visualwebarena-114,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+115,visualwebarena-115,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+116,visualwebarena-116,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+117,visualwebarena-117,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+118,visualwebarena-118,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+119,visualwebarena-119,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+120,visualwebarena-120,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+121,visualwebarena-121,"[""string_match""]",[],0,0,0,[],False,0,0
+122,visualwebarena-122,"[""string_match""]",[],0,0,0,[],False,0,0
+123,visualwebarena-123,"[""string_match""]",[],0,0,0,[],False,0,0
+124,visualwebarena-124,"[""string_match""]",[],0,0,0,[],False,0,0
+125,visualwebarena-125,"[""string_match""]",[],0,0,0,[],False,0,0
+126,visualwebarena-126,"[""string_match""]",[],0,0,0,[],False,0,0
+127,visualwebarena-127,"[""string_match""]",[],0,0,0,[],False,0,0
+128,visualwebarena-128,"[""string_match""]",[],0,0,0,[],False,0,0
+129,visualwebarena-129,"[""string_match""]",[],0,0,0,[],False,0,0
+130,visualwebarena-130,"[""string_match""]",[],0,0,0,[],False,0,0
+131,visualwebarena-131,"[""string_match""]",[],0,0,0,[],False,0,0
+132,visualwebarena-132,"[""string_match""]",[],0,0,0,[],False,0,0
+133,visualwebarena-133,"[""string_match""]",[],0,0,0,[],False,0,0
+134,visualwebarena-134,"[""string_match""]",[],0,0,0,[],False,0,0
+135,visualwebarena-135,"[""string_match""]",[],0,0,0,[],False,0,0
+136,visualwebarena-136,"[""string_match""]",[],0,0,0,[],False,0,0
+137,visualwebarena-137,"[""string_match""]",[],0,0,0,[],False,0,0
+138,visualwebarena-138,"[""string_match""]",[],0,0,0,[],False,0,0
+139,visualwebarena-139,"[""string_match""]",[],0,0,0,[],False,0,0
+140,visualwebarena-140,"[""string_match""]",[],0,0,0,[],False,0,0
+141,visualwebarena-141,"[""string_match""]",[],0,0,0,[],False,0,0
+142,visualwebarena-142,"[""string_match""]",[],0,0,0,[],False,0,0
+143,visualwebarena-143,"[""string_match""]",[],0,0,0,[],False,0,0
+144,visualwebarena-144,"[""string_match""]",[],0,0,0,[],False,0,0
+145,visualwebarena-145,"[""string_match""]",[],0,0,0,[],False,0,0
+146,visualwebarena-146,"[""string_match""]",[],0,0,0,[],False,0,0
+147,visualwebarena-147,"[""string_match""]",[],0,0,0,[],False,0,0
+148,visualwebarena-148,"[""string_match""]",[],0,0,0,[],False,0,0
+149,visualwebarena-149,"[""string_match""]",[],0,0,0,[],False,0,0
+150,visualwebarena-150,"[""url_match""]",[],0,0,0,[],False,0,0
+151,visualwebarena-151,"[""url_match""]",[],0,0,0,[],False,0,0
+152,visualwebarena-152,"[""url_match""]",[],0,0,0,[],False,0,0
+153,visualwebarena-153,"[""program_html"", ""page_image_query""]","[[""must_include""]]",0,1,0,"["".fotorama__stage__frame""]",False,0,0
+154,visualwebarena-154,"[""program_html"", ""page_image_query""]","[[""must_include""]]",0,1,0,"["".fotorama__stage__frame""]",False,0,0
+155,visualwebarena-155,"[""url_match""]",[],0,0,0,[],False,0,0
+156,visualwebarena-156,"[""url_match""]",[],0,0,0,[],False,0,0
+157,visualwebarena-157,"[""url_match""]",[],0,0,0,[],False,0,0
+158,visualwebarena-158,"[""program_html"", ""page_image_query""]","[[""required_values""], [""required_values""], [""must_include""]]",0,1,0,"["".fotorama__stage__frame""]",False,0,0
+159,visualwebarena-159,"[""page_image_query""]",[],0,1,1,"["".products-grid .wishlist .product-image-photo""]",False,0,0
+160,visualwebarena-160,"[""page_image_query""]",[],0,1,1,"["".products-grid .wishlist .product-image-photo""]",False,0,0
+161,visualwebarena-161,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+162,visualwebarena-162,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+163,visualwebarena-163,"[""page_image_query""]",[],0,1,1,"["".products-grid .wishlist .product-image-photo""]",False,0,0
+164,visualwebarena-164,"[""program_html"", ""page_image_query""]","[[""required_values""], [""must_include""]]",0,1,0,"["".fotorama__stage__frame""]",False,0,0
+165,visualwebarena-165,"[""program_html""]","[[""required_values""], [""required_values""], [""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+166,visualwebarena-166,"[""program_html"", ""page_image_query""]","[[""must_include""], [""must_include""]]",0,1,0,"["".fotorama__stage__frame""]",False,0,0
+167,visualwebarena-167,"[""string_match""]",[],0,0,0,[],False,0,0
+168,visualwebarena-168,"[""program_html""]","[[""exact_match""]]",1,0,0,[],False,0,0
+169,visualwebarena-169,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+170,visualwebarena-170,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+171,visualwebarena-171,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+172,visualwebarena-172,"[""program_html""]","[[""exact_match""]]",1,0,0,[],False,0,0
+173,visualwebarena-173,"[""program_html""]","[[""exact_match""]]",1,0,0,[],False,0,0
+174,visualwebarena-174,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+175,visualwebarena-175,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+176,visualwebarena-176,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+177,visualwebarena-177,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+178,visualwebarena-178,"[""program_html""]","[[""required_values""]]",0,0,0,[],False,0,0
+179,visualwebarena-179,"[""program_html""]","[[""required_values""], [""must_include""], [""required_values""]]",0,0,0,[],False,0,0
+180,visualwebarena-180,"[""program_html""]","[[""required_values""]]",0,0,0,[],False,0,0
+181,visualwebarena-181,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+182,visualwebarena-182,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+183,visualwebarena-183,"[""program_html""]","[[""required_values""]]",0,0,0,[],False,0,0
+184,visualwebarena-184,"[""program_html""]","[[""required_values""], [""must_include""]]",0,0,0,[],False,0,0
+185,visualwebarena-185,"[""program_html""]","[[""required_values""], [""must_include""]]",0,0,0,[],False,0,0
+186,visualwebarena-186,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+187,visualwebarena-187,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+188,visualwebarena-188,"[""string_match""]",[],0,0,0,[],False,0,0
+189,visualwebarena-189,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+190,visualwebarena-190,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+191,visualwebarena-191,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+192,visualwebarena-192,"[""string_match""]",[],0,0,0,[],False,0,0
+193,visualwebarena-193,"[""string_match""]",[],0,0,0,[],False,0,0
+194,visualwebarena-194,"[""string_match""]",[],0,0,0,[],False,0,0
+195,visualwebarena-195,"[""string_match""]",[],0,0,0,[],False,0,0
+196,visualwebarena-196,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+197,visualwebarena-197,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+198,visualwebarena-198,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+199,visualwebarena-199,"[""string_match""]",[],0,0,0,[],False,0,0
+200,visualwebarena-200,"[""string_match""]",[],0,0,0,[],False,0,0
+201,visualwebarena-201,"[""string_match""]",[],0,0,0,[],False,0,0
+202,visualwebarena-202,"[""string_match""]",[],0,0,0,[],False,0,0
+203,visualwebarena-203,"[""string_match""]",[],0,0,0,[],False,0,0
+204,visualwebarena-204,"[""string_match""]",[],0,0,0,[],False,0,0
+205,visualwebarena-205,"[""string_match""]",[],0,0,0,[],False,0,0
+206,visualwebarena-206,"[""string_match""]",[],0,0,0,[],False,0,0
+207,visualwebarena-207,"[""string_match""]",[],0,0,0,[],False,0,0
+208,visualwebarena-208,"[""string_match""]",[],0,0,0,[],False,0,0
+209,visualwebarena-209,"[""string_match""]",[],0,0,0,[],False,0,0
+210,visualwebarena-210,"[""string_match""]",[],0,0,0,[],False,0,0
+211,visualwebarena-211,"[""string_match""]",[],0,0,0,[],False,0,0
+212,visualwebarena-212,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+213,visualwebarena-213,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+214,visualwebarena-214,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+215,visualwebarena-215,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+216,visualwebarena-216,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+217,visualwebarena-217,"[""string_match""]",[],0,0,0,[],False,0,0
+218,visualwebarena-218,"[""string_match""]",[],0,0,0,[],False,0,0
+219,visualwebarena-219,"[""string_match""]",[],0,0,0,[],False,0,0
+220,visualwebarena-220,"[""string_match""]",[],0,0,0,[],False,0,0
+221,visualwebarena-221,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+222,visualwebarena-222,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+223,visualwebarena-223,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+224,visualwebarena-224,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+225,visualwebarena-225,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+226,visualwebarena-226,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+227,visualwebarena-227,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+228,visualwebarena-228,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+229,visualwebarena-229,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+230,visualwebarena-230,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+231,visualwebarena-231,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+232,visualwebarena-232,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+233,visualwebarena-233,"[""program_html""]","[[""must_include""], [""must_include""]]",2,0,0,[],False,0,0
+234,visualwebarena-234,"[""program_html""]","[[""must_include""], [""must_include""]]",2,0,0,[],False,0,0
+235,visualwebarena-235,"[""program_html""]","[[""must_include""], [""must_include""]]",2,0,0,[],False,0,0
+236,visualwebarena-236,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+237,visualwebarena-237,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+238,visualwebarena-238,"[""program_html""]","[[""must_include""], [""must_include""]]",2,0,0,[],False,0,0
+239,visualwebarena-239,"[""program_html""]","[[""must_include""], [""must_include""]]",2,0,0,[],False,0,0
+240,visualwebarena-240,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+241,visualwebarena-241,"[""string_match""]",[],0,0,0,[],False,0,0
+242,visualwebarena-242,"[""string_match""]",[],0,0,0,[],False,0,0
+243,visualwebarena-243,"[""string_match""]",[],0,0,0,[],False,0,0
+244,visualwebarena-244,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+245,visualwebarena-245,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+246,visualwebarena-246,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+247,visualwebarena-247,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+248,visualwebarena-248,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+249,visualwebarena-249,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+250,visualwebarena-250,"[""program_html""]","[[""must_include""], [""required_values""]]",0,0,0,[],False,0,0
+251,visualwebarena-251,"[""program_html""]","[[""must_include""], [""required_values""]]",0,0,0,[],False,0,0
+252,visualwebarena-252,"[""program_html""]","[[""must_include""], [""required_values""]]",0,0,0,[],False,0,0
+253,visualwebarena-253,"[""string_match"", ""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+254,visualwebarena-254,"[""string_match"", ""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+255,visualwebarena-255,"[""string_match"", ""program_html""]","[[""must_include""], [""required_values""]]",0,0,0,[],False,0,0
+256,visualwebarena-256,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+257,visualwebarena-257,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+258,visualwebarena-258,"[""program_html""]","[[""must_include""], [""must_include""]]",1,0,0,[],False,0,0
+259,visualwebarena-259,"[""program_html""]","[[""must_include""], [""must_include""]]",1,0,0,[],False,0,0
+260,visualwebarena-260,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+261,visualwebarena-261,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+262,visualwebarena-262,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+263,visualwebarena-263,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+264,visualwebarena-264,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+265,visualwebarena-265,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+266,visualwebarena-266,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+267,visualwebarena-267,"[""url_match"", ""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+268,visualwebarena-268,"[""url_match"", ""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+269,visualwebarena-269,"[""url_match"", ""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+270,visualwebarena-270,"[""url_match"", ""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+271,visualwebarena-271,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+272,visualwebarena-272,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+273,visualwebarena-273,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+274,visualwebarena-274,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+275,visualwebarena-275,"[""url_match""]",[],0,0,0,[],False,0,0
+276,visualwebarena-276,"[""url_match""]",[],0,0,0,[],False,0,0
+277,visualwebarena-277,"[""url_match""]",[],0,0,0,[],False,0,0
+278,visualwebarena-278,"[""url_match""]",[],0,0,0,[],False,0,0
+279,visualwebarena-279,"[""string_match""]",[],0,0,0,[],False,0,0
+280,visualwebarena-280,"[""string_match""]",[],0,0,0,[],False,0,0
+281,visualwebarena-281,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+282,visualwebarena-282,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+283,visualwebarena-283,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+284,visualwebarena-284,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+285,visualwebarena-285,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+286,visualwebarena-286,"[""page_image_query""]",[],0,1,1,"["".product-image-photo""]",False,0,0
+287,visualwebarena-287,"[""string_match""]",[],0,0,0,[],False,0,0
+288,visualwebarena-288,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+289,visualwebarena-289,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+290,visualwebarena-290,"[""string_match""]",[],0,0,0,[],False,0,0
+291,visualwebarena-291,"[""string_match""]",[],0,0,0,[],False,0,0
+292,visualwebarena-292,"[""string_match""]",[],0,0,0,[],False,0,0
+293,visualwebarena-293,"[""string_match""]",[],0,0,0,[],False,0,0
+294,visualwebarena-294,"[""string_match""]",[],0,0,0,[],False,0,0
+295,visualwebarena-295,"[""page_image_query""]",[],0,1,0,"["".fotorama__stage__frame""]",False,0,0
+296,visualwebarena-296,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+297,visualwebarena-297,"[""program_html"", ""page_image_query""]","[[""must_include""]]",0,1,0,"["".fotorama__stage__frame""]",False,0,0
+298,visualwebarena-298,"[""string_match""]",[],0,0,0,[],False,0,0
+299,visualwebarena-299,"[""string_match""]",[],0,0,0,[],False,0,0
+300,visualwebarena-300,"[""string_match""]",[],0,0,0,[],False,0,0
+301,visualwebarena-301,"[""string_match""]",[],0,0,0,[],False,0,0
+302,visualwebarena-302,"[""string_match""]",[],0,0,0,[],False,0,0
+303,visualwebarena-303,"[""string_match""]",[],0,0,0,[],False,0,0
+304,visualwebarena-304,"[""string_match""]",[],0,0,0,[],False,0,0
+305,visualwebarena-305,"[""url_match""]",[],0,0,0,[],False,0,0
+306,visualwebarena-306,"[""url_match""]",[],0,0,0,[],False,0,0
+307,visualwebarena-307,"[""url_match""]",[],0,0,0,[],False,0,0
+308,visualwebarena-308,"[""url_match""]",[],0,0,0,[],False,0,0
+309,visualwebarena-309,"[""url_match""]",[],0,0,0,[],False,0,0
+310,visualwebarena-310,"[""url_match""]",[],0,0,0,[],False,0,0
+311,visualwebarena-311,"[""string_match""]",[],0,0,0,[],False,0,0
+312,visualwebarena-312,"[""url_match""]",[],0,0,0,[],False,0,0
+313,visualwebarena-313,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+314,visualwebarena-314,"[""url_match""]",[],0,0,0,[],False,0,0
+315,visualwebarena-315,"[""url_match""]",[],0,0,0,[],False,0,0
+316,visualwebarena-316,"[""string_match""]",[],0,0,0,[],False,0,0
+317,visualwebarena-317,"[""string_match""]",[],0,0,0,[],False,0,0
+318,visualwebarena-318,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+319,visualwebarena-319,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+320,visualwebarena-320,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+321,visualwebarena-321,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+322,visualwebarena-322,"[""string_match""]",[],0,0,0,[],False,0,0
+323,visualwebarena-323,"[""string_match""]",[],0,0,0,[],False,0,0
+324,visualwebarena-324,"[""string_match""]",[],0,0,0,[],False,0,0
+325,visualwebarena-325,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+326,visualwebarena-326,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+327,visualwebarena-327,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+328,visualwebarena-328,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+329,visualwebarena-329,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+330,visualwebarena-330,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+331,visualwebarena-331,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+332,visualwebarena-332,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+333,visualwebarena-333,"[""string_match""]",[],0,0,0,[],False,0,0
+334,visualwebarena-334,"[""string_match""]",[],0,0,0,[],False,0,0
+335,visualwebarena-335,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+336,visualwebarena-336,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+337,visualwebarena-337,"[""string_match""]",[],0,0,0,[],False,0,0
+338,visualwebarena-338,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+339,visualwebarena-339,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+340,visualwebarena-340,"[""string_match""]",[],0,0,0,[],False,0,0
+341,visualwebarena-341,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+342,visualwebarena-342,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+343,visualwebarena-343,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+344,visualwebarena-344,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+345,visualwebarena-345,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+346,visualwebarena-346,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+347,visualwebarena-347,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+348,visualwebarena-348,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+349,visualwebarena-349,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+350,visualwebarena-350,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+351,visualwebarena-351,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+352,visualwebarena-352,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+353,visualwebarena-353,"[""url_match""]",[],0,0,0,[],False,0,0
+354,visualwebarena-354,"[""program_html""]","[[""required_values""], [""must_include""]]",0,0,0,[],False,0,0
+355,visualwebarena-355,"[""string_match""]",[],0,0,0,[],False,0,0
+356,visualwebarena-356,"[""url_match""]",[],0,0,0,[],False,0,0
+357,visualwebarena-357,"[""string_match""]",[],0,0,0,[],False,0,0
+358,visualwebarena-358,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+359,visualwebarena-359,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+360,visualwebarena-360,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+361,visualwebarena-361,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+362,visualwebarena-362,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+363,visualwebarena-363,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+364,visualwebarena-364,"[""string_match""]",[],0,0,0,[],False,0,0
+365,visualwebarena-365,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+366,visualwebarena-366,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+367,visualwebarena-367,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+368,visualwebarena-368,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+369,visualwebarena-369,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+370,visualwebarena-370,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+371,visualwebarena-371,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+372,visualwebarena-372,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+373,visualwebarena-373,"[""string_match""]",[],0,0,0,[],False,0,0
+374,visualwebarena-374,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+375,visualwebarena-375,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+376,visualwebarena-376,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+377,visualwebarena-377,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+378,visualwebarena-378,"[""string_match""]",[],0,0,0,[],False,0,0
+379,visualwebarena-379,"[""string_match""]",[],0,0,0,[],False,0,0
+380,visualwebarena-380,"[""string_match""]",[],0,0,0,[],False,0,0
+381,visualwebarena-381,"[""string_match""]",[],0,0,0,[],False,0,0
+382,visualwebarena-382,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+383,visualwebarena-383,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+384,visualwebarena-384,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+385,visualwebarena-385,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+386,visualwebarena-386,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+387,visualwebarena-387,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+388,visualwebarena-388,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+389,visualwebarena-389,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+390,visualwebarena-390,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+391,visualwebarena-391,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+392,visualwebarena-392,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+393,visualwebarena-393,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+394,visualwebarena-394,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+395,visualwebarena-395,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+396,visualwebarena-396,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+397,visualwebarena-397,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+398,visualwebarena-398,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+399,visualwebarena-399,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+400,visualwebarena-400,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+401,visualwebarena-401,"[""string_match""]",[],0,0,0,[],False,0,0
+402,visualwebarena-402,"[""string_match""]",[],0,0,0,[],False,0,0
+403,visualwebarena-403,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+404,visualwebarena-404,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+405,visualwebarena-405,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+406,visualwebarena-406,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+407,visualwebarena-407,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+408,visualwebarena-408,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+409,visualwebarena-409,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+410,visualwebarena-410,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+411,visualwebarena-411,"[""program_html""]","[[""must_include""], [""must_include""]]",1,0,0,[],False,0,0
+412,visualwebarena-412,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+413,visualwebarena-413,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+414,visualwebarena-414,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+415,visualwebarena-415,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+416,visualwebarena-416,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+417,visualwebarena-417,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+418,visualwebarena-418,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+419,visualwebarena-419,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+420,visualwebarena-420,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+421,visualwebarena-421,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+422,visualwebarena-422,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+423,visualwebarena-423,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+424,visualwebarena-424,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+425,visualwebarena-425,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+426,visualwebarena-426,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+427,visualwebarena-427,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+428,visualwebarena-428,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+429,visualwebarena-429,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+430,visualwebarena-430,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+431,visualwebarena-431,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+432,visualwebarena-432,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+433,visualwebarena-433,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+434,visualwebarena-434,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+435,visualwebarena-435,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+436,visualwebarena-436,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+437,visualwebarena-437,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+438,visualwebarena-438,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+439,visualwebarena-439,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+440,visualwebarena-440,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+441,visualwebarena-441,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+442,visualwebarena-442,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+443,visualwebarena-443,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+444,visualwebarena-444,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+445,visualwebarena-445,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+446,visualwebarena-446,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+447,visualwebarena-447,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+448,visualwebarena-448,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+449,visualwebarena-449,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+450,visualwebarena-450,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+451,visualwebarena-451,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+452,visualwebarena-452,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+453,visualwebarena-453,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+454,visualwebarena-454,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+455,visualwebarena-455,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+456,visualwebarena-456,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+457,visualwebarena-457,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+458,visualwebarena-458,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+459,visualwebarena-459,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+460,visualwebarena-460,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+461,visualwebarena-461,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+462,visualwebarena-462,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+463,visualwebarena-463,"[""program_html""]","[[""must_exclude""]]",1,0,0,[],False,0,0
+464,visualwebarena-464,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+465,visualwebarena-465,"[""program_html""]","[[""must_exclude""]]",1,0,0,[],False,0,0
+466,visualwebarena-466,"[""url_match""]",[],0,0,0,[],False,0,0
+467,visualwebarena-467,"[""url_match""]",[],0,0,0,[],False,0,0
+468,visualwebarena-468,"[""url_match""]",[],0,0,0,[],False,0,0
+469,visualwebarena-469,"[""string_match""]",[],0,0,0,[],False,0,0
+470,visualwebarena-470,"[""string_match""]",[],0,0,0,[],False,0,0
+471,visualwebarena-471,"[""string_match""]",[],0,0,0,[],False,0,0
+472,visualwebarena-472,"[""string_match""]",[],0,0,0,[],False,0,0
+473,visualwebarena-473,"[""string_match""]",[],0,0,0,[],False,0,0
+474,visualwebarena-474,"[""url_match""]",[],0,0,0,[],False,0,0
+475,visualwebarena-475,"[""url_match""]",[],0,0,0,[],False,0,0
+476,visualwebarena-476,"[""url_match""]",[],0,0,0,[],False,0,0
+477,visualwebarena-477,"[""url_match""]",[],0,0,0,[],False,0,0
+478,visualwebarena-478,"[""url_match""]",[],0,0,0,[],False,0,0
+479,visualwebarena-479,"[""url_match""]",[],0,0,0,[],False,0,0
+480,visualwebarena-480,"[""page_image_query""]",[],0,1,0,"["".submission__row""]",False,0,0
+481,visualwebarena-481,"[""page_image_query""]",[],0,1,0,"["".submission__row""]",False,0,0
+482,visualwebarena-482,"[""string_match""]",[],0,0,0,[],False,0,0
+483,visualwebarena-483,"[""url_match""]",[],0,0,0,[],False,0,0
+484,visualwebarena-484,"[""url_match""]",[],0,0,0,[],False,0,0
+485,visualwebarena-485,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+486,visualwebarena-486,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+487,visualwebarena-487,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+488,visualwebarena-488,"[""string_match""]",[],0,0,0,[],False,0,0
+489,visualwebarena-489,"[""string_match""]",[],0,0,0,[],False,0,0
+490,visualwebarena-490,"[""string_match""]",[],0,0,0,[],False,0,0
+491,visualwebarena-491,"[""string_match""]",[],0,0,0,[],False,0,0
+492,visualwebarena-492,"[""string_match""]",[],0,0,0,[],False,0,0
+493,visualwebarena-493,"[""url_match"", ""page_image_query""]",[],0,1,0,"["".submission__title""]",False,0,0
+494,visualwebarena-494,"[""program_html""]","[[""must_include""], [""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+495,visualwebarena-495,"[""program_html""]","[[""must_include""], [""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+496,visualwebarena-496,"[""url_match""]",[],0,0,0,[],False,0,0
+497,visualwebarena-497,"[""string_match""]",[],0,0,0,[],False,0,0
+498,visualwebarena-498,"[""url_match""]",[],0,0,0,[],False,0,0
+499,visualwebarena-499,"[""url_match""]",[],0,0,0,[],False,0,0
+500,visualwebarena-500,"[""url_match""]",[],0,0,0,[],False,0,0
+501,visualwebarena-501,"[""url_match""]",[],0,0,0,[],False,0,0
+502,visualwebarena-502,"[""url_match""]",[],0,0,0,[],False,0,0
+503,visualwebarena-503,"[""url_match""]",[],0,0,0,[],False,0,0
+504,visualwebarena-504,"[""url_match""]",[],0,0,0,[],False,0,0
+505,visualwebarena-505,"[""string_match""]",[],0,0,0,[],False,0,0
+506,visualwebarena-506,"[""url_match""]",[],0,0,0,[],False,0,0
+507,visualwebarena-507,"[""url_match""]",[],0,0,0,[],False,0,0
+508,visualwebarena-508,"[""url_match""]",[],0,0,0,[],False,0,0
+509,visualwebarena-509,"[""url_match"", ""program_html""]","[[""exact_match""], [""must_include""]]",0,0,0,[],False,0,0
+510,visualwebarena-510,"[""url_match"", ""program_html"", ""page_image_query""]","[[""must_include""]]",0,1,0,"["".submission__title""]",False,0,0
+511,visualwebarena-511,"[""string_match""]",[],0,0,0,[],False,0,0
+512,visualwebarena-512,"[""string_match""]",[],0,0,0,[],False,0,0
+513,visualwebarena-513,"[""string_match""]",[],0,0,0,[],False,0,0
+514,visualwebarena-514,"[""string_match""]",[],0,0,0,[],False,0,0
+515,visualwebarena-515,"[""string_match""]",[],0,0,0,[],False,0,0
+516,visualwebarena-516,"[""string_match""]",[],0,0,0,[],False,0,0
+517,visualwebarena-517,"[""string_match""]",[],0,0,0,[],False,0,0
+518,visualwebarena-518,"[""string_match""]",[],0,0,0,[],False,0,0
+519,visualwebarena-519,"[""string_match""]",[],0,0,0,[],False,0,0
+520,visualwebarena-520,"[""string_match""]",[],0,0,0,[],False,0,0
+521,visualwebarena-521,"[""string_match""]",[],0,0,0,[],False,0,0
+522,visualwebarena-522,"[""string_match""]",[],0,0,0,[],False,0,0
+523,visualwebarena-523,"[""string_match""]",[],0,0,0,[],False,0,0
+524,visualwebarena-524,"[""string_match""]",[],0,0,0,[],False,0,0
+525,visualwebarena-525,"[""string_match""]",[],0,0,0,[],False,0,0
+526,visualwebarena-526,"[""string_match""]",[],0,0,0,[],False,0,0
+527,visualwebarena-527,"[""string_match""]",[],0,0,0,[],False,0,0
+528,visualwebarena-528,"[""string_match""]",[],0,0,0,[],False,0,0
+529,visualwebarena-529,"[""string_match""]",[],0,0,0,[],False,0,0
+530,visualwebarena-530,"[""string_match""]",[],0,0,0,[],False,0,0
+531,visualwebarena-531,"[""string_match""]",[],0,0,0,[],False,0,0
+532,visualwebarena-532,"[""string_match""]",[],0,0,0,[],False,0,0
+533,visualwebarena-533,"[""string_match""]",[],0,0,0,[],False,0,0
+534,visualwebarena-534,"[""string_match""]",[],0,0,0,[],False,0,0
+535,visualwebarena-535,"[""program_html""]","[[""fuzzy_match""]]",0,0,0,[],False,1,0
+536,visualwebarena-536,"[""string_match""]",[],0,0,0,[],False,0,0
+537,visualwebarena-537,"[""program_html""]","[[""fuzzy_match""]]",0,0,0,[],False,1,0
+538,visualwebarena-538,"[""program_html""]","[[""fuzzy_match""]]",0,0,0,[],False,1,0
+539,visualwebarena-539,"[""program_html"", ""page_image_query"", ""url_match""]","[[""exact_match""]]",0,1,0,"["".submission__link""]",False,0,0
+540,visualwebarena-540,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+541,visualwebarena-541,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+542,visualwebarena-542,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+543,visualwebarena-543,"[""page_image_query""]",[],0,1,0,"["".submission__image""]",False,0,0
+544,visualwebarena-544,"[""page_image_query""]",[],0,1,0,"["".submission__image""]",False,0,0
+545,visualwebarena-545,"[""page_image_query""]",[],0,1,0,"["".submission__image""]",False,0,0
+546,visualwebarena-546,"[""program_html""]","[[""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""]]",0,0,0,[],False,0,0
+547,visualwebarena-547,"[""program_html""]","[[""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""]]",0,0,0,[],False,0,0
+548,visualwebarena-548,"[""program_html""]","[[""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""]]",0,0,0,[],False,0,0
+549,visualwebarena-549,"[""program_html""]","[[""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""]]",0,0,0,[],False,0,0
+550,visualwebarena-550,"[""program_html""]","[[""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""]]",0,0,0,[],False,0,0
+551,visualwebarena-551,"[""program_html""]","[[""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""]]",0,0,0,[],False,0,0
+552,visualwebarena-552,"[""string_match""]",[],0,0,0,[],False,0,0
+553,visualwebarena-553,"[""string_match""]",[],0,0,0,[],False,0,0
+554,visualwebarena-554,"[""program_html""]","[[""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""], [""exact_match""]]",0,0,0,[],False,0,0
+555,visualwebarena-555,"[""program_html""]","[[""exact_match""]]",0,0,0,[],False,0,0
+556,visualwebarena-556,"[""program_html""]","[[""exact_match""]]",0,0,0,[],False,0,0
+557,visualwebarena-557,"[""program_html""]","[[""exact_match""]]",0,0,0,[],False,0,0
+558,visualwebarena-558,"[""string_match""]",[],0,0,0,[],False,0,0
+559,visualwebarena-559,"[""string_match""]",[],0,0,0,[],False,0,0
+560,visualwebarena-560,"[""string_match""]",[],0,0,0,[],False,0,0
+561,visualwebarena-561,"[""string_match""]",[],0,0,0,[],False,0,0
+562,visualwebarena-562,"[""string_match""]",[],0,0,0,[],False,0,0
+563,visualwebarena-563,"[""string_match""]",[],0,0,0,[],False,0,0
+564,visualwebarena-564,"[""page_image_query""]",[],0,1,0,"["".submission__image""]",False,0,0
+565,visualwebarena-565,"[""page_image_query""]",[],0,1,0,"["".submission__image""]",False,0,0
+566,visualwebarena-566,"[""page_image_query""]",[],0,1,0,"["".submission__image""]",False,0,0
+567,visualwebarena-567,"[""page_image_query""]",[],0,1,0,"["".submission__image""]",False,0,0
+568,visualwebarena-568,"[""program_html""]","[[""exact_match""], [""exact_match""]]",2,0,0,[],False,0,0
+569,visualwebarena-569,"[""program_html""]","[[""exact_match""], [""exact_match""]]",1,0,0,[],False,0,0
+570,visualwebarena-570,"[""program_html""]","[[""exact_match""], [""exact_match""]]",1,0,0,[],False,0,0
+571,visualwebarena-571,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+572,visualwebarena-572,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+573,visualwebarena-573,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+574,visualwebarena-574,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+575,visualwebarena-575,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+576,visualwebarena-576,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+577,visualwebarena-577,"[""page_image_query""]",[],0,2,2,"["".submission__title"", "".submission__title""]",False,0,0
+578,visualwebarena-580,"[""url_match"", ""string_match""]",[],0,0,0,[],False,0,0
+579,visualwebarena-581,"[""url_match"", ""string_match""]",[],0,0,0,[],False,0,0
+580,visualwebarena-582,"[""url_match"", ""string_match""]",[],0,0,0,[],False,0,0
+581,visualwebarena-583,"[""string_match""]",[],0,0,0,[],False,0,0
+582,visualwebarena-584,"[""string_match""]",[],0,0,0,[],False,0,0
+583,visualwebarena-585,"[""string_match""]",[],0,0,0,[],False,0,0
+584,visualwebarena-586,"[""string_match""]",[],0,0,0,[],False,0,0
+585,visualwebarena-587,"[""url_match""]",[],0,0,0,[],False,0,0
+586,visualwebarena-588,"[""url_match""]",[],0,0,0,[],False,0,0
+587,visualwebarena-589,"[""string_match"", ""url_match""]",[],0,0,0,[],False,0,0
+588,visualwebarena-590,"[""string_match""]",[],0,0,0,[],False,0,0
+589,visualwebarena-591,"[""string_match"", ""url_match""]",[],0,0,0,[],False,0,0
+590,visualwebarena-592,"[""url_match""]",[],0,0,0,[],False,0,0
+591,visualwebarena-593,"[""url_match""]",[],0,0,0,[],False,0,0
+592,visualwebarena-594,"[""url_match""]",[],0,0,0,[],False,0,0
+593,visualwebarena-595,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+594,visualwebarena-596,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+595,visualwebarena-597,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+596,visualwebarena-598,"[""string_match""]",[],0,0,0,[],False,0,0
+597,visualwebarena-599,"[""string_match""]",[],0,0,0,[],False,0,0
+598,visualwebarena-600,"[""string_match""]",[],0,0,0,[],False,0,0
+599,visualwebarena-601,"[""url_match""]",[],0,0,0,[],False,0,0
+600,visualwebarena-602,"[""url_match""]",[],0,0,0,[],False,0,0
+601,visualwebarena-603,"[""url_match""]",[],0,0,0,[],False,0,0
+602,visualwebarena-604,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+603,visualwebarena-605,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+604,visualwebarena-606,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+605,visualwebarena-607,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+606,visualwebarena-608,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+607,visualwebarena-609,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+608,visualwebarena-610,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+609,visualwebarena-611,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+610,visualwebarena-612,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+611,visualwebarena-613,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+612,visualwebarena-614,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+613,visualwebarena-615,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+614,visualwebarena-616,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+615,visualwebarena-617,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+616,visualwebarena-618,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+617,visualwebarena-619,"[""url_match""]",[],0,0,0,[],False,0,0
+618,visualwebarena-620,"[""string_match"", ""url_match""]",[],0,0,0,[],False,0,0
+619,visualwebarena-621,"[""url_match""]",[],0,0,0,[],False,0,0
+620,visualwebarena-622,"[""string_match""]",[],0,0,0,[],False,0,0
+621,visualwebarena-623,"[""url_match""]",[],0,0,0,[],False,0,0
+622,visualwebarena-624,"[""program_html""]","[[""must_include"", ""must_exclude""]]",1,0,0,[],True,0,0
+623,visualwebarena-625,"[""program_html""]","[[""must_include"", ""must_exclude""]]",1,0,0,[],True,0,0
+624,visualwebarena-626,"[""program_html""]","[[""must_exclude""]]",1,0,0,[],False,0,0
+625,visualwebarena-627,"[""url_match""]",[],0,0,0,[],False,0,0
+626,visualwebarena-628,"[""string_match""]",[],0,0,0,[],False,0,0
+627,visualwebarena-629,"[""string_match""]",[],0,0,0,[],False,0,0
+628,visualwebarena-630,"[""string_match""]",[],0,0,0,[],False,0,0
+629,visualwebarena-631,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+630,visualwebarena-632,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+631,visualwebarena-633,"[""page_image_query""]",[],0,1,0,"["".submission__row""]",False,0,0
+632,visualwebarena-634,"[""program_html"", ""page_image_query""]","[[""must_include""]]",0,1,0,"["".submission__title""]",False,0,0
+633,visualwebarena-635,"[""program_html"", ""page_image_query""]","[[""must_include""]]",0,1,0,"["".submission__title""]",False,0,0
+634,visualwebarena-636,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+635,visualwebarena-637,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+636,visualwebarena-638,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+637,visualwebarena-639,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+638,visualwebarena-640,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+639,visualwebarena-641,"[""string_match""]",[],0,0,0,[],False,0,0
+640,visualwebarena-642,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+641,visualwebarena-643,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+642,visualwebarena-644,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+643,visualwebarena-645,"[""url_match""]",[],0,0,0,[],False,0,0
+644,visualwebarena-646,"[""url_match""]",[],0,0,0,[],False,0,0
+645,visualwebarena-647,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+646,visualwebarena-648,"[""string_match""]",[],0,0,0,[],False,0,0
+647,visualwebarena-649,"[""program_html"", ""page_image_query""]","[[""must_include""]]",0,1,0,"["".submission__link""]",False,0,0
+648,visualwebarena-650,"[""program_html"", ""page_image_query""]","[[""must_include""]]",0,1,0,"["".submission__link""]",False,0,0
+649,visualwebarena-651,"[""program_html"", ""page_image_query""]","[[""must_include""]]",0,1,0,"["".submission__link""]",False,0,0
+650,visualwebarena-652,"[""program_html"", ""page_image_query""]","[[""must_include""]]",0,1,0,"["".submission__link""]",False,0,0
+651,visualwebarena-653,"[""program_html"", ""page_image_query""]","[[""must_include""]]",0,1,0,"["".submission__link""]",False,0,0
+652,visualwebarena-654,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+653,visualwebarena-655,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+654,visualwebarena-656,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+655,visualwebarena-657,"[""string_match""]",[],0,0,0,[],False,0,0
+656,visualwebarena-658,"[""string_match""]",[],0,0,0,[],False,0,0
+657,visualwebarena-659,"[""program_html""]","[[""exact_match""]]",0,0,0,[],False,0,0
+658,visualwebarena-660,"[""program_html""]","[[""exact_match""]]",0,0,0,[],False,0,0
+659,visualwebarena-661,"[""program_html""]","[[""exact_match""]]",0,0,0,[],False,0,0
+660,visualwebarena-662,"[""url_match""]",[],0,0,0,[],False,0,0
+661,visualwebarena-663,"[""url_match""]",[],0,0,0,[],False,0,0
+662,visualwebarena-664,"[""program_html""]","[[""exact_match""]]",0,0,0,[],False,0,0
+663,visualwebarena-665,"[""program_html""]","[[""exact_match""]]",0,0,0,[],False,0,0
+664,visualwebarena-666,"[""url_match""]",[],0,0,0,[],False,0,0
+665,visualwebarena-667,"[""url_match""]",[],0,0,0,[],False,0,0
+666,visualwebarena-668,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+667,visualwebarena-669,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+668,visualwebarena-670,"[""url_match""]",[],0,0,0,[],False,0,0
+669,visualwebarena-671,"[""string_match""]",[],0,0,0,[],False,0,0
+670,visualwebarena-672,"[""string_match""]",[],0,0,0,[],False,0,0
+671,visualwebarena-673,"[""program_html"", ""page_image_query""]","[[""must_include""], [""must_include""]]",2,1,1,"["".submission__row""]",False,0,0
+672,visualwebarena-674,"[""program_html"", ""page_image_query""]","[[""must_include""], [""must_include""]]",2,1,1,"["".submission__row""]",False,0,0
+673,visualwebarena-675,"[""program_html"", ""page_image_query""]","[[""must_include""], [""must_include""]]",2,1,1,"["".submission__row""]",False,0,0
+674,visualwebarena-676,"[""url_match""]",[],0,0,0,[],False,0,0
+675,visualwebarena-677,"[""url_match""]",[],0,0,0,[],False,0,0
+676,visualwebarena-678,"[""url_match""]",[],0,0,0,[],False,0,0
+677,visualwebarena-679,"[""url_match""]",[],0,0,0,[],False,0,0
+678,visualwebarena-680,"[""program_html""]","[[""must_include""], [""must_include""], [""must_exclude""]]",3,0,0,[],False,0,0
+679,visualwebarena-681,"[""program_html""]","[[""must_include""]]",1,0,0,[],False,0,0
+680,visualwebarena-682,"[""string_match""]",[],0,0,0,[],False,0,0
+681,visualwebarena-683,"[""string_match""]",[],0,0,0,[],False,0,0
+682,visualwebarena-684,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+683,visualwebarena-685,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+684,visualwebarena-686,"[""string_match""]",[],0,0,0,[],False,0,0
+685,visualwebarena-687,"[""string_match""]",[],0,0,0,[],False,0,0
+686,visualwebarena-688,"[""string_match""]",[],0,0,0,[],False,0,0
+687,visualwebarena-689,"[""string_match""]",[],0,0,0,[],False,0,0
+688,visualwebarena-690,"[""string_match""]",[],0,0,0,[],False,0,0
+689,visualwebarena-691,"[""string_match""]",[],0,0,0,[],False,0,0
+690,visualwebarena-692,"[""string_match""]",[],0,0,0,[],False,0,0
+691,visualwebarena-693,"[""url_match""]",[],0,0,0,[],False,0,0
+692,visualwebarena-694,"[""url_match""]",[],0,0,0,[],False,0,0
+693,visualwebarena-695,"[""url_match""]",[],0,0,0,[],False,0,0
+694,visualwebarena-696,"[""url_match""]",[],0,0,0,[],False,0,0
+695,visualwebarena-697,"[""url_match""]",[],0,0,0,[],False,0,0
+696,visualwebarena-698,"[""string_match""]",[],0,0,0,[],False,0,0
+697,visualwebarena-699,"[""string_match""]",[],0,0,0,[],False,0,0
+698,visualwebarena-700,"[""string_match""]",[],0,0,0,[],False,0,0
+699,visualwebarena-701,"[""string_match""]",[],0,0,0,[],False,0,0
+700,visualwebarena-702,"[""string_match""]",[],0,0,0,[],False,0,0
+701,visualwebarena-703,"[""string_match""]",[],0,0,0,[],False,0,0
+702,visualwebarena-704,"[""program_html""]","[[""must_include""], [""must_include""]]",2,0,0,[],False,0,0
+703,visualwebarena-705,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+704,visualwebarena-706,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+705,visualwebarena-707,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+706,visualwebarena-708,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+707,visualwebarena-709,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+708,visualwebarena-710,"[""string_match""]",[],0,0,0,[],False,0,0
+709,visualwebarena-711,"[""string_match""]",[],0,0,0,[],False,0,0
+710,visualwebarena-712,"[""string_match""]",[],0,0,0,[],False,0,0
+711,visualwebarena-713,"[""string_match""]",[],0,0,0,[],False,0,0
+712,visualwebarena-714,"[""string_match""]",[],0,0,0,[],False,0,0
+713,visualwebarena-715,"[""string_match""]",[],0,0,0,[],False,0,0
+714,visualwebarena-716,"[""string_match""]",[],0,0,0,[],False,0,0
+715,visualwebarena-717,"[""string_match""]",[],0,0,0,[],False,0,0
+716,visualwebarena-718,"[""string_match""]",[],0,0,0,[],False,0,0
+717,visualwebarena-719,"[""string_match""]",[],0,0,0,[],False,0,0
+718,visualwebarena-720,"[""url_match""]",[],0,0,0,[],False,0,0
+719,visualwebarena-721,"[""url_match""]",[],0,0,0,[],False,0,0
+720,visualwebarena-722,"[""url_match""]",[],0,0,0,[],False,0,0
+721,visualwebarena-723,"[""url_match""]",[],0,0,0,[],False,0,0
+722,visualwebarena-724,"[""url_match""]",[],0,0,0,[],False,0,0
+723,visualwebarena-725,"[""string_match""]",[],0,0,0,[],False,0,0
+724,visualwebarena-726,"[""string_match""]",[],0,0,0,[],False,0,0
+725,visualwebarena-727,"[""url_match""]",[],0,0,0,[],False,0,0
+726,visualwebarena-728,"[""url_match""]",[],0,0,0,[],False,0,0
+727,visualwebarena-729,"[""url_match""]",[],0,0,0,[],False,0,0
+728,visualwebarena-730,"[""url_match""]",[],0,0,0,[],False,0,0
+729,visualwebarena-731,"[""url_match""]",[],0,0,0,[],False,0,0
+730,visualwebarena-732,"[""url_match""]",[],0,0,0,[],False,0,0
+731,visualwebarena-733,"[""program_html""]","[[""must_include""], [""must_include""], [""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+732,visualwebarena-734,"[""url_match""]",[],0,0,0,[],False,0,0
+733,visualwebarena-735,"[""url_match""]",[],0,0,0,[],False,0,0
+734,visualwebarena-736,"[""url_match""]",[],0,0,0,[],False,0,0
+735,visualwebarena-737,"[""url_match""]",[],0,0,0,[],False,0,0
+736,visualwebarena-738,"[""url_match""]",[],0,0,0,[],False,0,0
+737,visualwebarena-739,"[""url_match""]",[],0,0,0,[],False,0,0
+738,visualwebarena-740,"[""url_match""]",[],0,0,0,[],False,0,0
+739,visualwebarena-741,"[""url_match""]",[],0,0,0,[],False,0,0
+740,visualwebarena-742,"[""url_match""]",[],0,0,0,[],False,0,0
+741,visualwebarena-743,"[""url_match""]",[],0,0,0,[],False,0,0
+742,visualwebarena-744,"[""url_match""]",[],0,0,0,[],False,0,0
+743,visualwebarena-745,"[""url_match""]",[],0,0,0,[],False,0,0
+744,visualwebarena-746,"[""url_match""]",[],0,0,0,[],False,0,0
+745,visualwebarena-747,"[""url_match""]",[],0,0,0,[],False,0,0
+746,visualwebarena-748,"[""url_match""]",[],0,0,0,[],False,0,0
+747,visualwebarena-749,"[""url_match""]",[],0,0,0,[],False,0,0
+748,visualwebarena-750,"[""url_match""]",[],0,0,0,[],False,0,0
+749,visualwebarena-751,"[""program_html""]","[[""must_include""], [""must_include""], [""must_exclude""]]",0,0,0,[],False,0,0
+750,visualwebarena-752,"[""program_html""]","[[""must_include""], [""must_include""], [""must_exclude""]]",0,0,0,[],False,0,0
+751,visualwebarena-753,"[""program_html""]","[[""must_include""], [""must_include""], [""must_exclude""]]",0,0,0,[],False,0,0
+752,visualwebarena-754,"[""url_match""]",[],0,0,0,[],False,0,0
+753,visualwebarena-755,"[""url_match""]",[],0,0,0,[],False,0,0
+754,visualwebarena-756,"[""string_match""]",[],0,0,0,[],False,0,0
+755,visualwebarena-757,"[""url_match""]",[],0,0,0,[],False,0,0
+756,visualwebarena-758,"[""url_match"", ""string_match""]",[],0,0,0,[],False,0,0
+757,visualwebarena-759,"[""string_match""]",[],0,0,0,[],False,0,0
+758,visualwebarena-760,"[""url_match"", ""string_match""]",[],0,0,0,[],False,0,0
+759,visualwebarena-761,"[""url_match"", ""string_match""]",[],0,0,0,[],False,0,0
+760,visualwebarena-762,"[""url_match""]",[],0,0,0,[],False,0,0
+761,visualwebarena-763,"[""url_match""]",[],0,0,0,[],False,0,0
+762,visualwebarena-764,"[""url_match""]",[],0,0,0,[],False,0,0
+763,visualwebarena-765,"[""url_match""]",[],0,0,0,[],False,0,0
+764,visualwebarena-766,"[""url_match""]",[],0,0,0,[],False,0,0
+765,visualwebarena-767,"[""url_match""]",[],0,0,0,[],False,0,0
+766,visualwebarena-768,"[""url_match""]",[],0,0,0,[],False,0,0
+767,visualwebarena-769,"[""url_match""]",[],0,0,0,[],False,0,0
+768,visualwebarena-770,"[""url_match""]",[],0,0,0,[],False,0,0
+769,visualwebarena-771,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+770,visualwebarena-772,"[""url_match"", ""string_match""]",[],0,0,0,[],False,0,0
+771,visualwebarena-773,"[""url_match""]",[],0,0,0,[],False,0,0
+772,visualwebarena-774,"[""string_match""]",[],0,0,0,[],False,0,0
+773,visualwebarena-775,"[""url_match"", ""string_match""]",[],0,0,0,[],False,0,0
+774,visualwebarena-776,"[""string_match""]",[],0,0,0,[],False,0,0
+775,visualwebarena-777,"[""url_match""]",[],0,0,0,[],False,0,0
+776,visualwebarena-778,"[""string_match""]",[],0,0,0,[],False,0,0
+777,visualwebarena-779,"[""url_match""]",[],0,0,0,[],False,0,0
+778,visualwebarena-780,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+779,visualwebarena-781,"[""url_match""]",[],0,0,0,[],False,0,0
+780,visualwebarena-782,"[""string_match""]",[],0,0,0,[],False,0,0
+781,visualwebarena-783,"[""string_match""]",[],0,0,0,[],False,0,0
+782,visualwebarena-784,"[""string_match""]",[],0,0,0,[],False,0,0
+783,visualwebarena-785,"[""string_match""]",[],0,0,0,[],False,0,0
+784,visualwebarena-786,"[""string_match""]",[],0,0,0,[],False,0,0
+785,visualwebarena-787,"[""string_match""]",[],0,0,0,[],False,0,0
+786,visualwebarena-788,"[""url_match""]",[],0,0,0,[],False,0,0
+787,visualwebarena-789,"[""url_match""]",[],0,0,0,[],False,0,0
+788,visualwebarena-790,"[""url_match""]",[],0,0,0,[],False,0,0
+789,visualwebarena-791,"[""url_match""]",[],0,0,0,[],False,0,0
+790,visualwebarena-792,"[""url_match""]",[],0,0,0,[],False,0,0
+791,visualwebarena-793,"[""url_match""]",[],0,0,0,[],False,0,0
+792,visualwebarena-794,"[""string_match""]",[],0,0,0,[],False,0,0
+793,visualwebarena-795,"[""string_match""]",[],0,0,0,[],False,0,0
+794,visualwebarena-796,"[""string_match""]",[],0,0,0,[],False,0,0
+795,visualwebarena-797,"[""url_match""]",[],0,0,0,[],False,0,0
+796,visualwebarena-798,"[""url_match"", ""string_match""]",[],0,0,0,[],False,0,0
+797,visualwebarena-799,"[""url_match""]",[],0,0,0,[],False,0,0
+798,visualwebarena-800,"[""url_match""]",[],0,0,0,[],False,0,0
+799,visualwebarena-801,"[""url_match""]",[],0,0,0,[],False,0,0
+800,visualwebarena-802,"[""url_match""]",[],0,0,0,[],False,0,0
+801,visualwebarena-803,"[""url_match""]",[],0,0,0,[],False,0,0
+802,visualwebarena-804,"[""string_match""]",[],0,0,0,[],False,0,0
+803,visualwebarena-805,"[""string_match""]",[],0,0,0,[],False,0,0
+804,visualwebarena-806,"[""url_match""]",[],0,0,0,[],False,0,0
+805,visualwebarena-807,"[""url_match""]",[],0,0,0,[],False,0,0
+806,visualwebarena-808,"[""url_match""]",[],0,0,0,[],False,0,0
+807,visualwebarena-809,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+808,visualwebarena-810,"[""url_match""]",[],0,0,0,[],False,0,0
+809,visualwebarena-811,"[""string_match""]",[],0,0,0,[],False,0,0
+810,visualwebarena-812,"[""string_match""]",[],0,0,0,[],False,0,0
+811,visualwebarena-813,"[""string_match""]",[],0,0,0,[],False,0,0
+812,visualwebarena-814,"[""string_match""]",[],0,0,0,[],False,0,0
+813,visualwebarena-815,"[""url_match""]",[],0,0,0,[],False,0,0
+814,visualwebarena-816,"[""string_match""]",[],0,0,0,[],False,0,0
+815,visualwebarena-817,"[""url_match""]",[],0,0,0,[],False,0,0
+816,visualwebarena-818,"[""string_match""]",[],0,0,0,[],False,0,0
+817,visualwebarena-819,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+818,visualwebarena-820,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+819,visualwebarena-821,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+820,visualwebarena-822,"[""url_match""]",[],0,0,0,[],False,0,0
+821,visualwebarena-823,"[""url_match""]",[],0,0,0,[],False,0,0
+822,visualwebarena-824,"[""string_match""]",[],0,0,0,[],False,0,0
+823,visualwebarena-825,"[""string_match""]",[],0,0,0,[],False,0,0
+824,visualwebarena-826,"[""string_match""]",[],0,0,0,[],False,0,0
+825,visualwebarena-827,"[""url_match""]",[],0,0,0,[],False,0,0
+826,visualwebarena-828,"[""url_match""]",[],0,0,0,[],False,0,0
+827,visualwebarena-829,"[""url_match""]",[],0,0,0,[],False,0,0
+828,visualwebarena-830,"[""url_match""]",[],0,0,0,[],False,0,0
+829,visualwebarena-831,"[""url_match""]",[],0,0,0,[],False,0,0
+830,visualwebarena-832,"[""url_match""]",[],0,0,0,[],False,0,0
+831,visualwebarena-833,"[""url_match""]",[],0,0,0,[],False,0,0
+832,visualwebarena-834,"[""url_match""]",[],0,0,0,[],False,0,0
+833,visualwebarena-835,"[""program_html""]","[[""must_include""]]",0,0,0,[],False,0,0
+834,visualwebarena-836,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+835,visualwebarena-837,"[""string_match""]",[],0,0,0,[],False,0,0
+836,visualwebarena-838,"[""url_match""]",[],0,0,0,[],False,0,0
+837,visualwebarena-839,"[""string_match""]",[],0,0,0,[],False,0,0
+838,visualwebarena-840,"[""string_match""]",[],0,0,0,[],False,0,0
+839,visualwebarena-841,"[""url_match""]",[],0,0,0,[],False,0,0
+840,visualwebarena-842,"[""url_match""]",[],0,0,0,[],False,0,0
+841,visualwebarena-843,"[""string_match""]",[],0,0,0,[],False,0,0
+842,visualwebarena-844,"[""url_match""]",[],0,0,0,[],False,0,0
+843,visualwebarena-845,"[""url_match""]",[],0,0,0,[],False,0,0
+844,visualwebarena-846,"[""url_match""]",[],0,0,0,[],False,0,0
+845,visualwebarena-847,"[""url_match""]",[],0,0,0,[],False,0,0
+846,visualwebarena-848,"[""url_match""]",[],0,0,0,[],False,0,0
+847,visualwebarena-849,"[""string_match""]",[],0,0,0,[],False,0,0
+848,visualwebarena-850,"[""string_match""]",[],0,0,0,[],False,0,0
+849,visualwebarena-851,"[""url_match""]",[],0,0,0,[],False,0,0
+850,visualwebarena-852,"[""url_match""]",[],0,0,0,[],False,0,0
+851,visualwebarena-853,"[""url_match""]",[],0,0,0,[],False,0,0
+852,visualwebarena-854,"[""string_match""]",[],0,0,0,[],False,0,0
+853,visualwebarena-855,"[""url_match""]",[],0,0,0,[],False,0,0
+854,visualwebarena-856,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+855,visualwebarena-857,"[""url_match""]",[],0,0,0,[],False,0,0
+856,visualwebarena-858,"[""url_match""]",[],0,0,0,[],False,0,0
+857,visualwebarena-859,"[""url_match""]",[],0,0,0,[],False,0,0
+858,visualwebarena-860,"[""url_match""]",[],0,0,0,[],False,0,0
+859,visualwebarena-861,"[""url_match""]",[],0,0,0,[],False,0,0
+860,visualwebarena-862,"[""string_match""]",[],0,0,0,[],False,0,0
+861,visualwebarena-863,"[""url_match""]",[],0,0,0,[],False,0,0
+862,visualwebarena-864,"[""url_match""]",[],0,0,0,[],False,0,0
+863,visualwebarena-865,"[""string_match""]",[],0,0,0,[],False,0,0
+864,visualwebarena-866,"[""url_match""]",[],0,0,0,[],False,0,0
+865,visualwebarena-867,"[""string_match""]",[],0,0,0,[],False,0,0
+866,visualwebarena-868,"[""string_match""]",[],0,0,0,[],False,0,0
+867,visualwebarena-869,"[""url_match""]",[],0,0,0,[],False,0,0
+868,visualwebarena-870,"[""string_match""]",[],0,0,0,[],False,0,0
+869,visualwebarena-871,"[""string_match""]",[],0,0,0,[],False,0,0
+870,visualwebarena-872,"[""string_match""]",[],0,0,0,[],False,0,0
+871,visualwebarena-873,"[""url_match""]",[],0,0,0,[],False,0,0
+872,visualwebarena-874,"[""url_match""]",[],0,0,0,[],False,0,0
+873,visualwebarena-875,"[""string_match""]",[],0,0,0,[],False,0,0
+874,visualwebarena-876,"[""url_match""]",[],0,0,0,[],False,0,0
+875,visualwebarena-877,"[""url_match""]",[],0,0,0,[],False,0,0
+876,visualwebarena-878,"[""url_match""]",[],0,0,0,[],False,0,0
+877,visualwebarena-879,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+878,visualwebarena-880,"[""url_match""]",[],0,0,0,[],False,0,0
+879,visualwebarena-881,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+880,visualwebarena-882,"[""url_match""]",[],0,0,0,[],False,0,0
+881,visualwebarena-883,"[""url_match""]",[],0,0,0,[],False,0,0
+882,visualwebarena-884,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+883,visualwebarena-885,"[""string_match""]",[],0,0,0,[],False,0,0
+884,visualwebarena-886,"[""url_match""]",[],0,0,0,[],False,0,0
+885,visualwebarena-887,"[""url_match""]",[],0,0,0,[],False,0,0
+886,visualwebarena-888,"[""url_match""]",[],0,0,0,[],False,0,0
+887,visualwebarena-889,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+888,visualwebarena-890,"[""url_match""]",[],0,0,0,[],False,0,0
+889,visualwebarena-891,"[""url_match""]",[],0,0,0,[],False,0,0
+890,visualwebarena-892,"[""url_match""]",[],0,0,0,[],False,0,0
+891,visualwebarena-893,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+892,visualwebarena-894,"[""url_match""]",[],0,0,0,[],False,0,0
+893,visualwebarena-895,"[""url_match""]",[],0,0,0,[],False,0,0
+894,visualwebarena-896,"[""string_match""]",[],0,0,0,[],False,0,0
+895,visualwebarena-897,"[""string_match""]",[],0,0,0,[],False,0,0
+896,visualwebarena-898,"[""string_match""]",[],0,0,0,[],False,0,0
+897,visualwebarena-899,"[""program_html""]","[[""must_include""], [""must_include""]]",2,0,0,[],False,0,0
+898,visualwebarena-900,"[""url_match""]",[],0,0,0,[],False,0,0
+899,visualwebarena-901,"[""url_match""]",[],0,0,0,[],False,0,0
+900,visualwebarena-902,"[""url_match""]",[],0,0,0,[],False,0,0
+901,visualwebarena-903,"[""url_match""]",[],0,0,0,[],False,0,0
+902,visualwebarena-904,"[""program_html""]","[[""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+903,visualwebarena-905,"[""program_html""]","[[""must_include""], [""must_include""], [""must_include""], [""must_include""]]",0,0,0,[],False,0,0
+904,visualwebarena-906,"[""url_match""]",[],0,0,0,[],False,0,0
+905,visualwebarena-907,"[""url_match""]",[],0,0,0,[],False,0,0
+906,visualwebarena-908,"[""url_match""]",[],0,0,0,[],False,0,0
+907,visualwebarena-909,"[""string_match""]",[],0,0,0,[],False,0,0

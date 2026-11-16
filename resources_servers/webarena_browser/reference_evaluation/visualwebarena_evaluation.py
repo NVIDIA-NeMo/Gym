@@ -23,6 +23,7 @@ import logging
 import re
 import time
 import urllib.parse
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -554,7 +555,7 @@ def _score_program_html_required(
     score = 1.0
     if "exact_match" in required:
         score *= _exact_match(ref=required["exact_match"], pred=selected_element)
-    elif "must_include" in required:
+    if "must_include" in required:
         rule_score = 1.0
         groups: list[list[str]] = []
         for content in required["must_include"]:
@@ -573,14 +574,14 @@ def _score_program_html_required(
                 question="NOT USED",
                 judge_log_path=judge_log_path,
             )
-    elif "must_exclude" in required:
+    if "must_exclude" in required:
         for content in required["must_exclude"]:
             if " |OR| " in content:
                 raise ValueError("must_exclude does not support |OR| alternatives")
             score *= _must_exclude(content, selected_element)
-    elif "required_values" in required:
+    if "required_values" in required:
         score *= _score_required_values(selected_element, required["required_values"])
-    elif "fuzzy_match" in required:
+    if "fuzzy_match" in required:
         alternatives_score = 0.0
         errors: list[Exception] = []
         for reference in str(required["fuzzy_match"]).split(" |OR| "):
@@ -599,7 +600,9 @@ def _score_program_html_required(
         if errors and alternatives_score < 1.0:
             raise errors[0]
         score *= alternatives_score
-    else:
+    if not set(required).intersection(
+        {"exact_match", "must_include", "must_exclude", "required_values", "fuzzy_match"}
+    ):
         raise ValueError(f"Unknown required_contents: {required.keys()}")
     return score
 
@@ -677,6 +680,33 @@ def _program_html_snapshot_records(
     return records
 
 
+def _new_program_html_text(before: str, after: str) -> str:
+    """Keep new token occurrences, excluding repeated context and moved text.
+
+    Preserve the actual added fragments for VisualWebArena's semantic judge;
+    literal reference-count increases alone cannot recognize a new paraphrase.
+    """
+    before = html.unescape(before)
+    after = html.unescape(after)
+    remaining = Counter(token.group().casefold() for token in re.finditer(r"\w+|[^\w\s]", before))
+    fragments = []
+    start = end = None
+    for token in re.finditer(r"\w+|[^\w\s]", after):
+        key = token.group().casefold()
+        if remaining[key]:
+            remaining[key] -= 1
+            if start is not None:
+                fragments.append(after[start:end])
+                start = end = None
+        else:
+            if start is None:
+                start = token.start()
+            end = token.end()
+    if start is not None:
+        fragments.append(after[start:end])
+    return "\n".join(fragments)
+
+
 def _score_program_html_snapshot_records(
     required: dict[str, Any],
     records: list[dict[str, Any]],
@@ -690,25 +720,17 @@ def _score_program_html_snapshot_records(
             continue
         full_value = str(record.get("value") or "")
         before_value = str(record.get("before_value") or "")
+        # Exclusions apply to the whole final target, including old content.
+        if "must_exclude" in required and not _score_program_html_required(
+            {"must_exclude": required["must_exclude"]}, full_value, judge_log_path
+        ):
+            continue
         before_score = _score_program_html_required(required, before_value, judge_log_path)
         delta_value = str(record.get("delta_value") or "").strip()
         if delta_value:
-            # A line diff can repeat an existing match when unrelated text on
-            # that line changes. Require genuinely new matching content; a new
-            # copy of the required text still counts as an addition.
-            fresh_match = before_score == 0
-            if not fresh_match and "must_include" in required:
-                before_text = _clean_answer(html.unescape(before_value))
-                after_text = _clean_answer(html.unescape(full_value))
-                fresh_match = all(
-                    any(
-                        after_text.count(_clean_answer(part)) > before_text.count(_clean_answer(part))
-                        for part in content.split(" |OR| ")
-                    )
-                    for content in required["must_include"]
-                )
-            if fresh_match:
-                score = max(score, _score_program_html_required(required, delta_value, judge_log_path))
+            fresh_value = _new_program_html_text(before_value, full_value)
+            if fresh_value:
+                score = max(score, _score_program_html_required(required, fresh_value, judge_log_path))
 
         # A confirmed empty target/absence can satisfy a deletion criterion.
         # Require improvement over the baseline, including for empty strings.
@@ -731,7 +753,7 @@ def _page_image_snapshot_urls(query: dict[str, Any], eval_context: dict[str, Any
         for record in image_delta.get(bucket, []):
             if record.get("key") != key:
                 continue
-            candidates = record.get("delta_image_urls") or record.get("image_urls") or []
+            candidates = record.get("delta_image_urls", record.get("image_urls", [])) or []
             for url in candidates:
                 if url not in urls:
                     urls.append(str(url))
