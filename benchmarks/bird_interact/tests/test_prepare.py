@@ -93,7 +93,9 @@ class TestPrepare:
         output = bird_prepare.prepare("full", "a_interact", ground_truth_jsonl=str(ground_truth))
 
         assert output == tmp_path / "data" / "full" / "a_interact.jsonl"
-        assert [json.loads(line)["instance_id"] for line in output.read_text().splitlines()] == ["q1"]
+        (task,) = [json.loads(line) for line in output.read_text().splitlines()]
+        assert task["task_id"] == {"taskset": "bird_interact:a_interact", "task_id": "q1"}
+        assert task["task_input"]["instance_id"] == "q1" and task["task_input"]["sol_sql"]
         assert "kept 1 of 2 tasks; left out: 1 with no ground truth" in capsys.readouterr().out
 
     @pytest.mark.parametrize(
