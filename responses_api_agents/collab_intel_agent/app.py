@@ -121,6 +121,8 @@ class SandboxSpecConfig(BaseModel):
     metadata: dict[str, str] = Field(default_factory=dict)
     provider_options: dict[str, Any] = Field(default_factory=dict)
     require_no_egress: bool = True
+    # a provider failure to start or set up a phase's sandbox is retried on a fresh one this many times
+    start_retries: int = 2
 
 
 class CollabIntelAgentConfig(BaseResponsesAPIAgentConfig):
@@ -190,7 +192,17 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
             resources=SandboxResources.from_mapping(cfg.resources),
             provider_options=dict(cfg.provider_options),
         )
-        return BoxedExec(resolve_provider_config(provider, named), spec, require_no_egress=cfg.require_no_egress)
+        return BoxedExec(
+            resolve_provider_config(provider, named),
+            spec,
+            require_no_egress=cfg.require_no_egress,
+            start_retries=cfg.start_retries,
+        )
+
+    def multiple_workers_unsupported_reason(self) -> str | None:
+        if self.config.code_execution == "sandbox":
+            return "phase sandboxes and the routes that run commands in them are local to one worker"
+        return super().multiple_workers_unsupported_reason()
 
     def _env(self, home: Path, phase_key: str) -> dict[str, str]:
         seat = {
@@ -357,7 +369,8 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
         finally:
             ids = self._response_ids.pop(key)
             if self._boxes is not None:
-                await self._boxes.release(key)
+                with CancelScope(shield=True):  # a client disconnect must not leave the phase's sandbox running
+                    await self._boxes.release(key)
         return {"version": version, "started": started, "response_ids": ids, "result": result}
 
     def _trajectory(self, body: CollabIntelRunRequest, phases: list[dict[str, Any]]) -> TrajectoryRecord | None:

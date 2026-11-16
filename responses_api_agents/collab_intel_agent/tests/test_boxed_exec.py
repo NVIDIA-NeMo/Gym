@@ -17,6 +17,7 @@ import base64
 import importlib.util
 import io
 import json
+import os
 import subprocess
 import sys
 import tarfile
@@ -60,6 +61,9 @@ class FakeBox:
     egress = False
     exec_stdout: str | None = None
     start_error: Exception | None = None
+    start_errors = 0  # the next this many starts fail
+    stop_errors = 0  # the next this many stops fail
+    start_gate: asyncio.Event | None = None
     wrapper_result: dict = {"rc": 0, "stdout": "ok", "stderr": "", "changed": {}, "deleted": []}
 
     def __init__(self, provider, owns_provider=True):
@@ -69,6 +73,11 @@ class FakeBox:
         FakeBox.instances.append(self)
 
     async def start(self, spec):
+        if FakeBox.start_gate is not None:
+            await FakeBox.start_gate.wait()
+        if FakeBox.start_errors:
+            FakeBox.start_errors -= 1
+            raise ConnectionError("provider")
         if FakeBox.start_error is not None:
             raise FakeBox.start_error
         self.spec = spec
@@ -87,12 +96,16 @@ class FakeBox:
         return SandboxExecResult(stdout="", stderr="", return_code=0)
 
     async def stop(self):
+        if FakeBox.stop_errors:
+            FakeBox.stop_errors -= 1
+            raise ConnectionError("delete unconfirmed")
         self.stopped = True
 
 
 @pytest.fixture(autouse=True)
 def fake_sandbox(monkeypatch):
     FakeBox.instances, FakeBox.egress, FakeBox.start_error, FakeBox.exec_stdout = [], False, None, None
+    FakeBox.start_errors, FakeBox.stop_errors, FakeBox.start_gate = 0, 0, None
     FakeBox.wrapper_result = {"rc": 0, "stdout": "ok", "stderr": "", "changed": {}, "deleted": []}
     monkeypatch.setattr(boxed_exec, "AsyncSandbox", FakeBox)
 
@@ -156,6 +169,20 @@ def test_a_provider_failure_is_a_sandbox_error_that_names_only_the_class():
     with pytest.raises(SandboxExecError) as error:
         asyncio.run(_boxes().run("p", _request(runtime=True)))
     assert "ConnectionError" in str(error.value) and "secret" not in str(error.value)
+    assert len(FakeBox.instances) == 3  # the first try and two retries, each on a fresh sandbox
+
+
+def test_a_start_failure_is_retried_on_a_fresh_sandbox():
+    FakeBox.start_errors = 1
+    assert asyncio.run(_boxes().run("p", _request(runtime=True)))["rc"] == 0
+    assert len(FakeBox.instances) == 2 and FakeBox.instances[0].stopped  # the failed one is stopped too
+
+
+def test_an_unfit_sandbox_is_not_retried():
+    FakeBox.egress = True
+    with pytest.raises(SandboxExecError, match="open connections"):
+        asyncio.run(_boxes().run("p", _request(runtime=True)))
+    assert len(FakeBox.instances) == 1
 
 
 def test_a_phase_without_a_runtime_does_not_start_a_sandbox():
@@ -179,6 +206,65 @@ def test_files_that_grow_past_the_limit_fail_the_run():
         asyncio.run(_boxes().run("p", _request(runtime=True)))
 
 
+def test_a_failed_stop_keeps_the_sandbox_for_the_next_release_or_close():
+    boxes = _boxes()
+
+    async def go():
+        await boxes.run("p", _request(runtime=True))
+        await boxes.run("q", _request(runtime=True))
+        FakeBox.stop_errors = 1
+        await boxes.release("p")
+        assert not FakeBox.instances[0].stopped and "p" in boxes._boxes
+        with pytest.raises(SandboxExecError, match="ended"):  # an ended phase takes no command, even unstopped
+            await boxes.run("p", _request())
+        await boxes.release("p")  # the retry
+        assert FakeBox.instances[0].stopped and "p" not in boxes._boxes
+        await boxes.release("p")  # a no-op once stopped
+        FakeBox.stop_errors = 1
+        await boxes.close()  # q's stop fails once, then close tries again only at the next close
+        assert boxes._boxes == {"q": FakeBox.instances[1]}
+        await boxes.close()
+        assert FakeBox.instances[1].stopped and not boxes._boxes
+
+    asyncio.run(go())
+
+
+def test_a_setup_box_whose_stop_failed_is_retried_at_close():
+    FakeBox.egress, FakeBox.stop_errors = True, 1
+    boxes = _boxes()
+    with pytest.raises(SandboxExecError):
+        asyncio.run(boxes.run("p", _request(runtime=True)))
+    assert boxes._unstopped == [FakeBox.instances[0]]
+    asyncio.run(boxes.close())
+    assert FakeBox.instances[0].stopped and not boxes._unstopped
+
+
+def test_a_phase_released_while_its_sandbox_starts_never_runs_a_command():
+    boxes = _boxes()
+
+    async def go():
+        FakeBox.start_gate = asyncio.Event()
+        command = asyncio.create_task(boxes.run("p", _request(runtime=True)))
+        await asyncio.sleep(0)
+        await boxes.release("p")
+        FakeBox.start_gate.set()
+        with pytest.raises(SandboxExecError, match="ended"):
+            await command
+        (box,) = FakeBox.instances
+        assert box.stopped and not any("wrap.py" in c for c in box.commands)
+        with pytest.raises(SandboxExecError, match="ended"):  # a late request does not start another
+            await boxes.run("p", _request(runtime=True))
+        assert len(FakeBox.instances) == 1
+
+    asyncio.run(go())
+
+
+def test_a_sandbox_that_cannot_drop_privileges_is_refused():
+    FakeBox.wrapper_result = {"not_root": True}
+    with pytest.raises(SandboxExecError, match="not run commands as root"):
+        asyncio.run(_boxes().run("p", _request(runtime=True)))
+
+
 def test_release_stops_the_sandbox_and_close_closes_the_provider():
     boxes = _boxes()
     asyncio.run(boxes.run("p", _request(runtime=True)))
@@ -190,7 +276,7 @@ def test_release_stops_the_sandbox_and_close_closes_the_provider():
     boxes._provider.aclose.assert_awaited_once()
 
 
-def _wrapper(tmp_path: Path, argv: list[str], timeout: int = 20) -> dict:
+def _wrapper(tmp_path: Path, argv: list[str], timeout: int = 20, policy_uid: int | None = None) -> dict:
     """The in-sandbox wrapper on trusted test commands: the protocol, not any model's code."""
     tmp_path.mkdir(exist_ok=True)
     tar = tmp_path / "ws.tar"
@@ -203,6 +289,7 @@ def _wrapper(tmp_path: Path, argv: list[str], timeout: int = 20) -> dict:
         "timeout": timeout,
         "pythonpath": "",
         "max_bytes": 1000,
+        "policy_uid": policy_uid,
     }
     done = subprocess.run(
         [sys.executable, "-c", WRAPPER, _b64(json.dumps(args).encode())], capture_output=True, text=True, check=True
@@ -223,6 +310,11 @@ def test_wrapper_maps_the_workspace_placeholder_and_reports_a_timeout(tmp_path):
     result = _wrapper(tmp_path, ["@python", "-c", "import sys; print(sys.argv[1])", "@dir/x"])
     assert result["stdout"].strip() == str(tmp_path / "run" / "x")
     assert _wrapper(tmp_path / "t", ["@python", "-c", "import time; time.sleep(30)"], timeout=1)["rc"] is None
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="checks the refusal a non-root sandbox user gets")
+def test_wrapper_refuses_to_run_the_policy_as_its_own_user(tmp_path):
+    assert _wrapper(tmp_path, ["@python", "-c", "pass"], policy_uid=boxed_exec.POLICY_UID) == {"not_root": True}
 
 
 def test_wrapper_stops_collecting_past_the_byte_limit(tmp_path):
@@ -307,6 +399,28 @@ def test_files_outside_the_workspace_are_not_written_back(tmp_path, monkeypatch)
     assert not (tmp_path / "escape.txt").exists()
 
 
+def test_a_file_replaced_by_a_directory_and_the_reverse_come_back(tmp_path, monkeypatch):
+    ws = _workspace(tmp_path)
+    (ws / "edit.txt").write_text("old")
+    reply = {
+        "rc": 0,
+        "stdout": "",
+        "stderr": "",
+        "changed": {"edit.txt/child.txt": _b64(b"c"), "pkg": _b64(b"now a file")},
+        "deleted": ["edit.txt", "pkg/m.py"],
+    }
+    cli, _ = _cli_with_reply(monkeypatch, reply)
+    cli.run([sys.executable, "-c", "pass"], cwd=ws)
+    assert (ws / "edit.txt" / "child.txt").read_text() == "c" and (ws / "pkg").read_bytes() == b"now a file"
+
+
+def test_any_python_found_by_name_goes_to_the_sandbox(tmp_path, monkeypatch):
+    cli, sent = _cli_with_reply(monkeypatch, {"rc": 0, "stdout": "", "stderr": ""})
+    cli.run(["python3", "-c", "pass"], cwd=_workspace(tmp_path))
+    assert sent[0]["argv"] == ["@python", "-c", "pass"]
+    assert not cli._is_python("pythonista") and cli._is_python("/usr/bin/python3.12")
+
+
 def test_other_commands_run_as_before(tmp_path, monkeypatch):
     cli, sent = _cli_with_reply(monkeypatch, {})
     done = cli.run(["echo", "hello"], capture_output=True, text=True)
@@ -342,9 +456,32 @@ def test_starting_this_interpreter_any_other_way_is_refused(monkeypatch):
     _exits(monkeypatch, cli)
     with pytest.raises(SystemExit):
         cli.GuardedPopen([sys.executable, "-c", "pass"])
+    with pytest.raises(SystemExit):
+        cli.GuardedPopen(["python", "-c", "pass"])
+    with pytest.raises(SystemExit):
+        cli.GuardedPopen("python -c pass", shell=True)
+    with pytest.raises(SystemExit):
+        cli.run("python -c pass", shell=True)
     done = cli.GuardedPopen(["true"])  # other commands still start
     done.wait()
     assert done.returncode == 0
+
+
+def test_os_level_launchers_are_refused_once_the_harness_starts(monkeypatch):
+    cli = _load_cli()
+    _exits(monkeypatch, cli)
+    monkeypatch.setenv("CI_EXEC_URL", "http://127.0.0.1:9/ci_exec/k/run")
+    monkeypatch.setattr(cli.runpy, "run_module", lambda *a, **k: None)
+    for name in cli._OS_LAUNCHERS:  # restored after the test
+        if hasattr(cli.os, name):
+            monkeypatch.setattr(cli.os, name, getattr(cli.os, name))
+    monkeypatch.setattr(cli.subprocess, "run", cli.subprocess.run)
+    monkeypatch.setattr(cli.subprocess, "Popen", cli.subprocess.Popen)
+    cli.main()
+    with pytest.raises(SystemExit):
+        cli.os.system("python -c pass")
+    with pytest.raises(SystemExit):
+        cli.os.execv("/bin/true", ["true"])
 
 
 def test_the_runtime_is_pytest_and_its_dependencies_without_caches_or_metadata():

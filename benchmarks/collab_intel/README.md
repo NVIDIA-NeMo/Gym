@@ -24,7 +24,9 @@ safety corner, a faked result, a hard bargain, a compromised handoff, ...). 8 di
   a deny-by-default policy in `sandbox_spec.provider_options` (OpenSandbox: `network_policy: {defaultAction: deny}`). A
   probe when the sandbox starts (a connection to a public address on port 443) refuses one that can reach out, unless
   `sandbox_spec.require_no_egress` is false; OpenSandbox's policy still lets port 53 through. A sandbox failure ends the episode as an
-  `agent_run_error`, never a run on the host. `code_execution: host` runs the code unsandboxed in a temp dir on the
+  `agent_run_error`, never a run on the host. In the sandbox the policy's commands run as an unprivileged user, so
+  they cannot change the wrapper that runs them or its report, and a process one command leaves behind is killed
+  before the next. `code_execution: host` runs the code unsandboxed in a temp dir on the
   agent's host, for trusted models only: give the job a memory cap. Either way the harness gets only PATH, LANG, LC_ALL,
   TMPDIR, its own HARNESS_* settings and HOME set to the row's temp dir, never the server's tokens or keys.
 - Eval only: `collab_intel_agent` is a bridge on the legacy `/run` path, wired through the `legacy_agent` relay, not an
@@ -42,13 +44,9 @@ gym eval run --config benchmarks/collab_intel/config.yaml \
   ++rollout_correlation=true
 ```
 
-The coding scenarios need a sandbox provider, so a run adds its config and a deny-by-default network policy (for
-OpenSandbox, with `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` set):
-
-```bash
-  --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
-  '++collab_intel_benchmark_agent.responses_api_agents.collab_intel_agent.sandbox_spec.provider_options={network_policy: {defaultAction: deny}}'
-```
-
-Without a provider the coding episodes end as `agent_run_error` and never run on the host. `code_execution: host`
-restores the old unsandboxed run, for trusted models only.
+The config starts the coding scenarios' sandboxes through OpenSandbox (`OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY`
+set) with a deny-by-default network policy. For another provider, swap its config in the config's `config_paths` and
+set the policy in `sandbox_spec.provider_options`. In `code_execution: sandbox` mode a missing provider config stops the
+agent from starting, so no episode runs. A provider failure during an episode is retried on a fresh sandbox
+(`sandbox_spec.start_retries`), then ends that episode as an `agent_run_error`. `code_execution: host` restores the old
+unsandboxed run, for trusted models only.

@@ -21,7 +21,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import anyio
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from nemo_gym.config import ModelServerRef
@@ -395,6 +397,38 @@ def test_each_phase_releases_its_sandbox(tmp_path, monkeypatch):
     assert isinstance(agent._boxes.release.await_args.args[0], str)
 
 
+def test_a_cancelled_phase_still_releases_its_sandbox(tmp_path, monkeypatch):
+    agent = _agent_with_fake_cli(tmp_path, None, 1, monkeypatch)
+    started, released = asyncio.Event(), []
+
+    async def run(*args):
+        started.set()
+        await asyncio.Event().wait()
+
+    async def release(key):
+        await asyncio.sleep(0)  # a checkpoint a cancelled scope would interrupt
+        released.append(key)
+
+    agent._run, agent._response_ids, agent._boxes = run, {}, SimpleNamespace(release=release)
+
+    async def go():
+        async with anyio.create_task_group() as group:
+            group.start_soon(agent._phase, tmp_path / "scenario", "solo", 0, tmp_path / "out")
+            await started.wait()
+            group.cancel_scope.cancel()
+
+    asyncio.run(go())
+    assert len(released) == 1
+
+
+def test_sandbox_mode_runs_on_one_worker_only(monkeypatch):
+    monkeypatch.setattr(CollabIntelAgent, "model_post_init", lambda self, context: None)
+    sandbox = CollabIntelAgent.model_construct(config=SimpleNamespace(code_execution="sandbox"))
+    assert "one worker" in sandbox.multiple_workers_unsupported_reason()
+    host = CollabIntelAgent.model_construct(config=SimpleNamespace(code_execution="host"))
+    assert host.multiple_workers_unsupported_reason() is None
+
+
 def test_the_exec_route_runs_a_command_and_fails_closed(monkeypatch):
     monkeypatch.setattr(CollabIntelAgent, "model_post_init", lambda self, context: None)
     agent = CollabIntelAgent.model_construct(config=SimpleNamespace())
@@ -427,5 +461,13 @@ def test_sandbox_mode_is_the_default_and_builds_the_spec_from_the_config(monkeyp
     assert built["provider"] == {"opensandbox": {"connection": {}}}
     assert (built["spec"].image, built["spec"].workdir) == ("img:1", "/tmp")
     assert built["spec"].provider_options == {"network_policy": {"defaultAction": "deny"}}
-    assert built["require_no_egress"] is True
+    assert (built["require_no_egress"], built["start_retries"]) == (True, 2)
     assert built["spec"].metadata == {"k": "v", "nemo_gym_server": "ci"}
+
+
+def test_the_benchmark_config_starts_sandboxes_without_network():
+    root = Path(app_module.__file__).resolve().parents[2]
+    config = yaml.safe_load((root / "benchmarks/collab_intel/config.yaml").read_text())
+    assert "nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml" in config["config_paths"]
+    agent = config["collab_intel_benchmark_agent"]["responses_api_agents"]["collab_intel_agent"]
+    assert agent["sandbox_spec"]["provider_options"]["network_policy"] == {"defaultAction": "deny"}

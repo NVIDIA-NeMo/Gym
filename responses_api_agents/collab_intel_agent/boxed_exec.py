@@ -41,6 +41,8 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxProvider, SandboxSpec, create_
 logger = logging.getLogger(__name__)
 
 RUNTIME_DIR = "_rt"
+# the policy's commands run as this user (nobody), so they cannot change the wrapper, the runtime or the report
+POLICY_UID = 65534
 RUNS_DIR = "runs"
 # the changed files of one run that come back, in bytes
 MAX_CHANGED_BYTES = 8 * 1024 * 1024
@@ -58,11 +60,27 @@ EGRESS_PROBE = (
 # workspace, run, report the output and the files the run changed
 WRAPPER = """import base64, hashlib, json, os, shutil, subprocess, sys, tarfile
 a = json.loads(base64.b64decode(sys.argv[1]))
-d = a["dir"]
+d, uid = a["dir"], a["policy_uid"]
+if uid is not None and os.geteuid() != 0:
+    print(json.dumps({"not_root": True}))
+    sys.exit(0)
 os.makedirs(d)
 with tarfile.open(a["tar"]) as t:
     t.extractall(d, filter="data")
 os.remove(a["tar"])
+if uid is not None:  # only the workspace is the policy's: this file, the runtime and the report stay root's
+    for root, dirs, names in os.walk(d):
+        for p in [root] + [os.path.join(root, n) for n in dirs + names]:
+            os.lchown(p, uid, uid)
+
+
+def kill_policy():  # a process the command left behind could change a later command's workspace
+    for p in os.listdir("/proc") if uid is not None else []:
+        try:
+            if p.isdigit() and os.stat("/proc/" + p).st_uid == uid:
+                os.kill(int(p), 9)
+        except OSError:
+            pass
 
 
 def snapshot():
@@ -81,12 +99,14 @@ before = snapshot()
 argv = [sys.executable if x == "@python" else x.replace("@dir", d) for x in a["argv"]]
 env = {k: v.replace("@dir", d) for k, v in a["env"].items()}
 env |= {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": a["pythonpath"]}
+drop = {"user": uid, "group": uid, "extra_groups": []} if uid is not None else {}
 try:
     r = subprocess.run(argv, cwd=d, capture_output=True, text=True, errors="replace", timeout=a["timeout"], env=env,
-                       check=False)
+                       check=False, **drop)
     res = {"rc": r.returncode, "stdout": r.stdout, "stderr": r.stderr}
 except subprocess.TimeoutExpired:
     res = {"rc": None, "stdout": "", "stderr": ""}
+kill_policy()
 after = snapshot()
 changed, size = {}, 0
 for n, h in after.items():
@@ -110,6 +130,10 @@ class SandboxExecError(RuntimeError):
     Never a policy outcome."""
 
 
+class _ProviderError(SandboxExecError):
+    """The provider failed a start or a command, rather than the sandbox being unfit: a fresh sandbox may work."""
+
+
 def _runtime_unpack(tar: str, target: str) -> str:
     return (
         f"python -c \"import sys, tarfile; tarfile.open(sys.argv[1]).extractall(sys.argv[2], filter='data')\" "
@@ -118,17 +142,28 @@ def _runtime_unpack(tar: str, target: str) -> str:
 
 
 class BoxedExec:
-    """One sandbox per phase, created when the phase's first command arrives and stopped when the phase ends."""
+    """One sandbox per phase, created when the phase's first command arrives and stopped when the phase ends.
+
+    A box is dropped only once its stop succeeded, so a later release or close retries a failed one. An ended phase
+    takes no more commands, and a box that finished starting after its phase ended is stopped, not used."""
 
     def __init__(
-        self, provider: Mapping[str, Any] | SandboxProvider, spec: SandboxSpec, *, require_no_egress: bool = True
+        self,
+        provider: Mapping[str, Any] | SandboxProvider,
+        spec: SandboxSpec,
+        *,
+        require_no_egress: bool = True,
+        start_retries: int = 2,
     ) -> None:
         self._provider = create_provider(provider) if isinstance(provider, Mapping) else provider
         self._spec = spec
         self._require_no_egress = require_no_egress
+        self._start_retries = max(start_retries, 0)
         self._workdir = (spec.workdir or "/tmp").rstrip("/")
         self._boxes: dict[str, AsyncSandbox] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._ended: set[str] = set()
+        self._unstopped: list[AsyncSandbox] = []  # boxes that never served a phase and whose stop failed
 
     async def _put(self, box: AsyncSandbox, data: bytes, remote: str) -> None:
         with tempfile.TemporaryDirectory(prefix="ci-box-upload-") as tmp:
@@ -139,50 +174,70 @@ class BoxedExec:
     async def _sh(self, box: AsyncSandbox, command: str, *, timeout_s: float = 120) -> str:
         result = await box.exec(command, cwd=self._workdir, timeout_s=timeout_s)
         if result.error_type is not None or result.return_code != 0:
-            raise SandboxExecError(f"sandbox command failed ({result.error_type or result.return_code})")
+            raise _ProviderError(f"sandbox command failed ({result.error_type or result.return_code})")
         return result.stdout or ""
 
     async def _start(self, phase: str, runtime: bytes | None) -> AsyncSandbox:
-        """The phase's sandbox, with the runtime (pytest and its pure-python dependencies) unpacked in it."""
+        """The phase's sandbox, with the runtime (pytest and its pure-python dependencies) unpacked in it. A provider
+        failure is retried on a fresh sandbox, start_retries times."""
         async with self._locks.setdefault(phase, asyncio.Lock()):
+            if phase in self._ended:
+                raise SandboxExecError("the phase has ended")
             if phase in self._boxes:
                 return self._boxes[phase]
             if runtime is None:
                 raise SandboxExecError("the first command of a phase must carry the runtime")
-            box = AsyncSandbox(self._provider, owns_provider=False)
-            try:
-                await box.start(self._spec)
-            except Exception as exc:
-                raise SandboxExecError(f"sandbox did not start ({type(exc).__name__})") from None
-            try:
-                probe = (await self._sh(box, f"python -c {shlex.quote(EGRESS_PROBE)}")).strip()
-                if probe not in ("blocked", "egress"):
-                    raise SandboxExecError("the sandbox has no working python")
-                if probe == "egress" and self._require_no_egress:
-                    raise SandboxExecError(
-                        "the sandbox can open connections to other hosts: set a network policy that blocks them in "
-                        "sandbox_spec.provider_options, or require_no_egress: false to run with egress"
-                    )
-                if probe == "egress":
-                    logger.warning("collab_intel sandbox has network egress (require_no_egress is false)")
-                await self._put(box, runtime, f"{self._workdir}/{RUNTIME_DIR}.tar")
-                await self._sh(box, f"mkdir -p {RUNTIME_DIR} {RUNS_DIR}")
-                await self._sh(
-                    box, _runtime_unpack(f"{self._workdir}/{RUNTIME_DIR}.tar", f"{self._workdir}/{RUNTIME_DIR}")
-                )
-                await self._put(box, WRAPPER.encode(), f"{self._workdir}/wrap.py")
-            except BaseException as exc:
-                await self._stop(box)
-                if isinstance(exc, (SandboxExecError, asyncio.CancelledError)):
-                    raise
-                raise SandboxExecError(f"sandbox setup failed ({type(exc).__name__})") from None
+            for attempt in range(self._start_retries + 1):
+                try:
+                    box = await self._new_box(runtime)
+                    break
+                except _ProviderError as exc:
+                    if attempt == self._start_retries:
+                        raise SandboxExecError(str(exc)) from None
+                    logger.warning("collab_intel %s, retrying on a fresh sandbox", exc)
+            if phase in self._ended:  # the phase ended while its sandbox was starting
+                await self._stop_or_keep(box)
+                raise SandboxExecError("the phase has ended")
             self._boxes[phase] = box
             return box
+
+    async def _new_box(self, runtime: bytes) -> AsyncSandbox:
+        box = AsyncSandbox(self._provider, owns_provider=False)
+        try:
+            await box.start(self._spec)
+        except Exception as exc:
+            await self._stop_or_keep(box)
+            raise _ProviderError(f"sandbox did not start ({type(exc).__name__})") from None
+        try:
+            probe = (await self._sh(box, f"python -c {shlex.quote(EGRESS_PROBE)}")).strip()
+            if probe not in ("blocked", "egress"):
+                raise SandboxExecError("the sandbox has no working python")
+            if probe == "egress" and self._require_no_egress:
+                raise SandboxExecError(
+                    "the sandbox can open connections to other hosts: set a network policy that blocks them in "
+                    "sandbox_spec.provider_options, or require_no_egress: false to run with egress"
+                )
+            if probe == "egress":
+                logger.warning("collab_intel sandbox has network egress (require_no_egress is false)")
+            await self._put(box, runtime, f"{self._workdir}/{RUNTIME_DIR}.tar")
+            await self._sh(box, f"mkdir -p {RUNTIME_DIR} {RUNS_DIR}")
+            await self._sh(
+                box, _runtime_unpack(f"{self._workdir}/{RUNTIME_DIR}.tar", f"{self._workdir}/{RUNTIME_DIR}")
+            )
+            await self._put(box, WRAPPER.encode(), f"{self._workdir}/wrap.py")
+        except BaseException as exc:
+            await self._stop_or_keep(box)
+            if isinstance(exc, (SandboxExecError, asyncio.CancelledError)):
+                raise  # an unfit sandbox (egress, no python) is not retried: a fresh one would be the same
+            raise _ProviderError(f"sandbox setup failed ({type(exc).__name__})") from None
+        return box
 
     async def run(self, phase: str, request: dict[str, Any]) -> dict[str, Any]:
         """One command of the harness: request has argv ("@python" for the interpreter), env, timeout, a tar of the
         workspace (files), and on the phase's first command the runtime tar. Returns the exit code (None on a
         timeout), stdout, stderr, the changed files by relative path (base64) and the deleted paths."""
+        if phase in self._ended:
+            raise SandboxExecError("the phase has ended")
         try:
             runtime = base64.b64decode(request["runtime"]) if request.get("runtime") else None
             box = await self._start(phase, runtime)
@@ -196,6 +251,7 @@ class BoxedExec:
                 "timeout": request["timeout"],
                 "pythonpath": f"{self._workdir}/{RUNTIME_DIR}",
                 "max_bytes": MAX_CHANGED_BYTES,
+                "policy_uid": POLICY_UID,
             }
             encoded = base64.b64encode(json.dumps(args).encode()).decode()
             out = await self._sh(
@@ -212,25 +268,42 @@ class BoxedExec:
             raise
         except Exception as exc:
             raise SandboxExecError(f"sandbox run failed ({type(exc).__name__})") from None
+        if result.get("not_root"):
+            raise SandboxExecError(
+                "the sandbox does not run commands as root, so the policy's code could change the wrapper and its report"
+            )
         if result.pop("too_large", False):
             raise SandboxExecError(f"the command changed more than {MAX_CHANGED_BYTES} bytes of files")
         return result
 
-    async def _stop(self, box: AsyncSandbox) -> None:
+    async def _stop(self, box: AsyncSandbox) -> bool:
         try:
             await box.stop()
-        except Exception as exc:  # the spec's ttl is the backstop
+            return True
+        except Exception as exc:  # kept for a later retry; the spec's ttl is the backstop
             logger.warning("collab_intel sandbox stop failed (%s)", type(exc).__name__)
+            return False
+
+    async def _stop_or_keep(self, box: AsyncSandbox) -> None:
+        if not await self._stop(box):
+            self._unstopped.append(box)
 
     async def release(self, phase: str) -> None:
-        box = self._boxes.pop(phase, None)
+        """End the phase and stop its sandbox. Idempotent: a call after a failed stop retries it."""
+        self._ended.add(phase)
         self._locks.pop(phase, None)
-        if box is not None:
-            await self._stop(box)
+        box = self._boxes.get(phase)
+        if box is not None and await self._stop(box):
+            self._boxes.pop(phase, None)
 
     async def close(self) -> None:
         for phase in list(self._boxes):
             await self.release(phase)
+        self._unstopped = [box for box in self._unstopped if not await self._stop(box)]
+        if self._boxes or self._unstopped:
+            logger.warning(
+                "collab_intel: %d sandboxes did not stop, left to their ttl", len(self._boxes) + len(self._unstopped)
+            )
         try:
             await self._provider.aclose()
         except Exception as exc:

@@ -17,17 +17,21 @@
 Run by the agent in place of ``python -m collab_intel.harness.cli``, in the upstream repo's venv, so this file uses the
 standard library only. subprocess.run of a command that starts with this interpreter (pytest in the policy's workspace,
 the probes of a few checkers) is sent to CI_EXEC_URL instead (boxed_exec.py): the workspace goes there, and the output
-and the files the command changed come back. Any other way of starting this interpreter is refused. A failure of the
-sandbox ends the process with exit code 86 and CI_EXEC_ERROR on stderr, so it can never be scored as a policy failure.
+and the files the command changed come back. Any other way of starting a python interpreter (Popen, check_output, a
+bare "python", os.system, ...) is refused, so a launch form a new harness commit adds fails the episode instead of
+running the code here. A failure of the sandbox ends the process with exit code 86 and CI_EXEC_ERROR on stderr, so it
+can never be scored as a policy failure.
 """
 
 import base64
+import functools
 import importlib.metadata
 import io
 import json
 import os
 import re
 import runpy
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -48,6 +52,13 @@ _run = subprocess.run
 _Popen = subprocess.Popen
 _lock = threading.Lock()
 _runtime_sent = False
+_PYTHON_NAME = re.compile(r"python[0-9.]*$")
+# the ways of starting a process that bypass subprocess.Popen (os.popen goes through it); the pinned harness uses none
+# of them. Not os.posix_spawn: subprocess.Popen itself may use it.
+_OS_LAUNCHERS = (
+    *("system", "spawnv", "spawnve", "spawnvp", "spawnvpe", "spawnl", "spawnle", "spawnlp", "spawnlpe"),
+    *("execv", "execve", "execvp", "execvpe", "execl", "execle", "execlp", "execlpe"),
+)
 
 
 def _die(message: str) -> None:
@@ -127,23 +138,34 @@ def _send(payload: dict, timeout_s: float) -> dict:
 
 
 def _apply(cwd: Path, result: dict) -> None:
-    """What the command created, changed or deleted in the sandbox, in the workspace here."""
+    """What the command created, changed or deleted in the sandbox, in the workspace here. Deletions go first, and a
+    directory where a file now is goes too, so a file replaced by a directory (or the reverse) comes back as well."""
     root = cwd.resolve()
-    for name, data in result.get("changed", {}).items():
-        target = (root / name).resolve()
-        if root not in target.parents:
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(base64.b64decode(data))
     for name in result.get("deleted", []):
         target = (root / name).resolve()
         if root in target.parents:
             target.unlink(missing_ok=True)
+    for name, data in result.get("changed", {}).items():
+        target = (root / name).resolve()
+        if root not in target.parents:
+            continue
+        if target.is_dir():
+            shutil.rmtree(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(base64.b64decode(data))
+
+
+def _is_python(program) -> bool:
+    """This interpreter, or any other python found by name ("python", "python3", "/usr/bin/python3.12", ...)."""
+    program = str(program)
+    return program == sys.executable or bool(_PYTHON_NAME.match(os.path.basename(program)))
 
 
 def run(args, *popenargs, **kwargs):
     """subprocess.run, with a command that starts with this interpreter sent to the sandbox."""
-    if not (isinstance(args, (list, tuple)) and args and str(args[0]) == sys.executable):
+    if not (isinstance(args, (list, tuple)) and args and _is_python(args[0])):
+        if isinstance(args, str) and re.search(r"\bpython", args):
+            _die("a python command given as a string was refused: it would run on the agent's host")
         return _run(args, *popenargs, **kwargs)
     cwd = kwargs.get("cwd")
     if cwd is None:
@@ -180,12 +202,18 @@ def run(args, *popenargs, **kwargs):
 
 
 class GuardedPopen(_Popen):
-    """Every other way of starting this interpreter (Popen, check_output, ...) would run the code on this host."""
+    """Every other way of starting a python interpreter (Popen, check_output, ...) would run the code on this host."""
 
     def __init__(self, args, *popenargs, **kwargs):
-        if isinstance(args, (list, tuple)) and args and str(args[0]) == sys.executable:
+        if (isinstance(args, (list, tuple)) and args and _is_python(args[0])) or (
+            isinstance(args, str) and re.search(r"\bpython", args)
+        ):
             _die("a python command outside subprocess.run was refused: it would run on the agent's host")
         super().__init__(args, *popenargs, **kwargs)
+
+
+def _refuse(name: str, *args, **kwargs):
+    _die(f"os.{name} was refused: a process it starts would run on the agent's host")
 
 
 def main() -> None:
@@ -193,6 +221,9 @@ def main() -> None:
         _die("CI_EXEC_URL is not set")
     subprocess.run = run
     subprocess.Popen = GuardedPopen
+    for name in _OS_LAUNCHERS:
+        if hasattr(os, name):
+            setattr(os, name, functools.partial(_refuse, name))
     runpy.run_module("collab_intel.harness.cli", run_name="__main__", alter_sys=True)
 
 
