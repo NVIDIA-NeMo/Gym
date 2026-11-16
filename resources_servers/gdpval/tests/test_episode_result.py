@@ -45,7 +45,8 @@ def test_unset_indices_do_not_invalidate_a_typed_episode_result():
 
 
 @pytest.mark.parametrize("index", [0, 7])
-def test_explicit_legacy_indices_still_round_trip(index):
+def test_explicit_indices_still_round_trip(index):
+    # A relayed /run row carries the collector's indices into /verify, and the reply echoes them back.
     indices = {key: index for key in ("_ng_task_index", "_ng_rollout_index", "_ng_attempt_index")}
     payload = _response(**indices).model_dump(mode="json", by_alias=True)
     assert {key: payload[key] for key in indices} == indices
