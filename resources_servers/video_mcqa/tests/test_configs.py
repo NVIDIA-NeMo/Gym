@@ -7,7 +7,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServerConfig
-from nemo_gym.config_types import DatasetConfig
+from nemo_gym.config import DatasetConfig
 from resources_servers.video_mcqa.app import VideoMCQAResourcesServerConfig
 from resources_servers.video_mcqa.tests.test_app import make_server
 from resources_servers.videomme_v2.app import VideoMMEV2ResourcesServerConfig

@@ -11,9 +11,8 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from nemo_gym.config_types import AggregateMetricsRequest
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetricsRequest
 from resources_servers.videomme_v2.app import (
     CohortManifest,
     VideoMMEV2ResourcesServer,

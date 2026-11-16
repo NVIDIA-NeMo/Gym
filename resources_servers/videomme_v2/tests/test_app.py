@@ -10,13 +10,10 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from nemo_gym.base_resources_server import ResourcesSeedSessionRequest
-from nemo_gym.config_types import AggregateMetricsRequest
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetricsRequest
+from nemo_gym.core import EpisodeId, NeMoGymResponse, TaskId
+from nemo_gym.server_runtime import ResourcesSeedSessionRequest, check_resources_session_contract
 from resources_servers.video_mcqa.tests.helpers import grade_failed_run_and_replay
 from resources_servers.videomme_v2.app import (
     CohortManifest,
