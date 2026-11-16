@@ -117,6 +117,7 @@ if TYPE_CHECKING:
         choose_action,
         choose_stage_outcome,
         environment_fault_policy,
+        require_retry_or_fail,
     )
     from nemo_gym.core.responses_api_types import (
         CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
@@ -217,6 +218,7 @@ _PUBLIC_API = {
     "choose_stage_outcome": "outcome_policy",
     "applied_outcome_fields": "outcome_policy",
     "environment_fault_policy": "outcome_policy",
+    "require_retry_or_fail": "outcome_policy",
     "HARNESS_TERMINATION_UNCONFIRMED": "failure_kinds",
     "JUDGE_FAILED": "failure_kinds",
     "JUDGE_UNPARSEABLE": "failure_kinds",

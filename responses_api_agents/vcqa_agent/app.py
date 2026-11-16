@@ -68,6 +68,7 @@ from nemo_gym.core import (
     applied_outcome_fields,
     environment_fault_policy,
     failure_kinds,
+    require_retry_or_fail,
 )
 from nemo_gym.server_runtime import (
     BaseRunRequest,
@@ -121,6 +122,12 @@ class VcqaAgentConfig(BaseResponsesAPIAgentConfig):
     def keep_untouched_default_rules(cls, value: object) -> object:
         """A partial override changes only the rules it names; the others keep this agent's defaults."""
         return StageOutcomePolicyConfig.overlay(environment_fault_policy("agent", (ARTIFACT_UNAVAILABLE,)), value)
+
+    @field_validator("outcome_policy")
+    @classmethod
+    def require_retry_or_fail_decisions(cls, policy: StageOutcomePolicyConfig) -> StageOutcomePolicyConfig:
+        """This boundary can retry a masked row or leave it ungraded; it cannot count it as zero."""
+        return require_retry_or_fail(policy, "agent", (ARTIFACT_UNAVAILABLE,))
 
     sandbox_backend: Literal["apptainer", "apptainer_exec", "local", "provider"] = Field(
         default="apptainer",

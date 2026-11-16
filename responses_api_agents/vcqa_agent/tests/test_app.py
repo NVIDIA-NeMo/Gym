@@ -124,6 +124,11 @@ def test_config_uses_package_paths_and_hf_artifacts() -> None:
 ########################################
 
 
+def test_a_policy_that_would_count_a_masked_row_as_zero_is_refused() -> None:
+    with pytest.raises(ValueError, match="supports only retry or fail"):
+        _make_config(outcome_policy={"by_stage": {"agent": {"default_action": "count_as_zero"}}})
+
+
 class TestPathResolution:
     def test_relative_path_resolves_under_codebase(self) -> None:
         assert tools_mod._resolve_under_codebase("src/foo.py") == f"{CODEBASE_PATH}/src/foo.py"

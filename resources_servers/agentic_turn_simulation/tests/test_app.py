@@ -569,6 +569,11 @@ def _decision_policy(kind: str, failure_class: str, action: str) -> dict:
 DECISIONS = [("evaluation", "retry"), ("evaluation", "fail"), ("model", "retry"), ("model", "fail")]
 
 
+def test_a_policy_that_would_count_a_masked_row_as_zero_is_refused() -> None:
+    with pytest.raises(ValueError, match="supports only retry or fail"):
+        make_server(outcome_policy={"by_stage": {"agent": {"default_action": "count_as_zero"}}})
+
+
 class TestVerifyMasks:
     @pytest.mark.parametrize("failure_class,action", DECISIONS)
     async def test_the_saved_decision_follows_the_configured_policy(self, failure_class: str, action: str) -> None:

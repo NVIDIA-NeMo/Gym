@@ -37,6 +37,7 @@ from nemo_gym.core import (
     applied_outcome_fields,
     environment_fault_policy,
     failure_kinds,
+    require_retry_or_fail,
 )
 from nemo_gym.metrics import MASK_SAMPLE_FIELD
 from nemo_gym.server_runtime import (
@@ -162,6 +163,12 @@ class AgenticTurnSimulationResourcesServerConfig(BaseResourcesServerConfig):
         return StageOutcomePolicyConfig.overlay(
             environment_fault_policy("agent", (TIME_CAP_KIND, SIMULATOR_FAILED_KIND)), value
         )
+
+    @field_validator("outcome_policy")
+    @classmethod
+    def require_retry_or_fail_decisions(cls, policy: StageOutcomePolicyConfig) -> StageOutcomePolicyConfig:
+        """This boundary can retry a masked row or leave it ungraded; it cannot count it as zero."""
+        return require_retry_or_fail(policy, "agent", (TIME_CAP_KIND, SIMULATOR_FAILED_KIND))
 
     # Agent stop reasons that leave the turn unfinished by the policy's own doing: scored 0 as code_gate
     # "unfinished_turn", without a judge, which passes many cut-off turns (it credits the progress made before the cut).

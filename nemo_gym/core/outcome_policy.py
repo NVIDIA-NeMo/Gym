@@ -279,6 +279,21 @@ def environment_fault_policy(stage: FailureStage, failure_kinds: tuple[str, ...]
     )
 
 
+def require_retry_or_fail(
+    policy: StageOutcomePolicyConfig, stage: FailureStage, failure_kinds: tuple[str, ...]
+) -> StageOutcomePolicyConfig:
+    """Reject a configuration whose decision for one of the boundary's kinds is not one it can perform.
+
+    These boundaries mask the row and either let the harness run it again (``retry``) or leave it ungraded
+    (``fail``). ``count_as_zero`` would save a masked row that is not a counted zero, so it is refused at load.
+    """
+    for kind in failure_kinds:
+        action = choose_stage_outcome(failure_kind=kind, http_status=None, stage=stage, config=policy).action
+        if action not in (OutcomeAction.RETRY, OutcomeAction.FAIL):
+            raise ValueError(f"{kind} supports only retry or fail at the {stage} stage, not {action}")
+    return policy
+
+
 def applied_outcome_fields(
     *, failure_kind: str, stage: FailureStage, config: StageOutcomePolicyConfig
 ) -> dict[str, Any]:

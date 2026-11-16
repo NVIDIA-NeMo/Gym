@@ -1025,6 +1025,11 @@ async def test_user_generation_error_records_invalid_reason_when_fallback_disabl
     assert "user simulator call failed: model server returned no text" in verified.failure_reason
 
 
+def test_a_policy_that_would_count_a_masked_row_as_zero_is_refused() -> None:
+    with pytest.raises(ValueError, match="supports only retry or fail"):
+        make_server(outcome_policy={"by_stage": {"agent": {"default_action": "count_as_zero"}}})
+
+
 @pytest.mark.parametrize(
     "failure_class,action", [("evaluation", "retry"), ("evaluation", "fail"), ("model", "retry"), ("model", "fail")]
 )
