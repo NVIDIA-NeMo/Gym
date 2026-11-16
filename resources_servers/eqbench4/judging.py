@@ -5,7 +5,8 @@
 The pairwise judge compares two transcripts of the same scenario on several ability dimensions and names, for each
 dimension, the winning respondent's code followed by one to five plus signs, or "tie". This module reproduces the
 EQ-Bench 4 transcript layout, verdict parsing and margin arithmetic (https://github.com/EQ-bench/eqbench4, revision
-93dcb7f5d430433ad49d501e672a98bcff2c9678) as an independent implementation. No upstream prompt text lives here: the
+93dcb7f5d430433ad49d501e672a98bcff2c9678, licensed under BSD-3-Clause with the Commons Clause condition, Licensor:
+Samuel J. Paech) as an independent implementation. No upstream prompt text lives here: the
 prompts are rendered from the upstream files at preparation time and travel in the dataset rows.
 """
 

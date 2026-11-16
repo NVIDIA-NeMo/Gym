@@ -13,6 +13,7 @@ from nemo_gym.config import AggregateMetricsRequest
 from nemo_gym.core import NeMoGymResponse
 from nemo_gym.verification import JudgeError, exercise_verifier_fixture
 from resources_servers.eqbench4 import app as app_module
+from resources_servers.eqbench4 import upstream_rating
 from resources_servers.eqbench4.app import (
     VERIFIER_FIXTURE,
     EQBench4ResourcesServer,
@@ -20,8 +21,9 @@ from resources_servers.eqbench4.app import (
     EQBench4VerifyRequest,
     response_text,
 )
-from resources_servers.eqbench4.metrics import POLICY, POLICY_STOP_REASONS
+from resources_servers.eqbench4.metrics import POLICY
 from resources_servers.eqbench4.task_data import TaskData
+from resources_servers.eqbench4.tests.stand_in_solver import STAND_IN_FILES
 from resources_servers.eqbench4.verifier_fixture import fixture_verdict
 
 
@@ -72,6 +74,7 @@ def _transcript() -> list[dict[str, Any]]:
 
 
 def make_server(tmp_path: Path, **overrides: Any) -> EQBench4ResourcesServer:
+    upstream_rating.write_solver(tmp_path / "solver", STAND_IN_FILES)
     reference = tmp_path / "reference.jsonl"
     reference.write_text(
         "".join(
@@ -93,6 +96,7 @@ def make_server(tmp_path: Path, **overrides: Any) -> EQBench4ResourcesServer:
         "trait_judge_responses_create_params": {"input": [], "temperature": 0.7},
         "trait_judge_system_message": "Score traits.",
         "reference_comparisons_path": str(reference),
+        "rating_solver_dir": str(tmp_path / "solver"),
         "rating_bootstrap_resamples": 20,
     }
     config = EQBench4ResourcesServerConfig.model_validate(settings | overrides)
@@ -228,33 +232,24 @@ async def test_one_readable_order_decides_the_comparison(tmp_path: Path, monkeyp
         assert comparison.unreadable_orders == {"opponent_first": "no JSON verdict in the judge output"}
 
 
-@pytest.mark.parametrize(
-    ("reason", "failure_kind"),
-    [
-        ("context_limit", "model_context_limit"),
-        ("output_budget", "eqbench4:policy_output_budget"),
-        ("content_filter", "eqbench4:policy_content_filter"),
-        ("empty_reply", "eqbench4:policy_empty_reply"),
-        (None, "eqbench4:policy_empty_reply"),
-    ],
-)
-async def test_a_conversation_the_policy_stopped_is_left_out(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reason: str | None, failure_kind: str
+@pytest.mark.parametrize("reason", ["context_limit", "output_budget", "content_filter", "empty_reply", None])
+async def test_a_conversation_the_policy_stopped_loses_to_every_opponent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reason: str | None
 ) -> None:
     judge = ScriptedJudge()
     monkeypatch.setattr(app_module, "call_judge", judge)
-    result = await make_server(tmp_path).verify(
-        make_request(conversation_status="policy_failed", policy_stop_reason=reason, conversation_error="stopped")
+    request = make_request(
+        conversation_status="policy_failed", policy_stop_reason=reason, conversation_error="stopped"
     )
-    assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, True, failure_kind)
+    result = await make_server(tmp_path).verify(request)
+    # Scored, not masked: a policy that stops is not rated only on the conversations it finished.
+    assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, False, None)
+    assert result.evaluation_completed is True and result.policy_turns == 1
     assert result.policy_stop_reason == (reason or "empty_reply")
-    assert result.failure_reason == "stopped" and result.policy_turns == 1
-    assert not result.comparisons and not judge.calls
-    assert result.evaluation_completed is False
-
-
-def test_every_stop_reason_has_a_failure_kind() -> None:
-    assert set(app_module.POLICY_STOP_FAILURE_KINDS) == set(POLICY_STOP_REASONS)
+    assert [(c.opponent, c.comparison_index, c.fraction, c.readings) for c in result.comparisons] == [
+        (opponent.model, opponent.comparison_index, 0.0, []) for opponent in request.opponents
+    ]
+    assert not judge.calls
 
 
 async def test_aggregate_metrics_report_and_warn_about_left_out_conversations(
@@ -390,10 +385,19 @@ def test_metrics_place_the_policy_among_reference_models(tmp_path: Path) -> None
     }
 
 
-def test_missing_reference_comparisons_name_the_prepare_command(tmp_path: Path) -> None:
-    server = make_server(tmp_path, reference_comparisons_path="benchmarks/eqbench4/data/absent.jsonl")
-    with pytest.raises(FileNotFoundError, match="gym eval prepare --benchmark eqbench4"):
-        server.compute_metrics([[{"comparisons": [{"opponent": "x", "fraction": 0.5}]}]])
+def test_missing_prepared_files_name_the_prepare_command_and_keep_the_other_metrics(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    for overrides in (
+        {"reference_comparisons_path": "benchmarks/eqbench4/data/absent.jsonl"},
+        {"rating_solver_dir": str(tmp_path / "absent")},
+    ):
+        caplog.clear()
+        metrics = make_server(tmp_path, **overrides).compute_metrics(
+            [[{"policy_turns": 3, "comparisons": [{"opponent": "ref-a", "fraction": 0.5}]}]]
+        )
+        assert "eqbench4_elo" not in metrics and metrics["eqbench4_win_rate"] == 0.5
+        assert "gym eval prepare --benchmark eqbench4" in caplog.text
 
 
 def test_config_requires_a_judge(tmp_path: Path) -> None:
@@ -487,9 +491,12 @@ def test_comparisons_against_an_unrated_opponent_report_no_rating(tmp_path: Path
         {"reward": 0.6, "comparisons": [{"opponent": "ref-a", "fraction": 0.6}, {"opponent": "x", "fraction": 0.7}]}
     ]
     metrics = server.compute_metrics([rollouts])
-    assert "eqbench4_elo" not in metrics and metrics["eqbench4_unrated_opponents"] == 1
+    assert "eqbench4_elo" not in metrics and metrics["eqbench4_unrated_comparisons"] == 1
     assert metrics["eqbench4_win_rate"] == pytest.approx(0.65)
-    assert server.compute_repeat_metrics([rollouts]) == {"eqbench4_win_rate": pytest.approx(0.65)}
+    assert server.compute_repeat_metrics([rollouts]) == {
+        "eqbench4_win_rate": pytest.approx(0.65),
+        "eqbench4_unrated_comparisons": 1,
+    }
 
 
 def test_a_row_must_give_every_policy_turn_its_system_prompt() -> None:

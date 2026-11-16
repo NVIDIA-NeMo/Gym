@@ -13,14 +13,17 @@ from resources_servers.eqbench4.prepare import DEFAULT_OPPONENTS_PER_SCENARIO, p
 DATA_DIR = Path(__file__).parent / "data"
 OUTPUT_FPATH = DATA_DIR / "eqbench4_benchmark.jsonl"
 REFERENCE_COMPARISONS_FPATH = DATA_DIR / "reference_comparisons.jsonl"
+RATING_SOLVER_DIR = DATA_DIR / "rating_solver"
 CACHE_DIR = DATA_DIR / "upstream"
 
 
 def prepare(*, source_dir: str | None = None, opponents_per_scenario: int = DEFAULT_OPPONENTS_PER_SCENARIO) -> Path:
-    """Write the 120 scenario rows and the published comparison graph; return the rows' path."""
+    """Write the 120 scenario rows, the published comparison graph and the leaderboard's rating solver; return the
+    rows' path."""
     return prepare_eqbench4(
         OUTPUT_FPATH,
         REFERENCE_COMPARISONS_FPATH,
+        RATING_SOLVER_DIR,
         source_dir=source_dir,
         cache_dir=CACHE_DIR,
         opponents_per_scenario=opponents_per_scenario,

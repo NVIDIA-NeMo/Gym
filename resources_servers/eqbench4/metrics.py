@@ -2,11 +2,24 @@
 # SPDX-License-Identifier: Apache-2.0
 """EQ-Bench 4 aggregate metrics: the policy's rating on the published leaderboard scale."""
 
+import logging
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import Any
 
-from resources_servers.eqbench4.rating import Outcome, fit_ratings, rate_with_intervals
+from resources_servers.eqbench4.upstream_rating import Outcome, UpstreamSolver
+
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class RatingInputs:
+    """The published comparisons and the leaderboard's own solver, both written by the benchmark's prepare."""
+
+    reference: Sequence[Outcome]
+    solver: UpstreamSolver
 
 
 # The evaluated model's name in the rating fit; published models are named by their provider IDs.
@@ -33,7 +46,8 @@ _STOP_ADVICE = {
 
 
 def dropped_conversation_metrics(verify_responses: Sequence[dict[str, Any]]) -> dict[str, Any]:
-    """How many conversations were left out of the score because the policy or the persona stopped, over all rows."""
+    """How many conversations the policy stopped (each scored as a loss to every opponent) and the persona failed (left
+    out of the score), over all rows."""
     total = len(verify_responses)
     stopped = [row for row in verify_responses if row.get("conversation_status") == "policy_failed"]
     metrics: dict[str, Any] = {
@@ -54,7 +68,7 @@ def dropped_conversation_metrics(verify_responses: Sequence[dict[str, Any]]) -> 
 
 
 def dropped_conversation_alerts(metrics: dict[str, Any]) -> list[str]:
-    """Warnings for left-out conversations, naming each cause and what to check."""
+    """Warnings for stopped and left-out conversations, naming each cause and what to check."""
     total = metrics["eqbench4_conversations"]
     alerts = []
     if metrics["eqbench4_policy_stopped_conversations"]:
@@ -65,8 +79,8 @@ def dropped_conversation_alerts(metrics: dict[str, Any]) -> list[str]:
         )
         alerts.append(
             f"EQ-Bench 4: the policy stopped replying in {metrics['eqbench4_policy_stopped_conversations']} of "
-            f"{total} conversations ({metrics['eqbench4_policy_stopped_rate']:.1%}), which are left out of the "
-            f"score: {causes}."
+            f"{total} conversations ({metrics['eqbench4_policy_stopped_rate']:.1%}), each scored as a loss to every "
+            f"opponent: {causes}."
         )
     persona_failed = round(metrics["eqbench4_persona_failed_rate"] * total)
     if persona_failed:
@@ -95,13 +109,34 @@ def _models(reference: Sequence[Outcome]) -> list[str]:
     return sorted({outcome.model_a for outcome in reference} | {outcome.model_b for outcome in reference} | {POLICY})
 
 
-def _unrated_opponents(outcomes: Sequence[Outcome], models: Sequence[str]) -> set[str]:
-    """The policy's opponents that are not in the published comparisons (the synthetic example rows' opponents)."""
-    return {outcome.model_b for outcome in outcomes} - set(models)
+def _rateable(
+    outcomes: Sequence[Outcome], rating_inputs: Callable[[], RatingInputs], metrics: dict[str, Any]
+) -> tuple[RatingInputs, list[str]] | None:
+    """The rating inputs and the fit's models, or None, with a warning and the count in ``metrics``, when the policy
+    cannot be rated: the prepared files are missing, or some comparisons are against a model the published graph does
+    not hold (the synthetic example rows' opponent), which the fit would leave out."""
+    try:
+        inputs = rating_inputs()
+    except (FileNotFoundError, ValueError) as error:
+        logger.warning("EQ-Bench 4: no rating is reported: %s", error)
+        return None
+    models = _models(inputs.reference)
+    unrated = [outcome for outcome in outcomes if outcome.model_b not in models]
+    if unrated:
+        metrics["eqbench4_unrated_comparisons"] = len(unrated)
+        logger.warning(
+            "EQ-Bench 4: %d of %d comparisons are against models missing from the published comparisons (%s), which "
+            "the fit would leave out; no rating is reported",
+            len(unrated),
+            len(outcomes),
+            ", ".join(sorted({outcome.model_b for outcome in unrated})[:5]),
+        )
+        return None
+    return inputs, models
 
 
 def eqbench4_metrics(
-    tasks: Sequence[Sequence[dict[str, Any]]], reference: Sequence[Outcome], *, resamples: int
+    tasks: Sequence[Sequence[dict[str, Any]]], rating_inputs: Callable[[], RatingInputs], *, resamples: int
 ) -> dict[str, Any]:
     """The policy's Bradley-Terry rating among the published models, its 95% interval, and conversation statistics."""
     rollouts = _rollouts(tasks)
@@ -125,14 +160,11 @@ def eqbench4_metrics(
     if not outcomes:
         return metrics
     metrics["eqbench4_win_rate"] = sum(outcome.fraction_a for outcome in outcomes) / len(outcomes)
-    models = _models(reference)
-    if unrated := _unrated_opponents(outcomes, models):
-        # The fit leaves out a comparison against a model it does not know, so the rating would rest on the rest, or
-        # on none (the prior's 1200). Report no rating rather than one that ignores comparisons.
-        metrics["eqbench4_unrated_opponents"] = len(unrated)
+    rateable = _rateable(outcomes, rating_inputs, metrics)
+    if rateable is None:
         return metrics
-
-    ratings = rate_with_intervals(models, [*reference, *outcomes], resamples=resamples)
+    inputs, models = rateable
+    ratings = inputs.solver.rate_with_intervals(models, [*inputs.reference, *outcomes], resamples=resamples)
     policy = ratings[POLICY]
     metrics |= {
         "eqbench4_elo": policy.rating,
@@ -147,16 +179,19 @@ def eqbench4_metrics(
     return metrics
 
 
-def eqbench4_repeat_metrics(tasks: Sequence[Sequence[dict[str, Any]]], reference: Sequence[Outcome]) -> dict[str, Any]:
+def eqbench4_repeat_metrics(
+    tasks: Sequence[Sequence[dict[str, Any]]], rating_inputs: Callable[[], RatingInputs]
+) -> dict[str, Any]:
     """The policy's rating and win rate from one repeat's comparisons alone (no interval)."""
     outcomes = policy_outcomes(_rollouts(tasks))
     if not outcomes:
         return {}
     metrics: dict[str, Any] = {"eqbench4_win_rate": sum(outcome.fraction_a for outcome in outcomes) / len(outcomes)}
-    models = _models(reference)
-    if _unrated_opponents(outcomes, models):
+    rateable = _rateable(outcomes, rating_inputs, metrics)
+    if rateable is None:
         return metrics
-    return metrics | {"eqbench4_elo": fit_ratings(models, [*reference, *outcomes])[POLICY]}
+    inputs, models = rateable
+    return metrics | {"eqbench4_elo": inputs.solver.fit(models, [*inputs.reference, *outcomes])[POLICY]}
 
 
 def key_metrics(agent_metrics: dict[str, Any]) -> dict[str, Any]:

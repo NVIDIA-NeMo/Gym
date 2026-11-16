@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import json
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -15,6 +16,7 @@ from responses_api_agents.eqbench4_agent.app import (
     EQBench4AgentConfig,
     EQBench4RunRequest,
     PersonaReply,
+    PersonaUnavailableError,
     persona_messages,
     policy_stop_reason,
 )
@@ -194,7 +196,7 @@ async def test_persona_can_end_the_conversation() -> None:
     assert len(verify["transcript"]) == 2
 
 
-async def test_unusable_persona_replies_are_corrected_then_abandoned() -> None:
+async def test_unusable_persona_replies_are_corrected_then_fail_the_run_for_a_retry() -> None:
     servers = FakeServers(
         policy=["Hi.", "Go on."],
         persona=[
@@ -204,17 +206,17 @@ async def test_unusable_persona_replies_are_corrected_then_abandoned() -> None:
             "<internal>x</internal>",
         ],
     )
-    await make_agent(servers, persona_max_attempts=2).run(request(), make_body())
+    # The simulator broke the conversation, not the policy: the run fails, so the attempt is retried (a routed
+    # failure is a retryable agent_run_error) and the scenario keeps its place in the score.
+    with pytest.raises(PersonaUnavailableError, match="turn 2 after 2 attempt\(s\): no <dialogue> section"):
+        await make_agent(servers, persona_max_attempts=2).run(request(), make_body())
     persona = servers.bodies("persona")
     assert len(persona) == 4
     assert contents(persona[1])[-2:] == [
         ("assistant", "<dialogue>no monologue</dialogue>"),
         ("user", "Fix it: no <internal> section"),
     ]
-    verify = servers.verify_body()
-    assert verify["conversation_status"] == "persona_failed"
-    assert verify["conversation_error"] == "persona turn 2: no <dialogue> section"
-    assert [m["role"] for m in verify["transcript"]] == ["assistant", "user", "assistant"]
+    assert not [path for _, path, _ in servers.calls if path == "/verify"]
 
 
 def marked_response(*, metadata: dict | None = None, incomplete: str | None = None, refusal: bool = False) -> dict:
@@ -375,9 +377,12 @@ async def test_a_reply_without_a_response_id_is_reported_as_a_gap(capturing: Non
 
 async def test_a_persona_failure_leaves_the_policy_invocation_incomplete(capturing: None) -> None:
     servers = FakeServers(policy=["Hi."], persona=["<dialogue>no monologue</dialogue>"])
-    result = await make_agent(servers, persona_max_attempts=1).run(request(), captured_body())
-    root, persona_invocation = result.model_extra["ng_trajectory"]["invocations"]
-    assert (root["status"], persona_invocation["status"]) == ("incomplete", "failed")
+    inbound = request()
+    with pytest.raises(PersonaUnavailableError):
+        await make_agent(servers, persona_max_attempts=1).run(inbound, captured_body())
+    root, persona_invocation = inbound.state.nemo_gym_agent_trajectory.invocations
+    assert (root.status, persona_invocation.status) == ("incomplete", "failed")
+    assert persona_invocation.error_type == "PersonaUnavailableError" and len(persona_invocation.model_calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -508,3 +513,45 @@ def test_the_row_fields_the_agent_and_the_resources_server_share_do_not_drift() 
     for model in (EQBench4RunRequest, ResourcesRunRequest):
         own = set(model.model_fields) - set(TaskData.model_fields)
         assert own <= {"responses_create_params"} | set(model.__mro__[1].model_fields), (model.__module__, own)
+
+
+async def test_usage_is_reported_only_when_every_call_reported_it() -> None:
+    silent_persona = model_response(persona_text("Bye.", status="done"))
+    del silent_persona["usage"]
+
+    class SilentPersona(FakeServers):
+        async def post(self, *, server_name: str, url_path: str, json: Any, **kwargs: Any) -> FakeResponse:
+            if server_name == "persona":
+                self.calls.append((server_name, url_path, json.model_dump(mode="json")))
+                return FakeResponse(silent_persona)
+            return await super().post(server_name=server_name, url_path=url_path, json=json, **kwargs)
+
+    servers = SilentPersona(policy=["Hi."], persona=[])
+    await make_agent(servers).run(request(), make_body())
+    # A sum of the policy's usage alone would read as the whole conversation's.
+    assert servers.verify_body()["response"]["usage"] is None
+
+    complete = FakeServers(policy=["Hi."], persona=[persona_text("Bye.", status="done")])
+    await make_agent(complete).run(request(), make_body())
+    assert complete.verify_body()["response"]["usage"]["total_tokens"] == 2 * 10 + 2 * 99
+
+
+async def test_the_verify_payload_is_what_the_resources_server_reads() -> None:
+    """The conversation the agent sends to /verify validates as the resources server's verify request, for each way a
+    conversation ends, so a value one side adds alone fails here, not as a 422 in a run."""
+    from resources_servers.eqbench4.app import EQBench4VerifyRequest
+
+    row = json.loads(
+        (Path(__file__).parents[3] / "resources_servers/eqbench4/data/example.jsonl").read_text().splitlines()[0]
+    )
+    body = EQBench4RunRequest.model_validate(row | {"num_turns": 1})
+    endings = {
+        "completed": FakeServers(policy=["Hi."], persona=[persona_text("Ok.")]),
+        "persona_ended": FakeServers(policy=["Hi."], persona=[persona_text("Bye.", status="done")]),
+        "policy_failed": FakeServers(policy=[marked_response(incomplete="max_output_tokens")] * 7, persona=[]),
+    }
+    for status, servers in endings.items():
+        await make_agent(servers).run(request(), body)
+        verify = EQBench4VerifyRequest.model_validate(servers.verify_body())
+        assert verify.conversation_status == status
+    assert verify.policy_stop_reason == "output_budget"

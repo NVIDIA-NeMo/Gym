@@ -11,12 +11,12 @@ describes the measurement contract, provenance and differences from upstream; th
 | `conversation_status` | Result |
 | --- | --- |
 | `completed`, `persona_ended` | Judged against every opponent in the row; reward is the mean fraction |
-| `policy_failed` | No judge calls; reward 0, masked with the `failure_kind` of its `policy_stop_reason` |
-| `persona_failed` | No judge calls; reward 0, masked as `eqbench4:persona_failed` |
+| `policy_failed` | No judge calls; a loss to every opponent (fraction 0 each), reward 0, not masked |
+| `persona_failed` | No judge calls; reward 0, masked as `eqbench4:persona_failed` (only from an older agent: the current agent fails the run instead, so it is retried) |
 
-A stopped policy's `policy_stop_reason` maps to `failure_kind` as: `context_limit` → `model_context_limit`,
-`output_budget` → `eqbench4:policy_output_budget`, `content_filter` → `eqbench4:policy_content_filter`,
-`empty_reply` (also when no reason is given) → `eqbench4:policy_empty_reply`.
+A conversation the policy stopped keeps its `policy_stop_reason` (`context_limit`, `output_budget`,
+`content_filter`, or `empty_reply`, also when no reason is given). It is graded without a judge, inside
+`observe_programmatic_grading`, so its grading record is complete and bound to the loss.
 
 For each opponent the pairwise judge reads both conversations twice, policy first and opponent first, filled into the
 row's `pairwise_prompt` with seeded respondent codes. Judge `n` of `judge_model_servers` reads comparison
@@ -33,13 +33,18 @@ When `trait_judge_model_server` is set, the trait judge scores the conversation'
 never changes the reward; a failure is kept in `trait_judge_error`.
 
 The response adds `comparisons` (per opponent: fraction, margins, and each judge reading with its verdicts and text),
-`policy_turns`, `trait_scores`, `trait_judge_text`, `trait_judge_error`, and `evaluation_completed`: true for a judged
+`policy_turns`, `trait_scores`, `trait_judge_text`, `trait_judge_error`, and `evaluation_completed`: true for a scored
 conversation, false for one left out of the score without judging.
 
 ## Metrics
 
-`compute_metrics` reads the published comparisons at `reference_comparisons_path` (written by the benchmark's prepare
-script) and fits Bradley-Terry ratings to them together with the policy's comparisons:
+`compute_metrics` reads the published comparisons at `reference_comparisons_path` and rates the policy together with
+them by running EQ-Bench 4's own solver (`src/eqbench/ranking/soft_bt_solver.py` and its `config.py`), which the
+benchmark's prepare script downloads, checks against pinned SHA-256 hashes and writes to `rating_solver_dir`.
+`upstream_rating.py` checks the files again, imports them and calls `fit_soft_bt` and
+`compute_local_delta_percentile_bootstrap_ratings`; Gym holds no rating code. Without the prepared files, or when some
+comparisons are against a model the published graph does not hold, no rating is reported and a warning says why; the
+other metrics are:
 
 | Metric | Meaning |
 | --- | --- |
@@ -48,30 +53,32 @@ script) and fits Bradley-Terry ratings to them together with the policy's compar
 | `eqbench4_rank`, `eqbench4_models_ranked` | The policy's place among the rated models |
 | `eqbench4_ladder/<model>` | Each published model's rating in the same fit |
 | `eqbench4_win_rate` | Mean comparison fraction |
-| `eqbench4_unrated_opponents` | Opponents missing from the published comparisons (such as the synthetic example rows' opponent); when nonzero, no rating is reported, since the fit would leave those comparisons out |
+| `eqbench4_unrated_comparisons` | Comparisons against models missing from the published comparisons (such as the synthetic example rows' opponent); when nonzero, no rating is reported, since the fit would leave them out |
 | `eqbench4_trait/<name>` | Mean trait score, when the trait judge runs |
 | `eqbench4_judged_conversations`, `eqbench4_persona_ended_rate`, `eqbench4_mean_policy_turns` | Statistics of the judged conversations |
 
 `compute_repeat_metrics` reports each repeat's rating and win rate without an interval.
 
-Gym passes only scored rows to `compute_metrics`, so `aggregate_metrics` counts the conversations left out of the
-score over every row and adds:
+`aggregate_metrics` counts, over every row, the conversations the policy stopped and those left out of the score, and
+adds:
 
 | Metric | Meaning |
 | --- | --- |
-| `eqbench4_conversations` | All conversations, scored or left out |
-| `eqbench4_policy_stopped_rate`, `eqbench4_policy_stopped_conversations` | Share and count the policy stopped (key metric) |
+| `eqbench4_conversations` | All conversations |
+| `eqbench4_policy_stopped_rate`, `eqbench4_policy_stopped_conversations` | Share and count the policy stopped, each scored as a loss (key metric) |
 | `eqbench4_policy_stopped_rate/<cause>`, `eqbench4_policy_stopped/<cause>` | The same per cause: `context_limit`, `output_budget`, `content_filter`, `empty_reply` |
-| `eqbench4_persona_failed_rate` | Share the persona could not continue (key metric) |
+| `eqbench4_persona_failed_rate` | Share an older agent reported the persona could not continue (key metric) |
 
-When any conversation was left out it logs a warning with the counts per cause and the usual fix.
+When the policy stopped any conversation it logs a warning with the counts per cause and the usual fix.
 
 ## Configuration
 
-`configs/eqbench4.yaml` pairs the server with `eqbench4_agent` and a `legacy_agent` environment server;
-`configs/eqbench4_models.yaml` defines the persona and judge model servers. Key settings:
+`configs/eqbench4.yaml` pairs the server with `eqbench4_agent` and a `legacy_agent` environment server, and admits only
+that agent (`allowed_agents`): the conversation with the simulated persona is the agent's, so EQ-Bench 4 runs only with
+`eqbench4_agent`. `configs/eqbench4_models.yaml` defines the persona and judge model servers. Key settings:
 `judge_model_servers`, `judge_responses_create_params`, `judge_max_attempts`, `trait_judge_model_server`,
-`judge_concurrency`, `judge_timeout_secs`, `reference_comparisons_path` and `rating_bootstrap_resamples`.
+`judge_concurrency`, `judge_timeout_secs`, `reference_comparisons_path`, `rating_solver_dir` and
+`rating_bootstrap_resamples`.
 
 ## Tests
 
@@ -82,10 +89,9 @@ gym env test eqbench4
 
 ## Licensing
 
-Code: Apache-2.0. Data: prepared from [EQ-bench/eqbench4](https://github.com/EQ-bench/eqbench4) under BSD-3-Clause
-with the Commons Clause condition; nothing from it is committed. `data/example.jsonl` and the verifier fixture are
-synthetic.
+Code: Apache-2.0. Data and the rating solver: downloaded at preparation from
+[EQ-bench/eqbench4](https://github.com/EQ-bench/eqbench4) under BSD-3-Clause with the Commons Clause condition;
+nothing from it is committed. `data/example.jsonl`, the verifier fixture and the tests' stand-in solver are synthetic.
 
 Dependencies
 - nemo_gym: Apache 2.0
-- numpy: BSD-3-Clause

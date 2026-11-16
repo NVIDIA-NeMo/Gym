@@ -31,6 +31,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
     observe_llm_judge_grading,
+    observe_programmatic_grading,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import (
@@ -55,35 +56,29 @@ from resources_servers.eqbench4.judging import (
     weighted_margins,
 )
 from resources_servers.eqbench4.metrics import (
+    RatingInputs,
     dropped_conversation_alerts,
     dropped_conversation_metrics,
     eqbench4_metrics,
     eqbench4_repeat_metrics,
     key_metrics,
 )
-from resources_servers.eqbench4.rating import Outcome
 from resources_servers.eqbench4.task_data import (
     CONVERSATION_METADATA_KEY,
+    ConversationStatus,
     Opponent,
+    PolicyStopReason,
     SlottedPrompt,
     TranscriptMessage,
 )
+from resources_servers.eqbench4.upstream_rating import Outcome, UpstreamSolver
 from resources_servers.eqbench4.verifier_fixture import create_fixture_server, invoke_with_fixture_judge
 
 
 logger = logging.getLogger(__name__)
 
 GYM_ROOT = Path(__file__).resolve().parents[2]
-ConversationStatus = Literal["completed", "persona_ended", "persona_failed", "policy_failed"]
 Direction = Literal["policy_first", "opponent_first"]
-PolicyStopReason = Literal["context_limit", "output_budget", "content_filter", "empty_reply"]
-# How a conversation the policy stopped is labelled; a context-window overflow uses Gym's shared kind.
-POLICY_STOP_FAILURE_KINDS: dict[str, str] = {
-    "context_limit": "model_context_limit",
-    "output_budget": "eqbench4:policy_output_budget",
-    "content_filter": "eqbench4:policy_content_filter",
-    "empty_reply": "eqbench4:policy_empty_reply",
-}
 
 
 class EQBench4ResourcesServerConfig(BaseResourcesServerConfig):
@@ -102,6 +97,8 @@ class EQBench4ResourcesServerConfig(BaseResourcesServerConfig):
     judge_timeout_secs: float = Field(default=1800, gt=0)
     # Published comparisons written by the benchmark's prepare script, relative to the Gym root unless absolute.
     reference_comparisons_path: str
+    # EQ-Bench 4's own rating solver, downloaded and written there by the same prepare script (see upstream_rating).
+    rating_solver_dir: str
     rating_bootstrap_resamples: int = Field(default=200, ge=1)
 
 
@@ -195,6 +192,7 @@ class EQBench4ResourcesServer(SimpleResourcesServer):
     config: EQBench4ResourcesServerConfig
     _judge_semaphore: asyncio.Semaphore = PrivateAttr()
     _reference_outcomes: list[Outcome] | None = PrivateAttr(default=None)
+    _solver: UpstreamSolver | None = PrivateAttr(default=None)
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
@@ -215,17 +213,30 @@ class EQBench4ResourcesServer(SimpleResourcesServer):
                 failure_reason=body.conversation_error or "the persona simulator gave no valid reply",
             )
         if body.conversation_status == "policy_failed" or policy_turns == 0:
-            # As in EQ-Bench 4, an unfinished conversation is left out of the score; aggregate_metrics reports it.
+            # The policy stopped the conversation (no visible reply, an exhausted output budget, a content filter or
+            # refusal, a context overflow): it loses every comparison of the scenario. Masking it would rate the
+            # policy only on the conversations it chose to finish. aggregate_metrics reports the stops and why.
             reason = body.policy_stop_reason or "empty_reply"
-            return EQBench4VerifyResponse(
-                **(fields | {"policy_stop_reason": reason}),
-                reward=0.0,
-                policy_turns=policy_turns,
-                mask_sample=True,
-                evaluation_completed=False,
-                failure_kind=POLICY_STOP_FAILURE_KINDS[reason],
-                failure_reason=body.conversation_error or "the policy gave no visible reply",
-            )
+
+            def lose() -> EQBench4VerifyResponse:
+                return EQBench4VerifyResponse(
+                    **(fields | {"policy_stop_reason": reason}),
+                    reward=0.0,
+                    policy_turns=policy_turns,
+                    comparisons=[
+                        OpponentComparison(
+                            opponent=opponent.model,
+                            comparison_index=opponent.comparison_index,
+                            fraction=0.0,
+                            policy_margin=0.0,
+                            opponent_margin=0.0,
+                            readings=[],
+                        )
+                        for opponent in body.opponents
+                    ],
+                )
+
+            return observe_programmatic_grading(lose)
 
         async def grade() -> EQBench4VerifyResponse:
             # Every judge call of the verify belongs to its one grading operation, as Gym's trial gate requires, the
@@ -426,10 +437,10 @@ class EQBench4ResourcesServer(SimpleResourcesServer):
         return self._reference_outcomes
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
-        """Gym's aggregation, plus how many conversations were left out of the score and why.
+        """Gym's aggregation, plus how many conversations the policy stopped or were left out of the score, and why.
 
-        ``compute_metrics`` sees only scored rows, so the left-out conversations are counted here, over every row,
-        and each kind that occurred is logged as a warning.
+        ``compute_metrics`` sees only scored rows, so these are counted here, over every row, and each kind that
+        occurred is logged as a warning.
         """
         result = await super().aggregate_metrics(body)
         dropped = dropped_conversation_metrics(body.verify_responses)
@@ -441,11 +452,17 @@ class EQBench4ResourcesServer(SimpleResourcesServer):
             logger.warning(alert)
         return result
 
+    def _rating_inputs(self) -> RatingInputs:
+        if self._solver is None:
+            path = Path(self.config.rating_solver_dir)
+            self._solver = UpstreamSolver(path if path.is_absolute() else GYM_ROOT / path)
+        return RatingInputs(reference=self._reference(), solver=self._solver)
+
     def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
-        return eqbench4_metrics(tasks, self._reference(), resamples=self.config.rating_bootstrap_resamples)
+        return eqbench4_metrics(tasks, self._rating_inputs, resamples=self.config.rating_bootstrap_resamples)
 
     def compute_repeat_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
-        return eqbench4_repeat_metrics(tasks, self._reference())
+        return eqbench4_repeat_metrics(tasks, self._rating_inputs)
 
     def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:
         return key_metrics(agent_metrics)

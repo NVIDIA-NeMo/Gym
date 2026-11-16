@@ -1051,7 +1051,6 @@ version = "0.0.0"
 source = { virtual = "." }
 dependencies = [
     { name = "nemo-gym", extra = ["dev"] },
-    { name = "numpy" },
 ]
 
 [package.optional-dependencies]
@@ -1063,7 +1062,6 @@ telemetry = [
 requires-dist = [
     { name = "nemo-gym", extras = ["dev"], editable = "../../" },
     { name = "nemo-gym", extras = ["telemetry"], marker = "extra == 'telemetry'", editable = "../../" },
-    { name = "numpy" },
 ]
 provides-extras = ["telemetry"]
 

@@ -6,7 +6,9 @@ Source: https://github.com/EQ-bench/eqbench4 at revision 93dcb7f5d430433ad49d501
 BSD-3-Clause with the Commons Clause condition (Licensor: Samuel J. Paech). Nothing from that repository is stored in
 Gym. Preparation downloads the scenario dataset, the prompt and rubric files, the prompt-building module and the
 published result files, checks each against a pinned SHA-256, and runs the upstream prompt builder on the downloaded
-copy, so the rendered prompts match the leaderboard runs exactly. The prepared files are gitignored.
+copy, so the rendered prompts match the leaderboard runs exactly. It also writes the leaderboard's rating solver to the
+solver directory, which the resources server runs to rate the policy (see upstream_rating). The prepared files are
+gitignored.
 
 Every row holds one scenario: the evaluated model's per-turn system prompts and opening message, the persona
 simulator's system prompt, the pairwise and trait judge prompts split around their runtime slots, and the transcripts
@@ -28,7 +30,7 @@ from types import ModuleType
 from typing import Any
 
 from resources_servers.eqbench4.judging import NO_FINAL_STATE
-from resources_servers.eqbench4.rating import Outcome, canonical, fit_ratings
+from resources_servers.eqbench4.upstream_rating import SOLVER_SHA256, Outcome, UpstreamSolver, canonical, write_solver
 
 
 REVISION = "93dcb7f5d430433ad49d501e672a98bcff2c9678"
@@ -71,6 +73,8 @@ SOURCE_SHA256 = {
     "src/eqbench/rubrics/pairwise_dimensions_weights.txt": (
         "23c7166ca47128c4b12544cbed0b8cd14d386ea42ed04a381bab7c72768d7a83"
     ),
+    # The leaderboard's rating solver and its settings, run from the solver directory (see upstream_rating).
+    **SOLVER_SHA256,
     # Published leaderboard runs: one evaluated model each, with its transcripts and the comparisons its rating run
     # added.
     "results/r23.json": "c4a589e2a366f85723032070ba59ae1088c5897854355c2f588a3e8b76fbd3d3",
@@ -359,11 +363,11 @@ class ReferenceRuns:
             }
         )
 
-    def ladder(self) -> list[str]:
-        """Published models from the highest to the lowest fitted rating."""
+    def ladder(self, solver: UpstreamSolver) -> list[str]:
+        """Published models from the highest to the lowest rating the leaderboard's solver fits."""
         models = sorted(self.transcripts)
         outcomes = [Outcome(item["model_a"], item["model_b"], item["fraction_a"]) for item in self.comparisons]
-        ratings = fit_ratings(models, outcomes)
+        ratings = solver.fit(models, outcomes)
         return sorted(models, key=lambda model: (-ratings[model], model))
 
 
@@ -380,10 +384,11 @@ def build_rows(
     docs: list[dict[str, Any]],
     renderer: ScenarioRenderer,
     references: ReferenceRuns,
+    solver: UpstreamSolver,
     *,
     opponents_per_scenario: int,
 ) -> list[dict[str, Any]]:
-    ladder = references.ladder()
+    ladder = references.ladder(solver)
     rows = []
     for scenario_index, doc in enumerate(docs):
         scenario_id = doc["id"]
@@ -402,6 +407,7 @@ def build_rows(
                     "temperature": POLICY_TEMPERATURE,
                     "max_output_tokens": POLICY_MAX_OUTPUT_TOKENS,
                 },
+                "task_id": scenario_id,
                 "scenario_id": scenario_id,
                 "scenario_index": scenario_index,
                 "source_type": doc.get("source_type", "generated"),
@@ -439,13 +445,15 @@ def _write_jsonl(path: Path, items: list[dict[str, Any]]) -> None:
 def prepare_eqbench4(
     output_path: Path,
     reference_comparisons_path: Path,
+    rating_solver_dir: Path,
     *,
     source_dir: str | Path | None = None,
     cache_dir: Path | None = None,
     opponents_per_scenario: int = DEFAULT_OPPONENTS_PER_SCENARIO,
     log: Callable[[str], None] = print,
 ) -> Path:
-    """Write the benchmark rows and the published comparison graph; return the rows' path."""
+    """Write the benchmark rows, the published comparison graph and the leaderboard's rating solver; return the rows'
+    path."""
     if opponents_per_scenario < 1:
         raise ValueError("opponents_per_scenario must be at least 1")
     source = Path(source_dir) if source_dir is not None else None
@@ -459,9 +467,11 @@ def prepare_eqbench4(
     for path in RESULT_FILES:
         log(f"Reading {path}")
         references.add_run_file(json.loads(load_source(path, source_dir=source, cache_dir=cache_dir)))
+    write_solver(rating_solver_dir, files)
+    solver = UpstreamSolver(rating_solver_dir)
     with upstream_prompt_module(files) as prompts:
         rows = build_rows(
-            docs, ScenarioRenderer(prompts, files), references, opponents_per_scenario=opponents_per_scenario
+            docs, ScenarioRenderer(prompts, files), references, solver, opponents_per_scenario=opponents_per_scenario
         )
     _write_jsonl(reference_comparisons_path, references.comparisons)
     _write_jsonl(output_path, rows)

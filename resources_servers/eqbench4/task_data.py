@@ -13,6 +13,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # to grade it; the grading binding then covers the whole conversation, too.
 CONVERSATION_METADATA_KEY = "eqbench4_conversation"
 
+# How a conversation ended and, for one the policy stopped, why: eqbench4_agent sends them to /verify, and the
+# resources server reads them from there, so both declare them from here.
+ConversationStatus = Literal["completed", "persona_ended", "persona_failed", "policy_failed"]
+PolicyStopReason = Literal["context_limit", "output_budget", "content_filter", "empty_reply"]
+
 
 class TranscriptMessage(BaseModel):
     """One message of a conversation; ``user`` is the simulated persona and ``assistant`` the evaluated model."""
@@ -51,6 +56,9 @@ class Opponent(BaseModel):
 class TaskData(BaseModel):
     model_config = ConfigDict(extra="allow")
 
+    # The row's identity for resume and comparison: the scenario id, so it holds across re-preparations that change
+    # the opponents or the row order.
+    task_id: str
     scenario_id: str
     scenario_index: int = Field(ge=0)
     source_type: str = Field(default="generated", json_schema_extra={"consumed_by": ["metrics"]})

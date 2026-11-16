@@ -186,24 +186,31 @@ async def test_a_lost_conversation_is_an_unmasked_low_score(tmp_path: Path) -> N
     assert operation.outcome == "completed"
 
 
-@pytest.mark.parametrize(
-    ("fields", "failure_kind"),
-    [
-        ({"conversation_status": "policy_failed", "policy_stop_reason": "context_limit"}, "model_context_limit"),
-        (
-            {"conversation_status": "policy_failed", "policy_stop_reason": "output_budget"},
-            "eqbench4:policy_output_budget",
-        ),
-        ({"conversation_status": "persona_failed"}, "eqbench4:persona_failed"),
-    ],
-)
-async def test_an_unfinished_conversation_is_typed_masked_and_keeps_the_answer(
-    tmp_path: Path, fields: dict[str, Any], failure_kind: str
+@pytest.mark.parametrize("reason", ["context_limit", "output_budget", "content_filter", "empty_reply"])
+async def test_a_conversation_the_policy_stopped_is_a_recorded_loss_that_keeps_the_answer(
+    tmp_path: Path, reason: str
 ) -> None:
     transport = JudgeTransport()
-    request = make_request(**fields, conversation_error="stopped")
+    request = make_request(conversation_status="policy_failed", policy_stop_reason=reason, conversation_error="stop")
     result, invocation = await verify_observed(judged_server(tmp_path, transport), request)
 
+    # The policy's own stop: an unmasked loss to every opponent, graded without a judge and bound to the result.
+    assert (result.reward, result.mask_sample, result.evaluation_completed) == (0.0, False, True)
+    assert result.failure_kind is None and result.policy_stop_reason == reason
+    (operation,) = invocation.grading_operations
+    assert operation.outcome == "completed" and operation.kind != "llm_judge" and not operation.dependencies
+    assert operation.result_binding_sha256 == grading_result_binding(result)
+    assert not transport.replies
+    assert result.response == request.response and result.transcript == request.transcript
+
+
+async def test_a_persona_failure_from_an_older_agent_is_typed_masked_and_keeps_the_answer(tmp_path: Path) -> None:
+    # The current agent raises instead (a retried agent_run_error); a saved row an older agent wrote stays masked.
+    transport = JudgeTransport()
+    request = make_request(conversation_status="persona_failed", conversation_error="stopped")
+    result, invocation = await verify_observed(judged_server(tmp_path, transport), request)
+
+    failure_kind = "eqbench4:persona_failed"
     assert (result.mask_sample, result.evaluation_completed, result.failure_kind) == (True, False, failure_kind)
     assert result.failure_reason == "stopped"
     # Nothing was judged, and the policy's answer and conversation are kept as sent.

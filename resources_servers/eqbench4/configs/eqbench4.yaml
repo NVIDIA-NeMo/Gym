@@ -6,6 +6,8 @@ eqbench4_resources_server:
       entrypoint: app.py
       domain: rlhf
       verified: true
+      # The conversation with the simulated persona is eqbench4_agent's; another harness would judge no conversation.
+      allowed_agents: [eqbench4_agent]
       description: EQ-Bench 4 applied emotional-intelligence roleplay benchmark with a simulated persona
       value: Measure perception, adaptability and repair in multi-turn conversations with simulated users
       # The pairwise judge panel; comparison n goes to judge n modulo the panel size, as in EQ-Bench 4.
@@ -33,6 +35,8 @@ eqbench4_resources_server:
       judge_concurrency: 16
       judge_timeout_secs: 1800
       reference_comparisons_path: benchmarks/eqbench4/data/reference_comparisons.jsonl
+      # EQ-Bench 4's own rating solver, downloaded by the same prepare (no rating code is stored in Gym).
+      rating_solver_dir: benchmarks/eqbench4/data/rating_solver
       rating_bootstrap_resamples: 200
       datasets:
       - name: example

@@ -12,10 +12,13 @@ Runs one EQ-Bench 4 roleplay conversation between the policy and a simulated per
   the conversation with the roles swapped, its own latest reply in full and earlier replies as dialogue only, and
   `[Turn k of n]` before the policy's latest message.
 - The returned response is the last policy reply. Its usage sums every model call of the conversation, the policy's
-  and the persona's, because Gym's rollout usage covers the rollout's whole invocation tree.
+  and the persona's, because Gym's rollout usage covers the rollout's whole invocation tree; when any call reported
+  no usage, it is null rather than a partial sum.
 - A persona reply must have a non-empty `<internal>` section and a non-empty `<dialogue>` without control tags.
   Otherwise the agent shows the reply back with `persona_correction_message` and asks again, up to
-  `persona_max_attempts` replies; then the conversation ends as `persona_failed`. `<status>ended</status>` (or `end`,
+  `persona_max_attempts` replies; then the run fails with `PersonaUnavailableError`, a retryable `agent_run_error`
+  in the failures sidecar, so the conversation runs again on resume. The persona's calls carry no training
+  framework's sampling values (`trained=False`). `<status>ended</status>` (or `end`,
   `done`, `finished`, `stop`, `stopped`) ends it as `persona_ended`.
 - A policy reply with no visible text (after removing reasoning, including a reasoning block cut off before it
   closed) is asked again, up to `policy_max_attempts` replies (seven, as in EQ-Bench 4); then the conversation ends as

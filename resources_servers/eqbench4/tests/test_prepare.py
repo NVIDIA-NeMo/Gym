@@ -13,6 +13,8 @@ import pytest
 from resources_servers.eqbench4 import prepare as P
 from resources_servers.eqbench4.judging import PromptParts
 from resources_servers.eqbench4.task_data import TaskData
+from resources_servers.eqbench4.tests.stand_in_solver import STAND_IN_FILES
+from resources_servers.eqbench4.upstream_rating import UpstreamSolver
 
 
 STAND_IN_PROMPTS = """
@@ -133,6 +135,8 @@ def stand_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         ).encode(),
         "results/r2.json": json.dumps(_run_file("beta", [_comparison("beta", "gamma", "s2", 0.6)])).encode(),
         "results/r3.json": json.dumps(_run_file("gamma", [])).encode(),
+        # The rating solver, a stand-in pinned by the conftest.
+        **STAND_IN_FILES,
     }
     for path, data in files.items():
         target = tmp_path / path
@@ -206,7 +210,7 @@ def test_reference_runs_dedupe_and_ladder(stand_in: Path) -> None:
         {"model_a": "alpha", "model_b": "gamma", "fraction_a": 1.0, "scenario_id": "s2"},
         {"model_a": "beta", "model_b": "gamma", "fraction_a": 0.6, "scenario_id": "s2"},
     ]
-    assert references.ladder() == ["alpha", "beta", "gamma"]
+    assert references.ladder(UpstreamSolver(stand_in)) == ["alpha", "beta", "gamma"]
 
 
 def test_select_opponents_spreads_and_rotates() -> None:
@@ -224,6 +228,7 @@ def test_prepare_writes_rows_and_comparisons(stand_in: Path, tmp_path: Path) -> 
     output = P.prepare_eqbench4(
         tmp_path / "out" / "rows.jsonl",
         tmp_path / "out" / "comparisons.jsonl",
+        tmp_path / "out" / "solver",
         source_dir=stand_in,
         opponents_per_scenario=2,
         log=lambda message: None,
@@ -232,7 +237,11 @@ def test_prepare_writes_rows_and_comparisons(stand_in: Path, tmp_path: Path) -> 
     rows = [json.loads(line) for line in output.read_text().splitlines()]
     comparisons = [json.loads(line) for line in (tmp_path / "out" / "comparisons.jsonl").read_text().splitlines()]
     assert len(rows) == 2 and len(comparisons) == 3
+    # The leaderboard's solver is written beside them, as downloaded, for the resources server to run.
+    for path, data in STAND_IN_FILES.items():
+        assert (tmp_path / "out" / "solver" / path).read_bytes() == data
     first = TaskData.model_validate(rows[0])
+    assert [row["task_id"] for row in rows] == [row["scenario_id"] for row in rows] == ["s1", "s2"]
     assert rows[0]["responses_create_params"]["input"] == [
         {"role": "system", "content": "evaluated s1 turn 1/8"},
         {"role": "user", "content": '[Presenting issue (what begins this conversation): "issue s1"]'},
@@ -270,7 +279,9 @@ def test_prepare_writes_rows_and_comparisons(stand_in: Path, tmp_path: Path) -> 
 
 def test_prepare_rejects_bad_settings_and_scenarios(stand_in: Path, tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="at least 1"):
-        P.prepare_eqbench4(tmp_path / "a", tmp_path / "b", source_dir=stand_in, opponents_per_scenario=0)
+        P.prepare_eqbench4(
+            tmp_path / "a", tmp_path / "b", tmp_path / "c", source_dir=stand_in, opponents_per_scenario=0
+        )
     files = {path: P.load_source(path, source_dir=stand_in) for path in P.SOURCE_SHA256 if "results/" not in path}
     with P.upstream_prompt_module(files) as prompts:
         renderer = P.ScenarioRenderer(prompts, files)

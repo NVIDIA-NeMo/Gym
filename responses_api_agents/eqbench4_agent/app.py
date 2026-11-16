@@ -3,7 +3,8 @@
 """EQ-Bench 4 agent: a roleplay conversation between the policy and a simulated persona, then verification.
 
 The conversation follows EQ-Bench 4 (https://github.com/EQ-bench/eqbench4, revision
-93dcb7f5d430433ad49d501e672a98bcff2c9678), implemented independently:
+93dcb7f5d430433ad49d501e672a98bcff2c9678, licensed under BSD-3-Clause with the Commons Clause condition, Licensor:
+Samuel J. Paech), implemented independently:
 
 * The policy opens. Each policy turn sees that turn's system prompt and the dialogue so far; the first turn also sees
   the opening message that states the presenting issue.
@@ -41,7 +42,12 @@ from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.trajectory import AgentInvocation, ModelCallRef, ObservationGap, TrajectoryRecord, TrajectoryTurn
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.eqbench4.judging import strip_thinking
-from resources_servers.eqbench4.task_data import CONVERSATION_METADATA_KEY, check_system_prompts_cover_turns
+from resources_servers.eqbench4.task_data import (
+    CONVERSATION_METADATA_KEY,
+    ConversationStatus,
+    PolicyStopReason,
+    check_system_prompts_cover_turns,
+)
 
 
 LOG = logging.getLogger(__name__)
@@ -86,6 +92,12 @@ class EQBench4RunRequest(BaseRunRequest):
     def _a_system_prompt_per_policy_turn(self) -> "EQBench4RunRequest":
         check_system_prompts_cover_turns(self.evaluated_system_prompts, self.num_turns)
         return self
+
+
+class PersonaUnavailableError(RuntimeError):
+    """The persona simulator gave no usable reply in all its attempts. The simulator, not the policy, broke the
+    conversation, so the run fails like any other unavailable dependency: the attempt is retried (a routed failure
+    is a retryable ``agent_run_error``), and the scenario keeps its place in the score."""
 
 
 class EQBench4AgentVerifyResponse(BaseVerifyResponse):
@@ -289,10 +301,12 @@ class EQBench4Agent(SimpleResponsesAPIAgent):
 
         transcript: list[dict[str, str]] = []
         usage: NeMoGymResponseUsage | None = None
+        # Whether every model call reported its usage; a partial sum would read as the whole conversation's.
+        usage_complete = True
         policy_response: dict[str, Any] | None = None
-        status: Literal["completed", "persona_ended", "persona_failed", "policy_failed"] = "completed"
+        status: ConversationStatus = "completed"
         error: str | None = None
-        stop_reason: str | None = None
+        stop_reason: PolicyStopReason | None = None
         policy_turns = persona_turns = 0
         speaking = POLICY_INVOCATION
         try:
@@ -321,6 +335,7 @@ class EQBench4Agent(SimpleResponsesAPIAgent):
                         question = params.model_dump(mode="json")["input"]
                         trajectory.turn(POLICY_INVOCATION, self.config.model_server, started_at, question, parsed)
                     usage = accumulate_response_usage(usage, parsed.usage)
+                    usage_complete = usage_complete and parsed.usage is not None
                     text = visible_text(parsed)
                     if text:
                         break
@@ -343,12 +358,16 @@ class EQBench4Agent(SimpleResponsesAPIAgent):
 
                 # Every policy turn gets a persona reply, so the conversation ends on the persona's last turn.
                 speaking = PERSONA_INVOCATION
-                persona, persona_usage = await self._persona_reply(body, transcript, persona_turns + 1, trajectory)
+                persona, persona_usage, persona_usage_complete = await self._persona_reply(
+                    body, transcript, persona_turns + 1, trajectory
+                )
                 usage = accumulate_response_usage(usage, persona_usage)
+                usage_complete = usage_complete and persona_usage_complete
                 if persona.problems:
-                    status = "persona_failed"
-                    error = f"persona turn {persona_turns + 1}: " + "; ".join(persona.problems)
-                    break
+                    raise PersonaUnavailableError(
+                        f"no usable persona reply in turn {persona_turns + 1} after "
+                        f"{self.config.persona_max_attempts} attempt(s): " + "; ".join(persona.problems)
+                    )
                 transcript.append({"role": "user", "content": persona.dialogue, "raw_response": persona.text})
                 persona_turns += 1
                 if persona.ended:
@@ -395,7 +414,7 @@ class EQBench4Agent(SimpleResponsesAPIAgent):
         if policy_response is not None:
             metadata = (policy_response.get("metadata") or {}) | {CONVERSATION_METADATA_KEY: json.dumps(conversation)}
             policy_response = policy_response | {
-                "usage": usage.model_dump(mode="json") if usage else None,
+                "usage": usage.model_dump(mode="json") if usage and usage_complete else None,
                 "metadata": metadata,
             }
         verify_request = body.model_dump() | {"response": policy_response, **conversation}
@@ -413,7 +432,7 @@ class EQBench4Agent(SimpleResponsesAPIAgent):
         if policy_response is None:
             # No policy reply to grade: the verifier masks the row with a placeholder response, which carries the
             # usage of the calls that were made.
-            result.response.usage = usage
+            result.response.usage = usage if usage_complete else None
         return result
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
@@ -432,11 +451,13 @@ class EQBench4Agent(SimpleResponsesAPIAgent):
         transcript: list[dict[str, str]],
         turn: int,
         trajectory: ConversationTrajectory | None = None,
-    ) -> tuple[PersonaReply, NeMoGymResponseUsage | None]:
-        """The persona's reply to the latest policy turn, and the usage of every persona call it took."""
+    ) -> tuple[PersonaReply, NeMoGymResponseUsage | None, bool]:
+        """The persona's reply to the latest policy turn, the usage of every persona call it took, and whether every
+        one of those calls reported its usage."""
         messages = persona_messages(body.persona_system_prompt, transcript, turn, body.num_turns)
         reply = PersonaReply("")
         usage: NeMoGymResponseUsage | None = None
+        complete = True
         for attempt in range(1, self.config.persona_max_attempts + 1):
             params = self.config.persona_responses_create_params.model_copy(deep=True)
             params.input = [NeMoGymEasyInputMessage(role=m["role"], content=m["content"]) for m in messages]
@@ -454,9 +475,10 @@ class EQBench4Agent(SimpleResponsesAPIAgent):
             if trajectory is not None:
                 trajectory.turn(PERSONA_INVOCATION, self.config.persona_model_server, started_at, messages, parsed)
             usage = accumulate_response_usage(usage, parsed.usage)
+            complete = complete and parsed.usage is not None
             reply = PersonaReply(visible_text(parsed))
             if not reply.problems:
-                return reply, usage
+                return reply, usage, complete
             LOG.warning("Persona reply %d of turn %d unusable: %s", attempt, turn, "; ".join(reply.problems))
             messages = [
                 *messages,
@@ -466,7 +488,7 @@ class EQBench4Agent(SimpleResponsesAPIAgent):
                     "content": self.config.persona_correction_message.format(problems="; ".join(reply.problems)),
                 },
             ]
-        return reply, usage
+        return reply, usage, complete
 
 
 if __name__ == "__main__":

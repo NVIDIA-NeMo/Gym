@@ -16,18 +16,23 @@ Samuel J. Paech). Preparation downloads, and checks against pinned SHA-256 hashe
 - the prompt and rubric files and the prompt-building module `src/eqbench/core/prompts.py` with its schema imports,
   which preparation runs on the downloaded copy so every prompt is rendered exactly as in the leaderboard runs;
 - the 28 published result files `results/r*.json` (about 1.7 GB): their transcripts are the opponents, and their
-  10,689 pairwise comparisons are the reference rating graph.
+  10,689 pairwise comparisons are the reference rating graph;
+- the rating solver `src/eqbench/ranking/soft_bt_solver.py` and its `config.py`, which preparation writes to
+  `data/rating_solver/` and the resources server runs to rate the policy.
 
 Nothing from the upstream repository is committed to Gym; the prepared files and the download cache under `data/`
 are gitignored, and the bundled examples and fixtures are synthetic. Gym's integration code is Apache-2.0 and is an
-independent implementation; downloaded material keeps its upstream license.
+independent implementation of the conversation and judging protocol; the prompts and the rating are upstream's own
+code, run from the downloaded copy, which keeps its upstream license.
 
 **Task contract.** One row per scenario. The policy opens the conversation and speaks at most eight times, each
 time with that turn's system prompt (role, presenting issue, demographics, goals, `Current turn: k of 8`) and the
 dialogue so far; its first turn also sees the opening message that states the presenting issue. The persona never
 reveals its hidden profile to the policy. After each policy turn the persona simulator replies with a private
 `<internal>` monologue, its spoken `<dialogue>`, and a `<status>`; it can end the conversation early. The policy sees
-only the dialogue. The agent is `eqbench4_agent` (see its [README](../../responses_api_agents/eqbench4_agent/README.md)).
+only the dialogue. The agent is `eqbench4_agent` (see its [README](../../responses_api_agents/eqbench4_agent/README.md)),
+and EQ-Bench 4 runs only with it: the resources server admits no other agent (`allowed_agents`), since another harness
+would leave out the conversation with the persona.
 
 **Scoring.** For each row the resources server compares the policy's conversation with four published conversations
 of the same scenario. The pairwise judge reads both transcripts, the persona's monologues, and the full hidden
@@ -39,7 +44,8 @@ average weighted margin as a share of the largest possible margin (30). The row'
 [0, 1], higher is better.
 
 The headline metric is `eqbench4_elo`: soft Bradley-Terry ratings fitted to the fractional outcomes of the published
-comparisons plus the policy's, reported as `1200 + 400 / ln(10) * strength`, the scale of the leaderboard. Its 95%
+comparisons plus the policy's by the leaderboard's own solver, reported as `1200 + 400 / ln(10) * strength`, the scale
+of the leaderboard. Its 95%
 interval (`eqbench4_elo_ci_low`, `eqbench4_elo_ci_high`) comes from 200 pair-stratified bootstrap resamples, measuring
 how the policy's mean gap to the models within three ranks of it moves. `eqbench4_rank` counts the policy among the
 29 rated models, `eqbench4_ladder/<model>` lists every published model's rating in the same fit, and
@@ -63,24 +69,27 @@ because one reply was never parsed. When neither order holds a verdict after `ju
 masks the row as `judge_failed`, keeping the conversation for re-judging. The trait judge is informational: its
 failure is recorded in `trait_judge_error` and changes nothing else.
 
-**Conversations left out of the score.** As in EQ-Bench 4, a conversation that could not be finished is left out of
-the score (the row is masked), whole, whenever it stopped:
+**Conversations the policy stops are losses.** A conversation the policy stops scores as a loss to every opponent of
+the scenario (fraction 0 each, reward 0, not masked), so a model is never rated only on the scenarios it chose to
+finish, and a trainer cannot learn that stopping avoids a low reward. Its `policy_stop_reason` records why:
 
-| Cause | `failure_kind` | Usual fix |
+| `policy_stop_reason` | Cause | Usual fix |
 | --- | --- | --- |
-| The policy's prompt overflowed its context window (not asked again) | `model_context_limit` | Serve the policy with a longer context |
-| Seven policy replies cut at `max_output_tokens` before any visible text, often all reasoning | `eqbench4:policy_output_budget` | Raise the budget or lower reasoning effort |
-| A provider's content filter withheld the reply | `eqbench4:policy_content_filter` | Check the provider's filter |
-| Seven finished replies without visible text | `eqbench4:policy_empty_reply` | Inspect the policy's replies. A server reasoning parser (such as vLLM's `--reasoning-parser nemotron_v3`) on a model that does not close `</think>` hides the whole reply as reasoning: serve without the parser and set `uses_reasoning_parser=false` on the policy |
-| The persona gave no usable reply in three attempts | `eqbench4:persona_failed` | Check the persona model |
+| `context_limit` | The policy's prompt overflowed its context window (not asked again) | Serve the policy with a longer context |
+| `output_budget` | Seven policy replies cut at `max_output_tokens` before any visible text, often all reasoning | Raise the budget or lower reasoning effort |
+| `content_filter` | A provider's content filter withheld the reply, or the model refused | Check the provider's filter |
+| `empty_reply` | Seven finished replies without visible text | Inspect the policy's replies. A server reasoning parser (such as vLLM's `--reasoning-parser nemotron_v3`) on a model that does not close `</think>` hides the whole reply as reasoning: serve without the parser and set `uses_reasoning_parser=false` on the policy |
 
 The agent logs a warning naming the scenario, turn and cause each time. After the run the aggregate metrics report
 `eqbench4_conversations` (all conversations), `eqbench4_policy_stopped_rate` and its breakdown
-`eqbench4_policy_stopped_rate/<cause>` (with counts in `eqbench4_policy_stopped/<cause>`), and
-`eqbench4_persona_failed_rate`; both rates are also key metrics. The resources server logs a run-level warning with
-the counts and the usual fix whenever any conversation was left out. In the published leaderboard runs this never
-happened to an evaluated model (3,360 conversations); with other models a high rate means the score covers only the
-scenarios the model finished, and should be fixed before the score is trusted.
+`eqbench4_policy_stopped_rate/<cause>` (with counts in `eqbench4_policy_stopped/<cause>`); the rate is a key metric,
+and the resources server logs a run-level warning with the counts and the usual fix. Upstream EQ-Bench 4 rates only
+completed conversations and finishes unfinished ones when a run is resumed; its published runs completed 3,357 of
+3,360, so scoring a stop as a loss leaves the comparison with them unchanged.
+
+**The persona's failures are retried.** When the persona gives no usable reply in three attempts, the simulator, not
+the policy, broke the conversation: the agent fails the run, which the failures sidecar records as a retryable
+`agent_run_error`, and a resume runs the conversation again, so the scenario keeps its place in the score.
 
 **Endpoint outages are retried, not masked.** A persona or judge endpoint that refuses connections for
 `eqbench4_connection_retry_timeout_s` (300 s by default; Gym's default would retry forever) fails the call. A persona
@@ -98,7 +107,8 @@ gym env test eqbench4
 ```
 
 Preparation downloads the pinned files once into `benchmarks/eqbench4/data/upstream/` and writes
-`eqbench4_benchmark.jsonl` (120 rows, about 18 MB) and `reference_comparisons.jsonl`. To read a local checkout of
+`eqbench4_benchmark.jsonl` (120 rows, about 18 MB; each row's `task_id` is its scenario id),
+`reference_comparisons.jsonl` and the rating solver under `rating_solver/`. To read a local checkout of
 the pinned revision instead, set `+prepare_script_args.source_dir=/path/to/eqbench4` (a Windows checkout with CRLF line
 endings is accepted). `opponents_per_scenario` (default 4) sets how many published conversations each row is compared
 with.
@@ -157,9 +167,9 @@ and 120 trait-judge calls.
   the per-turn evaluated-model prompts of all of them except three resumed conversations that recorded a turn twice;
   the trait-judge prompt of 513 sampled conversations; and the pairwise-judge prompt of 651 sampled readings judged
   with the current template.
-- Ratings and bootstrap intervals from the published comparisons match upstream's own solver
-  (`compute_local_delta_percentile_bootstrap_ratings`) to 1e-12 Elo. The committed `results/elo_results.json` differs
-  from re-fitting those comparisons by up to 1.4 Elo; upstream's code gives the same re-fit as Gym.
+- Ratings and bootstrap intervals are upstream's own: the resources server runs the downloaded solver
+  (`fit_soft_bt`, `compute_local_delta_percentile_bootstrap_ratings`). The committed `results/elo_results.json` differs
+  from re-fitting the published comparisons with that solver by up to 1.4 Elo, so it is stale.
 - Claude Opus 4.6, evaluated end to end with the default persona and judges at `--temperature 1.0`, rates 1223.5
   (95% interval 1207.9 to 1237.2), rank 13; its published rating is 1222.7 (1214.1 to 1231.6), rank 13. At the rows'
   0.7 it rates 1197.2: compared with the same opponents in the same scenarios, its conversations score 0.034 lower
@@ -171,12 +181,16 @@ and 120 trait-judge calls.
   its rank neighbours (up to 718 new comparisons per published model). Gym compares each scenario with four published
   models spread evenly down the ladder, rotating by scenario (480 comparisons; 16 to 19 per published model), so every
   comparison can be judged inside one row. The rating is the same Bradley-Terry fit; the interval reflects this design.
-- **Unfinished conversations.** As upstream, a policy turn gets seven replies and an unfinished conversation is left
-  out; Gym also records and reports why (see above), and does not ask again after a context-window overflow, which
-  would recur.
+- **Unfinished conversations.** As upstream, a policy turn gets seven replies. Upstream rates only completed
+  conversations and finishes unfinished ones on a resumed run; Gym scores a conversation the policy stopped as a loss
+  to every opponent and records why (see above), retries one the persona broke, and does not ask the policy again
+  after a context-window overflow, which would recur.
 - **Unparseable judge replies.** A reading with no JSON verdict is asked again, up to three attempts, before the
   comparison falls back to its other order as upstream does. Upstream does not ask again, and drops a comparison
   neither of whose orders parses; Gym masks that row for re-judging instead.
+- **A JSON object without a verdict is not a reading.** Upstream accepts any JSON object, so an error object would
+  score as a tie on every dimension; Gym counts a reading only when a scored dimension holds `tie` or a respondent's
+  code, and otherwise treats it as unparseable.
 - **Persona corrections.** The correction shown to the persona after an unusable reply is Gym's wording.
 - **Presentation.** Respondent codes are seeded by scenario, opponent and order, so a re-judged row shows the judge the
   same prompt; upstream draws them at random. Both orders are always judged, so which model comes first does not
