@@ -133,8 +133,8 @@ policy call there ends the row after six hours as `environment_server_failed` (`
 waiting until the Slurm segment ends. The relay cancels its call to the agent, and collection does not replay the
 row automatically, because the agent may have stopped after generating an answer. Set
 `legacy_agent.default_episode_timeout_seconds` below `compute.cluster.walltime` when the segment is shorter than
-six hours, or to `null` when the agent's own budget is longer (mini-SWE on Terminal-Bench Science and 4 and the
-Partner IF dispatcher do), so that only the agent's limits apply.
+six hours, or to `null` when the agent's own budget is longer (the deprecated mini-SWE relay presets for Terminal-Bench Science and 4, and the
+Partner IF dispatcher, do), so that only the agent's limits apply.
 
 ## HLE: runaway generations
 

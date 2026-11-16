@@ -19,8 +19,11 @@ ROOT = Path(__file__).resolve().parents[3]
 # (config file, environment server instance) pairs whose relay must not end an episode at the default deadline.
 UNBOUNDED_RELAYS = [
     # mini-SWE's own budget is 8 hours (`agent_timeout_sec`).
-    ("benchmarks/terminal_bench_science/miniswe.yaml", "terminal_bench_science_miniswe_environment_server"),
-    ("benchmarks/terminal_bench_4/miniswe.yaml", "terminal_bench_4_miniswe_environment_server"),
+    (
+        "benchmarks/terminal_bench_science/miniswe_legacy_agent.yaml",
+        "terminal_bench_science_miniswe_environment_server",
+    ),
+    ("benchmarks/terminal_bench_4/miniswe_legacy_agent.yaml", "terminal_bench_4_miniswe_environment_server"),
     (
         "resources_servers/terminal_bench_4/configs/terminal_bench_4.yaml",
         "terminal_bench_4_miniswe_environment_server",

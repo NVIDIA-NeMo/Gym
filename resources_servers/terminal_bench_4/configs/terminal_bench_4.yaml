@@ -1,5 +1,5 @@
 config_paths:
-- benchmarks/terminal_bench_4/miniswe.yaml
+- benchmarks/terminal_bench_4/miniswe_legacy_agent.yaml
 terminal_bench_4:
   resources_servers:
     terminal_bench_4:
