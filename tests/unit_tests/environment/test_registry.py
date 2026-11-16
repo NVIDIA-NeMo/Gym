@@ -530,3 +530,43 @@ class TestReadEnvironmentDetails:
 
         assert details["agents"] == ["simple_agent"]
         assert details["datasets"] == []
+
+
+def _workload(name: str, server: str | None, *, manifest: bool = True) -> registry_module.EnvironmentCatalogEntry:
+    root = Path("/catalog") / name
+    return registry_module.EnvironmentCatalogEntry(
+        name=name,
+        config_path=root / "config.yaml",
+        path=root,
+        kind="benchmark",
+        manifest_path=root / "manifest.yaml" if manifest else None,
+        resources_server=server,
+    )
+
+
+def test_a_server_used_by_manifest_workloads_is_validated_through_each_of_them(tmp_path: Path) -> None:
+    catalog = [_workload("bench_b", "rubric"), _workload("bench_a", "rubric"), _workload("other", "elsewhere")]
+
+    found = registry_module.manifest_workloads_for_server("rubric", tmp_path, catalog)
+
+    assert [entry.name for entry in found] == ["bench_b", "bench_a"]
+
+
+@pytest.mark.parametrize("legacy_output", registry_module.LEGACY_SERVER_OUTPUTS)
+def test_either_legacy_output_keeps_a_server_on_the_legacy_contract(tmp_path: Path, legacy_output: str) -> None:
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / legacy_output).write_text("{}\n")
+
+    assert registry_module.manifest_workloads_for_server("rubric", tmp_path, [_workload("bench", "rubric")]) == ()
+
+
+def test_a_server_no_manifest_workload_names_stays_on_the_legacy_contract(tmp_path: Path) -> None:
+    catalog = [_workload("bench", "elsewhere"), _workload("unmigrated", "rubric", manifest=False)]
+
+    assert registry_module.manifest_workloads_for_server("rubric", tmp_path, catalog) == ()
+
+
+def test_manifest_workloads_default_to_the_discovered_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(registry_module, "discover_environment_catalog", lambda: (_workload("bench", "rubric"),))
+
+    assert [entry.name for entry in registry_module.manifest_workloads_for_server("rubric", tmp_path)] == ["bench"]

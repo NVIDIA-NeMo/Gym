@@ -71,6 +71,11 @@ def run_summary_path_for(output_fpath: Path) -> Path:
     return output_fpath.with_stem(output_fpath.stem + "_run_summary").with_suffix(".json")
 
 
+def task_selection_path_for(output_fpath: Path) -> Path:
+    """`results/rollouts.jsonl` -> `results/rollouts_task_selection.json`: the tasks a subset run selected by id."""
+    return output_fpath.with_stem(output_fpath.stem + "_task_selection").with_suffix(".json")
+
+
 def resolved_config_path_for(output_fpath: Path) -> Path:
     """`results/rollouts.jsonl` -> `results/rollouts_resolved_config.yaml`."""
     return output_fpath.with_stem(output_fpath.stem + "_resolved_config").with_suffix(".yaml")

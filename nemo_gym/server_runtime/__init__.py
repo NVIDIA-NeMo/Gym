@@ -49,15 +49,24 @@ if TYPE_CHECKING:
     from nemo_gym.server_runtime._checkpoint.steps import (
         CHECKPOINT_CLOSE_FOLLOWS_HEADER,
         StepType,
+        seed_rebinds_tool_accesses,
         seed_restarts,
         seed_verify_step_type,
     )
     from nemo_gym.server_runtime._checkpoint.store import write_participant_state
+    from nemo_gym.server_runtime.agent_context import (
+        AGENT_CONTEXT_KEY_NAME,
+        AgentContext,
+        AgentContextArtifact,
+    )
     from nemo_gym.server_runtime.base_environment_server import (
         BaseEnvironmentServer,
         BaseEnvironmentServerConfig,
+        BaseEnvironmentServerWithTools,
+        BaseEnvironmentServerWithToolsConfig,
         CleanupContext,
         CleanupHandle,
+        ServedTools,
         dependency_failure,
         handled_episode_failure,
         is_handled_episode_failure,
@@ -96,6 +105,15 @@ if TYPE_CHECKING:
         rollout_prefix_hook,
         with_rollout_prefix,
     )
+    from nemo_gym.server_runtime.episode_tools import (
+        EpisodeToolset,
+        ToolArgumentsError,
+        ToolCallRecord,
+        ToolResult,
+        ToolSpec,
+        TypedToolset,
+        episode_tool,
+    )
     from nemo_gym.server_runtime.mcp_auto_exposure import (
         TOKEN_HEADER,
         MCPTool,
@@ -109,6 +127,7 @@ if TYPE_CHECKING:
     from nemo_gym.server_runtime.request_handling.session_routing import SESSION_OWNER_HEADER, install_session_routing
     from nemo_gym.server_runtime.sandbox_lending import LentSandboxes
     from nemo_gym.server_runtime.single_agent_turn_types import (
+        SingleAgentTurnAgentContext,
         SingleAgentTurnFailure,
         SingleAgentTurnRequest,
         SingleAgentTurnResponse,
@@ -117,6 +136,8 @@ if TYPE_CHECKING:
     )
     from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
     from nemo_gym.server_runtime.tool_access import (
+        TOOL_CALL_ID_HEADER,
+        TOOL_ERROR_HEADER,
         DirectHTTPToolAccess,
         MCPStreamableHTTPConnection,
         MCPToolAccess,
@@ -136,12 +157,17 @@ _PUBLIC_API = {
     "async_rollout_prefix_hook": "base_server",
     "rollout_prefix_hook": "base_server",
     "with_rollout_prefix": "base_server",
+    "AGENT_CONTEXT_KEY_NAME": "agent_context",
     "Activation": "_checkpoint.agent",
     "ActivationOutOfOrderError": "_checkpoint.agent",
+    "AgentContext": "agent_context",
+    "AgentContextArtifact": "agent_context",
     "AgentSessionParticipant": "_checkpoint.agent",
     "AgentSessionRecord": "_checkpoint.agent",
     "BaseEnvironmentServer": "base_environment_server",
     "BaseEnvironmentServerConfig": "base_environment_server",
+    "BaseEnvironmentServerWithTools": "base_environment_server",
+    "BaseEnvironmentServerWithToolsConfig": "base_environment_server",
     "BaseMultiRewardVerifyResponse": "base_resources_server",
     "BaseResourcesServerConfig": "base_resources_server",
     "BaseRunRequest": "base_resources_server",
@@ -158,6 +184,7 @@ _PUBLIC_API = {
     "DirectHTTPToolAccess": "tool_access",
     "EnvironmentParticipant": "_checkpoint.environment",
     "EpisodeRecord": "_checkpoint.environment",
+    "EpisodeToolset": "episode_tools",
     "GenerationCutInventory": "_checkpoint.generation_cut",
     "GenerationCutPrefixAck": "_checkpoint.generation_cut",
     "GenerationCutReceipt": "_checkpoint.generation_cut",
@@ -188,8 +215,10 @@ _PUBLIC_API = {
     "RolloutContextMiddleware": "request_handling.rollout_context",
     "RolloutIdRequiredError": "_checkpoint.errors",
     "SESSION_OWNER_HEADER": "request_handling.session_routing",
+    "ServedTools": "base_environment_server",
     "SimpleResourcesServer": "base_resources_server",
     "SimpleServer": "base_server",
+    "SingleAgentTurnAgentContext": "single_agent_turn_types",
     "SingleAgentTurnFailure": "single_agent_turn_types",
     "SingleAgentTurnRequest": "single_agent_turn_types",
     "SingleAgentTurnResponse": "single_agent_turn_types",
@@ -198,10 +227,18 @@ _PUBLIC_API = {
     "StaleAttemptError": "_checkpoint.errors",
     "StepType": "_checkpoint.steps",
     "TOKEN_HEADER": "mcp_auto_exposure",
+    "TOOL_CALL_ID_HEADER": "tool_access",
+    "TOOL_ERROR_HEADER": "tool_access",
     "ToolAccess": "tool_access",
+    "ToolArgumentsError": "episode_tools",
+    "ToolCallRecord": "episode_tools",
+    "ToolResult": "episode_tools",
+    "ToolSpec": "episode_tools",
+    "TypedToolset": "episode_tools",
     "check_resources_session_contract": "testing.session_conformance",
     "dependency_failure": "base_environment_server",
     "entrypoint_ray_enabled": "ray_support",
+    "episode_tool": "episode_tools",
     "handled_episode_failure": "base_environment_server",
     "harvest_tools": "mcp_auto_exposure",
     "install_auto_exposure": "mcp_auto_exposure",
@@ -218,6 +255,7 @@ _PUBLIC_API = {
     "observe_verifier": "verifier_observability",
     "observe_verifier_sandbox": "verifier_observability",
     "require_rollout": "_checkpoint.agent",
+    "seed_rebinds_tool_accesses": "_checkpoint.steps",
     "seed_restarts": "_checkpoint.steps",
     "seed_verify_step_type": "_checkpoint.steps",
     "task_digest": "_checkpoint.environment",
