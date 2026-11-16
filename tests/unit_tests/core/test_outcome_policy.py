@@ -20,9 +20,11 @@ from nemo_gym.core.failure_kinds import (
 )
 from nemo_gym.core.outcome_policy import (
     OutcomeAction,
+    OutcomePolicyConfig,
     StageOutcomePolicyConfig,
     StagePolicyConfig,
     choose_stage_outcome,
+    declare_action_kind,
 )
 from nemo_gym.trajectory.trajectory_record import SandboxObservation
 
@@ -263,3 +265,16 @@ def test_a_boundary_overlay_keeps_its_default_classification_under_a_partial_ove
     assert (cut_off.action, cut_off.attribution) == ("retry", "evaluation")
     other = choose_stage_outcome(failure_kind="demo:other", http_status=None, stage="agent", config=untouched)
     assert (other.action, other.attribution) == ("fail", "model")
+
+
+def test_an_action_rule_names_only_the_namespaced_kinds_a_boundary_declared() -> None:
+    kind = declare_action_kind("demo:declared_cut_off")
+
+    assert StagePolicyConfig(by_failure_kind={kind: "retry"}).by_failure_kind[kind] == "retry"
+    assert OutcomePolicyConfig(default_action="fail", by_failure_kind={kind: "retry"}).by_failure_kind[kind] == "retry"
+    # An undeclared name, a misspelled registered one and a name that is not namespaced stay rejected.
+    for name in ("demo:undeclared", "provider_oom_kild"):
+        with pytest.raises(ValidationError, match="Unregistered failure kinds"):
+            StagePolicyConfig(by_failure_kind={name: "retry"})
+    with pytest.raises(ValueError, match="not a namespaced"):
+        declare_action_kind("provider_oom_killed")
