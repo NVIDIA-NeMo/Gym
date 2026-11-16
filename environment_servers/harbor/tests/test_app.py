@@ -1749,35 +1749,76 @@ class TestVerify:
         assert "pytest exploded" in result.failure_reason
         assert result.verifier_return_code == 1
 
-    async def test_exit_75_without_a_reward_is_masked_not_scored(self, tmp_path, monkeypatch):
-        # EX_TEMPFAIL from test.sh and no reward: the verifier could not grade (judge service or asset download
-        # unavailable), so the rollout is masked with the stdout tail as the reason.
-        sandbox = FakeSandbox(
-            verifier_files={
-                "test-stdout.txt": "verifier unavailable: judge route HTTP 403 (not available for this key)"
-            },
-            test_result=SandboxExecResult(stdout="", stderr="", return_code=75),
+    async def separately_verified(self, tmp_path, monkeypatch, verifier):
+        """An episode whose turn verifies in a fresh sandbox (``verifier``), the agent's being an ``AgentSandbox``."""
+        toml = TASK_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n')
+        toml += '\n[verifier.environment]\ndocker_image = "org/verifier:1"\n'
+        server, task, _, _ = make_server(tmp_path, monkeypatch, AgentSandbox(), toml=toml)
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
         )
-        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+
+        async def create_verifier(task, *, episode_key=None):
+            server._sandboxes[f"{episode_key}/verifier"] = verifier
+            return verifier
+
+        monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
+        return await run_episode(server, task)
+
+    async def test_exit_75_without_a_reward_is_masked_only_on_the_separate_path(self, tmp_path, monkeypatch):
+        # EX_TEMPFAIL from a separately run test.sh and no valid reward: the verifier could not grade (judge
+        # service or asset download unavailable), so the rollout is masked with the stdout tail as the reason.
+        unavailable = {"test-stdout.txt": "verifier unavailable: judge route HTTP 403 (not available for this key)"}
+        exit_75 = SandboxExecResult(stdout="", stderr="", return_code=75)
+        response = await self.separately_verified(
+            tmp_path, monkeypatch, FakeSandbox(verifier_files=unavailable, test_result=exit_75)
+        )
         result = response.result
-        assert result.reward == 0.0 and result.mask_sample is True
+        assert result.reward == 0.0 and result.mask_sample is True and result.verifier_mode == "separate"
         assert result.failure_kind == "harbor:verifier_unavailable"
         assert result.verifier_return_code == 75
         assert "exited 75" in result.failure_reason and "judge route HTTP 403" in result.failure_reason
-        # A written reward wins over the exit code.
-        sandbox = FakeSandbox(
-            verifier_files={"reward.json": json.dumps({"reward": 1})},
-            test_result=SandboxExecResult(stdout="", stderr="", return_code=75),
+        # A malformed reward file beside the code is the verifier's own: still masked, not an invalid reward.
+        response = await self.separately_verified(
+            tmp_path,
+            monkeypatch,
+            FakeSandbox(verifier_files={**unavailable, "reward.txt": "maybe"}, test_result=exit_75),
         )
-        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        assert response.result.mask_sample is True
+        assert response.result.failure_kind == "harbor:verifier_unavailable"
+        # A valid written reward wins over the exit code.
+        response = await self.separately_verified(
+            tmp_path,
+            monkeypatch,
+            FakeSandbox(verifier_files={"reward.json": json.dumps({"reward": 1})}, test_result=exit_75),
+        )
         assert response.result.reward == 1.0 and response.result.failure_kind is None
-        # Any other nonzero exit without a reward is still a measured 0: the agent can cause those.
-        sandbox = FakeSandbox(
-            verifier_files={"test-stdout.txt": "curl: (22) 429 Too Many Requests"},
-            test_result=SandboxExecResult(stdout="", stderr="", return_code=22),
+        # Any other nonzero exit without a reward is a measured 0 on either path: the agent can cause those.
+        response = await self.separately_verified(
+            tmp_path,
+            monkeypatch,
+            FakeSandbox(
+                verifier_files={"test-stdout.txt": "curl: (22) 429 Too Many Requests"},
+                test_result=SandboxExecResult(stdout="", stderr="", return_code=22),
+            ),
         )
-        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
         assert response.result.mask_sample is False and response.result.failure_kind == "harbor:missing_reward"
+        # A malformed reward with an ordinary exit is the ordinary invalid reward.
+        response = await self.separately_verified(
+            tmp_path,
+            monkeypatch,
+            FakeSandbox(verifier_files={"reward.txt": "maybe"}, test_result=SandboxExecResult("", "", 1)),
+        )
+        assert response.result.mask_sample is False and response.result.failure_kind == "harbor:invalid_reward"
+        # In the agent's sandbox (shared mode) the code is not trusted: a measured 0, as on any other exit, with
+        # the ignored code in the reason.
+        _, _, _, response = await self.verified(
+            tmp_path, monkeypatch, FakeSandbox(verifier_files=unavailable, test_result=exit_75)
+        )
+        result = response.result
+        assert result.mask_sample is False and result.reward == 0.0 and result.verifier_mode == "shared"
+        assert result.failure_kind == "harbor:missing_reward" and result.verifier_return_code == 75
+        assert "exited 75 in the agent's sandbox" in result.failure_reason
 
     async def test_invalid_reward_scores_zero(self, tmp_path, monkeypatch):
         sandbox = FakeSandbox(verifier_files={"reward.txt": "maybe"})
