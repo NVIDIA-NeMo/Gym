@@ -508,10 +508,6 @@ class TestAgentSandbox:
         config = yaml.safe_load((SERVER_DIR / "configs" / "r2e_gym.yaml").read_text())
         assert config["r2e_gym_resources_server"]["resources_servers"]["r2e_gym"]["apply_anti_cheating"] is True
 
-    def test_the_app_wires_cpu_cap_env_into_the_spec(self) -> None:
-        source = self._source()
-        assert "cpu_cap_env(sandbox_resources.cpu)" in source and "env=env," in source
-
 
 class TestMultiWorkerEntrypoint:
     def test_exposes_a_module_level_app_for_forked_workers(self) -> None:

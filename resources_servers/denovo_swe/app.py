@@ -45,11 +45,8 @@ from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.sandbox import (
     AsyncSandbox,
-    SandboxResources,
-    SandboxSpec,
-    cpu_cap_env,
+    CpuCappedSandboxConfig,
     resolve_provider_config,
-    resolve_provider_metadata,
 )
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -80,7 +77,7 @@ class DeNovoSWEResourcesServerConfig(BaseResourcesServerConfig):
     inconclusive_verification_retries: int = 1
     apply_anti_cheating: bool = True
     sandbox_provider: str
-    sandbox_config: dict[str, Any]
+    sandbox_config: CpuCappedSandboxConfig
 
 
 class DeNovoSWEInstanceRequest(BaseModel):
@@ -161,29 +158,17 @@ class DeNovoSWEResourcesServer(SimpleResourcesServer):
     ) -> AsyncSandbox:
         global_config_dict = get_global_config_dict()
         provider_config = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
-        provider_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
-
-        sandbox_resources = SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {}))
-        env = dict(self.config.sandbox_config.get("env", {}))
-        if self.config.sandbox_config.get("derive_cpu_env", True):
-            env = cpu_cap_env(sandbox_resources.cpu) | env
-
-        spec = SandboxSpec(
+        spec = self.config.sandbox_config.spec(
+            self.config.sandbox_provider,
             # The row names its own image; there is no repository template to apply.
             image=body.image_ref,
-            ttl_s=self.config.sandbox_config.get("ttl_s"),
-            ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s"),
             workdir=body.workdir,
-            env=env,
-            files=files or {},
-            metadata=provider_metadata
-            | self.config.sandbox_config.get("metadata", {})
-            | {
+            files=files,
+            metadata={
                 "nemo_gym_agent": self.config.name,
                 "instance_id": body.instance_id[:63],
             },
-            resources=sandbox_resources,
-            provider_options=self.config.sandbox_config.get("provider_options", {}),
+            named_configs=global_config_dict,
         )
         sandbox = AsyncSandbox(provider_config)
         await sandbox.start(spec)

@@ -248,7 +248,7 @@ def test_model_only_lends_a_sandbox_that_reaches_only_the_policy_model(root, mon
     )
     # Only the policy model resolves to the address the egress rule should allow.
     monkeypatch.setattr(
-        "nemo_gym.server_runtime.sandbox_lending.get_server_url",
+        "nemo_gym.server_runtime.sandbox_network.get_server_url",
         lambda name: {"policy_model": "http://10.1.2.3:9000", "judge": "http://10.9.9.9:9001"}[name],
     )
     specs = []

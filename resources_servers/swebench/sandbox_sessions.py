@@ -45,7 +45,7 @@ from pydantic import BaseModel, ValidationError
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import SESSION_EXPIRED, SESSION_LOST, EpisodeId
-from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, SandboxAccess
+from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, SandboxAccess, SandboxConfig
 from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     BaseVerifyResponse,
@@ -216,7 +216,9 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
                 self._task_session_fences.fence(session_id, record.seed.episode_id)
 
     def _session_lifetime_s(self) -> float:
-        ttl_s = self.config.sandbox_config.get("ttl_s")
+        sandbox_config = self.config.sandbox_config
+        # Servers not yet on the typed SandboxConfig keep sandbox_config as a mapping.
+        ttl_s = sandbox_config.ttl_s if isinstance(sandbox_config, SandboxConfig) else sandbox_config.get("ttl_s")
         return float(ttl_s) if ttl_s else DEFAULT_SESSION_LIFETIME_S
 
     async def seed_task_sandbox_session(

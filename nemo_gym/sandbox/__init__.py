@@ -114,7 +114,7 @@ if TYPE_CHECKING:
         sandbox_platform,
     )
     from nemo_gym.sandbox.compose_fields import service_gpus, service_resources
-    from nemo_gym.sandbox.config import SandboxConfig
+    from nemo_gym.sandbox.config import CpuCappedSandboxConfig, SandboxConfig
     from nemo_gym.sandbox.failures import sandbox_failure
     from nemo_gym.sandbox.providers.apptainer.provider import ApptainerProvider
     from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S, sandbox_credentials_rejected
@@ -153,6 +153,7 @@ _PUBLIC_API = {
     "PLACEMENT_GROUP_KEY": "adapters.docker_compose",
     "ApptainerProvider": "providers.apptainer.provider",
     "CPU_CAP_ENV_VARS": "utils",
+    "CpuCappedSandboxConfig": "config",
     "DirectSandboxConnection": "access",
     "DockerCreateConfig": "providers.docker.provider",
     "DockerProvider": "providers.docker.provider",

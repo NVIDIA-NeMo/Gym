@@ -30,7 +30,12 @@ import nemo_gym.sandbox.providers.registry as provider_registry
 from nemo_gym.core.failure_kinds import PROVIDER_UNAVAILABLE
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.api import AsyncSandbox, Sandbox, _AsyncLoopRunner
-from nemo_gym.sandbox.config import SandboxConfig, resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.config import (
+    CpuCappedSandboxConfig,
+    SandboxConfig,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
 from nemo_gym.sandbox.failures import sandbox_failure
 from nemo_gym.sandbox.providers.base import (
     SandboxEndpoint,
@@ -44,7 +49,7 @@ from nemo_gym.sandbox.providers.base import (
     clamp_resource_requests,
 )
 from nemo_gym.sandbox.providers.registry import create_provider, get_provider_class, list_providers, register_provider
-from nemo_gym.sandbox.utils import rewrite_image
+from nemo_gym.sandbox.utils import cpu_cap_env, rewrite_image
 from responses_api_agents.mini_swe_agent_2.sandbox_environment import MiniSWESandboxEnvironment
 
 
@@ -2192,6 +2197,63 @@ def test_sandbox_config_defaults_build_an_empty_spec() -> None:
     assert (spec.image, spec.workdir, spec.ttl_s, spec.ready_timeout_s) == (None, None, None, None)
     assert (spec.env, spec.files, spec.metadata, spec.provider_options) == ({}, {}, {}, {})
     assert spec.resources == SandboxResources()
+
+
+def test_sandbox_config_layers_server_env_then_cpu_caps_then_config_env() -> None:
+    config = SandboxConfig(resources={"cpu": 2.5}, env={"OMP_NUM_THREADS": "8", "A": "config"}, derive_cpu_env=True)
+
+    spec = config.spec(
+        "sandbox",
+        image=None,
+        workdir=None,
+        env={"A": "server", "GOMAXPROCS": "64", "B": "server"},
+        named_configs={"sandbox": {"local": {}}},
+    )
+
+    assert spec.env == cpu_cap_env(2) | {"OMP_NUM_THREADS": "8", "A": "config", "B": "server"}
+
+
+def test_sandbox_config_derives_cpu_caps_only_when_asked() -> None:
+    named = {"sandbox": {"local": {}}}
+
+    plain = SandboxConfig(resources={"cpu": 4}).spec("sandbox", image=None, workdir=None, named_configs=named)
+    capped = CpuCappedSandboxConfig(resources={"cpu": 4}).spec(
+        "sandbox", image=None, workdir=None, named_configs=named
+    )
+    opted_out = CpuCappedSandboxConfig(resources={"cpu": 4}, derive_cpu_env=False).spec(
+        "sandbox", image=None, workdir=None, named_configs=named
+    )
+    no_limit = CpuCappedSandboxConfig().spec("sandbox", image=None, workdir=None, named_configs=named)
+
+    assert plain.env == {}
+    assert capped.env == cpu_cap_env(4) and capped.env["OMP_NUM_THREADS"] == "4"
+    assert opted_out.env == {}
+    assert no_limit.env == {}
+
+
+def test_sandbox_config_adds_a_network_policy_beside_the_other_provider_options() -> None:
+    config = SandboxConfig(provider_options={"platform": {"arch": "arm64"}})
+    policy = {"defaultAction": "deny", "egress": []}
+
+    spec = config.spec(
+        "sandbox", image=None, workdir=None, network_policy=policy, named_configs={"sandbox": {"local": {}}}
+    )
+
+    assert spec.provider_options == {"platform": {"arch": "arm64"}, "network_policy": policy}
+    assert config.provider_options == {"platform": {"arch": "arm64"}}
+
+
+def test_sandbox_config_refuses_a_network_policy_the_provider_options_already_set() -> None:
+    config = SandboxConfig(provider_options={"network_policy": {"defaultAction": "allow"}})
+
+    with pytest.raises(ValueError, match="set one of them"):
+        config.spec(
+            "sandbox",
+            image=None,
+            workdir=None,
+            network_policy={"defaultAction": "deny", "egress": []},
+            named_configs={"sandbox": {"local": {}}},
+        )
 
 
 def test_sandbox_config_rejects_a_non_numeric_resource_value() -> None:

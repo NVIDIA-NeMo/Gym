@@ -46,11 +46,8 @@ from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import SESSION_LOST
 from nemo_gym.sandbox import (
     AsyncSandbox,
-    SandboxResources,
-    SandboxSpec,
-    cpu_cap_env,
+    CpuCappedSandboxConfig,
     resolve_provider_config,
-    resolve_provider_metadata,
 )
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -96,7 +93,7 @@ class R2EGymResourcesServerConfig(BaseResourcesServerConfig):
     inconclusive_verification_retries: int = 1
     apply_anti_cheating: bool = True
     sandbox_provider: str
-    sandbox_config: dict[str, Any]
+    sandbox_config: CpuCappedSandboxConfig
 
 
 class R2EGymInstanceRequest(BaseModel):
@@ -177,32 +174,18 @@ class R2EGymResourcesServer(SandboxSessionResourcesServer):
     ) -> AsyncSandbox:
         global_config_dict = get_global_config_dict()
         provider_config = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
-        provider_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
-
-        # Cap test parallelism to the CPU limit: a container sees the HOST core count, so numpy/pandas
-        # BLAS pools and xdist fan out ~96 workers against a small quota and CFS-throttle.
-        sandbox_resources = SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {}))
-        env = dict(self.config.sandbox_config.get("env", {}))
-        if self.config.sandbox_config.get("derive_cpu_env", True):
-            env = cpu_cap_env(sandbox_resources.cpu) | env
-
-        spec = SandboxSpec(
+        spec = self.config.sandbox_config.spec(
+            self.config.sandbox_provider,
             # The row names its own image; the project venv is already first on its PATH.
             image=body.image_name,
-            ttl_s=self.config.sandbox_config.get("ttl_s"),
-            ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s"),
             workdir=REPO_DIRECTORY,
-            env=env,
-            files=files or {},
-            metadata=provider_metadata
-            | self.config.sandbox_config.get("metadata", {})
-            | {
+            files=files,
+            metadata={
                 "nemo_gym_agent": self.config.name,
                 "instance_id": body.instance_id[:63],
                 "language": body.language[:63],
             },
-            resources=sandbox_resources,
-            provider_options=self.config.sandbox_config.get("provider_options", {}),
+            named_configs=global_config_dict,
         )
         sandbox = AsyncSandbox(provider_config)
         if session_id is not None:

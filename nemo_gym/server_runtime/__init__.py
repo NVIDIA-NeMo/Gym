@@ -114,6 +114,7 @@ if TYPE_CHECKING:
     from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
     from nemo_gym.server_runtime.request_handling.session_routing import SESSION_OWNER_HEADER, install_session_routing
     from nemo_gym.server_runtime.sandbox_lending import LentSandboxes
+    from nemo_gym.server_runtime.sandbox_network import SandboxNetwork, SandboxNetworkAccess
     from nemo_gym.server_runtime.single_agent_turn_types import (
         SingleAgentTurnAgentContext,
         SingleAgentTurnFailure,
@@ -175,6 +176,8 @@ _PUBLIC_API = {
     "MCPStreamableHTTPConnection": "tool_access",
     "MCPTool": "mcp_auto_exposure",
     "LentSandboxes": "sandbox_lending",
+    "SandboxNetwork": "sandbox_network",
+    "SandboxNetworkAccess": "sandbox_network",
     "MCPToolAccess": "tool_access",
     "ModelSamplingMiddleware": "request_handling.model_sampling",
     "NEMO_GYM_MCP_METADATA_KEY": "base_resources_server",

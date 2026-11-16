@@ -14,7 +14,7 @@ from nemo_gym.core.episode_types import TaskId
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.config import SandboxConfig
 from nemo_gym.sandbox.providers.local.provider import LocalProvider
-from nemo_gym.server_runtime import sandbox_lending
+from nemo_gym.server_runtime import sandbox_lending, sandbox_network
 from nemo_gym.server_runtime.base_resources_server import ResourcesSeedRejectedError
 from nemo_gym.server_runtime.sandbox_lending import LentSandboxes
 
@@ -389,7 +389,7 @@ async def test_model_only_lends_a_sandbox_that_reaches_only_the_model_server(mon
         asked.append(name)
         return "http://10.1.2.3:8000"
 
-    monkeypatch.setattr(sandbox_lending, "get_server_url", server_url)
+    monkeypatch.setattr(sandbox_network, "get_server_url", server_url)
     monkeypatch.setattr(_RecordingSandbox, "created", [])
     monkeypatch.setattr(sandbox_lending, "AsyncSandbox", _RecordingSandbox)
     lender = LentSandboxes(
@@ -410,6 +410,11 @@ async def test_model_only_lends_a_sandbox_that_reaches_only_the_model_server(mon
         "keep": True,
         "network_policy": {"defaultAction": "deny", "egress": [{"action": "allow", "target": "10.1.2.3"}]},
     }
+
+
+def test_no_network_is_refused_because_the_lent_harness_calls_the_model_server() -> None:
+    with pytest.raises(ValueError, match="cannot use no_network"):
+        LentSandboxes("sandbox", SandboxConfig(), image=None, workdir="/workspace", network_access="no_network")
 
 
 def test_model_and_tools_needs_tool_servers_and_only_it_takes_them() -> None:
@@ -457,7 +462,7 @@ async def test_model_and_tools_lends_a_sandbox_that_reaches_the_model_and_tool_s
         asked.append(name)
         return urls[name]
 
-    monkeypatch.setattr(sandbox_lending, "get_server_url", server_url)
+    monkeypatch.setattr(sandbox_network, "get_server_url", server_url)
     monkeypatch.setattr(_RecordingSandbox, "created", [])
     monkeypatch.setattr(sandbox_lending, "AsyncSandbox", _RecordingSandbox)
     lender = LentSandboxes(
@@ -486,7 +491,7 @@ async def test_model_and_tools_lends_a_sandbox_that_reaches_the_model_and_tool_s
 async def test_model_only_on_a_provider_without_network_policies_is_refused_before_a_sandbox_starts(
     workdir, started, monkeypatch
 ) -> None:
-    monkeypatch.setattr(sandbox_lending, "get_server_url", lambda name: "http://10.1.2.3:8000")
+    monkeypatch.setattr(sandbox_network, "get_server_url", lambda name: "http://10.1.2.3:8000")
     lender = LentSandboxes(
         "sandbox",
         SandboxConfig(),
