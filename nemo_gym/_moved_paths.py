@@ -797,6 +797,10 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
     "nemo_gym.token_id_capture.staging": {
         **_names("nemo_gym.models.token_capture.terminal", "0.8.0", "TerminalAttribution resolve_terminal"),
     },
+    "nemo_gym.mcp_auto_exposure": {
+        # Renamed when Environment Servers started to build MCP results with it.
+        "_to_result": MovedPath(new="nemo_gym.server_runtime.mcp_auto_exposure:to_call_tool_result", since="0.8.0"),
+    },
 }
 
 # Names renamed with the token capture package (token_id_capture -> token_capture), at each old module path that
