@@ -5,7 +5,7 @@ position: 5
 ---
 import { NavButton } from "../../../../components/NavButton";
 
-This tutorial focuses on the **Resources Server** implementation for environments that maintain state across tool calls within an episode. The full workflow — task data preparation, agent/model configuration, rollout collection, and training — follows the same steps as the [single-step tutorial](/environment-tutorials/single-step-environment). What changes here is the addition of per-episode session state via middleware.
+This tutorial focuses on the **Resources Server** implementation for environments that maintain state across tool calls within an episode. The full workflow — task data preparation, agent/model configuration, rollout collection, and training — follows the same steps as the [single-step tutorial](/environment-tutorials/single-step-environment). What changes here is the addition of per-episode session state, which the Resources Server creates and releases through its session state hooks.
 
 <NavButton href="/environment-tutorials/multi-step-environment" label="Multi-Step Environment" direction="prev" />
 
@@ -13,9 +13,11 @@ This tutorial focuses on the **Resources Server** implementation for environment
 
 ## What You'll Build
 
-A counter environment where the user asks the agent to increment a counter by a certain amount and report the final value. The environment seeds the counter with an initial value, and the agent must call `increment_counter` and `get_counter_value` in sequence to produce the correct result. Like the multi-step tutorial, this is single-turn (one user message, multiple tool calls) — but the key difference is that the counter value lives as server-side session state that persists across tool calls within the episode, managed via `SESSION_ID_KEY`.
+A counter environment where the user asks the agent to increment a counter by a certain amount and report the final value. The environment seeds the counter with an initial value, and the agent must call `increment_counter` and `get_counter_value` in sequence to produce the correct result. Like the multi-step tutorial, this is single-turn (one user message, multiple tool calls) — but the key difference is that the counter value lives as server-side session state that persists across tool calls within the episode, keyed by the session ID that `SESSION_ID_KEY` names.
 
 ### Episode Flow
+
+An Environment Server such as `single_agent_turn` runs each episode: it seeds the session, runs the agent turn, verifies, and closes the session.
 
 ```text
 Goal (what the agent is learning)
@@ -25,47 +27,47 @@ Inputs
   - seed input: initial_count (e.g., 3)
   - ground truth for grading: expected_count (e.g., 5)
 
-Flow (state is stored per session_id inside the ResourcesServer)
-  1) POST ResourcesServer /seed_session {"initial_count": 3}
-     - stores session_id_to_counter[session_id] = 3
-  2) POST ModelServer /v1/responses -> function_call: increment_counter({"count": 2})
-  3) POST ResourcesServer /increment_counter {"count": 2}
-     - counter becomes 5 for this session_id
-  4) POST ModelServer /v1/responses -> function_call: get_counter_value({})
-  5) POST ResourcesServer /get_counter_value {}
+Flow (state is stored per session ID inside the ResourcesServer)
+  1) EnvironmentServer -> ResourcesServer POST /seed_session
+       {"resources_session_id": "...", "episode_id": {...}, "task_id": {...}, "task_data": {"initial_count": 3, ...}}
+     - initialize_session_state stores session_id_to_counter[resources_session_id] = 3
+  2) Agent -> ModelServer POST /v1/responses -> function_call: increment_counter({"count": 2})
+  3) Agent -> ResourcesServer POST /increment_counter {"count": 2}
+     - counter becomes 5 for this session
+  4) Agent -> ModelServer POST /v1/responses -> function_call: get_counter_value({})
+  5) Agent -> ResourcesServer POST /get_counter_value {}
      - returns {"count": 5}
-  6) POST ResourcesServer /verify {"expected_count": 5, ...}
-     - reward = 1.0 iff stored counter == expected_count
+  6) EnvironmentServer -> ResourcesServer POST /verify {"expected_count": 5, ...}
+     - reward = 1.0 iff stored counter == expected_count; verifying() then releases the counter
+  7) EnvironmentServer -> ResourcesServer POST /close_session {"resources_session_id": "...", "episode_id": {...}}
 ```
 
 ---
 
 ## Implementation
 
-**File (simplified from [`resources_servers/example_session_state_mgmt/app.py`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_session_state_mgmt/app.py), with improved `seed_session` pattern):**
+**File (written for this tutorial; for a server on `main` that implements the same hooks and checks them in its tests, see [`resources_servers/math_with_code`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_code)):**
 
 ```python
-# simplified
-from typing import Dict
-
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, Field
 
+from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
-    BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesSessionLostError,
     SimpleResourcesServer,
+    lost_session_verification,
 )
-from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint  # Critical import!
 
 class StatefulCounterResourcesServerConfig(BaseResourcesServerConfig):
     pass
 
-# Custom seed request to initialize state
+# The task_data fields that seed a session; the base validates task_data against this model
 class StatefulCounterSeedSessionRequest(BaseSeedSessionRequest):
     initial_count: int
 
@@ -83,9 +85,10 @@ class StatefulCounterVerifyRequest(BaseVerifyRequest):
 
 class StatefulCounterResourcesServer(SimpleResourcesServer):
     config: StatefulCounterResourcesServerConfig
+    seed_request_model = StatefulCounterSeedSessionRequest
 
     # Session state storage - maps session_id -> state
-    session_id_to_counter: Dict[str, int] = Field(default_factory=dict)
+    session_id_to_counter: dict[str, int] = Field(default_factory=dict)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -93,48 +96,44 @@ class StatefulCounterResourcesServer(SimpleResourcesServer):
         app.post("/get_counter_value")(self.get_counter_value)
         return app
 
-    # Initialize session state
-    async def seed_session(
-        self,
-        request: Request,  # Must include Request to access session
-        body: StatefulCounterSeedSessionRequest
-    ) -> BaseSeedSessionResponse:
-        session_id = request.session[SESSION_ID_KEY]  # Get unique session ID
+    # Session state hooks: the base serves /seed_session and /close_session through them
+    def has_session_state(self, session_id: str) -> bool:
+        return session_id in self.session_id_to_counter
+
+    async def initialize_session_state(self, session_id: str, body: StatefulCounterSeedSessionRequest) -> None:
         self.session_id_to_counter[session_id] = body.initial_count
-        return BaseSeedSessionResponse()
+
+    async def release_session_state(self, session_id: str) -> None:
+        self.session_id_to_counter.pop(session_id, None)
 
     # Stateful tool - modifies session state
-    async def increment_counter(
-        self,
-        request: Request,
-        body: IncrementCounterRequest
-    ) -> IncrementCounterResponse:
+    async def increment_counter(self, request: Request, body: IncrementCounterRequest) -> IncrementCounterResponse:
         session_id = request.session[SESSION_ID_KEY]
-        counter = self.session_id_to_counter.setdefault(session_id, 0)
-        counter += body.count
-        self.session_id_to_counter[session_id] = counter
+        if session_id not in self.session_id_to_counter:
+            raise ResourcesSessionLostError(f"No open counter session {session_id}")
+        self.session_id_to_counter[session_id] += body.count
         return IncrementCounterResponse(success=True)
 
     # Read-only tool
     async def get_counter_value(self, request: Request) -> GetCounterValueResponse:
         session_id = request.session[SESSION_ID_KEY]
-        counter = self.session_id_to_counter.setdefault(session_id, 0)
-        return GetCounterValueResponse(count=counter)
+        if session_id not in self.session_id_to_counter:
+            raise ResourcesSessionLostError(f"No open counter session {session_id}")
+        return GetCounterValueResponse(count=self.session_id_to_counter[session_id])
 
     # Verify against expected final state
-    async def verify(
-        self,
-        request: Request,
-        body: StatefulCounterVerifyRequest
-    ) -> BaseVerifyResponse:
+    async def verify(self, request: Request, body: StatefulCounterVerifyRequest) -> BaseVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
-
-        reward = 0.0
-        if session_id in self.session_id_to_counter:
-            counter = self.session_id_to_counter[session_id]
-            reward = float(body.expected_count == counter)
-
-        return BaseVerifyResponse(**body.model_dump(), reward=reward)
+        async with self.verifying(session_id) as verification:
+            if verification.is_lost:
+                # Never seeded, already closed, or lost: mask the sample instead of scoring 0
+                return BaseVerifyResponse(
+                    **(body.model_dump() | lost_session_verification(f"counter session {session_id} is gone"))
+                )
+            # Live state on the first verify; the retained value on a retry
+            counter = self.session_id_to_counter[session_id] if verification.is_live else verification.retained
+            verification.retain(counter)
+            return BaseVerifyResponse(**body.model_dump(), reward=float(body.expected_count == counter))
 
 if __name__ == "__main__":
     StatefulCounterResourcesServer.run_webserver()
@@ -145,19 +144,48 @@ elif is_nemo_gym_fastapi_entrypoint(__file__):
 
 ### Key Pattern
 
-Use `SESSION_ID_KEY` from the request session middleware to maintain per-episode state. The session ID is automatically assigned by the framework's middleware (set up in `SimpleResourcesServer.setup_webserver()` via `self.setup_session_middleware(app)`).
+Implement the three session state hooks and set `seed_request_model`. `SimpleResourcesServer` then serves `/seed_session` and `/close_session` for you, under a per-session lock:
 
-**To access session state:**
-1. Add `request: Request` as a parameter to any endpoint method
-2. Read the session ID with `request.session[SESSION_ID_KEY]`
-3. Store state in an instance-level dictionary keyed by session ID
+1. **Seed.** An Environment Server sends a `ResourcesSeedSessionRequest` with `resources_session_id`, `episode_id`, `task_id`, and the task's fields in `task_data`. The base validates `task_data` against `seed_request_model` (invalid data gets HTTP 422), calls `initialize_session_state`, binds the session cookie to `resources_session_id`, and replies with a `ResourcesSeedSessionResponse`.
+2. **Tools.** Read the session ID with `request.session[SESSION_ID_KEY]` and key state by it. A tool call for a session the server no longer holds raises `ResourcesSessionLostError` (HTTP 404); do not create state with a default value.
+3. **Verify.** Score inside `async with self.verifying(session_id) as verification`. Return `lost_session_verification()` when `verification.is_lost`, so the sample is masked rather than scored 0. Call `verification.retain(...)` with what a retried verify needs; the context then releases the live state through `release_session_state`.
+4. **Close.** The base's `/close_session` calls `release_session_state` and fences the ID for `session_close_retry_window_seconds`. A close succeeds for a session that is already closed or was never seeded, and needs no cookie.
+
+The session middleware is set up in `SimpleResourcesServer.setup_webserver()` via `self.setup_session_middleware(app)`, so tool and verify handlers only add `request: Request` to read the ID.
 
 <Note>
-In `seed_session`, use direct assignment (`self.session_id_to_counter[session_id] = body.initial_count`) rather than `setdefault`. Using `setdefault` would silently ignore re-seed attempts if the session already exists, which can cause subtle bugs when the same session ID is reused across episodes. Note: the current `example_session_state_mgmt` implementation still uses `setdefault` in `seed_session` — the direct assignment shown here is the preferred pattern.
-
-In tool methods like `increment_counter` and `get_counter_value`, `setdefault` is appropriate — it provides a safe fallback of `0` if the session was somehow not initialized.
+Do not override `seed_session` to assign state again on every seed. A repeated seed with the same `resources_session_id`, episode, and task is a retry of the same episode, for example after a lost reply: the base returns the existing session without calling `initialize_session_state` again. The same ID from another episode or task gets HTTP 409, and so does a seed for a session that is already closed or verified.
 
 </Note>
+
+To check these rules, call `check_resources_session_contract` from the server's tests:
+
+```python
+from unittest.mock import MagicMock
+
+from nemo_gym.client import ServerClient
+from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.server_runtime import ResourcesSeedSessionRequest, check_resources_session_contract
+
+
+def test_session_contract() -> None:
+    config = StatefulCounterResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="counter")
+    server = StatefulCounterResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+    check_resources_session_contract(
+        server.setup_webserver(),
+        ResourcesSeedSessionRequest(
+            resources_session_id="contract-session",
+            episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+            task_id=TaskId(taskset="counter", task_id="0"),
+            task_data={"initial_count": 3},
+        ),
+        keeps_state=True,
+        holds_state=server.has_session_state,
+        verify_body=VERIFY_BODY,  # a /verify body with expected_count and a response
+    )
+```
+
+With `verify_body`, the check also confirms that a verify for a closed session returns a masked sample.
 
 ---
 
@@ -166,8 +194,12 @@ In tool methods like `increment_counter` and `get_counter_value`, `setdefault` i
 ```text
 [Episode start]
 
-Agent -> ResourcesServer: POST /seed_session {"initial_count": 3}
-  (ResourcesServer stores session_id_to_counter[session_id] = 3)
+EnvironmentServer -> ResourcesServer: POST /seed_session
+  {"resources_session_id": "resources-session-1", ..., "task_data": {"initial_count": 3, ...}}
+  (ResourcesServer stores session_id_to_counter["resources-session-1"] = 3
+   and returns {"resources_session_id": "resources-session-1"} with the session cookie)
+
+EnvironmentServer -> Agent: seed the agent session with direct HTTP access to the tools (carries the cookie)
 
 User: "Increment the counter by 2, then tell me the current value."
 
@@ -178,7 +210,7 @@ Model calls tool:
 Agent -> ResourcesServer: POST /increment_counter {"count": 2}
 ResourcesServer -> Agent:
   {"success": true}
-  (counter is now 5 for this session_id)
+  (counter is now 5 for this session)
 
 Agent -> ModelServer: POST /v1/responses
 Model calls tool:
@@ -188,12 +220,15 @@ Agent -> ResourcesServer: POST /get_counter_value {}
 ResourcesServer -> Agent:
   {"count": 5}
 
-[Episode end -> grading]
+[Agent turn ends -> grading]
 
-Agent -> ResourcesServer: POST /verify {"expected_count": 5, ...}
+EnvironmentServer -> ResourcesServer: POST /verify {"expected_count": 5, ...} (with the session cookie)
 ResourcesServer:
-  - reads counter for this session_id
+  - reads counter for this session
   - reward = 1.0 if counter == expected_count else 0.0
+  - releases the counter
+
+EnvironmentServer -> ResourcesServer: POST /close_session {"resources_session_id": "resources-session-1", ...}
 ```
 
 ---

@@ -9,27 +9,29 @@ A Resources Server implements the Environment interface related to: its tools, s
 <Info>
 **Agent Server context**
 
-The Agent is the behavior that decides what to do next, typically with different components like a Harness and a policy-model. 
-The Agent Server is the HTTP transport for two internal methods:
+The Agent is the behavior that decides what to do next, typically with different components like a Harness and a policy-model.
+An Environment Server decides the order of calls in each episode: it seeds the Resources Server, opens an agent session, runs the agent turn, closes the agent session, verifies, and closes the resources session. The Agent Server serves:
 
-- `run()` is exposed as `/run` and implements part of the episode orchestration associated with the Resources Server seed session, delegation of the Agent loop to responses() and call to the verifier.
-- `responses()` is exposed as `/v1/responses` and implements Agent behavior. Depending on the Agent Server, this can be a complete agent harness or one policy-model call.
+- `/v1/agent_sessions` and `/v1/agent_sessions/close`, which open and close the agent's session with the tool and sandbox access the Environment Server grants.
+- `/v1/responses`, which implements Agent behavior. Depending on the Agent Server, this can be a complete agent harness or one policy-model call.
 
-In `simple_agent`, `run()` delegates the Agent loop to `responses()` before requesting final verification. In `gymnasium_agent`, `run()` owns the model-and-environment loop and does not invoke `responses()` to the tool calling.
+Some Agent Servers also expose `/run`, which runs a whole episode inside the agent; a `legacy_agent` Environment Server relays rows to it unchanged. Do not build new benchmarks or environments on that relay. `gymnasium_agent` still runs the Gymnasium protocol below in its `run()`, which owns the model-and-environment loop.
 </Info>
 
 ## Resources Server Protocol Landscape
 
-NeMo Gym ships two framework-standard base protocols for coordinating an episode between the Agent and the Environment. Agent behavior and rollout orchestration are implemented by `responses()` and `run()` behind the Agent Server's HTTP endpoints; the Environment is implemented by the Resources Server.
+NeMo Gym ships two framework-standard base protocols for coordinating an episode between the Agent and the Environment. The Resources Server implements the Environment; what drives the episode depends on the protocol.
 
-Each protocol has a matching built-in Agent Server: `simple_agent` for the `/seed_session` and `/verify` interface, and `gymnasium_agent` for the `/reset` and `/step` interface.
+The seed/verify protocol is driven by the `single_agent_turn` Environment Server, paired with any Agent Server that serves agent sessions, such as `simple_agent` for direct HTTP tools or a sandboxed harness. The Gymnasium protocol is driven by `gymnasium_agent`, which runs the `/reset` and `/step` loop in its own `run()`.
 
-| Base protocol | Resources Server API | Matching built-in Agent Server | Reward contract |
+| Base protocol | Resources Server API | What drives the episode | Reward contract |
 |---|---|---|---|
-| Seed/verify | `/seed_session` and `/verify` | `simple_agent` | `/verify` scores the completed trajectory once. |
+| Seed/verify | `/seed_session`, `/verify` and `/close_session` | `single_agent_turn` Environment Server with an agent such as `simple_agent` | `/verify` scores the completed trajectory once. |
 | Gymnasium | `/reset` and `/step` | `gymnasium_agent` | Every `/step` returns a reward; `/run` accumulates them. |
 
-Pick one base protocol and build the Resources Server and Agent Server to match. `GymnasiumServer` exposes `/reset` and `/step` and does not expose `/verify`. `SimpleResourcesServer` defines `/seed_session` and `/verify` but can be extended with additional environment-specific routes.
+Tasks can also be task folders in the Harbor format instead of JSONL rows and a Resources Server: the `harbor` Environment Server seeds a sandbox from each folder, runs the agent, and runs the task's own verifier. Both formats are equal choices for a new benchmark; see [Author Task Folders](/data/task-folders/harbor-tasks). The rest of this page covers Resources Servers.
+
+Pick one base protocol and build the Resources Server and Agent Server to match. `GymnasiumServer` exposes `/reset` and `/step` and does not expose `/verify`. `SimpleResourcesServer` defines `/seed_session`, `/verify`, and `/close_session` but can be extended with additional environment-specific routes.
 
 <Note>
 The two base protocols do not describe every concrete Agent–Environment interface in the repository. Some environments extend the seed/verify protocol with custom transition endpoints. Other environments are embedded inside the Agent and do not use a Resources Server during `/run`.
@@ -65,40 +67,42 @@ The episode protocol defines initialization, transitions, and scoring. The actio
 
 ## Seed/Verify Protocol: `seed_session()` and `verify()`
 
-The seed/verify protocol brackets the Agent harness with environment initialization and final verification:
+The seed/verify protocol brackets the Agent harness with environment initialization, final verification, and cleanup. The `single_agent_turn` Environment Server makes every call to the Resources Server's lifecycle routes:
 
 ```text
-Client → Agent Server: POST /run
-Agent Server → Resources Server: POST /seed_session
-Agent Server run() → Agent Server responses(): POST /v1/responses
-  responses() ↔ Model Server
-  responses() → Resources Server tool endpoint
+Rollout collection → Environment Server: POST /run (one task)
+Environment Server → Resources Server: POST /seed_session (ResourcesSeedSessionRequest)
+Environment Server → Agent Server: POST /v1/agent_sessions (tool and sandbox grants)
+Environment Server → Agent Server: POST /v1/responses (the agent turn)
+  Agent ↔ Model Server
+  Agent → Resources Server tool endpoint (direct HTTP or MCP grant)
   ... repeat the model/tool Agent loop
-Agent Server → Resources Server: POST /verify
-Agent Server → Client: completed trajectory and reward
+Environment Server → Agent Server: POST /v1/agent_sessions/close
+Environment Server → Resources Server: POST /verify (with the resources session cookie)
+Environment Server → Resources Server: POST /close_session
+Environment Server → Rollout collection: verify response and trajectory
 ```
-
-For the built-in `simple_agent`, `run()` performs the lifecycle orchestration and `responses()` implements the Agent loop. The Agent Server exposes those methods as `/run` and `/v1/responses`, respectively.
 
 ### Lifecycle API
 
-`SimpleResourcesServer` exposes:
+`SimpleResourcesServer` serves `/seed_session`, `/close_session`, and `/verify`. A server implements `verify()`; a server with per-episode state also implements the [session state hooks](#session-cleanup) and names its seed model:
 
 ```python
-async def seed_session(
-    self,
-    body: BaseSeedSessionRequest,
-) -> BaseSeedSessionResponse:
-    ...
+class CounterSeed(BaseSeedSessionRequest):
+    initial_count: int
 
-async def verify(
-    self,
-    body: BaseVerifyRequest,
-) -> BaseVerifyResponse:
-    ...
+
+class CounterServer(SimpleResourcesServer):
+    seed_request_model = CounterSeed  # validates the seed's task_data
+
+    # A stateful server also implements has_session_state(), initialize_session_state() and release_session_state().
+
+    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+        ...
 ```
 
-- **`body` in `seed_session()`** contains fields used to initialize an episode. Define a `BaseSeedSessionRequest` subclass for fields such as an initial board, task ID, or sandbox image. The default implementation is a no-op.
+- **The seed body** is a `ResourcesSeedSessionRequest`: the Environment Server's `resources_session_id`, the `episode_id` and `task_id`, and the task's fields in `task_data`. A stateless server needs no seed code: the base answers with a `ResourcesSeedSessionResponse` that echoes `resources_session_id`, and `single_agent_turn` rejects a seed reply without it.
+- **`seed_request_model`** is the `BaseSeedSessionRequest` subclass that a stateful server's `task_data` must match, with fields such as an initial board or sandbox image. Invalid task data gets HTTP 422. The base passes the validated model to `initialize_session_state()`.
 - **`body.responses_create_params` in `verify()`** is the original model request.
 - **`body.response` in `verify()`** is the completed `NeMoGymResponse`, including the trajectory assembled by the Agent Server.
 - **Custom task metadata** requires a `BaseVerifyRequest` subclass. Declare fields such as `answer` or `expected_state`; undeclared fields are not retained by the base Pydantic model.
@@ -141,7 +145,7 @@ would send two user messages.
 
 ### Direct HTTP Tool-Calling Protocol
 
-The seed/verify episode protocol does not itself define how the Agent acts on the environment. `simple_agent` supplies a direct HTTP function-tool protocol inside `responses()`:
+The seed/verify episode protocol does not itself define how the Agent acts on the environment. When the Environment Server grants direct HTTP access (`resources_tool_transports: [direct_http]`), `simple_agent` supplies a direct HTTP function-tool protocol inside `responses()`:
 
 1. The input row declares function schemas in `responses_create_params.tools`.
 2. The Agent Server sends those schemas to the Model Server.
@@ -241,7 +245,7 @@ Choose the seed/verify protocol when:
 - The Agent harness should own model calls, tool dispatch, retries, or other orchestration.
 - Resources Server routes should be exposed directly as model tools.
 - One final reward should be computed from the completed trajectory or final environment state.
-- You are pairing the environment with `simple_agent` or a custom Agent Server that implements `/seed_session`, an Agent harness, and `/verify`.
+- You are running it through `single_agent_turn` with an Agent Server that serves agent sessions, such as `simple_agent` or a sandboxed harness.
 
 ## Gymnasium Protocol: `reset()` and `step()`
 
@@ -336,11 +340,11 @@ Choose the Gymnasium protocol when:
 - The environment decides the next observation and stopping condition.
 - Rewards are naturally assigned per transition.
 - The model response itself is the environment action.
-- You are pairing the environment with `gymnasium_agent` or a custom Agent Server that implements the `/reset` and `/step` loop.
+- You are pairing the environment with `gymnasium_agent` or a custom Agent Server that implements the `/reset` and `/step` loop. No Environment Server drives this protocol yet, so rollout collection reaches `gymnasium_agent` through a `legacy_agent` relay, as in `resources_servers/blackjack`.
 
 ## State Management
 
-Both episode protocols use the Resources Server's session middleware. It assigns a unique `session_id` cookie, and the Agent Server preserves that cookie across Resources Server calls in the same rollout.
+Both episode protocols use the Resources Server's session middleware, which identifies a rollout's session by a cookie. Under an Environment Server, the seed's `resources_session_id` becomes that session ID. The Environment Server keeps the cookie from the seed reply, hands it to the agent in its direct HTTP tool grant, and sends it with `/verify`; an MCP grant carries a signed session token for the same session instead. Under the Gymnasium protocol, `gymnasium_agent` keeps the cookie across `/reset` and `/step`.
 
 Store rollout-specific state under the session ID so concurrent episodes remain isolated. State can range from:
 
@@ -350,7 +354,7 @@ Store rollout-specific state under the session ID so concurrent episodes remain 
 
 ### Seed/Verify State
 
-`SimpleResourcesServer` does not define a state container. Add one and read the session ID from the FastAPI request:
+`SimpleResourcesServer` does not define a state container. Add one, implement the three session state hooks, and read the session ID from the FastAPI request:
 
 ```python
 from typing import Any
@@ -359,26 +363,34 @@ from fastapi import Request
 from pydantic import Field
 
 from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.server_runtime import lost_session_verification
 
 
 class StatefulServer(SimpleResourcesServer):
+    seed_request_model = SeedRequest
     session_state: dict[str, Any] = Field(default_factory=dict)
 
-    async def seed_session(self, request: Request, body: SeedRequest):
-        session_id = request.session[SESSION_ID_KEY]
+    def has_session_state(self, session_id: str) -> bool:
+        return session_id in self.session_state
+
+    async def initialize_session_state(self, session_id: str, body: SeedRequest) -> None:
         self.session_state[session_id] = initialize(body)
-        return BaseSeedSessionResponse()
+
+    async def release_session_state(self, session_id: str) -> None:
+        self.session_state.pop(session_id, None)
 
     async def verify(self, request: Request, body: VerifyRequest):
         session_id = request.session[SESSION_ID_KEY]
-        try:
-            reward = grade(self.session_state[session_id], body)
-            return make_verify_response(body, reward)
-        finally:
-            self.session_state.pop(session_id, None)
+        async with self.verifying(session_id) as verification:
+            if verification.is_lost:
+                return VerifyResponse(**(body.model_dump() | lost_session_verification("session is gone")))
+            # Live state on the first verify; the retained snapshot on a retry
+            state = self.session_state[session_id] if verification.is_live else verification.retained
+            verification.retain(snapshot(state))
+            return make_verify_response(body, grade(state, body))
 ```
 
-Tool endpoints can read the same `request.session[SESSION_ID_KEY]`, so `/seed_session`, tool calls, and `/verify` operate on the same environment instance.
+Tool endpoints can read the same `request.session[SESSION_ID_KEY]`, so `/seed_session`, tool calls, and `/verify` operate on the same environment instance. A tool call for a session the server no longer holds raises `ResourcesSessionLostError` (HTTP 404). The [Stateful Environment](/environment-tutorials/stateful-environment) tutorial builds a complete server this way.
 
 ### Gymnasium State
 
@@ -403,7 +415,7 @@ Do not put rollout-specific mutable data in an unkeyed server attribute.
 - **Seed/verify protocol**: servers using the state hooks release through the `verifying()` context described below. Servers with a custom lifecycle remove their own state in `verify()`, preferably in a `finally` block.
 - **Gymnasium protocol**: when `step()` returns `terminated=True` or `truncated=True`, `GymnasiumServer` calls `close_session()` and removes the entry from `self.session_state`.
 - **Heavyweight state**: override `close_session()`, release the external resource, and call `await super().close_session(session_id)`.
-- **Episode sessions**: an Environment Server seeds with a `ResourcesSeedSessionRequest` and closes through `/close_session`. Stateless servers keep the no-op lifecycle. Stateful servers implement `has_session_state()`, `initialize_session_state()` and `release_session_state()` on `SimpleResourcesServer`, and set `seed_request_model` to validate `task_data`. The base supplies seed, close and checkpoint retirement. Its `verifying()` context holds the session lock during scoring, releases state through the hook, and retains bounded retry evidence. See the [MCP Resources Server](/main/environment-tutorials/mcp-resources-server) example. A server that keeps its own lifecycle instead releases state by `resources_session_id`, not by the cookie (after a lost seed reply the close arrives without one), refuses a seed that no retry can fix with `ResourcesSeedRejectedError` (422) or `ResourcesSessionConflictError` (409), and checks these rules with `check_resources_session_contract(app, seed, keeps_state=True, holds_state=..., verify_body=...)` from `nemo_gym.server_runtime.testing.session_conformance`.
+- **Episode sessions**: an Environment Server seeds with a `ResourcesSeedSessionRequest` and closes through `/close_session`. Stateless servers keep the no-op lifecycle. Stateful servers implement `has_session_state()`, `initialize_session_state()` and `release_session_state()` on `SimpleResourcesServer`, and set `seed_request_model` to validate `task_data`. The base supplies seed, close and checkpoint retirement. Its `verifying()` context holds the session lock during scoring, releases state through the hook, and retains bounded retry evidence. See [`resources_servers/math_with_code`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/math_with_code), whose tests run `check_resources_session_contract`, and the [Stateful Environment](/environment-tutorials/stateful-environment) tutorial. A server that keeps its own lifecycle instead releases state by `resources_session_id`, not by the cookie (after a lost seed reply the close arrives without one), refuses a seed that no retry can fix with `ResourcesSeedRejectedError` (422) or `ResourcesSessionConflictError` (409), and checks these rules with `check_resources_session_contract(app, seed, keeps_state=True, holds_state=..., verify_body=...)` from `nemo_gym.server_runtime.testing.session_conformance`.
 - **Cleanup ownership**: release by session ID, including unknown or already-released IDs. Keep resource handles reachable and raise when cleanup fails so the owner can retry. The base releases the previous cookie run before initializing its replacement and cleans up partial initialization failures. It records a close only after cleanup succeeds. `ResourcesSessionLocks` serializes lifecycle operations; `ResourcesSessionFences` refuses late seeds during the close retry window. Tools that await must also hold `session_lock(session_id)` or coordinate with their resource's release implementation.
 - **Verification and checkpoint restore**: use `async with self.verifying(session_id) as verification` around scoring. If `verification.is_lost`, return a masked sample with `lost_session_verification()`. Live state is available while the context holds the lock; call `verification.retain(payload)` with compact evidence for retries, and read it from `verification.retained` on a retry. Retain that evidence before an awaited judge can fail; explicitly call `retain(None)` if a retry can score entirely from its request. A receipt without explicit retention is `is_lost`, even when unseeded verification is allowed with `verifying(session_id, allow_missing=True)`. A release failure is logged and observed without replacing a successful score or the original scoring exception, while ownership remains available for close or retirement to retry cleanup. Cancellation still propagates, and a request cancelled by its caller's disconnect leaves its release pending for the next verify retry, close or retirement. Retained evidence is process-local and bounded after successful release; it does not replace saving the policy answer or declaring a supported offline re-verification mode. Exported servers restore typed ownership with `restore_session_identity()` rather than writing base-class state. `check_resources_session_contract()` from `nemo_gym.server_runtime` checks the HTTP seed/close ownership contract.
 
@@ -457,17 +469,28 @@ Concurrency limits such as judge semaphores apply per worker, so the server as a
 
 ## YAML Configuration
 
-The Resources Server definition has the same YAML shape for both episode protocols. The paired Agent Server determines which protocol is used.
+The Resources Server definition has the same YAML shape for both episode protocols. The Environment Server and Agent Server paired with it determine which protocol is used.
 
 <Tabs>
 <Tab title="Seed/verify">
 
 ```yaml
+config_paths:
+  - environment_servers/single_agent_turn/configs/single_agent_turn.yaml
+
+environment_server_routes:
+  calculator: calculator_environment
+
 calculator:
   resources_servers:
     calculator:
       entrypoint: app.py
       domain: knowledge
+      datasets:
+      - name: example
+        type: example
+        taskset: calculator
+        jsonl_fpath: resources_servers/calculator/data/example.jsonl
 
 calculator_agent:
   responses_api_agents:
@@ -479,10 +502,18 @@ calculator_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/calculator/data/example.jsonl
+
+calculator_environment:
+  _inherit_from: single_agent_turn
+  environment_servers:
+    single_agent_turn:
+      resources_server:
+        type: resources_servers
+        name: calculator
+      agent_server:
+        type: responses_api_agents
+        name: calculator_agent
+      resources_tool_transports: [direct_http]
 ```
 
 </Tab>
@@ -510,15 +541,23 @@ calculator_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/calculator/data/example.jsonl
+
+calculator_environment:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: calculator_agent
 ```
 
 </Tab>
 </Tabs>
 
-The Agent Server's `resources_server.name` must match the top-level Resources Server instance name.
+Each `resources_server.name` must match the top-level Resources Server instance name. Under `single_agent_turn`, the Environment Server's own `resources_server` binding decides which Resources Server an episode uses.
 
-For an Environment Server, add `taskset: <name>` to the dataset
-declaration and map that name in `environment_server_routes`. The normal
+The seed/verify tab declares `taskset: calculator` on its dataset and maps that name in
+`environment_server_routes` to the Environment Server. The normal
 `gym dataset collate` and `gym eval run --benchmark ...` paths then convert prepared
 flat rows to `task_id` and `task_input`; no separate conversion command is needed.
 Collation leaves task-owned fields flat inside `task_input`; each Environment Server
@@ -529,8 +568,15 @@ into it, with conflicting values rejected. Dataset metrics count custom rows
 without requiring Responses API fields; response-specific metrics are collected
 only when those fields validate.
 The source JSONL stays unchanged and can still be shared with flat-row recipes.
-Omit `taskset` to keep the current flat-row format. This option accepts flat input
-only; already materialized input should be passed directly with `--input`.
+`taskset` accepts flat input only; already materialized input should be passed directly with `--input`.
+To run an `example` dataset against servers you started, materialize it first with
+`gym dataset collate ... --mode example_validation --output-dir <dir>` and pass `<dir>/example.jsonl` to
+`gym eval run --no-serve --input`.
+
+Rows without a `taskset` stay flat. Flat rows can run through `single_agent_turn_legacy`, which runs the
+same session lifecycle and accepts flat rows; name both `resources_server` and `agent_server` in its block, as
+[`example_single_tool_call_single_agent_turn.yaml`](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/example_single_tool_call/configs/example_single_tool_call_single_agent_turn.yaml)
+does. A `legacy_agent` relay, which sends each row to an agent's `/run`, is not for new seed/verify work.
 
 For example, add these keys to a config whose `swebench_pro_hermes` Environment
 Server binds the `swebench_pro_hermes_resources_server` instance:

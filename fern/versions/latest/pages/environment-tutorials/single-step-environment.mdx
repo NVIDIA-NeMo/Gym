@@ -42,7 +42,7 @@ Run all commands from the **repository root** directory (where `pyproject.toml` 
 
 ## How It Works
 
-NeMo Gym uses a decoupled three-component architecture: the **Agent Server** orchestrates the loop, the **Model Server** runs inference, and the **Resources Server** provides tools and verification. All three are async FastAPI servers communicating over HTTP, which allows many rollouts to run concurrently across episodes. See [Environment Components](/about/architecture) for the full architecture and diagram.
+NeMo Gym uses decoupled components: the **Environment Server** decides the order of calls in each episode (seed, agent turn, verification, cleanup), the **Agent Server** runs the model-and-tool loop, the **Model Server** runs inference, and the **Resources Server** provides tools and verification. All of them are async FastAPI servers communicating over HTTP, which allows many rollouts to run concurrently across episodes. See [Environment Components](/about/architecture) for the full architecture and diagram.
 
 In most cases, the **Resources Server** is where your changes go: define your tool endpoints and a `verify()` method that returns a reward. NeMo Gym ships several pre-built agent servers (`simple_agent`, `swe_agents`, etc.) and model servers (`openai_model`, `vllm_model`) that you can use as-is, or you can bring your own.
 
@@ -56,7 +56,7 @@ Resource servers live in the `resources_servers/` directory. Scaffold a weather 
 gym env init --resources-server my_weather_tool
 ```
 
-This generates the following structure along with a paired simple agent configuration:
+This generates the following structure along with a paired simple agent configuration (the configuration step in section 3 puts it behind the `single_agent_turn` Environment Server):
 
 ```text
 resources_servers/my_weather_tool/
@@ -141,16 +141,20 @@ This section covers the key aspects of building the environment itself: building
 
 ### 3.1 Agent Server
 
-While this tutorial is about a single-step environment, it still can use the built-in `simple_agent`, which handles even multi-step tool calling out of the box. No custom agent code is needed. Here is simplified pseudocode showing the core flow ([actual implementation](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_agent)):
+While this tutorial is about a single-step environment, it still can use the built-in `simple_agent`, which handles even multi-step tool calling out of the box. No custom agent code is needed. The `single_agent_turn` Environment Server runs each episode and calls `simple_agent` for the agent turn. Here is simplified pseudocode showing the core flow ([Environment Server](https://github.com/NVIDIA-NeMo/Gym/tree/main/environment_servers/single_agent_turn), [agent](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/simple_agent)):
 
 ```python
-# run() — episode lifecycle
-async def run(self, request, body):
-    await resources_server.seed_session(body)      # initialize env state
-    response = await self.responses(body)           # multi-step agent loop
-    return await resources_server.verify(response)  # compute reward
+# single_agent_turn Environment Server — one episode
+async def run(self, episode):
+    await resources_server.seed_session(episode)           # typed seed: session ID, episode, task and task_data
+    await agent_server.open_agent_session(tool_grants)     # direct HTTP access to the Resources Server's tools
+    response = await agent_server.responses(episode)       # the agent turn: multi-step tool loop
+    await agent_server.close_agent_session()
+    result = await resources_server.verify(response)       # compute reward
+    await resources_server.close_session(episode)          # release the session
+    return result
 
-# responses() — multi-step tool loop
+# simple_agent responses() — multi-step tool loop
 async def responses(self, body):
     while True:
         model_response = await model_server.responses(conversation)
@@ -166,7 +170,7 @@ async def responses(self, body):
     return model_response
 ```
 
-This tutorial uses `simple_agent`. For other patterns (multi-turn correction, custom orchestration), see the other agents in [`responses_api_agents/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents), or build your own by extending `SimpleResponsesAPIAgent`.
+This tutorial uses `simple_agent`. For other patterns (multi-turn correction, custom orchestration), see the other agents in [`responses_api_agents/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents), or wrap your own agent runtime as an Agent Server that serves agent sessions (see [Add or Update a Harness](/agent-server/add-or-update-a-harness)).
 
 ### 3.2 Resources Server
 
@@ -301,11 +305,17 @@ This first verifier intentionally checks only tool *usage*, not whether the city
 
 #### Configure - Wiring the pieces together
 
-Open `resources_servers/my_weather_tool/configs/my_weather_tool.yaml`. This file contains both the resource server and its paired simple agent configuration.
+Open `resources_servers/my_weather_tool/configs/my_weather_tool.yaml`. This file contains the resource server, its paired simple agent, and an Environment Server in front of the agent.
 
-Update the `domain` field from `other` to `agent`:
+Update the `domain` field from `other` to `agent`, declare a `taskset` on the dataset, and run the agent through the `single_agent_turn` Environment Server. The scaffold generates a `legacy_agent` relay for `my_weather_tool_environment_server`, which sends each row to the agent's `/run`; replace that block as shown:
 
 ```yaml
+config_paths:
+  - environment_servers/single_agent_turn/configs/single_agent_turn.yaml
+
+environment_server_routes:
+  my_weather_tool: my_weather_tool_environment_server
+
 my_weather_tool_resources_server:
   resources_servers:
     my_weather_tool:
@@ -313,6 +323,15 @@ my_weather_tool_resources_server:
       domain: agent  # Change from 'other' to match your use case
       verified: false
       description: Single-step weather tool calling
+      datasets:
+      - name: example
+        type: example
+        taskset: my_weather_tool
+        jsonl_fpath: resources_servers/my_weather_tool/data/example.jsonl
+      # The scaffold also generates train/validation dataset entries
+      # (which can declare a `source:` block — the unified dataset source).
+      # Those are omitted here since we only have example data at this stage.
+
 my_weather_tool_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -323,14 +342,21 @@ my_weather_tool_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      datasets:
-      - name: example
-        type: example
-        jsonl_fpath: resources_servers/my_weather_tool/data/example.jsonl
-      # The scaffold also generates train/validation dataset entries
-      # (which can declare a `source:` block — the unified dataset source).
-      # Those are omitted here since we only have example data at this stage.
+
+my_weather_tool_environment_server:
+  _inherit_from: single_agent_turn
+  environment_servers:
+    single_agent_turn:
+      resources_server:
+        type: resources_servers
+        name: my_weather_tool_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: my_weather_tool_simple_agent
+      resources_tool_transports: [direct_http]  # the agent calls get_weather over HTTP
 ```
+
+`taskset` makes collation turn each row into a typed task (`task_id` and `task_input`) and `environment_server_routes` sends that taskset to the Environment Server. To keep flat rows instead, drop `taskset` and the route, and use `single_agent_turn_legacy` (and its config under `environment_servers/single_agent_turn_legacy/configs/`) in place of `single_agent_turn`. It runs the same episode steps, and `gym eval run --agent my_weather_tool_simple_agent --input <raw rows>` reaches it. Do not keep the `legacy_agent` relay for new work.
 
 The `domain` field categorizes your resource server and is **required**. Common values: `math`, `coding`, `agent`, `knowledge`, `instruction_following`, `long_context`, `safety`, `games`, `e2e`, `other`.
 
@@ -339,7 +365,7 @@ The domain is used for metrics grouping and dataset naming. Choose the category 
 
 </Tip>
 
-The agent entry references the resource server and model server by name, wiring all three components together.
+The Environment Server references the resource server and the agent by name, and the agent references the model server, wiring the components together.
 
 ---
 
@@ -449,11 +475,12 @@ gym env start \
     --resources-server my_weather_tool
 ```
 
-`gym env start` reads the config files and starts all three components from the architecture diagram:
+`gym env start` reads the config files and starts the components from the architecture diagram:
 
-1. **Agent Server** (`my_weather_tool_simple_agent`) — the `simple_agent` that orchestrates the seed → model → tool → verify loop
-2. **Model Server** (`openai_model`) — proxies LLM inference requests to the OpenAI API
-3. **Resources Server** (`my_weather_tool_resources_server`) — serves your `get_weather` tool endpoint and `verify()` logic
+1. **Environment Server** (`my_weather_tool_environment_server`) — `single_agent_turn`, which runs each episode: seed → agent turn → verify → close
+2. **Agent Server** (`my_weather_tool_simple_agent`) — the `simple_agent` that runs the model → tool loop
+3. **Model Server** (`openai_model`) — proxies LLM inference requests to the OpenAI API
+4. **Resources Server** (`my_weather_tool_resources_server`) — serves your `get_weather` tool endpoint and `verify()` logic
 
 ### Configure API Keys
 
@@ -491,7 +518,7 @@ python responses_api_agents/simple_agent/client.py
 ```
 
 <Note>
-This client calls `/v1/responses`, which tests tool-calling but does not exercise the full episode lifecycle (`seed_session` → `responses` → `verify`). End-to-end validation happens during [rollout collection](#collect-rollouts) below.
+This client calls `/v1/responses`, which tests tool-calling but does not exercise the full episode lifecycle (`seed_session` → agent turn → `verify` → `close_session`). End-to-end validation happens during [rollout collection](#collect-rollouts) below.
 
 </Note>
 
@@ -502,12 +529,20 @@ Before training, you collect rollouts to validate that your environment works en
 1. **Validation** — confirm your tools, verification logic, and data produce sensible rewards. If a strong model scores near zero, something is likely wrong with your environment.
 2. **Baselining** — measure pass rates across models to understand task difficulty before training begins.
 
-With your servers still running, collect rollouts against your example inputs:
+The example rows route by taskset, so collate them into typed tasks first:
+
+```bash
+gym dataset collate --resources-server my_weather_tool \
+    --mode example_validation \
+    --output-dir results/my_weather_tool_example
+```
+
+With your servers still running, collect rollouts against the collated example tasks. The taskset route picks the Environment Server, so no `--agent` is needed:
 
 ```bash
 gym eval run --no-serve \
-    --agent my_weather_tool_simple_agent \
-    --input resources_servers/my_weather_tool/data/example.jsonl \
+    --resources-server my_weather_tool \
+    --input results/my_weather_tool_example/example.jsonl \
     --output resources_servers/my_weather_tool/data/example_rollouts.jsonl \
     --limit null \
     --num-repeats null \
