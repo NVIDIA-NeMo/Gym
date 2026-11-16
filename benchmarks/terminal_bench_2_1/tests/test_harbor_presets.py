@@ -10,9 +10,9 @@ import pytest
 from omegaconf import OmegaConf
 
 import nemo_gym.cli.eval as cli_eval
-from nemo_gym.config.global_config import GlobalConfigDictParser
+from nemo_gym.config import GlobalConfigDictParser
+from nemo_gym.data.tasks.harbor import load_task
 from nemo_gym.data.tasks.harbor.prepare import PreparedTaskset, build_run, harbor_benchmark
-from nemo_gym.data.tasks.harbor.task import load_task
 from tests.unit_tests.data.tasks.harbor.harbor_build_helpers import PULL_DOCKERFILE, write_task
 
 

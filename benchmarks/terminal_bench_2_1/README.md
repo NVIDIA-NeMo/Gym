@@ -36,6 +36,34 @@ gym eval run --benchmark terminal_bench_2_1/terminus_2 --sandbox opensandbox --m
   describes the files, the deployment overlay that reproduces the resources server's fixed sandbox size, and the two
   tasks whose published images fail their own tests (`qemu-startup`, `qemu-alpine-ssh`).
 
+### Scoring
+
+Each harness gets the task's agent budget (`[agent].timeout_sec`, capped by its own 10,800-second limit). When the
+budget runs out, the harness stops and the task's `tests/test.sh` grades the sandbox as the agent left it. Once
+`test.sh` has run, the row counts: a missing reward file scores 0. Infrastructure endings are retried or masked,
+never scored 0: a model-server or transport failure the harness reports, a sandbox or provider failure, a lost
+sandbox, and an episode that outlives its task's total budget. See the
+[`harbor` environment server](../../environment_servers/harbor/README.md#what-it-does).
+
+### Tasks the resources server repairs
+
+The Harbor path runs every task as published; the resources server repairs eleven of them at run time (see
+"Differences" below). Their reference solutions on the Harbor path
+(`gym dataset validate terminal_bench_2_1 --sandbox opensandbox --only-tasks ...`):
+
+| Task | Repair on the resources-server path | Reference solution on the Harbor path |
+| --- | --- | --- |
+| `qemu-startup`, `qemu-alpine-ssh` | Debian Bullseye security snapshot | 0: `tests/test.sh` installs `curl` from the Bullseye security mirror, which answers 404 |
+| `compile-compcert`, `extract-moves-from-video` | `ca-certificates` in `tests/test.sh` | 1 |
+| `pytorch-model-recovery`, `torch-tensor-parallelism`, `torch-pipeline-parallelism`, `mteb-retrieve` | PyTorch CPU wheel index in `tests/test.sh` | 1; the verifier downloads the CUDA build of `torch` and took 52 to 102 seconds of its 900 or 1,800 |
+| `mcmc-sampling-stan`, `build-cython-ext` | `solution/solve.sh` (golden-patch mode only) | 0: the published reference solution fails its tests; model rollouts are unaffected |
+| `build-pov-ray` | `solution/solve.sh` (golden-patch mode only) | 1 |
+
+`qemu-startup` and `qemu-alpine-ssh` score 0 on every rollout, as they do in Harbor itself: 2 of 89 tasks. When you
+compare with a source that repairs them, exclude them on both sides (`--exclude-tasks qemu-startup,qemu-alpine-ssh`)
+and say so. The `ca-certificates` repairs matter only for an agent that leaves `curl` without its CA bundle, which a
+reference solution does not show; such a rollout can score 0 on the Harbor path.
+
 ### Differences from the resources-server path
 
 The `*_legacy_agent` recipes and the sections below run the same tasks through the `terminal_bench_2_1` resources
@@ -44,10 +72,50 @@ server. Scores on the two paths are not interchangeable:
 - **Tasks.** The Harbor entry is Harbor's package-store copy; the resources server prepares rows from a clone of
   `harbor-framework/terminal-bench-2-1` at `7131e437`. The two differ in one file,
   `sanitize-git-repo/tests/test_outputs.py`.
-- **Verifier repairs.** The resources server patches some tasks at run time (a Debian Bullseye security snapshot,
-  `ca-certificates` and CPU-wheel index fixes in a few `tests/test.sh`). The Harbor path runs the tests as published.
+- **Repairs.** The resources server edits eight tasks' `tests/test.sh` (or their image's package sources) and, in
+  golden-patch mode, three reference solutions at run time; the Harbor path runs them as published. The table above
+  lists them and what each does on the Harbor path.
 - **Sandbox size and budgets.** The resources server gives every task 4 CPUs, 16 GiB and 30 GiB of disk and the
-  harness's own run limit; the Harbor path uses each task's declared resources and agent and verifier timeouts.
+  harness's own run limit (10,800 seconds for both harnesses); the Harbor path uses each task's declared resources
+  and agent and verifier timeouts (600 to 12,000 seconds of agent time, median 900). On a slow or shared endpoint
+  more episodes stop at the task's budget on the Harbor path, which lowers its score against the resources server's.
+  `rstan-to-pystan` declares 8 GiB, and its sandbox can be OOM-killed there (a masked or failed sample, not a 0). The
+  [Harbor tutorial](https://docs.nvidia.com/nemo/gym/main/tutorials/evaluation-tutorials/terminal-bench-2-1-harbor)
+  shows the overlay that gives the Harbor path the resources server's sandbox size.
+- **OpenCode harness.** `opencode` runs `opencode_agent` in place of `opencode_sandboxed_agent`; the two adapters ship
+  different defaults, so treat their scores as separate measurements. Both deny `webfetch`, `websearch` and `skill`.
+  `opencode_agent` keeps OpenCode subagents (`task`) enabled, which `opencode_sandboxed_agent` disables; it bounds
+  the whole run (10,800 seconds) rather than each model call (one hour), and its context window is metadata, not an
+  output cap. `opencode_sandboxed_agent` captures token IDs and requests `max_tokens` equal to its 262,144-token
+  window on every call, so an endpoint that serves exactly that window refuses every first call
+  (`context_length_exceeded`) and every rollout scores 0 without a recorded failure. Drop the per-call caps, as
+  [`policy_model_override.yaml`](../nemotron_3.5_super/policy_model_override.yaml) does, when you run
+  `opencode_legacy_agent` against such an endpoint.
+- **Terminus 2.** Both paths run `terminus_2_sandboxed_agent` with the same settings; on Harbor its run limit is the
+  task's agent budget rather than 10,800 seconds.
+
+### From the resources-server commands
+
+`terminal_bench_2_1/terminus_2` and `terminal_bench_2_1/opencode` keep their names but no longer read the resources
+server's keys, and `++` keys merge without an error, so map them:
+
+- `gym eval prepare --benchmark ...`: `gym dataset pull terminal_bench_2_1` fetches the task folders.
+- Row selection in the prepared `benchmark.jsonl` or `--input`: `--only-tasks` and `--exclude-tasks`.
+- The dataset's `num_repeats`: the preset's eight, or `--num-repeats`.
+- `terminal_bench_2_1_resources_server...sandbox_config.resources` and `.provider_options.resource_requests`:
+  `sandbox_resources_override` and `sandbox_provider_options` under
+  `harbor_environment_server.environment_servers.harbor` (the tutorial's overlay).
+- `...sandbox_config.metadata` (deployment labels such as those in
+  [`sandbox_utils.yaml`](../nemotron_3.5_super/sandbox_utils.yaml)) and `ready_timeout_s` (1,200 seconds there):
+  `sandbox_metadata` and `sandbox_ready_timeout_s` (default 900) in the same block.
+- `++use_absolute_ip=true`: not needed; the harness in the sandbox calls Gym's model server at the address the run's
+  servers listen on, so set `default_host` to one the sandboxes can reach.
+- `gym env start` with `gym eval run --no-serve`, and `gym eval plan`: not available for a Harbor-backed preset.
+- `gym eval submit` and launchers built on it: not yet. A submit benchmark passes only `+key=value` overrides to
+  `gym eval prepare` and `gym eval run`, so it cannot carry `--sandbox`; keep those configs on the `_legacy_agent`
+  names until submit can run a Harbor-backed preset.
+
+The old commands still run under `terminal_bench_2_1/terminus_2_legacy_agent` and `opencode_legacy_agent`.
 
 ## The resources-server path (legacy)
 
