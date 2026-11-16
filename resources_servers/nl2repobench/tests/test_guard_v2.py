@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for the block_target_v2 guard: identifier derivation, wrapper behaviour (run under bash with a stub in place of the real binary) and egress policy."""
 
-import os
 import shutil
 import stat
 import subprocess
@@ -12,8 +11,12 @@ import pytest
 from resources_servers.nl2repobench import guard_v2
 
 
-BCRYPT = guard_v2.derive_identifiers("pyca_bcrypt_pr-1", ["git clone --quiet https://github.com/pyca/bcrypt /tmp/_reference_repo"])
-SIX = guard_v2.derive_identifiers("benjaminp_six_pr-1", ["git clone https://github.com/benjaminp/six /tmp/_reference_repo"])
+BCRYPT = guard_v2.derive_identifiers(
+    "pyca_bcrypt_pr-1", ["git clone --quiet https://github.com/pyca/bcrypt /tmp/_reference_repo"]
+)
+SIX = guard_v2.derive_identifiers(
+    "benjaminp_six_pr-1", ["git clone https://github.com/benjaminp/six /tmp/_reference_repo"]
+)
 
 pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
 
@@ -47,7 +50,14 @@ def run_wrapper(tmp_path):
         wrapper = tmp_path / tool
         wrapper.write_text(guard_v2.render_wrapper(kind, tool, str(stub), *ident_slug))
         wrapper.chmod(0o755)
-        proc = subprocess.run([str(wrapper), *args], input=stdin, capture_output=True, text=True, timeout=30, stdin=None if stdin is not None else subprocess.DEVNULL)
+        proc = subprocess.run(
+            [str(wrapper), *args],
+            input=stdin,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            stdin=None if stdin is not None else subprocess.DEVNULL,
+        )
         return proc.returncode != 0 and "nl2repobench guard v2" in proc.stderr, proc
 
     return run
@@ -82,9 +92,27 @@ def run_wrapper(tmp_path):
         ("interp", "python", ["-m", "venv", "/tmp/v"], True),
         ("interp", "python", ["-m", "ensurepip"], True),
         ("interp", "python", ["-m", "pytest", "tests/"], False),
-        ("interp", "python", ["-c", "import urllib.request; urllib.request.urlopen('https://github.com/pyca/bcrypt/archive/main.tar.gz')"], True),
-        ("interp", "python", ["-c", "import urllib.request; urllib.request.urlopen('https://pypi.org/pypi/bcrypt/json')"], True),
-        ("interp", "python", ["-c", "import urllib.request; urllib.request.urlopen('https://github.com/other/thing')"], False),
+        (
+            "interp",
+            "python",
+            [
+                "-c",
+                "import urllib.request; urllib.request.urlopen('https://github.com/pyca/bcrypt/archive/main.tar.gz')",
+            ],
+            True,
+        ),
+        (
+            "interp",
+            "python",
+            ["-c", "import urllib.request; urllib.request.urlopen('https://pypi.org/pypi/bcrypt/json')"],
+            True,
+        ),
+        (
+            "interp",
+            "python",
+            ["-c", "import urllib.request; urllib.request.urlopen('https://github.com/other/thing')"],
+            False,
+        ),
         ("interp", "python", ["-c", "import bcrypt; print(bcrypt.__file__)"], False),
         ("interp", "python", ["--version"], False),
     ],

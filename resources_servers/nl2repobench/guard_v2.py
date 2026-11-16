@@ -46,6 +46,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Iterable
 
+
 # Source-hosting domains denied at the network layer in block_target_v2 (OpenSandbox egress policy, default allow).
 DENY_EGRESS_TARGETS = (
     "github.com",
@@ -95,7 +96,7 @@ def derive_identifiers(task_name: str, commands: Iterable[str]) -> tuple[list[st
             lowered = repo.lower()
             for prefix in ("python-", "python_", "py-", "py_"):
                 if lowered.startswith(prefix):
-                    names.add(repo[len(prefix):])
+                    names.add(repo[len(prefix) :])
             for suffix in ("-python", "_python", "-py", "_py", ".py"):
                 if lowered.endswith(suffix):
                     names.add(repo[: -len(suffix)])
@@ -256,7 +257,22 @@ exec "$REAL" "$@"
 """
 
 _PIP_NAMES = ("pip", "pip3")
-_FETCHER_PLAIN = ("uv", "uvx", "pipx", "poetry", "conda", "mamba", "micromamba", "npm", "npx", "apt", "apt-get", "go", "curl", "wget")
+_FETCHER_PLAIN = (
+    "uv",
+    "uvx",
+    "pipx",
+    "poetry",
+    "conda",
+    "mamba",
+    "micromamba",
+    "npm",
+    "npx",
+    "apt",
+    "apt-get",
+    "go",
+    "curl",
+    "wget",
+)
 _INTERP_PLAIN = ("node", "nodejs")
 
 # Discovery: every file/symlink named python*/pip*/uv/... under a bin/ directory in the usual roots. Directories are
@@ -267,7 +283,7 @@ _DISCOVER_CMD = (
     "-path '*/bin/*' \\( -name 'python*' -o -name 'pip*' -o -name uv -o -name uvx -o -name pipx -o -name poetry "
     "-o -name conda -o -name mamba -o -name micromamba -o -name npm -o -name npx -o -name node -o -name nodejs "
     "-o -name git -o -name curl -o -name wget -o -name apt -o -name apt-get -o -name go \\) 2>/dev/null "
-    "| while read -r f; do d=$(readlink -f \"$(dirname \"$f\")\"); echo \"$d/$(basename \"$f\")\"; done | sort -u"
+    '| while read -r f; do d=$(readlink -f "$(dirname "$f")"); echo "$d/$(basename "$f")"; done | sort -u'
 )
 
 

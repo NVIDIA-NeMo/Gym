@@ -89,7 +89,9 @@ class VLLMModelWithGuards(VLLMModel):
 
     def _create_guard_completion(self, reason: str) -> NeMoGymChatCompletion:
         completion = self._create_empty_chat_completion()
-        completion.choices[0].message.content = (
+        completion.choices[
+            0
+        ].message.content = (
             f"Stopping here: {reason}. The work above stands as the final result and nothing further will be run."
         )
         return completion
