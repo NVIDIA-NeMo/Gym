@@ -87,6 +87,16 @@ gym eval run --no-serve \
   fails ends the run; add `++route_failures_to_sidecar=true` to record it in `..._failures.jsonl` and keep going.
 - Run one resources-server worker (`num_workers` unset or 1, the default): sessions live in its memory, and a call
   that reaches another worker finds no session.
+- Each rollout is an Environment Server episode (`single_agent_turn_legacy`). Its typed seed binds the session to the
+  episode and task and carries the row's `responses_create_params` beside its `task_data`, so the session is built at
+  seed as for `/run`. `/harness`, `/simulate_tool_call`, `/verify` and close take the session's lock. Close is
+  idempotent; a `/harness` or `/simulate_tool_call` after close or verify answers 404 (`session_lost`), and a
+  `/verify` after close is masked. A `/verify` sent again with the same body returns the first result without
+  judging again, unless that result was masked: then it is scored again. The server is restart-only for Gym's
+  rollout checkpointing: its seed reply asks for a restart, so an episode a crash interrupts starts over from its
+  input with a new session. The agent's `/run` behind the deprecated
+  `legacy_agent` relay (`configs/agentic_turn_simulation_legacy_agent.yaml`) seeds with the flat row instead, and its
+  `/verify` releases the session.
 - The simulator and judge set throughput. For more than a few hundred rollouts, or to serve them from separate models,
   see [docs/training.md](docs/training.md#serving-the-simulator-and-the-judge).
 

@@ -14,9 +14,11 @@ from fastapi.testclient import TestClient
 from multidict import CIMultiDict, CIMultiDictProxy
 from yarl import URL
 
+from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.client import ServerClient
-from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import EpisodeId, NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.metrics import MASK_SAMPLE_FIELD
+from nemo_gym.server_runtime import DirectHTTPToolAccess
 from resources_servers.agentic_turn_simulation.app import AgenticTurnSimulationVerifyRequest
 from resources_servers.agentic_turn_simulation.cline_xml import NO_TOOLS_USED
 from resources_servers.agentic_turn_simulation.simulator import simulator_failure
@@ -871,19 +873,128 @@ class TestRun:
         assert result.reward == 1.0 and result.response.metadata["stop_reason"] == "final_message"
 
 
-class TestUnsupportedEpisodes:
-    """Agent-session episodes are refused, and /run without executing tools, before any call."""
+GRANT_URL = "http://turn-sim:9000"
 
-    @pytest.mark.parametrize(
-        "session_kwargs",
-        [{"in_session": True}, {"tool_access": object()}],
-        ids=["in_session", "tool_access"],
+
+def _grant(base_url: str = GRANT_URL) -> DirectHTTPToolAccess:
+    return DirectHTTPToolAccess(
+        name="turn_sim.direct_http",
+        required=True,
+        base_url=base_url,
+        cookies={"session": "typed"},
+        headers={"x-grant": "g1"},
     )
-    async def test_an_agent_session_episode_is_refused(self, session_kwargs: dict[str, Any]) -> None:
+
+
+class GrantScript:
+    """The grant's side of an agent session: /harness and /simulate_tool_call reach it by URL, not by server name."""
+
+    def __init__(self, harness: Optional[Dict[str, Any]] = None) -> None:
+        self.harness = harness or {"stop_tools": ["ask_user"], "protocol": "native"}
+        self.calls: List[Dict[str, Any]] = []
+
+    async def request(self, *, method: str, url: str, json: Any = None, cookies: Any = None, **kw: Any) -> MagicMock:
+        self.calls.append({"method": method, "url": url, "json": json, "cookies": cookies, **kw})
+        if url.endswith(HARNESS_PATH):
+            return _http(self.harness, cookies={"session": "after-harness"})
+        return _http({"output": f"result of {json['call_id']}"}, cookies={"session": "after-tool"})
+
+
+class TestAgentSessions:
+    """An Environment Server's episode reaches the resources server only through the session's direct HTTP grant."""
+
+    async def test_harness_and_tools_go_through_the_grant(self) -> None:
+        agent, script = _agent(_model(_fc("bash", "c1", '{"command": "ls"}')), _model(_msg("done")))
+        grant = GrantScript()
+        with patch(f"{MOD}.http_request", new=AsyncMock(side_effect=grant.request)):
+            response, _, _, resources_cookies = await _episode(
+                agent,
+                resources_server_cookies={"session": "typed"},
+                tool_access=_grant(),
+                in_session=True,
+            )
+        assert response.metadata["stop_reason"] == "final_message"
+        harness, tool = grant.calls
+        assert (harness["url"], tool["url"]) == (f"{GRANT_URL}{HARNESS_PATH}", f"{GRANT_URL}{TOOL_PATH}")
+        assert all(c["headers"] == {"x-grant": "g1"} and c["_internal"] for c in grant.calls)
+        # The resources server's seed held the row: /harness asks only for its harness, as on /run.
+        assert (
+            harness["json"] is None and harness["cookies"] == {"session": "typed"} and tool["json"]["call_id"] == "c1"
+        )
+        # Only the model calls go to Gym's server client; the session's cookies follow the tool replies.
+        assert [c["url_path"] for c in script.model_calls] == [MODEL_PATH, MODEL_PATH] and script.harness_calls == []
+        assert script.tool_calls == [] and resources_cookies == {"session": "after-tool"}
+
+    async def test_a_restored_attempt_names_its_own_rollout(self) -> None:
+        agent, _ = _agent(_model(_fc("bash", "c1")), _model(_msg("done")))
+        grant = GrantScript()
+        with patch(f"{MOD}.http_request", new=AsyncMock(side_effect=grant.request)):
+            await _episode(
+                agent,
+                tool_access=_grant(f"{GRANT_URL}/ng-rollout/0-0-attempt0"),
+                resources_prefix="/ng-rollout/0-0-attempt1",
+                in_session=True,
+            )
+        assert {c["url"].rsplit("/", 1)[0] for c in grant.calls} == {f"{GRANT_URL}/ng-rollout/0-0-attempt1"}
+
+    async def test_the_rows_harness_from_the_grant_drives_the_turn(self) -> None:
+        agent, _ = _agent(
+            _model(_msg("<read_file>\n<path>a.py</path>\n</read_file>")),
+            _model(_msg("<attempt_completion>\n<result>Fixed.</result>\n</attempt_completion>")),
+        )
+        grant = GrantScript(CLINE_HARNESS)
+        with patch(f"{MOD}.http_request", new=AsyncMock(side_effect=grant.request)):
+            response, *_ = await _episode(agent, tool_access=_grant(), in_session=True)
+        # Cline's XML protocol and stop tools, as /harness named them: the completion ends the turn unrun.
+        assert [c["json"]["name"] for c in grant.calls[1:]] == ["read_file"]
+        assert response.metadata["stop_reason"] == "attempt_completion" and response.metadata["steps"] == "2"
+
+    async def test_a_session_without_a_grant_is_refused_before_any_call(self) -> None:
         agent, _ = _agent()
-        with pytest.raises(NotImplementedError, match="supports only the legacy /run route"):
-            await agent._create_episode(_body(), model_url_path="/v1/responses", **session_kwargs)
+        with pytest.raises(RuntimeError, match="needs a direct HTTP tool access"):
+            await _episode(agent, in_session=True)
         agent.server_client.post.assert_not_awaited()
+
+    def test_a_seed_without_a_direct_grant_is_refused(self) -> None:
+        agent, _ = _agent()
+        client = TestClient(agent.setup_webserver(), raise_server_exceptions=False)
+        seed = AgentSeedSessionRequest(
+            agent_session_id="agent-session",
+            episode_id=EpisodeId(rollout_id="0-0", attempt=0),
+            task_id=TaskId(taskset="agent_arena", task_id="0"),
+        )
+        reply = client.post("/v1/agent_sessions", json=seed.model_dump(mode="json"))
+        assert reply.status_code == 422 and "direct_http" in reply.text
+        agent.server_client.post.assert_not_awaited()
+
+    def test_an_environment_server_episode_through_the_endpoints(self) -> None:
+        agent, script = _agent(_model(_fc("bash", "c1")), _model(_msg("done")))
+        grant = GrantScript()
+        client = TestClient(agent.setup_webserver())
+        seed = AgentSeedSessionRequest(
+            agent_session_id="agent-session",
+            episode_id=EpisodeId(rollout_id="0-0", attempt=0),
+            task_id=TaskId(taskset="agent_arena", task_id="0"),
+            tool_accesses=[_grant()],
+        )
+        assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+        with patch(f"{MOD}.http_request", new=AsyncMock(side_effect=grant.request)):
+            reply = client.post("/v1/responses", json={"input": [{"role": "user", "content": "hello"}]})
+        assert reply.status_code == 200 and reply.json()["metadata"]["stop_reason"] == "final_message"
+        assert [c["url"] for c in grant.calls] == [f"{GRANT_URL}{HARNESS_PATH}", f"{GRANT_URL}{TOOL_PATH}"]
+        assert script.harness_calls == [] and script.tool_calls == []
+        close = client.post(
+            "/v1/agent_sessions/close",
+            json=AgentCloseSessionRequest(agent_session_id="agent-session", episode_id=seed.episode_id).model_dump(
+                mode="json"
+            ),
+        )
+        # The close hands the Environment Server the cookies the last tool reply set, for its /verify.
+        assert close.status_code == 200 and close.json()["resources_cookies"] == {"session": "after-tool"}
+
+
+class TestUnsupportedEpisodes:
+    """/run without executing tools is refused before any call."""
 
     async def test_a_checkpointed_run_episode_is_not_a_session(self) -> None:
         # With Gym's rollout checkpointing on, /run passes a resources prefix and an activation without a session.

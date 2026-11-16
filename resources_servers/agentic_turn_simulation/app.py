@@ -16,22 +16,24 @@ of the turn on purpose, recoverably.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
 from collections import Counter, defaultdict
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from typing import Any, Callable, ClassVar, Literal
+from typing import Annotated, Any, Callable, ClassVar, Literal
 
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PrivateAttr
 
 from nemo_gym.client import SESSION_ID_KEY, get_response_json
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymResponseCreateParamsNonStreaming,
     NgFailureEvent,
     failure_kinds,
 )
@@ -39,12 +41,18 @@ from nemo_gym.metrics import MASK_SAMPLE_FIELD
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
+    BaseSeedSessionRequest,
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
+    ResourcesSessionLostError,
     ReverifyMode,
     SimpleResourcesServer,
+    lost_session_verification,
     observe_llm_judge_grading,
+    reject_partial_typed_seed,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import call_judge, is_judge_failure, record_parsed_judge_verdict
@@ -177,6 +185,21 @@ class AgenticTurnSimulationVerifyRequest(AgenticTurnSimulationRunRequest, BaseVe
     pass
 
 
+class AgenticTurnSimulationTaskData(BaseSeedSessionRequest):
+    """A typed seed's task: its `task_data` (the row without `responses_create_params`) and the row's
+    `responses_create_params`, which the seed carries beside it. The session is built from both, as from a `/run`
+    seed's row."""
+
+    model_config = ConfigDict(extra="allow")
+
+    responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+    verifier_metadata: dict[str, Any] | None = None
+
+
+# What a session is built from: a /run seed's row, or a typed seed's task.
+SeededRow = AgenticTurnSimulationRunRequest | AgenticTurnSimulationTaskData
+
+
 class HarnessResponse(BaseModel):
     """What the agent needs to know about the seeded row's harness."""
 
@@ -261,14 +284,14 @@ def _prepared_call(harness: Harness, call: dict[str, Any], metadata: dict[str, A
     return call if prepared == arguments else {**call, "arguments": json.dumps(prepared, ensure_ascii=False)}
 
 
-def _input_items(body: AgenticTurnSimulationRunRequest) -> list[dict[str, Any]]:
+def _input_items(body: SeededRow) -> list[dict[str, Any]]:
     rcp = body.responses_create_params
     if isinstance(rcp.input, str):
         return [{"type": "message", "role": "user", "content": rcp.input}]
     return [as_dict(i) for i in rcp.input or []]
 
 
-def _row_tools(body: AgenticTurnSimulationRunRequest) -> list[dict[str, Any]]:
+def _row_tools(body: SeededRow) -> list[dict[str, Any]]:
     return [as_dict(t) for t in body.responses_create_params.tools or []]
 
 
@@ -313,7 +336,7 @@ def _final_reply_unscored(body: AgenticTurnSimulationVerifyRequest) -> bool:
     return not _final_reply_failed(body) and as_dict(body.response.output[-1]).get("type") not in SCORED_ITEM_TYPES
 
 
-def _row_system_prompt(body: AgenticTurnSimulationRunRequest, prefix: list[dict[str, Any]]) -> str:
+def _row_system_prompt(body: SeededRow, prefix: list[dict[str, Any]]) -> str:
     """The row's own system prompt: its `instructions`, then its system and developer messages."""
     instructions = body.responses_create_params.instructions
     parts = [instructions] if isinstance(instructions, str) and instructions.strip() else []
@@ -349,6 +372,7 @@ def _without_rejected_param(params: dict[str, Any], error: str) -> bool:
 
 class AgenticTurnSimulationResourcesServer(SimpleResourcesServer):
     config: AgenticTurnSimulationResourcesServerConfig
+    seed_request_model: ClassVar[type[BaseSeedSessionRequest]] = AgenticTurnSimulationTaskData
 
     _sessions: dict[str, _Session] = PrivateAttr(default_factory=dict)
     _simulator_semaphore: ConcurrencyLimit = PrivateAttr()
@@ -374,9 +398,7 @@ class AgenticTurnSimulationResourcesServer(SimpleResourcesServer):
         forced = self.config.show_agent_system_prompt
         return harness.show_system_prompt if forced is None else forced
 
-    def _obstacle(
-        self, body: AgenticTurnSimulationRunRequest, harness: Harness, tool_names: frozenset[str]
-    ) -> Obstacle | None:
+    def _obstacle(self, body: SeededRow, harness: Harness, tool_names: frozenset[str]) -> Obstacle | None:
         """The row's armed obstacle, or None (always None when scoring the recorded turn)."""
         if self.config.score_source != "policy":
             return None
@@ -401,8 +423,7 @@ class AgenticTurnSimulationResourcesServer(SimpleResourcesServer):
         for sid in [s for s, state in self._sessions.items() if state.created < cutoff]:
             del self._sessions[sid]
 
-    async def seed_session(self, request: Request, body: AgenticTurnSimulationRunRequest) -> BaseSeedSessionResponse:
-        self._evict_stale_sessions()
+    def _new_session(self, body: SeededRow) -> _Session:
         harness = select_harness(body.verifier_metadata)
         prefix = harness.to_tool_items(_input_items(body))
         tools = _row_tools(body)
@@ -415,7 +436,7 @@ class AgenticTurnSimulationResourcesServer(SimpleResourcesServer):
         if harness.simulator_sees_tools:
             preamble += format_tools(harness.described_tools(tools, prefix)) + "\n\n"
         tool_names = harness.tool_names(tools)
-        self._sessions[request.session[SESSION_ID_KEY]] = _Session(
+        return _Session(
             harness=harness,
             prefix=prefix,
             tool_names=tool_names,
@@ -424,20 +445,57 @@ class AgenticTurnSimulationResourcesServer(SimpleResourcesServer):
             obstacle=self._obstacle(body, harness, tool_names),
             metadata=body.verifier_metadata or {},
         )
-        return BaseSeedSessionResponse()
+
+    async def seed_session(
+        self,
+        request: Request,
+        body: ResourcesSeedSessionRequest
+        | Annotated[AgenticTurnSimulationRunRequest, BeforeValidator(reject_partial_typed_seed)],
+    ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
+        """An agent's `/run` seeds with its row (keyed by the cookie); an Environment Server's typed seed binds the
+        session to its episode and task, and carries the row's `responses_create_params` beside its `task_data`."""
+        return await super().seed_session(body, request=request)
+
+    def has_session_state(self, session_id: str) -> bool:
+        return session_id in self._sessions
+
+    async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
+        self._evict_stale_sessions()
+        self._sessions[session_id] = self._new_session(body)
+
+    async def release_session_state(self, session_id: str) -> None:
+        self._sessions.pop(session_id, None)
+
+    def _locked(self, request: Request) -> Any:
+        """The request's session lock, or nothing to hold for a request without a session."""
+        sid = request.session.get(SESSION_ID_KEY)
+        return self.session_lock(sid) if sid is not None else nullcontext()
+
+    def _open_session_id(self, request: Request) -> str | None:
+        """The request's session ID; a session that was closed or verified refuses it (404, session_lost)."""
+        sid = request.session.get(SESSION_ID_KEY)
+        if sid is not None and (self.session_is_closed(sid) or self.session_is_verified(sid)):
+            raise ResourcesSessionLostError(f"agentic_turn_simulation session {sid} is closed or already verified")
+        return sid
 
     async def describe_harness(self, request: Request) -> HarnessResponse:
-        state = self._sessions.get(request.session.get(SESSION_ID_KEY))
-        if state is None:
-            raise HTTPException(
-                status_code=404, detail="No seeded session for this request: call /seed_session first."
-            )
-        return HarnessResponse(stop_tools=list(state.harness.stop_tools), protocol=state.harness.protocol)
+        async with self._locked(request):
+            state = self._sessions.get(self._open_session_id(request))
+            if state is None:
+                raise HTTPException(
+                    status_code=404, detail="No seeded session for this request: call /seed_session first."
+                )
+            return HarnessResponse(stop_tools=list(state.harness.stop_tools), protocol=state.harness.protocol)
 
     # --- tool simulation ------------------------------------------------------------------------------------
 
     async def simulate_tool_call(self, request: Request, body: SimulateToolCallRequest) -> SimulateToolCallResponse:
-        state = self._sessions.get(request.session.get(SESSION_ID_KEY))
+        # Serialized with the session's /harness, /verify and close: each call reads the workspace the last one left.
+        async with self._locked(request):
+            return await self._simulate_tool_call(self._open_session_id(request), body)
+
+    async def _simulate_tool_call(self, sid: str | None, body: SimulateToolCallRequest) -> SimulateToolCallResponse:
+        state = self._sessions.get(sid)
         if state is None:
             return SimulateToolCallResponse(output=simulator_failure("session not found"), source="failed")
         harness = state.harness
@@ -684,7 +742,7 @@ class AgenticTurnSimulationResourcesServer(SimpleResourcesServer):
         harness: Harness,
         items: list[dict[str, Any]],
         tool_names: frozenset[str],
-        state: _Session | None,
+        simulated_calls: dict[str, int],
     ) -> dict[str, Any]:
         """The verify response's fields that do not depend on the outcome."""
         response_metadata = _response_metadata(body)
@@ -719,7 +777,7 @@ class AgenticTurnSimulationResourcesServer(SimpleResourcesServer):
             "executed_calls": _executed_calls(policy_items, harness.stop_tools),
             "foreign_script_letters": letters,
             "shell_failures": harness.shell_failures(shell_items, tool_names) if harness.shell_failures else None,
-            "simulated_calls": dict(state.answered_by) if state is not None else {},
+            "simulated_calls": simulated_calls,
             "categories": list((body.verifier_metadata or {}).get("categories") or []),
             "harness": harness.name,
         }
@@ -730,12 +788,49 @@ class AgenticTurnSimulationResourcesServer(SimpleResourcesServer):
     async def verify(
         self, request: Request, body: AgenticTurnSimulationVerifyRequest
     ) -> AgenticTurnSimulationVerifyResponse:
-        state = self._sessions.pop(request.session.get(SESSION_ID_KEY), None)
+        sid = request.session.get(SESSION_ID_KEY)
+        if sid is None:
+            return await self._verify(body, simulated_calls={})
+        # Request-scored: the session only counts how its calls were answered, so an unseeded verify is scored too.
+        async with self.verifying(sid, allow_missing=True) as verification:
+            if verification.is_lost:
+                # An Environment Server verifies before it closes, so this verify is out of order; mask it.
+                return AgenticTurnSimulationVerifyResponse(
+                    **(
+                        body.model_dump()
+                        | lost_session_verification(f"agentic_turn_simulation session {sid} is closed")
+                    )
+                )
+            state = self._sessions.get(sid) if verification.is_live else None
+            if state is not None:
+                retained = {"simulated_calls": dict(state.answered_by)}
+            else:
+                retained = dict(verification.retained or {"simulated_calls": {}})
+            # The same request again (the caller resent it after losing the reply) gets the first result, judged once.
+            # Another request for the session is scored, with the counts the session left. A masked result is not kept
+            # (no usable verdict, say), so the same request sent again is scored again.
+            fingerprint = hashlib.sha256(body.model_dump_json().encode()).hexdigest()
+            if retained.get("fingerprint") == fingerprint:
+                return AgenticTurnSimulationVerifyResponse(**body.model_dump(), **retained["result"])
+            # Kept before the judge runs, so a verify whose scoring raised is retried with the session's counts.
+            verification.retain({"simulated_calls": retained["simulated_calls"]})
+            response = await self._verify(body, simulated_calls=retained["simulated_calls"])
+            request_fields = body.model_dump().keys()
+            result = {k: v for k, v in response.model_dump(mode="json").items() if k not in request_fields}
+            if not result.get(MASK_SAMPLE_FIELD):
+                verification.retain(
+                    {"simulated_calls": retained["simulated_calls"], "fingerprint": fingerprint, "result": result}
+                )
+            return response
+
+    async def _verify(
+        self, body: AgenticTurnSimulationVerifyRequest, *, simulated_calls: dict[str, int]
+    ) -> AgenticTurnSimulationVerifyResponse:
         harness = select_harness(body.verifier_metadata)
         tools = _row_tools(body)
         tool_names = harness.tool_names(tools)
         items = self._scored_items(body, harness)
-        common = self._response_fields(body, harness, items, tool_names, state)
+        common = self._response_fields(body, harness, items, tool_names, simulated_calls)
 
         def respond(reward: float, **outcome: Any) -> AgenticTurnSimulationVerifyResponse:
             return AgenticTurnSimulationVerifyResponse(**body.model_dump(), reward=reward, **common, **outcome)
