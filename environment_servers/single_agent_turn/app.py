@@ -4,6 +4,7 @@
 """Resources-backed single-agent environment server."""
 
 import asyncio
+import json
 import logging
 from collections.abc import Callable, Sequence
 from typing import Any, Literal
@@ -34,6 +35,7 @@ from nemo_gym.config import (
     AGENT_SESSION_AGENT_TYPES,
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,
+    STEP_DRIVEN_AGENT_TYPES,
     TOKEN_CAPTURE_BLOCK,
     TOKEN_CAPTURE_PATH_SEGMENT,
     AgentServerRef,
@@ -45,6 +47,7 @@ from nemo_gym.config import (
 from nemo_gym.core import (
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
+    SESSION_LOST,
     FailureBoundary,
     FailureReport,
     FailureReportRow,
@@ -154,11 +157,11 @@ class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
         default=None,
         description=(
             "Drive the agent one step per activation (one model call and the tool calls it makes), up to this many "
-            "steps in the episode. The agent must keep a session, run the tools it calls and stop after one step "
-            "(simple_agent with max_steps: 1); the server checks at startup. The episode ends after the first step "
-            "in which the model called no tool or that did not complete, and with end_on_task_state once the "
-            "resources server reports that the task ended. Its episodes take part in checkpoints as restarts. "
-            "Unset, the agent runs its own loop in one activation."
+            "steps in the episode. The agent must be of a type that takes one step per such activation, whatever its "
+            "own step limit (STEP_DRIVEN_AGENT_TYPES: the simple agent), and run the tools it calls; the server "
+            "checks at startup. The episode ends after the first step in which the model called no tool or that did "
+            "not complete, and with end_on_task_state once the resources server reports that the task ended. Its "
+            "episodes take part in checkpoints as restarts. Unset, the agent runs its own loop in one activation."
         ),
     )
     end_on_task_state: bool = Field(
@@ -201,9 +204,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         return "restart_only" if self.config.max_episode_steps is not None else self.checkpoint_mode
 
     def _check_step_driven_agent(self) -> None:
-        """Refuse to drive an agent one step per activation that cannot take its steps so: the agent must keep a
-        session (``AGENT_SESSION_AGENT_TYPES``), run the tools it calls, and stop after one step (``max_steps: 1``),
-        or a step taken after the task ended, within the same activation, would count."""
+        """Refuse to drive an agent one step per activation that cannot take its steps so: its type must take one step
+        per activation that names the episode's step limit (``STEP_DRIVEN_AGENT_TYPES``, which keep an agent session),
+        and it must run the tools it calls, or a step taken after the task ended, within the same activation, would
+        count. ``execute_tools`` is read as the agent's config reads it, so a string ``"false"`` is false."""
         name = self.config.agent_server.name
         instance = self.server_client.global_config_dict.get(name)
         agents = instance.get("responses_api_agents") if isinstance(instance, (dict, DictConfig)) else None
@@ -212,10 +216,13 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         problems = []
         if agent_type not in AGENT_SESSION_AGENT_TYPES:
             problems.append(f"its type {agent_type!r} keeps no agent session")
-        if config.get("execute_tools") is False:
+        elif agent_type not in STEP_DRIVEN_AGENT_TYPES:
+            problems.append(
+                f"its type {agent_type!r} does not take one step per activation "
+                f"(STEP_DRIVEN_AGENT_TYPES: {', '.join(sorted(STEP_DRIVEN_AGENT_TYPES))})"
+            )
+        if not TypeAdapter(bool).validate_python(config.get("execute_tools", True)):
             problems.append("it does not run the tools it calls (execute_tools: false)")
-        if config.get("max_steps") != 1:
-            problems.append(f"it stops after max_steps: {config.get('max_steps')} steps per activation, not 1")
         if problems:
             raise ValueError(
                 f"Environment Server {self.config.name!r} drives {name!r} one step per activation "
@@ -749,6 +756,8 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         in which the model called no tool or that did not complete, as the agent's own loop ends, and with
         ``end_on_task_state`` once the resources session reports that its task ended. The reply carries every step's
         output and their summed usage, as one activation's would; each step's failure report is saved as it arrives.
+        An episode that runs out of steps says so in its reply's metadata (``ng_termination_reason``), and a failure
+        after a step completed keeps the steps before it as its partial response.
         """
         limit = self.config.max_episode_steps
         conversation = (
@@ -758,40 +767,72 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         )
         outputs: list[Any] = []
         usage = None
-        for step in range(1, limit + 1):
-            response = await self._activate_agent(
-                request,
-                handles,
-                params.model_copy(update={"input": [*conversation, *outputs]}),
-                activation=step,
-                # The agent then counts its one step as completed, and keeps one record of the episode's invocation.
-                headers={AGENT_EPISODE_STEP_LIMIT_HEADER: str(limit)},
-            )
-            outputs.extend(response.output)
-            usage = accumulate_response_usage(usage, response.usage)
-            # A step that did not complete ends the episode, as a step without a tool call does. A reply may omit its
-            # status (a model server may send none, and the simple agent passes that on), so only a status other
-            # than completed, or truncation, counts as not completing.
+        response = None
+        try:
+            for step in range(1, limit + 1):
+                response = await self._activate_agent(
+                    request,
+                    handles,
+                    params.model_copy(update={"input": [*conversation, *outputs]}),
+                    activation=step,
+                    # The agent then takes one step, counts it as completed below the limit, and keeps one record of
+                    # the episode's invocation.
+                    headers={AGENT_EPISODE_STEP_LIMIT_HEADER: str(limit)},
+                )
+                outputs.extend(response.output)
+                usage = accumulate_response_usage(usage, response.usage)
+                # A step that did not complete ends the episode, as a step without a tool call does. A reply may omit
+                # its status (a model server may send none, and the simple agent passes that on), so only a status
+                # other than completed, or truncation, counts as not completing.
+                if (
+                    response.status not in (None, "completed")
+                    or response.incomplete_details is not None
+                    or not any(item.type == "function_call" for item in response.output)
+                ):
+                    break
+                # The episode ends after its last step either way, so the task state is not read after that one.
+                if step < limit and self.config.end_on_task_state and await self._task_ended(handles):
+                    break
+            else:
+                # Every step called a tool and none ended the episode: it stopped at its step limit. Only the metadata
+                # says so, as the simple agent marks how its own loop ended. The status stays the last step's, since
+                # an incomplete reply would read as malformed to rollout recovery, and incomplete_details names only
+                # the model's own cutoffs.
+                response = response.model_copy(
+                    update={"metadata": {**(response.metadata or {}), "ng_termination_reason": "max_episode_steps"}}
+                )
+        except NgFailureEvent as error:
+            # A failure after a step completed keeps the steps before it, with their usage, as its partial response.
+            # A failure before the first reply has none, and a partial response the failure already carries is newer.
             if (
-                response.status not in (None, "completed")
-                or response.incomplete_details is not None
-                or not any(item.type == "function_call" for item in response.output)
+                is_handled_episode_failure(error)
+                and response is not None
+                and error.episode_evidence.get("partial_response") is None
             ):
-                break
-            if self.config.end_on_task_state and await self._task_ended(handles):
-                break
+                error.episode_evidence["partial_response"] = response.model_copy(
+                    update={"output": outputs, "usage": usage}
+                )
+            raise
         return response.model_copy(update={"output": outputs, "usage": usage})
 
     async def _task_ended(self, handles: "SessionHandles") -> bool:
-        """Whether the episode's task has ended, as its resources session reports it (``RESOURCES_TASK_STATE_PATH``)."""
+        """Whether the episode's task has ended, as its resources session reports it (``RESOURCES_TASK_STATE_PATH``).
+
+        A session the resources server no longer holds (404 with ``failure_kind: session_lost``) ends the episode too:
+        it goes on to ``/verify``, which masks it, as when a tool call finds the session gone. Any other failed read
+        fails the episode.
+        """
         try:
             state_http_response = await self.server_client.get(
                 server_name=self.config.resources_server.name,
                 url_path=RESOURCES_TASK_STATE_PATH,
                 cookies=handles.resources_cookies,
             )
-            await raise_boundary_failure(state_http_response)
-            return ResourcesTaskState.model_validate(await get_response_json(state_http_response)).task_ended
+            content = await state_http_response.read()
+            if state_http_response.status == 404 and _names_lost_session(content):
+                return True
+            await raise_boundary_failure(state_http_response, content=content)
+            return ResourcesTaskState.model_validate_json(content).task_ended
         except Exception as error:
             # Read during the agent's turn, between its steps.
             raise dependency_failure(error, stage="agent") from error
@@ -1091,6 +1132,16 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
 
 def _cookies(response: Any) -> dict[str, str]:
     return {str(name): str(morsel.value) for name, morsel in response.cookies.items()}
+
+
+def _names_lost_session(content: bytes) -> bool:
+    """Whether a reply's body is a ``ResourcesSessionLostError`` naming a lost session (``session_lost``)."""
+    try:
+        body = json.loads(content)
+    except ValueError:
+        return False
+    detail = body.get("detail") if isinstance(body, dict) else None
+    return isinstance(detail, dict) and detail.get("failure_kind") == SESSION_LOST
 
 
 if __name__ == "__main__":
