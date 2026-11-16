@@ -80,10 +80,19 @@ def test_node_local_is_off_unless_set():
     assert custom.base_dir == "/raid/scratch"
 
 
-@pytest.mark.parametrize("base_dir", ["tmp", "/tmp/a,b", "/tmp/a:b", "/tmp/../etc", "/tmp/$HOME", "/tmp/a b"])
+@pytest.mark.parametrize(
+    "base_dir",
+    ["tmp", "/tmp/a,b", "/tmp/a:b", "/tmp/../etc", "/tmp/$HOME", "/tmp/a b", "/tmp\n", "/raid/scratch/\n"],
+)
 def test_a_base_dir_that_is_not_a_plain_absolute_path_is_refused(base_dir):
+    # A trailing newline (a YAML block scalar) would split the rendered path and point cleanup at base_dir itself.
     with pytest.raises(ValueError, match="node_local.base_dir"):
         NodeLocalConfig(base_dir=base_dir)
+
+
+@pytest.mark.parametrize(("base_dir", "rendered"), [("/tmp", "/tmp"), ("/raid/scratch/", "/raid/scratch")])
+def test_a_valid_base_dir_renders_one_per_job_directory_under_it(base_dir, rendered):
+    assert f'_gym_nl_dir={rendered}/gym-node-local-"$SLURM_JOB_ID"\n' in _script(_config({"base_dir": base_dir}))
 
 
 def test_the_stop_window_must_leave_time_to_stop_the_driver_and_archive():
