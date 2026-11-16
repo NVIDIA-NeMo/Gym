@@ -476,8 +476,8 @@ class NodeLocalConfig(_StrictModel):
 
     # The host directory each Slurm job gets its own `gym-node-local-<SLURM_JOB_ID>` under. It must be node-local.
     base_dir: str = "/tmp"
-    # Extract the newest earlier archive before the driver starts, so each archive holds the run's whole dir. Off
-    # suits files nothing reads back: each archive then holds only its own job's files.
+    # Extract the newest earlier archive before the driver starts, so each archive holds the run's whole dir and only
+    # the newest two are kept. Off suits files nothing reads back: each archive holds its own job's files, all kept.
     restore: bool = True
     # Bound on writing one archive.
     archive_timeout_seconds: int = Field(default=120, gt=0)

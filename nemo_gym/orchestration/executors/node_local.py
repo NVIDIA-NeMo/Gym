@@ -20,7 +20,7 @@ driver runs. The batch script creates `<base_dir>/gym-node-local-$SLURM_JOB_ID` 
 extracts the newest earlier archive into it, and mounts it into the driver container at a path that is the same for
 every job of the run, so absolute paths the run saves stay valid in its later jobs. When the driver step ends, the
 directory is written to `<job dir>/node-local/<SLURM_JOB_ID>.tar.gz` (one file, renamed into place once complete) and
-removed.
+removed. With restore each archive holds the whole directory, so only the newest two are kept.
 
 A step at its time limit is killed within moments (its `srun` gets TERM and kills the step), too fast to archive. So
 the watch loop stops the driver `stop_before_walltime_seconds` before the job's end time, archives, and then waits
@@ -54,11 +54,11 @@ done
 echo "No earlier archive in $archives: the node-local dir starts empty"
 """
 
-# Run on the driver's node as `bash -c SCRIPT _ DIR ARCHIVES JOB_ID TIMEOUT_SECONDS`.
+# Run on the driver's node as `bash -c SCRIPT _ DIR ARCHIVES JOB_ID TIMEOUT_SECONDS RESTORE`.
 _ARCHIVE_SCRIPT = """\
 # Ignored by tar too: the TERM Slurm sends a job at its end must not cut the archive short.
 trap '' TERM
-dir=$1 archives=$2 job=$3 limit=$4
+dir=$1 archives=$2 job=$3 limit=$4 restore=$5
 [ -d "$dir" ] || { echo "WARNING: no node-local dir $dir to archive"; exit 0; }
 tmp="$archives/.$job.tar.gz.tmp"
 rc=2
@@ -73,6 +73,12 @@ fi
 # GNU tar exits 1 when a file changed while it was read: the archive is still complete.
 if [ "$rc" -le 1 ] && mv -f -- "$tmp" "$archives/$job.tar.gz"; then
     echo "Archived the node-local dir to $archives/$job.tar.gz"
+    # With restore each archive holds the whole dir: keep the newest two, the second as restore's fallback.
+    if [ "$restore" = 1 ]; then
+        for name in $(ls -1 "$archives" | grep -xE '[0-9]{1,15}[.]tar[.]gz' | sort -rn | tail -n +3); do
+            rm -f -- "$archives/$name" && echo "Removed the superseded archive $archives/$name"
+        done
+    fi
 else
     rm -f -- "$tmp"
     echo "WARNING: archiving the node-local dir failed (exit $rc); its files from this job are lost"
@@ -90,7 +96,7 @@ _gym_nl_run() {{ {on_driver_node}bash -c "$1" _gym_node_local "${{@:2}}"; }}
 _gym_nl_archive() {{
     [[ -z "$_gym_nl_done" ]] || return 0
     _gym_nl_done=1
-    _gym_nl_run {archive_script} "$_gym_nl_dir" "$_gym_nl_archives" "$SLURM_JOB_ID" {archive_timeout}
+    _gym_nl_run {archive_script} "$_gym_nl_dir" "$_gym_nl_archives" "$SLURM_JOB_ID" {archive_timeout} {restore}
 }}
 _gym_nl_run {restore_script} "$_gym_nl_dir" "$_gym_nl_archives" {restore}"""
 

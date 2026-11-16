@@ -154,11 +154,14 @@ def test_the_dir_is_set_up_before_the_driver_and_archived_after_it():
     driver = script.index(_driver_line(script))
     after = script.index('\n_gym_run_driver\n_gym_nl_rc=$?\n_gym_nl_archive\ntrap - TERM\n(exit "$_gym_nl_rc")')
     assert restore < driver < after
-    assert '"$_gym_nl_dir" "$_gym_nl_archives" "$SLURM_JOB_ID" 120\n' in script
+    # The trailing 1: with restore on, the archive step prunes superseded archives.
+    assert '"$_gym_nl_dir" "$_gym_nl_archives" "$SLURM_JOB_ID" 120 1\n' in script
 
 
-def test_restore_can_be_turned_off():
-    assert '"$_gym_nl_dir" "$_gym_nl_archives" 0\n' in _script(_config({"restore": False}))
+def test_restore_can_be_turned_off_and_then_no_archive_is_pruned():
+    script = _script(_config({"restore": False}))
+    assert '"$_gym_nl_dir" "$_gym_nl_archives" 0\n' in script
+    assert '"$_gym_nl_dir" "$_gym_nl_archives" "$SLURM_JOB_ID" 120 0\n' in script
 
 
 def test_the_watch_loop_stops_the_driver_before_the_time_limit():
@@ -348,6 +351,48 @@ def test_without_restore_the_dir_starts_empty(tmp_path):
 
     assert returncode == 0
     assert _archive(tmp_path) == {}
+
+
+def _archive_names(tmp_path: Path) -> list[str]:
+    return sorted(p.name for p in (tmp_path / "run" / "b" / "node-local").iterdir())
+
+
+def test_with_restore_only_the_new_archive_and_the_one_before_it_are_kept(tmp_path):
+    archives = tmp_path / "run" / "b" / "node-local"
+    for job in (8, 9, 10):
+        _write_archive(archives / f"{job}.tar.gz", {f"ev/{job}.json": "row\n"})
+
+    returncode = _finish(_start_job(tmp_path, driver=_WRITE_EVIDENCE))
+
+    assert returncode == 0
+    # 11 holds everything 10 held plus this job's files; 10 stays as the fallback a restore would use.
+    assert _archive_names(tmp_path) == ["10.tar.gz", "11.tar.gz"]
+    assert _archive(tmp_path) == {"ev/10.json": "row\n", "ev/1.json": "row1\n"}
+
+
+def test_without_restore_every_archive_is_kept(tmp_path):
+    archives = tmp_path / "run" / "b" / "node-local"
+    for job in (8, 9, 10):
+        _write_archive(archives / f"{job}.tar.gz", {f"ev/{job}.json": "row\n"})
+
+    returncode = _finish(_start_job(tmp_path, driver=_WRITE_EVIDENCE, node_local={"restore": False}))
+
+    assert returncode == 0
+    assert _archive_names(tmp_path) == ["10.tar.gz", "11.tar.gz", "8.tar.gz", "9.tar.gz"]
+
+
+def test_a_failed_archive_prunes_nothing(tmp_path):
+    archives = tmp_path / "run" / "b" / "node-local"
+    for job in (8, 9, 10):
+        _write_archive(archives / f"{job}.tar.gz", {f"ev/{job}.json": "row\n"})
+    # Only writing an archive hangs; the restore still extracts.
+    hanging_tar = 'case "$1" in -czf) exec sleep 600 ;; *) exec /usr/bin/tar "$@" ;; esac'
+
+    returncode = _finish(_start_job(tmp_path, driver=_WRITE_EVIDENCE, fakes={"tar": hanging_tar}))
+
+    assert returncode == 0
+    assert "archiving the node-local dir failed" in (tmp_path / "job.out").read_text()
+    assert _archive_names(tmp_path) == ["10.tar.gz", "8.tar.gz", "9.tar.gz"]
 
 
 def test_a_lost_service_still_leaves_the_archive(tmp_path):
