@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # Flat CAD rows use sessions through single_agent_turn_legacy; no legacy_agent relay or custom agent is involved.
+rollout_correlation: true
+model_call_sampling:
+  required_model_servers: [policy_model]
+
 use_absolute_ip: true
 absolute_ip_server_types: [responses_api_models]
 head_server:
@@ -94,5 +98,10 @@ agent_sandbox:
 policy_model:
   responses_api_models:
     vllm_model:
+      # Set a unique directory for each independent run; share it across model workers.
+      rollout_generation_budget:
+        max_calls: 10
+        state_dir: ${oc.env:CAD_BUDGET_DIR}
+        agent_servers: ['${deepcad_opencode_environment_server.environment_servers.single_agent_turn_legacy.agent_server.name}']
       supply_prefix_token_ids: true
       return_token_id_information: true

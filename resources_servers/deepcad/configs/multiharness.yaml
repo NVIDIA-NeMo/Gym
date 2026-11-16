@@ -1,0 +1,128 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Seven concurrent native pairings; prepare each row with --file-input --harness NAME.
+config_paths:
+  - resources_servers/deepcad/configs/opencode.yaml
+  - responses_api_agents/pi_agent/configs/pi_agent.yaml
+  - responses_api_agents/hermes_agent/configs/hermes_agent.yaml
+  - responses_api_agents/codex_agent/configs/codex_agent.yaml
+  - responses_api_agents/claude_code_agent/configs/claude_code_agent.yaml
+  - responses_api_agents/openclaw_agent/configs/openclaw_agent.yaml
+  - responses_api_agents/nooa_agent/configs/nooa_agent.yaml
+
+nooa_environment_server: null
+
+pi_agent:
+  responses_api_agents:
+    pi_agent:
+      host: 127.0.0.1
+      resources_server: null
+      model_server: {type: responses_api_models, name: policy_model}
+      timeout: 1800
+      max_output_tokens: 32768
+      context_window: 131072
+      auto_compaction: false
+      image_input: true
+
+deepcad_pi_environment_server:
+  _copy: deepcad_opencode_environment_server
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server: {type: responses_api_agents, name: pi_agent}
+
+hermes_agent:
+  responses_api_agents:
+    hermes_agent:
+      host: 127.0.0.1
+      resources_server: null
+      model_server: {type: responses_api_models, name: policy_model}
+      sandbox_runner_timeout_seconds: 1800
+      max_tokens: 32768
+      context_length: 131072
+      compression_enabled: false
+      temperature: null
+
+deepcad_hermes_environment_server:
+  _copy: deepcad_opencode_environment_server
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server: {type: responses_api_agents, name: hermes_agent}
+
+codex_agent:
+  responses_api_agents:
+    codex_agent:
+      host: 127.0.0.1
+      resources_server: null
+      model_server: {type: responses_api_models, name: policy_model}
+      timeout: 1800
+      model_context_window: 131072
+      inherit_sandbox_environment: true
+
+deepcad_codex_environment_server:
+  _copy: deepcad_opencode_environment_server
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server: {type: responses_api_agents, name: codex_agent}
+
+claude_code_agent:
+  responses_api_agents:
+    claude_code_agent:
+      host: 127.0.0.1
+      resources_server: null
+      model_server: {type: responses_api_models, name: policy_model}
+      timeout: 1800
+      claude_code_version: 2.1.108
+      anthropic_api_key: ""
+      model: ${policy_model_name}
+
+deepcad_claude_code_environment_server:
+  _copy: deepcad_opencode_environment_server
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server: {type: responses_api_agents, name: claude_code_agent}
+
+openclaw_agent:
+  responses_api_agents:
+    openclaw_agent:
+      host: 127.0.0.1
+      resources_server: null
+      model_server: {type: responses_api_models, name: policy_model}
+      timeout: 1800
+      context_window: 131072
+      max_output_tokens: 32768
+
+deepcad_openclaw_environment_server:
+  _copy: deepcad_opencode_environment_server
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server: {type: responses_api_agents, name: openclaw_agent}
+
+nooa_agent:
+  responses_api_agents:
+    nooa_agent:
+      host: 127.0.0.1
+      resources_server: null
+      model_server: {type: responses_api_models, name: policy_model}
+      nooa:
+        execution_mode: sandboxed
+      sandbox_runner_timeout_seconds: 1800
+      context_window: 131072
+
+deepcad_nooa_environment_server:
+  _copy: deepcad_opencode_environment_server
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server: {type: responses_api_agents, name: nooa_agent}
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      rollout_generation_budget:
+        agent_servers:
+          - deepcad_opencode_agent
+          - pi_agent
+          - hermes_agent
+          - codex_agent
+          - claude_code_agent
+          - openclaw_agent
+          - nooa_agent

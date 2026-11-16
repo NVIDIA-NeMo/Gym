@@ -1,88 +1,149 @@
-# CAD workspaces with stock OpenCode
+# CAD workspaces with native agents
 
-`configs/opencode.yaml` pairs this resources server with the existing
-`responses_api_agents/opencode_agent` through `single_agent_turn_legacy`.
-There is no CAD agent adapter, custom MCP tool server, or `legacy_agent` relay.
-The word `legacy` in the Environment Server name refers to its flat JSONL input
-format; it still drives agent sessions through seed, activation, and close.
+`configs/multiharness.yaml` composes seven native Agent Servers, each with its own
+`single_agent_turn_legacy` Environment Server, sharing one CAD Resources Server
+and policy Model Server. It uses the session interfaces from
+[Gym #5950](https://github.com/NVIDIA-NeMo/Gym/pull/5950) alongside the Agentic-MME example
+in [Gym #5720](https://github.com/NVIDIA-NeMo/Gym/pull/5720).
+`configs/opencode.yaml` remains the standalone OpenCode recipe. There is no CAD
+agent loop, custom MCP server, or `legacy_agent` relay; `legacy` here names the
+flat-row input format.
 
-The resources server lends a workspace containing only target PNGs and view/color
-settings. The sandbox image supplies CadQuery and a renderer. OpenCode writes
-`/workspace/model.py`, uses `bash` to run the renderer, and uses `read` to inspect
-`/workspace/previews/preview.png`. The preview uses the target cameras and color;
-axis views are combined in front/side/top order. No reference STEP or source enters
-the workspace. Prompts, including operation hints, belong to prepared task rows.
+The Resources Server lends a workspace containing target PNGs and view/color
+settings. The agent writes `/workspace/model.py`, runs the supplied
+`/workspace/.cad/cad_render.py`, and inspects `/workspace/previews/preview.png`
+with its own image capabilities. Preview cameras and color match the targets;
+axis views retain front/side/top order. Reference STEP files and reference
+programs never enter the workspace. Operation hints remain task instructions.
 
-After OpenCode closes, the resources server collects the final regular UTF-8 file,
-retains its source for verification retries, stops the workspace, and invokes the
-existing isolated verifier. It never trusts prose, code fences, or a caller's
-`final_code`. Missing/invalid files and incomplete runs score zero. Workspace
-collection failures are masked; lost sessions cannot fall back to answer text.
-Close, failed-seed cleanup, and server shutdown stop lent workspaces. A failed
-stop retains ownership so cleanup can retry. Serving this state requires one
-resources-server worker.
+On close, the resource collects the final regular UTF-8 `model.py`, retains it
+for verification retries, stops the workspace, and calls the existing isolated
+verifier. Prose, code fences, preview geometry, and caller-provided `final_code`
+are not graded. Missing/invalid files, failed runs, and ordinary incomplete runs
+score zero. An incomplete response carrying the native `ng_rollout_stop` JSON
+marker with reason `model_call_budget_exhausted` is the sole exception: the
+resource collects and grades the saved file, without changing response status.
+This enables grading the artifact when the shared ten-call budget stops the
+agent; it changes the earlier completed-only eligibility rule. Malformed markers
+and other stop reasons remain ineligible. Workspace collection failures are masked. Cleanup failure retains ownership for retry.
+The stateful Resources Server requires one worker.
 
-## Prepare and run
+## Prepare and route inputs
 
-From the repository root, first build the network-disabled verifier image, then
-the workspace image (the pinned OpenCode binary is Linux x86-64):
+Input JSONL must contain valid `verifier_metadata`, task text, and inline target
+images from `dataset/prepare_gym.py`. Materialize lazy corpus rows first.
+
+```bash
+python -m resources_servers.deepcad.prepare_opencode INPUT.jsonl opencode.jsonl \
+  --file-input --harness opencode
+python -m resources_servers.deepcad.prepare_opencode INPUT.jsonl pi.jsonl \
+  --file-input --harness pi
+```
+
+Use `--file-input` for the shared seven-agent recipe; non-OpenCode selections
+require it. Preparation retains the
+original inline request under `task_data.responses_create_params` for resource
+seeding, while the outer activation contains task instructions and target-file
+paths as user text. The resource decodes targets to RGB PNG files in input order
+(`/workspace/target-0.png`, etc.). This is file-based image access, not a claim of
+byte-identical inline delivery to every native model client. Without the flag,
+activation retains inline images; not every native adapter accepts that format.
+
+`--harness` selects the existing `agent_ref` and `_ng_environment_server` fields.
+`task_source` remains `deepcad_opencode`, the shared resource. Prepare separate
+outputs for each harness and concatenate those rows to collect a mixed run; do
+not replace their routing with a single global `--agent` override.
+
+Preparation moves existing `temperature`, `top_p`, and `max_output_tokens` values
+to `_ng_model_sampling`, rejecting conflicts with an existing marker. It does
+not invent sampling values. For a 32,768-token per-call comparison, supply that
+explicit cap in the original request or marker before preparation. A smaller
+source cap stays smaller. Do not reintroduce unsupported activation parameters
+with collection-time sampling flags.
+
+## Runtime prerequisites
+
+Every workspace image must retain CadQuery, the CAD renderer, and its graphics
+libraries. The supplied image builds only the OpenCode runtime:
 
 ```bash
 docker build --platform linux/amd64 -t deepcad-cadquery:2.8.0 resources_servers/deepcad
 docker build --platform linux/amd64 -t deepcad-opencode:1.17.11 \
   -f resources_servers/deepcad/sandbox_image/Dockerfile .
-python -m resources_servers.deepcad.prepare_opencode INPUT.jsonl OUTPUT.jsonl
 ```
 
-`INPUT.jsonl` must already contain valid `verifier_metadata`, task text, and inline
-target images, as produced by `dataset/prepare_gym.py`. Raw lazy corpus records
-must be materialized first. The conversion preserves images, metadata, and
-sampling fields; it replaces single-turn output instructions with file-based
-workspace instructions and routes rows to `deepcad_opencode`.
+| `--harness` | Native runtime setup in the borrowed workspace |
+|---|---|
+| `opencode` | Pinned 1.17.11 binary and plugin archive are preinstalled by the supplied Dockerfile and SHA-256 checked. |
+| `pi` | Pinned 0.80.2 plus private Node 22.19.0; existing installer or a verified `sandbox_runtime_dir` containing both. |
+| `hermes` | Controller builds and uploads the server-locked Hermes Python runtime through `SandboxPythonRuntime`; install the server component from its lock. |
+| `codex` | Pinned 0.144.4 plus private Node 22.19.0; existing installer or verified `sandbox_runtime_dir`. |
+| `claude_code` | Pinned 2.1.108 Linux binary cached on the controller and uploaded; supplied local/sandbox binaries require `sandbox_executable_sha256`. |
+| `openclaw` | Pinned 2026.6.11 plus private Node 22.19.0; existing installer or verified `sandbox_runtime_dir`. |
+| `nooa` | Sandboxed, component-locked NOOA runtime packages the launching tracked Gym source into private Python; use its existing offline `runtime_wheelhouse` for offline setup. |
 
-Load `resources_servers/deepcad/configs/opencode.yaml` with the deployment's model
-configuration. Set `reference_root` to the external reference directory, and make
-only the model endpoint reachable from the workspace. Then use the standard
-`gym env resolve`, `gym env validate`, `gym env start`, and `gym eval run --no-serve`
-commands, with `OUTPUT.jsonl` and agent name `deepcad_opencode_agent`.
+Pi, Codex, and OpenClaw installers need package-download access unless their
+runtime directories are preinstalled; missing OS prerequisites may require root.
+Hermes and Claude obtain artifacts on the controller. NOOA requires a Git checkout
+and Git on the controller; its offline bundle must match the packaged source.
+Use these native setup mechanisms rather than assuming the OpenCode image already
+contains every CLI. Runtime setup and the task's actual Python/CadQuery imports
+must be checked before a model run, including native shell environment behavior.
 
-The config uses Docker bridge for workspaces and a network-disabled Docker
-provider for verification. `workspace_network_access: inherit` preserves Docker's
-network. A provider that enforces network policies may use `model_only` instead;
-Docker refuses that setting. Non-model services explicitly bind loopback. Check
-the final resolved addresses and probe the actual deployment: a network policy
-that permits the model's host permits every port on that host, and a host-network
-sandbox is not isolated by loopback pins.
+## Start and collect
 
-## Limits and training compatibility
-
-OpenCode 1.17.11 and its plugin dependencies are preinstalled and SHA-256 checked.
-The stock harness owns process supervision, image delivery, model routing,
-observations, and token capture. The CAD server owns task files and grading only.
-
-- Context: 131,072 tokens. Output limit: 32,768 tokens **per model call**.
-- `agent.build.steps: 10` is OpenCode's advisory step limit, not a hard ten-call
-  stop. The 1,800-second agent timeout and context limit remain hard limits.
-- Compaction and delegation are disabled through supported stock settings.
-- A training row's `max_output_tokens` must be at least the configured per-call
-  output limit; the stock harness rejects a smaller value.
-- Stock saved rollout exports retain tool-result text; they need not contain the
-  preview images. Validate the model-call media capture separately for training.
-- Gym token capture is enabled in this config. NeMo-RL serving must implement the
-  required-prefix extension; no custom model adapter is included in the PR.
-
-These limits differ from the removed custom agent's remaining-context policy.
-Report them when comparing scores. The shared geometry reward is unchanged.
-
-## Validation
+Choose an existing shared run directory and create a **new** budget directory for
+each independent run. All policy-model workers in that run must see the same path.
+Do not reuse another run's counters or give each worker an independent directory.
 
 ```bash
-python -m pytest resources_servers/deepcad/tests/test_opencode_sessions.py \
-  resources_servers/deepcad/tests/test_opencode_manifest.py -q
+export CAD_BUDGET_DIR="$(mktemp -d "${CAD_RUN_ROOT:?set a shared run directory}/cad-budget.XXXXXXXX")"
+gym env resolve --config resources_servers/deepcad/configs/multiharness.yaml \
+  --config deployment.yaml
+gym env validate --config resources_servers/deepcad/configs/multiharness.yaml \
+  --config deployment.yaml \
+  --server-types resources_servers,responses_api_agents,responses_api_models,environment_servers
+gym env start --config resources_servers/deepcad/configs/multiharness.yaml \
+  --config deployment.yaml
+# In another terminal, with the same CAD_BUDGET_DIR and configuration:
+gym eval run --no-serve \
+  --config resources_servers/deepcad/configs/multiharness.yaml --config deployment.yaml \
+  --input mixed.jsonl --output rollouts.jsonl
 ```
 
-Automated tests cover resource sessions, final-file authority, retained source,
-cleanup/retries, prompt/image preservation, and stock-harness input/config
-compatibility. They do not establish Docker or real-model rollout success.
-A fresh Linux image build, render/edit model smoke, and distributed token/media
-capture validation are required before marking this implementation production-ready.
+`deployment.yaml` supplies the actual model endpoint/credentials, private
+`reference_root`, and provider/image bindings. The defaults use Docker bridge for
+workspaces and network-disabled Docker for verification. Docker cannot enforce
+`model_only`; use a provider with network-policy support for that mode. Inspect
+resolved addresses: allowing a model host permits other ports on that host, and
+host-network sandboxes are not isolated by loopback pins.
+
+## Limits and validation boundary
+
+- The shared model-server budget permits at most **ten generation admissions per
+  rollout**, including auxiliary calls using that route. The next call is rejected.
+  This is not ten tool actions or a guarantee of ten successful model responses.
+  No shared-budget final prompt or forced final tool choice is configured.
+- The row's output cap is an upper bound: the model middleware uses the smaller
+  of that cap and the native request's cap. It does not raise a client's smaller
+  output limit. Missing source caps leave native/backend defaults in effect. This
+  multi-turn per-call limit is not an original single-turn total-token budget.
+- Explicit context/output settings are applied where the public adapter supports
+  them. Claude has no equivalent typed context/output controls; Codex and NOOA
+  rely on the row cap for the output ceiling. Inspect actual model requests before
+  claiming equal effective context or output limits across all seven.
+- Native turn, summary, delegation, and compaction behavior remains relevant.
+  Supported recipe settings disable some automatic behavior; the task prompt's
+  prohibition is not a universal runtime switch. OpenCode's `build.steps` is
+  advisory and can add its own final-turn instruction independently of the shared
+  budget. Agent timeouts are 1,800 seconds; the episode limit is 2,100 seconds.
+- Token capture is enabled. The serving backend must support the required-prefix
+  extension. Saved tool text alone does not prove preview images reached the
+  model; validate actual media, prefix continuity, terminal capture, and cleanup.
+
+Focused checks are in `tests/test_opencode_sessions.py` and
+`tests/test_opencode_manifest.py`. They cover preparation, routing, resource
+sessions, file authority, and cleanup; they do not establish a fresh image build
+or seven real-model rollouts. Earlier internal CAD quality/training experiments
+used different runtime/protocol configurations and do not validate this public
+file-input recipe. No new cross-harness quality or training parity is claimed.

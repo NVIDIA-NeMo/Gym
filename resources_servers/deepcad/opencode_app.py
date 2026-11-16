@@ -15,6 +15,7 @@ from fastapi import FastAPI, Request
 from PIL import Image
 from pydantic import BeforeValidator, Field, PrivateAttr
 
+from nemo_gym.agents import ROLLOUT_STOP_METADATA_KEY
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import VERIFIER_ERROR, NeMoGymResponseCreateParamsNonStreaming
@@ -204,10 +205,19 @@ class DeepCADOpenCodeResourcesServer(DeepCADResourcesServer):
                     final_file_status="workspace_lost",
                 )
             if verification.is_live:
+                budget_stopped = False
+                if body.response.status == "incomplete":
+                    marker = (body.response.metadata or {}).get(ROLLOUT_STOP_METADATA_KEY)
+                    try:
+                        stop = json.loads(marker) if isinstance(marker, str) else None
+                    except json.JSONDecodeError:
+                        stop = None
+                    budget_stopped = isinstance(stop, dict) and stop.get("reason") == "model_call_budget_exhausted"
                 try:
                     frozen = (
                         await self._collect_code(session_id)
-                        if body.response.status == "completed" and not body.response.incomplete_details
+                        if (body.response.status == "completed" and not body.response.incomplete_details)
+                        or budget_stopped
                         else ("", "agent_incomplete")
                     )
                 except (OSError, RuntimeError) as error:

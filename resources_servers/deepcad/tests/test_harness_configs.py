@@ -1,0 +1,113 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Exercise stock input boundaries; this does not install or run native clients."""
+
+from importlib import import_module
+from unittest.mock import MagicMock
+
+import pytest
+from omegaconf import DictConfig, OmegaConf
+
+from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServerConfig
+from nemo_gym.client import ServerClient
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.rollouts import RolloutCollectionHelper
+from resources_servers.deepcad.tests.test_opencode_manifest import CONFIG, prepared
+
+
+@pytest.mark.parametrize(
+    "harness,class_name,boundary",
+    [
+        ("opencode", "OpenCodeAgent", "_session_input"),
+        ("pi", "PiAgent", "_validate_request"),
+        ("hermes", "HermesAgent", "_validate_request"),
+        ("codex", "CodexAgent", "_sandbox_input"),
+        ("claude_code", "ClaudeCodeAgent", "_validate_sandbox_request"),
+        ("openclaw", "OpenClawAgent", "_sandbox_input"),
+        ("nooa", "NOOAAgent", None),
+    ],
+)
+def test_mixed_config_routes_file_input_to_stock_session_boundary(
+    tmp_path, monkeypatch, harness, class_name, boundary
+):
+    monkeypatch.setenv("CAD_BUDGET_DIR", str(tmp_path / "budget"))
+    root = CONFIG.parents[3]
+    config = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=OmegaConf.create(
+                {
+                    "config_paths": [
+                        str(CONFIG.with_name("multiharness.yaml")),
+                        str(root / "responses_api_models/vllm_model/configs/vllm_model.yaml"),
+                    ],
+                    "default_host": "192.0.2.10",
+                    "policy_base_url": "http://192.0.2.10:8000/v1",
+                    "policy_api_key": "EMPTY",
+                    "policy_model_name": "validation-only",
+                    "anthropic_api_key": "",
+                    "error_on_agent_without_environment_server": True,
+                }
+            ),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+        )
+    )
+    _, row = prepared(tmp_path, file_input=True, harness=harness)
+    rows = RolloutCollectionHelper().preprocess_examples([row], global_config_dict=config)
+    RolloutCollectionHelper._validate_environment_servers(rows, config)
+    row = rows[0]
+    env_name = f"deepcad_{harness}_environment_server"
+    env = SingleAgentTurnLegacyEnvironmentServerConfig(
+        name=env_name,
+        **OmegaConf.to_container(
+            config[env_name].environment_servers.single_agent_turn_legacy,
+            resolve=True,
+        ),
+    )
+    assert row["agent_ref"]["name"] == env.agent_server.name
+    assert env.resources_server.name == "deepcad_opencode"
+    assert env.resources_tool_transports == []
+    budget = config.policy_model.responses_api_models.vllm_model.rollout_generation_budget
+    assert budget.max_calls == 10
+    assert len(budget.agent_servers) == 7
+    assert env.agent_server.name in budget.agent_servers
+    assert (
+        len([key for key, value in config.items() if isinstance(value, DictConfig) and "environment_servers" in value])
+        == 7
+    )
+    module = import_module(f"responses_api_agents.{harness}_agent.app")
+    config_module = import_module("responses_api_agents.nooa_agent.config") if harness == "nooa" else module
+    values = OmegaConf.to_container(
+        config[env.agent_server.name].responses_api_agents[harness + "_agent"], resolve=True
+    )
+    agent_config = getattr(config_module, class_name + "Config")(name=env.agent_server.name, **values)
+    context_fields = {
+        "opencode": "context_window",
+        "pi": "context_window",
+        "hermes": "context_length",
+        "codex": "model_context_window",
+        "openclaw": "context_window",
+        "nooa": "context_window",
+    }
+    if harness in context_fields:
+        assert getattr(agent_config, context_fields[harness]) == 131072
+    if harness in {"opencode", "pi", "openclaw"}:
+        assert agent_config.max_output_tokens == 32768
+    if harness == "hermes":
+        assert agent_config.max_tokens == 32768 and not agent_config.compression_enabled
+    if harness == "pi":
+        assert not agent_config.auto_compaction and agent_config.image_input
+    params = NeMoGymResponseCreateParamsNonStreaming.model_validate(row["responses_create_params"])
+    if harness == "nooa":
+        from responses_api_agents.nooa_agent.task_agent import _latest_user_text
+
+        assert agent_config.nooa.execution_mode == "sandboxed"
+        assert "/workspace/target-0.png" in _latest_user_text(params)
+        assert "model.py" in _latest_user_text(params)
+    else:
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = config
+        agent = getattr(module, class_name)(config=agent_config, server_client=client)
+        getattr(agent, boundary)(params)
