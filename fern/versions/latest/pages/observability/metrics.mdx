@@ -293,8 +293,8 @@ these metrics whenever metrics are exported, whether or not the `checkpoint` spa
 | `gym.checkpoint.events_total` | Counter | count | Events that change a checkpoint's outcome without failing a call, by `nemo.gym.checkpoint.event`. |
 
 The operation is one of a participant's control operations (`prepare`, `commit`, `restore`, `resume`,
-`retire`, or `forget`), `lease_reopen` for one attempt to reopen a participant whose lease expired, or
-`coordinate.<operation>` for one call the controller makes to every participant. The participant kind is
+`retire`, `forget`, or `release`), `lease_reopen` for one attempt to reopen a participant whose lease
+expired, or `coordinate.<operation>` for one call the controller makes to every participant. The participant kind is
 the server's role in the checkpoint, such as `model`, `agent`, `resources`, or `environment`, and
 `controller` for coordination.
 

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Wires the opencode sandboxed agent to swemer_oml_resources_server for a training run.
-# `swemer_oml.yaml` alone only defines the resources server (enough for golden-patch validation,
+# `swemer_oml_legacy_agent.yaml` alone only defines the resources server (enough for golden-patch validation,
 # which never touches an agent); this separate file keeps that path free of the agent's much
 # larger opencode/sandbox config -- same split as swemer_v2.
 #
@@ -10,7 +10,7 @@
 
 config_paths:
   - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
-  - resources_servers/swemer_oml/configs/swemer_oml.yaml
+  - resources_servers/swemer_oml/configs/swemer_oml_legacy_agent.yaml
 
 swemer_oml_opencode_sandboxed_agent:
   _inherit_from: opencode_sandboxed_agent
