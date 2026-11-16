@@ -93,6 +93,7 @@ from nemo_gym.core import (
 from nemo_gym.rollouts.health.timeouts import TimeoutEvent
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
+    END_ACTIVATION_HEADER,
     SESSION_OWNER_HEADER,
     TOOL_CALL_ID_HEADER,
     TOOL_ERROR_HEADER,
@@ -893,6 +894,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
             all_fn_calls = [o for o in model_response.output if o.type == "function_call"]
             tool_images: list[ToolOutputImage] = []
+            # A tool's server ends the activation after this step's tool calls (END_ACTIVATION_HEADER).
+            ends_activation = False
             for output_function_call in all_fn_calls:
                 if collect_trajectory:
                     started_at = time()
@@ -940,6 +943,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     tool_images.extend(images)
                     resources_server_cookies = dict(resources_server_cookies or {})
                     resources_server_cookies.update(_cookies(api_response))
+                    ends_activation |= api_response.headers.get(END_ACTIVATION_HEADER) == "true"
                     if collect_trajectory:
                         completed = 200 <= api_response.status < 400
                         error_result = api_response.headers.get(TOOL_ERROR_HEADER) == "true"
@@ -979,6 +983,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 turns[-1].step_count = len(tool_records)
             pending_tools = False
 
+            if ends_activation:
+                break
             # Check if max steps is not None and if we have exhausted it.
             if self.config.max_steps and step >= self.config.max_steps:
                 invocation_status = "incomplete"

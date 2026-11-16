@@ -136,6 +136,7 @@ if TYPE_CHECKING:
     )
     from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
     from nemo_gym.server_runtime.tool_access import (
+        END_ACTIVATION_HEADER,
         TOOL_CALL_ID_HEADER,
         TOOL_ERROR_HEADER,
         DirectHTTPToolAccess,
@@ -227,6 +228,7 @@ _PUBLIC_API = {
     "StaleAttemptError": "_checkpoint.errors",
     "StepType": "_checkpoint.steps",
     "TOKEN_HEADER": "mcp_auto_exposure",
+    "END_ACTIVATION_HEADER": "tool_access",
     "TOOL_CALL_ID_HEADER": "tool_access",
     "TOOL_ERROR_HEADER": "tool_access",
     "ToolAccess": "tool_access",

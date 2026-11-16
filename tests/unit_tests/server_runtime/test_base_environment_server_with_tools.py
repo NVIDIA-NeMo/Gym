@@ -31,6 +31,7 @@ from nemo_gym.server_runtime.episode_tokens import EPISODE_TOKEN_HEADER, Episode
 from nemo_gym.server_runtime.episode_tools import ToolResult, ToolSpec, TypedToolset, episode_tool
 from nemo_gym.server_runtime.request_handling.request_context import install_request_context_isolation
 from nemo_gym.server_runtime.tool_access import (
+    END_ACTIVATION_HEADER,
     TOOL_CALL_ID_HEADER,
     TOOL_ERROR_HEADER,
     DirectHTTPToolAccess,
@@ -99,6 +100,11 @@ class _Counter:
     async def overdraw(self, arguments: _Amount) -> ToolResult:
         """Refuse to take more than the total, with an error result the agent handles."""
         return ToolResult(output={"detail": f"the total is {self.total}"}, is_error=True)
+
+    @episode_tool
+    async def submit(self, arguments: _Amount) -> ToolResult:
+        """Add an amount and end the agent's activation, as a submission that ends a turn does."""
+        return ToolResult(output=await self.add(arguments), ends_activation=True)
 
     @episode_tool
     async def rollout(self, arguments: _Nothing) -> str | None:
@@ -324,6 +330,29 @@ def test_a_reply_says_whether_the_call_was_an_error(path: str, body: Any, status
     assert replies[0].status_code == status
     assert (replies[0].headers.get(TOOL_ERROR_HEADER) == "true") is flagged
     assert [call.is_error for call in recorded] == [flagged]
+
+
+@pytest.mark.parametrize(
+    "path, body, ends",
+    [
+        pytest.param("/add", {"amount": 2}, False, id="result"),
+        pytest.param("/submit", {"amount": 2}, True, id="ends-activation"),
+        pytest.param("/submit", {"amount": "two"}, False, id="failed-call"),
+    ],
+)
+def test_a_reply_says_whether_the_call_ends_the_activation(path: str, body: Any, ends: bool) -> None:
+    """Only a result the tool marks with ``ends_activation`` carries the header; a call that never ran does not."""
+    replies: list[httpx.Response] = []
+
+    async def agent(server: _Server, counter: _Counter, served: ServedTools) -> None:
+        replies.append(await http.post(path, json=body, headers=_headers(served)))
+
+    server, http = _server(agent)
+    asyncio.run(server.run_request(_request()))
+
+    assert (replies[0].headers.get(END_ACTIVATION_HEADER) == "true") is ends
+    if ends:
+        assert replies[0].json() == {"total": 2}
 
 
 @pytest.mark.parametrize("path", ["/run", "/aggregate_metrics", "/ng-rollout/3-0/run", "/add/../run", "/a/b"])
