@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 ROOT = Path(__file__).resolve().parents[3]
 PROVIDER_CONFIG = ROOT / "nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml"
 OFFICEENV_CONFIG = ROOT / "resources_servers/officeenv_sandbox/configs/officeenv_opensandbox.yaml"
+OFFICEENV_SERVER = "officeenv_sandbox_resources_server"  # the server whose sandbox settings that config sets
 PI_INSTALLER = ROOT / "responses_api_agents/pi_agent/install_pi_runtime.sh"
 EGRESS = ["https://pypi.org/simple/", "https://registry.npmjs.org/", "https://nodejs.org/dist/index.json"]
 REPLY = b"officeenv-probe-ok"
@@ -77,8 +78,8 @@ def provider_block() -> dict:
 def sandbox_config() -> SandboxConfig:
     from nemo_gym.sandbox import SandboxConfig
 
-    oe = OmegaConf.to_container(OmegaConf.load(OFFICEENV_CONFIG)["oe"], resolve=True)
-    settings = oe["resources_servers"]["officeenv_sandbox"]["sandbox_config"]
+    server = OmegaConf.to_container(OmegaConf.load(OFFICEENV_CONFIG)[OFFICEENV_SERVER], resolve=True)
+    settings = server["resources_servers"]["officeenv_sandbox"]["sandbox_config"]
     return SandboxConfig(
         **{key: settings[key] for key in ("ttl_s", "resources", "env", "metadata") if key in settings}
     )
@@ -104,7 +105,8 @@ async def probe(args: argparse.Namespace) -> dict:
     config = sandbox_config()
     if args.ttl_s:
         config = config.model_copy(update={"ttl_s": args.ttl_s})
-    image = OmegaConf.load(OFFICEENV_CONFIG)["oe"]["resources_servers"]["officeenv_sandbox"]["sandbox_config"]["image"]
+    server = OmegaConf.load(OFFICEENV_CONFIG)[OFFICEENV_SERVER]
+    image = server["resources_servers"]["officeenv_sandbox"]["sandbox_config"]["image"]
     spec = config.spec(
         "sandbox",
         image=image,

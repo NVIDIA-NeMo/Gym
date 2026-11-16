@@ -1,8 +1,14 @@
 # OfficeEnv's episodes for a sandboxed harness, without the harness: each episode session borrows a
 # sandbox (a container from sandbox/Dockerfile), reaches the apps the way its row's exposure says (MCP tools, commands
-# or endpoints), and moves file content over the episode's file API (README.md in the workspace). The harness configs
-# compose it with a harness and the environment server that binds the two: configs/officeenv_sandbox.yaml (Pi),
-# configs/officeenv_sandbox_codex.yaml (Codex CLI) and configs/officeenv_sandbox_miniswe.yaml (mini-SWE).
+# or endpoints), and moves file content over the episode's file API (README.md in the workspace). Each harness config
+# composes it with a harness and the environment server that binds the two: configs/officeenv_sandbox.yaml (Pi) and
+# configs/officeenv_sandbox_<harness>.yaml (Codex CLI, mini-SWE, OpenCode, OpenClaw, Terminus 2).
+#
+# The instances a harness config adds are named after the harness (officeenv_sandbox_<harness>_agent, which inherits
+# Gym's instance of the harness, and officeenv_sandbox_<harness>_environment_server), so several harness configs
+# compose in one run. A harness that names the MCP tools its own way (Pi, Codex, OpenCode) runs on a copy of this
+# server, officeenv_sandbox_<harness>_resources_server; the others run on this one. A copy takes the settings this
+# server has in the merged config, those of a later config and of the command line included.
 
 # When Gym's run command stops its servers (a job's end, Ctrl-C), it kills the ones still running this long after
 # signalling them (1 s by default). This server stops the sandboxes it lent, all at once, within it less a 2 s margin
@@ -10,7 +16,7 @@
 # that includes this config waits up to 30 s to stop, not only this one.
 server_shutdown_timeout_seconds: 30
 
-oe:
+officeenv_sandbox_resources_server:
   resources_servers:
     officeenv_sandbox:
       entrypoint: app.py
