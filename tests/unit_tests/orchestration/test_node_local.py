@@ -558,7 +558,8 @@ def _real_driver_fakes(tmp_path: Path, gym_exit: int) -> dict[str, str]:
         "gym": f"{_WRITE_EVIDENCE}; exit {gym_exit}",
         "python3": (
             f"if tar -tzf {archive} 2>/dev/null | grep -q ev/1.json; then echo 'exporter found the evidence archive'; "
-            "else echo 'exporter found no evidence archive'; fi"
+            "else echo 'exporter found no evidence archive'; fi; "
+            f"! ls -A {archive.parent.parent} | grep -q archive_done || echo 'exporter found the marker'"
         ),
     }
 
@@ -575,6 +576,9 @@ def test_the_evidence_is_archived_before_the_exports_read_the_job_dir(tmp_path):
     assert output.count("Archived the node-local files") == 1
     assert _archive_names(tmp_path) == ["11.0.tar.gz"]
     assert not (tmp_path / "host" / "gym-node-local-11").exists()
+    # The wait takes the marker before the exports run, so they never upload it.
+    assert "exporter found the marker" not in output
+    assert not list((tmp_path / "run" / "b").glob(".gym_node_local_archive_done*"))
 
 
 def test_a_failed_evaluation_exports_nothing_and_is_archived_after_the_driver(tmp_path):
@@ -592,14 +596,13 @@ def test_a_failed_evaluation_exports_nothing_and_is_archived_after_the_driver(tm
 def test_the_exports_wait_for_the_archive_only_with_node_local(tmp_path):
     with_node_local = _script(_config(True, exports=True))
     without = _script(_config(exports=True))
-    assert 'GYM_NODE_LOCAL_ARCHIVED=/jobs/20261116_run/b/.gym_node_local_archived."$SLURM_JOB_ID" ' in (
-        _driver_line(with_node_local)
-    )
+    marker = '/jobs/20261116_run/b/.gym_node_local_archive_done."$SLURM_JOB_ID"'
+    assert f"GYM_NODE_LOCAL_ARCHIVE_DONE_MARKER={marker} " in _driver_line(with_node_local)
     # The bound: archive_timeout_seconds (120) plus the margin for the 5 s poll and the step that archives.
     assert "_gym_i < 180" in with_node_local and "_gym_i <" not in without
-    assert ': > /jobs/20261116_run/b/.gym_node_local_archived."$SLURM_JOB_ID"' in with_node_local
-    assert "GYM_NODE_LOCAL_ARCHIVED" not in without
-    assert "GYM_NODE_LOCAL_ARCHIVED" not in _script(_config(True))
+    assert f": > {marker}" in with_node_local
+    assert "GYM_NODE_LOCAL_ARCHIVE_DONE_MARKER" not in without
+    assert "GYM_NODE_LOCAL_ARCHIVE_DONE_MARKER" not in _script(_config(True))
 
 
 def test_a_term_to_the_job_archives_the_dir_first(tmp_path):

@@ -30,13 +30,14 @@ from pathlib import Path
 
 from nemo_gym.orchestration.api import NodeLocalConfig
 from nemo_gym.orchestration.executors.resume_script import JOB_CHAIN_NAME
-from nemo_gym.orchestration.executors.script_templates import NODE_LOCAL_ARCHIVED_ENV
+from nemo_gym.orchestration.executors.script_templates import NODE_LOCAL_ARCHIVE_DONE_MARKER_ENV
 
 
 NODE_LOCAL_DIR_ENV = "GYM_NODE_LOCAL_DIR"
-# The barrier file (NODE_LOCAL_ARCHIVED_ENV) the job writes once it has archived; the exports wait for it.
-_ARCHIVED_NAME = ".gym_node_local_archived"
-# The exports' wait for that barrier beyond archive_timeout_seconds: the watch polls every 5 s, then starts a step.
+# The marker (NODE_LOCAL_ARCHIVE_DONE_MARKER_ENV) the job creates once its archive step has ended; the exports wait
+# for it.
+_ARCHIVE_DONE_MARKER_NAME = ".gym_node_local_archive_done"
+# The exports' wait for that marker beyond archive_timeout_seconds: the watch polls every 5 s, then starts a step.
 ARCHIVE_WAIT_MARGIN_SECONDS = 60
 ARCHIVES_DIRNAME = "node-local"
 # Inside the driver container: one path per run and benchmark, the same in every job of the run.
@@ -133,7 +134,7 @@ _gym_nl_run() {{ {on_driver_node}bash -c "$1" _gym_node_local "${{@:2}}"; }}
 _gym_nl_archive() {{
     [[ -z "$_gym_nl_done" ]] || return 0
     _gym_nl_done=1
-    _gym_nl_run {archive_script} "$_gym_nl_dir" "$_gym_nl_archives" "$SLURM_JOB_ID.${{SLURM_RESTART_COUNT:-0}}" {archive_timeout}{release}
+    _gym_nl_run {archive_script} "$_gym_nl_dir" "$_gym_nl_archives" "$SLURM_JOB_ID.${{SLURM_RESTART_COUNT:-0}}" {archive_timeout}{create_marker}
 }}
 _gym_nl_cleanup() {{ _gym_nl_run {cleanup_script} "$_gym_nl_dir"; }}
 # Once the evaluation has succeeded, archive before the exports read the job dir.
@@ -173,18 +174,18 @@ def driver_mount(remote_bench_dir: Path) -> str:
     return f'"$_gym_nl_dir":{shlex.quote(container_dir(remote_bench_dir))}'
 
 
-def _archived_barrier(remote_bench_dir: Path) -> str:
-    return f'{shlex.quote(str(remote_bench_dir / _ARCHIVED_NAME))}."$SLURM_JOB_ID"'
+def _archive_done_marker(remote_bench_dir: Path) -> str:
+    return f'{shlex.quote(str(remote_bench_dir / _ARCHIVE_DONE_MARKER_NAME))}."$SLURM_JOB_ID"'
 
 
 def driver_env_prefix(remote_bench_dir: Path, *, exports: bool) -> str:
-    """The driver's env: the dir, and with exports the barrier file that says the dir has been archived."""
-    barrier = f"{NODE_LOCAL_ARCHIVED_ENV}={_archived_barrier(remote_bench_dir)} " if exports else ""
-    return f"{NODE_LOCAL_DIR_ENV}={shlex.quote(container_dir(remote_bench_dir))} {barrier}"
+    """The driver's env: the dir, and with exports the marker that says the archive step has ended."""
+    marker = f"{NODE_LOCAL_ARCHIVE_DONE_MARKER_ENV}={_archive_done_marker(remote_bench_dir)} " if exports else ""
+    return f"{NODE_LOCAL_DIR_ENV}={shlex.quote(container_dir(remote_bench_dir))} {marker}"
 
 
 def archive_wait_seconds(config: NodeLocalConfig) -> int:
-    """How long the exports wait for the barrier before they run anyway."""
+    """How long the exports wait for the marker before they run anyway."""
     return config.archive_timeout_seconds + ARCHIVE_WAIT_MARGIN_SECONDS
 
 
@@ -192,7 +193,7 @@ def render_setup(config: NodeLocalConfig, remote_bench_dir: Path, driver_node_fl
     """Batch-script lines that run before the driver: create (and restore) the dir and define the archive step.
 
     `driver_node_flags` are the driver step's own `srun` node flags; empty when the batch shell runs on its node.
-    With `exports`, every archive (or failed one) also releases the exports' barrier.
+    With `exports`, every archive step (also a failed one) then creates the marker the exports wait for.
     """
     on_driver_node = f"srun --overlap{driver_node_flags} " if driver_node_flags else ""
     blocks = [
@@ -205,7 +206,7 @@ def render_setup(config: NodeLocalConfig, remote_bench_dir: Path, driver_node_fl
             restore_script=shlex.quote(_RESTORE_SCRIPT),
             chain=shlex.quote(str(remote_bench_dir / JOB_CHAIN_NAME)),
             restore=int(config.restore),
-            release=f"\n    : > {_archived_barrier(remote_bench_dir)}" if exports else "",
+            create_marker=f"\n    : > {_archive_done_marker(remote_bench_dir)}" if exports else "",
             cleanup_script=shlex.quote(_CLEANUP_SCRIPT),
         )
     ]
@@ -214,13 +215,17 @@ def render_setup(config: NodeLocalConfig, remote_bench_dir: Path, driver_node_fl
     return "\n".join(blocks)
 
 
-def render_after_driver(driver_node_flags: str) -> str:
-    """Batch-script lines right after the driver step: archive, remove the dir, restore the step's status in `$?`."""
+def render_after_driver(remote_bench_dir: Path, driver_node_flags: str, *, exports: bool) -> str:
+    """Batch-script lines right after the driver step: archive, remove the dir, restore the step's status in `$?`.
+
+    With `exports` the exports have run by then: the marker goes too, should their wait have timed out before it came.
+    """
     return "\n".join(
         [
             "_gym_nl_rc=$?",
             "_gym_nl_archive",
             "_gym_nl_cleanup",
+            *([f"rm -f -- {_archive_done_marker(remote_bench_dir)}"] if exports else []),
             *([] if driver_node_flags else ["trap - TERM"]),
             '(exit "$_gym_nl_rc")',
         ]

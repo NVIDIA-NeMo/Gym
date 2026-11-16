@@ -1376,7 +1376,9 @@ def build_sbatch_script(
             + "\n"
             + driver_command
             + "\n"
-            + node_local_script.render_after_driver(node_local_flags)
+            + node_local_script.render_after_driver(
+                remote_bench_dir, node_local_flags, exports=export_tail is not None
+            )
         )
     if resume:
         # A job that finished the run cancels the follow-up and sentinel it queued; its status stays the driver's.

@@ -224,7 +224,7 @@ def render_export_tail(
     and cannot change it. They run only after a successful run, so a partial run is never exported, and an
     export that already succeeded is not repeated (the export step decides that from its result file).
     With `archive_wait_seconds` (a node-local dir), the exports first wait up to that long for the job to archive the
-    dir into the job dir, which it signals with the file named by `NODE_LOCAL_ARCHIVED_ENV`.
+    dir into the job dir, which it signals by creating the marker named by `NODE_LOCAL_ARCHIVE_DONE_MARKER_ENV`.
     """
     bench = shlex.quote(str(bench_dir))
     lines = [
@@ -253,16 +253,19 @@ def render_export_tail(
     return "\n".join(lines)
 
 
-# The job archives the node-local dir once the marker exists; an exporter must find that archive in the job dir.
-NODE_LOCAL_ARCHIVED_ENV = "GYM_NODE_LOCAL_ARCHIVED"
+# The marker the job creates once its node-local archive step has ended; the exports wait for it, so an exporter finds
+# the archive in the job dir.
+NODE_LOCAL_ARCHIVE_DONE_MARKER_ENV = "GYM_NODE_LOCAL_ARCHIVE_DONE_MARKER"
 
 
 def _archive_wait_lines(seconds: int) -> list[str]:
-    barrier = f'"${{{NODE_LOCAL_ARCHIVED_ENV}:-}}"'
+    marker = f'"${{{NODE_LOCAL_ARCHIVE_DONE_MARKER_ENV}:-}}"'
     return [
-        f"    if [ -n {barrier} ]; then",
-        f"        for ((_gym_i = 0; _gym_i < {seconds}; _gym_i++)); do [ ! -e {barrier} ] || break; sleep 1; done",
-        f'        [ -e {barrier} ] || echo "WARNING: the node-local dir was not archived within {seconds}s; exporting anyway"',
+        f"    if [ -n {marker} ]; then",
+        f"        for ((_gym_i = 0; _gym_i < {seconds}; _gym_i += 5)); do [ ! -e {marker} ] || break; sleep 5; done",
+        # Removed once seen, so the exports never upload it.
+        f"        if [ -e {marker} ]; then rm -f -- {marker} || true; "
+        f'else echo "WARNING: the node-local dir was not archived within {seconds}s; exporting anyway"; fi',
         "    fi",
     ]
 
