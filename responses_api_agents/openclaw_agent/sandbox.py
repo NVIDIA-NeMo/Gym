@@ -5,7 +5,10 @@
 import asyncio
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import PurePosixPath
+from time import monotonic
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
@@ -17,8 +20,8 @@ from nemo_gym.agents import (
     is_harness_termination_failure,
     shell_assignments,
 )
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent
-from nemo_gym.sandbox import read_text, upload_text
+from nemo_gym.core import MediaFile, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent
+from nemo_gym.sandbox import media_path, read_text, upload_bytes, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
 
 
@@ -143,23 +146,41 @@ class OpenClawSandboxSession(AgentSessionState):
             raise RuntimeError("OpenClaw MCP probe termination is unconfirmed")
         self.probe = None
 
-    async def execute(self, payload: dict[str, JsonValue], *, timeout: float, close_timeout: float) -> dict[str, str]:
+    async def execute(
+        self,
+        payload: dict[str, JsonValue],
+        *,
+        media: Sequence[MediaFile] = (),
+        timeout: float,
+        close_timeout: float,
+    ) -> dict[str, str]:
         """Run through the common lifecycle; the adapter validates terminal events."""
         artifacts = await self.session.execute(
-            stage_activation=lambda: self.stage_activation(payload),
+            stage_activation=lambda: self.stage_activation(payload, media=media),
             collect=self.collect_artifacts,
             timeout=timeout,
             close_timeout=close_timeout,
+            deadline=monotonic() + timeout,
         )
         if self.session.closing:
             raise asyncio.CancelledError
         return artifacts
 
-    async def stage_activation(self, payload: dict[str, JsonValue]) -> SandboxCommand:
+    async def stage_activation(
+        self, payload: dict[str, JsonValue], *, media: Sequence[MediaFile] = ()
+    ) -> SandboxCommand:
         """Stage the invocation and return the OpenClaw worker command."""
         directory = self.session.session_dir
         await self.upload_json("home/.openclaw/openclaw.json", payload["config"])
-        await upload_text(self.session.sandbox, path=f"{directory}/prompt.txt", text=payload["prompt"])
+        prompt = payload["prompt"]
+        # The CLI only loads local images under its media allowlist. Session-owned files are
+        # removed on close; staging runs inside the shared close fence and activation deadline.
+        # OpenClaw deduplicates marker paths, so repeated images need separate files.
+        for index, file in enumerate(media, 1):
+            path = f"{directory}/home/.openclaw/media/{index}-{PurePosixPath(media_path(file)).name}"
+            await upload_bytes(self.session.sandbox, path=path, data=file.data)
+            prompt += f"\n[Image: source: {path}]"
+        await upload_text(self.session.sandbox, path=f"{directory}/prompt.txt", text=prompt)
         params = {
             "cwd": payload["cwd"],
             "command": payload["command"],
