@@ -466,3 +466,23 @@ def test_local_reader_marks_malformed_session_boundaries(tmp_path, metadata):
     (directory / "native.jsonl").write_text("\n".join(json.dumps(event) for event in events))
     bundle = read_codex_observations(tmp_path, "invocation", returncode=0, timed_out=False)
     assert any(gap.code == "subagent_hierarchy_unavailable" for gap in bundle.gaps)
+
+
+def test_native_prompt_images_are_preserved() -> None:
+    content = [
+        {"type": "input_text", "text": "image follows"},
+        {"type": "input_image", "image_url": "data:image/png;base64,image-bytes", "detail": "high"},
+    ]
+    transcript = json.dumps(
+        {
+            "type": "response_item",
+            "timestamp": "2026-11-10T12:00:00Z",
+            "payload": {"type": "message", "role": "user", "content": content},
+        }
+    )
+    bundle = parse_codex_observations(transcript, "images", returncode=0, timed_out=False)
+    observed = bundle.records[0].conversation[0].model_dump(mode="json")["content"]
+    assert observed[0]["text"] == "image follows"
+    assert observed[1]["image_url"] == content[1]["image_url"]
+    assert observed[1]["detail"] == "high"
+    assert not bundle.gaps

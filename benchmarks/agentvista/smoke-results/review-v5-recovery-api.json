@@ -1,0 +1,104 @@
+{
+  "scope": "Two bounded live Kimi API rollouts on public AgentVista task agentvista-000; not benchmark accuracy qualification",
+  "code_revision": "Commit containing this receipt",
+  "pipeline": "Actual benchmark YAML -> Gym Environment Server -> agent sessions -> Resources Server -> original judge",
+  "model": "nvidia/moonshotai/kimi-k3",
+  "context_tokens": 65536,
+  "output_tokens": 32768,
+  "default_max_turns": 3,
+  "opencode_max_steps": 3,
+  "actor_timeout_seconds": 240,
+  "episode_timeout_seconds": 360,
+  "top_p": 0.95,
+  "provider_note": "Initial top_p=1.0 attempts were rejected by the endpoint with enforced top_p=0.95; both remained masked. Row-level override used for reruns; benchmark defaults unchanged.",
+  "initial_attempts": [
+    {
+      "harness": "default",
+      "http_status": 200,
+      "task_id": "agentvista-000",
+      "elapsed_seconds": 37.0,
+      "mask_sample": true,
+      "reward": 0.0,
+      "verify_status": "ERROR",
+      "failure_kind": "agentvista:execution",
+      "failure_reason": "RuntimeError: Original harness recorded a model/capture error; inspect trajectory",
+      "execution_health": {},
+      "error": null
+    },
+    {
+      "harness": "opencode",
+      "http_status": 200,
+      "task_id": "agentvista-000",
+      "elapsed_seconds": 21.47,
+      "mask_sample": true,
+      "reward": 0.0,
+      "verify_status": "ERROR",
+      "failure_kind": "agentvista:native_error",
+      "failure_reason": "RuntimeError: OpenCode termination: native_error; inspect native artifacts",
+      "execution_health": {
+        "termination": "native_error",
+        "finish_reason": null,
+        "output_tokens_limit": 32768,
+        "last_step_output_tokens": null,
+        "returncode": 1,
+        "timed_out": false,
+        "native_errors": 1,
+        "tool_calls": 0,
+        "tool_errors": 0,
+        "execution_healthy": false
+      },
+      "error": null
+    }
+  ],
+  "results": [
+    {
+      "harness": "default",
+      "http_status": 200,
+      "task_id": "agentvista-000",
+      "elapsed_seconds": 323.44,
+      "mask_sample": false,
+      "reward": 0.0,
+      "verify_status": "FAIL",
+      "failure_kind": null,
+      "failure_reason": null,
+      "execution_health": {},
+      "error": null
+    },
+    {
+      "harness": "opencode",
+      "http_status": 200,
+      "task_id": "agentvista-000",
+      "elapsed_seconds": 258.64,
+      "mask_sample": false,
+      "reward": 0.0,
+      "verify_status": "FAIL",
+      "failure_kind": null,
+      "failure_reason": null,
+      "execution_health": {
+        "termination": "timeout",
+        "finish_reason": "tool-calls",
+        "output_tokens_limit": 32768,
+        "last_step_output_tokens": 185,
+        "returncode": -15,
+        "timed_out": true,
+        "native_errors": 0,
+        "tool_calls": 2,
+        "tool_errors": 0,
+        "execution_healthy": false,
+        "task_success": false
+      },
+      "error": null
+    }
+  ],
+  "limitations": [
+    "OpenCode reached its actor deadline with retained output; not healthy-execution qualification.",
+    "No full-dataset evaluation or fresh runtime image build.",
+    "Judge-outage recovery validated by real subprocess fixtures with the identical saved answer, including timeout/cancellation and restart; no live outage injected."
+  ],
+  "local_validation": {
+    "native_cli_agent_and_resource_tests_passed": 101,
+    "core_manifest_and_import_tests_passed": 4,
+    "resource_ci_command_tests_passed": 25,
+    "regression_negative_controls_expected_failures": 14
+  }
+}
