@@ -105,6 +105,31 @@ async def test_invalid_code_zero(server: DeepCADResourcesServer, text: str, kind
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("error", [RecursionError, MemoryError])
+async def test_compile_resource_errors_are_unmasked_zero(server, error):
+    server._evaluate = AsyncMock()
+    with patch("resources_servers.deepcad.app.compile", side_effect=error("compile failed"), create=True):
+        result = await server.verify(request("result = 1"))
+    assert result.reward == 0 and not result.mask_sample
+    assert result.failure_kind == "deepcad:syntax"
+    assert result.failure_reason == "compile failed"
+    server._evaluate.assert_not_awaited()
+
+
+@pytest.mark.parametrize("mixed_iou", [None, {}])
+def test_geometry_requires_positive_weight_even_with_unused_mixed_config(mixed_iou):
+    with pytest.raises(ValueError, match="Geometry scoring requires at least one positive reward weight"):
+        DeepCADResourcesServerConfig(
+            host="127.0.0.1",
+            port=8080,
+            entrypoint="app.py",
+            name="deepcad",
+            mixed_iou=mixed_iou,
+            reward_weights={"voxel_iou": 0},
+        )
+
+
+@pytest.mark.asyncio
 async def test_continuous_reward(server: DeepCADResourcesServer) -> None:
     with patch.object(DeepCADResourcesServer, "_evaluate", AsyncMock(return_value={"reward": 0.37})):
         assert (await server.verify(request("result = 1"))).reward == 0.37
@@ -362,13 +387,18 @@ async def test_geometry_library_dirs_reach_worker(server, monkeypatch):
     assert os.environ["LD_LIBRARY_PATH"] == "/existing/cuda"
 
 
-def test_geometry_preflight_rejects_broken_runtime(server, tmp_path):
-    server.config.geometry_library_dirs = [str(tmp_path)]
+@pytest.mark.parametrize("external_libraries", [False, True])
+@pytest.mark.parametrize("metric", ["geometry", "mixed_iou"])
+def test_geometry_preflight_rejects_broken_runtime(server, tmp_path, external_libraries, metric):
+    server.config.geometry_library_dirs = [str(tmp_path)] if external_libraries else []
+    server.config.verification_metric = metric
     process = MagicMock(returncode=1, stderr="ImportError: libGL.so.1")
     with patch("resources_servers.deepcad.app.subprocess.run", return_value=process) as probe:
         with pytest.raises(RuntimeError, match="CAD geometry runtime preflight failed:.*libGL"):
             server.setup_webserver()
-    assert probe.call_args.kwargs["env"]["LD_LIBRARY_PATH"].startswith(str(tmp_path))
+    assert probe.call_args.args[0][-1] == f"import resources_servers.deepcad.{metric}"
+    if external_libraries:
+        assert probe.call_args.kwargs["env"]["LD_LIBRARY_PATH"].startswith(str(tmp_path))
 
 
 def test_geometry_preflight_rejects_missing_library_directory(server, tmp_path):

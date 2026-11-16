@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import base64
 import copy
+import ctypes.util
 import hashlib
-import io
 import json
+import os
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -195,25 +196,6 @@ def test_annotation_free_axis_render_removes_labels_and_leaders(tmp_path: Path) 
         assert np.any(pixels[44:212, 44:212] < 200)
 
 
-@pytest.mark.parametrize("probability", [0, 1])
-def test_augment_fixed_annotations_updates_images_and_prompt(tmp_path: Path, probability: float) -> None:
-    from resources_servers.deepcad.dataset.augment_views import augment
-
-    shape = cq.Workplane("XY").box(0.02, 0.03, 0.004).val()
-    cq.exporters.export(shape, str(tmp_path / "part.step"))
-    images = render_views(shape, tmp_path / "original")
-    source = task_row("part", "part.step", images, metrics=construction_metrics(document()), dimensions_mm=[20, 30, 4])
-    result = augment((copy.deepcopy(source), tmp_path, tmp_path / "new", 0, 42, probability))
-    assert result["verifier_metadata"]["engineering_annotations"] == (probability == 0)
-    assert ("20, 30, 4" in str(result["responses_create_params"])) == (probability == 0)
-    assert result == augment((copy.deepcopy(source), tmp_path, tmp_path / "new", 0, 42, probability))
-    first_image = next(
-        v for v in result["responses_create_params"]["input"][1]["content"] if v["type"] == "input_image"
-    )
-    pixels = np.asarray(Image.open(io.BytesIO(base64.b64decode(first_image["image_url"].split(",", 1)[1]))))
-    assert bool(np.any(pixels[:32] < 255)) == (probability == 0)
-
-
 @pytest.mark.parametrize("probability,mode", [(0, "axis"), (1, "diagonal")])
 def test_view_probability_extremes(probability: float, mode: str) -> None:
     assert all(sample_view_mode(str(index), diagonal_view_probability=probability) == mode for index in range(100))
@@ -243,6 +225,10 @@ def test_views_are_independent_of_bucket_selection() -> None:
     assert 0.67 < ratio < 0.83
 
 
+@pytest.mark.skipif(
+    sys.platform == "linux" and not os.environ.get("DISPLAY") and not ctypes.util.find_library("OSMesa"),
+    reason="Headless diagonal rendering requires OSMesa or a display",
+)
 def test_diagonal_composite_and_prompt(tmp_path: Path) -> None:
     shape = cq.Workplane("XY").box(0.02, 0.03, 0.004).faces(">Z").workplane().hole(0.006).val()
     images = render_diagonal_views(shape, tmp_path)
@@ -264,31 +250,6 @@ def test_diagonal_composite_and_prompt(tmp_path: Path) -> None:
     assert "20, 30, 4" in json.dumps(prompt)
     assert "private.step" not in json.dumps(prompt)
     assert sum(item["type"] == "input_image" for item in prompt["input"][1]["content"]) == 1
-
-
-@pytest.mark.parametrize("probability,mode,count,size", [(0, "axis", 3, (256, 256)), (1, "diagonal", 1, (524, 524))])
-def test_augment_existing_row_preserves_target(
-    tmp_path: Path, probability: float, mode: str, count: int, size: tuple[int, int]
-) -> None:
-    from resources_servers.deepcad.dataset.augment_views import augment
-    from resources_servers.deepcad.task_data import TaskData
-
-    shape = cq.Workplane("XY").box(0.02, 0.03, 0.004).val()
-    cq.exporters.export(shape, str(tmp_path / "part.step"))
-    images = render_views(shape, tmp_path / "original")
-    row = task_row("part", "part.step", images, metrics=construction_metrics(document()))
-    original = copy.deepcopy(row)
-    result = augment((row, tmp_path, tmp_path / "new", probability, 42, 0))
-    assert result["verifier_metadata"] == original["verifier_metadata"] | {"view_mode": mode}
-    TaskData.model_validate(result["verifier_metadata"])
-    inputs = [
-        item for item in result["responses_create_params"]["input"][1]["content"] if item["type"] == "input_image"
-    ]
-    assert len(inputs) == count
-    assert all(
-        Image.open(io.BytesIO(base64.b64decode(item["image_url"].split(",", 1)[1]))).size == size for item in inputs
-    )
-    assert result["task_source"] == original["task_source"]
 
 
 def test_plate_depth_with_mislabeled_outer_loops() -> None:

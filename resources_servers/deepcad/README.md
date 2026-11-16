@@ -22,11 +22,12 @@ docker build -t deepcad-cadquery:2.8.0 resources_servers/deepcad
 
 `configs/deepcad.yaml` wires the verifier to Gym's single-turn agent. Set the
 model endpoint using the normal Gym model-server configuration. Supply your own
-prepared task JSONL and reference STEP files; this contribution bundles no data.
-Set `reference_root` to the external reference directory (the config uses
-`cad-data/references` as a placeholder) and pass your task JSONL to the rollout
-collector. Each task's `reference_step` must be relative to `reference_root`;
-references outside that directory are rejected.
+prepared task JSONL and reference STEP files for training. The default config
+includes five synthetic examples and their reference solids in `data/`, licensed
+under Apache-2.0. No research corpus is bundled. To use external data, override
+`reference_root` and pass your task JSONL to the rollout collector. Each task's
+`reference_step` must be relative to `reference_root`; references outside that
+directory are rejected.
 
 The execution sandbox has no network and receives only the submitted program
 and runner. It receives no reference geometry. Host scoring dependencies must
@@ -39,8 +40,9 @@ centered and uniformly scaled by its longest bounding-box dimension. Orientation
 and aspect ratio are preserved. `iou_backend: voxel` selects filled-grid IoU.
 
 `verification_metric: mixed_iou` combines B-rep, octree, and boundary IoU with
-default weights 0.3, 0.3, and 0.4. Configure `mixed_iou: {}` and
-`reward_weights: {voxel_iou: 0}` to enable it. Octree depth and the boundary band
+default weights 0.3, 0.3, and 0.4. Set `verification_metric: mixed_iou`,
+`mixed_iou: {}`, and `reward_weights: {voxel_iou: 0}` to enable it.
+Geometry scoring requires a positive geometry reward weight. Octree depth and the boundary band
 must fit `voxel_resolution`. `reference_cache_root` can cache reference geometry
 preparation; use node-local storage for active caches on clusters.
 
@@ -68,6 +70,29 @@ Startup checks reject missing directories and failed scorer imports before
 rollouts begin. A self-contained server environment normally needs no override.
 
 ## Inputs and tests
+
+Regenerate the five synthetic examples (box, cylinder, sphere, tube, and drilled
+plate) and their embedded axis-view images from the repository root:
+
+```bash
+python -m resources_servers.deepcad.dataset.prepare_examples
+gym dataset collate --config resources_servers/deepcad/configs/deepcad.yaml \
+  --config responses_api_models/vllm_model/configs/vllm_model.yaml \
+  +output_dirpath=/tmp/cad-example-validation +mode=example_validation
+```
+
+Use the normal model-server configuration for collection. With the services
+running, collect five actual agent responses and verifier results:
+
+```bash
+gym eval run --no-serve --agent deepcad_simple_agent \
+  --input resources_servers/deepcad/data/example.jsonl \
+  --output resources_servers/deepcad/data/example_rollouts.jsonl --limit 5
+```
+
+The committed records use the Mixed76 checkpoint through the single-turn
+Environment Server on HSG, with Enroot and CadQuery 2.8.0. The Enroot deployment
+sets `bypass_entrypoint: false`. Docker and OpenCode require separate live checks.
 
 `dataset/prepare_gym.py` prepares images and task rows from DeepCAD construction
 histories. `dataset/augment_inputs.py` supplies deterministic axis/diagonal view
