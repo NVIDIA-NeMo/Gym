@@ -53,10 +53,15 @@ class WebArenaFamilyEvaluator(Protocol):
     def close(self) -> None: ...
 
 
-def _task_needs_judge(task_config: dict) -> bool:
+def _task_needs_judge(task_config: dict, benchmark: WebBenchmark = WebBenchmark.WEBARENA) -> bool:
     eval_config = task_config.get("eval") or {}
     reference_answers = eval_config.get("reference_answers") or {}
     if set(reference_answers).intersection({"exact_match", "must_include", "fuzzy_match"}):
+        return True
+    if benchmark == WebBenchmark.VISUALWEBARENA and any(
+        set(target.get("required_contents") or {}).intersection({"must_include", "fuzzy_match"})
+        for target in eval_config.get("program_html") or []
+    ):
         return True
     return any(query.get("eval_vqa") for query in eval_config.get("page_image_query") or [])
 
@@ -159,7 +164,7 @@ class WebArenaFamilyReferenceEvaluator:
                 f"{self.benchmark.value} evaluator received benchmark {task.benchmark.value!r}"
             )
         task_config, collision_plan = _reference_task_config(task, self.config)
-        if _task_needs_judge(task_config) and not os.environ.get("WEBARENA_JUDGE_API_KEY", "").strip():
+        if _task_needs_judge(task_config, self.benchmark) and not os.environ.get("WEBARENA_JUDGE_API_KEY", "").strip():
             raise EvaluatorConfigurationError("WEBARENA_JUDGE_API_KEY is required by this WebArena-family task")
         if any(
             query.get("eval_fuzzy_image_match")

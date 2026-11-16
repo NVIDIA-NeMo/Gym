@@ -13,6 +13,7 @@ From the repository root:
 
 ```bash
 gym eval prepare --benchmark visualwebarena
+python benchmarks/visualwebarena/prepare.py
 ```
 
 The prepare command downloads the public
@@ -23,8 +24,9 @@ before producing the model-neutral
 `benchmarks/visualwebarena/data/visualwebarena.jsonl`. Source identity is
 recorded in `source_lock.json`.
 
-Preparation also writes a private, gitignored
-`benchmarks/visualwebarena/env.yaml`. Use `--force-env` only when replacing an
+The first command prepares the dataset only. The second reuses the cached
+source and writes a private, gitignored `benchmarks/visualwebarena/env.yaml`.
+It preserves an existing configuration without overwriting it. Use `--force-env` only when replacing an
 existing generated file intentionally:
 
 ```bash
@@ -37,6 +39,7 @@ To reuse an offline or shared checkout, set the root containing both
 ```bash
 export VISUALWEBARENA_SOURCE_ROOT=/shared/webarena_benchmarks
 gym eval prepare --benchmark visualwebarena
+python benchmarks/visualwebarena/prepare.py
 ```
 
 Mount that root read-only at the same absolute path on every distributed
@@ -131,3 +134,7 @@ model, tokenizer, template, tool and reasoning parsers, runtime identities,
 sampling, recovery, all 22 comparison groups and remaining visual review.
 Later source changes require their own validation; this result does not measure
 the current PR head.
+
+The [2026-11-16 review-fix report](validation-2026-11-16.md) records the scorer
+corrections, complete regression comparison and separate synthetic model smoke.
+It does not replace the historical full-population result with a new score.

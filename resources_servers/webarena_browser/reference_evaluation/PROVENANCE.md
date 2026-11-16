@@ -24,10 +24,10 @@ surrounding lifecycle and replaces two infrastructure imports:
 The Gym lifecycle preserves both snapshot sources used by the pinned
 runner: synchronous site/API snapshots and live-browser snapshots are merged
 at task start and task end before deltas are built. The source modules were
-compared structurally at the top-level function/class-body boundary; changes
-are confined to imports, local infrastructure boundaries, formatting, and the
-documented wrappers above. All 168 pinned definitions were present with zero
-missing, extra, or changed AST bodies in the final audit.
+compared structurally at the top-level function/class-body boundary during the
+initial import. That historical audit covered all 168 pinned definitions with
+zero missing, extra, or changed AST bodies at that time. It does not describe
+the current implementations after the Gym adaptations listed below.
 
 Public benchmark credentials are resolved through the WebArena site's
 environment-aware login boundary. No model checkpoint, deployment secret, or
@@ -37,12 +37,21 @@ site state is vendored here.
 
 Source repository and original URL: see the [immutable public import-provenance record](https://github.com/NVIDIA-NeMo/Gym/blob/d46f2f60d2f6eda11e94deb48e6a16b21b5389fc/resources_servers/webarena_browser/reference_evaluation/PROVENANCE.md#source-url-license-and-original-notices). Original revision: `3b775dc538931ead0cb6b4922349da9c6d493dab` (`nemotron-v3`). This permalink identifies the published provenance record, not a new upstream source revision.
 
-The root LICENSE at that exact original revision is Apache-2.0 and contains `Copyright 2024 XLANG NLP Lab`; its original locator and verification are retained in the [same immutable public record](https://github.com/NVIDIA-NeMo/Gym/blob/d46f2f60d2f6eda11e94deb48e6a16b21b5389fc/resources_servers/webarena_browser/reference_evaluation/PROVENANCE.md#source-url-license-and-original-notices). The complete original text is retained in `SOURCE_LICENSE`. The pinned tree has no additional LICENSE, COPYING or NOTICE files, and the three original module headers contain no separate copyright notices.
+The root LICENSE at that exact original revision is Apache-2.0 and contains `Copyright 2024 XLANG NLP Lab`; its original locator and verification are retained in the [same immutable public record](https://github.com/NVIDIA-NeMo/Gym/blob/d46f2f60d2f6eda11e94deb48e6a16b21b5389fc/resources_servers/webarena_browser/reference_evaluation/PROVENANCE.md#source-url-license-and-original-notices). The complete original text is retained in `SOURCE_LICENSE`. The pinned tree has no additional LICENSE, COPYING or NOTICE files. The four original module headers contain no separate copyright notices; the VisualWebArena module was independently fetched at the pinned revision on 2026-11-16 and its complete SHA-256 was verified against the table above.
 
 | Original file | Gym file |
 | --- | --- |
 | `webarena/common/classic_evaluation.py` | `resources_servers/webarena_browser/reference_evaluation/classic_evaluation.py` |
+| `webarena/common/visualwebarena_evaluation.py` | `resources_servers/webarena_browser/reference_evaluation/visualwebarena_evaluation.py` |
 | `webarena/common/eval_snapshots.py` | `resources_servers/webarena_browser/reference_evaluation/eval_snapshots.py` |
 | `webarena/common/eval_collision.py` | `nemo_gym/web/evaluation_collision.py` |
 
-The 92-definition AST comparison above describes the initial port only. Subsequent Gym changes include infrastructure error classification, snapshot validation, per-tab failure propagation and deployment-normalized keys; current code is not claimed to have unchanged AST bodies.
+The earlier WebArena-only audit covered 92 definitions; the full initial
+WebArena-family audit covered 168. Subsequent Gym changes include infrastructure
+error classification, snapshot validation, per-tab failure propagation and
+deployment-normalized keys. VisualWebArena additionally distinguishes unplanned
+targets from authoritative empty deltas, requires fresh matching content,
+preserves numeric zero, combines fuzzy alternatives with OR and independent
+predicates with AND, and distinguishes missing/corrupt candidate images from
+unavailable transport/browser/judge evidence. Its semantic judge fallbacks remain
+VisualWebArena-specific. Current code is not claimed to have unchanged AST bodies.

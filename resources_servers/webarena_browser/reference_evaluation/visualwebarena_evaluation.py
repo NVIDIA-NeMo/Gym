@@ -1,5 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Original source provenance: https://github.com/NVIDIA-NeMo/Gym/blob/d46f2f60d2f6eda11e94deb48e6a16b21b5389fc/resources_servers/webarena_browser/reference_evaluation/PROVENANCE.md
+# Revision: 3b775dc538931ead0cb6b4922349da9c6d493dab
+# Original file: webarena/common/visualwebarena_evaluation.py
+# Original license: Apache-2.0; Copyright 2024 XLANG NLP Lab (root LICENSE).
+# Adapted for Gym; see resources_servers/webarena_browser/reference_evaluation/PROVENANCE.md.
 """VisualWebArena evaluation helpers.
 
 This follows VisualWebArena's eval schema while reusing the judge API pattern
@@ -39,6 +44,7 @@ from .classic_evaluation import (
     _llm_ua_match,
     _parse_judge_json_label,
     _preview_text,
+    _program_html_expression,
     _reference_url_alternatives,
     _word_tokenize_like_webarena,
     shopping_get_latest_order_url,
@@ -170,14 +176,15 @@ def _string_match(task_config: dict, answer: Any, judge_log_path: Path | None = 
             score *= float(any(_clean_answer(str(option)) in pred for option in value))
         elif approach == "fuzzy_match":
             if value == "N/A":
-                score *= _exact_match(ref=value, pred=pred)
-                if score != 1:
-                    score = _llm_ua_match(
+                cur_score = _exact_match(ref=value, pred=pred)
+                if cur_score != 1:
+                    cur_score = _llm_ua_match(
                         pred=pred,
                         reference=task_config["eval"].get("string_note", ""),
                         question=task_config["intent"],
                         judge_log_path=judge_log_path,
                     )
+                score *= cur_score
             else:
                 for reference in value:
                     score *= _llm_fuzzy_match(
@@ -232,37 +239,32 @@ def _url_match_message(
 
 
 async def _shopping_get_all_product_order(page) -> list[dict[str, Any]]:
-    try:
-        result = await page.evaluate(
-            """
+    result = await page.evaluate(
+        """
 (() => {
-    try {
-        const table = document.querySelector("#my-orders-table");
-        if (!table) return [];
-        return [...table.getElementsByTagName('tbody')].map((x) => {
-            return [...x.getElementsByTagName('td')].reduce(function(obj, y) {
-                const key = y.className.split(' ')[1];
-                obj[key] = y.outerText;
-                if (key === 'name' && y.querySelector('dl')) {
-                    var option_dict = {};
-                    const options = [...y.querySelector('dl').children];
-                    for (let i = 0; i < options.length; i += 2) {
-                        option_dict[options[i].outerText] = options[i + 1].outerText;
-                    }
-                    obj['options'] = option_dict;
+
+    const table = document.querySelector("#my-orders-table");
+    if (!table) return [];
+    return [...table.getElementsByTagName('tbody')].map((x) => {
+        return [...x.getElementsByTagName('td')].reduce(function(obj, y) {
+            const key = y.className.split(' ')[1];
+            obj[key] = y.outerText;
+            if (key === 'name' && y.querySelector('dl')) {
+                var option_dict = {};
+                const options = [...y.querySelector('dl').children];
+                for (let i = 0; i < options.length; i += 2) {
+                    option_dict[options[i].outerText] = options[i + 1].outerText;
                 }
-                return obj;
-            }, {});
-        });
-    } catch (e) {
-        return [];
-    }
+                obj['options'] = option_dict;
+            }
+            return obj;
+        }, {});
+    });
+
 })();
-            """
-        )
-        return result or []
-    except Exception:
-        return []
+        """
+    )
+    return result or []
 
 
 async def shopping_get_order_product_name_list(page) -> str:
@@ -291,94 +293,70 @@ async def shopping_get_order_product_option(page, sku: str, option_name: str) ->
 
 
 async def shopping_get_product_attributes(page, attribute: str) -> str:
-    try:
-        return await page.evaluate(
-            """
-            (attribute) => {
-                try {
-                    const searchTerms = attribute.toLowerCase().split(' |or| ');
-                    return Array.from(
-                        document.querySelector('#productDetails_detailBullets_sections1 > tbody').children
-                    )
-                    .filter(x => searchTerms.some(term => x.children[0].outerText.toLowerCase().includes(term)))
-                    .map(x => x.children[1].outerText)
-                    .join(', ');
-                } catch (e) {
-                    return '';
-                }
-            }
-            """,
-            attribute,
-        )
-    except Exception:
-        return ""
+    return await page.evaluate(
+        """
+        (attribute) => {
+            const searchTerms = attribute.toLowerCase().split(' |or| ');
+            const rows = document.querySelector('#productDetails_detailBullets_sections1 > tbody')?.children || [];
+            return Array.from(rows)
+                .filter(x => searchTerms.some(term => x.children[0].outerText.toLowerCase().includes(term)))
+                .map(x => x.children[1].outerText)
+                .join(', ');
+        }
+        """,
+        attribute,
+    )
 
 
 async def shopping_get_product_price(page) -> float:
-    try:
-        return await page.evaluate(
-            """
-            () => {
-                const el = document.querySelector("#maincontent > div.columns > div > div.product-info-main > div.product-info-price > div.price-box.price-final_price > span > span");
-                if (!el) return 0;
-                const res = parseFloat(el.outerText.substr(1));
-                return res ? res : 0;
-            }
-            """
-        )
-    except Exception:
-        return 0
+    return await page.evaluate(
+        """
+        () => {
+            const el = document.querySelector("#maincontent > div.columns > div > div.product-info-main > div.product-info-price > div.price-box.price-final_price > span > span");
+            if (!el) return 0;
+            const res = parseFloat(el.outerText.substr(1));
+            return res ? res : 0;
+        }
+        """
+    )
 
 
 async def shopping_get_num_reviews(page) -> int:
-    try:
-        return await page.evaluate(
-            """
-            () => {
-                const el = document.querySelector("#tab-label-reviews-title");
-                if (!el) return 0;
-                const res = parseInt(el.outerText.split(' ')[1]);
-                return res ? res : 0;
-            }
-            """
-        )
-    except Exception:
-        return 0
+    return await page.evaluate(
+        """
+        () => {
+            const el = document.querySelector("#tab-label-reviews-title");
+            if (!el) return 0;
+            const res = parseInt(el.outerText.split(' ')[1]);
+            return res ? res : 0;
+        }
+        """
+    )
 
 
 async def shopping_get_rating_as_percentage(page) -> int:
-    try:
-        return await page.evaluate(
-            """
-            () => {
-                const el = document.querySelector('.rating-result');
-                if (!el) return 0;
-                const rating = parseFloat(el.title.replace('%', ''));
-                return rating ? rating : 0;
-            }
-            """
-        )
-    except Exception:
-        return 0
+    return await page.evaluate(
+        """
+        () => {
+            const el = document.querySelector('.rating-result');
+            if (!el) return 0;
+            const rating = parseFloat(el.title.replace('%', ''));
+            return rating ? rating : 0;
+        }
+        """
+    )
 
 
 async def get_query_text(page, selector: str) -> str:
-    try:
-        return await page.evaluate(
-            """
-            (selector) => {
-                try {
-                    const el = document.querySelector(selector);
-                    return el ? el.textContent : '';
-                } catch (e) {
-                    return '';
-                }
-            }
-            """,
-            selector,
-        )
-    except Exception:
-        return ""
+    return await page.evaluate(
+        """
+        (selector) => {
+            const el = document.querySelector(selector);
+            return el ? el.textContent : '';
+        }
+        """,
+        selector,
+    )
 
 
 async def get_query_text_lowercase(page, selector: str) -> str:
@@ -394,50 +372,45 @@ def reddit_get_post_url(url: str) -> str:
 
 
 async def reddit_get_post_comment_tree(page) -> dict[str, Any]:
-    try:
-        return await page.evaluate(
-            """
-            (function buildCommentTree(node, data_level) {
-                let tree = {
-                    "username": node.querySelector(".fg-inherit").outerText,
-                    "net_score": parseInt(node.querySelector(".vote__net-score").outerText),
-                    "content": node.querySelector(".comment__content").outerText,
-                    "time": node.querySelector('.comment__main > header > h1 > span > time').dateTime,
-                    "children": []
-                };
-                node.querySelectorAll(".comment").forEach((child) => {
-                    if (parseInt(child.getAttribute('data-level')) === data_level + 1) {
-                        tree.children.push(buildCommentTree(child, data_level + 1));
-                    }
-                });
-                return tree;
-            })(document.querySelector("#main"), 0)
-            """
-        )
-    except Exception:
-        return {}
+    return await page.evaluate(
+        """
+        (function buildCommentTree(node, data_level) {
+            if (!node) return {};
+            let tree = {
+                "username": (node.querySelector(".fg-inherit")?.outerText || ""),
+                "net_score": parseInt((node.querySelector(".vote__net-score")?.outerText || "0")),
+                "content": (node.querySelector(".comment__content")?.outerText || ""),
+                "time": (node.querySelector('.comment__main > header > h1 > span > time')?.dateTime || ""),
+                "children": []
+            };
+            node.querySelectorAll(".comment").forEach((child) => {
+                if (parseInt(child.getAttribute('data-level')) === data_level + 1) {
+                    tree.children.push(buildCommentTree(child, data_level + 1));
+                }
+            });
+            return tree;
+        })(document.querySelector("#main"), 0)
+        """
+    )
 
 
 async def reddit_get_latest_comment_obj_by_username(page, username: str) -> dict[str, Any]:
-    try:
-        comment_tree = await reddit_get_post_comment_tree(page)
-        latest_time = datetime.min.replace(tzinfo=timezone.utc)
-        comment: dict[str, Any] = {}
+    comment_tree = await reddit_get_post_comment_tree(page)
+    latest_time = datetime.min.replace(tzinfo=timezone.utc)
+    comment: dict[str, Any] = {}
 
-        def dfs(node: dict[str, Any]) -> None:
-            nonlocal latest_time, comment
-            if node.get("username") == username:
-                node_time = datetime.fromisoformat(node["time"].replace("Z", "+00:00"))
-                if node_time > latest_time:
-                    comment = {**node, "time": node_time}
-                    latest_time = node_time
-            for child in node.get("children", []):
-                dfs(child)
+    def dfs(node: dict[str, Any]) -> None:
+        nonlocal latest_time, comment
+        if node.get("username") == username:
+            node_time = datetime.fromisoformat(node["time"].replace("Z", "+00:00"))
+            if node_time > latest_time:
+                comment = {**node, "time": node_time}
+                latest_time = node_time
+        for child in node.get("children", []):
+            dfs(child)
 
-        dfs(comment_tree)
-        return comment
-    except Exception:
-        return {}
+    dfs(comment_tree)
+    return comment
 
 
 async def reddit_get_latest_comment_content_by_username(page, username: str) -> str:
@@ -446,26 +419,23 @@ async def reddit_get_latest_comment_content_by_username(page, username: str) -> 
 
 
 async def reddit_get_parent_comment_obj_of_latest_comment_by_username(page, username: str) -> dict[str, Any]:
-    try:
-        comment_tree = await reddit_get_post_comment_tree(page)
-        latest_time = datetime.min.replace(tzinfo=timezone.utc)
-        comment: dict[str, Any] = {}
+    comment_tree = await reddit_get_post_comment_tree(page)
+    latest_time = datetime.min.replace(tzinfo=timezone.utc)
+    comment: dict[str, Any] = {}
 
-        def dfs(node: dict[str, Any]) -> None:
-            nonlocal latest_time, comment
-            for child in node.get("children", []):
-                if child.get("username") == username:
-                    child_time = datetime.fromisoformat(child["time"].replace("Z", "+00:00"))
-                    if child_time > latest_time:
-                        comment = {**node, "time": child_time}
-                        latest_time = child_time
-                else:
-                    dfs(child)
+    def dfs(node: dict[str, Any]) -> None:
+        nonlocal latest_time, comment
+        for child in node.get("children", []):
+            if child.get("username") == username:
+                child_time = datetime.fromisoformat(child["time"].replace("Z", "+00:00"))
+                if child_time > latest_time:
+                    comment = {**node, "time": child_time}
+                    latest_time = child_time
+            else:
+                dfs(child)
 
-        dfs(comment_tree)
-        return comment
-    except Exception:
-        return {}
+    dfs(comment_tree)
+    return comment
 
 
 async def reddit_get_parent_comment_username_of_latest_comment_by_username(page, username: str) -> str:
@@ -474,27 +444,24 @@ async def reddit_get_parent_comment_username_of_latest_comment_by_username(page,
 
 
 async def gitlab_get_project_memeber_role(page, account_name: str) -> str:
-    try:
-        account_idx = await page.evaluate(
-            """
-            (accountName) => {
-                const elements = document.querySelectorAll("td[data-label='Account'] span.gl-avatar-labeled-sublabel");
-                for (let i = 0; i < elements.length; i++) {
-                    if (elements[i].outerText === `@${accountName}`) return i;
-                }
-                return -1;
+    account_idx = await page.evaluate(
+        """
+        (accountName) => {
+            const elements = document.querySelectorAll("td[data-label='Account'] span.gl-avatar-labeled-sublabel");
+            for (let i = 0; i < elements.length; i++) {
+                if (elements[i].outerText === `@${accountName}`) return i;
             }
-            """,
-            account_name,
+            return -1;
+        }
+        """,
+        account_name,
+    )
+    return str(
+        await page.evaluate(
+            """(idx) => document.querySelectorAll("td.col-max-role span")[idx]?.outerText || "" """,
+            account_idx,
         )
-        return str(
-            await page.evaluate(
-                """(idx) => document.querySelectorAll("td.col-max-role span")[idx]?.outerText || """,
-                account_idx,
-            )
-        )
-    except Exception:
-        return ""
+    )
 
 
 async def _eval_helper_expression(expr: str, page) -> Any:
@@ -564,22 +531,15 @@ async def _select_content(target: dict, page) -> Any:
     if not locator.strip():
         return await page.content()
     if locator.startswith("document.") or locator.startswith("[...document."):
-        if "prep_actions" in target:
-            try:
-                for prep_action in target["prep_actions"]:
-                    await page.evaluate(f"() => {prep_action}")
-            except Exception:
-                logger.debug("VisualWebArena prep_actions failed", exc_info=True)
-        try:
-            return str(await page.evaluate(f"() => {locator}") or "")
-        except Exception:
-            return ""
+        for prep_action in target.get("prep_actions", []):
+            await page.evaluate(f"() => {prep_action}")
+        return str(await page.evaluate(_program_html_expression(locator)) or "")
     if locator.startswith("lambda:"):
-        try:
-            selected = await page.evaluate(locator.removeprefix("lambda:"))
-            return selected if selected else None
-        except Exception:
-            return None
+        selected = await page.evaluate(locator.removeprefix("lambda:"))
+        # Zero is an observed numeric value; empty selections remain misses.
+        if isinstance(selected, (int, float)) and not isinstance(selected, bool):
+            return selected
+        return selected if selected else None
     if locator.startswith("func:"):
         return await _eval_helper_expression(locator, page)
     raise ValueError(f"Unknown program_html locator: {locator}")
@@ -621,21 +581,34 @@ def _score_program_html_required(
     elif "required_values" in required:
         score *= _score_required_values(selected_element, required["required_values"])
     elif "fuzzy_match" in required:
+        alternatives_score = 0.0
+        errors: list[Exception] = []
         for reference in str(required["fuzzy_match"]).split(" |OR| "):
-            score *= _llm_fuzzy_match(
-                pred=selected_element,
-                reference=reference,
-                question="NOT USED",
-                judge_log_path=judge_log_path,
-            )
+            try:
+                alternatives_score = max(
+                    alternatives_score,
+                    _llm_fuzzy_match(
+                        pred=selected_element,
+                        reference=reference,
+                        question="NOT USED",
+                        judge_log_path=judge_log_path,
+                    ),
+                )
+            except Exception as exc:
+                errors.append(exc)
+        if errors and alternatives_score < 1.0:
+            raise errors[0]
+        score *= alternatives_score
     else:
         raise ValueError(f"Unknown required_contents: {required.keys()}")
     return score
 
 
-def _order_delta_urls(eval_context: dict[str, Any] | None) -> list[str]:
-    if not eval_context:
-        return []
+def _order_delta_urls(eval_context: dict[str, Any] | None) -> list[str] | None:
+    """Return None without an order capture, or its authoritative delta URLs."""
+    adapters = ((eval_context or {}).get("collision_plan") or {}).get("snapshot_adapters") or {}
+    if "shopping_orders" not in adapters:
+        return None
     order_delta = (eval_context.get("deltas") or {}).get("shopping_orders") or {}
     urls = []
     for bucket in ("added", "changed"):
@@ -646,12 +619,12 @@ def _order_delta_urls(eval_context: dict[str, Any] | None) -> list[str]:
     return urls
 
 
-def _review_delta_values(expr: Any, eval_context: dict[str, Any] | None) -> list[str]:
+def _review_delta_values(expr: Any, eval_context: dict[str, Any] | None) -> list[str] | None:
     if not eval_context:
-        return []
+        return None
     calls = extract_helper_calls(expr)
     if not calls:
-        return []
+        return None
     call = calls[0]
     helper_name = call["name"]
     if helper_name not in {
@@ -659,11 +632,14 @@ def _review_delta_values(expr: Any, eval_context: dict[str, Any] | None) -> list
         "shopping_get_sku_latest_review_rating",
         "shopping_get_sku_latest_review_text",
     }:
-        return []
+        return None
     args = call.get("args") or []
     if not args or args[0] is None:
-        return []
+        return None
     sku = str(args[0])
+    adapters = ((eval_context.get("collision_plan") or {}).get("snapshot_adapters")) or {}
+    if sku not in (adapters.get("shopping_reviews") or {}).get("skus", []):
+        return None
     sku_delta = ((eval_context.get("deltas") or {}).get("shopping_reviews") or {}).get(sku, {})
     values = []
     for bucket in ("added", "changed"):
@@ -682,10 +658,15 @@ def _review_delta_values(expr: Any, eval_context: dict[str, Any] | None) -> list
 def _program_html_snapshot_records(
     target: dict[str, Any],
     eval_context: dict[str, Any] | None,
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any]] | None:
+    """Distinguish unplanned targets from planned captures with no new records."""
     if not eval_context:
-        return []
+        return None
     key = snapshot_target_key(target)
+    adapters = ((eval_context.get("collision_plan") or {}).get("snapshot_adapters")) or {}
+    specs = (adapters.get("program_html") or {}).get("targets", [])
+    if not any(spec.get("key") == key for spec in specs):
+        return None
     program_delta = (eval_context.get("deltas") or {}).get("program_html") or {}
     records = []
     for bucket in ("added", "changed"):
@@ -703,26 +684,47 @@ def _score_program_html_snapshot_records(
 ) -> float:
     score = 0.0
     for record in records:
-        delta_value = str(record.get("delta_value") or "").strip()
-        if delta_value:
-            score = max(
-                score,
-                _score_program_html_required(required, delta_value, judge_log_path),
-            )
-
+        # An unrelated landing document supplies neither target content nor
+        # proof of an empty target. Confirmed 404/410 absence is distinct.
+        if record.get("target_document") is False and not record.get("target_absent"):
+            continue
         full_value = str(record.get("value") or "")
         before_value = str(record.get("before_value") or "")
-        full_score = _score_program_html_required(required, full_value, judge_log_path)
         before_score = _score_program_html_required(required, before_value, judge_log_path)
-        if full_value and full_score > before_score:
+        delta_value = str(record.get("delta_value") or "").strip()
+        if delta_value:
+            # A line diff can repeat an existing match when unrelated text on
+            # that line changes. Require genuinely new matching content; a new
+            # copy of the required text still counts as an addition.
+            fresh_match = before_score == 0
+            if not fresh_match and "must_include" in required:
+                before_text = _clean_answer(html.unescape(before_value))
+                after_text = _clean_answer(html.unescape(full_value))
+                fresh_match = all(
+                    any(
+                        after_text.count(_clean_answer(part)) > before_text.count(_clean_answer(part))
+                        for part in content.split(" |OR| ")
+                    )
+                    for content in required["must_include"]
+                )
+            if fresh_match:
+                score = max(score, _score_program_html_required(required, delta_value, judge_log_path))
+
+        # A confirmed empty target/absence can satisfy a deletion criterion.
+        # Require improvement over the baseline, including for empty strings.
+        full_score = _score_program_html_required(required, full_value, judge_log_path)
+        if full_score > before_score:
             score = max(score, full_score)
     return score
 
 
-def _page_image_snapshot_urls(query: dict[str, Any], eval_context: dict[str, Any] | None) -> list[str]:
+def _page_image_snapshot_urls(query: dict[str, Any], eval_context: dict[str, Any] | None) -> list[str] | None:
     if not eval_context:
-        return []
+        return None
     key = snapshot_target_key(query)
+    adapters = (eval_context.get("collision_plan") or {}).get("snapshot_adapters") or {}
+    if not any(spec.get("key") == key for spec in (adapters.get("page_image_query") or {}).get("queries", [])):
+        return None
     image_delta = (eval_context.get("deltas") or {}).get("page_image_query") or {}
     urls = []
     for bucket in ("added", "changed"):
@@ -745,18 +747,17 @@ async def _program_html_target(
     target_url = target["url"]
     original_target_url = target_url
     snapshot_records = _program_html_snapshot_records(target, eval_context)
-    if snapshot_records:
+    if snapshot_records is not None:
         snapshot_score = _score_program_html_snapshot_records(
             target["required_contents"],
             snapshot_records,
             judge_log_path,
         )
-        if snapshot_score:
-            return snapshot_score
+        return snapshot_score
 
     if any(call["name"] == "shopping_get_latest_order_url" for call in extract_helper_calls(target_url)):
         candidate_urls = _order_delta_urls(eval_context)
-        if candidate_urls:
+        if candidate_urls is not None:
             target_score = 0.0
             for candidate_url in candidate_urls:
                 candidate_target = {**target, "url": candidate_url}
@@ -767,9 +768,13 @@ async def _program_html_target(
             return target_score
 
     review_values = _review_delta_values(target.get("locator"), eval_context)
-    if review_values:
+    if review_values is not None:
         return max(
-            _score_program_html_required(target["required_contents"], value, judge_log_path) for value in review_values
+            (
+                _score_program_html_required(target["required_contents"], value, judge_log_path)
+                for value in review_values
+            ),
+            default=0.0,
         )
 
     if isinstance(target_url, str) and target_url.startswith("func:"):
@@ -804,26 +809,39 @@ async def _program_html(
         if target["url"] == "last":
             pages = list(page.context.pages)
             target_score = 0.0
+            candidate_errors: list[Exception] = []
             for candidate in pages or [page]:
                 try:
                     target_score = max(
                         target_score,
                         await _program_html_target(target, candidate, judge_log_path, eval_context),
                     )
-                except Exception:
+                except Exception as exc:
+                    candidate_errors.append(exc)
                     logger.info("VisualWebArena program_html tab check failed", exc_info=True)
+            if candidate_errors and target_score < 1.0:
+                raise candidate_errors[0]
             score *= target_score
         else:
             score *= await _program_html_target(target, page, judge_log_path, eval_context)
     return score
 
 
+class _UnavailableTaskImage(Exception):
+    """A fetched candidate is missing (404/410) or is not a decodable image."""
+
+
 def _fetch_image(url: str) -> Any:
     from PIL import Image
 
     response = httpx.get(url, timeout=60, follow_redirects=True)
+    if response.status_code in (404, 410):
+        raise _UnavailableTaskImage(f"Candidate image is absent: HTTP {response.status_code}")
     response.raise_for_status()
-    return Image.open(io.BytesIO(response.content)).convert("RGB")
+    try:
+        return Image.open(io.BytesIO(response.content)).convert("RGB")
+    except (OSError, ValueError) as exc:
+        raise _UnavailableTaskImage("Candidate response is not a decodable image") from exc
 
 
 def _load_reference_image(ref: str) -> Any:
@@ -887,7 +905,7 @@ def _image_ssim(image_a: Any, image_b: Any) -> float:
     return float(score)
 
 
-async def _collect_page_images(page, locator: str) -> list[Any]:
+async def _collect_page_images(page, locator: str, *, errors: list[Exception] | None = None) -> list[Any]:
     if not locator.strip():
         elements = await page.query_selector_all("img")
     elif locator.startswith("."):
@@ -906,6 +924,7 @@ async def _collect_page_images(page, locator: str) -> list[Any]:
     else:
         raise ValueError(f"Unknown image locator: {locator}")
 
+    failures = errors if errors is not None else []
     images: list[Any] = []
     for element in elements:
         try:
@@ -919,8 +938,12 @@ async def _collect_page_images(page, locator: str) -> list[Any]:
             if not image_url.startswith(("http://", "https://", "www.")):
                 image_url = urllib.parse.urljoin(page.url, image_url)
             images.append(_fetch_image(image_url))
-        except Exception:
-            logger.debug("Failed to fetch image element", exc_info=True)
+        except _UnavailableTaskImage:
+            continue
+        except Exception as exc:
+            failures.append(exc)
+    if errors is None and failures and not images:
+        raise failures[0]
     return images
 
 
@@ -1092,17 +1115,23 @@ async def _page_image_query(
     score = 1.0
     for query in task_config["eval"].get("page_image_query") or []:
         snapshot_urls = _page_image_snapshot_urls(query, eval_context)
-        if snapshot_urls:
-            images = []
+        if snapshot_urls is not None:
+            images, errors = [], []
             for image_url in snapshot_urls:
                 try:
                     images.append(_fetch_image(image_url))
-                except Exception:
-                    logger.debug("Failed to fetch snapshot image URL %s", image_url, exc_info=True)
+                except _UnavailableTaskImage:
+                    continue
+                except Exception as exc:
+                    errors.append(exc)
+            query_score = 0.0
             if images:
                 image_log_paths = _save_judge_images(images, judge_log_path)
-                score *= _score_page_image_query_images(query, images, image_log_paths, judge_log_path)
-                continue
+                query_score = _score_page_image_query_images(query, images, image_log_paths, judge_log_path)
+            if errors and query_score < 1.0:
+                raise errors[0]
+            score *= query_score
+            continue
 
         target_url = query["eval_image_url"]
         if isinstance(target_url, str) and target_url.startswith("func:"):
@@ -1110,26 +1139,27 @@ async def _page_image_query(
 
         candidate_pages = _open_context_pages(page)
         if not candidate_pages:
-            return 0.0
+            raise RuntimeError("No open page available for image evaluation")
         if target_url != "last":
             await goto(candidate_pages[0], target_url, wait_until="domcontentloaded", timeout=60000)
             await asyncio.sleep(3)
             candidate_pages = [candidate_pages[0]]
 
         query_score = 0.0
+        errors: list[Exception] = []
         for candidate in candidate_pages:
             try:
-                images = await _collect_page_images(candidate, query["eval_image_class"])
-            except Exception:
-                logger.info("VisualWebArena page_image_query page check failed", exc_info=True)
-                continue
-            if not images:
-                continue
-            image_log_paths = _save_judge_images(images, judge_log_path)
-            query_score = max(
-                query_score,
-                _score_page_image_query_images(query, images, image_log_paths, judge_log_path),
-            )
+                images = await _collect_page_images(candidate, query["eval_image_class"], errors=errors)
+                if images:
+                    image_log_paths = _save_judge_images(images, judge_log_path)
+                    query_score = max(
+                        query_score,
+                        _score_page_image_query_images(query, images, image_log_paths, judge_log_path),
+                    )
+            except Exception as exc:
+                errors.append(exc)
+        if errors and query_score < 1.0:
+            raise errors[0]
         score *= query_score
     return score
 
@@ -1201,37 +1231,32 @@ def _eval_helper_expression_sync(expr: str, page) -> Any:
 
 
 def _shopping_get_all_product_order_sync(page) -> list[dict[str, Any]]:
-    try:
-        result = page.evaluate(
-            """
+    result = page.evaluate(
+        """
 (() => {
-    try {
-        const table = document.querySelector("#my-orders-table");
-        if (!table) return [];
-        return [...table.getElementsByTagName('tbody')].map((x) => {
-            return [...x.getElementsByTagName('td')].reduce(function(obj, y) {
-                const key = y.className.split(' ')[1];
-                obj[key] = y.outerText;
-                if (key === 'name' && y.querySelector('dl')) {
-                    var option_dict = {};
-                    const options = [...y.querySelector('dl').children];
-                    for (let i = 0; i < options.length; i += 2) {
-                        option_dict[options[i].outerText] = options[i + 1].outerText;
-                    }
-                    obj['options'] = option_dict;
+
+    const table = document.querySelector("#my-orders-table");
+    if (!table) return [];
+    return [...table.getElementsByTagName('tbody')].map((x) => {
+        return [...x.getElementsByTagName('td')].reduce(function(obj, y) {
+            const key = y.className.split(' ')[1];
+            obj[key] = y.outerText;
+            if (key === 'name' && y.querySelector('dl')) {
+                var option_dict = {};
+                const options = [...y.querySelector('dl').children];
+                for (let i = 0; i < options.length; i += 2) {
+                    option_dict[options[i].outerText] = options[i + 1].outerText;
                 }
-                return obj;
-            }, {});
-        });
-    } catch (e) {
-        return [];
-    }
+                obj['options'] = option_dict;
+            }
+            return obj;
+        }, {});
+    });
+
 })();
-            """
-        )
-        return result or []
-    except Exception:
-        return []
+        """
+    )
+    return result or []
 
 
 def _shopping_get_order_product_name_list_sync(page) -> str:
@@ -1257,94 +1282,70 @@ def _shopping_get_order_product_option_sync(page, sku: str, option_name: str) ->
 
 
 def _shopping_get_product_attributes_sync(page, attribute: str) -> str:
-    try:
-        return page.evaluate(
-            """
-            (attribute) => {
-                try {
-                    const searchTerms = attribute.toLowerCase().split(' |or| ');
-                    return Array.from(
-                        document.querySelector('#productDetails_detailBullets_sections1 > tbody').children
-                    )
-                    .filter(x => searchTerms.some(term => x.children[0].outerText.toLowerCase().includes(term)))
-                    .map(x => x.children[1].outerText)
-                    .join(', ');
-                } catch (e) {
-                    return '';
-                }
-            }
-            """,
-            attribute,
-        )
-    except Exception:
-        return ""
+    return page.evaluate(
+        """
+        (attribute) => {
+            const searchTerms = attribute.toLowerCase().split(' |or| ');
+            const rows = document.querySelector('#productDetails_detailBullets_sections1 > tbody')?.children || [];
+            return Array.from(rows)
+                .filter(x => searchTerms.some(term => x.children[0].outerText.toLowerCase().includes(term)))
+                .map(x => x.children[1].outerText)
+                .join(', ');
+        }
+        """,
+        attribute,
+    )
 
 
 def _shopping_get_product_price_sync(page) -> float:
-    try:
-        return page.evaluate(
-            """
-            () => {
-                const el = document.querySelector("#maincontent > div.columns > div > div.product-info-main > div.product-info-price > div.price-box.price-final_price > span > span");
-                if (!el) return 0;
-                const res = parseFloat(el.outerText.substr(1));
-                return res ? res : 0;
-            }
-            """
-        )
-    except Exception:
-        return 0
+    return page.evaluate(
+        """
+        () => {
+            const el = document.querySelector("#maincontent > div.columns > div > div.product-info-main > div.product-info-price > div.price-box.price-final_price > span > span");
+            if (!el) return 0;
+            const res = parseFloat(el.outerText.substr(1));
+            return res ? res : 0;
+        }
+        """
+    )
 
 
 def _shopping_get_num_reviews_sync(page) -> int:
-    try:
-        return page.evaluate(
-            """
-            () => {
-                const el = document.querySelector("#tab-label-reviews-title");
-                if (!el) return 0;
-                const res = parseInt(el.outerText.split(' ')[1]);
-                return res ? res : 0;
-            }
-            """
-        )
-    except Exception:
-        return 0
+    return page.evaluate(
+        """
+        () => {
+            const el = document.querySelector("#tab-label-reviews-title");
+            if (!el) return 0;
+            const res = parseInt(el.outerText.split(' ')[1]);
+            return res ? res : 0;
+        }
+        """
+    )
 
 
 def _shopping_get_rating_as_percentage_sync(page) -> int:
-    try:
-        return page.evaluate(
-            """
-            () => {
-                const el = document.querySelector('.rating-result');
-                if (!el) return 0;
-                const rating = parseFloat(el.title.replace('%', ''));
-                return rating ? rating : 0;
-            }
-            """
-        )
-    except Exception:
-        return 0
+    return page.evaluate(
+        """
+        () => {
+            const el = document.querySelector('.rating-result');
+            if (!el) return 0;
+            const rating = parseFloat(el.title.replace('%', ''));
+            return rating ? rating : 0;
+        }
+        """
+    )
 
 
 def _get_query_text_sync(page, selector: str) -> str:
-    try:
-        return page.evaluate(
-            """
-            (selector) => {
-                try {
-                    const el = document.querySelector(selector);
-                    return el ? el.textContent : '';
-                } catch (e) {
-                    return '';
-                }
-            }
-            """,
-            selector,
-        )
-    except Exception:
-        return ""
+    return page.evaluate(
+        """
+        (selector) => {
+            const el = document.querySelector(selector);
+            return el ? el.textContent : '';
+        }
+        """,
+        selector,
+    )
 
 
 def _get_query_text_lowercase_sync(page, selector: str) -> str:
@@ -1352,50 +1353,45 @@ def _get_query_text_lowercase_sync(page, selector: str) -> str:
 
 
 def _reddit_get_post_comment_tree_sync(page) -> dict[str, Any]:
-    try:
-        return page.evaluate(
-            """
-            (function buildCommentTree(node, data_level) {
-                let tree = {
-                    "username": node.querySelector(".fg-inherit").outerText,
-                    "net_score": parseInt(node.querySelector(".vote__net-score").outerText),
-                    "content": node.querySelector(".comment__content").outerText,
-                    "time": node.querySelector('.comment__main > header > h1 > span > time').dateTime,
-                    "children": []
-                };
-                node.querySelectorAll(".comment").forEach((child) => {
-                    if (parseInt(child.getAttribute('data-level')) === data_level + 1) {
-                        tree.children.push(buildCommentTree(child, data_level + 1));
-                    }
-                });
-                return tree;
-            })(document.querySelector("#main"), 0)
-            """
-        )
-    except Exception:
-        return {}
+    return page.evaluate(
+        """
+        (function buildCommentTree(node, data_level) {
+            if (!node) return {};
+            let tree = {
+                "username": (node.querySelector(".fg-inherit")?.outerText || ""),
+                "net_score": parseInt((node.querySelector(".vote__net-score")?.outerText || "0")),
+                "content": (node.querySelector(".comment__content")?.outerText || ""),
+                "time": (node.querySelector('.comment__main > header > h1 > span > time')?.dateTime || ""),
+                "children": []
+            };
+            node.querySelectorAll(".comment").forEach((child) => {
+                if (parseInt(child.getAttribute('data-level')) === data_level + 1) {
+                    tree.children.push(buildCommentTree(child, data_level + 1));
+                }
+            });
+            return tree;
+        })(document.querySelector("#main"), 0)
+        """
+    )
 
 
 def _reddit_get_latest_comment_obj_by_username_sync(page, username: str) -> dict[str, Any]:
-    try:
-        comment_tree = _reddit_get_post_comment_tree_sync(page)
-        latest_time = datetime.min.replace(tzinfo=timezone.utc)
-        comment: dict[str, Any] = {}
+    comment_tree = _reddit_get_post_comment_tree_sync(page)
+    latest_time = datetime.min.replace(tzinfo=timezone.utc)
+    comment: dict[str, Any] = {}
 
-        def dfs(node: dict[str, Any]) -> None:
-            nonlocal latest_time, comment
-            if node.get("username") == username:
-                node_time = datetime.fromisoformat(node["time"].replace("Z", "+00:00"))
-                if node_time > latest_time:
-                    comment = {**node, "time": node_time}
-                    latest_time = node_time
-            for child in node.get("children", []):
-                dfs(child)
+    def dfs(node: dict[str, Any]) -> None:
+        nonlocal latest_time, comment
+        if node.get("username") == username:
+            node_time = datetime.fromisoformat(node["time"].replace("Z", "+00:00"))
+            if node_time > latest_time:
+                comment = {**node, "time": node_time}
+                latest_time = node_time
+        for child in node.get("children", []):
+            dfs(child)
 
-        dfs(comment_tree)
-        return comment
-    except Exception:
-        return {}
+    dfs(comment_tree)
+    return comment
 
 
 def _reddit_get_latest_comment_content_by_username_sync(page, username: str) -> str:
@@ -1403,50 +1399,44 @@ def _reddit_get_latest_comment_content_by_username_sync(page, username: str) -> 
 
 
 def _reddit_get_parent_comment_username_of_latest_comment_by_username_sync(page, username: str) -> str:
-    try:
-        comment_tree = _reddit_get_post_comment_tree_sync(page)
-        latest_time = datetime.min.replace(tzinfo=timezone.utc)
-        parent_username = ""
+    comment_tree = _reddit_get_post_comment_tree_sync(page)
+    latest_time = datetime.min.replace(tzinfo=timezone.utc)
+    parent_username = ""
 
-        def dfs(node: dict[str, Any]) -> None:
-            nonlocal latest_time, parent_username
-            for child in node.get("children", []):
-                if child.get("username") == username:
-                    child_time = datetime.fromisoformat(child["time"].replace("Z", "+00:00"))
-                    if child_time > latest_time:
-                        parent_username = str(node.get("username", ""))
-                        latest_time = child_time
-                else:
-                    dfs(child)
+    def dfs(node: dict[str, Any]) -> None:
+        nonlocal latest_time, parent_username
+        for child in node.get("children", []):
+            if child.get("username") == username:
+                child_time = datetime.fromisoformat(child["time"].replace("Z", "+00:00"))
+                if child_time > latest_time:
+                    parent_username = str(node.get("username", ""))
+                    latest_time = child_time
+            else:
+                dfs(child)
 
-        dfs(comment_tree)
-        return parent_username
-    except Exception:
-        return ""
+    dfs(comment_tree)
+    return parent_username
 
 
 def _gitlab_get_project_memeber_role_sync(page, account_name: str) -> str:
-    try:
-        account_idx = page.evaluate(
-            """
-            (accountName) => {
-                const elements = document.querySelectorAll("td[data-label='Account'] span.gl-avatar-labeled-sublabel");
-                for (let i = 0; i < elements.length; i++) {
-                    if (elements[i].outerText === `@${accountName}`) return i;
-                }
-                return -1;
+    account_idx = page.evaluate(
+        """
+        (accountName) => {
+            const elements = document.querySelectorAll("td[data-label='Account'] span.gl-avatar-labeled-sublabel");
+            for (let i = 0; i < elements.length; i++) {
+                if (elements[i].outerText === `@${accountName}`) return i;
             }
-            """,
-            account_name,
+            return -1;
+        }
+        """,
+        account_name,
+    )
+    return str(
+        page.evaluate(
+            """(idx) => document.querySelectorAll("td.col-max-role span")[idx]?.outerText || "" """,
+            account_idx,
         )
-        return str(
-            page.evaluate(
-                """(idx) => document.querySelectorAll("td.col-max-role span")[idx]?.outerText || """,
-                account_idx,
-            )
-        )
-    except Exception:
-        return ""
+    )
 
 
 def _select_content_sync(target: dict, page) -> Any:
@@ -1454,22 +1444,15 @@ def _select_content_sync(target: dict, page) -> Any:
     if not locator.strip():
         return page.content()
     if locator.startswith("document.") or locator.startswith("[...document."):
-        if "prep_actions" in target:
-            try:
-                for prep_action in target["prep_actions"]:
-                    page.evaluate(f"() => {prep_action}")
-            except Exception:
-                logger.debug("VisualWebArena prep_actions failed", exc_info=True)
-        try:
-            return str(page.evaluate(f"() => {locator}") or "")
-        except Exception:
-            return ""
+        for prep_action in target.get("prep_actions", []):
+            page.evaluate(f"() => {prep_action}")
+        return str(page.evaluate(_program_html_expression(locator)) or "")
     if locator.startswith("lambda:"):
-        try:
-            selected = page.evaluate(locator.removeprefix("lambda:"))
-            return selected if selected else None
-        except Exception:
-            return None
+        selected = page.evaluate(locator.removeprefix("lambda:"))
+        # Zero is an observed numeric value; empty selections remain misses.
+        if isinstance(selected, (int, float)) and not isinstance(selected, bool):
+            return selected
+        return selected if selected else None
     if locator.startswith("func:"):
         return _eval_helper_expression_sync(locator, page)
     raise ValueError(f"Unknown program_html locator: {locator}")
@@ -1483,18 +1466,17 @@ def _program_html_target_sync(
 ) -> float:
     target_url = target["url"]
     snapshot_records = _program_html_snapshot_records(target, eval_context)
-    if snapshot_records:
+    if snapshot_records is not None:
         snapshot_score = _score_program_html_snapshot_records(
             target["required_contents"],
             snapshot_records,
             judge_log_path,
         )
-        if snapshot_score:
-            return snapshot_score
+        return snapshot_score
 
     if any(call["name"] == "shopping_get_latest_order_url" for call in extract_helper_calls(target_url)):
         candidate_urls = _order_delta_urls(eval_context)
-        if candidate_urls:
+        if candidate_urls is not None:
             target_score = 0.0
             for candidate_url in candidate_urls:
                 candidate_target = {**target, "url": candidate_url}
@@ -1505,9 +1487,13 @@ def _program_html_target_sync(
             return target_score
 
     review_values = _review_delta_values(target.get("locator"), eval_context)
-    if review_values:
+    if review_values is not None:
         return max(
-            _score_program_html_required(target["required_contents"], value, judge_log_path) for value in review_values
+            (
+                _score_program_html_required(target["required_contents"], value, judge_log_path)
+                for value in review_values
+            ),
+            default=0.0,
         )
 
     if isinstance(target_url, str) and target_url.startswith("func:"):
@@ -1535,21 +1521,25 @@ def _program_html_sync(
         if target["url"] == "last":
             pages = list(page.context.pages)
             target_score = 0.0
+            candidate_errors: list[Exception] = []
             for candidate in pages or [page]:
                 try:
                     target_score = max(
                         target_score,
                         _program_html_target_sync(target, candidate, judge_log_path, eval_context),
                     )
-                except Exception:
+                except Exception as exc:
+                    candidate_errors.append(exc)
                     logger.info("VisualWebArena program_html tab check failed", exc_info=True)
+            if candidate_errors and target_score < 1.0:
+                raise candidate_errors[0]
             score *= target_score
         else:
             score *= _program_html_target_sync(target, page, judge_log_path, eval_context)
     return score
 
 
-def _collect_page_images_sync(page, locator: str) -> list[Any]:
+def _collect_page_images_sync(page, locator: str, *, errors: list[Exception] | None = None) -> list[Any]:
     if not locator.strip():
         elements = page.query_selector_all("img")
     elif locator.startswith("."):
@@ -1568,6 +1558,7 @@ def _collect_page_images_sync(page, locator: str) -> list[Any]:
     else:
         raise ValueError(f"Unknown image locator: {locator}")
 
+    failures = errors if errors is not None else []
     images: list[Any] = []
     for element in elements:
         try:
@@ -1581,8 +1572,12 @@ def _collect_page_images_sync(page, locator: str) -> list[Any]:
             if not image_url.startswith(("http://", "https://", "www.")):
                 image_url = urllib.parse.urljoin(page.url, image_url)
             images.append(_fetch_image(image_url))
-        except Exception:
-            logger.debug("Failed to fetch image element", exc_info=True)
+        except _UnavailableTaskImage:
+            continue
+        except Exception as exc:
+            failures.append(exc)
+    if errors is None and failures and not images:
+        raise failures[0]
     return images
 
 
@@ -1595,17 +1590,23 @@ def _page_image_query_sync(
     score = 1.0
     for query in task_config["eval"].get("page_image_query") or []:
         snapshot_urls = _page_image_snapshot_urls(query, eval_context)
-        if snapshot_urls:
-            images = []
+        if snapshot_urls is not None:
+            images, errors = [], []
             for image_url in snapshot_urls:
                 try:
                     images.append(_fetch_image(image_url))
-                except Exception:
-                    logger.debug("Failed to fetch sync snapshot image URL %s", image_url, exc_info=True)
+                except _UnavailableTaskImage:
+                    continue
+                except Exception as exc:
+                    errors.append(exc)
+            query_score = 0.0
             if images:
                 image_log_paths = _save_judge_images(images, judge_log_path)
-                score *= _score_page_image_query_images(query, images, image_log_paths, judge_log_path)
-                continue
+                query_score = _score_page_image_query_images(query, images, image_log_paths, judge_log_path)
+            if errors and query_score < 1.0:
+                raise errors[0]
+            score *= query_score
+            continue
 
         target_url = query["eval_image_url"]
         if isinstance(target_url, str) and target_url.startswith("func:"):
@@ -1613,26 +1614,27 @@ def _page_image_query_sync(
 
         candidate_pages = _open_context_pages(page)
         if not candidate_pages:
-            return 0.0
+            raise RuntimeError("No open page available for image evaluation")
         if target_url != "last":
             candidate_pages[0].goto(target_url, wait_until="domcontentloaded", timeout=60000)
             time.sleep(3)
             candidate_pages = [candidate_pages[0]]
 
         query_score = 0.0
+        errors: list[Exception] = []
         for candidate in candidate_pages:
             try:
-                images = _collect_page_images_sync(candidate, query["eval_image_class"])
-            except Exception:
-                logger.info("VisualWebArena page_image_query tab check failed", exc_info=True)
-                continue
-            if not images:
-                continue
-            image_log_paths = _save_judge_images(images, judge_log_path)
-            query_score = max(
-                query_score,
-                _score_page_image_query_images(query, images, image_log_paths, judge_log_path),
-            )
+                images = _collect_page_images_sync(candidate, query["eval_image_class"], errors=errors)
+                if images:
+                    image_log_paths = _save_judge_images(images, judge_log_path)
+                    query_score = max(
+                        query_score,
+                        _score_page_image_query_images(query, images, image_log_paths, judge_log_path),
+                    )
+            except Exception as exc:
+                errors.append(exc)
+        if errors and query_score < 1.0:
+            raise errors[0]
         score *= query_score
     return score
 

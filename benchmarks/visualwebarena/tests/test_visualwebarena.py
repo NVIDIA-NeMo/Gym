@@ -183,6 +183,27 @@ def test_write_env_is_private_and_rejects_display_sharing(tmp_path) -> None:
     assert sampling.top_p == 0.95
     assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
 
+    # The documented second preparation command is safe to repeat after users
+    # customize their deployment or policy configuration.
+    custom_content = content + "\n# deployment-specific customization\n"
+    env_path.write_text(custom_content)
+    assert not visualwebarena_prepare.write_env(
+        env_path,
+        input_jsonl=tmp_path / "different-input.jsonl",
+        output_jsonl=tmp_path / "different-output.jsonl",
+        source_root=tmp_path / "different-source",
+    )
+    assert env_path.read_text() == custom_content
+    assert visualwebarena_prepare.write_env(
+        env_path,
+        input_jsonl=tmp_path / "input.jsonl",
+        output_jsonl=tmp_path / "output.jsonl",
+        source_root=tmp_path / "source",
+        force=True,
+    )
+    assert env_path.read_text() == content
+    assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
+
     with pytest.raises(ValueError, match="one DISPLAY"):
         visualwebarena_prepare.write_env(
             tmp_path / "other.yaml",
