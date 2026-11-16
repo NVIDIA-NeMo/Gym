@@ -283,13 +283,17 @@ def create_owned_folder(path: Path) -> Path:
     """Create ``path`` as a folder Gym owns for one run, so :func:`delete_owned_folder` may remove it later.
 
     An entry point calls this for a folder it chose for the run, such as a node-local capture folder.
-    The folder must not exist yet, so a folder that already holds someone's files is never marked.
-    A folder that already carries the marker is reused, so a restarted run can take its folder back.
+    A folder that already holds someone's files is never marked.
+    An existing folder is taken only when it is empty, as a job script's ``mkdir -p`` or a start cut short leaves it,
+    or when it already carries the marker, so a restarted run can take its folder back.
     Raises ``FileExistsError`` for any other existing path.
     """
     try:
         path.mkdir(parents=True)
     except FileExistsError:
+        if path.is_dir() and not any(path.iterdir()):
+            (path / OWNED_MARKER).touch()
+            return path
         if not (path / OWNED_MARKER).is_file():
             raise FileExistsError(
                 f"{path} already exists and Gym did not create it for a run; choose a new folder for this run"
@@ -309,9 +313,10 @@ def delete_owned_folder(path: Path, *, deadline: float | None = None) -> bool:
     The marker goes last, so a later call can finish a deletion the deadline cut short.
     Returns whether the folder is gone.
 
-    For model-call capture, delete the folder only when a checkpoint controller ran for the run:
-    NeMo RL, or rollout collection with ``checkpoint_dir``, whose checkpoints hold the durable copy.
-    Without one, capture is the run's only copy of the model calls and is run output.
+    For model-call capture, delete the folder only when the run's consumer has already taken what it needs from it.
+    NeMo RL reads the capture rows into training while the run goes on and resumes from its own checkpoints,
+    so it deletes its capture folders at shutdown, with checkpointing on or off.
+    An evaluation run keeps capture: it can be the only copy of the request and response bodies, so it is run output.
     """
     if not path.exists():
         return True
