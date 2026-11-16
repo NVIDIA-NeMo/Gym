@@ -36,12 +36,6 @@ def test_web_resources_config_defaults_and_paths(tmp_path, monkeypatch: pytest.M
     assert config.auth_token() == "bearer-secret"
 
 
-@pytest.mark.parametrize("num_workers", [0, 2, 8])
-def test_web_resources_config_requires_one_process(num_workers: int) -> None:
-    with pytest.raises(ValidationError, match="num_workers must be 1"):
-        _config(num_workers=num_workers)
-
-
 def test_web_resources_config_rejects_duplicate_benchmarks() -> None:
     with pytest.raises(ValidationError, match="allowed_benchmarks must not contain duplicates"):
         _config(allowed_benchmarks=[WebBenchmark.WEBARENA, WebBenchmark.WEBARENA])

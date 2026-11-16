@@ -105,10 +105,6 @@ class OSWorldResourcesServerConfig(BaseResourcesServerConfig):
             raise ValueError("worker names must be unique")
         if self.enable_proxy and not self.proxy_config_file:
             raise ValueError("proxy_config_file is required when enable_proxy=true")
-        if self.num_workers not in {None, 1}:
-            raise ValueError(
-                "OSWorld Resources Server keeps live DesktopEnv objects in process; num_workers must be 1"
-            )
         return self
 
     @property

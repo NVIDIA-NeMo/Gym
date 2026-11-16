@@ -18,6 +18,7 @@ from app import (
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
+from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 
 
 def _make_response(text: str) -> NeMoGymResponse:
@@ -862,3 +863,13 @@ class TestDownloadCometModel:
         # Fast-path skips produce entirely; only the local resolve runs.
         assert calls == [(str(dest), True)]
         assert ckpt == str(dest / "checkpoints" / "model.ckpt")
+
+
+def test_several_workers_are_refused_only_with_segale() -> None:
+    segale = _make_server(compute_segale=True)
+    segale.config.num_workers = 2
+    with pytest.raises(ValueError, match="needs num_workers=1: with compute_segale"):
+        refuse_unsupported_num_workers(segale)
+    no_segale = _make_server(compute_segale=False)
+    no_segale.config.num_workers = 2
+    refuse_unsupported_num_workers(no_segale)

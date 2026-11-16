@@ -32,6 +32,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 LOG = logging.getLogger(__name__)
@@ -140,6 +141,15 @@ class LongmtEvalVerifyResponse(LongmtEvalVerifyRequest, BaseVerifyResponse):
 class LongmtEvalServer(SimpleResourcesServer):
     ray_enabled = True
     config: LongmtEvalConfig
+
+    def multiple_workers_unsupported_reason(self) -> Optional[str]:
+        # Without SEGALE, verify builds no actor pool and keeps nothing between requests.
+        if not self.config.compute_segale:
+            return None
+        return (
+            "with compute_segale, each worker builds its own Ray GPU actor pool, "
+            "so several workers multiply the GPU actors and can fail to schedule them"
+        )
 
     _segale_actors: List[Any] = PrivateAttr(default_factory=list)
     _actor_lock: Any = PrivateAttr(default=None)
@@ -311,3 +321,6 @@ class LongmtEvalServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     LongmtEvalServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = LongmtEvalServer.run_webserver()  # noqa: F401

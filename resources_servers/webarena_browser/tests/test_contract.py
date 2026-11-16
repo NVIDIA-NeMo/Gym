@@ -7,9 +7,12 @@ import inspect
 import os
 import tomllib
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
+from nemo_gym.client import ServerClient
+from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from nemo_gym.web import (
     BrowserSessionHandle,
     EvaluatorConfigurationError,
@@ -266,3 +269,10 @@ def test_component_declares_isolated_runtime_dependencies() -> None:
         "path": "../..",
         "editable": True,
     }
+
+
+def test_several_workers_are_refused() -> None:
+    server = WebArenaBrowserResourcesServer(config=_config(num_workers=2), server_client=MagicMock(spec=ServerClient))
+
+    with pytest.raises(ValueError, match="needs num_workers=1: PyAutoGUI drives the one X display"):
+        refuse_unsupported_num_workers(server)

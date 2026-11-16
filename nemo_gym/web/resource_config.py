@@ -39,8 +39,6 @@ class WebResourcesServerConfig(BaseResourcesServerConfig):
 
     @model_validator(mode="after")
     def validate_stateful_server(self) -> "WebResourcesServerConfig":
-        if self.num_workers not in {None, 1}:
-            raise ValueError("web sessions are process-local; num_workers must be 1")
         if len(set(self.allowed_benchmarks)) != len(self.allowed_benchmarks):
             raise ValueError("allowed_benchmarks must not contain duplicates")
         if len(self.browser_session_provider) != 1:

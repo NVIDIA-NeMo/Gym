@@ -13,6 +13,12 @@ class VisualBrowserResourcesServer(WebResourcesServer):
     ray_enabled = False
     config: VisualBrowserResourcesServerConfig
 
+    def multiple_workers_unsupported_reason(self) -> str | None:
+        return (
+            "PyAutoGUI drives the one X display, and seed moves the session cookie to an identity "
+            "that session routing does not follow, so later steps and /close can reach a worker without the browser"
+        )
+
     def make_session_manager(self) -> VisualBrowserSessionManager:
         return VisualBrowserSessionManager(self.config)
 
