@@ -8,6 +8,10 @@ config_paths:
   - responses_api_agents/openclaw_agent/configs/openclaw_agent.yaml
   - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
 
+# The episodes' server under OpenClaw's own name, as configs/officeenv_sandbox.yaml explains for Pi.
+officeenv_sandbox_openclaw_resources_server:
+  _inherit_from: officeenv_sandbox_resources_server
+
 # Gym's OpenClaw (responses_api_agents/openclaw_agent), under this config's own name.
 officeenv_sandbox_openclaw_agent:
   _inherit_from: openclaw_agent
@@ -22,7 +26,7 @@ officeenv_sandbox_openclaw_environment_server:
   environment_servers:
     single_agent_turn_legacy:
       resources_server:
-        name: officeenv_sandbox_resources_server
+        name: officeenv_sandbox_openclaw_resources_server
       agent_server:
         name: officeenv_sandbox_openclaw_agent
       resources_tool_transports: []

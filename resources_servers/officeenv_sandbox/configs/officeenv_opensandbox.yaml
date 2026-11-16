@@ -19,8 +19,8 @@ config_paths:
 use_absolute_ip: true
 absolute_ip_server_types: [responses_api_models, resources_servers]
 
-# The episodes' server, whose settings each harness's copy of it takes too (Pi's here, and the copy of any harness
-# config composed beside this one).
+# The episodes' server, whose settings each harness's server inherits (Pi's here, and that of any harness config
+# composed before this one).
 officeenv_sandbox_resources_server:
   resources_servers:
     officeenv_sandbox:

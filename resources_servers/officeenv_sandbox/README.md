@@ -124,25 +124,25 @@ waits for it to be ready (`sandbox.opensandbox.create`), creates have taken up t
 Each harness config names its instances after its harness, as Gym's benchmarks name theirs:
 `officeenv_sandbox_<harness>_agent` inherits Gym's instance of the harness (`_inherit_from`), and
 `officeenv_sandbox_<harness>_environment_server` (`_inherit_from: single_agent_turn_legacy`) binds
-it to the episodes. Pi, Codex and OpenCode name the MCP tools their own way, so each runs on its
-own copy of the episodes' server, `officeenv_sandbox_<harness>_resources_server` (`_copy`, with
-its `sandbox_config.mcp_tool_prefix`); mini-SWE, OpenClaw and Terminus 2 run on
-`officeenv_sandbox_resources_server` itself:
+it to the episodes' server, which each harness runs under its own name too,
+`officeenv_sandbox_<harness>_resources_server` (`_inherit_from: officeenv_sandbox_resources_server`;
+Pi, Codex and OpenCode set their own `sandbox_config.mcp_tool_prefix` there):
 
 | Harness | Agent | Environment server | Resources server |
 |---|---|---|---|
 | Pi | `officeenv_sandbox_pi_agent` | `officeenv_sandbox_pi_environment_server` | `officeenv_sandbox_pi_resources_server` |
 | Codex CLI | `officeenv_sandbox_codex_agent` | `officeenv_sandbox_codex_environment_server` | `officeenv_sandbox_codex_resources_server` |
 | OpenCode | `officeenv_sandbox_opencode_agent` | `officeenv_sandbox_opencode_environment_server` | `officeenv_sandbox_opencode_resources_server` |
-| OpenClaw | `officeenv_sandbox_openclaw_agent` | `officeenv_sandbox_openclaw_environment_server` | `officeenv_sandbox_resources_server` |
-| mini-SWE | `officeenv_sandbox_miniswe_agent` | `officeenv_sandbox_miniswe_environment_server` | `officeenv_sandbox_resources_server` |
-| Terminus 2 | `officeenv_sandbox_terminus_2_agent` | `officeenv_sandbox_terminus_2_environment_server` | `officeenv_sandbox_resources_server` |
+| OpenClaw | `officeenv_sandbox_openclaw_agent` | `officeenv_sandbox_openclaw_environment_server` | `officeenv_sandbox_openclaw_resources_server` |
+| mini-SWE | `officeenv_sandbox_miniswe_agent` | `officeenv_sandbox_miniswe_environment_server` | `officeenv_sandbox_miniswe_resources_server` |
+| Terminus 2 | `officeenv_sandbox_terminus_2_agent` | `officeenv_sandbox_terminus_2_environment_server` | `officeenv_sandbox_terminus_2_resources_server` |
 
-A copy takes the settings the episodes' server has in the merged config, a later config's and the
-command line's included: an override of `officeenv_sandbox_resources_server` reaches every
-harness's server, and one of `officeenv_sandbox_<harness>_resources_server` that harness's alone.
-So several harness configs compose in one run, each row going to the harness its `agent_ref`
-names (`--agent` names it for rows that name none):
+Each harness's server takes the settings the episodes' server has in the merged config, a later
+config's and the command line's included: an override of `officeenv_sandbox_resources_server`
+reaches every harness's server, and one of `officeenv_sandbox_<harness>_resources_server` that
+harness's alone. The episodes' server itself starts only when no harness config is composed. So
+several harness configs compose in one run, each row going to the harness its `agent_ref` names
+(`--agent` names it for rows that name none):
 
 ```bash
 gym env start --config resources_servers/officeenv_sandbox/configs/officeenv_sandbox.yaml \
@@ -150,10 +150,11 @@ gym env start --config resources_servers/officeenv_sandbox/configs/officeenv_san
   --config nemo_gym/sandbox/providers/docker/configs/docker.yaml <model and host arguments as below>
 ```
 
-List `configs/officeenv_opensandbox.yaml` after the other harness configs: a harness config listed
-after it pulls the episodes' config in after the OpenSandbox settings, which then go back to the
-episodes' own. No instance name reaches a sandbox: the MCP endpoint lists itself as `company`
-(`mcp_server_name`), and the session cookie's name is a hash.
+List `configs/officeenv_opensandbox.yaml` after the other harness configs: Gym merges the
+episodes' config once, where the first harness config listed pulls it in, and listed after the
+OpenSandbox config it would set the episodes' settings back over the OpenSandbox ones. No instance
+name reaches a sandbox: the MCP endpoint lists itself as `company` (`mcp_server_name`), and the
+session cookie's name is a hash.
 
 ### Images and what a row needs
 
