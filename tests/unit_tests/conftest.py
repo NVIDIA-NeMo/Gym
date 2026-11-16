@@ -8,6 +8,7 @@ import logging
 import pytest
 
 import nemo_gym.artifacts.exporters as exporters_module
+import nemo_gym.rollouts.rollout_collection as rollout_collection_module
 from nemo_gym.config.global_config import reset_global_config_dict
 from tests.unit_tests.data.tasks.harbor.harbor_registry_fakes import FakeRegistryClient
 
@@ -41,6 +42,16 @@ def no_real_registry(request):
     its teardown while the test's patches are still in place."""
     if request.module.__name__.rpartition(".")[2].startswith("test_harbor"):
         _use_fake_registry(request.getfixturevalue("monkeypatch"))
+
+
+@pytest.fixture(autouse=True)
+def immediate_dispatch_reservations():
+    """Each reservation is written at once, so a test dispatching rows one by one does not wait out the production
+    spacing between manifest writes."""
+    saved = rollout_collection_module.DISPATCH_RESERVATION_INTERVAL_SECONDS
+    rollout_collection_module.DISPATCH_RESERVATION_INTERVAL_SECONDS = 0.0
+    yield
+    rollout_collection_module.DISPATCH_RESERVATION_INTERVAL_SECONDS = saved
 
 
 @pytest.fixture(autouse=True)

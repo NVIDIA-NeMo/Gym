@@ -672,9 +672,9 @@ def test_batch_reservations_are_durable_before_dispatch(prepared_run, monkeypatc
         original_write = RunManifest.write
         writes = []
 
-        def write(manifest, path):
+        def write(manifest, path, **kwargs):
             writes.append(dict(manifest.next_attempt))
-            original_write(manifest, path)
+            original_write(manifest, path, **kwargs)
 
         monkeypatch.setattr(RunManifest, "write", write)
         store.record_dispatches(rows)
@@ -693,7 +693,7 @@ def test_failed_batch_reservation_changes_neither_memory_nor_disk(prepared_run, 
         original_rows = [dict(row) for row in rows]
         before = snapshot(output)
 
-        def fail(*args):
+        def fail(*args, **kwargs):
             raise OSError("disk full")
 
         monkeypatch.setattr(RunManifest, "write", fail)
@@ -781,9 +781,9 @@ async def test_production_dispatch_batches_reservations_before_http(runner_confi
     writes = []
     original = RunManifest.write
 
-    def write(manifest, path):
+    def write(manifest, path, **kwargs):
         writes.append(dict(manifest.next_attempt))
-        original(manifest, path)
+        original(manifest, path, **kwargs)
 
     monkeypatch.setattr(RunManifest, "write", write)
 
@@ -809,10 +809,10 @@ async def test_invalid_reply_without_routing_explains_how_to_continue(runner_con
 async def test_reservation_write_failure_prevents_http_dispatch(runner_config, monkeypatch):
     original = RunManifest.write
 
-    def write(manifest, path):
+    def write(manifest, path, **kwargs):
         if manifest.next_attempt:
             raise OSError("reservation disk unavailable")
-        original(manifest, path)
+        original(manifest, path, **kwargs)
 
     monkeypatch.setattr(RunManifest, "write", write)
     client = install_fake_server_client(monkeypatch, AsyncMock())
