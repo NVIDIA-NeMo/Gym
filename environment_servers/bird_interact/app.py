@@ -431,8 +431,11 @@ class AInteractTools:
                 observation="Your budget is spent. Only submit is allowed now.", coins_left=episode.coins_left
             )
         episode.coins_spent += self._server.config.action_costs[action]
+        phase = episode.phase
         observation = await act(episode)
-        if episode.coins_left <= 0 and action == "submit" and not episode.finished:
+        # Only a submission that did not pass ends the task when the budget is spent: a pass opens the follow-up, or
+        # has already finished the task.
+        if episode.coins_left <= 0 and action == "submit" and not episode.finished and episode.phase == phase:
             episode.finished = True
             observation += "\nYour budget is spent, so the task ends here."
         return ToolObservation(observation=observation, coins_left=episode.coins_left)

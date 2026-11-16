@@ -243,9 +243,12 @@ def _server(
     return server, client
 
 
-async def _run(server: BirdInteractEnvironmentServer, task: str = "bookshop_1", **row: Any) -> BirdInteractResponse:
+async def _run(
+    server: BirdInteractEnvironmentServer, task: str = "bookshop_1", *, skip_token_capture: bool = False, **row: Any
+) -> BirdInteractResponse:
     request = BirdInteractRequest(
         episode_id=EpisodeId(rollout_id=f"{task}-0"),
+        skip_token_capture=skip_token_capture,
         task=MaterializedTask(
             task_id=TaskId(taskset="bird_interact:example", task_id=task),
             task_input=BirdInteractTask.model_validate(TASKS[task] | row),
@@ -554,6 +557,25 @@ class TestAgenticMode:
         assert response.result.finished is True
         assert _phases(response) == [{"phase": 1, "passed": False, "attempts": 1, "reward": 0.0}]
 
+    async def test_a_passing_submit_that_spends_the_budget_still_opens_the_follow_up(self) -> None:
+        seen: dict[str, Any] = {}
+        task = TASKS["bookshop_3"]
+
+        async def agent(tools: _Tools) -> str:
+            while (await tools.observe("execute", sql="SELECT 1"))["coins_left"] > 0:
+                pass
+            seen["phase_1"] = await tools.observe("submit", sql=task["sol_sql"][0])
+            seen["phase_2"] = await tools.observe("submit", sql=task["follow_up"]["sol_sql"][0])
+            return "Done."
+
+        server, _ = _server("a_interact", turns=[agent], coin_patience=0)
+
+        response = await _run(server, "bookshop_3")
+
+        assert "the task ends here" not in seen["phase_1"]["observation"]
+        assert seen["phase_2"]["observation"] != "The task is finished."
+        assert (response.result.reward, response.result.finished) == (pytest.approx(1.0), True)
+
     async def test_an_exploratory_query_returns_a_bounded_preview(self) -> None:
         seen: dict[str, Any] = {}
 
@@ -699,6 +721,21 @@ class TestAgentSession:
         await _run(server)
 
         assert client.agent_calls[0]["path"] == "/ng-rollout/bookshop_1-0/training-token-capture/v1/responses"
+
+    @pytest.mark.parametrize("all_agents", [False, True])
+    async def test_a_request_that_skips_token_capture_stays_off_the_training_path(self, all_agents: bool) -> None:
+        server, client = _server(turns=["Done."])
+        agent = {"host": "agent", "port": 1, "entrypoint": "app.py", "token_id_capture": not all_agents}
+        client.global_config_dict = OmegaConf.create(
+            {
+                "agent": {"responses_api_agents": {"agent": agent}},
+                "token_id_capture": {"enabled": True, "all_agents": all_agents},
+            }
+        )
+
+        await _run(server, skip_token_capture=True)
+
+        assert client.agent_calls[0]["path"] == "/ng-rollout/bookshop_1-0/v1/responses"
 
 
 class TestDatabaseSandbox:
