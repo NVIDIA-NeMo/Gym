@@ -1066,12 +1066,15 @@ class VLLMModel(SimpleResponsesAPIModel):
                 if key in self.config.sampling_overrides
             ]
             if any(value != pinned_limits[0][1] for _, value in pinned_limits[1:]):
+                first_name, first_value = pinned_limits[0]
                 LOG.warning(
                     "`%s` pins the output-token limit to different values under different names %s; "
-                    "every endpoint sends %s=%s",
+                    "every endpoint sends %s",
                     self.config.name,
                     dict(pinned_limits),
-                    *pinned_limits[0],
+                    f"no limit, because {first_name} is null"
+                    if first_value is None
+                    else f"{first_name}={first_value}",
                 )
 
         self._clients = [
@@ -1237,7 +1240,9 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         A null pin removes the parameter from the body instead of sending ``null``, so the engine
         applies its own default. A null limit removes the request's limit under every name and
-        sends none.
+        sends none. On Chat and Responses the engine then sets no limit of its own. On
+        ``/v1/completions`` its default for a request without ``max_tokens`` is 16 tokens, so a
+        null limit does not lift the limit on that endpoint.
         """
         if not self.config.sampling_overrides:
             return body_dict

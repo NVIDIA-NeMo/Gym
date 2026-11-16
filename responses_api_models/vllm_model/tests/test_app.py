@@ -7345,6 +7345,18 @@ class TestSamplingOverrides:
             {"temperature": 1.0, "max_output_tokens": 200},
         ]
 
+    def test_a_null_limit_pin_under_the_first_name_sends_no_limit(self, caplog) -> None:
+        """The first pinned name in ``_OUTPUT_BUDGET_KEYS`` order decides the limit also when its value is null:
+        no endpoint sends a limit, the 200 under the later name is not sent, and the start-up warning says so."""
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.vllm_model"):
+            server = self._server({"max_completion_tokens": None, "max_tokens": 200})
+        sent = [
+            server._apply_sampling_overrides({"max_tokens": 500}, api=api)
+            for api in ("chat", "completions", "responses")
+        ]
+        assert sent == [{}, {}, {}]
+        assert "every endpoint sends no limit, because max_completion_tokens is null" in caplog.text
+
     def test_pinned_limit_reaches_the_responses_native_path_as_max_output_tokens(self) -> None:
         """vLLM's Responses endpoint reads only ``max_output_tokens``, so a Chat-spelled pin is sent under that name."""
         server = self._server({"max_tokens": 100}, is_responses_native=True)
