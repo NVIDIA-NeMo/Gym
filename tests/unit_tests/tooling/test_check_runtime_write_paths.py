@@ -109,6 +109,48 @@ def test_allowlisted_sites_pass_and_new_or_stale_entries_fail(tmp_path: Path, ca
     assert "'responses_api_agents/gone/app.py cwd run' no longer matches" in capsys.readouterr().out
 
 
+def test_skips_conftest_test_modules_and_hidden_folders(tmp_path: Path) -> None:
+    cwd_call = "from pathlib import Path\nROOT = Path.cwd()\n"
+    _write(tmp_path, "resources_servers/demo/conftest.py", cwd_call)
+    _write(tmp_path, "resources_servers/demo/test_app.py", cwd_call)
+    _write(tmp_path, "resources_servers/demo/.venv/lib/site.py", cwd_call)
+    _write(tmp_path, "resources_servers/demo/.cache/x.py", cwd_call)
+
+    assert check.scan(tmp_path) == []
+
+
+def test_cwd_with_an_argument_is_not_a_cwd_call_but_a_positional_field_default_is_flagged(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "resources_servers/demo/app.py",
+        """
+        from pydantic import BaseModel, Field
+
+        class Config(BaseModel):
+            out_dir: str = Field("results/x")
+
+        def f(thing):
+            return thing.cwd("arg")
+        """,
+    )
+
+    assert {(rule, scope) for _, _, rule, scope in check.scan(tmp_path)} == {("relative-default", "Config.out_dir")}
+
+
+def test_quoted_and_nested_absolute_fallbacks_are_absolute(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "resources_servers/demo/configs/demo.yaml",
+        """
+        demo:
+          quoted_dir: ${oc.env:X,'/abs/x'}
+          nested_dir: ${oc.env:A,${oc.env:B,/abs}}/y
+        """,
+    )
+
+    assert check.scan_yaml(tmp_path) == []
+
+
 def test_repository_has_no_sites_outside_the_allowlist() -> None:
     assert check.main(["--root", str(REPO_ROOT)]) == 0
 

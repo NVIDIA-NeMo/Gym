@@ -18,8 +18,10 @@ import subprocess
 import sys
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import anyio
 import pytest
 from omegaconf import DictConfig
 
@@ -122,7 +124,12 @@ class TestDebugFolder:
 
 
 class TestTempFolder:
-    def test_folder_is_under_the_temporary_directory_and_removed_on_exit(self, set_global_config) -> None:
+    def test_folder_is_under_the_temporary_directory_and_removed_on_exit(
+        self, set_global_config, tmp_path: Path, monkeypatch
+    ) -> None:
+        # The system temporary directory, pointed at a test folder so the host's own /tmp is left alone.
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+        monkeypatch.setattr(runtime_files, "_checked_temp_parents", set())
         set_global_config(None)
 
         with temp_folder(kind="workspace") as path:
@@ -266,6 +273,35 @@ class TestStaleTempFolders:
         with temp_folder(kind="workspace") as path:
             assert path.exists()
 
+    def test_another_users_folders_stay(self, tmp_path: Path, monkeypatch) -> None:
+        folder = tmp_path / self._name(self._dead_pid())
+        folder.mkdir()
+        real_uid = os.getuid()
+        monkeypatch.setattr(os, "getuid", lambda: real_uid + 1)
+
+        assert remove_stale_temp_folders(tmp_path) == []
+        assert folder.exists()
+
+    def test_files_and_symlinks_with_a_matching_name_are_left_alone(self, tmp_path: Path) -> None:
+        (tmp_path / self._name(self._dead_pid())).write_text("")
+        target = tmp_path / "target"
+        target.mkdir()
+        (target / "keep").write_text("")
+        (tmp_path / self._name(self._dead_pid(), tag="lnk")).symlink_to(target)
+
+        assert remove_stale_temp_folders(tmp_path) == []
+        assert (target / "keep").exists()
+
+    def test_a_process_this_user_cannot_signal_counts_as_running(self, tmp_path: Path) -> None:
+        if os.getuid() == 0:
+            pytest.skip("root may signal every process")
+        # PID 1 is alive in every namespace, and a process of another user answers with PermissionError.
+        folder = tmp_path / self._name(1)
+        folder.mkdir()
+
+        assert remove_stale_temp_folders(tmp_path) == []
+        assert folder.exists()
+
 
 def test_parent_replaces_temp_dir_for_code_without_gym_configuration(set_global_config, tmp_path: Path) -> None:
     set_global_config(None)
@@ -371,3 +407,65 @@ def test_debug_folder_accepts_a_string_override(set_global_config, tmp_path: Pat
     path = debug_folder(server_name="swebench", kind="verification", override=str(tmp_path))
 
     assert path is not None and path.is_relative_to(tmp_path)
+
+
+def _cleanup_left_after_a_repeated_cancellation(cancel_kind: str) -> list[Path]:
+    """Cancel again while cleanup waits behind a busy worker thread, as under load, and return what is left."""
+
+    async def main() -> list[Path]:
+        loop = asyncio.get_running_loop()
+        executor = ThreadPoolExecutor(max_workers=1)
+        loop.set_default_executor(executor)
+        created: list[Path] = []
+        entered = asyncio.Event()
+        scopes: list[anyio.CancelScope] = []
+
+        async def work() -> None:
+            with anyio.CancelScope() as scope:
+                scopes.append(scope)
+                async with async_temp_folder(kind="workspace") as path:
+                    created.append(path)
+                    entered.set()
+                    await asyncio.sleep(3600)
+
+        task = asyncio.create_task(work())
+        await entered.wait()
+        gate = threading.Event()
+        busy = loop.run_in_executor(None, gate.wait)
+        if cancel_kind == "anyio":
+            # anyio delivers the cancellation again at every await in the scope, as the disconnect middleware does.
+            scopes[0].cancel()
+        else:
+            task.cancel()
+            await asyncio.sleep(0.05)
+            task.cancel()
+        try:
+            await asyncio.wait_for(task, 5)
+        except asyncio.CancelledError:
+            pass
+        gate.set()
+        await busy
+        await loop.run_in_executor(None, lambda: None)
+        executor.shutdown(wait=True)
+        return [path for path in created if path.exists()]
+
+    return asyncio.run(main())
+
+
+@pytest.mark.parametrize("cancel_kind", ["anyio", "task"])
+def test_cleanup_survives_a_repeated_cancellation_while_queued(
+    set_global_config, tmp_path: Path, cancel_kind: str
+) -> None:
+    set_global_config({"temp_dir": str(tmp_path / "temp")})
+
+    assert _cleanup_left_after_a_repeated_cancellation(cancel_kind) == []
+    assert list((tmp_path / "temp").iterdir()) == []
+
+
+def test_a_server_name_with_a_slash_stays_one_segment(set_global_config, tmp_path: Path) -> None:
+    set_global_config({"debug_dir": str(tmp_path)})
+
+    path = debug_folder(server_name="../escape", kind="verification")
+
+    assert path is not None
+    assert path.relative_to(tmp_path).parts[0] == "..%2Fescape"

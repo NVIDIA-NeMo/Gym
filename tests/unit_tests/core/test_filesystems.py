@@ -68,3 +68,16 @@ def test_the_caller_supplies_the_advice(mountinfo: Path, caplog: pytest.LogCaptu
         )
 
     assert caplog.text.rstrip().endswith("Kept as run output.")
+
+
+def test_the_deepest_mount_wins_whatever_the_line_order(tmp_path: Path) -> None:
+    mountinfo = tmp_path / "mountinfo"
+    # The kernel lists mounts in mount order, so a parent mounted later can follow its child.
+    mountinfo.write_text(
+        "42 40 0:51 / /lustre/local rw,relatime shared:22 - ext4 /dev/sdb rw\n"
+        "40 22 0:50 / /lustre rw,relatime shared:20 - lustre 10.0.0.1@o2ib:/fs rw\n"
+        "22 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw\n"
+    )
+
+    assert filesystem_type("/lustre/local/x", mountinfo=mountinfo) == "ext4"
+    assert filesystem_type("/lustre/x", mountinfo=mountinfo) == "lustre"
