@@ -34,7 +34,7 @@ from tests.helpers.agent_environment_migration import (
 migration = load_migration()
 
 
-@pytest.mark.parametrize("agent_type", ["pi_agent", "pool_agent"])
+@pytest.mark.parametrize("agent_type", ["pi_agent", "pool_agent", "crewai_agent", "cline_agent"])
 def test_default_agent_composes_with_exactly_one_session_environment(tmp_path: Path, agent_type: str) -> None:
     config = tmp_path / "agent.yaml"
     default = SCRIPT.parents[1] / f"responses_api_agents/{agent_type}/configs/{agent_type}.yaml"
@@ -135,6 +135,45 @@ def test_default_claude_composes_with_exactly_one_session_environment(tmp_path: 
     assert resolved.claude_code_agent.responses_api_agents.claude_code_agent.resources_server is None
 
 
+def test_default_openhands_composes_with_exactly_one_session_environment(tmp_path: Path) -> None:
+    config = tmp_path / "agent.yaml"
+    default = SCRIPT.parents[1] / "responses_api_agents/openhands_agent/configs/openhands_agent.yaml"
+    config.write_text(default.read_text())
+    composition = tmp_path / "run.yaml"
+    composition.write_text(
+        "policy_model_name: test-model\n"
+        + _server_fronting("openhands_agent", name="session_environment", server_type="single_agent_turn")
+    )
+    before = config.read_text()
+    assert migration.main([str(config)]) == 0
+    assert config.read_text() == before
+    resolved = _parse(config, composition, strict=True)
+    assert _environment_servers_by_agent(resolved) == {"openhands_agent": ["session_environment"]}
+    assert resolved.openhands_agent.responses_api_agents.openhands_agent.resources_server is None
+
+
+@pytest.mark.parametrize("resources", [None, {"type": "resources_servers", "name": "my_resources"}])
+def test_openhands_gets_no_legacy_relay_whatever_its_resources_binding(
+    tmp_path: Path, resources: dict[str, str] | None
+) -> None:
+    # OpenHands answers /run with 422, so a legacy relay in front of it could never run an episode.
+    config = tmp_path / "agent.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "my_agent": {
+                    "responses_api_agents": {
+                        "openhands_agent": {"entrypoint": "app.py", "resources_server": resources}
+                    }
+                }
+            }
+        )
+    )
+    before = config.read_text()
+    assert migration.main([str(config)]) == 0
+    assert config.read_text() == before
+
+
 def test_default_droid_composes_with_exactly_one_session_environment(tmp_path: Path) -> None:
     config = tmp_path / "agent.yaml"
     default = SCRIPT.parents[1] / "responses_api_agents/droid_agent/configs/droid_agent.yaml"
@@ -176,6 +215,29 @@ def test_opencode_session_template_composes_with_one_environment(tmp_path: Path)
     resolved = _parse(config, composition, strict=True)
     assert _environment_servers_by_agent(resolved) == {"opencode_agent": ["session_environment"]}
     assert resolved.opencode_agent.responses_api_agents.opencode_agent.resources_server is None
+
+
+def test_deepagents_sandbox_template_composes_with_one_environment(tmp_path: Path) -> None:
+    config = tmp_path / "agent.yaml"
+    default = (
+        SCRIPT.parents[1]
+        / "responses_api_agents/langchain_deepagents_agent/configs/langchain_deepagents_sandbox_agent.yaml"
+    )
+    config.write_text(default.read_text())
+    composition = tmp_path / "run.yaml"
+    composition.write_text(
+        "policy_model_name: test-model\n"
+        + _server_fronting(
+            "langchain_deepagents_sandbox_agent", name="session_environment", server_type="single_agent_turn_legacy"
+        )
+    )
+    before = config.read_text()
+    assert migration.main([str(config)]) == 0
+    assert config.read_text() == before
+    resolved = _parse(config, composition, strict=True)
+    assert _environment_servers_by_agent(resolved) == {"langchain_deepagents_sandbox_agent": ["session_environment"]}
+    agent = resolved.langchain_deepagents_sandbox_agent.responses_api_agents.langchain_deepagents_agent
+    assert (agent.entrypoint, agent.resources_server, agent.tool_profile) == ("app.py", None, "builtin")
 
 
 def test_session_openclaw_template_composes_with_one_environment(tmp_path: Path) -> None:
@@ -242,11 +304,13 @@ def test_default_hermes_composes_with_exactly_one_session_environment(tmp_path: 
         "hermes_agent",
         "pi_agent",
         "pool_agent",
+        "simple_strands_agent",
         "codex_agent",
         "openclaw_agent",
         "opencode_agent",
         "kilocode_agent",
         "claude_code_agent",
+        "cline_agent",
         "harbor_oracle_agent",
         "terminus_2_sandboxed_agent",
         "mini_swe_agent",

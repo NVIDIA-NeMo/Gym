@@ -11,7 +11,7 @@ from nemo_gym.server_runtime import verifier_observability
 from nemo_gym.server_runtime.verifier_observability import observe_llm_judge_grading
 from nemo_gym.trajectory.trajectory_record import VerifierInvocation, grading_result_binding
 from nemo_gym.verification import judge
-from nemo_gym.verification.judge import call_judge, record_parsed_judge_verdict
+from nemo_gym.verification.judge import call_judge, record_parsed_judge_verdict, record_rejected_judge_reply
 
 
 class JudgeReply(BaseModel):
@@ -138,3 +138,32 @@ async def test_one_parsed_reply_does_not_cover_a_later_fallback(judge_server):
     assert value["reward"] == 0.0
     assert invocation.grading_operations[0].outcome == "unknown"
     assert len(invocation.grading_operations[0].dependencies) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("accepted", [False, True])
+async def test_rejected_reply_is_retained_but_requires_an_accepted_verdict(judge_server, accepted):
+    client, replies = judge_server
+    replies.append({"id": "rejected"})
+    if accepted:
+        replies.append({"id": "accepted"})
+    invocation = VerifierInvocation(invocation_id="verify-retry")
+    token = verifier_observability._active_verifier.set(invocation)
+
+    async def calculate():
+        await call_judge(client, server_name="judge", url_path="/v1/responses", json={}, response_model=JudgeReply)
+        record_rejected_judge_reply()
+        if accepted:
+            await call_judge(client, server_name="judge", url_path="/v1/responses", json={}, response_model=JudgeReply)
+            record_parsed_judge_verdict()
+        return _result(1.0 if accepted else 0.0)
+
+    try:
+        await observe_llm_judge_grading(calculate)
+    finally:
+        verifier_observability._active_verifier.reset(token)
+    [operation] = invocation.grading_operations
+    assert operation.outcome == ("completed" if accepted else "unknown")
+    assert [dependency.response_id for dependency in operation.dependencies] == (
+        ["rejected", "accepted"] if accepted else ["rejected"]
+    )

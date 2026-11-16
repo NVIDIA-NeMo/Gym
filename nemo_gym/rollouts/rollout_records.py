@@ -218,6 +218,8 @@ class _Outcome:
     has_reward: bool
     elapsed_seconds: float | None
     final_zero: bool = False
+    # Allocation-end reconciliation cannot undo a producer decision or a terminal retained result.
+    allocation_end_protected: bool = False
     # A scored result whose producer applied ``count_as_zero`` (a failure the policy settled as the model's zero): the
     # failure kind. It is a success to selection, so only the coverage report singles it out.
     counted_zero_kind: str | None = None
@@ -228,8 +230,6 @@ class _Outcome:
     masked_infrastructure: bool = False
     # The masked result an operator approved to run again (``masked_kept_answer_kind``): counted as the line above.
     rerun_approved: bool = False
-    # A masked result whose producer chose ``fail`` (a defect in the task data, for example): the failure kind.
-    masked_failed_kind: str | None = None
 
 
 # A read-only selection parses a row above this size without the values of its skipped keys, in chunks.
@@ -746,6 +746,11 @@ class RolloutRecords:
             failure_class=failure_class,
             legacy_failure_class=row.get("_ng_failure_legacy_class"),
             terminal=bool(row.get("_ng_failure_terminal")),
+            allocation_end_protected=row.get("failure_outcome_action") in {"fail", "count_as_zero", "verify"}
+            or (
+                bool(row.get("_ng_failure_terminal"))
+                and (has_saved_generation(row) or has_recorded_grade(row) or keeps_partial_response(row))
+            ),
             masked=bool(row.get("mask_sample")),
             has_reward=type(row.get("reward")) in (int, float),
             elapsed_seconds=observed_elapsed(row),
@@ -768,11 +773,6 @@ class RolloutRecords:
             and (_holds_saved_answer(row) or has_recorded_grade(row) or keeps_partial_response(row)),
             masked_infrastructure=masked_infrastructure,
             rerun_approved=rerun_approved,
-            masked_failed_kind=(
-                str(row.get("failure_kind") or "unknown")
-                if failure_class is None and row.get("mask_sample") and row.get("failure_outcome_action") == "fail"
-                else None
-            ),
         )
         outcome = self.payloads[key]
         if (
@@ -909,9 +909,19 @@ class RolloutRecords:
                 rows.append(record._read(handles[record.path]))
             return rows
 
+    def _terminal(self, outcome: _Outcome) -> bool:
+        return is_terminal_failure(
+            {
+                "_ng_failure_class": outcome.failure_class,
+                "_ng_failure_legacy_class": outcome.legacy_failure_class,
+                "_ng_failure_terminal": outcome.terminal,
+            },
+            retry_terminal_timeouts=self.retry_terminal_timeouts,
+        )
+
     def _retryable(self, identity: str) -> bool:
         payload = self.payloads.get((identity, self.latest.get(identity)))
-        terminal = payload.terminal if payload else False
+        terminal = self._terminal(payload) if payload else False
         if payload and payload.final_zero:
             return False
         if identity in self.unresolved_dispatches:
@@ -930,15 +940,6 @@ class RolloutRecords:
             # An interruption with no recorded eligible cause stops automatic recovery; its history and the
             # failures counted before it stay, and a saved answer is never regenerated.
             return False
-        if payload and self.retry_terminal_timeouts:
-            terminal = is_terminal_failure(
-                {
-                    "_ng_failure_class": payload.failure_class,
-                    "_ng_failure_legacy_class": payload.legacy_failure_class,
-                    "_ng_failure_terminal": payload.terminal,
-                },
-                retry_terminal_timeouts=True,
-            )
         if payload and payload.masked_infrastructure and self.disposition(identity) == "success":
             # Infrastructure masked this result, so it is retried and a later attempt supersedes it.
             return True
@@ -991,7 +992,8 @@ class RolloutRecords:
             ]
             if any(
                 (outcome.failure_class is None and not outcome.masked_infrastructure)
-                or outcome.terminal
+                or self._terminal(outcome)
+                or outcome.allocation_end_protected
                 or outcome.saved_answer
                 or outcome.final_zero
                 or outcome.interruption_cause_unknown
@@ -1011,9 +1013,10 @@ class RolloutRecords:
         return eligible
 
     def allocation_end_charges(self, *, close_diagnostics: bool = False) -> list[dict]:
-        """The failure rows that charge a rollout for each later end of an allocation it was in flight in.
+        """Failure charges for repeated allocation ends or confirmed unanswered route-failure diagnostics.
 
-        A reserved attempt with no saved outcome was in flight when the allocation that made it ended: the writer that
+        A reserved attempt with neither an outcome nor a failure diagnostic was in flight when its allocation ended:
+        the writer that
         loads the Store holds run_lock, so no other allocation of the run is alive. The first such end of an identity
         re-runs for free, and every later one spends an attempt of its cap: the earliest reservation without an
         outcome stays as it is and each later one gets a non-terminal ``rollout_allocation_ended`` failure. Only an
@@ -1128,15 +1131,7 @@ class RolloutRecords:
             for identity in self.expected
             if self.disposition(identity) == "success"
         )
-        # Masked with ``fail`` by its producer: final (recovery stops on it), never measured, so the run is not complete
-        # until the row's data is fixed or dropped. The kinds tell the benchmark owner what to fix.
-        masked_failed = Counter(
-            self.payloads[(identity, self.latest[identity])].masked_failed_kind
-            for identity in self.expected
-            if self.disposition(identity) == "success"
-            and self.payloads[(identity, self.latest[identity])].masked_failed_kind
-        )
-        settled = counts["success"] - masked_retryable - masked_exhausted - masked_failed.total() + final_zeros
+        settled = counts["success"] - masked_retryable - masked_exhausted + final_zeros
         # Rollouts with no final result: a resume still runs them, or nothing has run for them yet. Final failures
         # (terminal, at their attempt cap, or ``stopped_not_retried``, which resume does not run again) are not open,
         # even when they are not settled.
@@ -1151,8 +1146,6 @@ class RolloutRecords:
             "masked": masked,
             "masked_retryable": masked_retryable,
             "masked_exhausted": masked_exhausted,
-            "masked_failed": masked_failed.total(),
-            "masked_failed_kinds": dict(sorted(masked_failed.items())),
             "unscored": unscored,
             "failed": counts["failure"],
             "failed_final": failed_final,
@@ -1180,6 +1173,7 @@ class RolloutRecords:
             "max_rollout_attempts": max_attempts,
             "attempt_extension": self.attempt_extension,
             "retry_terminal_timeouts": self.retry_terminal_timeouts,
+            "settled": settled,
             "completion_fraction": settled / expected if expected else 1.0,
             "complete": settled == expected,
             "reconciled": missing == 0,

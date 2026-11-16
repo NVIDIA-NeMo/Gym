@@ -33,10 +33,12 @@ from nemo_gym.rollouts.rollout_recovery import (
     run_lock,
 )
 from nemo_gym.rollouts.rollout_store import RolloutStore
+from tests.unit_tests.orchestration import test_resume_script
 from tests.unit_tests.orchestration.test_allocation_cut_recovery import _cut_run, _decide, _digests
 from tests.unit_tests.orchestration.test_eval_resubmit import _handle, _resumable_run, _sbatch_env
 from tests.unit_tests.orchestration.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.orchestration.test_eval_resubmit import slurm_bin as slurm_bin
+from tests.unit_tests.orchestration.test_requeued_chain_sentinel import _TERMINAL, _requeued_chain, _sentinel
 from tests.unit_tests.orchestration.test_resume_script import _run_prologue
 
 
@@ -195,6 +197,45 @@ def test_earlier_answer_or_grade_is_never_replaced(tmp_path, earlier):
         assert writer.coverage()["missing"] == 1 and not writer.pending()
 
 
+@pytest.mark.parametrize(
+    "earlier, retry_terminal_timeouts, eligible",
+    [
+        ({"_ng_failure_class": "timeout_exceeded"}, True, True),
+        ({"_ng_failure_class": "timeout_exceeded"}, False, False),
+        ({"_ng_failure_class": "agent_timeout", "_ng_failure_legacy_class": "timeout_exceeded"}, True, True),
+        ({"_ng_failure_class": "agent_timeout"}, True, False),
+        ({"_ng_failure_class": "timeout_exceeded", "failure_outcome_action": "fail"}, True, False),
+        ({"_ng_failure_class": "timeout_exceeded", "failure_outcome_action": "verify"}, True, False),
+        ({"_ng_failure_class": "timeout_exceeded", "failure_outcome_action": "count_as_zero"}, True, False),
+        ({"_ng_failure_class": "timeout_exceeded", "_ng_failure_counts_as_zero": True}, True, False),
+        ({"_ng_failure_class": "timeout_exceeded", "evaluation_completed": True}, True, False),
+        (
+            {
+                "_ng_failure_class": "timeout_exceeded",
+                "response": {"object": "response", "id": "saved", "status": "completed", "output": []},
+            },
+            True,
+            False,
+        ),
+    ],
+)
+def test_earlier_terminal_timeout_obeys_saved_retry_policy(tmp_path, earlier, retry_terminal_timeouts, eligible):
+    output = _run(tmp_path, prior_attempts=1, prior_outcome={"_ng_failure_terminal": True, **earlier})
+    reader = RolloutStore.read(output)
+    reader.manifest.model_copy(update={"retry_terminal_timeouts": retry_terminal_timeouts}).write(
+        manifest_path_for(output)
+    )
+    before = _digests(output)
+    with run_lock(output), _resume(output, approved=True) as writer:
+        assert bool(writer.pending()) is eligible
+        assert writer.coverage()["missing"] == (0 if eligible else 1)
+        if eligible:
+            assert writer.coverage()["counted_failures"] == 2
+            assert writer.coverage()["final_zeros"] == 0
+    if not eligible:
+        assert _digests(output) == before
+
+
 def test_pending_rejudgment_stays_unresolved(tmp_path):
     output = _run(tmp_path)
     reader = RolloutStore.read(output)
@@ -269,6 +310,34 @@ def test_auto_continuation_passes_the_confirmed_manifest_to_the_writer(tmp_path)
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert RolloutStore.read(output).coverage()["counted_failures"] == 1
+
+
+def test_requeue_sentinel_passes_the_confirmed_manifest_to_the_queued_writer(tmp_path, monkeypatch):
+    output = _run(tmp_path, chain=False)
+    _requeued_chain(tmp_path, _TERMINAL, inventory=False)
+    before = _digests(tmp_path)
+    expected = hashlib.sha256(manifest_path_for(output).read_bytes()).hexdigest()
+    # Capture what sbatch inherits; do not recompute admission in the queued writer.
+    monkeypatch.setattr(
+        test_resume_script,
+        "_FAKE_SBATCH",
+        test_resume_script._FAKE_SBATCH
+        + f'printf "%s\\n" "${{{ENDED_ALLOCATION_MANIFEST_ENV}:-}}" > "$FAKE_LOG_DIR/ended_manifest"\n',
+    )
+
+    result = _sentinel(tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    admission = (tmp_path / "ended_manifest").read_text().strip()
+    assert admission == expected
+    assert _digests(tmp_path) == before  # The sentinel inspects and queues; it does not close diagnostics.
+    monkeypatch.setenv(ENDED_ALLOCATION_MANIFEST_ENV, admission)
+    with run_lock(output), _resume(output) as writer:
+        [retry] = writer.pending()
+        assert (retry["_ng_task_index"], retry["_ng_attempt_index"]) == (1, 1)
+        assert writer.coverage()["counted_failures"] == 1
+        assert writer.coverage()["final_zeros"] == 0
+    assert RolloutStore.read(output).selected("success")[0]["reward"] == 1.0
 
 
 def test_recover_passes_the_confirmed_manifest_to_the_queued_writer(tmp_path, slurm_bin, monkeypatch):

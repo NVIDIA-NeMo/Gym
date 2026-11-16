@@ -14,4 +14,5 @@ HARNESSES = {
     "copilot": "CopilotAgent",
     "openclaw": "OpenClawAgent",
     "nooa": "NOOAAgent",
+    "crewai": "CrewAIAgent",
 }
