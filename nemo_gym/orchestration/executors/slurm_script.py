@@ -1126,6 +1126,7 @@ def build_sbatch_script(
     policy_type = config.driver.policy_model_type
     extra_flags = [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []
     driver_env = dict(config.driver.env)
+    driver_env["NEMO_GYM_BENCH_DIR"] = str(remote_bench_dir)
     if instrumented:
         driver_env = {
             **driver_telemetry_env(

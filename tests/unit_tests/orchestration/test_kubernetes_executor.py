@@ -456,6 +456,36 @@ def test_benchmark_command_is_forwarded_to_the_driver(tmp_path):
     assert "GYM_CMD" not in driver_script
 
 
+def test_structured_benchmark_gets_bench_dir_env_var(tmp_path):
+    from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
+
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {"cluster": {"type": "kubernetes", "namespace": "eng-test", "pvc_name": "workspace"}},
+            "driver": {"container": "gym:latest", "policy_model": "vllm_model", "benchmarks": {"bench_a": {}}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+            "otel": {"enabled": False},
+        }
+    )
+    run_dir = tmp_path / "run"
+
+    job = build_job_manifest(
+        config,
+        "bench_a",
+        config.driver.benchmarks["bench_a"],
+        next(iter(config.compute.values())),
+        run_dir,
+        name="gym-test-bench-a",
+        gym_job_id="gym-job-test",
+        resolved_config="",
+        manifest="",
+    )
+
+    env = {e["name"]: e["value"] for e in job["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["NEMO_GYM_BENCH_DIR"] == str(run_dir)
+
+
 def test_benchmark_command_gets_policy_and_bench_dir_env_vars(tmp_path):
     # driver.policy_model injects policy_base_url/model_name/api_key into benchmark.run *after*
     # construction (see SubmitConfig._resolve_and_validate_placements), so this works even for a

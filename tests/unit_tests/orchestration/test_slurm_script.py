@@ -2034,6 +2034,15 @@ def test_a_command_is_told_where_to_write_and_how_to_reach_the_policy(tmp_path):
     assert "NEMO_GYM_POLICY_API_KEY=dummy" in script
 
 
+def test_a_structured_benchmark_is_told_its_job_directory(tmp_path):
+    bench_dir = tmp_path / "jobs" / "b"
+    config = _command_config(tmp_path, None)
+    benchmark = config.driver.benchmarks["osworld"]
+    assert benchmark.command is None
+    script = build_sbatch_script(config, "osworld", benchmark, config.compute["hsg"], bench_dir)
+    assert f"NEMO_GYM_BENCH_DIR={bench_dir}" in script
+
+
 def test_a_command_keeps_the_driver_env_the_config_declared(tmp_path):
     script = _render_command(tmp_path, "harness", env={"AWS_ACCESS_KEY_ID": "lit:AKIAFAKE"})
 
