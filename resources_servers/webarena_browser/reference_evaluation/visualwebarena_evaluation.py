@@ -729,6 +729,11 @@ def _score_program_html_snapshot_records(
         }
         if strict and not _score_program_html_required(strict, full_value, judge_log_path):
             continue
+        # Line and token deltas can omit retained negation or other context.
+        # Every success must first satisfy the complete observed target.
+        full_score = _score_program_html_required(required, full_value, judge_log_path)
+        if not full_score:
+            continue
         before_score = _score_program_html_required(required, before_value, judge_log_path)
         delta_value = str(record.get("delta_value") or "").strip()
         if delta_value:
@@ -736,19 +741,11 @@ def _score_program_html_snapshot_records(
             semantic = {kind: value for kind, value in required.items() if kind in {"must_include", "fuzzy_match"}}
             if fresh_value and semantic:
                 fresh_score = _score_program_html_required(semantic, fresh_value, judge_log_path)
-                # Novel fragments establish freshness; the observed added
-                # text must also satisfy the matcher without token removal.
-                if fresh_score:
-                    observed_score = (
-                        fresh_score
-                        if fresh_value == delta_value
-                        else _score_program_html_required(semantic, delta_value, judge_log_path)
-                    )
-                    score = max(score, min(fresh_score, observed_score))
+                # Fragments establish freshness, never semantic truth alone.
+                score = max(score, min(fresh_score, full_score))
 
         # A confirmed empty target/absence can satisfy a deletion criterion.
         # Require improvement over the baseline, including for empty strings.
-        full_score = _score_program_html_required(required, full_value, judge_log_path)
         if full_score > before_score:
             score = max(score, full_score)
     return score

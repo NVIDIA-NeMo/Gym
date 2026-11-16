@@ -153,3 +153,8 @@ The [observed-value repair](validation-2026-11-16-exact-match.md) fixes task 568
 exact-format regression: freshness cannot trim an invalid observed comment into
 a passing answer. It retains all 60 before/after cases and the separate strict
 format model smoke.
+
+The [complete semantic-context follow-up](validation-2026-11-16-semantic-context.md)
+requires the full observed target to pass before freshness can earn credit.
+It retains all 30 new regression comparisons and every real-model semantic
+probe, including qualification failures and a native partial-equivalence miss.
