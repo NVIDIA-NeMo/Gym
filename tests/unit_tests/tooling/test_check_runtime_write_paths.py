@@ -115,6 +115,7 @@ def test_skips_conftest_test_modules_and_hidden_folders(tmp_path: Path) -> None:
     _write(tmp_path, "resources_servers/demo/test_app.py", cwd_call)
     _write(tmp_path, "resources_servers/demo/.venv/lib/site.py", cwd_call)
     _write(tmp_path, "resources_servers/demo/.cache/x.py", cwd_call)
+    _write(tmp_path, "resources_servers/demo/.hidden.py", cwd_call)
 
     assert check.scan(tmp_path) == []
 
