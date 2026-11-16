@@ -18,5 +18,19 @@ def prepare() -> Path:
     return jsonl_path
 
 
+def is_prepared_data_current(fpath: str | Path) -> bool:
+    """Whether a cached JSONL can be reused: it exists and the pinned ripgrep the agent needs is in place."""
+
+    from resources_servers.deepswe.prepare import ensure_ripgrep
+
+    if not Path(fpath).is_file():
+        return False
+    try:
+        ensure_ripgrep(allow_download=False)
+    except FileNotFoundError:
+        return False
+    return True
+
+
 if __name__ == "__main__":
     print(prepare())

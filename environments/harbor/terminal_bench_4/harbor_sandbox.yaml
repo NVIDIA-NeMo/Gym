@@ -9,8 +9,12 @@
 # that cap adds about 11 s per task between the agent's last command and the trajectory write
 # (parity trajectories: 15.4 s median against 4.6 s with this benchmark's own server, which polls at
 # the provider defaults below). Keep this overlay to the cadence; every other deployment setting
-# stays in the shipped block.
+# stays in the shipped block, apart from the S3 opt-out below.
 sandbox:
+  default_metadata:
+    # Leave out the cell's shared read-only S3 bucket (/mnt/s3-data, data unrelated to the benchmark): agents
+    # search it, and the 4.1 distributed-dedup verifier stops on its read errors. A GPU block needs the same key.
+    nemo.nvidia.com/s3-hostpath: 'false'
   opensandbox:
     operations:
       background_poll_initial_s: 0.25

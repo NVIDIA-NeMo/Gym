@@ -2,7 +2,7 @@
 
 The 66 Terminal Bench 4 tasks also run as plain Harbor task folders through the generic `harbor` environment
 server, without the `terminal_bench_4` benchmark's own server. The dataset comes from Harbor's package store,
-pinned by tag (`@4.0.0`); the pull records each task's content hash in `manifest.toml` and refuses a task
+pinned by tag (`@4.1.0`); the pull records each task's content hash in `manifest.toml` and refuses a task
 folder that no longer matches it. The `terminal_bench_4/miniswe` benchmark runs this entry with mini-SWE at the Artificial
 Analysis settings (`gym eval run --benchmark terminal_bench_4/miniswe`; see `benchmarks/terminal_bench_4/README.md`).
 
@@ -15,7 +15,8 @@ gym eval run terminal_bench_4 --agent mini_swe_agent/mini_swe_agent_sandboxed --
   --model-type openai_model --model <model> --model-url <url>
 ```
 
-`dataset.toml` here declares the dataset's source, `harbor:terminal-bench/terminal-bench@4.0.0`. The pull fetches
+`dataset.toml` here declares the dataset's source, `harbor:terminal-bench/terminal-bench@4.1.0` (Terminal-Bench 4.1;
+it named 4.0.0 before the 4.1 update, the same as `benchmarks/terminal_bench_4/manifest.json`). The pull fetches
 it into this folder (the 66 task folders and `manifest.toml` are gitignored beside this README), a pull of that
 reference itself lands here too, and the two commands above resolve the entry name to this folder; the
 `harbor:...` reference still works as a target and fetches into the same place. A checkout that fetched the reference
@@ -31,7 +32,9 @@ folder, and pull again.
 `harbor_sandbox.yaml` overlays the shipped OpenSandbox block with the status-poll cadence the legacy
 benchmark's server runs at (0.25 s backing off to 2 s). The shipped cap of 30 s is sized for about 1,500
 concurrent SWE-bench samples and adds about 11 s per TB4 task between the agent's last command and the
-trajectory write.
+trajectory write. It also sets `nemo.nvidia.com/s3-hostpath: 'false'` in the block's `default_metadata`, so
+the agent and verifier sandboxes leave out the cell's shared read-only bucket at `/mnt/s3-data`, as the legacy
+benchmark's server does; a `sandbox_gpu` block for the H100 tasks needs the same key.
 
 Every fetch keeps each task folder whose content hash still matches and refuses one that was edited, so the
 model run reuses the validated tasks. `gym dataset validate` runs every reference

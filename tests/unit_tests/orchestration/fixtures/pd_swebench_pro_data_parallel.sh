@@ -22,7 +22,7 @@ export GYM_POOL_PREFILL_NODES="$(IFS=,; echo "${gym_nodes[*]:0:4}")"
 export GYM_POOL_DECODE_NODES="$(IFS=,; echo "${gym_nodes[*]:4:6}")"
 
 # service: otel_collector
-env OTEL_TOKEN=${OTEL_TOKEN} SLURM_JOB_ID=${SLURM_JOB_ID} srun --overlap --nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1 --output=logs/otel_collector-$SLURM_JOB_ID.log otelcol-contrib --config /jobs/swebench_pro/otel/collector.yaml &
+env OTEL_TOKEN=${OTEL_TOKEN} SLURM_JOB_ID=${SLURM_JOB_ID} srun --overlap --nodelist="${gym_nodes[0]}" --nodes=1 --ntasks=1 --output=logs/otel_collector-$SLURM_JOB_ID.log sh -c 'src=$(command -v otelcol-contrib) || { echo "OTel collector binary not found: "otelcol-contrib >&2; exit 127; }; dir=$(mktemp -d "/tmp/gym-otel-$SLURM_JOB_ID.XXXXXX") && cp "$src" "$dir"/otelcol-contrib || exit 1; export GYM_OTEL_LOCAL_DIR="$dir"; trap "kill -TERM \$pid 2>/dev/null" TERM INT; "$dir"/otelcol-contrib --config /jobs/swebench_pro/otel/collector.yaml & pid=$!; wait $pid; rc=$?; while kill -0 $pid 2>/dev/null; do wait $pid; rc=$?; done; trap "" TERM INT; for s in metrics traces logs; do if [ -e "$dir/$s.jsonl" ]; then cat "$dir/$s.jsonl" >> /jobs/swebench_pro/otel/"$s.jsonl" && rm -f "$dir/$s.jsonl"; fi; done; rm -f "$dir"/otelcol-contrib; rmdir "$dir" 2>/dev/null; exit $rc' &
 OTEL_COLLECTOR_PID=$!
 
 # service: policy-prefill
@@ -181,7 +181,7 @@ _gym_run_driver() {
 _gym_run_driver
 DRIVER_RC=$?
 sleep 20
-pkill -TERM -u "$USER" -f -- '^otelcol\-contrib --config /jobs/swebench_pro/otel/collector\.yaml' || true
-for _i in $(seq 1 30); do kill -0 $OTEL_COLLECTOR_PID 2>/dev/null || break; sleep 1; done
+pkill -TERM -u "$USER" -f -- '^/tmp/gym\-otel\-'"$SLURM_JOB_ID"'\.[^/]+/otelcol\-contrib --config /jobs/swebench_pro/otel/collector\.yaml' || true
+for _i in $(seq 1 120); do kill -0 $OTEL_COLLECTOR_PID 2>/dev/null || break; sleep 1; done
 kill -TERM $OTEL_COLLECTOR_PID 2>/dev/null || true
 exit $DRIVER_RC
