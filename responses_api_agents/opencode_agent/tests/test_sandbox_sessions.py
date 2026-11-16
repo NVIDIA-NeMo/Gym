@@ -1116,6 +1116,22 @@ def test_step_limit_marks_the_response(setup, steps, model_calls, marked):
     assert body["metadata"].get("harness_step_limit_reached") == ("true" if marked else None)
 
 
+@pytest.mark.parametrize(("configured", "max_steps", "marked"), [(None, 3, True), (9, 3, True), (2, 4, False)])
+def test_max_steps_is_the_step_limit_the_response_reports(setup, configured, max_steps, marked):
+    """max_steps replaces a configured agent.build.steps in the launched config and in the step-limit check."""
+    agent, sandbox = setup
+    agent.config.opencode_config = {"agent": {"build": {"steps": configured}}} if configured is not None else {}
+    agent.config.max_steps = max_steps
+    sandbox.events = step_events(3)
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        config = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])
+    assert config["agent"]["build"]["steps"] == max_steps
+    assert result.json()["metadata"].get("harness_step_limit_reached") == ("true" if marked else None)
+
+
 def test_step_limit_counts_only_the_last_prompt():
     from responses_api_agents.opencode_agent.app import reached_step_limit
 
