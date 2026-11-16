@@ -147,6 +147,15 @@ def _worker(payload: _WorkerInput) -> RolloutDigest:
     return evaluate_record(record, payload.ignored_checks, line=payload.line, parse_error=parse_error)
 
 
+def _lacks_evidence_for_unparsed_tool_call(call: dict[str, Any]) -> bool:
+    """A call that cannot show whether tool markup leaked into its answer: its request is missing, or it offered
+    tools and its response is missing. Failed attempts and length refusals have no answer to inspect."""
+    if _is_failed_attempt(call) or _is_length_refusal(call):
+        return False
+    request = call.get("request")
+    return not isinstance(request, dict) or bool(request.get("tools") and not isinstance(call.get("response"), dict))
+
+
 def evaluate_record(
     record: dict[str, Any],
     ignored_checks: frozenset[str],
@@ -257,16 +266,8 @@ def evaluate_record(
         ):
             unobserved.append(spec.id)
         if spec.id == "model_call_unparsed_tool_call" and any(
-            not _is_failed_attempt(call)
-            and not _is_length_refusal(call)
-            and (
-                not isinstance(call.get("request"), dict)
-                or (call["request"].get("tools") and not isinstance(call.get("response"), dict))
-            )
-            for call in bindings.matched_calls
+            _lacks_evidence_for_unparsed_tool_call(call) for call in bindings.matched_calls
         ):
-            # A call without its request, or a tool-offering call without its response, cannot show whether tool
-            # markup leaked. Missing evidence is not a clean result; a fully observed call can still prove a leak.
             unobserved.append(spec.id)
         try:
             findings.extend(_ROLLOUT_CHECKS[spec.id](record, trajectory, bindings, subject))

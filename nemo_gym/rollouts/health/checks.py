@@ -950,10 +950,10 @@ _TOOL_CALL_MARKUP = ("<tool_call>", "<function=", "[TOOL_CALLS]", "<|python_tag|
 # A structured call in a Responses output: an item of these types means the serving parser did its job. Outputs,
 # compaction and tool-definition carriers (mcp_list_tools) are not calls.
 _STRUCTURED_CALL_TYPES = (_AGENT_TOOL_CALL_TYPES - {"mcp_list_tools"}) | {
-    "apply_patch_call",
-    "shell_call",
-    "tool_search_call",
-    "program",
+    "apply_patch_call",  # the built-in patch tool
+    "shell_call",  # the built-in shell tool (``local_shell_call`` is in the shared set)
+    "tool_search_call",  # a search over deferred tool definitions
+    "program",  # a model-written program that calls tools (programmatic tool calling)
 }
 # Gym's model servers move a reasoning parser's output into Chat content as leading <think> blocks
 # (ChatCompletionsConverter._wrap_reasoning_in_think_tags). Only that leading wrapping is reasoning; a tag later in
