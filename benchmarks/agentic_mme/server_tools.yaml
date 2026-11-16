@@ -4,7 +4,10 @@
 # Each episode's seed loads the task images into a workspace on the resources server. simple_agent calls the tools
 # over HTTP, and each tool reply carries its new image under tool_output_images, which simple_agent shows the model in
 # a user message after the turn's tool outputs, as the Agentic-MME agent does. The prompt and tools are the same as in
-# config.yaml, so its scores should match that track. Web search is off.
+# config.yaml, so its scores should match that track on rollouts without a context overflow. A context overflow scores
+# 0 in config.yaml, but simple_agent reports it as a plain HTTP 400, which this benchmark's outcome policy fails
+# ungraded (configs/agentic_mme.yaml). So compare the tracks on rollouts without one, and report each track's number of
+# failed rollouts with its score. Web search is off.
 #
 # prepare.py writes the images under benchmarks/agentic_mme/data/images; for the example rows set
 # AGENTIC_MME_IMAGE_ROOT=resources_servers/agentic_mme/data/example_images.
@@ -51,3 +54,8 @@ agentic_mme_environment_server:
         name: agentic_mme_server_tools_agent
       resources_tool_transports:
         - direct_http
+      # Each admitted episode holds an image workspace on the resources server, up to max_total_image_pixels (64 MP,
+      # about 192 MB). Admission bounds how many exist at once, as the Agentic-MME agent's max_concurrent_rollouts does
+      # in config.yaml. Admission comes before the episode deadline starts.
+      max_concurrent_episodes: 32
+      queue_timeout_seconds: 86400

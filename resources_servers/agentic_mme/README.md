@@ -155,12 +155,13 @@ agentic_mme_serpapi_api_key and agentic_mme_jina_api_key (the Jina key may be an
 empty string). This explicitly allows images to be sent to SerpAPI. Only use it
 with data approved for that service.
 
-For deterministic offline retrieval, set retrieval.mode=replay and put an ordered
-retrieval_replay list on each input row; entries contain tool_name, arguments and
-output from a previous tool_trace, one per retrieval call, including calls rejected
-before the provider (their recorded error is replayed). Replay must match tool and
-arguments, as sent or once normalized. Mismatches fail visibly and never fall back to
-the network.
+For repeatable retrieval, use the shared cache (below) with `cache_write: false`. Replay works only on the
+Agentic-MME agent's own `/run`, not under the Environment Server, which every config here uses: an agent session
+receives only the model request, not the task row's replay list, so the agent refuses `retrieval.mode=replay` there.
+On `/run`, set `retrieval.mode=replay` and put an ordered `retrieval_replay` list on each input row; entries contain
+tool_name, arguments and output from a previous tool_trace, one per retrieval call, including calls rejected before the
+provider (their recorded error is replayed). Replay must match tool and arguments, as sent or once normalized.
+Mismatches fail visibly and never fall back to the network.
 
 ### OpenCode in a lent sandbox
 
@@ -181,9 +182,11 @@ set `sandbox_network_access: inherit`. A rule opens every port of an allowed hos
 server (it returns the whole config, keys included), the judge, the agent, the Environment Server and (except with
 server tools) this server the address `127.0.0.1`; a server's own host also wins over a launcher's `default_host`.
 NeMo RL sets the head server's address itself, which wins over the recipe, so under NeMo RL the head server stays on
-the node's address. The rules block raw IP addresses only on an OpenSandbox server that
-enforces egress at the IP layer (`dns+nft`). The Environment Server admits 32 episodes at a time, the agent's
-concurrency, because each seed starts a sandbox.
+the node's address, and OpenCode's shell in the sandbox can read the whole config, keys included. Do not run
+`opencode.yaml` under NeMo RL with real keys until the head server stops returning secrets.
+`opencode_server_tools.yaml` turns OpenCode's shell off, so it is not affected. The rules block raw IP addresses only
+on an OpenSandbox server that enforces egress at the IP layer (`dns+nft`). The Environment Server admits 32 episodes at
+a time, the agent's concurrency, because each seed starts a sandbox.
 
 Both need a sandbox image built from `sandbox_image/Dockerfile` (`AGENTIC_MME_SANDBOX_IMAGE`) and the OpenSandbox
 provider (`OPENSANDBOX_DOMAIN`, `OPENSANDBOX_API_KEY`). The image holds OpenCode and OpenCode's plugin dependencies,

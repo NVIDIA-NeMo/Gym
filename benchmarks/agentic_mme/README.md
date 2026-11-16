@@ -104,5 +104,6 @@ benchmark-contamination guard.
 
 - Task-only accuracy: process (S/V) scoring is not implemented, so results are not comparable to the paper's Track A.
 - Judge-based reward: scores depend on the judge model; `string_match_reward` gives a judge-free reference.
-- Retrieval results change over time; use `retrieval.mode: replay` or the shared cache for repeatable runs.
+- Retrieval results change over time; use the shared cache with `cache_write: false` for repeatable runs.
+  `retrieval.mode: replay` works only on the Agentic-MME agent's own `/run`, which no config here uses.
 - `experimental: true`: no published result has been reproduced with this integration yet.
