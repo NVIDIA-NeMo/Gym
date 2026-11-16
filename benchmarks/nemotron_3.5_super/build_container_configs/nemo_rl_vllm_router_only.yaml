@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Reuse the SOTA build stages and Slurm settings in NeMo-RL's worker environment.
+config_paths:
+  - benchmarks/nemotron_3.5_super/build_container_configs/current_sota.yaml
+
+# Need to override these
+input_container_fpath: null
+output_container_fpath: null
+
+python_executable: /opt/ray_venvs/nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker/bin/python
+
+vllm_router:
+  branch: bxyu/nemo-rl-pd
+
+# Use the output as CONTAINER in the RL launcher. Warm up and serve through RL:
+# Gym's serving stages would launch outside the vLLM actor environment.
+warmup: null
+run: null
