@@ -17,18 +17,19 @@
 
 Files that many small writes produce, such as per-rollout evidence, stay on the driver node's own disk while the
 driver runs. The batch script creates `<base_dir>/gym-node-local-$SLURM_JOB_ID` on the driver's node, optionally
-extracts the newest earlier archive into it, and mounts it into the driver container at a path that is the same for
-every job of the run, so absolute paths the run saves stay valid in its later jobs. When the driver step ends, the
-directory is written to `<job dir>/node-local/<SLURM_JOB_ID>.tar.gz` (one file, renamed into place once complete) and
-removed. With exports, the archive is written as soon as the evaluation has succeeded instead, and the exports wait for
-it, so an exporter of the job dir finds it. With restore each archive holds the whole directory, so only it and the
-archive it was restored from are kept.
+extracts every earlier archive of the run into it, and mounts it into the driver container at a path that is the same
+for every job of the run, so absolute paths the run saves stay valid in its later jobs. When the driver step ends, the
+files the job added or changed are written to `<job dir>/node-local/<SLURM_JOB_ID>.<SLURM_RESTART_COUNT>.tar.gz` (one
+file, renamed into place once complete) and the directory is removed. With exports, the archive is written as soon as
+the evaluation has succeeded instead, and the exports wait for it, so an exporter of the job dir finds it. Each archive
+holds one job attempt's files, so none is ever removed, and a restore extracts them all in the order the jobs ran.
 """
 
 import shlex
 from pathlib import Path
 
 from nemo_gym.orchestration.api import NodeLocalConfig
+from nemo_gym.orchestration.executors.resume_script import JOB_CHAIN_NAME
 from nemo_gym.orchestration.executors.script_templates import NODE_LOCAL_ARCHIVED_ENV
 
 
@@ -41,42 +42,70 @@ ARCHIVES_DIRNAME = "node-local"
 # Inside the driver container: one path per run and benchmark, the same in every job of the run.
 _CONTAINER_ROOT = "/tmp/gym-node-local"
 
-# Run on the driver's node as `bash -c SCRIPT _ DIR ARCHIVES RESTORE`. `DIR.restored-from` names the archive it
-# extracted, for the archive step's pruning.
+# Run on the driver's node as `bash -c SCRIPT _ DIR ARCHIVES CHAIN JOB_ID RESTORE`. Archives are named
+# `<job id>.<restart count>.tar.gz`: a requeued attempt keeps its job id. `DIR.stamp` marks the end of the restore.
 _RESTORE_SCRIPT = """\
-dir=$1 archives=$2
-rm -f -- "$dir.restored-from"
-rm -rf -- "$dir" && mkdir -p -m 700 -- "$dir" || { echo "ERROR: cannot create the node-local dir $dir"; exit 1; }
-[ "$3" = 1 ] || exit 0
-found=0
-for name in $(ls -1 "$archives" 2>/dev/null | grep -xE '[0-9]{1,15}[.]tar[.]gz' | sort -rn); do
-    found=1
-    if tar -xzf "$archives/$name" -C "$dir"; then
-        echo "Restored the node-local dir from $archives/$name"
-        echo "$name" > "$dir.restored-from"
-        exit 0
-    fi
-    echo "WARNING: cannot extract $archives/$name; trying an older archive"
-    rm -rf -- "$dir" && mkdir -p -m 700 -- "$dir" || exit 1
-done
-# Saved results may name files in those archives: an empty dir would publish a run without them.
-if [ "$found" = 1 ]; then
-    echo "ERROR: no node-local archive in $archives could be restored; the driver does not start"
+set -f
+IFS=$'\\n'
+dir=$1 archives=$2 chain=$3 job=$4 restore=$5
+# Saved rows may name files in any archive of the run: a job that cannot restore them all does not start the driver.
+fail() {
+    echo "ERROR: $1; the driver does not start, since saved rows may name files in the run's node-local archives."
+    rm -rf -- "$dir"
     exit 1
+}
+rm -rf -- "$dir" "$dir.stamp" "$dir.list" && mkdir -p -m 700 -- "$dir" || { echo "ERROR: cannot create the node-local dir $dir"; exit 1; }
+names=""
+# Only a missing dir means that no job has archived yet.
+if [ -e "$archives" ] && ! names=$(ls -1A -- "$archives"); then
+    [ "$restore" != 1 ] || fail "cannot list $archives"
 fi
-echo "No earlier archive in $archives: the node-local dir starts empty"
+# Left by a job cut off mid-archive: no two jobs of a run are live at once.
+for name in $names; do
+    case $name in .*.tar.gz.tmp) rm -f -- "$archives/$name" && echo "Removed the partial archive $archives/$name" ;; esac
+done
+if [ "$restore" = 1 ]; then
+    ids=""
+    if [ -e "$chain" ]; then ids=$(cat -- "$chain") || fail "cannot read the job chain $chain"; fi
+    found=$(printf '%s\\n' $names | grep -xE '[0-9]{1,15}[.][0-9]{1,6}[.]tar[.]gz' | sort -t. -k1,1n -k2,2n)
+    restored=0
+    # The job chain's order, then archives it does not name (a run without a chain) by job id; attempts in order.
+    for id in $({ printf '%s\\n' $ids; printf '%s\\n' $found | cut -d. -f1; } | awk '/^[0-9]+$/ && !seen[$0]++'); do
+        mine=$(printf '%s\\n' $found | grep "^$id[.]")
+        [ -n "$mine" ] || [ "$id" = "$job" ] || echo "NOTE: job $id of the run left no node-local archive: any files it wrote there are lost"
+        for name in $mine; do
+            if ! tar -xzf "$archives/$name" -C "$dir"; then
+                fail "cannot extract $archives/$name (repair or remove it, or set node_local.restore to false)"
+            fi
+            echo "Restored $archives/$name"
+            restored=$((restored + 1))
+        done
+    done
+    [ "$restored" -gt 0 ] || echo "No earlier archive in $archives: the node-local dir starts empty"
+fi
+# Extraction set the ctime of every restored file before this: the archive step takes what changes after it.
+touch -- "$dir.stamp" || { rm -rf -- "$dir"; echo "ERROR: cannot create $dir.stamp"; exit 1; }
 """
 
-# Run on the driver's node as `bash -c SCRIPT _ DIR ARCHIVES JOB_ID TIMEOUT_SECONDS RESTORE`.
+# Run on the driver's node as `bash -c SCRIPT _ DIR ARCHIVES NAME TIMEOUT_SECONDS`.
 _ARCHIVE_SCRIPT = """\
 # Ignored by tar too: the TERM Slurm sends a job at its end must not cut the archive short.
 trap '' TERM
-dir=$1 archives=$2 job=$3 limit=$4 restore=$5
+dir=$1 archives=$2 name=$3 limit=$4
 [ -d "$dir" ] || { echo "WARNING: no node-local dir $dir to archive"; exit 0; }
-tmp="$archives/.$job.tar.gz.tmp"
+tmp="$archives/.$name.tar.gz.tmp"
+stamp=""
+[ ! -e "$dir.stamp" ] || stamp="$dir.stamp"
 rc=2
 if mkdir -p -- "$archives"; then
-    tar -czf "$tmp" -C "$dir" . &
+    # Only what this job added or changed (all of it without the stamp); a failed listing fails the archive.
+    (
+        cd -- "$dir" && find . ${stamp:+-cnewer "$stamp"} -print0 > "$dir.list" || exit 2
+        # GNU tar fails on a listed file removed before it reads it, such as a temporary file; BSD tar warns.
+        ignore=""
+        if tar --version 2>/dev/null | grep -q 'GNU tar'; then ignore=--ignore-failed-read; fi
+        exec tar --null --no-recursion $ignore -czf "$tmp" -T "$dir.list"
+    ) &
     pid=$!
     for _ in $(seq "$limit"); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
     kill -KILL "$pid" 2>/dev/null
@@ -84,19 +113,8 @@ if mkdir -p -- "$archives"; then
     rc=$?
 fi
 # GNU tar exits 1 when a file changed while it was read: the archive is still complete.
-if [ "$rc" -le 1 ] && mv -f -- "$tmp" "$archives/$job.tar.gz"; then
-    echo "Archived the node-local dir to $archives/$job.tar.gz"
-    # With restore each archive holds the whole dir: of the older ones keep only the one this job restored from,
-    # a known-good fallback (without a record, the newest older one).
-    if [ "$restore" = 1 ]; then
-        keep=$(cat "$dir.restored-from" 2>/dev/null)
-        for name in $(ls -1 "$archives" | grep -xE '[0-9]{1,15}[.]tar[.]gz' | sort -rn); do
-            (( 10#${name%%.*} < 10#$job )) || continue
-            [ -n "$keep" ] || keep=$name
-            [ "$name" != "$keep" ] || continue
-            rm -f -- "$archives/$name" && echo "Removed the superseded archive $archives/$name"
-        done
-    fi
+if [ "$rc" -le 1 ] && mv -f -- "$tmp" "$archives/$name.tar.gz"; then
+    echo "Archived the node-local files this job added or changed to $archives/$name.tar.gz"
 else
     rm -f -- "$tmp"
     echo "WARNING: archiving the node-local dir failed (exit $rc); its files from this job are lost"
@@ -104,7 +122,7 @@ fi
 """
 
 # Run on the driver's node once the driver step has ended: exports may still read the dir until then.
-_CLEANUP_SCRIPT = 'rm -rf -- "$1" "$1.restored-from"'
+_CLEANUP_SCRIPT = 'rm -rf -- "$1" "$1.stamp" "$1.list"'
 
 _SETUP_TEMPLATE = """\
 # --- Node-local dir, archived into the job dir when the driver step ends ---
@@ -115,7 +133,7 @@ _gym_nl_run() {{ {on_driver_node}bash -c "$1" _gym_node_local "${{@:2}}"; }}
 _gym_nl_archive() {{
     [[ -z "$_gym_nl_done" ]] || return 0
     _gym_nl_done=1
-    _gym_nl_run {archive_script} "$_gym_nl_dir" "$_gym_nl_archives" "$SLURM_JOB_ID" {archive_timeout} {restore}{release}
+    _gym_nl_run {archive_script} "$_gym_nl_dir" "$_gym_nl_archives" "$SLURM_JOB_ID.${{SLURM_RESTART_COUNT:-0}}" {archive_timeout}{release}
 }}
 _gym_nl_cleanup() {{ _gym_nl_run {cleanup_script} "$_gym_nl_dir"; }}
 # Once the evaluation has succeeded, archive before the exports read the job dir.
@@ -125,7 +143,7 @@ _gym_nl_watch() {{
         _gym_nl_archive
     fi
 }}
-_gym_nl_run {restore_script} "$_gym_nl_dir" "$_gym_nl_archives" {restore} || exit $?"""
+_gym_nl_run {restore_script} "$_gym_nl_dir" "$_gym_nl_archives" {chain} "$SLURM_JOB_ID" {restore} || exit $?"""
 
 # Only where the batch shell runs on the driver's node: a step can no longer start once the job is ending.
 _TERM_TRAP = """\
@@ -185,6 +203,7 @@ def render_setup(config: NodeLocalConfig, remote_bench_dir: Path, driver_node_fl
             archive_script=shlex.quote(_ARCHIVE_SCRIPT),
             archive_timeout=config.archive_timeout_seconds,
             restore_script=shlex.quote(_RESTORE_SCRIPT),
+            chain=shlex.quote(str(remote_bench_dir / JOB_CHAIN_NAME)),
             restore=int(config.restore),
             release=f"\n    : > {_archived_barrier(remote_bench_dir)}" if exports else "",
             cleanup_script=shlex.quote(_CLEANUP_SCRIPT),

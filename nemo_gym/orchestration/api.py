@@ -469,13 +469,14 @@ class NodeLocalConfig(_StrictModel):
     """A directory on the driver's node for files that should stay off shared storage.
 
     The driver and the servers it starts find it in `GYM_NODE_LOCAL_DIR`. When the driver step ends, the job writes
-    it into the job dir as one archive, `node-local/<SLURM_JOB_ID>.tar.gz`, and removes it.
+    the files it added or changed into the job dir as one archive,
+    `node-local/<SLURM_JOB_ID>.<SLURM_RESTART_COUNT>.tar.gz`, and removes the directory.
     """
 
     # The host directory each Slurm job gets its own `gym-node-local-<SLURM_JOB_ID>` under. It must be node-local.
     base_dir: str = "/tmp"
-    # Extract the newest earlier archive that extracts before the driver starts; each archive then holds the run's
-    # whole dir, kept with the one it came from. Off suits files nothing reads back: each archive holds one job's.
+    # Extract every earlier archive of the run, in the order its jobs ran, before the driver starts. Off suits files
+    # nothing reads back: each job then starts empty.
     restore: bool = True
     # Bound on writing one archive.
     archive_timeout_seconds: int = Field(default=120, gt=0)

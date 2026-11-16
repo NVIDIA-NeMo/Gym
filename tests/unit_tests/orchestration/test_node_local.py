@@ -173,21 +173,21 @@ def test_the_host_dir_is_unique_to_the_slurm_job_and_archives_land_in_the_job_di
 
 def test_the_dir_is_set_up_before_the_driver_and_archived_after_it():
     script = _script(_config(True))
-    restore = script.index('"$_gym_nl_dir" "$_gym_nl_archives" 1 || exit $?\n')
+    restore = script.index('"$SLURM_JOB_ID" 1 || exit $?\n')
     driver = script.index(_driver_line(script))
     # The dir goes only once the driver step has ended: exports may read it until then.
     after = script.index(
         '\n_gym_run_driver\n_gym_nl_rc=$?\n_gym_nl_archive\n_gym_nl_cleanup\ntrap - TERM\n(exit "$_gym_nl_rc")'
     )
     assert restore < driver < after
-    # The trailing 1: with restore on, the archive step prunes superseded archives.
-    assert '"$_gym_nl_dir" "$_gym_nl_archives" "$SLURM_JOB_ID" 120 1\n' in script
 
 
-def test_restore_can_be_turned_off_and_then_no_archive_is_pruned():
+def test_restore_can_be_turned_off():
     script = _script(_config({"restore": False}))
-    assert '"$_gym_nl_dir" "$_gym_nl_archives" 0 || exit $?\n' in script
-    assert '"$_gym_nl_dir" "$_gym_nl_archives" "$SLURM_JOB_ID" 120 0\n' in script
+    assert (
+        '"$_gym_nl_dir" "$_gym_nl_archives" /jobs/20261116_run/b/.gym_job_chain "$SLURM_JOB_ID" 0 || exit $?\n'
+        in script
+    )
 
 
 def test_a_driver_with_no_service_is_still_watched():
@@ -261,6 +261,7 @@ def _start_job(
     exports: bool = False,
     job_id: str = "11",
     off_batch: bool = False,
+    env: dict[str, str] | None = None,
 ) -> subprocess.Popen:
     """Start the rendered job.sh in its own process group.
 
@@ -296,7 +297,12 @@ def _start_job(
             stderr=subprocess.STDOUT,
             cwd=bench,
             # COPYFILE_DISABLE keeps macOS tar from adding `._` metadata entries to the archives.
-            env={"PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin", "SLURM_JOB_ID": job_id, "COPYFILE_DISABLE": "1"},
+            env={
+                "PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin",
+                "SLURM_JOB_ID": job_id,
+                "COPYFILE_DISABLE": "1",
+                **(env or {}),
+            },
             start_new_session=True,
         )
 
@@ -321,7 +327,7 @@ def _wait_for(path: Path, timeout: float = 30) -> None:
         time.sleep(0.1)
 
 
-def _archive(tmp_path: Path, name: str = "11") -> dict[str, str]:
+def _archive(tmp_path: Path, name: str = "11.0") -> dict[str, str]:
     with tarfile.open(tmp_path / "run" / "b" / "node-local" / f"{name}.tar.gz") as archive:
         return {
             member.name.removeprefix("./"): archive.extractfile(member).read().decode()
@@ -348,21 +354,73 @@ def test_a_driver_that_ends_leaves_one_archive_of_the_dir_and_its_status(tmp_pat
     assert returncode == 7
     assert _archive(tmp_path) == {"ev/1.json": "row1\n"}
     assert not (tmp_path / "host" / "gym-node-local-11").exists()
-    assert [p.name for p in (tmp_path / "run" / "b" / "node-local").iterdir()] == ["11.tar.gz"]
+    assert _archive_names(tmp_path) == ["11.0.tar.gz"]
 
 
-def test_restore_extracts_the_newest_archive_and_the_next_archive_holds_everything(tmp_path):
+def _archive_names(tmp_path: Path) -> list[str]:
+    return sorted(p.name for p in (tmp_path / "run" / "b" / "node-local").iterdir())
+
+
+def test_restore_extracts_every_archive_by_job_id_and_the_new_one_holds_only_what_the_job_changed(tmp_path):
     archives = tmp_path / "run" / "b" / "node-local"
-    # 10 is newer than 9, though it sorts first as text.
-    _write_archive(archives / "9.tar.gz", {"ev/old.json": "stale\n"})
-    _write_archive(archives / "10.tar.gz", {"ev/0.json": "row0\n"})
-    driver = f'cat "$GYM_NODE_LOCAL_DIR/ev/0.json"; test ! -e "$GYM_NODE_LOCAL_DIR/ev/old.json" && {_WRITE_EVIDENCE}'
+    # 10 ran after 9, though it sorts first as text: its version of a.json wins.
+    _write_archive(archives / "9.0.tar.gz", {"ev/a.json": "nine\n", "ev/9.json": "row9\n"})
+    _write_archive(archives / "10.0.tar.gz", {"ev/a.json": "ten\n", "ev/10.json": "row10\n"})
+    driver = (
+        'd="$GYM_NODE_LOCAL_DIR/ev"; [ "$(cat "$d/a.json")" = ten ] && cat "$d/9.json" "$d/10.json" '
+        f'&& echo changed >> "$d/10.json" && {_WRITE_EVIDENCE}'
+    )
 
     returncode = _finish(_start_job(tmp_path, driver=driver))
 
+    output = (tmp_path / "job.out").read_text()
+    assert returncode == 0, output
+    assert output.index("Restored " + str(archives / "9.0.tar.gz")) < output.index(
+        "Restored " + str(archives / "10.0")
+    )
+    # Restored files the job left alone stay out of its archive; the one it changed goes in.
+    assert _archive(tmp_path) == {"ev/1.json": "row1\n", "ev/10.json": "row10\nchanged\n"}
+    assert _archive_names(tmp_path) == ["10.0.tar.gz", "11.0.tar.gz", "9.0.tar.gz"]
+
+
+def test_restore_follows_the_job_chain_then_archives_it_does_not_name(tmp_path):
+    bench = tmp_path / "run" / "b"
+    archives = bench / "node-local"
+    # Job ids wrapped at MaxJobId: 20 ran before 9. 15 left no archive; 5 is outside the chain (a judge-only job).
+    (bench).mkdir(parents=True)
+    (bench / ".gym_job_chain").write_text("20\n15\n9\n11\n")
+    _write_archive(archives / "20.0.tar.gz", {"ev/a.json": "first\n"})
+    _write_archive(archives / "9.0.tar.gz", {"ev/a.json": "second\n"})
+    _write_archive(archives / "5.0.tar.gz", {"ev/judge.json": "judged\n"})
+    driver = 'd="$GYM_NODE_LOCAL_DIR/ev"; [ "$(cat "$d/a.json")" = second ] && cat "$d/judge.json"'
+
+    returncode = _finish(_start_job(tmp_path, driver=driver))
+
+    output = (tmp_path / "job.out").read_text()
+    assert returncode == 0, output
+    assert "judged" in output
+    restored = [line.split("/")[-1] for line in output.splitlines() if line.startswith("Restored ")]
+    assert restored == ["20.0.tar.gz", "9.0.tar.gz", "5.0.tar.gz"]
+    assert "NOTE: job 15 of the run left no node-local archive" in output
+    # The running job is in the chain too, and has no archive yet.
+    assert "job 11 of the run" not in output
+
+
+def test_a_requeued_attempt_restores_its_earlier_attempt_and_keeps_its_archive(tmp_path):
+    archives = tmp_path / "run" / "b" / "node-local"
+    _write_archive(archives / "11.0.tar.gz", {"ev/0.json": "row0\n"})
+
+    returncode = _finish(
+        _start_job(
+            tmp_path,
+            driver=f'cat "$GYM_NODE_LOCAL_DIR/ev/0.json" && {_WRITE_EVIDENCE}',
+            env={"SLURM_RESTART_COUNT": "1"},
+        )
+    )
+
     assert returncode == 0
-    assert "Restored the node-local dir from" in (tmp_path / "job.out").read_text()
-    assert _archive(tmp_path) == {"ev/0.json": "row0\n", "ev/1.json": "row1\n"}
+    assert _archive_names(tmp_path) == ["11.0.tar.gz", "11.1.tar.gz"]
+    assert _archive(tmp_path, "11.1") == {"ev/1.json": "row1\n"}
 
 
 def _truncated_archive(path: Path) -> None:
@@ -371,103 +429,91 @@ def _truncated_archive(path: Path) -> None:
     path.write_bytes(path.read_bytes()[: path.stat().st_size // 2])
 
 
-def test_restore_falls_back_to_an_older_archive_when_the_newest_does_not_extract(tmp_path):
+def test_an_archive_that_does_not_extract_stops_the_job_before_the_driver(tmp_path):
     archives = tmp_path / "run" / "b" / "node-local"
-    _write_archive(archives / "9.tar.gz", {"ev/0.json": "row0\n"})
-    _truncated_archive(archives / "10.tar.gz")
-    driver = 'cat "$GYM_NODE_LOCAL_DIR/ev/0.json"; test ! -e "$GYM_NODE_LOCAL_DIR/ev/partial.json"'
-
-    returncode = _finish(_start_job(tmp_path, driver=driver))
-
-    assert returncode == 0
-    output = (tmp_path / "job.out").read_text()
-    assert "cannot extract" in output and "row0" in output
-
-
-def test_when_no_archive_restores_the_driver_does_not_start(tmp_path):
-    archives = tmp_path / "run" / "b" / "node-local"
-    (archives / "10.tar.gz").parent.mkdir(parents=True)
-    (archives / "10.tar.gz").write_bytes(b"not a tar")
-    _truncated_archive(archives / "9.tar.gz")
+    _write_archive(archives / "9.0.tar.gz", {"ev/0.json": "row0\n"})
+    _truncated_archive(archives / "10.0.tar.gz")
 
     returncode = _finish(_start_job(tmp_path, driver=": > driver-ran"))
 
     assert returncode == 1
-    assert "ERROR: no node-local archive in" in (tmp_path / "job.out").read_text()
+    assert f"ERROR: cannot extract {archives / '10.0.tar.gz'}" in (tmp_path / "job.out").read_text()
     assert not (tmp_path / "run" / "b" / "driver-ran").exists()
-    assert sorted(p.name for p in archives.iterdir()) == ["10.tar.gz", "9.tar.gz"]
+    assert not (tmp_path / "host" / "gym-node-local-11").exists()
+    assert _archive_names(tmp_path) == ["10.0.tar.gz", "9.0.tar.gz"]
 
 
-def test_without_restore_the_dir_starts_empty(tmp_path):
-    _write_archive(tmp_path / "run" / "b" / "node-local" / "10.tar.gz", {"ev/0.json": "row0\n"})
+@pytest.mark.skipif(os.geteuid() == 0, reason="root lists a directory whatever its mode")
+def test_an_archives_dir_that_cannot_be_listed_stops_the_job_before_the_driver(tmp_path):
+    archives = tmp_path / "run" / "b" / "node-local"
+    _write_archive(archives / "10.0.tar.gz", {"ev/0.json": "row0\n"})
+    archives.chmod(0)
+    try:
+        returncode = _finish(_start_job(tmp_path, driver=": > driver-ran"))
+    finally:
+        archives.chmod(0o755)
 
-    returncode = _finish(
-        _start_job(tmp_path, driver='test -z "$(ls -A "$GYM_NODE_LOCAL_DIR")"', node_local={"restore": False})
-    )
+    assert returncode == 1
+    assert f"ERROR: cannot list {archives}" in (tmp_path / "job.out").read_text()
+    assert not (tmp_path / "run" / "b" / "driver-ran").exists()
+
+
+def test_without_an_archives_dir_the_dir_starts_empty(tmp_path):
+    returncode = _finish(_start_job(tmp_path, driver='test -z "$(ls -A "$GYM_NODE_LOCAL_DIR")"'))
 
     assert returncode == 0
-    assert _archive(tmp_path) == {}
+    assert "No earlier archive in" in (tmp_path / "job.out").read_text()
 
 
-def _archive_names(tmp_path: Path) -> list[str]:
-    return sorted(p.name for p in (tmp_path / "run" / "b" / "node-local").iterdir())
-
-
-def test_with_restore_only_the_new_archive_and_the_one_before_it_are_kept(tmp_path):
+def test_restore_removes_the_partial_archive_of_a_job_cut_off_mid_archive(tmp_path):
     archives = tmp_path / "run" / "b" / "node-local"
-    for job in (8, 9, 10):
-        _write_archive(archives / f"{job}.tar.gz", {f"ev/{job}.json": "row\n"})
+    _write_archive(archives / "10.0.tar.gz", {"ev/0.json": "row0\n"})
+    (archives / ".10.0.tar.gz.tmp").write_bytes(b"cut off")
 
     returncode = _finish(_start_job(tmp_path, driver=_WRITE_EVIDENCE))
 
     assert returncode == 0
-    # 11 holds everything 10 held plus this job's files; 10 stays as the fallback a restore would use.
-    assert _archive_names(tmp_path) == ["10.tar.gz", "11.tar.gz"]
-    assert _archive(tmp_path) == {"ev/10.json": "row\n", "ev/1.json": "row1\n"}
+    assert "Removed the partial archive" in (tmp_path / "job.out").read_text()
+    assert _archive_names(tmp_path) == ["10.0.tar.gz", "11.0.tar.gz"]
 
 
-def test_pruning_keeps_the_archive_the_job_restored_from_not_a_newer_broken_one(tmp_path):
-    archives = tmp_path / "run" / "b" / "node-local"
-    _write_archive(archives / "9.tar.gz", {"ev/0.json": "row0\n"})
-    (archives / "10.tar.gz").write_bytes(b"not a tar")
-
-    assert _finish(_start_job(tmp_path, driver=_WRITE_EVIDENCE)) == 0
-
-    # Job 11 restored from 9, so 9 stays as the known-good fallback and the broken 10 goes.
-    assert _archive_names(tmp_path) == ["11.tar.gz", "9.tar.gz"]
-    (archives / "11.tar.gz").write_bytes(b"not a tar")
-
-    returncode = _finish(_start_job(tmp_path, driver='cat "$GYM_NODE_LOCAL_DIR/ev/0.json"', job_id="12"))
-
-    assert returncode == 0
-    assert "Restored the node-local dir from" in (tmp_path / "job.out").read_text()
-    assert "row0" in (tmp_path / "job.out").read_text()
-    assert _archive_names(tmp_path) == ["12.tar.gz", "9.tar.gz"]
-
-
-def test_without_restore_every_archive_is_kept(tmp_path):
+def test_without_restore_the_dir_starts_empty_and_every_archive_is_kept(tmp_path):
     archives = tmp_path / "run" / "b" / "node-local"
     for job in (8, 9, 10):
-        _write_archive(archives / f"{job}.tar.gz", {f"ev/{job}.json": "row\n"})
+        _write_archive(archives / f"{job}.0.tar.gz", {f"ev/{job}.json": "row\n"})
+    driver = f'test -z "$(ls -A "$GYM_NODE_LOCAL_DIR")" && {_WRITE_EVIDENCE}'
 
-    returncode = _finish(_start_job(tmp_path, driver=_WRITE_EVIDENCE, node_local={"restore": False}))
+    returncode = _finish(_start_job(tmp_path, driver=driver, node_local={"restore": False}))
 
     assert returncode == 0
-    assert _archive_names(tmp_path) == ["10.tar.gz", "11.tar.gz", "8.tar.gz", "9.tar.gz"]
+    assert _archive(tmp_path) == {"ev/1.json": "row1\n"}
+    assert _archive_names(tmp_path) == ["10.0.tar.gz", "11.0.tar.gz", "8.0.tar.gz", "9.0.tar.gz"]
 
 
-def test_a_failed_archive_prunes_nothing(tmp_path):
+# Only writing an archive hangs; the restore still extracts.
+_HANGING_TAR = 'case "$*" in *-czf*) exec sleep 600 ;; *) exec /usr/bin/tar "$@" ;; esac'
+
+
+def test_a_failed_archive_leaves_no_partial_file_and_every_earlier_archive(tmp_path):
     archives = tmp_path / "run" / "b" / "node-local"
-    for job in (8, 9, 10):
-        _write_archive(archives / f"{job}.tar.gz", {f"ev/{job}.json": "row\n"})
-    # Only writing an archive hangs; the restore still extracts.
-    hanging_tar = 'case "$1" in -czf) exec sleep 600 ;; *) exec /usr/bin/tar "$@" ;; esac'
+    for job in (9, 10):
+        _write_archive(archives / f"{job}.0.tar.gz", {f"ev/{job}.json": "row\n"})
 
-    returncode = _finish(_start_job(tmp_path, driver=_WRITE_EVIDENCE, fakes={"tar": hanging_tar}))
+    returncode = _finish(_start_job(tmp_path, driver=_WRITE_EVIDENCE, fakes={"tar": _HANGING_TAR}))
 
     assert returncode == 0
     assert "archiving the node-local dir failed" in (tmp_path / "job.out").read_text()
-    assert _archive_names(tmp_path) == ["10.tar.gz", "8.tar.gz", "9.tar.gz"]
+    assert _archive_names(tmp_path) == ["10.0.tar.gz", "9.0.tar.gz"]
+
+
+def test_a_file_removed_before_tar_reads_it_does_not_cost_the_archive(tmp_path):
+    # find lists a file that is gone by the time tar reads it, as a temporary file the driver renames can be.
+    find = '/usr/bin/find "$@" && printf "./ev/gone.tmp\\0"'
+
+    returncode = _finish(_start_job(tmp_path, driver=_WRITE_EVIDENCE, fakes={"find": find}))
+
+    assert returncode == 0
+    assert _archive(tmp_path) == {"ev/1.json": "row1\n"}
 
 
 def test_a_lost_service_still_leaves_the_archive(tmp_path):
@@ -492,7 +538,7 @@ def test_a_service_lost_after_the_evaluation_succeeded_still_lets_the_watch_arch
     service = f"until [ -e {bench / 'eval.succeeded.11'} ]; do sleep 0.1; done; exit 3"
     driver = (
         f"trap 'echo driver got TERM; exit 143' TERM; {_WRITE_EVIDENCE}; : > \"$GYM_EVAL_SUCCEEDED_MARKER\"; "
-        f"for _ in $(seq 300); do [ -e {bench / 'node-local' / '11.tar.gz'} ] && exit 5; sleep 0.1; done; exit 9"
+        f"for _ in $(seq 300); do [ -e {bench / 'node-local' / '11.0.tar.gz'} ] && exit 5; sleep 0.1; done; exit 9"
     )
     process = _start_job(tmp_path, driver=driver, service=service, exports=True, off_batch=off_batch)
 
@@ -501,13 +547,13 @@ def test_a_service_lost_after_the_evaluation_succeeded_still_lets_the_watch_arch
     output = (tmp_path / "job.out").read_text()
     assert returncode == 5, output
     assert "driver got TERM" not in output
-    assert output.count("Archived the node-local dir") == 1
+    assert output.count("Archived the node-local files") == 1
     assert _archive(tmp_path) == {"ev/1.json": "row1\n"}
 
 
 def _real_driver_fakes(tmp_path: Path, gym_exit: int) -> dict[str, str]:
     """`gym eval run` writes the evidence; the exporter (`python3 -m ...export_step`) reports what the job dir holds."""
-    archive = tmp_path / "run" / "b" / "node-local" / "11.tar.gz"
+    archive = tmp_path / "run" / "b" / "node-local" / "11.0.tar.gz"
     return {
         "gym": f"{_WRITE_EVIDENCE}; exit {gym_exit}",
         "python3": (
@@ -526,8 +572,8 @@ def test_the_evidence_is_archived_before_the_exports_read_the_job_dir(tmp_path):
     assert returncode == 0
     assert "The evaluation succeeded: archiving the node-local dir before the exports" in output
     assert "exporter found the evidence archive" in output
-    assert output.count("Archived the node-local dir") == 1
-    assert _archive_names(tmp_path) == ["11.tar.gz"]
+    assert output.count("Archived the node-local files") == 1
+    assert _archive_names(tmp_path) == ["11.0.tar.gz"]
     assert not (tmp_path / "host" / "gym-node-local-11").exists()
 
 
@@ -539,7 +585,7 @@ def test_a_failed_evaluation_exports_nothing_and_is_archived_after_the_driver(tm
     output = (tmp_path / "job.out").read_text()
     assert returncode == 3
     assert "exporter" not in output and "The evaluation succeeded" not in output
-    assert output.count("Archived the node-local dir") == 1
+    assert output.count("Archived the node-local files") == 1
     assert _archive(tmp_path) == {"ev/1.json": "row1\n"}
 
 
@@ -575,7 +621,7 @@ def test_a_term_to_the_job_archives_the_dir_first(tmp_path):
 
 def test_an_archive_that_overruns_its_bound_is_dropped_whole(tmp_path):
     # tar never finishes; the 5 s bound kills it, and no partial archive takes the final name.
-    returncode = _finish(_start_job(tmp_path, driver=_WRITE_EVIDENCE, fakes={"tar": "exec sleep 600"}))
+    returncode = _finish(_start_job(tmp_path, driver=_WRITE_EVIDENCE, fakes={"tar": _HANGING_TAR}))
 
     assert returncode == 0
     assert "archiving the node-local dir failed" in (tmp_path / "job.out").read_text()
