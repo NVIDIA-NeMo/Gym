@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 import pytest
 
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.models.chat_completions_converter import ChatCompletionsConverter
+from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.models.token_capture.completion import completion_items, output_item_fingerprint
 from responses_api_agents.osworld_agent.adapter_agents import (
     NemotronV3NanoOmniAgent,
