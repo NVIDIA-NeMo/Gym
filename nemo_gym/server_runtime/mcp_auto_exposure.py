@@ -30,7 +30,9 @@ tools by overriding ``mcp_allowed_tools_for_session(seed_body)``; the token mint
 read calls (a harness in a sandbox), two config options make it an ordinary one: ``mcp_server_name``
 is the name clients list it under, and ``mcp_bearer_token`` hands out the token as ``Authorization:
 Bearer``, requires it for tools/list, answers a tool outside the token's grant as an unknown tool,
-and words its errors without naming the framework or the tool's route.
+and words its errors without naming the framework or the tool's route. Exposure with
+``mcp_bearer_token`` refuses to start unless the server overrides ``get_session_secret()``: the
+default key is public, so code that reads one token could sign another session's.
 
 Dispatch is direct: the route's handler runs exactly once per MCP call, invoked with a fabricated
 ``Request`` whose ``.session`` is materialized directly — no middleware, no routing, no second app
@@ -894,16 +896,23 @@ def install_auto_exposure(server: Any, app: FastAPI) -> dict[str, MCPTool]:
             "on the same server. Remove the hand-rolled /mcp mount and rely on expose_tools_over_mcp."
         )
 
+    token_header = session_token_header(server)
+    # With bearer tokens, only a session learns which tools exist, and only its own, and errors name no framework.
+    bearer = token_header == "Authorization"
+    if bearer and server.get_session_secret() == server.get_session_middleware_key():
+        # Bearer tokens go to code that can read them. Anyone can compute the session middleware key from the
+        # server's class and name, and the default cookie name shows it, so that code could sign any session's token.
+        raise ValueError(
+            f"{server.config.name!r} sets mcp_bearer_token but signs its MCP session tokens with its public session "
+            f"middleware key. Override {type(server).__name__}.get_session_secret() to return a secret."
+        )
+
     serializer = session_token_serializer(server)
     tools = harvest_tools(app, server)
 
     mint_metadata = functools.partial(_mint_session_metadata, server, serializer)
     _wrap_seed_session(app, mint_metadata)
     _wrap_verify(app, server)
-
-    token_header = session_token_header(server)
-    # With bearer tokens, only a session learns which tools exist, and only its own, and errors name no framework.
-    bearer = token_header == "Authorization"
 
     def session_claims(ctx_request: Optional[Request], *, required: bool) -> tuple[Optional[str], Optional[frozenset]]:
         token = mcp_session_token(ctx_request.headers, token_header) if ctx_request is not None else None

@@ -547,8 +547,9 @@ class TestTheSessionIdSources:
             assert b.post("/take", cookie=stored.cookies["sid_state"]).json() == {"worker": "a", "value": 7}
 
     def test_a_bearer_token(self, socket_dir: str) -> None:
-        a = Worker("a", socket_dir, mcp=True, mcp_bearer_token=True)
-        b = Worker("b", socket_dir, mcp=True, mcp_bearer_token=True)
+        # A server that hands out bearer tokens signs them with a secret.
+        a = Worker("a", socket_dir, mcp=True, mcp_bearer_token=True, server_class=SecretSigningServer)
+        b = Worker("b", socket_dir, mcp=True, mcp_bearer_token=True, server_class=SecretSigningServer)
         with a.client, b.client:
             grant = a.post("/seed_session", json={}).json()["mcp"]["headers"]["Authorization"]
             token = grant.removeprefix("Bearer ")

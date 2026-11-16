@@ -177,24 +177,27 @@ async def test_the_tasks_agent_context_reaches_the_agent_seed_and_not_the_resour
     assert "agent_context" not in client.calls[1][2]["json"]
 
 
-async def test_single_agent_turn_translates_resources_mcp_metadata_to_canonical_tool_access() -> None:
+# The server's own name, and names a resources server's mcp_server_name takes.
+@pytest.mark.parametrize("listed_as", ["resources", "company", "company_x", "company-x"])
+async def test_single_agent_turn_translates_resources_mcp_metadata_to_canonical_tool_access(listed_as: str) -> None:
     environment_server, client = _environment_server(resources_tool_transports=["direct_http", "mcp"])
     client.responses[0] = _Response(
         {
             "resources_session_id": "resources-session",
             "resources_tools": {
-                "server_name": "resources",
+                "server_name": listed_as,
                 "headers": {"Authorization": "Bearer scoped"},
             },
         }
     )
 
-    await environment_server.run_request(_request())
+    result = await environment_server.run_request(_request())
 
+    assert result.failure is None, result.failure
     create_body = AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"])
     direct_access, mcp_access = create_body.tool_accesses
     assert direct_access.name == "resources.direct_http"
-    assert mcp_access.name == "resources"
+    assert mcp_access.name == listed_as
     assert mcp_access.required is True
     assert mcp_access.connection.transport == "streamable_http"
     assert str(mcp_access.connection.url) == "http://resources:8000/mcp"

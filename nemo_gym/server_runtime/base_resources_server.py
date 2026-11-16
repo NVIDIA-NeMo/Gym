@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import logging
+import re
 from abc import abstractmethod
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping
@@ -80,6 +81,7 @@ from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, Bas
 from nemo_gym.server_runtime.request_handling.model_sampling import CallerSamplingMiddleware
 from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
 from nemo_gym.server_runtime.request_handling.session_routing import SessionKind, mcp_session_token
+from nemo_gym.server_runtime.tool_access import MCP_TOOL_ACCESS_NAME_PATTERN
 from nemo_gym.server_runtime.verifier_observability import observe_verifier
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
 from nemo_gym.trajectory.trajectory_record import VerifierInvocation
@@ -154,10 +156,12 @@ class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
     expose_tools_over_mcp: bool = False
     mcp_server_name: Optional[str] = Field(
         default=None,
+        # MCP clients name its tools mcp__<name>__<tool>, from the alphabet of the tools' own names.
         pattern=r"^[A-Za-z0-9_-]+$",
         description="The name the MCP endpoint lists itself under in /seed_session's MCP metadata, which clients "
-        "name its tools by (default: this server's name). For an endpoint that code a model can read calls, "
-        "such as a harness in a sandbox. Needs expose_tools_over_mcp",
+        "name its tools by (default: this server's name): letters, digits, '_' and '-', starting with a letter "
+        "or a digit. For an endpoint that code a model can read calls, such as a harness in a sandbox. Needs "
+        "expose_tools_over_mcp",
     )
     mcp_bearer_token: bool = Field(
         default=False,
@@ -165,7 +169,8 @@ class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
         f"{NEMO_GYM_MCP_SESSION_TOKEN_HEADER}, and require one for tools/list too, which then lists only the "
         "session's tools; a tool outside the session's grant is answered as an unknown tool, and errors name no "
         "framework. For clients that pass the seed's MCP headers as given, as the environment server's MCP grants "
-        "do. Needs expose_tools_over_mcp",
+        "do. Needs expose_tools_over_mcp, and a server that overrides get_session_secret(): the server refuses to "
+        "start when the tokens it hands out are signed with its public session middleware key",
     )
     session_close_retry_window_seconds: float = Field(
         default=300,
@@ -181,6 +186,17 @@ class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
     )
     # The mode of reverification (for gym eval reverify) of this server.
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNKNOWN
+
+    @field_validator("mcp_server_name")
+    @classmethod
+    def _mcp_server_name_is_a_grant_name(cls, name: Optional[str]) -> Optional[str]:
+        """Refuse a name that no MCP grant takes: an Environment Server grants agents this endpoint under it."""
+        if name is not None and re.fullmatch(MCP_TOOL_ACCESS_NAME_PATTERN, name) is None:
+            raise ValueError(
+                f"{name!r} is not a name an MCP grant takes ({MCP_TOOL_ACCESS_NAME_PATTERN}), and Environment "
+                "Servers grant agents this endpoint under it"
+            )
+        return name
 
     @model_validator(mode="after")
     def _mcp_options_need_the_mcp_endpoint(self) -> "BaseResourcesServerConfig":
