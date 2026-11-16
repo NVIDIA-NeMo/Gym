@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import ast
 import asyncio
 import time
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -107,3 +109,32 @@ def test_default_retry_controls_are_unchanged(tmp_path):
 def test_invalid_retry_controls_are_rejected(setting, value):
     with pytest.raises(ValidationError):
         config(**{setting: value})
+
+
+def test_the_vllm_model_records_the_server_queue_on_every_client_it_builds(tmp_path):
+    endpoint = tmp_path / "endpoint.txt"
+    server = VLLMModel(
+        config=config(base_url=["http://first.invalid/v1", "http://second.invalid/v1"]),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    assert [client.record_server_queue for client in server._clients] == [True, True]
+
+    server = VLLMModel(
+        config=config(base_url="http://placeholder.invalid/v1", endpoint_file=str(endpoint)),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    endpoint.write_text("http://rebound.invalid/v1")
+    server._maybe_rebind_endpoint()
+    assert [client.base_url for client in server._clients] == ["http://rebound.invalid/v1"]
+    assert [client.record_server_queue for client in server._clients] == [True]
+
+
+def test_no_other_model_server_records_the_server_queue():
+    """The queue reading reads vLLM's metrics page, so only the vLLM model server asks for it."""
+    root = Path(__file__).resolve().parents[2]
+    users = {}
+    for app in sorted(root.glob("*/app.py")):
+        for node in ast.walk(ast.parse(app.read_text())):
+            if isinstance(node, ast.keyword) and node.arg == "record_server_queue":
+                users.setdefault(app.parent.name, []).append(ast.unparse(node.value))
+    assert users == {"vllm_model": ["True", "True"]}

@@ -17,7 +17,9 @@
 Thin wrapper around ``benchmarks.hle_diamond.prepare.prepare`` with ``text_only=True``:
 the 728 questions without an image are written as raw fields to
 ``benchmarks/hle_diamond/data/hle_diamond_benchmark_text.jsonl`` for rollout-time
-templating via ``prompt_config`` (``text.yaml`` and the sandboxed presets).
+templating via ``prompt_config``: ``text.yaml``, the agent-session presets (``opencode.yaml``,
+``pi.yaml``, their search variants and ``opencode_reference.yaml``) and their ``*_legacy_agent``
+relay presets.
 """
 
 import argparse

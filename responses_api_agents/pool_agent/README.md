@@ -5,7 +5,12 @@ coordinates resource preparation, agent execution, verification, and cleanup.
 Pool runs its own tools and calls a Gym Model Server for inference.
 
 [configs/pool_agent.yaml](configs/pool_agent.yaml) defines the agent defaults.
-The adapter supports evaluation; token IDs and logprobs are not available for training.
+Training token-ID capture is off by default. Model calls go to the Gym Model Server under
+the rollout's prefix. Run-level `token_id_capture.enabled: true` and either the agent's `token_id_capture: true`
+or run-level `token_id_capture.all_agents: true` route those calls through capture. Capture also needs a capture
+store and a model backend that returns token IDs (see
+[Training on External Agent Harnesses](https://docs.nvidia.com/nemo/gym/main/tutorials/training-tutorials/external-agent-harnesses)).
+No training capture run has validated this agent.
 
 ## Configure and run
 

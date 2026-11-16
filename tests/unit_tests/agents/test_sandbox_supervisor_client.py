@@ -25,8 +25,10 @@ from nemo_gym.agents.utils.supervisor_client import (
     SUPERVISOR_FILE,
     SUPERVISOR_PID_FILE,
     SUPERVISOR_SCRIPT,
+    control_cwd,
     exec_timeout,
     parse_cleanup_receipt,
+    remove_session_directory,
     stop_and_confirm_cleanup,
     supervised_launch_command,
     supervision_timeouts,
@@ -453,3 +455,24 @@ def test_absent_exit_code_is_not_success(caplog):
     assert parse_cleanup_receipt({"cleanup_confirmed": True}) == full
     with pytest.raises(ValueError, match="termination was not confirmed"):
         parse_cleanup_receipt({"return_code": 0, "error": None})
+
+
+async def test_stop_and_removal_do_not_need_a_workdir_the_task_moved(session, tmp_path):
+    # A task may run `mv /app /app.bak`; Docker then refuses `exec -w /app`, and so does this local sandbox.
+    sandbox, session_dir = session
+    moved = tmp_path / "app"
+
+    receipt = await stop_and_confirm_cleanup(
+        sandbox, session_dir=str(session_dir), workdir=str(moved), timeout=1, harness="test"
+    )
+    await remove_session_directory(
+        sandbox, session_dir=str(session_dir), workdir=str(moved), timeout=5, harness="test"
+    )
+
+    assert receipt["cleanup_confirmed"] is True
+    assert not session_dir.exists() and not moved.exists()
+
+
+def test_a_relative_session_directory_still_resolves_against_the_workdir():
+    assert control_cwd(session_dir="/tmp/session", workdir="/app") == "/"
+    assert control_cwd(session_dir=".gym/session", workdir="/app") == "/app"

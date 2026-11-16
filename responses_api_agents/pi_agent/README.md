@@ -6,7 +6,14 @@ verification, and cleanup. Pi borrows the sandbox and runs its own model/tool lo
 
 [configs/pi_agent.yaml](configs/pi_agent.yaml) is the default agent configuration. Benchmark
 and agent settings are independent; the run configuration connects them through the
-Environment Server. This harness is currently for evaluation; token IDs and logprobs are not wired up.
+Environment Server.
+
+Training token-ID capture is off by default. With `model_server`, model calls go to the Gym Model Server under
+the rollout's prefix. Run-level `token_id_capture.enabled: true` and either the agent's `token_id_capture: true`
+or run-level `token_id_capture.all_agents: true` route those calls through capture. Capture also needs a capture
+store and a model backend that returns token IDs (see
+[Training on External Agent Harnesses](https://docs.nvidia.com/nemo/gym/main/tutorials/training-tutorials/external-agent-harnesses)).
+No training capture run has validated this agent.
 
 ## Configure and run
 

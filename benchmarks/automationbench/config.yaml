@@ -1,32 +1,35 @@
+# AutomationBench scored with the Artificial Analysis headline metric, run with simple_agent through the
+# single_agent_turn Environment Server. See README.md.
+#
+#   gym eval prepare --benchmark automationbench
+#   gym eval run --benchmark automationbench --split benchmark --output <rollouts.jsonl> ...
+#
+# The verifiers_agent recipe behind the legacy_agent relay is config_legacy_agent.yaml (deprecated).
+config_paths:
+  - resources_servers/automationbench/configs/automationbench.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+# The sampling config_legacy_agent.yaml sends from its agent config. Run-level, so it reaches every row of a run that
+# loads this file; `++responses_create_params.temperature=...` replaces it. Rows carry none, because verifiers_agent
+# would let a row's value win over its own config.
+responses_create_params:
+  temperature: 1.0
+  top_p: 1.0
+
 automationbench:
   responses_api_agents:
-    verifiers_agent:
+    simple_agent:
       entrypoint: app.py
-      domain: other
-      description: AutomationBench scored with the Artificial Analysis headline metric, guardrail-gated partial credit.
-      value: Evaluate enterprise workflow automation capabilities
+      # verifiers' max_turns is 50 model calls, but it never runs the 50th call's tool calls, and the score reads only
+      # the final world. simple_agent runs a call's tool calls before it checks max_steps, so 49 caps both at 49 rounds.
+      max_steps: 49
+      # Sessions take tool access from the Environment Server's grant; dataset tooling finds the task schema here.
+      resources_server:
+        type: resources_servers
+        name: automationbench_resources_server
       model_server:
         type: responses_api_models
         name: policy_model
-      model_name: ""
-      vf_env_id: automationbench_env
-      vf_env_args:
-        max_turns: 50
-        toolset: api
-        # Both metrics are reported; this selects which one carries the reward weight.
-        reward_fn: aa_headline
-      # Opt in to per-assertion verdicts in every rollout (response.exported_state.assertion_results).
-      export_state_columns: []
-      group_size: 1
-      max_concurrent_generation: -1
-      max_concurrent_scoring: -1
-      max_tokens: 131072
-      temperature: 1.0
-      top_p: 1.0
-      # OpenAI client deadline configuration
-      client_timeout_s: 3600
-      client_connect_timeout_s: 60
-      client_max_retries: 0
       datasets:
         - name: example
           type: example
@@ -43,9 +46,14 @@ automationbench:
           license: MIT
 
 automationbench_environment_server:
+  _inherit_from: single_agent_turn_legacy
   environment_servers:
-    legacy_agent:
-      entrypoint: app.py
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: automationbench_resources_server
       agent_server:
         type: responses_api_agents
         name: automationbench
+      resources_tool_transports:
+        - direct_http

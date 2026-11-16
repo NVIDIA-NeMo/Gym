@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Kimi Code borrows SandboxAccess from the Environment Server. The run configuration binds the
+# independent benchmark and agent; this config selects only the harness and model.
+kimi_code_agent:
+  responses_api_agents:
+    kimi_code_agent:
+      entrypoint: app.py
+      num_workers: 1
+      resources_server: null
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      kimi_version: 2.1.1
+      # Optional second model server for Agent/AgentSwarm children (Kimi's [secondary_model] default).
+      subagent_model_server: null
+      subagent_model: null
+      subagent_model_force: false
+      # false disables Agent and AgentSwarm (solo control).
+      subagents: true
+      swarm_max_concurrency: null
+      max_steps_per_turn: null
+      print_max_turns: null
+      # Kimi K3 accepts low, high and max only.
+      thinking_effort: null
+      max_context_size: 262144
+      disabled_tools: [CronCreate, CronList, CronDelete, WebSearch, FetchURL]
+      permission_rules: []
+      kimi_config: {}
+      concurrency: 32
+      # Seconds per activation, enforced by the sandbox's process supervisor.
+      timeout: 7200
+      sandbox_install_timeout_seconds: 900
+      session_close_timeout_seconds: 60
+      # Only for an agent-owned sandbox, when Resources supplies no sandbox_access.
+      sandbox_provider: null
+      sandbox_config: {}
+      network_access: inherit  # model_only limits an owned sandbox's egress to the model host

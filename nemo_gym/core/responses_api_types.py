@@ -1160,6 +1160,15 @@ class NeMoGymResponseOutputTokensDetails(ResponseOutputTokensDetails):
 
 
 class NeMoGymResponseUsage(ResponseUsage):
+    """Token usage of a response; for an agent, the sum over its policy-model responses that finished.
+
+    A detail such as ``input_tokens_details.cached_tokens`` (cache reads) is the count the model or
+    harness reported. When it reported none, or reported a zero that only stands for "absent", set
+    None: consumers read 0 as a measured "no cache hits". Use 0 only for a known zero, such as a
+    response that made no model call, and say why in a comment. Use ``accumulate_response_usage``
+    or ``sum_from_list`` to add usages; they keep an unknown detail unknown.
+    """
+
     input_tokens_details: NeMoGymResponseInputTokensDetails
     output_tokens_details: NeMoGymResponseOutputTokensDetails
 
@@ -1170,6 +1179,7 @@ class NeMoGymResponseUsage(ResponseUsage):
             total = accumulate_response_usage(total, usage)
         if total is not None:
             return total
+        # The sum over no responses is a known zero, details included.
         return cls(
             input_tokens=0,
             input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0, cache_write_tokens=0),
@@ -1269,6 +1279,14 @@ NeMoGymChatCompletionOutputMessage: TypeAlias = Annotated[
 
 class NeMoGymChoice(Choice):
     message: NeMoGymChatCompletionOutputMessage
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_repetition_finish_reason(cls, value: Any) -> Any:
+        """Retain vLLM's repetition cause while using the SDK's stop category."""
+        if isinstance(value, dict) and value.get("finish_reason") == "repetition":
+            return {**value, "finish_reason": "stop", "native_finish_reason": "repetition"}
+        return value
 
 
 class NeMoGymChatCompletion(ChatCompletion):
@@ -1418,6 +1436,7 @@ class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageP
     tool_calls: Optional[NeMoGymChatCompletionMessageToolCallsParam] = None
     # Some harnesses replay reasoning on assistant history in Chat Completions.
     reasoning_content: str | None
+    reasoning: str | None
 
 
 class NeMoGymChatCompletionAssistantMessageForTrainingParam(

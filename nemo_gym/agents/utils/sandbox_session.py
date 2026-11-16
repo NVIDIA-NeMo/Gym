@@ -19,6 +19,7 @@ from nemo_gym.agents.utils.supervisor_client import (
     SUPERVISOR_FILE,
     SUPERVISOR_SCRIPT,
     CleanupReceipt,
+    control_cwd,
     is_harness_termination_failure,
     remove_session_directory,
     stop_and_confirm_cleanup,
@@ -455,7 +456,9 @@ class SandboxSession[Artifacts]:
                 self._unconfirmed_expiry = False
                 marker = quote(f"{self.session_dir}/{EXPIRE_REQUEST_FILE}")
                 probe = await self.sandbox.exec(
-                    f"[ -e {marker} ] && echo present", cwd=self.workdir, timeout_s=timeout
+                    f"[ -e {marker} ] && echo present",
+                    cwd=control_cwd(session_dir=self.session_dir, workdir=self.workdir),
+                    timeout_s=timeout,
                 )
         except Exception:
             if self._expire_write is not None and not self._expire_write.done():
