@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import sys
 from csv import DictWriter
 from glob import glob
 from pathlib import Path
@@ -21,6 +22,8 @@ from shutil import copytree
 from swebench.harness.constants import MAP_REPO_TO_EXT
 
 
+# The server's `verification_log_dir`, where a golden-patch run kept its logs.
+log_root = Path(sys.argv[1])
 benchmark_fpath = Path("benchmarks/swebench/data/swebench_multilingual_benchmark.jsonl")
 failed_sample_dirpath = Path("results/failed_swe_multilingual_golden_patch")
 failed_sample_dirpath.mkdir(parents=True, exist_ok=True)
@@ -36,10 +39,10 @@ writer.writeheader()
 
 
 def copy_sample(path: Path, instance_id: str):
-    relative_report_path = path.relative_to("resources_servers/swebench/logs/run_evaluation")
+    relative_report_path = path.relative_to(log_root)
     session_id = relative_report_path.parts[0]
     copytree(
-        src=Path("resources_servers/swebench/logs/run_evaluation") / session_id,
+        src=log_root / session_id,
         dst=failed_sample_dirpath / session_id,
         dirs_exist_ok=True,
     )
@@ -50,7 +53,7 @@ def copy_sample(path: Path, instance_id: str):
 
 seen_instance_ids = []
 failed_instance_ids = []
-for path in glob("resources_servers/swebench/logs/run_evaluation/**/report.json", recursive=True):
+for path in glob(str(log_root / "**" / "report.json"), recursive=True):
     path = Path(path)
     report = json.loads(path.read_text())
     instance_id: str = list(report.keys())[0]
@@ -81,7 +84,7 @@ for instance_id in instance_id_to_row:
     if instance_id in seen_instance_ids:
         continue
 
-    dirpaths = glob(f"resources_servers/swebench/logs/run_evaluation/**/{instance_id}", recursive=True)
+    dirpaths = glob(str(log_root / "**" / instance_id), recursive=True)
     dirpaths: list[Path] = list(map(Path, dirpaths))
     dirpaths.sort(key=lambda p: p.stat().st_birthtime, reverse=True)
 

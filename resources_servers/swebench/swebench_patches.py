@@ -46,6 +46,7 @@ async def run_instance(
     run_id: str,
     timeout: int | None = None,
     rewrite_reports: bool = False,
+    log_root: Path = RUN_EVALUATION_LOG_DIR,
 ) -> dict:
     """
     Run a single instance with the given prediction.
@@ -59,11 +60,12 @@ async def run_instance(
         run_id (str): Run ID
         timeout (int): Timeout for running tests
         rewrite_reports (bool): True if eval run is just to reformat existing report
+        log_root (Path): Folder for the run's logs. The upstream default is relative to the working directory.
     """
     # Set up logging directory
     instance_id = test_spec.instance_id
     model_name_or_path = pred.get(KEY_MODEL, "None").replace("/", "__")
-    log_dir = RUN_EVALUATION_LOG_DIR / run_id / model_name_or_path / instance_id
+    log_dir = log_root / run_id / model_name_or_path / instance_id
 
     # Set up report file
     report_path = log_dir / LOG_REPORT
