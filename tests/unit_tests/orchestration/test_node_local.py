@@ -252,6 +252,7 @@ def _start_job(
     end_in: int | None = None,
     fakes: dict[str, str] | None = None,
     exports: bool = False,
+    job_id: str = "11",
 ) -> subprocess.Popen:
     """Start the rendered job.sh in its own process group; `end_in`: scontrol reports the job's end that many s on."""
     host = tmp_path / "host"
@@ -274,7 +275,7 @@ def _start_job(
             stderr=subprocess.STDOUT,
             cwd=bench,
             # COPYFILE_DISABLE keeps macOS tar from adding `._` metadata entries to the archives.
-            env={"PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin", "SLURM_JOB_ID": "11", "COPYFILE_DISABLE": "1"},
+            env={"PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin", "SLURM_JOB_ID": job_id, "COPYFILE_DISABLE": "1"},
             start_new_session=True,
         )
 
@@ -398,6 +399,25 @@ def test_with_restore_only_the_new_archive_and_the_one_before_it_are_kept(tmp_pa
     # 11 holds everything 10 held plus this job's files; 10 stays as the fallback a restore would use.
     assert _archive_names(tmp_path) == ["10.tar.gz", "11.tar.gz"]
     assert _archive(tmp_path) == {"ev/10.json": "row\n", "ev/1.json": "row1\n"}
+
+
+def test_pruning_keeps_the_archive_the_job_restored_from_not_a_newer_broken_one(tmp_path):
+    archives = tmp_path / "run" / "b" / "node-local"
+    _write_archive(archives / "9.tar.gz", {"ev/0.json": "row0\n"})
+    (archives / "10.tar.gz").write_bytes(b"not a tar")
+
+    assert _finish(_start_job(tmp_path, driver=_WRITE_EVIDENCE)) == 0
+
+    # Job 11 restored from 9, so 9 stays as the known-good fallback and the broken 10 goes.
+    assert _archive_names(tmp_path) == ["11.tar.gz", "9.tar.gz"]
+    (archives / "11.tar.gz").write_bytes(b"not a tar")
+
+    returncode = _finish(_start_job(tmp_path, driver='cat "$GYM_NODE_LOCAL_DIR/ev/0.json"', job_id="12"))
+
+    assert returncode == 0
+    assert "Restored the node-local dir from" in (tmp_path / "job.out").read_text()
+    assert "row0" in (tmp_path / "job.out").read_text()
+    assert _archive_names(tmp_path) == ["12.tar.gz", "9.tar.gz"]
 
 
 def test_without_restore_every_archive_is_kept(tmp_path):

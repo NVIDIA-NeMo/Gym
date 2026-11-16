@@ -20,7 +20,8 @@ driver runs. The batch script creates `<base_dir>/gym-node-local-$SLURM_JOB_ID` 
 extracts the newest earlier archive into it, and mounts it into the driver container at a path that is the same for
 every job of the run, so absolute paths the run saves stay valid in its later jobs. When the driver step ends, the
 directory is written to `<job dir>/node-local/<SLURM_JOB_ID>.tar.gz` (one file, renamed into place once complete) and
-removed. With restore each archive holds the whole directory, so only the newest two are kept.
+removed. With restore each archive holds the whole directory, so only it and the archive it was restored from
+are kept.
 
 A step at its time limit is killed within moments (its `srun` gets TERM and kills the step), too fast to archive. So
 the watch loop stops the driver `stop_before_walltime_seconds` before the job's end time, archives, and then waits
@@ -38,9 +39,11 @@ ARCHIVES_DIRNAME = "node-local"
 # Inside the driver container: one path per run and benchmark, the same in every job of the run.
 _CONTAINER_ROOT = "/tmp/gym-node-local"
 
-# Run on the driver's node as `bash -c SCRIPT _ DIR ARCHIVES RESTORE`.
+# Run on the driver's node as `bash -c SCRIPT _ DIR ARCHIVES RESTORE`. `DIR.restored-from` names the archive it
+# extracted, for the archive step's pruning.
 _RESTORE_SCRIPT = """\
 dir=$1 archives=$2
+rm -f -- "$dir.restored-from"
 rm -rf -- "$dir" && mkdir -p -m 700 -- "$dir" || { echo "ERROR: cannot create the node-local dir $dir"; exit 1; }
 [ "$3" = 1 ] || exit 0
 found=0
@@ -48,6 +51,7 @@ for name in $(ls -1 "$archives" 2>/dev/null | grep -xE '[0-9]{1,15}[.]tar[.]gz' 
     found=1
     if tar -xzf "$archives/$name" -C "$dir"; then
         echo "Restored the node-local dir from $archives/$name"
+        echo "$name" > "$dir.restored-from"
         exit 0
     fi
     echo "WARNING: cannot extract $archives/$name; trying an older archive"
@@ -80,9 +84,14 @@ fi
 # GNU tar exits 1 when a file changed while it was read: the archive is still complete.
 if [ "$rc" -le 1 ] && mv -f -- "$tmp" "$archives/$job.tar.gz"; then
     echo "Archived the node-local dir to $archives/$job.tar.gz"
-    # With restore each archive holds the whole dir: keep the newest two, the second as restore's fallback.
+    # With restore each archive holds the whole dir: of the older ones keep only the one this job restored from,
+    # a known-good fallback (without a record, the newest older one).
     if [ "$restore" = 1 ]; then
-        for name in $(ls -1 "$archives" | grep -xE '[0-9]{1,15}[.]tar[.]gz' | sort -rn | tail -n +3); do
+        keep=$(cat "$dir.restored-from" 2>/dev/null)
+        for name in $(ls -1 "$archives" | grep -xE '[0-9]{1,15}[.]tar[.]gz' | sort -rn); do
+            (( 10#${name%%.*} < 10#$job )) || continue
+            [ -n "$keep" ] || keep=$name
+            [ "$name" != "$keep" ] || continue
             rm -f -- "$archives/$name" && echo "Removed the superseded archive $archives/$name"
         done
     fi
@@ -90,7 +99,7 @@ else
     rm -f -- "$tmp"
     echo "WARNING: archiving the node-local dir failed (exit $rc); its files from this job are lost"
 fi
-rm -rf -- "$dir"
+rm -rf -- "$dir" "$dir.restored-from"
 """
 
 _SETUP_TEMPLATE = """\
