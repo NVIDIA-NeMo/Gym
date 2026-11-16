@@ -25,6 +25,9 @@ gym eval run --no-serve \
    --limit 1
 ```
 
+For the default response budget and score-comparison guidance, see
+[Agent response budget](../../environments/workplace_assistant/README.md#agent-response-budget).
+
 ## Generating Additional Training Data
 
 To generate your own training JSONL for this environment using NeMo Data Designer, see the [synthetic data generation example](notebooks/synthetic-data-generation/).

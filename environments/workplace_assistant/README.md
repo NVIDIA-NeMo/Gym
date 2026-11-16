@@ -25,6 +25,19 @@ gym eval run --no-serve \
    --limit 1
 ```
 
+## Agent response budget
+
+The bundled `workplace_assistant_simple_agent` configuration permits up to 10
+model responses per task. This counts model responses, including a final answer,
+rather than individual tool calls. For example, validation task `251` requires
+eight customer updates and a search to discover the customer IDs; with
+serial tool calls, that workflow uses 10 responses including the final answer.
+
+This replaces the previous limit of six. Record the configured `max_steps` when
+comparing results: runs with the two budgets are not directly comparable.
+Ten responses provide more room for multi-record tasks but do not guarantee
+completion when extra lookups, pagination or recovery are needed.
+
 ## Generating Additional Training Data
 
 To generate your own training JSONL for this environment using NeMo Data Designer, see the [synthetic data generation example](../../resources_servers/workplace_assistant/notebooks/synthetic-data-generation/).
