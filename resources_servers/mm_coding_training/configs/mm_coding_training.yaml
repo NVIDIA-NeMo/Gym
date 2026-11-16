@@ -13,7 +13,7 @@ mm_coding_training:
         and quality grading.
       value: Train chart, SVG, document and webpage generation on the same execution-gated
         quality reward.
-      reference_root: ${oc.env:MM_CODING_REFERENCE_ROOT,environments/mm_coding_single/data}
+      reference_root: ${oc.env:MM_CODING_REFERENCE_ROOT,environments/mm_coding_single/data}  # runtime-path: read
       sandbox_provider: sandbox
       sandbox_image: ${oc.env:MM_CODING_SANDBOX_IMAGE}
       judge_model_server:
