@@ -1928,6 +1928,136 @@ def test_a_cancelled_call_keeps_its_claim_until_the_detached_write_finishes(tmp_
     asyncio.run(run())
 
 
+def _capture_call(store, rollout_id, app):
+    from nemo_gym.models.model_call_capture import _CaptureMiddleware
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": b'{"input":"x"}', "more_body": False}
+
+    async def send(_message: dict) -> None:
+        pass
+
+    path = f"/ng-rollout/{rollout_id}/v1/responses"
+    return _CaptureMiddleware(app, store=store, model_server_name="srv")(
+        {"type": "http", "path": path, "raw_path": path.encode(), "headers": []}, receive, send
+    )
+
+
+async def _respond(scope, receive, send) -> None:
+    del scope
+    await receive()
+    await send({"type": "http.response.start", "status": 200, "headers": []})
+    await send({"type": "http.response.body", "body": b'{"id":"resp-1"}', "more_body": False})
+
+
+def test_a_call_is_claimed_off_the_event_loop_before_it_is_forwarded(tmp_path, monkeypatch):
+    import asyncio
+    import threading
+
+    store = CaptureStore(tmp_path)
+    claiming, proceed = threading.Event(), threading.Event()
+    waits = []
+    mark_pending = store.mark_pending
+
+    def held_claim(rollout_id, model_call_id):
+        claiming.set()
+        waits.append(proceed.wait(2))
+        mark_pending(rollout_id, model_call_id)
+
+    monkeypatch.setattr(store, "mark_pending", held_claim)
+    forwarded = []
+
+    async def app(scope, receive, send) -> None:
+        forwarded.append(store.has_pending("r-claim"))
+        await _respond(scope, receive, send)
+
+    async def run() -> None:
+        task = asyncio.create_task(_capture_call(store, "r-claim", app))
+        # A claim on the event loop would block this coroutine until its wait timed out.
+        assert await asyncio.to_thread(claiming.wait, 2) is True
+        assert forwarded == []
+        proceed.set()
+        await task
+
+    asyncio.run(run())
+    assert waits == [True]
+    assert forwarded == [True]
+    assert store.has_pending("r-claim") is False
+
+
+def test_a_call_cancelled_while_claiming_releases_its_claim(tmp_path, monkeypatch):
+    import asyncio
+    import threading
+
+    from nemo_gym.rollouts.model_calls import await_model_call_capture_quiescence
+
+    store = CaptureStore(tmp_path)
+    claiming, proceed = threading.Event(), threading.Event()
+    mark_pending = store.mark_pending
+
+    def held_claim(rollout_id, model_call_id):
+        claiming.set()
+        proceed.wait(5)
+        mark_pending(rollout_id, model_call_id)
+
+    monkeypatch.setattr(store, "mark_pending", held_claim)
+
+    async def app(scope, receive, send) -> None:
+        raise AssertionError("forwarded a cancelled call")
+
+    async def run() -> None:
+        task = asyncio.create_task(_capture_call(store, "r-claim-cancel", app))
+        await asyncio.to_thread(claiming.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # The claim lands after the cancelled call recorded its row and released it.
+        proceed.set()
+        await asyncio.sleep(0.1)
+        assert await await_model_call_capture_quiescence("r-claim-cancel", [tmp_path], timeout_s=5.0) is True
+        assert [exchange["error_category"] for exchange in store.read("r-claim-cancel")] == ["cancelled"]
+
+    asyncio.run(run())
+
+
+def test_a_cancelled_write_queued_behind_busy_threads_still_releases_its_claim(tmp_path):
+    import asyncio
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from nemo_gym.rollouts.model_calls import await_model_call_capture_quiescence
+
+    store = CaptureStore(tmp_path)
+
+    async def run() -> None:
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+        in_flight = asyncio.Event()
+
+        async def app(scope, receive, send) -> None:
+            in_flight.set()
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(_capture_call(store, "r-backlog", app))
+        await in_flight.wait()
+        busy, gate = threading.Event(), threading.Event()
+        blocker = loop.run_in_executor(None, lambda: busy.set() or gate.wait(5))
+        while not busy.is_set():
+            await asyncio.sleep(0.01)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        # The write is queued behind the busy thread; a second cancel must not drop it.
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        gate.set()
+        await blocker
+        assert await await_model_call_capture_quiescence("r-backlog", [tmp_path], timeout_s=5.0) is True
+        assert len(store.read("r-backlog")) == 1
+
+    asyncio.run(run())
+
+
 def test_capture_claim_is_visible_while_the_call_is_still_in_flight(tmp_path):
     """The claim must exist for the call's whole lifetime, not just its write.
 

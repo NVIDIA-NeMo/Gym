@@ -1136,11 +1136,11 @@ class _CaptureMiddleware:
             for message in deferred_response_messages:
                 await send(message)
 
-        # Claimed before the call is forwarded, for its whole lifetime. A claim taken only at
-        # write time does not exist while the call is in flight, so a reader can look, see nothing
-        # outstanding, and snapshot the rollout before the row lands.
-        self._store.mark_pending(rollout_id, model_call_id)
         try:
+            # Claimed before the call is forwarded and held for its whole lifetime, so a reader never snapshots
+            # before the row lands. Off the event loop, since it waits on the claims file's lock; inside the try,
+            # so a call cancelled while claiming still releases its claim.
+            await asyncio.to_thread(self._store.mark_pending, rollout_id, model_call_id)
             with rollout_context(rollout_id):
                 await self._app(scope, _receive, _send)
         except (Exception, asyncio.CancelledError) as exc:
@@ -1150,8 +1150,8 @@ class _CaptureMiddleware:
             upstream_body = bytes(state["body"]) or exception_body
             error_category = _classify_status(upstream_status) if isinstance(upstream_status, int) else None
             error_category = error_category or _classify_exception(exc)
-            # Offload the blocking write+fsync so it never stalls the event loop. Shielded: a write
-            # cancelled before it starts would leave this call's claim outstanding until the drain timeout.
+            # Offload the blocking write+fsync so it never stalls the event loop. Shielded: a cancel that
+            # lands while the write is still queued behind busy threads would drop it, and its claim with it.
             try:
                 write = asyncio.to_thread(
                     _record,
