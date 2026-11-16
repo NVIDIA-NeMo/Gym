@@ -121,7 +121,9 @@ def test_worker_selects_backend_and_keeps_components(tmp_path: Path, capsys, bac
 
 
 @pytest.mark.parametrize("reference_failure", [True, False])
-def test_worker_masks_boolean_failures(tmp_path: Path, capsys, reference_failure: bool) -> None:
+def test_worker_separates_reference_and_prediction_preparation_failures(
+    tmp_path: Path, capsys, reference_failure: bool
+) -> None:
     path = tmp_path / "box.step"
     shape = cq.Workplane("XY").box(1, 2, 3).val()
     cq.exporters.export(shape, str(path))
@@ -136,5 +138,22 @@ def test_worker_masks_boolean_failures(tmp_path: Path, capsys, reference_failure
     ):
         geometry.main()
     result = json.loads(capsys.readouterr().out)
-    assert result["mask_sample"] and result["reward"] == 0
-    assert result["failure_kind"] == ("deepcad:reference" if reference_failure else "deepcad:infrastructure")
+    assert result.get("mask_sample", False) is reference_failure
+    assert result["reward"] == 0
+    assert result["failure_kind"] == ("deepcad:reference" if reference_failure else "deepcad:geometry")
+
+
+@pytest.mark.parametrize("backend", ["brep", "voxel"])
+def test_worker_pairwise_failure_stays_masked(tmp_path, capsys, backend):
+    path = tmp_path / "box.step"
+    cq.exporters.export(cq.Workplane("XY").box(1, 2, 3), str(path))
+    prepare = "checked_normalized_solid" if backend == "brep" else "normalized_voxels"
+    compare = "brep_iou" if backend == "brep" else "voxel_iou"
+    with (
+        patch("sys.argv", ["geometry", str(path), str(path), "64", json.dumps({"iou_backend": backend})]),
+        patch.object(geometry, prepare, return_value=object()),
+        patch.object(geometry, compare, side_effect=RuntimeError("pairwise failed")),
+    ):
+        geometry.main()
+    result = json.loads(capsys.readouterr().out)
+    assert result["mask_sample"] and result["failure_kind"] == "verifier_error"

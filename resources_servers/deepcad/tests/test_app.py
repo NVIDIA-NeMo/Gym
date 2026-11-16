@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import cadquery as cq
 import pytest
 
+from nemo_gym.core import PROVIDER_UNAVAILABLE, VERIFIER_ERROR
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.server_runtime.base_server import ServerClient
 from resources_servers.deepcad.app import (
@@ -173,12 +174,20 @@ async def test_reference_mask(server: DeepCADResourcesServer, reference: str) ->
             "artifact",
             False,
         ),
+        (
+            SandboxExecResult("", "", 0),
+            SandboxExecResult("", "", 0),
+            SandboxExecResult("100", "", 0, "timeout"),
+            "infrastructure",
+            True,
+        ),
         (SandboxExecResult("", "", 0), SandboxExecResult("", "", 0), SandboxExecResult("100", "", 0), None, False),
     ],
 )
 async def test_sandbox_outcomes(
     server: DeepCADResourcesServer, probe, execution, check, kind, mask, bonus_enabled, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    server.config.inconclusive_verification_retries = 0
     server.config.operation_bonus.enabled = bonus_enabled
     monkeypatch.setenv("BASH_FUNC_exit-dramatically%%", "() { exit 1; }")
     sandbox = AsyncMock()
@@ -191,7 +200,9 @@ async def test_sandbox_outcomes(
             result = await server._evaluate("result=1", "box.step")
     assert result.get("mask_sample", False) is mask
     if kind:
-        assert result["reward"] == 0 and result["failure_kind"] == f"deepcad:{kind}"
+        assert result["reward"] == 0 and result["failure_kind"] == (
+            PROVIDER_UNAVAILABLE if kind == "infrastructure" else f"deepcad:{kind}"
+        )
     else:
         assert result["reward"] == 0.82
         sandbox.download.assert_awaited_once()
@@ -417,3 +428,72 @@ def test_geometry_preflight_accepts_valid_runtime(server, tmp_path):
         patch("resources_servers.deepcad.app.SimpleResourcesServer.setup_webserver", return_value=sentinel),
     ):
         assert server.setup_webserver() is sentinel
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recover", [True, False])
+async def test_verifier_retries_same_source_in_fresh_sandbox(server, recover):
+    server.config.inconclusive_verification_retries = 1
+    sandboxes = [AsyncMock(), AsyncMock()]
+    sandboxes[0].exec.return_value = SandboxExecResult("", "", 0, "runtime")
+    sandboxes[1].exec.side_effect = (
+        [SandboxExecResult("", "", 0), SandboxExecResult("", "", 0), SandboxExecResult("100", "", 0)]
+        if recover
+        else [SandboxExecResult("", "", 0, "runtime")]
+    )
+    contexts = []
+    for sandbox in sandboxes:
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=sandbox)
+        context.__aexit__ = AsyncMock(return_value=False)
+        contexts.append(context)
+    with (
+        patch("resources_servers.deepcad.app.AsyncSandbox", side_effect=contexts) as factory,
+        patch("resources_servers.deepcad.app.asyncio.sleep", new_callable=AsyncMock),
+        patch.object(DeepCADResourcesServer, "_score", AsyncMock(return_value={"reward": 0.82})),
+    ):
+        result = await server.verify(request("result=1"))
+    assert factory.call_count == 2
+    assert [call.args[1].files["/sandbox/model.py"] for call in factory.call_args_list] == ["result=1"] * 2
+    assert all(call.args[1].ttl_s == server.config.execution_timeout_s + 300 for call in factory.call_args_list)
+    for context in contexts:
+        context.__aexit__.assert_awaited_once()
+    assert result.evaluation_completed is recover
+    assert result.mask_sample is (not recover)
+    assert result.reward == (0.82 if recover else 0)
+    assert result.failure_kind == (None if recover else PROVIDER_UNAVAILABLE)
+
+
+@pytest.mark.asyncio
+async def test_scoring_exception_exhausts_retry_with_verifier_kind(server):
+    server.config.inconclusive_verification_retries = 0
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = [
+        SandboxExecResult("", "", 0),
+        SandboxExecResult("", "", 0),
+        SandboxExecResult("100", "", 0),
+    ]
+    context = MagicMock()
+    context.__aenter__ = AsyncMock(return_value=sandbox)
+    context.__aexit__ = AsyncMock(return_value=False)
+    with (
+        patch("resources_servers.deepcad.app.AsyncSandbox", return_value=context),
+        patch.object(DeepCADResourcesServer, "_score", AsyncMock(side_effect=TimeoutError("scorer timeout"))),
+    ):
+        result = await server.verify(request("result=1"))
+    assert result.mask_sample and not result.evaluation_completed
+    assert result.failure_kind == VERIFIER_ERROR
+
+
+@pytest.mark.asyncio
+async def test_model_execution_failure_does_not_retry(server):
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = [SandboxExecResult("", "", 0), SandboxExecResult("", "", 124, "timeout")]
+    context = MagicMock()
+    context.__aenter__ = AsyncMock(return_value=sandbox)
+    context.__aexit__ = AsyncMock(return_value=False)
+    with patch("resources_servers.deepcad.app.AsyncSandbox", return_value=context) as factory:
+        result = await server.verify(request("result=1"))
+    factory.assert_called_once()
+    assert result.reward == 0 and not result.mask_sample and result.evaluation_completed
+    assert result.failure_kind == "deepcad:execution"

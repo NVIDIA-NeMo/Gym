@@ -163,3 +163,35 @@ def test_runner_optional_cq_namespace(tmp_path, monkeypatch, preload, explicit_i
                 with pytest.raises(NameError, match="cq"):
                     runner.main()
                 assert not output.exists()
+
+
+@pytest.mark.parametrize("offset", [0.5, 3.0])
+def test_runner_fuses_overlapping_and_disjoint_solids_with_score_parity(tmp_path, offset):
+    first = cq.Workplane("XY").box(2, 2, 2).val()
+    second = first.translate((offset, 0, 0))
+    compound = cq.Compound.makeCompound([first, second])
+    expected = first.fuse(second)
+    code = f"import cadquery as cq\na=cq.Workplane('XY').box(2,2,2).val()\nresult=cq.Compound.makeCompound([a,a.translate(({offset},0,0))])"
+    (tmp_path / "model.py").write_text(code)
+    output = tmp_path / "prediction.step"
+    real_export = cq.exporters.export
+    with (
+        patch.object(runner, "Path", side_effect=lambda path: tmp_path / Path(path).name),
+        patch.object(runner.cq.exporters, "export", side_effect=lambda shape, _: real_export(shape, str(output))),
+    ):
+        runner.main()
+    actual = geometry.load_solid(output)
+    assert actual.Volume() == pytest.approx(expected.Volume())
+    assert len(actual.Solids()) == len(expected.Solids())
+    assert geometry.score(actual, compound)["reward"] == pytest.approx(1, abs=1e-6)
+    assert geometry.score(actual, expected)["reward"] == pytest.approx(1, abs=1e-6)
+
+
+@pytest.mark.parametrize("offset", [0.5, 3.0])
+def test_fused_prediction_normalization_preserves_union_without_host_fuse(offset):
+    first = cq.Workplane("XY").box(2, 2, 2).val()
+    shape = first.fuse(first.translate((offset, 0, 0)))
+    expected = geometry.checked_normalized_solid(shape)
+    with patch.object(cq.Shape, "fuse", side_effect=AssertionError("prediction fused on host")):
+        actual = geometry.checked_normalized_solid(shape, fuse_solids=False)
+    assert geometry.brep_iou(actual, expected)["reward"] == pytest.approx(1, abs=1e-6)

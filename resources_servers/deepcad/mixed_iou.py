@@ -22,6 +22,7 @@ import numpy as np
 import trimesh
 from scipy.ndimage import distance_transform_edt
 
+from nemo_gym.core import VERIFIER_ERROR
 from resources_servers.deepcad.geometry import brep_iou, load_solid
 from resources_servers.deepcad.mixed_iou_config import MixedIoUConfig
 
@@ -69,7 +70,8 @@ def octree_iou(a: np.ndarray, b: np.ndarray, depth: int) -> float:
     return (directed(a, b) + directed(b, a)) / 2
 
 
-def prepare(shape: cq.Shape, resolution: int, config: MixedIoUConfig):
+def prepare(shape: cq.Shape, resolution: int, config: MixedIoUConfig, *, fuse_solids: bool = True):
+    """Build metric inputs; skip fusion only for a sandbox-produced solid union."""
     # Meshing a shape can attach invalid polygon-on-triangulation caches to OCC
     # edges. Tessellate only a deep copy; Boolean operands remain pristine.
     bounds = shape.BoundingBox()
@@ -90,7 +92,9 @@ def prepare(shape: cq.Shape, resolution: int, config: MixedIoUConfig):
         solids = transformed.Solids()
         if not solids:
             raise ValueError("No normalized solid bodies")
-        union = solids[0].fuse(*solids[1:]) if len(solids) > 1 else solids[0]
+        union = transformed
+        if fuse_solids:
+            union = solids[0].fuse(*solids[1:]) if len(solids) > 1 else solids[0]
         if not union.isValid() or not np.isfinite(union.Volume()) or union.Volume() <= 0:
             raise ValueError("Invalid normalized solid union")
         return union
@@ -154,6 +158,8 @@ def score_paths(
     resolution: int,
     config: MixedIoUConfig,
     cache_root: Path | None = None,
+    *,
+    prediction_fused: bool = False,
 ) -> dict:
     config.validate_resolution(resolution)
     started = time.perf_counter()
@@ -168,8 +174,11 @@ def score_paths(
         return dict(reward=0.0, failure_kind="deepcad:geometry", failure_reason=str(exc))
     try:
         t = time.perf_counter()
-        pred_solid, pred_grid, pred_band = prepare(shape, resolution, config)
+        pred_solid, pred_grid, pred_band = prepare(shape, resolution, config, fuse_solids=not prediction_fused)
         prediction_time = time.perf_counter() - t
+    except Exception as exc:
+        return dict(reward=0.0, failure_kind="deepcad:geometry", failure_reason=str(exc))
+    try:
         t = time.perf_counter()
         result = brep_iou(pred_solid, ref_solid)
         brep_time = time.perf_counter() - t
@@ -200,7 +209,13 @@ def score_paths(
         )
         return result
     except Exception as exc:
-        return dict(reward=0.0, mask_sample=True, failure_kind="deepcad:infrastructure", failure_reason=str(exc))
+        return dict(
+            reward=0.0,
+            mask_sample=True,
+            evaluation_completed=False,
+            failure_kind=VERIFIER_ERROR,
+            failure_reason=str(exc),
+        )
 
 
 def main():
@@ -213,6 +228,7 @@ def main():
         int(sys.argv[3]),
         MixedIoUConfig.model_validate(options["mixed_iou"]),
         Path(options["cache_root"]) if options.get("cache_root") else None,
+        prediction_fused=options.get("prediction_fused", False),
     )
     print(json.dumps(result, allow_nan=False))
 

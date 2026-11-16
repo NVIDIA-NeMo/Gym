@@ -58,8 +58,14 @@ names, and can miss dynamic calls. It does not prove execution or contribution
 to the final geometry. The bonus remains disabled by default; scores with it
 enabled are not directly comparable to the previous runtime-trace version.
 
-Invalid generated code or geometry earns zero. Missing/invalid references,
-scorer failures, and sandbox infrastructure failures set `mask_sample: true`.
+The sandbox fuses predicted solids within the generated program execution budget.
+The scorer preserves that union during normalization. Invalid generated code or
+geometry, including prediction normalization failures, earns zero. Missing/invalid references,
+inconclusive pairwise scorer failures, and sandbox infrastructure failures set
+`mask_sample: true`. Provider and scorer exceptions retry the same source in a
+fresh sandbox up to `inconclusive_verification_retries` times (default 2).
+Exhausted retries report `evaluation_completed: false` and a registered
+`provider_unavailable` or `verifier_error` failure kind. Model failures do not retry.
 The historical `voxel_iou` reward-component key denotes volume IoU from the
 selected backend. Raw scores remain available independently of reward weights.
 

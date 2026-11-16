@@ -17,7 +17,14 @@ from typing import Any, Literal
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, resolve_provider_config
+from nemo_gym.core import PROVIDER_UNAVAILABLE, VERIFIER_ERROR
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    SandboxResources,
+    SandboxSpec,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
 from nemo_gym.server_runtime import (
     BaseMultiRewardVerifyResponse,
     BaseResourcesServerConfig,
@@ -57,6 +64,7 @@ class DeepCADResourcesServerConfig(BaseResourcesServerConfig):
     max_concurrency: int = Field(default=4, ge=1)
     execution_timeout_s: int = Field(default=60, ge=1)
     geometry_timeout_s: int = Field(default=120, ge=1)
+    inconclusive_verification_retries: int = Field(default=2, ge=0, le=10)
     geometry_library_dirs: list[str] = Field(default_factory=list)
     max_code_bytes: int = Field(default=65536, ge=1)
     max_step_bytes: int = Field(default=32 * 1024 * 1024, ge=1)
@@ -86,6 +94,7 @@ class DeepCADVerifyRequest(BaseVerifyRequest):
 
 
 class DeepCADVerifyResponse(BaseMultiRewardVerifyResponse):
+    evaluation_completed: bool = True
     source_operations: list[str] = Field(default_factory=list)
     matched_operations: list[str] = Field(default_factory=list)
     operation_bonus: float = 0.0
@@ -250,6 +259,16 @@ class DeepCADResourcesServer(SimpleResourcesServer):
         return extract_code(assistant_text(body))
 
     async def _evaluate(self, code: str, reference_step: str, *, view_mode: str = "axis") -> dict[str, Any]:
+        # Regrade the same submission; never request another policy sample on an infrastructure failure.
+        for attempt in range(self.config.inconclusive_verification_retries + 1):
+            result = await self._evaluate_once(code, reference_step, view_mode=view_mode)
+            if result.get("evaluation_completed", True):
+                return result
+            if attempt < self.config.inconclusive_verification_retries:
+                await asyncio.sleep(min(2**attempt, 4))
+        return result
+
+    async def _evaluate_once(self, code: str, reference_step: str, *, view_mode: str = "axis") -> dict[str, Any]:
         root = Path(self.config.reference_root).expanduser().resolve()
         reference = (root / reference_step).resolve()
         if not reference.is_relative_to(root) or not reference.is_file():
@@ -259,10 +278,14 @@ class DeepCADResourcesServer(SimpleResourcesServer):
                 "failure_kind": "deepcad:reference",
                 "failure_reason": "Reference STEP missing or outside reference_root",
             }
+        failure_kind = PROVIDER_UNAVAILABLE
         try:
             provider = resolve_provider_config(self.config.sandbox_provider, self.server_client.global_config_dict)
             spec = SandboxSpec(
                 image=self.config.sandbox_image,
+                metadata=resolve_provider_metadata(
+                    self.config.sandbox_provider, self.server_client.global_config_dict
+                ),
                 ttl_s=self.config.execution_timeout_s + 300,
                 workdir="/sandbox",
                 env={
@@ -305,6 +328,8 @@ class DeepCADResourcesServer(SimpleResourcesServer):
                     check = await sandbox.exec(
                         "test -f /sandbox/prediction.step && wc -c < /sandbox/prediction.step", timeout_s=10
                     )
+                    if check.error_type:
+                        raise RuntimeError(f"Sandbox artifact check failed: {check.error_type}")
                     try:
                         size = int((check.stdout or "").strip())
                     except ValueError:
@@ -316,6 +341,7 @@ class DeepCADResourcesServer(SimpleResourcesServer):
                             "failure_reason": "Missing or oversized STEP artifact",
                         }
                     await sandbox.download("/sandbox/prediction.step", prediction)
+                failure_kind = VERIFIER_ERROR
                 scored = await self._score(prediction, reference, view_mode=view_mode, artifact_dir=None)
                 return scored
         except Exception as exc:
@@ -323,7 +349,8 @@ class DeepCADResourcesServer(SimpleResourcesServer):
             return {
                 "reward": 0.0,
                 "mask_sample": True,
-                "failure_kind": "deepcad:infrastructure",
+                "evaluation_completed": False,
+                "failure_kind": failure_kind,
                 "failure_reason": str(exc),
             }
 
@@ -336,6 +363,7 @@ class DeepCADResourcesServer(SimpleResourcesServer):
         self, prediction: Path, reference: Path, *, view_mode: str = "axis", artifact_dir: Path | None = None
     ) -> dict[str, Any]:
         options = {
+            "prediction_fused": True,
             "iou_backend": self.config.iou_backend,
             "alignment": self.config.alignment,
             "view_mode": view_mode,
