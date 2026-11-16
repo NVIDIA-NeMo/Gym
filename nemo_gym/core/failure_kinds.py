@@ -103,6 +103,9 @@ MODEL_CONTEXT_LIMIT = "model_context_limit"
 # --- environment: one episode attempt ------------------------------------------------ #
 ENVIRONMENT_SERVER_FAILED = "environment_server_failed"
 ENVIRONMENT_PROTOCOL_VIOLATION = "environment_protocol_violation"
+# The environment's own queue/episode deadlines, not a timeout of an inner operation.
+ENVIRONMENT_ADMISSION_TIMEOUT = "environment_admission_timeout"
+ENVIRONMENT_EPISODE_TIMEOUT = "environment_episode_timeout"
 
 # --- verifier and judge --------------------------------------------------------------- #
 # ``judge_failed`` is produced today by judge_failsafe and by reverification.
@@ -257,6 +260,8 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         AGENT_ROUTE_FAILED,
         HARNESS_TERMINATION_UNCONFIRMED,
         EPISODE_FAILED,
+        ENVIRONMENT_ADMISSION_TIMEOUT,
+        ENVIRONMENT_EPISODE_TIMEOUT,
         COLLECTION_DISPATCH_FAILED,
         HARBOR_FAILED,
         INFRASTRUCTURE_ERROR,

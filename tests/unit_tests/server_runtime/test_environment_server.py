@@ -772,3 +772,43 @@ def test_cleanup_observations_preserve_the_episode_outcome(primary_kind, cleanup
             assert event.foreign_error.exception_type.endswith(
                 "TimeoutError" if cleanup_error == "timeout" else "ConnectionError"
             )
+
+
+@pytest.mark.parametrize("stage", ["admission", "episode"])
+def test_owned_deadlines_save_an_environment_event_without_changing_live_routing(stage):
+    from nemo_gym.core.failure_records import FailureReport
+    from nemo_gym.core.typed_exceptions import rebuild_failure
+    from nemo_gym.rollouts.rollout_collection import _episode_record
+
+    class Environment(_EnvironmentServer):
+        async def run(self, request, cleanup):
+            await asyncio.sleep(60)
+
+    config = _environment_server(
+        max_concurrent_episodes=1,
+        queue_timeout_seconds=0.01,
+        default_episode_timeout_seconds=0.01,
+    ).config
+    server = Environment(config=config, server_client=MagicMock(spec=ServerClient))
+
+    async def run():
+        if stage == "admission":
+            async with server._admission:
+                return await server.run_request(_request())
+        return await server.run_request(_request())
+
+    response = asyncio.run(run())
+    assert response.failure.terminal is False and response.result is None
+    assert response.failure.failure_kind is None  # Keep the existing episode-routing contract.
+    report = FailureReport.model_validate_json(response.failure_report.model_dump_json())
+    event = report.events[report.failure_id]
+    assert event.boundary == "environment"
+    assert event.failure_kind == f"environment_{stage}_timeout"
+    assert event.stage == ("admission" if stage == "admission" else None)
+    assert event.operation == ("episode.admission" if stage == "admission" else "episode")
+    assert event.foreign_error.exception_type == "TimeoutError"
+    assert rebuild_failure(report).event_id == event.event_id
+    record = _episode_record(response.model_dump(mode="json"))
+    assert record["_ng_failure_id"] == event.event_id
+    assert record["_ng_failure_terminal"] is False
+    assert record["_ng_failure_events"][event.event_id]["failure_kind"] == event.failure_kind

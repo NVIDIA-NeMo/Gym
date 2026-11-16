@@ -304,8 +304,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 # The close runs after the failed step, which parks until resume while a checkpoint is open.
                 try:
                     await agent_cleanup.close()
-                except Exception:
-                    pass  # Final unwind retries the close and logs its failure.
+                except Exception as error:
+                    # Final unwind retries; retain this attempt even if that retry succeeds.
+                    cleanup.observe_failure("agent session", error)
                 if closed_agent:
                     failure.episode_evidence["agent_observations"] = closed_agent[-1].agent_observations
                     failure.episode_evidence["trajectory"] = closed_agent[-1].trajectory
