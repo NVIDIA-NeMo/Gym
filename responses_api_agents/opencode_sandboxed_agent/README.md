@@ -78,7 +78,10 @@ For benchmark selection, prompts, and repeat counts, see the
 
 Set `OPENCODE_SANDBOX_IMAGE` or `PI_SANDBOX_IMAGE` to your validated image digest,
 plus `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` for your assigned sandbox API.
-Set `OPENCODE_ARTIFACTS_DIR` or `PI_ARTIFACTS_DIR` to durable host storage.
+For Pi, set `PI_ARTIFACTS_DIR` to durable host storage.
+`OPENCODE_ARTIFACTS_DIR` is optional and only for debugging.
+When set to an absolute path, it keeps each rollout's OpenCode export in a folder of its own, and those folders are never removed.
+When unset, each export is removed once it is parsed.
 Search additionally reads `TAVILY_API_KEY`, accepting either one key or a
 comma-separated pool. Provider credentials remain on the host; the sandbox receives
 only per-session Gym MCP headers. See [Tavily search](../../fern/versions/latest/pages/infrastructure/tavily-search.mdx)
