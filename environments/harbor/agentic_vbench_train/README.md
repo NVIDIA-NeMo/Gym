@@ -128,4 +128,28 @@ parsed tool calls and reasoning, not the tokens the model generated, so no promp
 Keeping history reasoning in the template (`chat_template_kwargs.truncate_history_thinking=false`) did not change
 that. This is the case Gym's capture docs route to framework-owned reconstruction (`token_id_capture.parent_resolution:
 source_history` with the training framework's external staging), which NeMo RL uses; the standalone run therefore
-shows the records, not a training batch. The NeMo RL smoke below is the training-side evidence.
+shows the records, not a training batch.
+
+A NeMo RL smoke (main 0.8.0, `run_grpo_single_controller.py`, five nodes: one vLLM generation node at TP8/EP8 and
+four Megatron training nodes at TP8/EP16/CP2, Gym from this branch, the eight generated tasks with two generations
+each, token capture with `parent_resolution: source_history` and vLLM-worker external staging as NeMo RL configures
+it) launched end to end on this entry: the three Gym servers started under NeMo RL, sixteen episodes ran through the
+harbor server, `opencode_agent` and the Podman sandboxes (13 to 124 model calls each, 26k to 46k cumulative tokens),
+and the ledger chained every call to its parent up to OpenCode's automatic compaction. In eleven of the sixteen
+episodes the chain breaks at 41k to 46k cumulative tokens, where OpenCode compacts (the 49,152-token context minus
+the 8,192-token output reserve): every call from the compaction summary on is `unresolved_parent`, the reassembler
+rejected those rollouts, and it accepted the five that never compacted. The training step then failed inside NeMo RL's
+loss diagnostics (`clipped_pg_diagnostic_metrics` takes `.min()` over an empty valid mask) before a weight update.
+Both open items are NeMo RL's, not this entry's: reconstruction across OpenCode compaction (Gym's capture docs route it
+to the framework), and a batch whose rejected rollouts are placeholders. One more NeMo RL main gap met on the way: a
+harbor row's `task_input` is a single-step `turns` list, which main's `_build_inputs` rejects (the smoke read
+`turns[0].responses_create_params` through a local patch).
+
+Subagents (`subagents.yaml`), `gym eval run` on one generated task per family with Gemini 4 through
+`inference_provider` and token capture off: the sequencing episode ran three OpenCode sessions, the primary agent made
+two `task` calls (127 s and 139 s) that each spawned an analyst session (27 and 25 messages, both ending with status
+`failed` in OpenCode's export, not inspected further), reward 0; the repair episode ran two sessions, three `task` calls
+(300 s, 255 s, 197 s) to one analyst session (52 messages, `completed`, the follow-ups through the task id it returned),
+reward 0.819. Every child session was reported as a child invocation of the primary's (`parent_invocation_id`), with one
+`subagent_spawn_ambiguous` gap where the three calls share the child. The assembly and repurpose episodes were dropped by
+the same `OpenCode exited with code 1` as the benchmark entry's full-set run on that route.
