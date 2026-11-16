@@ -239,7 +239,12 @@ for arg in "$@"; do
         done ;;
     esac
 done
-case "$*" in *logs/driver-*) %(driver)s ;; *) %(service)s ;; esac
+case "$*" in
+    *logs/driver-*) %(driver)s ;;
+    # A node-local step on the driver's node: run it here, on the host.
+    *" _gym_node_local "*) while [[ "$1" == --* ]]; do shift; done; exec "$@" ;;
+    *) %(service)s ;;
+esac
 """
 
 
@@ -253,17 +258,38 @@ def _start_job(
     fakes: dict[str, str] | None = None,
     exports: bool = False,
     job_id: str = "11",
+    off_batch: bool = False,
 ) -> subprocess.Popen:
-    """Start the rendered job.sh in its own process group; `end_in`: scontrol reports the job's end that many s on."""
+    """Start the rendered job.sh in its own process group; `end_in`: scontrol reports the job's end that many s on.
+
+    `off_batch` pins the policy, and so the driver, to the second of two nodes: node-local steps then go through srun.
+    """
     host = tmp_path / "host"
     host.mkdir(exist_ok=True)
-    config = _config({"base_dir": str(host), "archive_timeout_seconds": 5, **(node_local or {})}, exports=exports)
+    placement = (
+        {
+            "services": {"policy": {"type": "vllm", "container": "img", "model": "/ckpt", "node_pool": "aux"}},
+            "pools": _TWO_POOLS,
+            "policy": "policy",
+        }
+        if off_batch
+        else {}
+    )
+    node_local = {"base_dir": str(host), "archive_timeout_seconds": 5, **(node_local or {})}
+    config = _config(node_local, exports=exports, **placement)
     bench = tmp_path / "run" / "b"
     bench.mkdir(parents=True, exist_ok=True)
     (tmp_path / "bin").mkdir(exist_ok=True)
     all_fakes = {"srun": _FAKE_SRUN % {"driver": driver, "service": service}, "curl": "exit 0", **(fakes or {})}
-    if end_in is not None:
-        all_fakes["scontrol"] = f'echo "JobId=1 TimeLimit=04:00:00 EndTime=$(($(date +%s) + {end_in})) Partition=b"'
+    job_line = (
+        f'echo "JobId=1 TimeLimit=04:00:00 EndTime=$(($(date +%s) + {end_in})) Partition=b"'
+        if end_in is not None
+        else "exit 1"
+    )
+    if off_batch:
+        all_fakes["scontrol"] = f"case \"$2\" in hostnames) printf 'n0\\nn1\\n' ;; *) {job_line} ;; esac"
+    elif end_in is not None:
+        all_fakes["scontrol"] = job_line
     for name, body in all_fakes.items():
         (tmp_path / "bin" / name).write_text(f"#!/bin/bash\n{body}\n")
         (tmp_path / "bin" / name).chmod(0o755)
@@ -495,6 +521,35 @@ def test_after_the_evaluation_succeeded_the_deadline_archives_and_leaves_the_exp
     assert returncode == 0
     assert "the evaluation has finished: archiving the node-local dir" in output
     assert "stopping the driver" not in output and "exports done" in output
+    assert output.count("Archived the node-local dir") == 1
+    assert _archive(tmp_path) == {"ev/1.json": "row1\n"}
+
+
+@pytest.mark.parametrize("off_batch", [False, True], ids=["batch_node", "off_batch_node"])
+def test_a_service_lost_after_the_evaluation_succeeded_still_lets_the_deadline_archive(tmp_path, off_batch):
+    # The service dies once the evaluation has succeeded and before the poll that reaches the deadline (3 s on); the
+    # exports then run on, so only a watch that keeps polling archives before the driver step ends.
+    bench = tmp_path / "run" / "b"
+    service = f"until [ -e {bench / 'eval.succeeded.11'} ]; do sleep 0.1; done; exit 3"
+    driver = (
+        f"trap 'echo driver got TERM; exit 143' TERM; {_WRITE_EVIDENCE}; : > \"$GYM_EVAL_SUCCEEDED_MARKER\"; "
+        f"for _ in $(seq 300); do [ -e {bench / 'node-local' / '11.tar.gz'} ] && exit 5; sleep 0.1; done; exit 9"
+    )
+    process = _start_job(
+        tmp_path,
+        driver=driver,
+        service=service,
+        node_local={"stop_before_walltime_seconds": 65},
+        end_in=68,
+        exports=True,
+        off_batch=off_batch,
+    )
+
+    returncode = _finish(process)
+
+    output = (tmp_path / "job.out").read_text()
+    assert returncode == 5, output
+    assert "driver got TERM" not in output and "stopping the driver" not in output
     assert output.count("Archived the node-local dir") == 1
     assert _archive(tmp_path) == {"ev/1.json": "row1\n"}
 

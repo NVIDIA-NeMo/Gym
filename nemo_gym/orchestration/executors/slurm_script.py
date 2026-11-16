@@ -799,7 +799,7 @@ _gym_service_exited() {{
     # A successful run tears its services down as the driver ends: if the driver is already gone, its status stands.
     # Once the evaluation has succeeded (a driver with exports writes the marker then), a service that is lost
     # costs nothing the exports need, so the driver is left to finish and its status stands.
-    if [ -e "${{GYM_EVAL_SUCCEEDED_MARKER:-}}" ] || ! kill -0 "$_gym_driver_pid" 2>/dev/null; then
+    if [ -e "${{GYM_EVAL_SUCCEEDED_MARKER:-}}" ] || ! kill -0 "$_gym_driver_pid" 2>/dev/null; then{settled}
         wait "$_gym_driver_pid"
         return
     fi
@@ -819,6 +819,13 @@ _gym_run_driver() {{
 }}
 _gym_run_driver"""
 
+# The services are no longer watched, but the extra check keeps its poll until the driver ends.
+_SETTLED_EXTRA_CHECK = """
+        while kill -0 "$_gym_driver_pid" 2>/dev/null; do
+            {extra_check}
+            sleep 5
+        done"""
+
 
 def _render_watched_driver(driver: str, services: list[str], extra_check: str = "") -> str:
     """The driver step, ended with TERM if a service it depends on exits first.
@@ -830,7 +837,8 @@ def _render_watched_driver(driver: str, services: list[str], extra_check: str = 
     `GYM_EVAL_SUCCEEDED_MARKER` as soon as the evaluation succeeds, and from then on a lost service no
     longer ends the driver: the exports do not use it, and a requeue would reload the model for nothing.
     The driver's PID is kept in a lowercase variable, which no service's uppercase <NAME>_PID can overwrite.
-    `extra_check` is one more line the loop runs on every poll.
+    `extra_check` is one more line the loop runs on every poll, also after a service is lost once the evaluation has
+    succeeded.
     """
     if not services and not extra_check:
         return driver
@@ -841,7 +849,8 @@ def _render_watched_driver(driver: str, services: list[str], extra_check: str = 
         ]
         + ([f"        {extra_check}"] if extra_check else [])
     )
-    return _WATCHED_DRIVER_TEMPLATE.format(driver=driver, checks=checks)
+    settled = _SETTLED_EXTRA_CHECK.format(extra_check=extra_check) if extra_check else ""
+    return _WATCHED_DRIVER_TEMPLATE.format(driver=driver, checks=checks, settled=settled)
 
 
 def _pool_offsets(compute: SlurmComputeConfig) -> dict[str, tuple[int, int]]:
