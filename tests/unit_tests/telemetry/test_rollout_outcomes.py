@@ -10,7 +10,6 @@ import pytest
 
 from nemo_gym.rollouts import rollout_collection
 from nemo_gym.telemetry import gym_metrics
-from nemo_gym.telemetry.span_groups import GymSpanGroup
 from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, failing_row, install_fake_server_client
 from tests.unit_tests.rollouts.test_rollout_recovery import runner_config  # noqa: F401 - fixture
 from tests.unit_tests.telemetry.test_sandbox_active import collected_metrics  # noqa: F401 - fixture
@@ -34,8 +33,8 @@ def _key(**attrs):
     return tuple(sorted(attrs.items()))
 
 
-def _rollout_group_only(monkeypatch):
-    monkeypatch.setattr(rollout_collection, "is_span_group_enabled", lambda group: group == GymSpanGroup.ROLLOUT)
+def _metrics_exporting(monkeypatch, exporting=True):
+    monkeypatch.setattr(rollout_collection, "is_metrics_exporter_active", lambda: exporting)
 
 
 def test_outcomes_are_counted_with_bounded_failure_attributes(collected_metrics):  # noqa: F811
@@ -64,8 +63,10 @@ def test_outcomes_are_counted_with_bounded_failure_attributes(collected_metrics)
     }
 
 
-def test_driver_helper_reads_the_record_and_respects_the_span_group(collected_metrics, monkeypatch):  # noqa: F811
-    _rollout_group_only(monkeypatch)
+def test_driver_helper_follows_the_metrics_exporter_not_the_span_group(collected_metrics, monkeypatch):  # noqa: F811
+    _metrics_exporting(monkeypatch)
+    # Span groups choose spans only: with every group off, the counter still records.
+    monkeypatch.setattr(rollout_collection, "is_span_group_enabled", lambda group: False)
     rollout_collection._record_rollout_outcome({"reward": 1.0}, "scored", "env")
     rollout_collection._record_rollout_outcome(
         {
@@ -77,7 +78,9 @@ def test_driver_helper_reads_the_record_and_respects_the_span_group(collected_me
         "failed",
         "env",
     )
-    monkeypatch.setattr(rollout_collection, "is_span_group_enabled", lambda group: False)
+    # Without a metrics exporter it records nothing, even with every span group on.
+    monkeypatch.setattr(rollout_collection, "is_span_group_enabled", lambda group: True)
+    _metrics_exporting(monkeypatch, False)
     rollout_collection._record_rollout_outcome({"reward": 1.0}, "scored", "env")
     assert _by_attrs(collected_metrics) == {
         _key(**{OUTCOME: "scored", DISPATCH: "env"}): 1,
@@ -94,7 +97,7 @@ def test_driver_helper_reads_the_record_and_respects_the_span_group(collected_me
 
 
 def test_an_unregistered_kind_is_bucketed(collected_metrics, monkeypatch):  # noqa: F811
-    _rollout_group_only(monkeypatch)
+    _metrics_exporting(monkeypatch)
     for kind in ("connect to 10.0.0.7:8000 refused after 3 retries", "session_lost", "tb4:sandbox_gone"):
         rollout_collection._record_rollout_outcome(
             {rollout_collection.NG_FAILURE_CLASS_KEY: "infrastructure_error", "failure_kind": kind}, "failed", "env"
@@ -107,7 +110,7 @@ def test_an_unregistered_kind_is_bucketed(collected_metrics, monkeypatch):  # no
 
 
 def test_failure_fields_on_a_scored_row_are_not_labels(collected_metrics, monkeypatch):  # noqa: F811
-    _rollout_group_only(monkeypatch)
+    _metrics_exporting(monkeypatch)
     rollout_collection._record_rollout_outcome(
         {"reward": 0.0, "failure_kind": "verifier_error", "_ng_failure_type": "StaleEcho"}, "scored", "env"
     )
@@ -116,7 +119,7 @@ def test_failure_fields_on_a_scored_row_are_not_labels(collected_metrics, monkey
 
 @pytest.mark.parametrize("kind", [None, "verifier_error", "tb4:sandbox_gone", "unbounded text"])
 def test_original_routing_labels_are_not_replaced_by_saved_record(collected_metrics, monkeypatch, kind):  # noqa: F811
-    _rollout_group_only(monkeypatch)
+    _metrics_exporting(monkeypatch)
     rollout_collection._record_rollout_outcome(
         {
             "_ng_failure_class": "agent_run_error",
@@ -144,7 +147,7 @@ async def test_persisted_outcomes_count_once_and_resumed_cache_is_not_counted(
 ):
     from nemo_gym.rollouts.rollout_store import RolloutStore
 
-    _rollout_group_only(monkeypatch)
+    _metrics_exporting(monkeypatch)
     runner_config.route_failures_to_sidecar = True
 
     async def post(**kwargs):
@@ -189,7 +192,7 @@ async def test_persisted_outcomes_count_once_and_resumed_cache_is_not_counted(
 async def test_outcome_rejected_by_storage_is_not_counted(runner_config, collected_metrics, monkeypatch):  # noqa: F811
     from nemo_gym.rollouts.rollout_store import RolloutStore
 
-    _rollout_group_only(monkeypatch)
+    _metrics_exporting(monkeypatch)
     install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, {"reward": 1.0, "response": {}})))
 
     def reject(self, result, **kwargs):
@@ -222,7 +225,7 @@ async def test_legacy_counter_keeps_routing_class_and_only_explicit_kind(
     failure_class,
     kind,  # noqa: F811
 ):
-    _rollout_group_only(monkeypatch)
+    _metrics_exporting(monkeypatch)
     runner_config.route_failures_to_sidecar = routing
 
     async def post(**kwargs):
@@ -259,7 +262,7 @@ async def test_transport_counter_does_not_invent_a_kind(
 ):  # noqa: F811
     from tests.unit_tests.rollouts.test_rollout_collection import http_error
 
-    _rollout_group_only(monkeypatch)
+    _metrics_exporting(monkeypatch)
 
     async def post(**kwargs):
         if kwargs["json"]["_ng_task_index"] == 0:
@@ -281,7 +284,7 @@ async def test_native_failure_kind_cannot_become_free_text_counter_class(
     import orjson
     from omegaconf import OmegaConf
 
-    _rollout_group_only(monkeypatch)
+    _metrics_exporting(monkeypatch)
     Path(runner_config.input_jsonl_fpath).write_bytes(
         b"".join(
             orjson.dumps({"task_id": {"taskset": "native", "task_id": str(i)}, "task_input": {}}) + b"\n"
@@ -317,7 +320,7 @@ async def test_native_failure_kind_cannot_become_free_text_counter_class(
 
 
 async def _failed_points(tmp_path, monkeypatch, collected_metrics, input_extra, reply):  # noqa: F811
-    monkeypatch.setattr(rollout_collection, "is_span_group_enabled", lambda group: group == GymSpanGroup.ROLLOUT)
+    _metrics_exporting(monkeypatch)
     monkeypatch.setattr(rollout_collection, "get_global_config_dict", lambda: {})
     source = tmp_path / "input.jsonl"
     source.write_text(json.dumps(failing_row(0) | input_extra) + "\n" + json.dumps(failing_row(1)) + "\n")
@@ -392,7 +395,7 @@ async def test_custom_typed_dispatcher_keeps_labels_without_routing_diagnostics(
     from nemo_gym.rollouts.rollout_records import logical_rollout_id
     from nemo_gym.rollouts.rollout_store import RolloutStore
 
-    _rollout_group_only(monkeypatch)
+    _metrics_exporting(monkeypatch)
     install_fake_server_client(monkeypatch, AsyncMock())
 
     class TypedDispatcher(rollout_collection.RolloutCollectionHelper):

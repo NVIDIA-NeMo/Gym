@@ -2305,7 +2305,7 @@ def test_child_result_sums_usage_of_every_policy_response_gym_received() -> None
     )
     expected = {
         "input_tokens": 3700,
-        "input_tokens_details": {"cached_tokens": 1536},
+        "input_tokens_details": {"cached_tokens": 1536, "cache_write_tokens": None},
         "output_tokens": 118,
         "output_tokens_details": {"reasoning_tokens": 30},
         "total_tokens": 3818,
@@ -2569,11 +2569,12 @@ def test_a_crashed_worker_is_a_typed_infrastructure_failure_row() -> None:
 @pytest.mark.parametrize(
     "reason", ["proxy_configuration_error", "proxy_required_but_disabled", "task_configuration_error"]
 )
-def test_a_configuration_refusal_stays_a_masked_row_without_a_failure_kind(reason: str) -> None:
+def test_a_configuration_refusal_is_a_masked_row_typed_without_a_retry(reason: str) -> None:
     request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
     row = _empty_response(request, error=f"{reason}: see the task", termination_reason=reason).model_dump(mode="json")
     assert (row["mask_sample"], row["runtime_admission_reason"]) == (True, reason)
-    assert row.get("failure_kind") is None
+    assert row["failure_kind"] == "osworld_agent:configuration_error"
+    assert reason in row["failure_reason"]
     assert not {"_ng_failure_class", "_ng_failure_events", "_ng_failure_id"} & set(row)
 
 

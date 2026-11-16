@@ -324,3 +324,49 @@ def test_a_fresh_run_at_the_same_path_does_not_inherit_an_earlier_runs_extension
 
     with RolloutStore.start_or_resume(output, prepare, resume=True) as resumed:
         assert resumed.attempt_cap == 3
+
+
+def _verdict(decision):
+    from nemo_gym.orchestration.recovery import operator_verdict
+
+    return operator_verdict({"status": "FAILED", "expected_samples": decision.expected, "errors": []}, decision)
+
+
+def test_an_extension_refused_for_an_old_reader_keeps_it_and_names_the_repin_in_one_call(tmp_path):
+    prepare_managed(tmp_path, "exhausted", n=2)
+    (tmp_path / ".gym_infra_retries").write_text("3\n")
+    selected = select_managed_evidence(collect(tmp_path), tmp_path)
+    old = selected.model_copy(
+        update={
+            "attempt_extension_applied": None,
+            "managed_selection": [fact.model_copy(update={"replayable": None}) for fact in selected.managed_selection],
+        }
+    )
+
+    decision = decide_from_collected(old, max_infra_retries=3, max_walltime_s=None, live_job=False, extend_attempts=1)
+
+    assert decision.action.value == "stop" and decision.reason.startswith("--extend-attempts 1 is refused")
+    action = _verdict(decision)["action"]
+    assert (
+        "`gym eval resubmit GYM_JOB_ID BENCHMARK --recover --extend-attempts N --extend-retries N --repin COMMIT "
+        "--repin-reason TEXT`" in (action)
+    ), action
+    assert "`gym eval submit`" not in action
+
+
+def test_an_extension_refused_for_an_unreadable_record_is_not_offered_again(tmp_path):
+    prepare_managed(tmp_path, "exhausted", n=2)
+    selected = select_managed_evidence(collect(tmp_path), tmp_path)
+    unreadable = selected.model_copy(update={"attempt_extension_state": "malformed"})
+
+    decision = decide_from_collected(
+        unreadable, max_infra_retries=3, max_walltime_s=None, live_job=False, extend_attempts=1
+    )
+
+    assert decision.action.value == "stop" and "is unreadable" in decision.reason
+    verdict = _verdict(decision)
+    # The same extension would be refused again: read the record first, never a loop or a fresh submit.
+    assert verdict["state"] == "unknown"
+    assert (
+        verdict["action"] == "make the file the reason names readable again and inspect again (completed work is kept)"
+    )

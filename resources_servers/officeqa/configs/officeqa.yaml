@@ -1,0 +1,10 @@
+officeqa_pro_resources_server:
+  resources_servers:
+    officeqa:
+      entrypoint: app.py
+      allowed_agents: [opencode_agent, claude_code_agent]
+      domain: agent
+      verified: false
+      description: OfficeQA document sandbox and answer verification
+      workspace_root: ${officeqa_pro_workspace_root}
+      numeric_tolerance: 0.0

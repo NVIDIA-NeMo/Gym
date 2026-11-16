@@ -27,6 +27,7 @@ from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import EpisodeId, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
+    SESSION_OWNER_HEADER,
     ActivationOutOfOrderError,
     BaseRunRequest,
     BaseVerifyRequest,
@@ -39,6 +40,7 @@ from nemo_gym.server_runtime import (
     seed_restarts,
     seed_verify_step_type,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 LOG = logging.getLogger(__name__)
@@ -79,7 +81,9 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
     # exports it. Keep its reply until /run records the verification boundary.
     _model_replies: dict[str, _ModelReply] = PrivateAttr(default_factory=dict)
 
-    async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+    async def export_agent_sessions(
+        self, session_keys: list[str], *, checkpoint_id: str
+    ) -> dict[str, dict[str, JsonValue]]:
         states = {}
         for key in session_keys:
             reply = self._model_replies.get(key, _ModelReply())
@@ -161,22 +165,26 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
                 f"Received an invalid response from the model server: {json.dumps(model_response_json)}"
             ) from e
 
-    async def run(self, body: ToolSimulationAgentRunRequest = Body()) -> ToolSimulationAgentVerifyResponse:
+    async def run(
+        self, request: Request, body: ToolSimulationAgentRunRequest = Body()
+    ) -> ToolSimulationAgentVerifyResponse:
         participant = self.checkpoint_participant
         if participant is None:
             return await self._run(body, legacy_run=None)
+        # The model call below activates the episode this worker holds, so with several workers it must come back here.
+        owner = getattr(request.app.state, "nemo_gym_routing_id", None)
         episode_id = EpisodeId.from_capture_key(require_rollout(self.rollout_id_from_run(body)))
         session_key = f"{_LEGACY_SESSION_PREFIX}{episode_id.rollout_id}"
         async with participant.legacy_run(session_key, episode_id) as legacy_run:
             model_reply = self._model_replies.setdefault(session_key, _ModelReply())
             try:
-                return await self._run(body, legacy_run=legacy_run)
+                return await self._run(body, legacy_run=legacy_run, owner=owner)
             finally:
                 if self._model_replies.get(session_key) is model_reply:
                     self._model_replies.pop(session_key)
 
     async def _run(
-        self, body: ToolSimulationAgentRunRequest, *, legacy_run: LegacyRun | None
+        self, body: ToolSimulationAgentRunRequest, *, legacy_run: LegacyRun | None, owner: str | None = None
     ) -> ToolSimulationAgentVerifyResponse:
         config = self.config
         continuation = (legacy_run.continuation if legacy_run else None) or {}
@@ -231,6 +239,7 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
                     server_name=config.name,
                     url_path=self.url_path_for_run("/v1/responses", body),
                     json=body.responses_create_params,
+                    headers={SESSION_OWNER_HEADER: owner} if owner is not None else {},
                 )
                 await raise_for_status(response)
                 response_json = await get_response_json(response)
@@ -306,3 +315,6 @@ class ToolSimulationAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     ToolSimulationAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ToolSimulationAgent.run_webserver()  # noqa: F401

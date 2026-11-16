@@ -61,6 +61,7 @@ from nemo_gym.core.failure_kinds import (
     FailureClassificationConfig,
     FailureStage,
     classify_failure,
+    is_namespaced,
     is_registered,
     is_server_status,
 )
@@ -134,6 +135,16 @@ def has_recorded_grade(row: Mapping[str, Any]) -> bool:
     evaluation is the grade's durable record. Only a row with neither a kept answer nor a recorded grade may run fresh.
     """
     return row.get("evaluation_completed") is True
+
+
+def unsettled_masked_note(coverage: Mapping[str, Any]) -> str:
+    """Why infrastructure-masked results are not settled, for an incomplete-run message; empty when none is."""
+    if not coverage.get("masked_exhausted"):
+        return ""
+    return (
+        f"{coverage['masked_exhausted']} infrastructure-masked result(s) spent their attempt budget "
+        "(masked_exhausted): continue with gym eval resubmit --recover --extend-attempts N."
+    )
 
 
 def _row_failure_kind(row: Mapping[str, Any]) -> Any:
@@ -427,8 +438,9 @@ def _masked_evaluation_side_kind(
 
     The rules ``masked_infrastructure_kind`` and ``masked_kept_answer_kind`` share, all but the saved answer: the row
     is masked by the Environment Server that graded it, is no failure row, omitted stand-in or re-judgment, and its
-    ``failure_kind`` is registered, evaluation-side through the shared classifier, not one whose saved answer is graded
-    again (``_MASKED_REGRADE_KINDS``) and not a ``transport_*`` verify call.
+    ``failure_kind`` is registered, or namespaced with the ``retry`` action its owner recorded and no model
+    attribution. The kind is evaluation-side through the shared classifier (or carries a recorded ``retry``), not one
+    whose saved answer is graded again (``_MASKED_REGRADE_KINDS``) and not a built-in ``transport_*`` verify call.
     """
     if (
         row.get("mask_sample") is not True
@@ -453,12 +465,14 @@ def _masked_evaluation_side_kind(
             http_status=status,
             config=classification,
         )
+    retry_declared = row.get("failure_outcome_action") == OutcomeAction.RETRY
+    namespaced_retry = retry_declared and row.get("failure_outcome_attribution") != FailureClass.MODEL
     if (
         not isinstance(kind, str)
-        or not is_registered(kind)
-        or selected_class != FailureClass.EVALUATION
+        or not (is_registered(kind) or (is_namespaced(kind) and namespaced_retry))
+        or (selected_class != FailureClass.EVALUATION and not retry_declared)
         or kind in _MASKED_REGRADE_KINDS
-        or kind.startswith("transport_")
+        or (not is_namespaced(kind) and kind.startswith("transport_"))
     ):
         return None
     return kind
@@ -471,11 +485,14 @@ def masked_infrastructure_kind(
 
     A result row is masked (``mask_sample``) by the Environment Server that graded it, so its ``failure_kind`` was
     reported at that boundary: a lost session, a failed provider, an infrastructure error, a verifier that could not
-    run. When the kind is evaluation-side through the shared classifier the rollout is retried like an infrastructure
-    failure, within its attempt cap: the masked row counts one failed attempt and a later attempt supersedes it. A
-    model-class kind, no kind, an unregistered or namespaced kind, and the kinds whose saved answer is graded again
-    (``_MASKED_REGRADE_KINDS``, including a ``transport_*`` verify call) keep the masked row as the result. So does a
-    saved answer (``_keeps_saved_answer``): it is never sampled again, whatever its verifier could grade of it.
+    run. When the kind is evaluation-side through the shared classifier, or its owner recorded the ``retry`` action,
+    the rollout is retried like an infrastructure failure, within its attempt cap: the masked row counts one failed
+    attempt and a later attempt supersedes it. A recorded ``retry`` is honored for a registered kind whatever its
+    attribution, but for a namespaced kind only when it is not attributed to the model. A model-class kind, no kind,
+    an unregistered kind, a namespaced kind without a recorded ``retry`` or attributed to the model, and the kinds
+    whose saved answer is graded again (``_MASKED_REGRADE_KINDS``, including a built-in ``transport_*`` verify call)
+    keep the masked row as the result. So does a saved answer (``_keeps_saved_answer``): it is never sampled again,
+    whatever its verifier could grade of it.
     """
     kind = _masked_evaluation_side_kind(row, classification=classification)
     return None if kind is None or _keeps_saved_answer(row) else kind
@@ -499,10 +516,16 @@ def _keeps_saved_answer(row: Mapping[str, Any]) -> bool:
 
     Same facts as recovery's saved-answer test: a collector projection's own flag, else the retained generation of the
     response (``has_saved_generation``, which leaves out a no-generation placeholder) or of a native partial response.
+    A recorded grade (``has_recorded_grade``) always keeps it. An agent-stage fault whose owner recorded ``retry`` and
+    has no grade keeps no answer: its response is the failed attempt's partial transcript, whatever its status.
     """
+    if has_recorded_grade(row):
+        return True  # A graded result stays the result, whatever the collector's flag or the stage's retry says.
     flag = row.get("_ng_collected_saved_answer")
     if isinstance(flag, bool):
         return flag
+    if failure_stage(row) == "agent" and row.get("failure_outcome_action") == OutcomeAction.RETRY:
+        return False
     answer = row.get("response") if "response" in row else row.get("_ng_failure_partial_response")
     return has_saved_generation({"response": answer}) or keeps_partial_response(row)
 
@@ -838,6 +861,37 @@ def _without_runtime_options(value: Any) -> Any:
     return result
 
 
+def _is_nested_interpolation(text: str, start: int) -> bool:
+    """Whether the match at ``start`` sits inside an unclosed ``${`` interpolation.
+
+    A reference nested in another interpolation (an ``oc.select`` default, a URL
+    template) must stay valid OmegaConf grammar when a marker replaces it.
+    """
+    depth = 0
+    index = 0
+    while index < start:
+        if text.startswith("${", index):
+            depth += 1
+            index += 2
+        elif text[index] == "}" and depth:
+            depth -= 1
+            index += 1
+        else:
+            index += 1
+    return depth > 0
+
+
+def _grammar_safe_marker(marker: str, match: re.Match[str]) -> str:
+    """``marker`` as-is at the top level, single-quoted when nested in an interpolation.
+
+    A bare ``<runtime:x>`` / ``<redacted>`` marker is a plain string on its own, but breaks
+    OmegaConf's grammar inside another ``${...}`` (``token recognition error at: '<'``).
+    Quoting makes the surrounding resolver read it as a string literal that resolves to the
+    same text. The top-level form is byte-identical, so already-persisted identities are unchanged.
+    """
+    return f"'{marker}'" if _is_nested_interpolation(match.string, match.start()) else marker
+
+
 def _normalize_runtime_references(value: Any) -> Any:
     """Keep recognized connection references stable wherever clients nest them.
 
@@ -856,7 +910,7 @@ def _normalize_runtime_references(value: Any) -> Any:
             operational = reference in _SERVER_RUNTIME_OPTIONS or (
                 len(parts) == 4 and parts[1] in _SERVER_KINDS and parts[3] in _SERVER_RUNTIME_OPTIONS
             )
-            return f"<runtime:{reference}>" if operational else match[0]
+            return _grammar_safe_marker(f"<runtime:{reference}>", match) if operational else match[0]
 
         return re.sub(r"\$\{([^{}]+)\}", normalize, value)
     return value
@@ -908,8 +962,12 @@ def _credential_safe(value: Any, *, secret: bool = False) -> Any:
         return _REDACTED
     if not isinstance(value, str):
         return value
-    value = _ENV_REFERENCE.sub(lambda m: _REDACTED if _is_credential_name(m[1]) else m[0], value)
-    value = _CONFIG_REFERENCE.sub(lambda m: _REDACTED if _is_credential_name(m[1].split(".")[-1]) else m[0], value)
+    value = _ENV_REFERENCE.sub(
+        lambda m: _grammar_safe_marker(_REDACTED, m) if _is_credential_name(m[1]) else m[0], value
+    )
+    value = _CONFIG_REFERENCE.sub(
+        lambda m: _grammar_safe_marker(_REDACTED, m) if _is_credential_name(m[1].split(".")[-1]) else m[0], value
+    )
     assignment = _ASSIGNMENT.match(value)
     if assignment and _is_credential_name(assignment[1]):
         return f"{assignment[1]}={_REDACTED}"

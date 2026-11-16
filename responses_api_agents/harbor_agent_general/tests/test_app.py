@@ -628,3 +628,18 @@ async def test_a_failed_trial_names_the_phase_it_was_in(tmp_path, monkeypatch, r
     message = str(raised.value)
     assert message.startswith(f"[sandbox phase={phase} ")
     assert " reason=SandboxApiException] Harbor trial failed with SandboxApiException: sandbox ended" in message
+
+
+def test_startup_logs_the_deprecation_notice(agent: HarborAgent, caplog: pytest.LogCaptureFixture) -> None:
+    """The server says on startup that it is deprecated, where its replacement lives, and that users need not act yet."""
+    with caplog.at_level("WARNING", logger="responses_api_agents.harbor_agent_general.app"):
+        agent.model_post_init(None)
+    notices = {record.getMessage() for record in caplog.records if "deprecated" in record.getMessage()}
+    assert len(notices) == 1
+    (notice,) = notices
+    assert "responses_api_agents/harbor_agent_general is deprecated" in notice
+    assert "environment_servers/harbor" in notice
+    # The notice names the repo path, not a docs URL, so it does not break when the docs pages move.
+    assert "docs.nvidia.com" not in notice
+    # Users of the built-in benchmarks did not pick this agent, so the notice says no action is needed yet.
+    assert "no action is needed" in notice

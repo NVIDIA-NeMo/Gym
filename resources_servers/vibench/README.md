@@ -5,24 +5,42 @@ working web application from a product requirements document. A task hands the a
 and an empty container; grading stands the finished app up for real, seeds it with data
 through its own UI, and then drives it in a browser against a human-written test plan.
 
-The agent copies the built app out of its own sandbox and this server grades it in a fresh
-one, so the sandbox is never shared. That is not a stylistic choice: reaching into the agent's
-box requires `serialize()`/`connect()`, which only the OpenSandbox provider implements, so the
-shape `swebench` uses cannot run on Docker, Apptainer or enroot. See
-[#2082](https://github.com/NVIDIA-NeMo/Gym/issues/2082) for the design discussion.
+This environment covers ViBench 1.0 (`v1/` in vibench-public): 24 apps, each with an MVP
+PRD and feature PRDs. ViBench 2.0, which builds 17 apps feature by feature in one conversation
+on its own Harbor harness, is not integrated.
 
 ## Shape
+
+Two configs run this server:
+
+- `configs/vibench.yaml`, the default, runs the episode through the `single_agent_turn_legacy` Environment
+  Server and the agent-session protocol. This server owns the build sandbox and lends it; the agent
+  only borrows it. The rest of this README describes this path unless it says otherwise.
+- `configs/vibench_legacy_agent.yaml` is deprecated. It keeps the legacy relay path through `vibench_agent`;
+  see [Legacy relay path](#legacy-relay-path). The two paths are configured differently, so their scores are not
+  directly comparable.
 
 | Stage | Owner |
 | --- | --- |
 | Task rows (`app`, `artifact`, PRD paths, test-plan paths) | `prepare.py` → `data/*.jsonl` |
-| PRD text + asset paths | `seed_session` in `app.py` (no sandbox, no handle) |
-| Build sandbox, PRD staging, writing the app, harvesting it | `responses_api_agents/vibench_agent` |
-| Seed → evaluate → score | `verify` in `app.py`, shelling into a ViBench checkout |
+| Build sandbox, PRD and asset staging, `SandboxAccess` | `seed_session` in `app.py` |
+| Writing the app in the lent sandbox | `responses_api_agents/opencode_agent` (an agent session) |
+| Harvesting the app, stopping the sandbox, seed → evaluate → score | `verify` in `app.py`, shelling into a ViBench checkout |
+| Stopping a sandbox that was never verified | `close_session` in `app.py` |
 
-The agent writes a tarball of the built app into `artifact_dir` and passes the path to
-`/verify`. A plain shared path is enough: grading already shells into a local Docker daemon,
-so both processes are on one host either way.
+`verify` tars the app directory inside the sandbox, downloads it and stops the sandbox before
+grading starts. Grading then runs on the copy, in fresh compose stacks on this server's Docker
+daemon; the box the model controlled is never graded in place. A second `verify` of the same
+session regrades the same copy. The harvest holds the session's lock, so a concurrent `verify` or a
+`close` waits for it, and each `verify` grades its own copy outside the lock. A missing app directory, or one tar cannot read, is a build
+failure. A provider that fails to run the harvest or transfer the archive is the environment's
+failure, not the model's: the sample is masked with that failure kind, and the sandbox is kept so
+a resent `verify` can harvest again (close stops it). Sessions are process-local, so the server
+runs with one worker.
+
+The sandbox provider has to support reattaching (`serialize()`/`connect()`), since the agent
+borrows the sandbox from another process. OpenSandbox, Docker, Apptainer and E2B do; enroot and the
+local provider do not.
 
 One row is one `(app, artifact)` pair. Reward is the mean normalized score
 (`score / full_points`) across that artifact's test plans, with the per-plan values exposed
@@ -34,10 +52,11 @@ partial credit is the signal the benchmark is built around.
 
 ## Setup
 
-Requires Docker and a ViBench checkout. ViBench's grading scripts invoke the legacy
-`docker-compose` name, which Docker 29.x no longer ships; without it seeding fails in
-seconds and reports a fully failed seeding rate, which reads like a bad app rather than a
-missing binary.
+The resources server's host needs Docker and a vibench-public checkout, because grading runs
+there. ViBench's grading scripts invoke the legacy `docker-compose` name, which Docker 29.x no
+longer ships; without it seeding fails in seconds and reports a fully failed seeding rate,
+which reads like a bad app rather than a missing binary. The build sandbox can run on any
+provider that supports reattaching.
 
 This environment covers ViBench 1.0. Since ViBench 2.0 the 1.0 materials live under `v1/` and
 the shared runner under `_harness/`. `v2.0.7` is the tag this environment was checked against; a
@@ -49,14 +68,15 @@ cd ~/vibench/v1 && uv sync && cp .env.template .env   # fill in the grader's pro
 cd ~/vibench && docker build -f _harness/runner/docker/Dockerfile.base -t app-bench-base:latest .
 ```
 
-`app-bench-base:latest` is the tag ViBench's own pipeline builds and reuses, so the build
-sandbox and the grading stack share one base image. Its `WORKDIR` is `/app`, which is where
-sandboxed agents land; override `app_workdir` only alongside a different image.
+`app-bench-base:latest` is the tag ViBench's 1.0 pipeline builds and reuses, so the build
+sandbox and the grading stack share one base image. Its `WORKDIR` is `/app`, which is where the
+builder lands; override `app_workdir` only alongside a different image. For a remote provider
+such as OpenSandbox, push the image to a registry the provider can pull and set
+`VIBENCH_BUILD_IMAGE` to it.
 
 ```bash
 export VIBENCH_REPO_ROOT=~/vibench
 export VIBENCH_ENV_FILE=~/vibench/v1/.env
-export VIBENCH_ARTIFACT_DIR=/tmp/vibench-artifacts
 ```
 
 `VIBENCH_ENV_FILE` supplies `AGENT_SEEDING_LLM_*` and `AGENT_EVALUATION_LLM_*` for the
@@ -79,43 +99,65 @@ python resources_servers/vibench/prepare.py \
 ```
 
 That yields 24 tasks across 74 test plans. Row paths are relative to the checkout root
-(`v1/prds/<app>/...`). `data/example.jsonl` holds five of them
-(`notes`, `quiz`, `barber`, `wedding`, `market_place`).
+(`v1/prds/<app>/...`). `data/example.jsonl` holds five of them (`notes`, `quiz`, `barber`,
+`wedding`, `market_place`).
 
 P0 covers `mvp` artifacts only. `prepare.py` already resolves the PRD chain and test plans
-for feature artifacts, but `seed_session` only ever hands the agent a PRD — there is no path
-yet to stage an existing codebase into the build sandbox, which a feature task starts from.
+for feature artifacts, but `seed_session` only stages a PRD into an empty `/app` — there is no
+path yet to stage the existing codebase a feature task starts from.
 
 `feature-ri` — building a feature on top of the reference implementation — is a follow-up
-rather than a blocked one: the starting tree already exists, it just needs staging into the
-sandbox the way the PRD already is. `feature-mvp` (`featureN-on_mvp`) is harder, because it
-starts from the model's own MVP output and so depends on a prior rollout's artifact.
+rather than a blocked one: vibench-public ships the starting trees at
+`v1/results/<app>/RI_MVP/app/` for 21 of the 24 apps (not `barber`, `canary` or `quiz`), and
+`seed_session` would upload one into the sandbox the way it uploads the PRD assets.
+`feature-mvp` (`featureN-on_mvp`) is harder, because it starts from the model's own MVP output
+and so depends on a prior rollout's artifact.
 
 ## Run
 
 The second `--config` is required: `sandbox_provider: sandbox` is a reference that the
 provider config binds, so without it startup fails with *"Sandbox provider reference
 'sandbox' is not defined in the merged config"*. Swap that one path to move to another
-provider (OpenSandbox, Fargate, Enroot) without editing this config.
+provider without editing this config.
 
-Use `vibench_agent`'s docker config rather than the stock one. Note it binds the model
-server to `0.0.0.0` so the bridge can reach it, which publishes that one server — and the
-run's token-capture path — on every host interface. Single-tenant hosts only, or firewall
-the port; see the comment at the top of that file. Stock Docker uses a 180s
-exec timeout, which kills long installs, and OpenCode is told the policy model is at
-`http://127.0.0.1:<port>` (`get_server_url`) — inside a bridged container that is the
-container itself, so the harness makes **zero** LLM calls and exports an empty app. That
-config keeps the default bridge, adds `host.docker.internal` via Docker's host-gateway,
-and the agent rewrites loopback model URLs to it. Do not use `network: host`: that puts
-model-written code on the host network namespace. OpenSandbox does not need this file;
-set `sandbox_model_base_url` on the agent instead.
+OpenCode in the build sandbox calls the policy model through Gym's model server, so the
+sandbox must reach that server by address: run with `use_absolute_ip=true` and
+`absolute_ip_server_types=[responses_api_models]`. Without the first, OpenCode is told the model
+is on loopback, which inside the sandbox is the sandbox itself, so it makes **zero** LLM calls and
+the build leaves an empty app. Without the second, every server listens on the host's address,
+including the one whose config endpoint returns the merged config and this resources server, which
+holds the grader's keys.
+
+With OpenSandbox, start Gym on a host the sandboxes can route to:
 
 ```bash
 gym env start \
     --config resources_servers/vibench/configs/vibench.yaml \
-    --config responses_api_agents/vibench_agent/configs/docker.yaml \
-    --model-type openai_model
+    --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
+    --model-type openai_model \
+    ++use_absolute_ip=true \
+    '++absolute_ip_server_types=[responses_api_models]'
+```
 
+With Docker, use this environment's `configs/docker.yaml` instead of the stock Docker provider
+config. It sets both settings, so only the model server listens on the host's address, which
+the default bridge can route to — and with it the run's token-capture path. Single-tenant hosts
+only, or firewall the port; see the comment at the top of that file. The stock config's 180s
+exec timeout would also kill the build, which OpenCode runs as one long exec. Do not use
+`network: host`: that puts model-written code on the host network namespace. Do not use
+`responses_api_agents/vibench_agent/configs/docker.yaml` either: it belongs to the legacy relay
+config, and with it the sandbox gets a loopback model URL that OpenCode cannot reach.
+
+```bash
+gym env start \
+    --config resources_servers/vibench/configs/vibench.yaml \
+    --config resources_servers/vibench/configs/docker.yaml \
+    --model-type openai_model
+```
+
+Then, in either case:
+
+```bash
 gym eval run --no-serve \
     --agent vibench_opencode_agent \
     --input resources_servers/vibench/data/example.jsonl \
@@ -124,14 +166,48 @@ gym eval run --no-serve \
     --num-repeats 1
 ```
 
+The recipe keeps the legacy relay path's `vibench_agent` settings where it can: OpenCode 1.17.11
+and a 5,400-second build. Three differ. The output budget is 32,768 tokens per model call
+and the context window 229,376, so a call fits a 262,144-token served context; the legacy
+recipe asks for the whole window on every call, which an OpenAI-compatible server such as vLLM
+refuses, and OpenCode then ends the build with no model call at all. OpenCode also runs with
+`opencode_agent`'s command deny-list (`configs/permissions/default.yaml`), which also denies Git
+network commands, Git history mining and `curl`/`wget` to GitHub; the legacy recipe denies only
+process killing and `rm -rf /`. And the recipe has no web, skill or subagent tools: the deny-list
+turns off `webfetch`, `websearch` and `skill`, and the recipe turns off `task` through `permission`
+as well. The legacy recipe allows all four.
+
 Start with `--limit 1`. A single rollout builds an app and then runs a full compose stack
 per test plan; wall-clock is tens of minutes and the box needs headroom for
 `max_concurrent_test_plans` simultaneous Postgres + app + Playwright stacks.
 
+## Legacy relay path
+
+`responses_api_agents/vibench_agent` still runs ViBench behind the `legacy_agent` relay, from
+`configs/vibench_legacy_agent.yaml`, which is deprecated. That agent starts its own build sandbox
+from the same image, runs OpenCode in it with the legacy recipe above, and writes the app as a
+tarball into `artifact_dir`, a directory it shares with this server; `seed_session` hands it only the PRD text and asset
+directories, and `verify` unpacks the tarball and grades it the same way. The shared directory puts
+the agent and this server on one host. With Docker, use the agent's own `configs/docker.yaml`; with
+OpenSandbox, set `sandbox_model_base_url` on the agent. See
+[its README](../../responses_api_agents/vibench_agent/README.md).
+
+```bash
+gym env start \
+    --config resources_servers/vibench/configs/vibench_legacy_agent.yaml \
+    --config responses_api_agents/vibench_agent/configs/docker.yaml \
+    --model-type openai_model
+```
+
+The two paths differ in output budget and command deny-list, so their scores are not directly
+comparable. `vibench_agent` will be removed after the Environment Server migration; until then
+this config keeps it runnable.
+
 ## Validation
 
-Run end to end on a Docker host against the code in this branch. All five example tasks
-graded, 16/16 test plans, no build or seeding failures:
+Run end to end on a Docker host with the legacy relay path's agent, `vibench_agent`, which owns the
+build sandbox and hands the app over through a shared directory. Grading is unchanged since. All five
+example tasks graded, 16/16 test plans, no build or seeding failures:
 
 | app | reward | plans graded |
 | --- | --- | --- |
@@ -144,6 +220,9 @@ graded, 16/16 test plans, no build or seeding failures:
 Mean 0.785. The spread matters more than the mean: `wedding` well below the rest shows the
 scale is not saturated. `data/example_rollouts.jsonl` holds this run, with its task paths
 updated to the `v1/` layout.
+
+The default session path (`configs/vibench.yaml`) has been run through seed, build and harvest
+on OpenSandbox, but not yet graded end to end, so these numbers are not a baseline for it.
 
 The reward tracks model capability. An earlier run with a weaker policy model scored 0.0 on
 `notes` with 0/19 steps, its app unreachable because the build produced no output, while the
@@ -164,7 +243,8 @@ These are known and deliberate; each is a follow-up rather than a bug.
 - **Grading runs on the resources server's Docker daemon**, not inside a Gym sandbox,
   because ViBench's grading stack is multi-container (app + postgres + code-browse). Folding
   it into one supervisord image is the prerequisite for running this on more than one host.
-- **The agent and the resources server must share `artifact_dir`** (see above).
+- **Sessions are process-local**: the resources server runs with one worker and holds every
+  episode's build sandbox until its verify or close.
 - **The verifier is itself an LLM agent** driving a browser, so reward is stochastic.
   Profile that variance — repeated grading of one fixed app — before treating this as a
   training signal. `REVERIFY_MODE` is `UNSUPPORTED` for the same reason: scores cannot be
@@ -178,10 +258,11 @@ These are known and deliberate; each is a follow-up rather than a bug.
 
 ## Anti-cheat
 
-The agent's sandbox receives the PRD and `v1/prds/<app>/assets/` (`prds/<app>/assets/` before ViBench 2.0) only. Test plans and
-`test_assets/` are never staged into the build container — they are read at grade time by
-the resources server. Dataset paths are resolved against `vibench_repo_root` and rejected
-if they escape it.
+The build sandbox receives the PRD and `v1/prds/<app>/assets/` (`prds/<app>/assets/` before
+ViBench 2.0) only. Test plans and `test_assets/` are never staged into it — they are read at
+grade time by the resources server. Dataset paths are resolved against `vibench_repo_root` and
+rejected if they escape it. The harvested tarball is untrusted: unpacking refuses members and
+links that escape the app directory.
 
 ## Licensing
 

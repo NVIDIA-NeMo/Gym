@@ -18,77 +18,19 @@ GenRM Response API Model (local vLLM server).
 
 A specialized Response API Model for GenRM (Generative Reward Model) that supports
 custom roles for pairwise comparison (response_1, response_2, principle).
-Downloads the model and starts a vLLM server (e.g. via Ray).
+Downloads the model and starts a vLLM server (e.g. via Ray). To use a GenRM vLLM pool that runs elsewhere, use
+`external_app.py`, which needs no Ray.
 """
 
-from typing import Any, Dict
+from typing import Any
 
 from fastapi import Request
 
-from nemo_gym.models import ChatCompletionsConverter
-from responses_api_models.local_vllm_model.app import (
-    LocalVLLMModel,
-    LocalVLLMModelConfig,
-)
+from responses_api_models.genrm_model.common import GenRMModelConfig, append_genrm_roles
+from responses_api_models.local_vllm_model.app import LocalVLLMModel
 
 
-class GenRMModelMixin:
-    """Mixin that provides GenRM preprocessing for the local vLLM backend.
-
-    Expects config to have return_token_id_information and supports_principle_role.
-    """
-
-    def get_converter(self) -> ChatCompletionsConverter:
-        return ChatCompletionsConverter(
-            return_token_id_information=self.config.return_token_id_information,
-            uses_reasoning_parser=self.config.uses_reasoning_parser,
-            custom_tool_strategy=self.config.custom_tool_strategy,
-            inline_tool_output_images=self.config.inline_tool_output_images,
-        )
-
-    def _preprocess_chat_completion_create_params(self, request: Request, body_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """Extend base preprocessing to inject GenRM custom roles from metadata.
-
-        The resources server passes the comparison payload via ``metadata`` so
-        that the ``input`` field carries only the conversation history and the
-        request schema stays generic:
-
-        - ``metadata["response_1"]`` → appended as a ``"response_1"`` message
-        - ``metadata["response_2"]`` → appended as a ``"response_2"`` message
-        - ``metadata["principle"]``  → appended as a ``"principle"`` message
-          (only when ``supports_principle_role=True``)
-
-        ``metadata`` is consumed here and not forwarded to vLLM.
-        """
-        body_dict = super()._preprocess_chat_completion_create_params(request, body_dict)
-
-        metadata = body_dict.pop("metadata", None) or {}
-        response_1 = metadata.get("response_1")
-        response_2 = metadata.get("response_2")
-        principle = metadata.get("principle")
-
-        messages = body_dict["messages"]
-
-        if self.config.supports_principle_role and principle:
-            messages.append({"role": "principle", "content": principle})
-
-        # Candidate responses currently support text only; the user message may contain images.
-        if response_1 is not None:
-            messages.append({"role": "response_1", "content": response_1})
-
-        if response_2 is not None:
-            messages.append({"role": "response_2", "content": response_2})
-
-        return body_dict
-
-
-class GenRMModelConfig(LocalVLLMModelConfig):
-    """Configuration for GenRM with a locally managed vLLM server."""
-
-    supports_principle_role: bool = True
-
-
-class GenRMModel(GenRMModelMixin, LocalVLLMModel):
+class GenRMModel(LocalVLLMModel):
     """GenRM Response API Model (local vLLM server).
 
     Specialized Response API Model for GenRM inference. Downloads the model,
@@ -99,6 +41,10 @@ class GenRMModel(GenRMModelMixin, LocalVLLMModel):
     ray_enabled = True
 
     config: GenRMModelConfig
+
+    def _preprocess_chat_completion_create_params(self, request: Request, body_dict: dict[str, Any]) -> dict[str, Any]:
+        body_dict = super()._preprocess_chat_completion_create_params(request, body_dict)
+        return append_genrm_roles(body_dict, supports_principle_role=self.config.supports_principle_role)
 
 
 if __name__ == "__main__":
