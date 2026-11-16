@@ -86,6 +86,7 @@ from resources_servers.scale_swe.verification import (
     run_verification,
     verification_files,
 )
+from resources_servers.swebench.agent_network import AgentNetworkConfig
 from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
 from resources_servers.swebench.patch_capture import (
     CaptureCommandError,
@@ -102,7 +103,7 @@ LOG = logging.getLogger(__name__)
 _COMMIT_ID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 
 
-class ScaleSWEResourcesServerConfig(BaseResourcesServerConfig):
+class ScaleSWEResourcesServerConfig(BaseResourcesServerConfig, AgentNetworkConfig):
     is_verifying_golden_patch: bool = False
     # "worktree" (diff of the working tree) or "committed" (committed work only); see swebench/patch_capture.py.
     patch_capture_mode: PatchCaptureMode = "worktree"
@@ -219,6 +220,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
+        self.config.check_agent_network_provider(get_global_config_dict())
         self._session_id_to_sandbox: dict[str, AsyncSandbox] = {}
         self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
         self._session_id_to_base_commit: dict[str, str] = {}
@@ -289,7 +291,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
         )
 
     async def _create_sandbox(
-        self, body: ScaleSWEInstanceRequest, files: dict[str, str] | None = None
+        self, body: ScaleSWEInstanceRequest, files: dict[str, str] | None = None, *, for_agent: bool = False
     ) -> AsyncSandbox:
         global_config_dict = get_global_config_dict()
         provider_config = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
@@ -320,7 +322,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
                 "instance_id": body.instance_id[:63],
             },
             resources=sandbox_resources,
-            provider_options=self.config.sandbox_config.get("provider_options", {}),
+            provider_options=self.config.sandbox_provider_options(provider_config, for_agent=for_agent),
         )
         sandbox = AsyncSandbox(provider_config)
         await sandbox.start(spec)
@@ -636,7 +638,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
         self._session_id_to_pristine_untracked.pop(session_id, None)
         self._session_id_to_base_commit.pop(session_id, None)
 
-        sandbox = await self._create_sandbox(body)
+        sandbox = await self._create_sandbox(body, for_agent=True)
         if own_before_setup:
             # An episode session owns its sandbox from the start, so the failed seed's cleanup or a close
             # can stop it when the setup below fails.
