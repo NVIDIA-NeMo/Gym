@@ -81,6 +81,15 @@ _process_folders: dict[tuple[int, Path], Path] = {}
 # Guards the first use of a parent: its check and cleanup, and creating this process's folder in it.
 # Requests start their temporary folders in worker threads, so a burst of first requests arrives together.
 _first_use_lock = threading.Lock()
+
+
+def _reset_first_use_lock() -> None:
+    """Give a forked child its own lock: a thread of the parent may have held the inherited one at the fork."""
+    global _first_use_lock
+    _first_use_lock = threading.Lock()
+
+
+os.register_at_fork(after_in_child=_reset_first_use_lock)
 _checked_debug_roots: set[Path] = set()
 
 
