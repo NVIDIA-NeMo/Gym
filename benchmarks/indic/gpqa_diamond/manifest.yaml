@@ -53,6 +53,6 @@ session_model: episode
 state: none
 adopted_from:
   source: https://huggingface.co/datasets/ai4bharat/indic-gpqa
-  ref: c3c32b0a0ec7aeebe884c4c55c46730b4274a612
+  ref: c3c32b0a0ec7aeebe884c4c55c46730b4274a612  # pragma: allowlist secret
   reconciled: '2026-10-12'
 lifecycle: active

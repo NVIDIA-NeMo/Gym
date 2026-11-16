@@ -50,6 +50,6 @@ canonical_split: test
 standard_prompt_config: benchmarks/prompts/lean4/formal-proof-deepseek-prover-v2.yaml
 adopted_from:
   source: https://github.com/Goedel-LM/Goedel-Prover-V2
-  ref: 2e9036e118464aa96a8bebaf9f5b9d091aa3585c
+  ref: 2e9036e118464aa96a8bebaf9f5b9d091aa3585c  # pragma: allowlist secret
   reconciled: '2026-04-23'
 lifecycle: active

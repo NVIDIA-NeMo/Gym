@@ -54,6 +54,6 @@ canonical_split: test
 prompt_source: prepared
 adopted_from:
   source: https://huggingface.co/datasets/ArtificialAnalysis/AA-LCR
-  ref: 9a77ef56b717057ade24ceab4d273712a0b4f19e
+  ref: 9a77ef56b717057ade24ceab4d273712a0b4f19e  # pragma: allowlist secret
   reconciled: '2026-09-08'
 lifecycle: active

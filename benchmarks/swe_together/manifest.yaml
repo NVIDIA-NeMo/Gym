@@ -43,5 +43,5 @@ datasets:
     num_repeats: 2
 adopted_from:
   source: https://github.com/Togetherbench/SWE-Together
-  ref: 891d19eb4b3a64a47c3d49bbd066a311e0133254
+  ref: 891d19eb4b3a64a47c3d49bbd066a311e0133254  # pragma: allowlist secret
   reconciled: '2026-10-23'
