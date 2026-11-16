@@ -13,7 +13,10 @@ The harness conformance probes are not run at the Evaluation level.
 Goose's native subagents come from its built-in `summon` extension: the `delegate` tool runs a subagent in its own
 session, synchronously or with `async: true` followed by `load(task_id)`. Several delegate calls in one turn run
 concurrently. Delegates cannot delegate further (depth 1). `GOOSE_SUBAGENT_PROVIDER` and `GOOSE_SUBAGENT_MODEL` pin
-delegates to the same Gym Model Server and model, whatever provider or model the policy passes to `delegate`.
+delegates to the same Gym Model Server and model. They outrank the `delegate` tool's arguments, but a recipe's own
+`settings.goose_provider` or `goose_model` still outranks them. Delegates send the root's session header, so their
+model and compaction calls are credited to the root invocation, and the observation bundle reports
+`model_call_ownership_unavailable` while `delegate` is on.
 
 ## Configure and run
 
@@ -75,6 +78,14 @@ its asset cache, checks the SHA-256 pinned in `sandbox.py`, and uploads it. On e
 checksum again, extracts it, checks the version Goose reports and publishes it, so a binary already at the runtime path
 is never trusted. The sandbox needs only bash, `sha256sum`, `tar`, `gzip` and `timeout`, and no internet access. The
 agent server needs access to GitHub releases.
+
+Goose needs CA certificates to construct its HTTP client, even when the model endpoint uses HTTP. When the
+task image has no trust store (no `SSL_CERT_FILE` or `SSL_CERT_DIR`, and none of the standard bundle files such
+as `/etc/ssl/certs/ca-certificates.crt`), setup uploads Certifi's public CA bundle into the private session
+directory and selects it with `SSL_CERT_FILE`. Goose's tool shells inherit that variable, so an image with
+its own trust store is left alone: the task, and any certificate the agent adds to it, keep working as they
+would under another harness. Certificate verification stays enabled, and an explicit
+`SandboxAccess.env.SSL_CERT_FILE` is preserved for endpoints that use a custom trust store.
 
 Goose runs in `SandboxAccess.workdir` through the shared `harness_runner.sh` under the process supervisor. Its
 config, sessions and state live under `GOOSE_PATH_ROOT` in a private session directory, so tool shells keep the

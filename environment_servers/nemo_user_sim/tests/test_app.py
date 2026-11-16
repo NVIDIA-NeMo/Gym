@@ -68,6 +68,34 @@ def _server() -> UserSimEnvironmentServer:
     )
 
 
+@pytest.mark.parametrize(
+    ("capture_training_tokens", "skip_token_capture", "path"),
+    [
+        (True, False, "/ng-rollout/rollout/training-token-capture/v1/responses"),
+        # The user simulator is never captured.
+        (False, False, "/ng-rollout/rollout/v1/responses"),
+        # A rollout that skips capture captures no participant, the assistant included.
+        (True, True, "/ng-rollout/rollout/v1/responses"),
+    ],
+)
+def test_only_the_assistant_of_a_captured_episode_is_activated_with_the_training_tag(
+    capture_training_tokens: bool, skip_token_capture: bool, path: str
+) -> None:
+    server = _server()
+    server.server_client.global_config_dict = OmegaConf.create(
+        {
+            "token_id_capture": {"enabled": True, "all_agents": True},
+            "nemo_user_sim_assistant": {"responses_api_agents": {"simple_agent": {}}},
+        }
+    )
+    request = _request().model_copy(update={"skip_token_capture": skip_token_capture})
+
+    assert (
+        server.responses_path("nemo_user_sim_assistant", request, capture_training_tokens=capture_training_tokens)
+        == path
+    )
+
+
 def test_aliases_route_participants_and_support_roles() -> None:
     config = _server().config
 

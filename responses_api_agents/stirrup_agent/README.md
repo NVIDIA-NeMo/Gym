@@ -54,6 +54,7 @@ episode.
 | `sandbox_runner_timeout_seconds` | `12600` | Bound on one episode; a request's `metadata.agent_timeout_sec` (as Harbor task rows carry) can shorten it, never extend it, and the response metadata records the applied `agent_timeout_sec`. At the limit the response carries the turns completed so far, with `status: incomplete` and `metadata.stop_reason: wall_time`. |
 | `session_close_timeout_seconds` | `30` | Bound on each cleanup phase at close. |
 | `completion_token_buffer` | `1000` | Safety margin (in tokens) reserved when sizing `max_completion_tokens` per call. |
+| `image_token_estimate` | `1536` | Prompt tokens counted per image when sizing `max_completion_tokens`; the base64 bytes are not counted. |
 
 ## Dynamic `max_completion_tokens` sizing
 
@@ -77,6 +78,12 @@ The wrapper ships a `DynamicMaxTokensChatCompletionsClient`
 `completion_token_buffer` absorbs the residual gap between our estimate and the exact prompt the server renders
 (chat-template wrappers, tool-schema injection). The default `1000` works in practice; raise it (e.g. 2000–5000) if
 you see sporadic HTTP 400 responses at the vLLM proxy.
+
+Each image counts as `image_token_estimate` tokens (default `1536`) instead of its base64 length. A model that spends
+more than that on an image takes the difference out of `completion_token_buffer`, so the buffer has to cover
+`N_images × (real tokens per image − image_token_estimate)`. For high-resolution screenshots or many images, raise
+`image_token_estimate` to the model's real per-image cost, or raise the buffer. `input_video` parts are not covered:
+stirrup serializes them as `file` parts, which are still counted by their characters.
 
 The character estimate can substantially overcount retained reasoning, so the client still dispatches the configured
 completion floor; the hard completion cap always applies.

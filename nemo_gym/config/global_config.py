@@ -56,6 +56,7 @@ from nemo_gym.config.config_types import (
     ConfigMissingValuesError,
     ConfigPathNotFoundError,
     HeadServerConfigMalformedError,
+    InheritCycleError,
     InheritPathNotFoundError,
     MalformedConfigPathsError,
     NoServerInstancesError,
@@ -226,16 +227,22 @@ ENVIRONMENT_SERVER_TYPE_KEY_NAME = "environment_servers"
 # so this list is the source of truth; a unit test keeps it in step with the agent apps.
 AGENT_SESSION_AGENT_TYPES = frozenset(
     {
+        "agentic_mme_agent",
+        "agentvista_agent",
         "browsecomp_agent",
         "claude_code_agent",
+        "cline_agent",
         "codex_agent",
         "copilot_agent",
+        "crewai_agent",
         "droid_agent",
         "goose_agent",
         "harbor_oracle_agent",
         "hermes_agent",
         "langgraph_agent",
         "kilocode_agent",
+        "langchain_deepagents_agent",
+        "kimi_code_agent",
         "mini_swe_agent",
         "miniswe_sandboxed_agent",
         "nooa_agent",
@@ -244,11 +251,18 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "openhands_agent",
         "pi_agent",
         "pool_agent",
+        "prime_agent",
+        "qwen_code_agent",
         "simple_agent",
+        "simple_strands_agent",
         "stirrup_agent",
+        "terminus_2_agent",
         "terminus_2_sandboxed_agent",
     }
 )
+# Session agents whose swap-source template (`resources_server.name: ???`) runs on the host through /run.
+# Their sessions need an explicitly bound sandbox template, so a swap keeps the legacy_agent relay.
+HOST_RUN_SWAP_AGENT_TYPES = frozenset({"prime_agent", "simple_strands_agent"})
 # An environment server type that drives its agent through agent sessions, and keeps the agent's /run as a
 # fallback through a legacy_agent relay.
 SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE = "single_agent_turn_legacy"
@@ -261,6 +275,7 @@ _LEGACY_RELAY_KEPT_KEYS = (
     "port",
     "num_workers",
     "uvicorn_reuse_port",
+    "default_episode_timeout_seconds",
 )
 # Carried over from the environment's agent instance onto the composed agent; every other key is dropped.
 _COMPOSED_AGENT_CARRY_OVER_KEYS = ("resources_server", "model_server", "datasets")
@@ -343,6 +358,9 @@ ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"
 ROLLOUT_ID_KEY_NAME = "_ng_rollout_id"
 # Sampling values a training framework sets for one rollout's trained agent; see nemo_gym/core/model_call_sampling.py.
 MODEL_SAMPLING_KEY_NAME = "_ng_model_sampling"
+# A training framework sets it to true on a rollout it does not train on, such as a validation rollout, so none of
+# the rollout's model calls is captured. False or absent leaves capture to the run's token_id_capture block.
+SKIP_TOKEN_CAPTURE_KEY_NAME = "_ng_skip_token_capture"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
 AGENT_REF_KEY_NAME = "agent_ref"
@@ -993,7 +1011,7 @@ Duplicate config paths:
                 global_config_dict[renames[target.name]] = instance
 
             self._retarget_environment_servers(global_config_dict, renames, agent_type=source.agent_type)
-            if source.agent_type not in AGENT_SESSION_AGENT_TYPES:
+            if source.agent_type not in AGENT_SESSION_AGENT_TYPES or source.agent_type in HOST_RUN_SWAP_AGENT_TYPES:
                 self._relay_agents_without_sessions(global_config_dict, set(renames.values()))
             self._raise_on_outdated_routing(global_config_dict, renames)
             self._route_rows_stamped_before_the_swap(global_config_dict, renames)
@@ -1021,7 +1039,10 @@ Duplicate config paths:
                 for reference in environment_server_agent_refs(server):
                     if reference.get("name") in renames:
                         reference["name"] = renames[reference["name"]]
-                        if agent_type == "langgraph_agent" and server_type == SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE:
+                        if (
+                            agent_type in {"langgraph_agent", "langchain_deepagents_agent"}
+                            and server_type == SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE
+                        ):
                             # These graphs only call models; the environment still owns verification,
                             # but must not grant resource tools the selected agent cannot consume.
                             server["resources_tool_transports"] = []
@@ -1030,7 +1051,8 @@ Duplicate config paths:
     def _relay_agents_without_sessions(global_config_dict: DictConfig, agent_names: set[str]) -> None:
         """Replace each single_agent_turn_legacy server fronting one of `agent_names` with a legacy_agent relay.
 
-        Those agents do not implement agent sessions, so single_agent_turn_legacy would fail every episode.
+        Those agents either do not implement agent sessions or are in HOST_RUN_SWAP_AGENT_TYPES, whose swap template
+        runs on the host through /run, so single_agent_turn_legacy would fail every episode.
         The relay calls the agent's own /run, as the environment did before it moved to agent sessions.
         """
         for instance_name, instance in global_config_dict.items():
@@ -1047,7 +1069,7 @@ Duplicate config paths:
                 continue
             logger.info(
                 f"Environment server '{instance_name}' runs '{agent_name}' through a legacy_agent relay: "
-                f"that agent type does not implement the agent sessions single_agent_turn_legacy needs."
+                f"that agent type has no agent sessions, or its swap template runs on the host through /run."
             )
             servers[LEGACY_AGENT_SERVER_TYPE] = {key: server[key] for key in _LEGACY_RELAY_KEPT_KEYS if key in server}
             servers.pop(SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE)
@@ -1237,6 +1259,84 @@ the check."""
                 composed[key] = deepcopy(original[key])
             elif OmegaConf.is_missing(original, key):
                 composed[key] = MISSING
+
+    def _raise_on_ignored_agent_type(
+        self, global_config_dict: DictConfig, selected_instances: List[_AgentInstance]
+    ) -> None:
+        """Refuse an `--agent-type` selection that no task of the composed config runs on.
+
+        Composition puts the selected agent in place of the workload's only when the selected config leaves
+        `resources_server.name` unset (`???`) or is a LangGraph agent. Session agents (codex_agent, hermes_agent,
+        opencode_agent, ...) set `resources_server: null` instead, so selecting one only adds an instance nothing
+        routes to, while every task still runs on the agent the workload binds. Each dataset the run would collect
+        (those of type `split`, when the run sets one) must resolve, as rollout dispatch resolves it, to an agent of
+        a type the selected config declares. A config that declares no agent instance selects nothing to check, and
+        a dataset that cannot be routed is left to data preparation to report.
+        """
+        selected_types = {instance.agent_type for instance in selected_instances}
+        if not selected_types:
+            return
+        loaded = [instance.name for instance in selected_instances if instance.name in global_config_dict]
+        bind_name = loaded[0] if len(loaded) == 1 else "<selected agent instance>"
+        split = global_config_dict.get("split")
+        agent_types = {agent.name: agent.agent_type for agent in self._agent_instances(global_config_dict)}
+        mismatches: List[str] = []
+        rebinds: List[str] = []
+        for owner_name, owner in global_config_dict.items_ex(resolve=False):
+            if owner_name in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS or not isinstance(owner, DictConfig):
+                continue
+            servers = owner.get(RESOURCES_SERVER_TYPE_KEY_NAME, owner.get(AGENT_SERVER_TYPE_KEY_NAME))
+            if not isinstance(servers, DictConfig) or len(servers) != 1:
+                continue
+            server = next(iter(servers.values()))
+            datasets = server.get("datasets") if isinstance(server, DictConfig) else None
+            for dataset in datasets if isinstance(datasets, ListConfig) else []:
+                if not isinstance(dataset, DictConfig) or (split is not None and dataset.get("type") != split):
+                    continue
+                taskset = dataset.get("taskset")
+                try:
+                    agent_name = resolve_dataset_agent(
+                        global_config_dict, str(owner_name), dataset.get("agent"), taskset=taskset
+                    )
+                except ConfigError:
+                    continue
+                agent_type = agent_types.get(agent_name) if agent_name is not None else None
+                if agent_type is None or agent_type in selected_types:
+                    continue
+                source = f"taskset {taskset!r}" if taskset is not None else f"dataset {dataset.get('name')!r}"
+                environment_name = taskset_environment_server_name(global_config_dict, taskset)
+                if environment_name is None:
+                    mismatches.append(f"  - {source} of {owner_name} runs on {agent_name} ({agent_type})")
+                    continue
+                server_type = next(iter(global_config_dict[environment_name][ENVIRONMENT_SERVER_TYPE_KEY_NAME]))
+                mismatches.append(
+                    f"  - {source} of {owner_name} routes to {environment_name}, which runs {agent_name} ({agent_type})"
+                )
+                rebinds.append(
+                    f"++{environment_name}.{ENVIRONMENT_SERVER_TYPE_KEY_NAME}.{server_type}.{AGENT_SERVER_REF_KEY_NAME}"
+                    f".name={bind_name}"
+                )
+        if not mismatches:
+            return
+
+        selected = ", ".join(f"{instance.name} ({instance.agent_type})" for instance in selected_instances)
+        listing = "\n".join(dict.fromkeys(mismatches))
+        message = (
+            f"--agent-type loaded {selected}, but these tasks would still run on another agent:\n{listing}\n\n"
+            "--agent-type puts the selected agent in place of the workload's only when its config leaves "
+            "`resources_server.name` unset (`???`) or it is a LangGraph agent. Session agents set "
+            "`resources_server: null`, so they run only where the workload config binds them. Drop --agent-type to run "
+            "the configured agent, or run a config that binds the selected one: `gym list benchmarks` lists the "
+            "benchmark configs that ship, and 'Swap the agent or the benchmark' in the Integrate Existing Agents guide "
+            "shows how to write one."
+        )
+        if rebinds:
+            message += (
+                "\nTo bind it from the command line, override the Environment Server's agent_server; the routed "
+                "resources server's `allowed_agents` must list the agent, or pass --allow-unsupported-pairing:\n"
+                + "\n".join(f"  {rebind}" for rebind in dict.fromkeys(rebinds))
+            )
+        raise AgentCompositionError(message)
 
     def _front_agents_without_environment_server(self, global_config_dict: DictConfig) -> None:
         """Give every agent an environment server, since rollout collection reaches agents only through one.
@@ -1451,13 +1551,20 @@ For example, on the command line:
                         )
 
     def _recursively_swap_keys_helper(
-        self, dict_config: DictConfig, original_dict_config: DictConfig, frozen_dict_config: DictConfig
+        self,
+        dict_config: DictConfig,
+        original_dict_config: DictConfig,
+        frozen_dict_config: DictConfig,
+        inherit_chain: tuple[str, ...] = (),
     ) -> None:
         # items_ex(resolve=False) yields raw values: directive strings like "${inherit_from:...}"
         # come back unresolved (so the swap detection below still matches), and a missing ('???')
         # leaf is returned as-is instead of raising MissingMandatoryValue mid-swap. Any genuinely
         # unset values are reported together by raise_on_missing_values, which runs after this pass.
         for k, v in list(dict_config.items_ex(resolve=False)):
+            if k not in dict_config:
+                # An earlier sibling's `_inherit_from` moved this entry; resolving it again would re-add it.
+                continue
             is_delete_property = isinstance(v, DictConfig) and DELETE_KEY_KEY_NAME in v
 
             if is_delete_property:
@@ -1472,7 +1579,7 @@ For example, on the command line:
                 keys_to_delete -= existing_keys
 
             if isinstance(v, (DictConfig, dict)):
-                self._recursively_swap_keys_helper(v, original_dict_config, frozen_dict_config)
+                self._recursively_swap_keys_helper(v, original_dict_config, frozen_dict_config, inherit_chain)
             elif isinstance(v, (ListConfig, list)):
                 # Iterate without resolving so a missing ('???') element doesn't raise mid-swap (it's
                 # a scalar, so it's skipped here and reported later by raise_on_missing_values).
@@ -1481,7 +1588,9 @@ For example, on the command line:
                         continue
                     inner_v = v[i]
                     if isinstance(inner_v, (DictConfig, dict)):
-                        self._recursively_swap_keys_helper(inner_v, original_dict_config, frozen_dict_config)
+                        self._recursively_swap_keys_helper(
+                            inner_v, original_dict_config, frozen_dict_config, inherit_chain
+                        )
 
             # e.g. ${inherit_from:grpo.num_prompts_per_step}
             is_swap_str = isinstance(v, str) and v.startswith("${inherit_from:")
@@ -1524,17 +1633,42 @@ For example, on the command line:
                 dict_config[k] = "???"
                 continue
 
+            # The source is read from the frozen copy, so its own directives are still raw. In a chain
+            # (target -> source -> base) the source's `_inherit_from` would otherwise reach the target
+            # unresolved, so resolve a copy of the source first.
+            if isinstance(swapped_value, DictConfig):
+                swapped_value = self._resolve_swap_source(
+                    swapped_value, path_to_swap, original_dict_config, frozen_dict_config, inherit_chain
+                )
+
             if is_swap_property or is_copy_property:
                 swapped_value = OmegaConf.merge(swapped_value, v)
 
             dict_config[k] = swapped_value
 
-            # TODO We may want to recurse again after swap since we are not guaranteed to traverse the swapped-from value before hitting this swap.
-
             if is_delete_property:
                 # Enforce that every key-to-delete exists
                 for key in keys_to_delete:
                     dict_config[k].pop(key)
+
+    def _resolve_swap_source(
+        self,
+        source: DictConfig,
+        path: List[str],
+        original_dict_config: DictConfig,
+        frozen_dict_config: DictConfig,
+        inherit_chain: tuple[str, ...],
+    ) -> DictConfig:
+        """Return ``source`` with its own swap, copy and delete directives applied, leaving the frozen copy intact."""
+        source_path = ".".join(path)
+        if source_path in inherit_chain:
+            cycle = " -> ".join((*inherit_chain, source_path))
+            raise InheritCycleError(f"Config inheritance forms a cycle: {cycle}")
+        holder = DictConfig({path[-1]: deepcopy(source)})
+        self._recursively_swap_keys_helper(
+            holder, original_dict_config, frozen_dict_config, (*inherit_chain, source_path)
+        )
+        return holder[path[-1]]
 
     def _recursive_index_dict_using_path(self, dict_config: DictConfig, path: List[str]) -> "DictConfig | object":
         for k in path:
@@ -1566,13 +1700,19 @@ For example, on the command line:
         # @bxyu-nvidia: Hydra returns `cli_global_config_dict` as a struct, but this causes problems in downstream swapping/merging.
         OmegaConf.set_struct(cli_global_config_dict, False)
 
+        # The config `--agent-type` loaded. Its LangGraph agent is the one composition puts in place of the workload's
+        # agent, and after composition the workload must run the selected agent (see _raise_on_ignored_agent_type).
         selected_agent = None
-        selected_config_path = cli_global_config_dict.pop("_selected_langgraph_config", None)
+        selected_instances: List[_AgentInstance] = []
+        selected_config_path = cli_global_config_dict.pop("_selected_agent_config", None)
         if selected_config_path:
             selected_instances = self._agent_instances(_load_config_yaml(selected_config_path))
-            if len(selected_instances) != 1 or selected_instances[0].agent_type != "langgraph_agent":
-                raise AgentCompositionError("The selected LangGraph config must declare exactly one LangGraph agent.")
-            selected_agent = selected_instances[0].name
+            if any(instance.agent_type == "langgraph_agent" for instance in selected_instances):
+                if len(selected_instances) != 1:
+                    raise AgentCompositionError(
+                        "The selected LangGraph config must declare exactly one LangGraph agent."
+                    )
+                selected_agent = selected_instances[0].name
 
         # Command line overrides function input.
         initial_global_config_dict = OmegaConf.create(parse_config.initial_global_config_dict or dict())
@@ -1641,6 +1781,8 @@ Pass each config with --config (it builds the list for you), e.g.:
         # a '???' in a deleted or overwritten branch is not reported. Otherwise the first unset
         # value surfaces as an opaque MissingMandatoryValue deep in the pipeline.
         self.raise_on_missing_values(global_config_dict)
+        # Before the relays below, so an ignored selection fails before the warning about its unrouted instance.
+        self._raise_on_ignored_agent_type(global_config_dict, selected_instances)
         # NOTE(martas): this is for catching agents not attached to an environment server
         self._front_agents_without_environment_server(global_config_dict)
 

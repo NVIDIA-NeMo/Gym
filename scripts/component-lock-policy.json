@@ -4,6 +4,11 @@
       "pyarrow>=25.0.1,<26"
     ]
   },
+  "resources_servers/agentic_mme": {
+    "override-dependencies": [
+      "opencv-python-headless==5.0.0.93"
+    ]
+  },
   "resources_servers/code_fim": {
     "override-dependencies": [
       "pathspec"
@@ -19,13 +24,12 @@
       "cryptography"
     ]
   },
-  "resources_servers/longmt_eval": {
+  "resources_servers/longmt_eval/scoring": {
+    "standalone": true,
+    "reason": "Python 3.12 SEGALE/COMET 2.2.7 environment: Transformers 4.x compatibility and protobuf 4.25.9 retained from the validated scoring stack. These are explicit compatibility exceptions, not a claim that older versions meet the root security floor.",
     "constraint-dependencies": [
-      "transformers>=4.17,<5"
-    ],
-    "override-dependencies": [
-      "torchvision==0.27.0",
-      "protobuf==6.33.6"
+      "transformers>=4.17,<5",
+      "protobuf==4.25.9"
     ]
   },
   "resources_servers/model_identity": {
@@ -89,7 +93,7 @@
   },
   "responses_api_agents/agentic_mme_agent": {
     "override-dependencies": [
-      "opencv-python-headless>=4.10"
+      "opencv-python-headless==5.0.0.93"
     ]
   },
   "responses_api_agents/harbor_agent": {
