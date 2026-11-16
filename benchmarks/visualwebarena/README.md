@@ -158,3 +158,9 @@ The [complete semantic-context follow-up](validation-2026-11-16-semantic-context
 requires the full observed target to pass before freshness can earn credit.
 It retains all 30 new regression comparisons and every real-model semantic
 probe, including qualification failures and a native partial-equivalence miss.
+
+The [query resource-identity follow-up](validation-2026-11-16-query-identity.md)
+preserves the value order of repeated URL parameters during snapshot capture.
+It retains all 22 old/new cases and both real HTTP/browser/model checks, with
+the complete resolved configuration for each case. No new 908-task score was
+measured.

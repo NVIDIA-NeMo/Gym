@@ -65,6 +65,13 @@ def _same_snapshot_origin(requested: SplitResult, landed: SplitResult) -> bool:
     return bool(requested.hostname) and (requested.hostname, ports[0]) == (landed.hostname, ports[1])
 
 
+def _snapshot_query_values(query: str) -> dict[str, list[str]]:
+    values: dict[str, list[str]] = {}
+    for key, value in parse_qsl(query, keep_blank_values=True):
+        values.setdefault(key, []).append(value)
+    return values
+
+
 def _snapshot_url_matches(requested_url: str, landed_url: str) -> bool:
     """Recognize the same resource, including bounded local-site canonical redirects."""
     requested, landed = urlsplit(requested_url), urlsplit(landed_url)
@@ -87,9 +94,9 @@ def _snapshot_url_matches(requested_url: str, landed_url: str) -> bool:
         else:
             paths = [re.sub(r"^/index\.php(?:/|$)", "/", path[len(prefix) :]).rstrip("/") or "/" for path in paths]
         break
-    return paths[0] == paths[1] and sorted(parse_qsl(requested.query, keep_blank_values=True)) == sorted(
-        parse_qsl(landed.query, keep_blank_values=True)
-    )
+    # Different keys may move, but an application can select the first or
+    # last value of a repeated key. Keep that resource identity intact.
+    return paths[0] == paths[1] and _snapshot_query_values(requested.query) == _snapshot_query_values(landed.query)
 
 
 def _validate_snapshot_navigation(record: dict[str, Any], phase: str) -> None:
