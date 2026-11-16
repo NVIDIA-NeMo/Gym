@@ -111,3 +111,56 @@ def test_allowlisted_sites_pass_and_new_or_stale_entries_fail(tmp_path: Path, ca
 
 def test_repository_has_no_sites_outside_the_allowlist() -> None:
     assert check.main(["--root", str(REPO_ROOT)]) == 0
+
+
+def _yaml_findings(root: Path) -> set[tuple[str, str, str]]:
+    return {(file, rule, scope) for file, _, rule, scope in check.scan_yaml(root)}
+
+
+def test_flags_relative_folder_settings_in_yaml_configs(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "responses_api_agents/demo/configs/demo.yaml",
+        """
+        demo_agent:
+          responses_api_agents:
+            demo:
+              artifacts_dir: results/demo
+              env_dir: ${oc.env:DEMO_DIR,results/demo}
+              nested_dir: ${oc.select:a,${oc.select:b,results/x}/agent}
+              unset_dir: ${oc.env:DEMO_DIR,null}
+              absolute_dir: /scratch/demo
+              under_results_dir: ${results_dir}/demo
+              select_results_dir: ${oc.select:results_dir,results}/demo
+              read_only_dir: data/prompts  # runtime-path: read
+              timeout: 10
+        prepare_script_args:
+          output_dir: benchmarks/demo/data
+        """,
+    )
+    _write(tmp_path, "benchmarks/demo/config.yaml", "jobs:\n  - jobs_dir: results/jobs\n")
+
+    assert _yaml_findings(tmp_path) == {
+        (
+            "responses_api_agents/demo/configs/demo.yaml",
+            "yaml-relative-default",
+            "demo_agent.responses_api_agents.demo.artifacts_dir",
+        ),
+        (
+            "responses_api_agents/demo/configs/demo.yaml",
+            "yaml-relative-default",
+            "demo_agent.responses_api_agents.demo.env_dir",
+        ),
+        (
+            "responses_api_agents/demo/configs/demo.yaml",
+            "yaml-relative-default",
+            "demo_agent.responses_api_agents.demo.nested_dir",
+        ),
+        ("benchmarks/demo/config.yaml", "yaml-relative-default", "jobs.0.jobs_dir"),
+    }
+
+
+def test_yaml_tests_folders_are_skipped(tmp_path: Path) -> None:
+    _write(tmp_path, "resources_servers/demo/tests/fixture.yaml", "artifacts_dir: results/demo\n")
+
+    assert _yaml_findings(tmp_path) == set()

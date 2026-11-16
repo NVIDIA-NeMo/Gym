@@ -14,15 +14,19 @@
 # limitations under the License.
 """Fail on server code that would write into the Gym source checkout while it runs.
 
-A server starts with its own source folder as the working directory, so these resolve inside the checkout:
+A server starts with its own source folder as the working directory.
+These therefore resolve inside the checkout:
 
 - ``cwd``: a call to ``Path.cwd()`` or ``os.getcwd()``.
 - ``relative-default``: a setting or parameter named ``*_dir`` or ``*_root`` whose default is a relative path.
   For example ``artifacts_dir: Path = Path("results/x")`` or ``log_dir: str = "cache/x"``.
+- ``yaml-relative-default``: a ``*_dir`` or ``*_root`` key in a YAML config whose value is a relative path.
+  An ``${oc.env:...}`` or ``${oc.select:...}`` interpolation counts by its fallback, which applies when nothing is set.
+  A reference to another key, such as ``${results_dir}/x``, counts as absolute.
 
 Use nemo_gym/core/runtime_files.py instead.
 A path that is only read, such as a bundled prompt, can say so with a ``# runtime-path: read`` comment.
-The comment goes on the flagged line.
+The comment goes on the flagged line, in Python or YAML.
 Sites that predate this check are listed in scripts/runtime_write_paths_allowlist.txt as ``<file> <rule> <scope>``.
 The scope is the enclosing class and function, or the setting's name.
 The check also fails on a listed site that no longer exists, so the list only shrinks.
@@ -32,14 +36,23 @@ Usage: python scripts/check_runtime_write_paths.py [--root DIR] [--allowlist FIL
 
 import argparse
 import ast
+import re
 import sys
 import warnings
 from pathlib import Path
+
+import yaml
 
 
 SCANNED_DIRS = ("nemo_gym", "resources_servers", "responses_api_agents", "responses_api_models", "environment_servers")
 # The CLI runs in the user's own working directory, where relative paths are what the user means.
 EXCLUDED_PREFIXES = ("nemo_gym/cli/",)
+# Benchmark and environment configs start the servers above, so their folder settings count too.
+SCANNED_YAML_DIRS = (*SCANNED_DIRS, "benchmarks", "environments")
+# Keys under these run only while preparing a dataset, by hand, not inside a server.
+EXCLUDED_YAML_KEYS = ("prepare_script_args",)
+# The innermost interpolation of a value: no nested `${` and no closing brace inside it.
+_INTERPOLATION = re.compile(r"\$\{([^${}]*)\}")
 DEFAULT_ALLOWLIST = Path("scripts/runtime_write_paths_allowlist.txt")
 _PATH_SUFFIXES = ("_dir", "_root")
 READ_MARKER = "runtime-path: read"
@@ -156,12 +169,72 @@ def scan(root: Path) -> list[tuple[str, int, str, str]]:
     return findings
 
 
+def _interpolation_fallback(value: str) -> str:
+    """The value with each interpolation replaced by its fallback, or by ``/`` when it names another key."""
+    while (match := _INTERPOLATION.search(value)) is not None:
+        resolver, _, arguments = match.group(1).partition(":")
+        name, comma, default = arguments.partition(",")
+        # Gym's config parser always sets these to absolute paths, so their fallback never applies.
+        always_set = name.strip() in ("results_dir", "cache_dir")
+        if resolver in ("oc.env", "oc.select") and comma and not always_set:
+            replacement = default.strip().strip("'\"")
+        else:
+            replacement = "/"
+        value = value[: match.start()] + replacement + value[match.end() :]
+    return value
+
+
+def _is_relative_yaml_path(node: yaml.Node) -> bool:
+    if not isinstance(node, yaml.ScalarNode) or node.tag != "tag:yaml.org,2002:str":
+        return False
+    value = _interpolation_fallback(node.value).strip()
+    return value not in ("", "null", "None", "???") and not value.startswith(("/", "~", "$"))
+
+
+def _yaml_findings(node: yaml.Node, path: list[str], lines: list[str], findings: list[tuple[int, str]]) -> None:
+    if isinstance(node, yaml.MappingNode):
+        for key_node, value_node in node.value:
+            key = str(key_node.value)
+            if key in EXCLUDED_YAML_KEYS:
+                continue
+            line = value_node.start_mark.line
+            if key.endswith(_PATH_SUFFIXES) and _is_relative_yaml_path(value_node) and READ_MARKER not in lines[line]:
+                findings.append((line + 1, ".".join([*path, key])))
+            _yaml_findings(value_node, [*path, key], lines, findings)
+    elif isinstance(node, yaml.SequenceNode):
+        for index, item in enumerate(node.value):
+            _yaml_findings(item, [*path, str(index)], lines, findings)
+
+
+def scan_yaml(root: Path) -> list[tuple[str, int, str, str]]:
+    """Return ``(file, line, rule, scope)`` for every relative folder setting in the YAML configs under ``root``."""
+    findings = []
+    for directory in SCANNED_YAML_DIRS:
+        for path in sorted((root / directory).rglob("*.yaml")):
+            relative = path.relative_to(root).as_posix()
+            if _is_excluded(relative) or "/." in f"/{relative}":
+                continue
+            source = path.read_text(encoding="utf-8")
+            try:
+                documents = list(yaml.compose_all(source))
+            except yaml.YAMLError as error:
+                findings.append((relative, 0, "syntax-error", type(error).__name__))
+                continue
+            lines = source.splitlines()
+            for document in documents:
+                found: list[tuple[int, str]] = []
+                if document is not None:
+                    _yaml_findings(document, [], lines, found)
+                findings.extend((relative, line, "yaml-relative-default", scope) for line, scope in found)
+    return findings
+
+
 def read_allowlist(path: Path) -> set[tuple[str, str, str]]:
     entries = set()
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if line and not line.startswith("#"):
-            file, rule, scope = line.split()
+            file, rule, scope = line.split(maxsplit=2)
             entries.add((file, rule, scope))
     return entries
 
@@ -174,7 +247,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     allowlist_path = args.allowlist or args.root / DEFAULT_ALLOWLIST
 
-    findings = scan(args.root)
+    findings = scan(args.root) + scan_yaml(args.root)
     keys = {(file, rule, scope) for file, _, rule, scope in findings}
     if args.write_allowlist:
         header = allowlist_path.read_text(encoding="utf-8").split("\n\n", 1)[0] if allowlist_path.exists() else ""
