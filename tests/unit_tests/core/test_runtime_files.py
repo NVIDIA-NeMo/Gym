@@ -338,13 +338,16 @@ async def test_folder_is_removed_when_cancelled_while_it_is_created(
     set_global_config, tmp_path: Path, monkeypatch
 ) -> None:
     set_global_config({"temp_dir": str(tmp_path)})
-    started, release = threading.Event(), threading.Event()
+    started, release, created = threading.Event(), threading.Event(), threading.Event()
     create = runtime_files._create_temp_folder
+    made: list[Path] = []
 
     def slow_create(kind: str, parent: Path | None) -> Path:
         started.set()
         release.wait(5)
-        return create(kind, parent)
+        made.append(create(kind, parent))
+        created.set()
+        return made[0]
 
     monkeypatch.setattr(runtime_files, "_create_temp_folder", slow_create)
 
@@ -358,11 +361,14 @@ async def test_folder_is_removed_when_cancelled_while_it_is_created(
     with pytest.raises(asyncio.CancelledError):
         await task
     release.set()
-    for _ in range(100):
-        if not any(tmp_path.iterdir()):
+    # The folder must really be created after the cancel, or the test would prove nothing.
+    assert await asyncio.to_thread(created.wait, 5)
+    for _ in range(200):
+        if not made[0].exists():
             break
         await asyncio.sleep(0.01)
 
+    assert not made[0].exists()
     assert list(tmp_path.iterdir()) == []
 
 

@@ -74,11 +74,11 @@ def _is_excluded(relative: str) -> bool:
 
 
 def _files(root: Path, directory: str, suffix: str) -> list[Path]:
-    """Files under ``root / directory`` with ``suffix``, never descending into hidden folders such as ``.venv``."""
+    """Files under ``root / directory`` with ``suffix``, skipping hidden files and hidden folders such as ``.venv``."""
     found = []
     for current, folders, files in os.walk(root / directory):
         folders[:] = sorted(name for name in folders if not name.startswith("."))
-        found.extend(Path(current, name) for name in sorted(files) if name.endswith(suffix))
+        found.extend(Path(current, name) for name in sorted(files) if name.endswith(suffix) and name[0] != ".")
     return found
 
 
