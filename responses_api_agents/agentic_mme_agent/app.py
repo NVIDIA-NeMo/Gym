@@ -140,6 +140,11 @@ class PolicyCallFailure:
         forwarded = FailureHeader.decode(error.headers)
         if forwarded is not None:
             report = report.merged(forwarded)
+        if outcome.failure_kind == MODEL_CONTEXT_LIMIT:
+            # The model server's report selects its refused request, a model_request_error. The Environment Server
+            # fails a reply whose selected cause does not match its outcome, so keep the events but select none: the
+            # outcome policy then grades the refusal as the model's own result.
+            report = report.model_copy(update={"failure_id": None})
         return cls(f"HTTP {error.status}: {detail[:1000]}", outcome, report.model_dump(mode="json"))
 
     def failed_response(self, response: NeMoGymResponse) -> NeMoGymResponse:

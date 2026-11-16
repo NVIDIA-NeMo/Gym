@@ -297,8 +297,10 @@ async def test_a_policy_timeout_keeps_its_cause_and_the_model_servers_report() -
     assert json.loads(result.metadata[AGENT_OUTCOME_METADATA_KEY]) == {"failure_kind": "model_policy_response_timeout"}
     kept = FailureReport.model_validate(result.model_dump()["failure_report"])
     assert set(report.events) <= set(kept.events)
-    # Gym's default for a confirmed policy timeout: the rollout fails ungraded, under this benchmark's policy too.
-    assert agent_outcome_policy(result, config=BENCHMARK_POLICY) == OutcomeAction.FAIL
+    # The Environment Server finds the timeout as the reply's selected cause, so it applies its timeout rule (retry,
+    # unless a policy says otherwise) instead of failing a reply whose cause it cannot read.
+    cause = SingleAgentTurnLegacyEnvironmentServer._agent_failure(result)
+    assert cause is not None and cause.failure_kind == "model_policy_response_timeout"
 
 
 @pytest.mark.asyncio
@@ -481,7 +483,19 @@ async def test_a_collected_context_limit_ending_scores_zero_with_its_cause(monke
     The Environment Server grades the failed response: the row scores 0, is graded, counts the crop, and records the
     refusal as /run does.
     """
-    refused = refused_reply(400, b'{"error": {"code": "context_length_exceeded", "message": "too many tokens"}}')
+    # The policy model server is a Gym server: its 400 carries its report, which selects the refused model request.
+    refused_request = FailureEvent(
+        boundary=FailureBoundary.MODEL,
+        failure_kind=MODEL_REQUEST_ERROR,
+        failure_reason="HTTP 400 from the model server",
+        operation="model_request",
+        operation_id="final-call",
+        http_status=400,
+        attempt_id="attempt-0",
+    )
+    report = FailureReport(failure_id=refused_request.event_id, events={refused_request.event_id: refused_request})
+    body = b'{"error": {"code": "context_length_exceeded", "message": "too many tokens"}}'
+    refused = refused_reply(400, body, report)
     row, calls, _ = await collect_config_rollout(monkeypatch, [response(output=[call(call_id="crop")]), refused])
 
     assert ("agentic_mme_agent", "/run") not in calls
