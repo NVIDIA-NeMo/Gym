@@ -1,5 +1,0 @@
-{"responses_create_params": {"input": [{"role": "user", "content": "Write a short greeting about project Aurora in a text file. Use the supplied brief for the launch date."}], "metadata": {"task_id": "synthetic-1"}}}
-{"responses_create_params": {"input": [{"role": "user", "content": "Write a short announcement about project Aurora in a text file. Use the supplied brief for the launch date."}], "metadata": {"task_id": "synthetic-2"}}}
-{"responses_create_params": {"input": [{"role": "user", "content": "Write a short checklist about project Aurora in a text file. Use the supplied brief for the launch date."}], "metadata": {"task_id": "synthetic-3"}}}
-{"responses_create_params": {"input": [{"role": "user", "content": "Write a short schedule about project Aurora in a text file. Use the supplied brief for the launch date."}], "metadata": {"task_id": "synthetic-4"}}}
-{"responses_create_params": {"input": [{"role": "user", "content": "Write a short summary about project Aurora in a text file. Use the supplied brief for the launch date."}], "metadata": {"task_id": "synthetic-5"}}}

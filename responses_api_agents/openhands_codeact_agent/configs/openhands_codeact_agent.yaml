@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# OpenHands CodeAct borrows the task sandbox the Resources Server lends through the Environment Server. The run
+# configuration binds the benchmark and this agent; this config selects only the harness and model.
+openhands_codeact_agent:
+  responses_api_agents:
+    openhands_codeact_agent:
+      entrypoint: app.py
+      resources_server: null
+      # Every model call, including the condenser's summaries, goes through this Gym model server.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      concurrency: 8
+      # Seconds per activation, inside the Environment Server's episode timeout.
+      timeout: 10800
+      # CodeAct's iteration limit; reaching it ends the run as incomplete, with its work graded. null removes it.
+      max_iterations: 200
+      max_context: 196608
+      # Per model call, unless the request sets max_output_tokens. Sampling defaults apply unless the request sets them.
+      max_output_tokens: 32768
+      temperature: 1.0
+      top_p: 1.0
+      model_read_timeout_s: 1800
+      # Context compaction is off unless set, for example to 0.7 of max_context.
+      context_summarization_cutoff: null
+      mcp_tool_timeout_seconds: 900
+      # The staged runtime (runtime/build_runtime.sh) must be readable inside the task sandbox at these paths.
+      remote_openhands_install_script_path: ${oc.env:OPENHANDS_CODEACT_INSTALL_SCRIPT,/staged/install.sh}
+      remote_openhands_archive_path: ${oc.env:OPENHANDS_CODEACT_ARCHIVE,/staged/runtime.tar.gz}
+      harness_install_timeout: 900
+      session_close_timeout_seconds: 90

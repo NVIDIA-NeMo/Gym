@@ -248,6 +248,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "openclaw_agent",
         "opencode_agent",
         "openhands_agent",
+        "openhands_codeact_agent",
         "pi_agent",
         "pool_agent",
         "prime_agent",

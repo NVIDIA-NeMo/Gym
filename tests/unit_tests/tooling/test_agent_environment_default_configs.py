@@ -34,7 +34,10 @@ from tests.helpers.agent_environment_migration import (
 migration = load_migration()
 
 
-@pytest.mark.parametrize("agent_type", ["pi_agent", "pool_agent", "crewai_agent", "cline_agent", "terminus_2_agent"])
+@pytest.mark.parametrize(
+    "agent_type",
+    ["pi_agent", "pool_agent", "crewai_agent", "cline_agent", "terminus_2_agent", "openhands_codeact_agent"],
+)
 def test_default_agent_composes_with_exactly_one_session_environment(tmp_path: Path, agent_type: str) -> None:
     config = tmp_path / "agent.yaml"
     default = SCRIPT.parents[1] / f"responses_api_agents/{agent_type}/configs/{agent_type}.yaml"
@@ -152,19 +155,18 @@ def test_default_openhands_composes_with_exactly_one_session_environment(tmp_pat
     assert resolved.openhands_agent.responses_api_agents.openhands_agent.resources_server is None
 
 
+@pytest.mark.parametrize("agent_type", ["openhands_agent", "openhands_codeact_agent"])
 @pytest.mark.parametrize("resources", [None, {"type": "resources_servers", "name": "my_resources"}])
 def test_openhands_gets_no_legacy_relay_whatever_its_resources_binding(
-    tmp_path: Path, resources: dict[str, str] | None
+    tmp_path: Path, resources: dict[str, str] | None, agent_type: str
 ) -> None:
-    # OpenHands answers /run with 422, so a legacy relay in front of it could never run an episode.
+    # Both OpenHands adapters answer /run with 422, so a legacy relay in front of one could never run an episode.
     config = tmp_path / "agent.yaml"
     config.write_text(
         yaml.safe_dump(
             {
                 "my_agent": {
-                    "responses_api_agents": {
-                        "openhands_agent": {"entrypoint": "app.py", "resources_server": resources}
-                    }
+                    "responses_api_agents": {agent_type: {"entrypoint": "app.py", "resources_server": resources}}
                 }
             }
         )
