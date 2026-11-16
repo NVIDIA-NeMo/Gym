@@ -41,6 +41,9 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxProvider, SandboxSpec, create_
 
 logger = logging.getLogger(__name__)
 
+# the wrapper, the runtime and the run directories live here: root's, mode 0755, so the policy's uid cannot plant a
+# module the root wrapper would import
+CONTROL_DIR = "ci-ctl"
 RUNTIME_DIR = "_rt"
 # the policy's commands run as this user, so they cannot change the wrapper, the runtime or the report. A uid no account
 # in the image has (the wrapper checks), so killing what its commands leave behind never hits a service of the sandbox.
@@ -48,6 +51,8 @@ POLICY_UID = 10001
 RUNS_DIR = "runs"
 # the changed files of one run that come back, in bytes
 MAX_CHANGED_BYTES = 8 * 1024 * 1024
+# one stop attempt; one that runs longer is kept and retried at close, and the spec's ttl is the backstop
+STOP_TIMEOUT_S = 120
 # a connect() to a public address, on a port that is not DNS (a deny policy still lets port 53 through): "egress" if it
 # succeeds
 EGRESS_PROBE = (
@@ -60,7 +65,7 @@ EGRESS_PROBE = (
 )
 # runs in the sandbox for one command ("@python" is its interpreter, "@dir" the unpacked workspace): unpack the
 # workspace, run, report the output and the files the run changed
-WRAPPER = """import base64, hashlib, json, os, pwd, shutil, subprocess, sys, tarfile
+WRAPPER = """import base64, hashlib, json, os, pwd, shutil, subprocess, sys, tarfile, time
 a = json.loads(base64.b64decode(sys.argv[1]))
 d, uid = a["dir"], a["policy_uid"]
 if uid is not None and uid in [u.pw_uid for u in pwd.getpwall()]:
@@ -79,13 +84,36 @@ if uid is not None:  # only the workspace is the policy's: this file, the runtim
             os.lchown(p, uid, uid)
 
 
-def kill_policy():  # a process the command left behind could change a later command's workspace
-    for p in os.listdir("/proc") if uid is not None else []:
+def policy_alive():  # the uid's processes, zombies left out
+    alive = []
+    for p in filter(str.isdigit, os.listdir("/proc")):
         try:
-            if p.isdigit() and os.stat("/proc/" + p).st_uid == uid:
-                os.kill(int(p), 9)
-        except OSError:
+            with open("/proc/" + p + "/stat") as f:
+                state = f.read().rsplit(")", 1)[1].split()[0]
+            if os.stat("/proc/" + p).st_uid == uid and state != "Z":
+                alive.append(p)
+        except (OSError, IndexError):
             pass
+    return alive
+
+
+# A process the command left behind could change a later command's workspace. Signal every process of the uid as that
+# uid (kill -1), and again until none is left, since one forked during a pass survives it.
+def kill_policy():
+    for _ in range(50):
+        if not policy_alive():
+            return True
+        pid = os.fork()
+        if pid == 0:
+            try:
+                os.setgid(uid)
+                os.setuid(uid)
+                os.kill(-1, 9)
+            finally:
+                os._exit(0)
+        os.waitpid(pid, 0)
+        time.sleep(0.1)
+    return not policy_alive()
 
 
 def snapshot():
@@ -111,7 +139,8 @@ try:
     res = {"rc": r.returncode, "stdout": r.stdout, "stderr": r.stderr}
 except subprocess.TimeoutExpired:
     res = {"rc": None, "stdout": "", "stderr": ""}
-kill_policy()
+if uid is not None and not kill_policy():
+    res["leftover"] = True
 after = snapshot()
 changed, size = {}, 0
 for n, h in after.items():
@@ -165,6 +194,7 @@ class BoxedExec:
         self._require_no_egress = require_no_egress
         self._start_retries = max(start_retries, 0)
         self._workdir = (spec.workdir or "/tmp").rstrip("/")
+        self._control = f"{self._workdir}/{CONTROL_DIR}"
         self._boxes: dict[str, AsyncSandbox] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._ended: set[str] = set()
@@ -225,12 +255,11 @@ class BoxedExec:
                 )
             if probe == "egress":
                 logger.warning("collab_intel sandbox has network egress (require_no_egress is false)")
-            await self._put(box, runtime, f"{self._workdir}/{RUNTIME_DIR}.tar")
-            await self._sh(box, f"mkdir -p {RUNTIME_DIR} {RUNS_DIR}")
-            await self._sh(
-                box, _runtime_unpack(f"{self._workdir}/{RUNTIME_DIR}.tar", f"{self._workdir}/{RUNTIME_DIR}")
-            )
-            await self._put(box, WRAPPER.encode(), f"{self._workdir}/wrap.py")
+            ctl = self._control
+            await self._sh(box, f"mkdir -m 0755 {ctl} {ctl}/{RUNTIME_DIR} {ctl}/{RUNS_DIR}")  # fails if planted
+            await self._put(box, runtime, f"{ctl}/{RUNTIME_DIR}.tar")
+            await self._sh(box, _runtime_unpack(f"{ctl}/{RUNTIME_DIR}.tar", f"{ctl}/{RUNTIME_DIR}"))
+            await self._put(box, WRAPPER.encode(), f"{ctl}/wrap.py")
         except BaseException as exc:
             await self._stop_or_keep(box)
             if isinstance(exc, (SandboxExecError, asyncio.CancelledError)):
@@ -254,7 +283,7 @@ class BoxedExec:
         try:
             runtime = base64.b64decode(request["runtime"]) if request.get("runtime") else None
             box = await self._start(phase, runtime)
-            run_dir = f"{self._workdir}/{RUNS_DIR}/{uuid.uuid4().hex}"
+            run_dir = f"{self._control}/{RUNS_DIR}/{uuid.uuid4().hex}"
             await self._put(box, base64.b64decode(request["files"]), f"{run_dir}.tar")
             args = {
                 "dir": run_dir,
@@ -262,14 +291,14 @@ class BoxedExec:
                 "argv": request["argv"],
                 "env": request["env"],
                 "timeout": request["timeout"],
-                "pythonpath": f"{self._workdir}/{RUNTIME_DIR}",
+                "pythonpath": f"{self._control}/{RUNTIME_DIR}",
                 "max_bytes": MAX_CHANGED_BYTES,
                 "policy_uid": POLICY_UID,
             }
             encoded = base64.b64encode(json.dumps(args).encode()).decode()
             out = await self._sh(
                 box,
-                f"python {shlex.quote(self._workdir + '/wrap.py')} {shlex.quote(encoded)}",
+                f"python -I {shlex.quote(self._control + '/wrap.py')} {shlex.quote(encoded)}",
                 timeout_s=request["timeout"] + 120,
             )
             result = json.loads(out.strip().splitlines()[-1])
@@ -287,13 +316,15 @@ class BoxedExec:
             )
         if result.get("uid_in_use"):
             raise SandboxExecError(f"uid {POLICY_UID} belongs to an account of the sandbox image: use another image")
+        if result.get("leftover"):
+            raise SandboxExecError("processes the command started survived every kill: the sandbox is not reusable")
         if result.pop("too_large", False):
             raise SandboxExecError(f"the command changed more than {MAX_CHANGED_BYTES} bytes of files")
         return result
 
     async def _stop(self, box: AsyncSandbox) -> bool:
         try:
-            await box.stop()
+            await asyncio.wait_for(box.stop(), STOP_TIMEOUT_S)  # a hung delete must not hold the phase's release
             return True
         except Exception as exc:  # kept for a later retry; the spec's ttl is the backstop
             logger.warning("collab_intel sandbox stop failed (%s)", type(exc).__name__)

@@ -63,6 +63,7 @@ class FakeBox:
     start_error: Exception | None = None
     start_errors = 0  # the next this many starts fail
     stop_errors = 0  # the next this many stops fail
+    stop_hangs = 0  # the next this many stops never return
     start_gate: asyncio.Event | None = None
     wrapper_result: dict = {"rc": 0, "stdout": "ok", "stderr": "", "changed": {}, "deleted": []}
 
@@ -96,6 +97,9 @@ class FakeBox:
         return SandboxExecResult(stdout="", stderr="", return_code=0)
 
     async def stop(self):
+        if FakeBox.stop_hangs:
+            FakeBox.stop_hangs -= 1
+            await asyncio.Event().wait()
         if FakeBox.stop_errors:
             FakeBox.stop_errors -= 1
             raise ConnectionError("delete unconfirmed")
@@ -105,7 +109,7 @@ class FakeBox:
 @pytest.fixture(autouse=True)
 def fake_sandbox(monkeypatch):
     FakeBox.instances, FakeBox.egress, FakeBox.start_error, FakeBox.exec_stdout = [], False, None, None
-    FakeBox.start_errors, FakeBox.stop_errors, FakeBox.start_gate = 0, 0, None
+    FakeBox.start_errors, FakeBox.stop_errors, FakeBox.stop_hangs, FakeBox.start_gate = 0, 0, 0, None
     FakeBox.wrapper_result = {"rc": 0, "stdout": "ok", "stderr": "", "changed": {}, "deleted": []}
     monkeypatch.setattr(boxed_exec, "AsyncSandbox", FakeBox)
 
@@ -133,10 +137,12 @@ def test_the_first_command_of_a_phase_starts_a_sandbox_and_the_next_one_reuses_i
     (box,) = FakeBox.instances
     assert box.spec.image == "python:3.12-slim"
     # the runtime and the wrapper go in once, the workspace with every command
-    assert [r for r, _ in box.uploads].count("/tmp/_rt.tar") == 1
-    assert [r for r, _ in box.uploads].count("/tmp/wrap.py") == 1
-    assert sum(r.startswith("/tmp/runs/") for r, _ in box.uploads) == 2
-    assert sum("wrap.py" in c for c in box.commands) == 2
+    assert [r for r, _ in box.uploads].count("/tmp/ci-ctl/_rt.tar") == 1
+    assert [r for r, _ in box.uploads].count("/tmp/ci-ctl/wrap.py") == 1
+    assert sum(r.startswith("/tmp/ci-ctl/runs/") for r, _ in box.uploads) == 2
+    # the control dir is made root's 0755 before anything goes in, and the wrapper runs isolated
+    assert box.commands[1].startswith("mkdir -m 0755 /tmp/ci-ctl ")
+    assert sum(c.startswith("python -I /tmp/ci-ctl/wrap.py ") for c in box.commands) == 2
 
 
 def test_a_sandbox_with_network_egress_is_refused_and_stopped():
@@ -227,6 +233,27 @@ def test_a_failed_stop_keeps_the_sandbox_for_the_next_release_or_close():
         assert FakeBox.instances[1].stopped and not boxes._boxes
 
     asyncio.run(go())
+
+
+def test_a_hung_stop_is_bounded_and_retried_at_close(monkeypatch):
+    monkeypatch.setattr(boxed_exec, "STOP_TIMEOUT_S", 0.05)
+    boxes = _boxes()
+
+    async def go():
+        await boxes.run("p", _request(runtime=True))
+        FakeBox.stop_hangs = 1
+        await boxes.release("p")  # returns despite the hang, and keeps the box
+        assert "p" in boxes._boxes and not FakeBox.instances[0].stopped
+        await boxes.close()
+        assert FakeBox.instances[0].stopped and not boxes._boxes
+
+    asyncio.run(go())
+
+
+def test_processes_that_survive_the_kill_fail_the_run():
+    FakeBox.wrapper_result = {"rc": 0, "stdout": "", "stderr": "", "changed": {}, "deleted": [], "leftover": True}
+    with pytest.raises(SandboxExecError, match="survived"):
+        asyncio.run(_boxes().run("p", _request(runtime=True)))
 
 
 def test_a_setup_box_whose_stop_failed_is_retried_at_close():
@@ -335,6 +362,31 @@ def test_wrapper_maps_the_workspace_placeholder_and_reports_a_timeout(tmp_path):
 @pytest.mark.skipif(os.geteuid() == 0, reason="checks the refusal a non-root sandbox user gets")
 def test_wrapper_refuses_to_run_the_policy_as_its_own_user(tmp_path):
     assert _wrapper(tmp_path, ["@python", "-c", "pass"], policy_uid=boxed_exec.POLICY_UID) == {"not_root": True}
+
+
+def test_an_isolated_wrapper_does_not_import_a_module_planted_beside_it(tmp_path):
+    ctl = tmp_path / "ctl"
+    ctl.mkdir()
+    (ctl / "wrap.py").write_text(WRAPPER)
+    (ctl / "json.py").write_text("raise SystemExit('planted json imported')\n")
+    tar = tmp_path / "ws.tar"
+    tar.write_bytes(base64.b64decode(_tar({"a.txt": "a"})))
+    args = {
+        "dir": str(tmp_path / "run"),
+        "tar": str(tar),
+        "argv": ["@python", "-c", "print('ok')"],
+        "env": {},
+        "timeout": 20,
+        "pythonpath": "",
+        "max_bytes": 1000,
+        "policy_uid": None,
+    }
+    encoded = _b64(json.dumps(args).encode())
+    done = subprocess.run([sys.executable, "-I", str(ctl / "wrap.py"), encoded], capture_output=True, text=True)
+    assert json.loads(done.stdout.strip().splitlines()[-1])["stdout"].strip() == "ok"
+    tar.write_bytes(base64.b64decode(_tar({"a.txt": "a"})))
+    poisoned = subprocess.run([sys.executable, str(ctl / "wrap.py"), encoded], capture_output=True, text=True)
+    assert "planted json imported" in poisoned.stderr  # what -I and the root-only directory prevent
 
 
 def test_wrapper_refuses_a_policy_uid_that_an_account_of_the_image_has(tmp_path):
