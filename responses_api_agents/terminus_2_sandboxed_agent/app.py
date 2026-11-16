@@ -662,6 +662,12 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> Terminus2SessionState:
         """Borrow the resources server's sandbox for this episode."""
+        required = sorted(access.name for access in self.effective_tool_accesses(body) if access.required)
+        if required:
+            raise HTTPException(
+                422,
+                "Terminus 2 sessions cannot use required Resources Server tool grants: " + ", ".join(required),
+            )
         if body.sandbox_access is None:
             raise HTTPException(422, "Terminus 2 needs sandbox_access from the resources server")
         connection = body.sandbox_access.connection

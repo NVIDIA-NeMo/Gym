@@ -584,3 +584,29 @@ async def test_a_turn_cancelled_before_its_first_step_is_a_masked_cancellation(t
     assert refused.value.status_code == 503 and "cancelled" in refused.value.detail
     assert state.result is not None and state.result.termination.reason == "cancelled"
     assert state.result.agent_started is False
+
+
+@pytest.mark.parametrize("required", [True, False])
+@pytest.mark.parametrize("configured", [True, False])
+@pytest.mark.parametrize("kind", ["mcp", "direct_http"])
+def test_required_tool_grants_refused_before_connecting(monkeypatch, tmp_path, required, configured, kind):
+    agent, client, sandbox, provider, connect = make_agent(tmp_path, monkeypatch)
+    body = seed_body()
+    access = {"name": "gdpval_finish", "required": required, "kind": kind}
+    if kind == "mcp":
+        access["connection"] = {"transport": "streamable_http", "url": "http://resources/mcp"}
+    else:
+        access["base_url"] = "http://resources"
+    body["tool_accesses"] = [access]
+    if configured:
+        from nemo_gym.agents import AgentSeedSessionRequest
+
+        agent.config.tool_accesses = AgentSeedSessionRequest.model_validate(body).tool_accesses
+        body["tool_accesses"] = []
+    response = client.post("/v1/agent_sessions", json=body)
+    assert response.status_code == (422 if required else 200), response.text
+    if required:
+        assert "gdpval_finish" in response.text
+        connect.assert_not_awaited()
+    else:
+        connect.assert_awaited_once()
