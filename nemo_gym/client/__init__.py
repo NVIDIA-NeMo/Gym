@@ -21,6 +21,7 @@ from nemo_gym._public_api import lazy_exports
 
 
 if TYPE_CHECKING:
+    from nemo_gym.client.dependency_policy import DependencyOutcomePolicyConfig, dependency_outcome
     from nemo_gym.client.http_client import (
         MAX_NUM_TRIES,
         GlobalAIOHTTPAsyncClientConfig,
@@ -55,6 +56,8 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "DependencyOutcomePolicyConfig": "dependency_policy",
+    "dependency_outcome": "dependency_policy",
     "GlobalAIOHTTPAsyncClientConfig": "http_client",
     "MAX_NUM_TRIES": "http_client",
     "MODEL_RESPONSE_TIMEOUT_REASON": "openai_client",

@@ -11,12 +11,13 @@ from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Generic, TypeVar
 
-from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
+from aiohttp import ClientResponseError
 from anyio import CancelScope
 from fastapi import Body, FastAPI
 from pydantic import ConfigDict, Field, JsonValue, PositiveFloat, PositiveInt, model_validator
 from typing_extensions import Self
 
+from nemo_gym.client.dependency_policy import DependencyOutcomePolicyConfig, dependency_outcome
 from nemo_gym.client.http_client import format_exception_with_response_body
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest, BaseRunServerInstanceConfig
 from nemo_gym.core.episode_context import rollout_context
@@ -25,6 +26,7 @@ from nemo_gym.core.failure_kinds import EPISODE_FAILED, SESSION_RELEASE_FAILED, 
 from nemo_gym.core.failure_records import EpisodeFailure, FailureBoundary, FailureReport
 from nemo_gym.core.failure_transport import reply_failure_report, report_for_current_request
 from nemo_gym.core.model_call_sampling import MODEL_SAMPLING_NULL, encode_model_sampling
+from nemo_gym.core.outcome_policy import OutcomeAction
 from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.server_runtime._checkpoint.control import CheckpointMode
 from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
@@ -182,9 +184,7 @@ def is_handled_episode_failure(error: BaseException) -> bool:
     )
 
 
-# Request Timeout, Too Early and Too Many Requests clear on a later attempt.
-# Any other 4xx faults the request itself, so a retry is refused the same way.
-_RETRYABLE_CLIENT_ERROR_STATUSES = frozenset({408, 425, 429})
+_DEFAULT_DEPENDENCY_OUTCOME_POLICY = DependencyOutcomePolicyConfig()
 
 
 def is_retryable_dependency_status(status: int) -> bool:
@@ -192,22 +192,12 @@ def is_retryable_dependency_status(status: int) -> bool:
 
     408, 425, 429 and every 5xx are retried; every other 4xx is terminal.
     """
-    return status in _RETRYABLE_CLIENT_ERROR_STATUSES or status >= 500
+    return is_retryable_dependency_error(ClientResponseError(None, (), status=status))
 
 
 def is_retryable_dependency_error(error: BaseException) -> bool:
-    """Return whether a failed call to another server is worth another episode attempt.
-
-    An HTTP error is classified by its status (see ``is_retryable_dependency_status``). A refused or dropped
-    connection and a timeout are transient. Any other error, such as a reply that fails validation, would fail the
-    same way again.
-    """
-    if isinstance(error, NgFailureEvent) and error.http_error is not None:
-        error = error.http_error
-    if isinstance(error, ClientResponseError):
-        return is_retryable_dependency_status(error.status)
-    # A dropped connection mid-body raises ClientPayloadError, which is transient like a refused connection.
-    return isinstance(error, (ClientConnectionError, ClientPayloadError, TimeoutError))
+    """Compatibility query using the shared dependency policy's defaults."""
+    return dependency_outcome(error, config=_DEFAULT_DEPENDENCY_OUTCOME_POLICY).action == OutcomeAction.RETRY
 
 
 def dependency_failure(
@@ -216,6 +206,7 @@ def dependency_failure(
     stage: FailureStage,
     terminal: bool | None = None,
     name_error_type: bool = False,
+    policy: DependencyOutcomePolicyConfig | None = None,
     **fields: Any,
 ) -> NgFailureEvent:
     """Turn a failed call to another server into the episode's failure.
@@ -223,7 +214,7 @@ def dependency_failure(
     ``failure_reason`` keeps the dependency's own explanation from its response body
     (see ``format_exception_with_response_body``), prefixed with the error's class name when ``name_error_type`` is set,
     and bounded to the failure's 2000 characters. ``terminal`` defaults to
-    ``not is_retryable_dependency_error(error)``; pass it only where the stage decides on its own.
+    the configured dependency policy; pass it only where the caller has already made the disposition.
     ``fields`` retain partial evidence for the response adapter, such as a partial response.
     """
     description_error = (
@@ -232,12 +223,13 @@ def dependency_failure(
     failure_reason = format_exception_with_response_body(description_error)
     if name_error_type:
         failure_reason = f"{type(description_error).__name__}: {failure_reason}"
+    decision = dependency_outcome(error, config=policy or DependencyOutcomePolicyConfig(), stage=stage)
     handled = handled_episode_failure(
         boundary=FailureBoundary.ENVIRONMENT,
         stage=stage,
         operation="episode",
         failure_reason=failure_reason[:2000],
-        terminal=not is_retryable_dependency_error(error) if terminal is None else terminal,
+        terminal=decision.action == OutcomeAction.FAIL if terminal is None else terminal,
         evidence=fields,
     )
     # The dependency's error is this failure's explicit cause, whether or not the caller writes ``from``.

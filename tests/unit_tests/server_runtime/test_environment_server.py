@@ -772,3 +772,61 @@ def test_cleanup_observations_preserve_the_episode_outcome(primary_kind, cleanup
             assert event.foreign_error.exception_type.endswith(
                 "TimeoutError" if cleanup_error == "timeout" else "ConnectionError"
             )
+
+
+@pytest.mark.parametrize("action,terminal", [("retry", False), ("fail", True)])
+def test_dependency_policy_override_controls_terminal_projection(action, terminal):
+    from nemo_gym.client.dependency_policy import DependencyOutcomePolicyConfig
+
+    policy = DependencyOutcomePolicyConfig(by_status_code={503: action})
+    error = ClientResponseError(MagicMock(), (), status=503)
+    failure = dependency_failure(error, stage="seed", policy=policy)
+    assert failure.episode_terminal is terminal
+    assert failure.__cause__ is error
+    assert failure.stage == "seed"
+    # An unrelated default survives this partial override.
+    other = dependency_failure(TimeoutError(), stage="seed", policy=policy)
+    assert other.episode_terminal is False
+
+
+@pytest.mark.parametrize("action", ["verify", "count_as_zero"])
+def test_dependency_policy_rejects_actions_without_an_executor(action):
+    from pydantic import ValidationError
+
+    from nemo_gym.client.dependency_policy import DependencyOutcomePolicyConfig
+
+    with pytest.raises(ValidationError, match="does not support"):
+        DependencyOutcomePolicyConfig(default_action=action)
+
+
+@pytest.mark.parametrize("error_type", ["ServerTimeoutError", "ConnectionTimeoutError", "SocketTimeoutError"])
+def test_dependency_timeout_policy_covers_aiohttp_timeouts(error_type):
+    import aiohttp
+
+    from nemo_gym.client.dependency_policy import DependencyOutcomePolicyConfig
+
+    error = getattr(aiohttp, error_type)("socket deadline")
+    policy = DependencyOutcomePolicyConfig(by_failure_kind={"transport_timeout": "fail"})
+    assert dependency_failure(error, stage="seed", policy=policy).episode_terminal is True
+
+
+def test_dependency_policy_is_only_exposed_on_consuming_environment():
+    from pydantic import ValidationError
+
+    from tests.helpers.single_agent_turn import _environment_server
+
+    environment, _ = _environment_server()
+    assert environment.config.dependency_outcome_policy.default_action == "fail"
+    config = BaseEnvironmentServerConfig.model_fields
+    assert "dependency_outcome_policy" not in config
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        BaseEnvironmentServerConfig.model_validate(
+            {
+                "name": "environment",
+                "host": "localhost",
+                "port": 8000,
+                "entrypoint": "app.py",
+                "cleanup_timeout_seconds": 10,
+                "dependency_outcome_policy": {"default_action": "fail"},
+            }
+        )
