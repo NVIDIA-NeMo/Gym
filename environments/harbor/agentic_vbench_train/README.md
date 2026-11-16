@@ -93,6 +93,15 @@ without new code where upstream already has them:
   (`compaction_summary_max_tokens`, `compaction_summary_max_attempts`). See
   [`benchmarks/agentic_vbench/opencode_plugins/`](../../../benchmarks/agentic_vbench/opencode_plugins/README.md).
 
+**Delegation**, opt-in through [`subagents.yaml`](subagents.yaml): the primary agent's `task` tool offers one
+subagent, `analyst`, the report-only media analyst of the Agentic-VBench subagent SFT traces (10 steps, no further
+delegation, must not write the judged output); the built-in `general` and `explore` are hidden. The analyst runs on
+the policy with the run's sampling, and each analyst session's model calls are captured with the rollout's and
+reported as a child invocation of the primary agent's. Which calls of a child session train, and how its context is
+reconstructed, is NeMo RL's decision; Gym's local lineage treats a child's first call as a new root. Pass the
+overlay after `harbor_train.yaml` (and after `compaction_plugins.yaml` when both are on);
+`agentic_vbench_subagent_steps` changes the analyst's step cap.
+
 Images with OpenCode baked in: `opencode_agent` installs OpenCode into the sandbox at session start unless
 `sandbox_executable_path` (with `sandbox_executable_sha256`) names a binary the image already holds; a task image
 built with the runtime at that path skips the download (the harness README, "Preinstalled runtime").
@@ -100,7 +109,7 @@ built with the runtime at that path skips the download (the harness README, "Pre
 ## Validation status
 
 Unit tests cover the prepare script's task-root path, the staged plugins (node tests), the model server's summary
-recovery and the verifier-only multiplier.
+recovery, the verifier-only multiplier and the subagent overlay (a session configuration the harness accepts).
 
 `gym dataset validate agentic_vbench_train --sandbox docker` with `harbor_train.yaml` (judge protocol
 `nvinference-hybrid`) on a root of eight generated tasks, two per family, from the internal curriculum: 8/8 scored,
