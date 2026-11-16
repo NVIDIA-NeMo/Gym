@@ -385,6 +385,15 @@ class TestGlobalConfig:
 
         assert get_global_config_dict()["temp_dir"] == str(tmp_path / "link" / "temp")
 
+    @mark.parametrize("key", ["debug_dir", "temp_dir"])
+    def test_empty_runtime_file_root_is_refused(self, monkeypatch: MonkeyPatch, key: str) -> None:
+        # An empty string would otherwise become the working directory: the source checkout.
+        self._mock_versions_for_testing(monkeypatch)
+        self._mock_parse_environment(monkeypatch, DictConfig({key: ""}))
+
+        with raises(ConfigError, match=f"{key} must be a non-empty path string"):
+            get_global_config_dict()
+
     def test_get_global_config_dict_global_exists(self, monkeypatch: MonkeyPatch) -> None:
         # Clear any lingering env vars.
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)

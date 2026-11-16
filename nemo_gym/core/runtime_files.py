@@ -267,7 +267,12 @@ def temp_folder(*, kind: str, keep_as: Path | None = None, parent: Path | None =
 async def async_temp_folder(
     *, kind: str, keep_as: Path | None = None, parent: Path | None = None
 ) -> AsyncIterator[Path]:
-    """:func:`temp_folder` for a coroutine: creating and removing the folder run in a worker thread."""
+    """:func:`temp_folder` for a coroutine: creating and removing the folder run in a worker thread.
+
+    The removal is shielded from cancellation.
+    Under an anyio cancel scope, which cancels again at every await, the block can exit before the folder is gone;
+    the removal then finishes in the background.
+    """
     creating = asyncio.ensure_future(asyncio.to_thread(_create_temp_folder, kind, parent))
     try:
         path = await asyncio.shield(creating)
