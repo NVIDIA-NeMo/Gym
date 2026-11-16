@@ -57,6 +57,18 @@ final turn cannot reuse earlier analysis as its answer. Context overflow optiona
 (`truncate_on_overflow`), which is for eval only — during training the full trajectory has to be
 preserved for reward assignment.
 
+For the agent's own `/run` endpoint (including `big_finance` through the relay), two opt-in fields cover a resources
+server that briefly cannot answer `seed_session` or `verify`,
+for example a multi-worker server whose session routing answers 502 when it cannot reach the
+worker that holds the session:
+
+| Field | Effect | Default |
+|-------|--------|---------|
+| `resources_server_retries` | Extra attempts at `seed_session` and `verify` on 502, 503 or 504, with backoff of 1s, 2s, 4s, capped at 10s. Both calls must be safe to repeat on that server. | `0` |
+| `keep_response_on_verify_failure` | When `verify` still fails, or its reply cannot be read or parsed, return the generated rollout as a masked zero (`masked_verify_failure`), instead of the empty error response a trainer cannot use. A reply lost in transport is first retried against a `STATELESS` verifier (`verify_with_transport_retry`). | `false` |
+
+These fields do not apply to session execution: the Environment Server owns seeding and verification there.
+
 # Running behind an Environment Server
 
 The shipped `finance_sec_search` and `finance_agent_v2` resources and benchmark configs run through the

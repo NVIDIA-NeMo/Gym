@@ -11,6 +11,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+from scripts.check_suites.github_actions import (
+    COMPARE_BRANCH,
+    COMPARE_MODES,
+    CompareMode,
+    annotation_data,
+    changed_paths,
+    tested_sha,
+    write_ci_result,
+)
+
 from .feedback import failure_details, reproduction
 from .registry import HARNESSES
 
@@ -25,17 +35,14 @@ def select_harnesses(paths: list[str]) -> list[str]:
         adapter = next((name for name in HARNESSES if path.startswith(f"responses_api_agents/{name}_agent/")), None)
         if adapter:
             selected.add(adapter)
-        elif path.startswith(("nemo_gym/cli/", "nemo_gym/data/tasks/")) and path not in (
-            "nemo_gym/cli/__init__.py",
-            "nemo_gym/cli/utils.py",
-        ):
+        elif path.startswith(("nemo_gym/orchestration/", "nemo_gym/cli/", "nemo_gym/eval/", "nemo_gym/environment/")):
+            continue
+        elif path.startswith("nemo_gym/data/tasks/"):
             # Probes construct their own rows and call the collector directly.
-            # A change to either of these two still runs every harness.
             continue
         elif path.startswith(
             (
                 "nemo_gym/",
-                "responses_api_agents/shared/",
                 "environment_servers/legacy_agent/",
                 "environment_servers/single_agent_turn/",
                 "environment_servers/single_agent_turn_legacy/",
@@ -62,12 +69,20 @@ def select_harnesses(paths: list[str]) -> list[str]:
                     "environment_servers/",
                     "tests/",
                     "benchmarks/",
+                    "environments/",
+                    "docker/",
+                    ".agents/",
+                    "scripts/environment_server_compliance/",
                     "fern/",
                     "docs/",
                 )
             )
             or ("/" not in path and path.endswith(".md"))
             or path in ("LICENSE", ".gitignore")
+            or (
+                path.startswith(".github/workflows/")
+                and path not in (".github/workflows/harness-conformance.yml", ".github/workflows/cicd-main.yml")
+            )
         ):
             continue
         else:
@@ -76,21 +91,35 @@ def select_harnesses(paths: list[str]) -> list[str]:
     return [name for name in HARNESSES if name in selected]
 
 
-def changed_harnesses(base: str, *, root: Path = ROOT) -> list[str]:
-    """Compare the entire branch since its merge base, including deleted/renamed paths."""
-    if not base:
-        return list(HARNESSES)
-    try:
-        ancestor = subprocess.check_output(
-            ["git", "merge-base", "--", base, "HEAD"], cwd=root, text=True, stderr=subprocess.PIPE
-        ).strip()
-        paths = subprocess.check_output(
-            ["git", "diff", "--name-only", "--no-renames", "-z", ancestor, "HEAD", "--"], cwd=root
-        ).decode("utf-8", errors="replace")
-    except subprocess.CalledProcessError:
-        print("::warning::Could not determine changed files; running all registered harnesses.")
-        return list(HARNESSES)
-    return select_harnesses([path for path in paths.split("\0") if path])
+def changed_harnesses(base: str, *, root: Path = ROOT, compare: CompareMode = COMPARE_BRANCH) -> list[str]:
+    """Select the harnesses affected by the paths changed from `base` (see `changed_paths`)."""
+    paths = changed_paths(base, root=root, subject="registered harnesses", compare=compare)
+    return list(HARNESSES) if paths is None else select_harnesses(paths)
+
+
+def _build_crewai_sandbox_runtime() -> None:
+    """Build CrewAI's sandbox runtime before the probes run.
+
+    The runtime, CrewAI and its dependencies for the sandbox's platform, takes longer to build than one probe episode
+    lasts, so the probes' first seed would time out building it. Installing it once into a throwaway local sandbox
+    leaves it in Gym's cache and under the local provider's ``/tmp``, where every probe seed finds it.
+    """
+    import asyncio
+    import tempfile
+
+    from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider
+    from responses_api_agents.crewai_agent.sandbox import RUNTIME
+
+    async def build() -> None:
+        with tempfile.TemporaryDirectory() as workdir:
+            sandbox = AsyncSandbox(create_provider({"local": {}}))
+            await sandbox.start(SandboxSpec(workdir=workdir))
+            try:
+                await RUNTIME.install(sandbox, timeout_s=600)
+            finally:
+                await sandbox.stop()
+
+    asyncio.run(build())
 
 
 def install_runtime(harness: str) -> None:
@@ -107,8 +136,10 @@ def install_runtime(harness: str) -> None:
     if harness == "nooa":
         subprocess.run([sys.executable, "-m", "scripts.harness_conformance.nooa"], cwd=ROOT, check=True)
         return
-    if harness in ("hermes", "stirrup", "simple", "openclaw"):
-        # Simple is built in; Hermes is locked; Stirrup and OpenClaw provision the task sandbox.
+    if harness == "crewai":
+        _build_crewai_sandbox_runtime()
+    if harness in ("hermes", "stirrup", "simple", "openclaw", "copilot", "crewai"):
+        # Simple is built in; Hermes is locked; the remaining harnesses provision the task sandbox.
         return
     defaults = yaml.safe_load((adapter / "configs" / f"{harness}_agent.yaml").read_text())
     config = defaults[f"{harness}_agent"]["responses_api_agents"][f"{harness}_agent"]
@@ -148,17 +179,14 @@ def report(harness: str, *, output: Path, exit_code: int) -> str:
     else:
         status = "passed"
         message = f"{harness}: P0 conformance requirements are fulfilled; additional checks are reported below."
-    output.mkdir(parents=True, exist_ok=True)
-    (output / "ci-result.json").write_text(
-        json.dumps({"harness": harness, "sha": os.environ.get("GITHUB_SHA", "local"), "status": status}) + "\n"
-    )
+    write_ci_result(output, subject=harness, status=status, subject_key="harness")
     markdown = f"## Harness conformance: {harness}\n\n{message}\n\n"
     count, first = failure_details(harness, output)
     markdown += f"**Failed scenario checks:** {count}\n\n**First failure:** {first}\n\n"
     if status != "passed":
         detail = f"{message} Failed scenario checks: {count}. First failure: {first}"
-        print(f"::warning title={warning_title}::{detail}".replace("%", "%25"))
-    markdown += f"Source: `{os.environ.get('GITHUB_SHA', 'local')}`\n\n"
+        print(f"::warning title={warning_title}::{annotation_data(detail)}")
+    markdown += f"Source: `{tested_sha()}`\n\n"
     report_path = output / "conformance_report.md"
     if report_path.exists():
         markdown += report_path.read_text() + "\n"
@@ -171,6 +199,7 @@ def main() -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     select = commands.add_parser("select")
     select.add_argument("--base", default="")
+    select.add_argument("--compare", choices=COMPARE_MODES, default=COMPARE_BRANCH)
     install = commands.add_parser("install")
     install.add_argument("--harness", choices=HARNESSES, required=True)
     publish = commands.add_parser("report")
@@ -179,7 +208,7 @@ def main() -> None:
     publish.add_argument("--exit-code", type=int, required=True)
     args = parser.parse_args()
     if args.command == "select":
-        harnesses = changed_harnesses(args.base)
+        harnesses = changed_harnesses(args.base, compare=args.compare)
         print(f"Selected harnesses: {harnesses}")
         with Path(os.environ["GITHUB_OUTPUT"]).open("a") as handle:
             handle.write(f"harnesses={json.dumps(harnesses)}\n")

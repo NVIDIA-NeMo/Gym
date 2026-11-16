@@ -1354,6 +1354,39 @@ async def activate(agent, sandbox):
     return request, seeded.agent_session_id, task
 
 
+async def test_close_stops_config_staging_before_releasing_the_sandbox(setup):
+    agent, sandbox = setup
+    events = []
+    started = asyncio.Event()
+    upload = sandbox.upload
+
+    async def stall_config(source, destination):
+        if not destination.endswith("/home/.codex/config.toml"):
+            return await upload(source, destination)
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            events.append("upload cancelled")
+            raise
+
+    sandbox.upload = stall_config
+    sandbox.disconnect.side_effect = lambda: events.append("sandbox released")
+    request = Request({"type": "http", "headers": [], "session": {}, "path_params": {"rollout_id": "codex-smoke-a2"}})
+    # The configuration carries the grant's headers.
+    body = AgentSeedSessionRequest.model_validate({**seed().model_dump(mode="json"), "tool_accesses": [mcp_grant()]})
+    seeded = await agent.seed_agent_session(request, body)
+    task = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
+    await asyncio.wait_for(started.wait(), 5)
+    await asyncio.wait_for(
+        agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(seeded.agent_session_id))), 10
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 5)
+    assert events == ["upload cancelled", "sandbox released"]
+    sandbox.launch.assert_not_awaited()
+
+
 async def test_rollout_stop_ends_codex_as_a_timeout(setup):
     agent, sandbox = setup
     sandbox.blocked = True
@@ -3576,7 +3609,7 @@ def test_later_rejection_preserves_real_tool_output_and_available_usage(setup, u
                 "input_tokens": 20,
                 "output_tokens": 8,
                 "total_tokens": 28,
-                "input_tokens_details": {"cached_tokens": 3},
+                "input_tokens_details": {"cached_tokens": 3, "cache_write_tokens": None},
                 "output_tokens_details": {"reasoning_tokens": 2},
             }
         elif usage_source == "cli":
@@ -3650,7 +3683,7 @@ def test_graded_failure_reports_native_usage_or_none(setup, usage_source):
             "input_tokens": 20,
             "output_tokens": 8,
             "total_tokens": 28,
-            "input_tokens_details": {"cached_tokens": 3},
+            "input_tokens_details": {"cached_tokens": 3, "cache_write_tokens": None},
             "output_tokens_details": {"reasoning_tokens": 2},
         }
     else:

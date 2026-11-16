@@ -636,6 +636,20 @@ def is_metrics_exporter_active() -> bool:
     return _METRICS_EXPORTING
 
 
+def is_span_group_or_metrics_active(group: str) -> bool:
+    """Whether a site that both spans ``group`` and records metrics should take its instrumented path.
+
+    Spans follow ``span_groups`` and metrics follow the metrics exporter, independently, so a
+    site instruments when either is on. ``managed_span`` still checks the span group itself.
+    """
+    if _METRICS_EXPORTING:
+        return True
+    # Function-local, like every lens import in this module.
+    from nemo_gym.telemetry._fallbacks import is_span_group_enabled
+
+    return is_span_group_enabled(group)
+
+
 def is_trace_exporter_active() -> bool:
     """Whether this process exports spans.
 

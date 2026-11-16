@@ -73,6 +73,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JudgeError, call_judge
 
 # The grader the apptainer comparators were scored with. NOT the longer
@@ -192,6 +193,7 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     # Abort the run after this many rollouts in a row fail to grade. Guards the silent-starvation
     # mode where a dead judge masks every sample and the run burns its wall producing nothing.
     # Counted per ROLLOUT, not per attempt, so one transient burst cannot trip it. 0 disables.
+    # With num_workers > 1, each worker counts the rollouts it graded, so each worker aborts on its own.
     judge_max_consecutive_failures: int = 25
     # Budget covers reasoning + final message combined. 2048 makes reasoning judges burn the
     # whole budget thinking, emitting no final message, which reads as an unparseable verdict.
@@ -474,6 +476,8 @@ class SearchResourcesServer(SimpleResourcesServer):
         return self._exa_cache
 
     async def _exa_cache_stats(self) -> Dict[str, Any]:
+        # With num_workers > 1, each worker keeps its own index and stats, so this reports the worker that answers.
+        # A worker's index also misses entries other workers stored since it started, which costs an Exa call.
         return dict(self._cache.stats)
 
     async def _exa_proxy(self, request: Request) -> Response:
@@ -628,3 +632,6 @@ class SearchResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     SearchResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SearchResourcesServer.run_webserver()  # noqa: F401

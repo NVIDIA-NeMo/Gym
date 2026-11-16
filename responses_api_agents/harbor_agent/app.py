@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import logging
 import re
 import sys
 from asyncio import Semaphore
@@ -43,7 +44,11 @@ from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.harbor_agent.utils import HarborAgentUtils
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class HarborDatasetSourceConfig(BaseModel):
@@ -230,6 +235,11 @@ class HarborAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
+        LOGGER.warning(
+            "responses_api_agents/harbor_agent is deprecated. The built-in benchmarks that use it will be migrated to "
+            "the harbor environment server (environment_servers/harbor, see its README.md); no action is needed "
+            "from you yet. New work should use the harbor environment server."
+        )
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
@@ -251,7 +261,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
             global_config_dict = get_global_config_dict()
 
             policy_model_name = global_config_dict["policy_model_name"]
-            base_url = self._resolve_model_base_url(global_config_dict)
+            base_url = self._resolve_model_base_url(global_config_dict, body)
             run_timestamp = datetime.now(timezone.utc)
             run_id = self._build_run_id(run_timestamp)
 
@@ -417,14 +427,15 @@ class HarborAgent(SimpleResponsesAPIAgent):
         sanitized = sanitized.strip("._")
         return sanitized or "unknown"
 
-    def _resolve_model_base_url(self, global_config_dict: Any) -> str:
-        """Resolve model base URL from required model_server reference."""
+    def _resolve_model_base_url(self, global_config_dict: Any, body: HarborRunRequest) -> str:
+        """Resolve the model base URL from the required model_server reference, with this run's URL segments."""
         server_name = self.config.model_server.name
         model_server_config = get_first_server_config_dict(
             global_config_dict,
             server_name,
         )
-        return f"http://{model_server_config['host']}:{model_server_config['port']}/v1"
+        base_url = f"http://{model_server_config['host']}:{model_server_config['port']}"
+        return f"{self.base_url_for_run(base_url, body)}/v1"
 
     def _build_job_config(
         self,
@@ -554,3 +565,6 @@ class HarborAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     HarborAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = HarborAgent.run_webserver()  # noqa: F401

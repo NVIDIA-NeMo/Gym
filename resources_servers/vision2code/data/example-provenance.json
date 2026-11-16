@@ -1,0 +1,113 @@
+{
+  "description": "Five saved Kimi K3 single-pass rollouts and their reference/render image pairs, sampled without a reward threshold.",
+  "source_run": "kimi-k3-test-mini-gpt61sol-pass1-v2",
+  "source_rollouts_sha256": "defb6aa585da4e4d3b5ed1742e52a7962ea008056951f3a32ee4c0c318111245",
+  "source_settings_sha256": "25a5f974e8a3608746f4fc2dc863824ecfa56fbc14a67f3ec2fc419c0959318b",
+  "selection": {
+    "algorithm": "random.Random(seed).sample over task-id-sorted eligible rows",
+    "seed": 20261110,
+    "eligible_count": 11,
+    "sample_count": 5,
+    "eligibility": "Unmasked, successful matplotlib renders; reference images use the Matplotlib license already retained in this repository. No reward filtering."
+  },
+  "collection_settings": {
+    "policy": "nvidia/moonshotai/kimi-k3",
+    "judge": "openai/openai/gpt-6.1-sol",
+    "temperature": 0.0,
+    "max_output_tokens": 32768,
+    "num_passes": 1,
+    "use_blended_reward": true,
+    "blended_reward_apply_judge_caps": false,
+    "preparation": {
+      "include_canvas_dimensions": false,
+      "include_rendering_instructions": false,
+      "include_library_instructions": false
+    },
+    "gym_commit": "c26e8d6b550840bb2dab11fe0ac923db6518e14e",
+    "renderer_sha256": "3a073b675472ff47052263ae6325510d41a01563c86984f11c8abd5ad0313d3d"
+  },
+  "reward_mode": "uncapped Blend A",
+  "export_changes": [
+    "Local image/artifact paths replaced with repository-relative paths.",
+    "Machine-specific timings, execution diagnostics, collection identifiers and encrypted judge reasoning omitted.",
+    "Policy requests, policy outputs, recorded scores and copied image bytes preserved."
+  ],
+  "reference_license": "Matplotlib; see LICENSE.matplotlib",
+  "results": [
+    {
+      "id": "matplotlib_test_000045_e3d14e5666cb",
+      "source_line": 483,
+      "source_row_sha256": "884ae5ff188a3e5e3cdccbfba774574273823c361b9e516a53d995d9c042809b",
+      "source_artifact_id": "ccdac96383cb4fee99818bb75ecd8388",
+      "source_id": "matplotlib:default:stable__gallery__statistics__confidence_ellipse:figure_000.png",
+      "source_url": "https://matplotlib.org/stable/gallery/statistics/confidence_ellipse.html",
+      "reference": "example-1.png",
+      "reference_sha256": "c7fdc36b9371a5a3091cc79ac4ddb27d5ba17d7e4320728ff06dc14e3249b071",
+      "render": "example-1-output.png",
+      "render_sha256": "854d1cefdbe2f7edd5b61051b581fcbe477433d102e3c0939a38ecb4b056d4c1",
+      "reward": 0.67684,
+      "mask_sample": false,
+      "render_status": "ok"
+    },
+    {
+      "id": "matplotlib_test_000026_ae155987adb4",
+      "source_line": 490,
+      "source_row_sha256": "7205116c952c2ebfb29484ac44a1ccd9863ddaee7b26f362080a4063104e143d",
+      "source_artifact_id": "5005352d1674479e89a3b0492bab9f8c",
+      "source_id": "matplotlib:default:stable__gallery__userdemo__simple_legend02:figure_000.png",
+      "source_url": "https://matplotlib.org/stable/gallery/userdemo/simple_legend02.html",
+      "reference": "example-2.png",
+      "reference_sha256": "95082c03a46372ebd62e6d44fb17aceb884942cad6e6cf992750b8dff8a01b3d",
+      "render": "example-2-output.png",
+      "render_sha256": "27797d42a412c7e30ba21661bdf32326d24360efface5ebd528b5e146f82fbb3",
+      "reward": 0.64774,
+      "mask_sample": false,
+      "render_status": "ok"
+    },
+    {
+      "id": "matplotlib_test_000065_22b16f67e54d",
+      "source_line": 463,
+      "source_row_sha256": "190cc6d329e1af93c1b284d934f4f2b966aac284c55ac7fb5866987390c221f5",
+      "source_artifact_id": "1f98e2fe1cb24a07be34f672c1cbbe1b",
+      "source_id": "matplotlib:default:stable__gallery__pyplots__pyplot_simple:figure_000.png",
+      "source_url": "https://matplotlib.org/stable/gallery/pyplots/pyplot_simple.html",
+      "reference": "example-3.png",
+      "reference_sha256": "d45bafb2629d6f8a7e6377356f86ea73d908423cef0c355363948051ed4e83a5",
+      "render": "example-3-output.png",
+      "render_sha256": "17cd500e568fd8380fb292a597969dc4be86bf5cdd46fa31d8973b1eda1b6dab",
+      "reward": 0.48902,
+      "mask_sample": false,
+      "render_status": "ok"
+    },
+    {
+      "id": "matplotlib_test_000058_197d20bd57b7",
+      "source_line": 498,
+      "source_row_sha256": "156d3887b0669f8309bc21103a599569501edf64bebe49f391039b571de0905a",
+      "source_artifact_id": "96c9947730a748e2bdea5bedf913f94e",
+      "source_id": "matplotlib:default:stable__gallery__event_handling__data_browser:figure_000.png",
+      "source_url": "https://matplotlib.org/stable/gallery/event_handling/data_browser.html",
+      "reference": "example-4.png",
+      "reference_sha256": "ee1bdfeb70d492f20102539ae1297e297f3e159b5b0448476884e73d106eda63",
+      "render": "example-4-output.png",
+      "render_sha256": "acf0658de13175587d0ba38b20019aa400015b80ef271fe7244d8bac560710ee",
+      "reward": 0.68694,
+      "mask_sample": false,
+      "render_status": "ok"
+    },
+    {
+      "id": "matplotlib_test_000112_8cf1fea7b522",
+      "source_line": 487,
+      "source_row_sha256": "8291e17f57cf6b47c1d14d0723dab25472af2fb236940423f006f32e0099a589",
+      "source_artifact_id": "87da864a5d3b48f7a3a2023d01de7c9b",
+      "source_id": "matplotlib:default:stable__gallery__widgets__buttons:figure_000.png",
+      "source_url": "https://matplotlib.org/stable/gallery/widgets/buttons.html",
+      "reference": "example-5.png",
+      "reference_sha256": "52cf2cb1fde1a8c7bd0f58c6abc430923d893be81801936398c15d20f11445f7",
+      "render": "example-5-output.png",
+      "render_sha256": "0a75127b5d334f69073e18eb1662acaa8bb83ba2d433318ee65e82d814adc5c8",
+      "reward": 0.9476000000000001,
+      "mask_sample": false,
+      "render_status": "ok"
+    }
+  ]
+}
