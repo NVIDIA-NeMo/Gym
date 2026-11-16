@@ -31,6 +31,7 @@ from pathlib import Path
 from nemo_gym.orchestration.api import NodeLocalConfig
 from nemo_gym.orchestration.executors.resume_script import JOB_CHAIN_NAME
 from nemo_gym.orchestration.executors.script_templates import NODE_LOCAL_ARCHIVE_DONE_MARKER_ENV
+from nemo_gym.orchestration.jobs import EVAL_SUCCEEDED_FILENAME
 
 
 NODE_LOCAL_DIR_ENV = "GYM_NODE_LOCAL_DIR"
@@ -210,6 +211,12 @@ def render_setup(config: NodeLocalConfig, remote_bench_dir: Path, driver_node_fl
             cleanup_script=shlex.quote(_CLEANUP_SCRIPT),
         )
     ]
+    if exports:
+        succeeded = f'{shlex.quote(str(remote_bench_dir / EVAL_SUCCEEDED_FILENAME))}."$SLURM_JOB_ID"'
+        blocks.append(
+            "# A requeued attempt keeps its job id: an earlier attempt's markers must not count for it.\n"
+            f"rm -f -- {succeeded} {_archive_done_marker(remote_bench_dir)}"
+        )
     if not driver_node_flags:
         blocks.append(_TERM_TRAP)
     return "\n".join(blocks)

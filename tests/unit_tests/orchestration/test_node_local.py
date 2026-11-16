@@ -551,6 +551,25 @@ def test_a_service_lost_after_the_evaluation_succeeded_still_lets_the_watch_arch
     assert _archive(tmp_path) == {"ev/1.json": "row1\n"}
 
 
+def test_a_requeued_attempt_does_not_take_its_earlier_attempts_markers(tmp_path):
+    # The first attempt succeeded and was requeued while its exports ran: both of its markers are still there.
+    bench = tmp_path / "run" / "b"
+    bench.mkdir(parents=True)
+    (bench / "eval.succeeded.11").touch()
+    (bench / ".gym_node_local_archive_done.11").touch()
+    driver = (
+        'test ! -e "$GYM_EVAL_SUCCEEDED_MARKER" && test ! -e "$GYM_NODE_LOCAL_ARCHIVE_DONE_MARKER" && sleep 1 && '
+        f"{_WRITE_EVIDENCE}"
+    )
+
+    returncode = _finish(_start_job(tmp_path, driver=driver, exports=True, env={"SLURM_RESTART_COUNT": "1"}))
+
+    output = (tmp_path / "job.out").read_text()
+    assert returncode == 0, output
+    assert "The evaluation succeeded" not in output
+    assert _archive(tmp_path, "11.1") == {"ev/1.json": "row1\n"}
+
+
 def _real_driver_fakes(tmp_path: Path, gym_exit: int) -> dict[str, str]:
     """`gym eval run` writes the evidence; the exporter (`python3 -m ...export_step`) reports what the job dir holds."""
     archive = tmp_path / "run" / "b" / "node-local" / "11.0.tar.gz"
