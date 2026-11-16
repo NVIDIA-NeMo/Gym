@@ -145,7 +145,7 @@ def test_the_driver_gets_the_dir_at_a_path_every_job_of_the_run_shares():
 def test_the_host_dir_is_unique_to_the_slurm_job_and_archives_land_in_the_job_dir():
     script = _script(_config({"base_dir": "/raid/scratch"}))
     assert '_gym_nl_dir=/raid/scratch/gym-node-local-"$SLURM_JOB_ID"' in script
-    assert "_gym_nl_archives=/jobs/20261116_run/b/node-local" in script
+    assert "_gym_nl_archives=/jobs/20261116_run/b/node-local" in script  # pragma: allowlist secret
 
 
 def test_the_dir_is_set_up_before_the_driver_and_archived_after_it():
