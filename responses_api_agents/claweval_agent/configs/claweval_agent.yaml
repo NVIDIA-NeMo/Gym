@@ -1,0 +1,51 @@
+observability_enabled: true
+
+claweval_agent:
+  responses_api_agents:
+    claweval_agent:
+      entrypoint: app.py
+      domain: agent
+      description: Native Claw-Eval evaluation with Pyxis sandboxes and native graders
+      value: Evaluate general, multimodal, and multi-turn assistant tasks
+      claweval_root: ${oc.env:CLAW_EVAL_ROOT}
+      claweval_revision: ${oc.env:CLAW_EVAL_REVISION,null}
+      claweval_config: ${oc.env:CLAW_EVAL_CONFIG,config_multimodal.yaml}
+      python_executable: ${oc.env:CLAW_EVAL_PYTHON,python3}
+      fixture_root: ${oc.env:CLAW_EVAL_FIXTURE_ROOT,''}
+      sandbox_image: ${oc.env:CLAW_EVAL_SANDBOX_IMAGE}
+      sandbox_dependencies: ${oc.env:CLAW_EVAL_SANDBOX_DEPS}
+      workspace_root: ${oc.env:CLAW_EVAL_GYM_OUTPUT,outputs/claweval_agent}
+      concurrency: 1
+      timeout: 3600
+      no_judge: false
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      policy_base_url: ${oc.select:policy_base_url,''}
+      policy_model_name: ${oc.select:policy_model_name,''}
+      policy_api_key: ${oc.select:policy_api_key,''}
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/claweval_agent/data/example.jsonl
+
+claweval_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: claweval_agent
+
+# Native SDK owns retry policy. Preserve its multimodal and reasoning parameters.
+policy_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.select:policy_base_url,'http://localhost:8000/v1'}
+      openai_api_key: ${oc.select:policy_api_key,''}
+      openai_model: ${oc.select:policy_model_name,''}
+      forward_streaming_chat_provider_extensions: true
+      upstream_max_num_tries: 1
+      max_http_attempts: 1
+      propagate_upstream_http_status_codes: [400, 401, 403, 404, 408, 422, 429, 500, 502, 503, 504, 529]

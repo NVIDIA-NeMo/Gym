@@ -1,0 +1,4 @@
+config_paths:
+  - benchmarks/claweval/general.yaml
+  - benchmarks/claweval/multimodal.yaml
+  - benchmarks/claweval/multi_turn.yaml
