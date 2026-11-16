@@ -551,7 +551,12 @@ class AnthropicConverter:
                 },
             }
         )
-        return message.model_dump(mode="json", exclude_none=True)
+        result = message.model_dump(mode="json", exclude_none=True)
+        for field in ("native_stop_reason", "native_finish_reason"):
+            value = getattr(response, field, None)
+            if value is not None:
+                result[field] = value
+        return result
 
     def _iter_output_dicts(self, response: NeMoGymResponse) -> List[Dict[str, Any]]:
         # The Anthropic mapping drops token metadata, so skip copying the token lists of training variants
