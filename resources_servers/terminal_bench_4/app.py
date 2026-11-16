@@ -101,6 +101,8 @@ _DEFAULT_AGENT_USERS = (None, "root", 0, "0")
 _RESOURCES_SESSION_KEY = "tb4_resources_session_id"
 # Setup errors that no retry can fix: the attempt ends as a final infrastructure failure.
 _DETERMINISTIC_SETUP = frozenset({ExecLimitConfigurationError.__name__, ProviderCapabilityError.__name__})
+# A failure record bounds its failure_reason at this length.
+_MAX_FAILURE_REASON = 2000
 
 
 def atomic_json(path, value):
@@ -713,6 +715,15 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 failure_type = failure
         elif session.termination.reason == "infrastructure_error" and not result.get("sandbox_resource_limit"):
             failure = session.termination.detail or "Agent infrastructure failure"
+        if result.get("sandbox_resource_limit"):
+            # The sandbox's limit death is the graded result: the harness's failure events (a cleanup the dead
+            # sandbox could not confirm) stay as observations, and none is selected as the row's failure.
+            extra = {key: value for key, value in extra.items() if key != FailureReportRow.FAILURE_ID}
+        failure_reason = failure or verifier_failure
+        if failure and session.termination.reason == "infrastructure_error" and session.termination.detail:
+            # The exception type classifies the failure; the reason says what happened, and is all an in-process
+            # caller sees of it.
+            failure_reason = session.termination.detail[:_MAX_FAILURE_REASON]
         legacy = getattr(session, "resources_request", None) is None
         ungraded_verifier = bool(failure) and not completed and session.termination.reason != "infrastructure_error"
         legacy_failure = {}
@@ -737,7 +748,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             evaluation_completed=completed,
             termination=session.termination,
             infrastructure_error=failure,
-            failure_reason=failure or verifier_failure,
+            failure_reason=failure_reason,
             failure_kind=(
                 VERIFIER_ERROR
                 if verifier_failure or ungraded_verifier

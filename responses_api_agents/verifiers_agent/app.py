@@ -223,7 +223,7 @@ def _as_response_usage(usage: Any) -> Optional[NeMoGymResponseUsage]:
     return NeMoGymResponseUsage(
         input_tokens=usage.prompt_tokens,
         input_tokens_details=NeMoGymResponseInputTokensDetails(
-            cached_tokens=getattr(prompt_details, "cached_tokens", None) or 0
+            cached_tokens=getattr(prompt_details, "cached_tokens", None)
         ),
         output_tokens=usage.completion_tokens,
         output_tokens_details=NeMoGymResponseOutputTokensDetails(

@@ -19,7 +19,7 @@ One collector per benchmark job, in its own `srun --overlap` step like any other
 scrapes each model service's Prometheus `/metrics` on localhost, accepts OTLP from the job's own
 processes, stamps the resource attributes the shared dashboards filter on (`user`, `run_id`,
 `slurm_job_id`, plus `benchmark`, `cluster`, `model`), and exports to the configured OTLP/HTTP
-endpoint (when remote export is enabled) and to `<job dir>/otel/*.jsonl`.
+endpoint (when remote export is enabled) and to `<job dir>/otel/*.jsonl` (written node-local, copied when it stops).
 
 The ingest token travels twice, as the HTTP `Authorization` header and as an `Authorization`
 resource attribute: a routing proxy in front of the backend resolves the tenant from the
@@ -43,6 +43,11 @@ logger = logging.getLogger(__name__)
 COLLECTOR_SERVICE_NAME = "otel_collector"
 COLLECTOR_DIR = "otel"
 COLLECTOR_CONFIG_NAME = "collector.yaml"
+# The collector runs a node-local copy of its binary and writes its jsonl there, never on shared storage;
+# its step appends the files into `<job dir>/otel/` when it stops. The step exports the directory in this variable.
+COLLECTOR_LOCAL_DIR_PREFIX = "/tmp/gym-otel-"
+COLLECTOR_LOCAL_DIR_ENV = "GYM_OTEL_LOCAL_DIR"
+COLLECTOR_FILE_SIGNALS = ("metrics", "traces", "logs")
 # Below the clusters' ephemeral range (ip_local_port_range 9000-65000): the collector's default
 # 13133 lies inside it, so an outgoing connection on the node can hold it and abort startup.
 COLLECTOR_HEALTH_PORT = 4319
@@ -92,7 +97,8 @@ def vllm_traces_env(component: str, service_name: str) -> dict[str, str]:
 # Seconds the collector keeps running after the driver exits, so one more scrape sees the final
 # counters before it is asked to flush and stop.
 FINAL_SCRAPE_GRACE_SECONDS = 20
-SHUTDOWN_WAIT_SECONDS = 30
+# Covers the flush and the copy of the node-local jsonl into the job directory.
+SHUTDOWN_WAIT_SECONDS = 120
 
 
 def scrape_targets(config: SubmitConfig) -> dict[str, int]:
@@ -165,16 +171,19 @@ def _policy_model_name(config: SubmitConfig) -> str | None:
     return service.served_model_name or service.model
 
 
-def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_bench_dir: Path) -> str:
+def render_collector_config(
+    config: SubmitConfig, benchmark_name: str, remote_bench_dir: Path, *, node_local: bool = True
+) -> str:
     """The collector's YAML for one benchmark job.
 
     `run_id` is the submission's gym job id, which is the job directory's parent by construction
     (`<output_path>/<gym_job_id>/<benchmark>`); `cluster` is the sole compute key, the same value
     `SubmissionRecord.cluster` records. Values only known inside the job (`SLURM_JOB_ID`, the
-    token) are left as `${env:...}` for the collector to expand at startup.
+    token, the node-local directory) are left as `${env:...}` for the collector to expand at startup.
+    `node_local=False` writes the jsonl straight into the job directory, for a job.sh that predates the copy.
     """
     obs = config.otel
-    otel_dir = remote_bench_dir / COLLECTOR_DIR
+    file_dir = f"${{env:{COLLECTOR_LOCAL_DIR_ENV}}}" if node_local else str(remote_bench_dir / COLLECTOR_DIR)
     token = f"${{env:{obs.token_env}}}"
     interval = f"{obs.scrape_interval_seconds}s"
 
@@ -295,9 +304,7 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
         },
         "exporters": {
             "otlp_http/managed": {"endpoint": obs.endpoint, "headers": {"Authorization": f"Bearer {token}"}},
-            "file/metrics": {"path": str(otel_dir / "metrics.jsonl")},
-            "file/traces": {"path": str(otel_dir / "traces.jsonl")},
-            "file/logs": {"path": str(otel_dir / "logs.jsonl")},
+            **{f"file/{signal}": {"path": f"{file_dir}/{signal}.jsonl"} for signal in COLLECTOR_FILE_SIGNALS},
         },
         "service": {
             "extensions": ["health_check"],
