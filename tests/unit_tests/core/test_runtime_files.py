@@ -268,6 +268,25 @@ class TestOwnedFolders:
         assert delete_owned_folder(chosen) is False
         assert (chosen / "0-0.jsonl").exists()
 
+    def test_refuses_to_mark_a_folder_that_already_exists(self, tmp_path: Path) -> None:
+        chosen = tmp_path / "kept-capture"
+        chosen.mkdir()
+        (chosen / "0-0.jsonl").write_text("{}")
+
+        with pytest.raises(FileExistsError, match="Gym did not create it"):
+            create_owned_folder(chosen)
+
+        assert not (chosen / ".nemo-gym-owned").exists()
+        assert delete_owned_folder(chosen) is False
+        assert (chosen / "0-0.jsonl").exists()
+
+    def test_a_restarted_run_reuses_its_own_folder(self, tmp_path: Path) -> None:
+        capture = create_owned_folder(tmp_path / "capture")
+        (capture / "0-0.jsonl").write_text("{}")
+
+        assert create_owned_folder(capture) == capture
+        assert (capture / "0-0.jsonl").exists()
+
     def test_a_second_call_or_a_missing_folder_does_nothing(self, tmp_path: Path) -> None:
         capture = create_owned_folder(tmp_path / "capture")
 
