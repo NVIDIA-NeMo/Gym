@@ -55,7 +55,9 @@ class LentSandboxes:
     lent, such as linking a task's commands. Its start runs to its end once begun, within ``start_timeout_s``, even
     while the request that asked for it is being cancelled: a create cut in flight leaves a sandbox whose id the
     provider never returned, which nothing here could stop. A lend cancelled meanwhile lends nothing; it stops the
-    sandbox it started. Once :meth:`release_all` has begun, no lend starts a sandbox.
+    sandbox it started. A start that ``start_timeout_s`` cuts before the provider returned the sandbox's id is logged
+    at ERROR with the session, the task, the provider, the image and the labels, so a reaper can find the sandbox the
+    create may have left. Once :meth:`release_all` has begun, no lend starts a sandbox.
 
     With ``network_access="model_only"``, each sandbox is created with an egress rule that allows only the host of
     ``model_server``, the model server that a harness in the sandbox calls. ``model_and_tools`` also allows the hosts
@@ -156,10 +158,11 @@ class LentSandboxes:
         self._refuse_after_release_all()
         sandbox = AsyncSandbox(provider_config)
         started = self._starting[resources_session_id] = asyncio.Event()
+        start_limit: anyio.CancelScope | None = None
         try:
             # The start runs to its end once begun (the class docstring); start() and start_with_setup() stop the
             # sandbox themselves, shielded like every stop, when delivering its files or its setup fails.
-            with anyio.CancelScope(shield=True), anyio.fail_after(self._start_timeout_s):
+            with anyio.CancelScope(shield=True), anyio.fail_after(self._start_timeout_s) as start_limit:
                 if setup is None:
                     await sandbox.start(spec)
                 else:
@@ -168,6 +171,21 @@ class LentSandboxes:
             await anyio.lowlevel.checkpoint()  # a lend cancelled meanwhile lends nothing
             self._refuse_after_release_all()  # release_all began during the start: it would not stop this sandbox
         except BaseException as error:
+            if start_limit is not None and start_limit.cancel_called and sandbox.sandbox_id is None:
+                # The limit cut the provider's create in flight: the stop below cannot reach what it created.
+                LOGGER.error(
+                    "The sandbox of resources session %s (task %s of taskset %s) did not start within "
+                    "start_timeout_s (%s s), and the %s provider's create was cut before it returned the sandbox's "
+                    "id: a sandbox it created is not stopped here, so a reaper must find it, by image %s and "
+                    "labels %s",
+                    resources_session_id,
+                    task_id.task_id,
+                    task_id.taskset,
+                    self._start_timeout_s,
+                    next(iter(provider_config)),
+                    spec.image,
+                    spec.metadata,
+                )
             try:
                 await sandbox.stop(timeout_s=STOP_TIMEOUT_S)
             except Exception:
