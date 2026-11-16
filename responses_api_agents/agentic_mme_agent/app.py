@@ -30,7 +30,6 @@ from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
     MODEL_CONTEXT_LIMIT,
-    MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
     FailureHeader,
@@ -129,7 +128,8 @@ class PolicyCallFailure:
         if is_context_limit(error.status, detail):
             outcome = AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
         elif timeout is not None:
-            outcome = AgentOutcome(failure_kind=MODEL_POLICY_RESPONSE_TIMEOUT)
+            # A policy timeout, or a model server queue timeout when every attempt waited in that server's queue.
+            outcome = AgentOutcome(failure_kind=timeout.failure_kind)
         elif 400 <= error.status <= 599:
             outcome = AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=error.status)
         else:

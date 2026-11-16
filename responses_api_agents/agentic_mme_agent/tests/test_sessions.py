@@ -267,8 +267,11 @@ async def test_refused_model_call_is_graded_only_when_the_context_refused_it(
     assert agent_outcome_policy(result, config=BENCHMARK_POLICY) == action
 
 
-def timed_out_report() -> FailureReport:
-    """The policy model server's report of a call that timed out waiting for the model on each of its 3 attempts."""
+def timed_out_report(requests_waiting: int | None = None) -> FailureReport:
+    """The policy model server's report of a call that timed out waiting for the model on each of its 3 attempts.
+
+    ``requests_waiting`` is the model server's queue at each timeout.
+    """
     attempts = [
         FailureEvent(
             boundary=FailureBoundary.MODEL,
@@ -277,7 +280,7 @@ def timed_out_report() -> FailureReport:
             operation="model_request",
             operation_id="final-call",
             attempt_id=f"attempt-{index}",
-            details=ModelFailureDetails(request_upload_complete=True),
+            details=ModelFailureDetails(request_upload_complete=True, server_requests_waiting=requests_waiting),
             foreign_error=SdkErrorDetails(exception_type="TimeoutError", message=""),
         )
         for index in range(3)
@@ -286,21 +289,29 @@ def timed_out_report() -> FailureReport:
 
 
 @pytest.mark.asyncio
-async def test_a_policy_timeout_keeps_its_cause_and_the_model_servers_report() -> None:
+@pytest.mark.parametrize(
+    ("requests_waiting", "failure_kind"),
+    [(None, "model_policy_response_timeout"), (0, "model_policy_response_timeout"), (3, "model_server_queue_timeout")],
+    ids=["no_queue_reading", "empty_queue", "queued"],
+)
+async def test_a_policy_timeout_keeps_its_cause_and_the_model_servers_report(
+    requests_waiting: int | None, failure_kind: str
+) -> None:
     # The model server spent its own attempts waiting for the model and answered 500. The response names the timeout,
-    # as simple_agent's session reply does, and keeps the model server's report.
-    report = timed_out_report()
+    # as simple_agent's session reply does, and keeps the model server's report. When requests waited in the model
+    # server's queue at every timeout, the timeout is that server's.
+    report = timed_out_report(requests_waiting)
     refused = refused_reply(500, b"Internal Server Error", report)
     result = await run_session_with_failing_call(refused, failing_call=1)
 
     assert result.status == "failed"
-    assert json.loads(result.metadata[AGENT_OUTCOME_METADATA_KEY]) == {"failure_kind": "model_policy_response_timeout"}
+    assert json.loads(result.metadata[AGENT_OUTCOME_METADATA_KEY]) == {"failure_kind": failure_kind}
     kept = FailureReport.model_validate(result.model_dump()["failure_report"])
     assert set(report.events) <= set(kept.events)
-    # The Environment Server finds the timeout as the reply's selected cause, so it applies its timeout rule (retry,
+    # The Environment Server finds the timeout as the reply's selected cause, so it applies the timeout's rule (retry,
     # unless a policy says otherwise) instead of failing a reply whose cause it cannot read.
     cause = SingleAgentTurnLegacyEnvironmentServer._agent_failure(result)
-    assert cause is not None and cause.failure_kind == "model_policy_response_timeout"
+    assert cause is not None and cause.failure_kind == failure_kind
 
 
 @pytest.mark.asyncio
