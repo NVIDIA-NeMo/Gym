@@ -19,7 +19,7 @@ agentic_mme:
     agentic_mme:
       allowed_agents: [simple_agent]
       serve_image_tools: true
-      image_root: ${oc.env:AGENTIC_MME_IMAGE_ROOT,benchmarks/agentic_mme/data/images}
+      image_root: ${oc.env:AGENTIC_MME_IMAGE_ROOT,benchmarks/agentic_mme/data/images}  # runtime-path: read
 
 # Drop the Agentic-MME agent; the environment server below runs simple_agent instead.
 agentic_mme_agent: null
