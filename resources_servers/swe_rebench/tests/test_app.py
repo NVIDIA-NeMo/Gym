@@ -620,7 +620,10 @@ class TestSweAgentsContainerSetup:
         monkeypatch.setattr(app, "resolve_provider_config", lambda *_: {})
         monkeypatch.setattr(app, "resolve_provider_metadata", lambda *_: {})
         server = SimpleNamespace(
-            config=SimpleNamespace(
+            config=app.SWERebenchResourcesServerConfig(
+                host="127.0.0.1",
+                port=8000,
+                entrypoint="resources_servers/swe_rebench",
                 sandbox_config=sandbox_config,
                 sandbox_provider="sandbox",
                 name="swe_rebench",

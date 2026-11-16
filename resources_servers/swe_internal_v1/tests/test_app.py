@@ -372,7 +372,14 @@ class TestSweAgentsContainerSetup:
         monkeypatch.setattr(app, "resolve_provider_config", lambda *_: {})
         monkeypatch.setattr(app, "resolve_provider_metadata", lambda *_: {})
         server = SimpleNamespace(
-            config=SimpleNamespace(sandbox_config=sandbox_config, sandbox_provider="sandbox", name="swe_internal_v1")
+            config=app.SweInternalV1ResourcesServerConfig(
+                host="127.0.0.1",
+                port=8000,
+                entrypoint="resources_servers/swe_internal_v1",
+                name="swe_internal_v1",
+                sandbox_config=sandbox_config,
+                sandbox_provider="sandbox",
+            )
         )
         body = app.SweInternalV1InstanceRequest(
             instance_id="task-1", image_ref="img", run_script="run", parsing_script="parse"
