@@ -537,6 +537,8 @@ class Domain(str, Enum):
     - `safety`                — refusing harmful content / resisting jailbreaks & prompt injection.
     - `games`                 — interactive game environments (e.g. blackjack, tetris).
     - `translation`           — machine translation quality (e.g. WMT).
+    - `asr`                   — speech recognition and speech transcription (e.g. LibriSpeech, the Open ASR leaderboard,
+      meeting transcription).
     - `e2e`                   — end-to-end pipelines spanning multiple capabilities at once.
     - `rlhf`                  — preference / reward-model / LLM-as-judge evaluations.
     - `other`                 — catch-all when no specific domain above applies.
@@ -551,6 +553,7 @@ class Domain(str, Enum):
     SAFETY = "safety"
     GAMES = "games"
     TRANSLATION = "translation"
+    ASR = "asr"
     E2E = "e2e"
     RLHF = "rlhf"
     OTHER = "other"
