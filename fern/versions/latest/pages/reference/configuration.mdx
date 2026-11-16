@@ -59,7 +59,7 @@ One question decides it: who needs the file after the request that wrote it ends
 | Who needs it afterwards | Where it goes | Per-server override |
 |-------------------------|---------------|---------------------|
 | Nobody: a harness workspace, a payload, a log that is parsed and discarded | `temp_folder()` / `async_temp_folder()` under `temp_dir` | None |
-| Only a person diagnosing the run: verification logs, screenshots, trajectories, failure records | `debug_folder()` under `debug_dir`; returns `None` when debug files are off | The server's `debug_dir` |
+| Only a person diagnosing the run: verification logs, screenshots, trajectories, failure records | `debug_folder()` under `debug_dir`; returns `None` when debug files are off | The server's `debug_dir`, typed `DebugDir` so a relative path fails when the configuration loads |
 | The run, or a later run that reads it back | The server's `output_dir` | `output_dir` |
 | Any later run, because it is rebuilt from its inputs | `cache_dir` | None |
 | Several components that must agree on the path | `model_call_capture_dir` | None |

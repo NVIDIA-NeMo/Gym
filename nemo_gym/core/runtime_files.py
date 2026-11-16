@@ -44,8 +44,11 @@ from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Annotated
 from urllib.parse import quote
 from uuid import uuid4
+
+from pydantic import AfterValidator
 
 from nemo_gym.config.global_config import (
     DEBUG_DIR_KEY_NAME,
@@ -80,6 +83,21 @@ _process_folders: dict[tuple[int, Path], Path] = {}
 _checked_debug_roots: set[Path] = set()
 
 
+def _require_absolute(path: Path | None) -> Path | None:
+    """Refuse a relative per-server folder: a server would resolve it against its own source folder."""
+    if path is not None and not path.is_absolute():
+        raise ValueError(
+            f"A debug folder must be an absolute path, got {str(path)!r}: a server resolves a "
+            "relative path against its own source folder."
+        )
+    return path
+
+
+# A server's own ``debug_dir`` setting: ``None`` defers to the global one, and a relative path fails when the
+# server's configuration loads, rather than on every request that writes debug files.
+DebugDir = Annotated[Path | None, AfterValidator(_require_absolute)]
+
+
 def debug_folder(
     *, server_name: str, kind: str, label: str | None = None, override: str | Path | None = None
 ) -> Path | None:
@@ -110,13 +128,7 @@ def debug_folder(
     if server_name in ("", ".", ".."):
         raise ValueError(f"server_name must name a server, got {server_name!r}")
     if override is not None:
-        override = Path(override)
-        if not override.is_absolute():
-            raise ValueError(
-                f"A debug folder must be an absolute path, got {str(override)!r}: a server resolves a "
-                "relative path against its own source folder."
-            )
-        root = override
+        root = _require_absolute(Path(override))
     else:
         global_root = (maybe_get_global_config_dict() or {}).get(DEBUG_DIR_KEY_NAME)
         if not global_root:
