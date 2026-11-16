@@ -214,15 +214,18 @@ async def test_non_judge_errors_fail_the_whole_group(server):
     assert all("ValueError: bad comparison" in r.detail for r in results)
 
 
-async def test_compare_endpoint_fails_on_a_failed_comparison(server):
-    # /compare has no per-response mask.
-    server._run_single_comparison = judge_failing({(1, 2)})
+async def test_compare_endpoint_fails_fast_on_a_failed_comparison(server):
+    # /compare has no per-response mask, so it does not wait for the rest of the comparisons.
+    cancelled = set()
+    # (2, 3) would never finish on its own.
+    server._run_single_comparison = judge_failing({(1, 2)}, blocked={(2, 3)}, cancelled=cancelled)
     request = genrm.GenRMCompareRequest(
         conversation_history=[], response_objs=[response_obj(str(i)) for i in range(4)]
     )
     with pytest.raises(HTTPException) as raised:
-        await server.compare(request)
-    assert raised.value.status_code == 503 and "rollout_index=1 lost a comparison" in raised.value.detail
+        await asyncio.wait_for(server.compare(request), 1)
+    assert raised.value.status_code == 503 and NO_VERDICT in raised.value.detail
+    assert cancelled == {(2, 3)}
 
 
 @pytest.mark.parametrize("failing_passes", [{0}, {0, 1}])

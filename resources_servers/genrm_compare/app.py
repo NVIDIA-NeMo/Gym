@@ -1562,6 +1562,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         response_objs: List[Dict[str, Any]],
         principle: Optional[str] = None,
         expected_rubric_ids: Optional[Tuple[int, ...]] = None,
+        fail_fast: bool = False,
     ) -> Tuple[List[ComparisonOutcome], List[Tuple[int, int, int]]]:
         cfg = self.config
         comparison_pairs = generate_comparison_pairs(cfg.comparison_strategy, len(response_objs))
@@ -1582,12 +1583,16 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     )
                 )
                 metadata.append((i, j, judge_idx))
-        return await self._gather_comparisons(tasks, metadata), metadata
+        return await self._gather_comparisons(tasks, metadata, fail_fast=fail_fast), metadata
 
     async def _gather_comparisons(
-        self, tasks: List[asyncio.Task], metadata: List[Tuple[int, int, int]]
+        self, tasks: List[asyncio.Task], metadata: List[Tuple[int, int, int]], fail_fast: bool = False
     ) -> List[ComparisonOutcome]:
-        """Await every comparison. A JudgeError takes its comparison's place; any other error fails the group."""
+        """Await every comparison. A JudgeError takes its comparison's place; any other error fails the group.
+
+        With ``fail_fast``, for a caller that cannot mask one response, the first error of any kind is raised at
+        once and the comparisons still running are cancelled.
+        """
         positions = {task: position for position, task in enumerate(tasks)}
         try:
             pending = set(tasks)
@@ -1597,7 +1602,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     error = task.exception()
                     if error is None:
                         continue
-                    if not isinstance(error, JudgeError):
+                    if fail_fast or not isinstance(error, JudgeError):
                         raise error
                     position = positions[task]
                     # Log now: a non-judge error or the group deadline can still end the group before all finish.
@@ -1629,17 +1634,16 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         if num_responses < 2:
             return [cfg.default_score] * num_responses, {}, [], []
 
+        # This API has no per-response mask, so the first failed comparison fails the request.
         raw_results, comparison_metadata = await self._collect_comparisons(
             conversation_history,
             response_objs,
             principle,
             expected_rubric_ids,
+            fail_fast=True,
         )
         aggregate_result = self._aggregate_results(response_objs, raw_results, comparison_metadata)
-        rewards, _, _, metrics, comparison_results, _, _, _, masked = aggregate_result
-        if masked:
-            # This API has no per-response mask, so a failed comparison fails the request.
-            raise masked[min(masked)]
+        rewards, _, _, metrics, comparison_results, _, _, _, _ = aggregate_result
         return rewards, metrics, comparison_results, comparison_metadata
 
     async def _run_fixed_baseline_compare(

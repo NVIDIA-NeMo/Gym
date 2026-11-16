@@ -446,7 +446,8 @@ A late request to a retained failed explicit-ID group, or to a member masked alo
 group, receives its recorded failure, even if it contains a regenerated answer. To judge again, advance the
 group attempt for every member. Preserving answers does not enable individual judge-only reverification:
 reconstructing and retrying a full group remains the caller's responsibility. The batch `/compare` endpoint
-returns HTTP 503 for judge failures.
+has no per-response mask: its first failed comparison returns HTTP 503 at once, and the comparisons still
+running are cancelled.
 
 Failure and server shutdown release waiters and discard stored response bodies. Owned judge tasks are
 cancelled and drained. During HTTP-server shutdown, requests may receive an upstream error or lose their
@@ -479,8 +480,8 @@ this.
   0.0, `mask_sample`, `failure_kind: judge_failed`). Under `circular`, one failed comparison (5, 6) masks
   members 5 and 6. Under `all_pairs`, or with several judge passes, a member with any failed comparison is
   masked. In `fixed_baseline` mode, a member with a failed judge pass against the baseline is masked. When
-  every member is masked, for example when the judge is down, the whole group fails as a judge failure. The
-  server waits for every comparison to finish or fail, within the group deadline.
+  every member is masked, for example when the judge is down, the whole group fails as a judge failure. At
+  `/verify`, the server waits for every comparison to finish or fail, within the group deadline.
 - **Scoring:** every other member is scored from all of its comparisons, including those against a masked
   member, which still measure it. Bonuses and length and style adjustments apply as usual, over the scored
   members only.
