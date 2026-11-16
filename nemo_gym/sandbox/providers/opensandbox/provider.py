@@ -462,14 +462,17 @@ RENEW_RETRY_MIN_S = 1.0
 def _renewal_retry_delay(remaining_s: float, *, interval_s: float, timeout_s: float) -> float:
     """How long to wait before a failed lease renewal is tried again, given what is left of the sandbox's TTL.
 
-    Half of what is left once one more request's timeout is set aside, so the tries continue up to the expiry and
-    come closer together as it nears: a full interval's wait after each failure could put the next try past it.
-    Never longer than the interval, nor shorter than ``RENEW_RETRY_MIN_S``. Once the TTL has run out nothing is
-    left to save, and the tries go back to the interval until the service says the sandbox is gone.
+    Up to half of what is left once one more request's timeout is set aside, so the tries continue up to the
+    expiry and come closer together as it nears: a full interval's wait after each failure could put the next try
+    past it. The wait is jittered down to half of that, so sandboxes created together do not retry in step
+    against a service that is down or recovering. Never longer than the interval, nor shorter than
+    ``RENEW_RETRY_MIN_S``. Once the TTL has run out nothing is left to save, and the tries go back to the interval
+    until the service says the sandbox is gone.
     """
     if remaining_s <= 0:
         return interval_s
-    return min(interval_s, max(RENEW_RETRY_MIN_S, (remaining_s - timeout_s) / 2))
+    delay_s = min(interval_s, (remaining_s - timeout_s) / 2) * random.uniform(0.5, 1.0)
+    return max(RENEW_RETRY_MIN_S, delay_s)
 
 
 def _is_missing_sandbox_delete_error(exception: BaseException) -> bool:
@@ -512,8 +515,17 @@ def _is_snapshot_not_found(error: BaseException) -> bool:
     return False
 
 
+# ``SandboxError.UNEXPECTED_RESPONSE``: the code the SDK's ``SandboxApiException`` carries when the reply gave none.
+SDK_UNPARSED_ERROR_CODE = "UNEXPECTED_RESPONSE"
+
+
 def _is_http_not_found(error: BaseException) -> bool:
-    """Whether ``error``, or an error it was raised from or while handling, is an SDK error for an HTTP 404."""
+    """Whether ``error``, or an error it was raised from or while handling, is an SDK error for a bare HTTP 404.
+
+    Bare means the SDK parsed no error code from the reply: its error carries none, or the placeholder code the
+    SDK gives an error it was handed no code for. A 404 with a code says what is missing, such as
+    ``KUBERNETES::SANDBOX_NOT_FOUND`` from the endpoint lookup that follows the create, and is not counted.
+    """
     seen: set[int] = set()
     pending: list[BaseException] = [error]
     while pending:
@@ -522,7 +534,9 @@ def _is_http_not_found(error: BaseException) -> bool:
             continue
         seen.add(id(current))
         if getattr(current, "status_code", None) == 404:
-            return True
+            code = getattr(getattr(current, "error", None), "code", None)
+            if code is None or code == SDK_UNPARSED_ERROR_CODE:
+                return True
         pending.extend(link for link in (current.__cause__, current.__context__) if link is not None)
     return False
 
@@ -1848,8 +1862,9 @@ class OpenSandboxProvider:
 
         Raises ``SandboxSnapshotNotFoundError`` when the server answers that it has no such snapshot: with its
         ``SNAPSHOT::NOT_FOUND`` code, or with a bare HTTP 404, which is what the service sends for a create from a
-        snapshot it has deleted. The create names nothing else that could be missing: the snapshot stands in for
-        the image. A snapshot whose delete was only just accepted can still create a sandbox for a short while.
+        snapshot it has deleted. A 404 with any other error code keeps its own type: it is about something else,
+        such as the new sandbox being gone by the time its endpoint is looked up. A snapshot whose delete was only
+        just accepted can still create a sandbox for a short while.
         """
         fork = replace(spec, image=None, provider_options={**spec.provider_options, "snapshot_id": snapshot_id})
         try:

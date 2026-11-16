@@ -365,6 +365,10 @@ class _SnapshotIndex:
             os.close(descriptor)
 
 
+# How long one sandbox stop may take. A stop that hangs must not hold up a shutdown or the stops behind it.
+STOP_TIMEOUT_S = 120.0
+
+
 @dataclass
 class _Entry:
     sandbox: AsyncSandbox
@@ -410,6 +414,11 @@ class SandboxSessionCheckpointer:
             self._index.root.mkdir(parents=True, exist_ok=True)
         # Keys whose sandbox is being created or restored: no other create, add or restore may take them meanwhile.
         self._pending: set[str] = set()
+        # Set while no key is pending, which is what ``aclose`` waits for before it stops the sandboxes.
+        self._none_pending = asyncio.Event()
+        self._none_pending.set()
+        # Set by ``aclose``: from then on no sandbox is created, added or restored.
+        self._closed = False
         # Forks a restore created and will not install, from before their stop until it succeeds: a stop that
         # fails or is cancelled leaves its fork here for ``settle``, the next restore and ``aclose`` to stop again.
         self._unstopped_forks: list[AsyncSandbox] = []
@@ -469,12 +478,15 @@ class SandboxSessionCheckpointer:
         return entry.sandbox if entry is not None else None
 
     def add(self, key: str, sandbox: AsyncSandbox, spec: SandboxSpec) -> None:
-        """Track a sandbox the owner started itself; ``spec`` is what a restore re-creates it from.
+        """Track a sandbox the owner started itself; ``spec`` is what a restore re-creates its fork from.
 
+        The default user and working directory are the exception: an export reads them from the sandbox, so a fork
+        runs commands as the sandbox did when it was exported, and takes only the rest of its spec from ``spec``.
         The sandbox must run on this checkpointer's provider without owning it
         (``AsyncSandbox(checkpointer.provider, spec, owns_provider=False)``): the provider is shared by every
         sandbox, and a sandbox that owned it would close it for all of them when stopped.
         """
+        self._require_open()
         if key in self._entries or key in self._pending:
             raise ValueError(f"{key!r} already has a sandbox")
         if sandbox.owns_provider:
@@ -491,17 +503,32 @@ class SandboxSessionCheckpointer:
 
         The key is taken from the first moment, so a second create for it is refused while the first is starting.
         """
+        self._require_open()
         if key in self._entries or key in self._pending:
             raise ValueError(f"{key!r} already has a sandbox")
-        self._pending.add(key)
+        self._take_keys([key])
         try:
             sandbox = AsyncSandbox(self._provider, spec, owns_provider=False)
             async with self._semaphore:
                 await sandbox.start()
             self._entries[key] = _Entry(sandbox=sandbox, spec=spec)
         finally:
-            self._pending.discard(key)
+            self._give_back_keys([key])
         return sandbox
+
+    def _require_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("the sandbox checkpointer is closed: it starts, adds and restores no more sandboxes")
+
+    def _take_keys(self, keys: Iterable[str]) -> None:
+        self._pending.update(keys)
+        if self._pending:
+            self._none_pending.clear()
+
+    def _give_back_keys(self, keys: Iterable[str]) -> None:
+        self._pending.difference_update(keys)
+        if not self._pending:
+            self._none_pending.set()
 
     async def access(self, key: str, *, provider_config_ref: str, workdir: str) -> SandboxAccess:
         """Access to ``key``'s current sandbox for a borrower, such as an agent that runs a harness in it.
@@ -533,10 +560,15 @@ class SandboxSessionCheckpointer:
         """Stop every sandbox this checkpointer is responsible for; call it at the server's shutdown.
 
         That is every key's sandbox and every fork a failed restore left running, after the background work has
-        ended. A sandbox whose stop fails is logged and stays tracked (its key stays in :attr:`keys`), the others
-        are still stopped, and calling this again tries the rest again. Snapshots are not touched: the controller
-        may still restore from them, and only its release deletes them.
+        ended. The checkpointer is closed first: ``create``, ``add`` and ``restore`` raise ``RuntimeError`` from
+        then on, and the ones already running are waited for, so a restore that installs its forks during the
+        shutdown has them stopped here. A sandbox whose stop fails or takes longer than ``STOP_TIMEOUT_S`` is
+        logged and stays tracked (its key stays in :attr:`keys`), the others are still stopped, and calling this
+        again tries the rest again. Snapshots are not touched: the controller may still restore from them, and
+        only its release deletes them.
         """
+        self._closed = True
+        await self._none_pending.wait()
         keys = list(self._entries)
         outcomes = await asyncio.gather(*(self.stop(key) for key in keys), return_exceptions=True)
         for key, outcome in zip(keys, outcomes):
@@ -697,7 +729,10 @@ class SandboxSessionCheckpointer:
         the crashed process's sandboxes are stopped in the background, best effort; a failure there is logged and
         the sandbox runs out its lifetime.
         """
+        self._require_open()
         await self._stop_forks()
+        # Again, since ``aclose`` may have run during the stops: nothing awaits from here until the keys are taken.
+        self._require_open()
         provider_name = self._provider_name()
         parsed: dict[str, tuple[SandboxCheckpointState, SandboxSpec]] = {}
         for key, raw in states.items():
@@ -726,7 +761,7 @@ class SandboxSessionCheckpointer:
             parsed[key] = (state, spec)
 
         created: dict[str, AsyncSandbox] = {}
-        self._pending.update(parsed)
+        self._take_keys(parsed)
         try:
             try:
                 outcomes = await asyncio.gather(
@@ -747,7 +782,7 @@ class SandboxSessionCheckpointer:
             for key, sandbox in created.items():
                 self._entries[key] = _Entry(sandbox=sandbox, spec=parsed[key][1])
         finally:
-            self._pending.difference_update(parsed)
+            self._give_back_keys(parsed)
         # The crashed process's sandboxes are superseded: nothing continues them. Off the critical path: the install
         # is deadline-bound and the forks are already in place.
         self._spawn(self._stop_superseded_all(parsed))
@@ -815,7 +850,7 @@ class SandboxSessionCheckpointer:
             return
         sandbox_id = state.descriptor.get("sandbox_id")
         try:
-            async with self._semaphore:
+            async with self._semaphore, asyncio.timeout(STOP_TIMEOUT_S):
                 old = await AsyncSandbox.connect(state.descriptor, provider=self._provider, owns_provider=False)
                 await old.stop()
         except Exception as error:
@@ -925,8 +960,9 @@ class SandboxSessionCheckpointer:
     async def stop(self, key: str) -> None:
         """Stop and forget ``key``'s sandbox; a no-op for a key without one, so a retire may repeat it.
 
-        If the stop fails the key stays tracked, so a retried retire stops it again. The sandbox's snapshots stay: a
-        checkpoint the controller may still restore can name them, and only a release knows which.
+        If the stop fails, or takes longer than ``STOP_TIMEOUT_S`` and raises ``TimeoutError``, the key stays
+        tracked, so a retried retire stops it again. The sandbox's snapshots stay: a checkpoint the controller may
+        still restore can name them, and only a release knows which.
         """
         entry = self._entries.get(key)
         if entry is None:
@@ -935,7 +971,8 @@ class SandboxSessionCheckpointer:
         self._entries.pop(key, None)
 
     async def _stop_sandbox(self, sandbox: AsyncSandbox) -> None:
-        async with self._semaphore:
+        # The time limit starts once the stop has its turn, so a stop that waits behind others is not cut short.
+        async with self._semaphore, asyncio.timeout(STOP_TIMEOUT_S):
             await sandbox.stop()
 
     def _provider_name(self) -> str:

@@ -1025,6 +1025,43 @@ async def test_a_restore_cancelled_after_a_fork_completed_stops_that_fork(state_
     await fresh.settle()
 
 
+async def test_a_fork_of_a_cancelled_restore_whose_stop_fails_stays_tracked_until_settle_stops_it(
+    state_dir: Path,
+) -> None:
+    """The cancel path must record the forks before it stops them: a stop that fails would otherwise lose one."""
+    provider = FakeSnapshotProvider()
+    states = await (await seeded(provider, state_dir, "s1", "s2")).export(["s1", "s2"], checkpoint_id="c1")
+    # The forks are sb-5, then sb-6: the restore is cancelled while sb-6 is created, and sb-5's first stop fails.
+    second_started = asyncio.Event()
+    original_fork = provider.create_from_snapshot
+
+    async def fork_then_hang(snapshot_id: str, spec: SandboxSpec) -> SandboxHandle:
+        if "sb-5" in provider.boxes:
+            second_started.set()
+            await asyncio.Event().wait()
+        return await original_fork(snapshot_id, spec)
+
+    provider.create_from_snapshot = fork_then_hang  # type: ignore[method-assign]
+    provider.fail[("close", "sb-5")] = RuntimeError("HTTP 503")
+
+    fresh = make_checkpointer(state_dir, provider, parallelism=1)
+    restore = asyncio.create_task(fresh.restore(states))
+    await asyncio.wait_for(second_started.wait(), timeout=5)
+    restore.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await restore
+    await until(lambda: not fresh._background)
+
+    assert ops(provider, "close") == ["sb-5"], "the background rollback tried the stop, which failed"
+    assert provider.boxes["sb-5"]["state"] == "running" and fresh.keys == []
+    assert [fork.sandbox_id for fork in fresh._unstopped_forks] == ["sb-5"], "the fork is still recorded"
+
+    await fresh.settle()
+
+    assert provider.boxes["sb-5"]["state"] == "stopped" and fresh._unstopped_forks == []
+    assert ops(provider, "close") == ["sb-5", "sb-5"]
+
+
 async def test_a_fork_whose_rollback_stop_failed_is_logged_and_stopped_by_the_next_restore(
     state_dir: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1180,6 +1217,83 @@ async def test_aclose_stops_the_rest_when_one_stop_fails_and_a_second_call_retri
     assert "sandbox of s2 was not stopped at shutdown" in caplog.text and "HTTP 503" in caplog.text
     await checkpointer.aclose()
     assert checkpointer.keys == [] and provider.boxes["sb-2"]["state"] == "stopped"
+
+
+async def test_aclose_waits_for_a_running_restore_and_stops_the_forks_it_installs(state_dir: Path) -> None:
+    """A restore's install can outlive the request that started it, so a shutdown can come while it forks."""
+    provider = FakeSnapshotProvider()
+    states = await (await seeded(provider, state_dir, "s1", "s2")).export(["s1", "s2"], checkpoint_id="c1")
+    # The forks are sb-5 and sb-6; the second is held until the shutdown has begun.
+    gate = asyncio.Event()
+    second_started = asyncio.Event()
+    original_fork = provider.create_from_snapshot
+
+    async def fork_then_wait(snapshot_id: str, spec: SandboxSpec) -> SandboxHandle:
+        if "sb-5" in provider.boxes:
+            second_started.set()
+            await gate.wait()
+        return await original_fork(snapshot_id, spec)
+
+    provider.create_from_snapshot = fork_then_wait  # type: ignore[method-assign]
+    fresh = make_checkpointer(state_dir, provider, parallelism=1)
+    restore = asyncio.create_task(fresh.restore(states))
+    await asyncio.wait_for(second_started.wait(), timeout=5)
+
+    closing = asyncio.create_task(fresh.aclose())
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert not closing.done(), "the shutdown waits for the restore instead of returning before its forks exist"
+    assert ops(provider, "close") == [], "nothing is stopped while the restore may still install"
+
+    gate.set()
+    await restore
+    await asyncio.wait_for(closing, timeout=5)
+
+    assert fresh.keys == [] and fresh._unstopped_forks == []
+    assert provider.boxes["sb-5"]["state"] == "stopped" and provider.boxes["sb-6"]["state"] == "stopped"
+
+
+async def test_a_closed_checkpointer_refuses_create_add_and_restore(state_dir: Path) -> None:
+    provider = FakeSnapshotProvider()
+    states = await (await seeded(provider, state_dir, "s1")).export(["s1"], checkpoint_id="c1")
+    fresh = make_checkpointer(state_dir, provider)
+    await fresh.aclose()
+    calls_before = list(provider.calls)
+
+    with pytest.raises(RuntimeError, match="checkpointer is closed"):
+        await fresh.create("s2", SPEC)
+    with pytest.raises(RuntimeError, match="checkpointer is closed"):
+        fresh.add("s3", AsyncSandbox(provider, SPEC, owns_provider=False), SPEC)
+    with pytest.raises(RuntimeError, match="checkpointer is closed"):
+        await fresh.restore(states)
+
+    assert provider.calls == calls_before and fresh.keys == []
+
+
+async def test_aclose_gives_up_on_a_stop_that_hangs_and_keeps_its_sandbox_tracked(
+    state_dir: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    provider = FakeSnapshotProvider()
+    checkpointer = await seeded(provider, state_dir, "s1", "s2")
+    close = provider.close
+
+    async def close_that_hangs(handle: SandboxHandle) -> None:
+        if handle.sandbox_id == "sb-1":
+            await asyncio.Event().wait()
+        await close(handle)
+
+    provider.close = close_that_hangs  # type: ignore[method-assign]
+    monkeypatch.setattr(checkpoint_sandbox, "STOP_TIMEOUT_S", 0.05)
+
+    with caplog.at_level(logging.WARNING, logger=checkpoint_sandbox.__name__):
+        await asyncio.wait_for(checkpointer.aclose(), timeout=5)
+
+    assert checkpointer.keys == ["s1"], "the sandbox whose stop hung can be stopped by a later call"
+    assert provider.boxes["sb-1"]["state"] == "running" and provider.boxes["sb-2"]["state"] == "stopped"
+    assert "sandbox of s1 was not stopped at shutdown" in caplog.text and "TimeoutError" in caplog.text
+    provider.close = close  # type: ignore[method-assign]
+    await checkpointer.aclose()
+    assert checkpointer.keys == [] and provider.boxes["sb-1"]["state"] == "stopped"
 
 
 async def test_restore_refuses_a_state_of_a_format_version_it_does_not_know(state_dir: Path) -> None:

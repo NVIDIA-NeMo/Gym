@@ -15,6 +15,7 @@
 
 import asyncio
 import builtins
+import functools
 import gc
 import logging
 from contextlib import contextmanager
@@ -724,9 +725,32 @@ async def test_a_failed_lease_renewal_is_retried_before_the_lease_runs_out(
     ids=["far", "nearer", "near", "floor", "inside-one-timeout", "expired", "long-expired"],
 )
 def test_a_renewal_retry_waits_half_of_what_is_left_of_the_lease_and_never_past_the_interval(
-    remaining_s: float, expected_s: float
+    remaining_s: float, expected_s: float, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(opensandbox_provider.random, "uniform", lambda low, high: high)
     assert opensandbox_provider._renewal_retry_delay(remaining_s, interval_s=300, timeout_s=30) == expected_s
+
+
+def test_a_renewal_retry_is_jittered_down_to_half_its_wait_but_not_below_the_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sandboxes created in one burst fail their renewals together; without jitter they would retry in step."""
+    bounds: list[tuple[float, float]] = []
+
+    def lowest(low: float, high: float) -> float:
+        bounds.append((low, high))
+        return low
+
+    monkeypatch.setattr(opensandbox_provider.random, "uniform", lowest)
+    delay = functools.partial(opensandbox_provider._renewal_retry_delay, interval_s=300, timeout_s=30)
+
+    assert delay(870) == 150 and delay(540) == 127.5, "half of the unjittered 300 and 255"
+    assert delay(31) == opensandbox_provider.RENEW_RETRY_MIN_S, "the floor holds under jitter"
+    assert set(bounds) == {(0.5, 1.0)}
+
+    monkeypatch.undo()
+    delays = {delay(540) for _ in range(50)}
+    assert len(delays) > 1 and all(127.5 <= value <= 255 for value in delays), "the waits differ between sandboxes"
 
 
 def _sandbox_gone() -> RuntimeError:

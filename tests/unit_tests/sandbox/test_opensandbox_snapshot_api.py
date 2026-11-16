@@ -237,12 +237,15 @@ async def test_a_snapshot_still_unknown_after_the_grace_fails_before_the_snapsho
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _management(monkeypatch, [_ManagementResponse(404, {"code": "SNAPSHOT::NOT_FOUND"})])
+    provider = _provider(snapshot_timeout_s=30, snapshot_lookup_grace_s=0.05)
+    # The first management request imports the SDK, which takes longer than the grace in a fresh process.
+    provider._connection_config()
     started = time.monotonic()
 
     with pytest.raises(
         SandboxSnapshotNotFoundError, match=r"'snap-1' lookup failed -> HTTP 404 \(\d+ lookups over .*NOT_FOUND"
     ):
-        await _provider(snapshot_timeout_s=30, snapshot_lookup_grace_s=0.05).wait_snapshot_ready("snap-1")
+        await provider.wait_snapshot_ready("snap-1")
 
     assert len(calls) > 1, "the 404s within the grace were retried"
     assert time.monotonic() - started < 5, "the grace, not the snapshot timeout, ended the wait"
@@ -817,6 +820,27 @@ async def test_a_bare_404_to_a_create_from_a_snapshot_is_snapshot_not_found(monk
 
     assert raised.value.snapshot_id == "snap-1"
     assert isinstance(raised.value.__cause__, NgFailureEvent) and raised.value.__cause__.__cause__ is bare
+
+
+async def test_a_404_about_the_sandbox_to_a_create_from_a_snapshot_keeps_its_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After the create the SDK looks up the new sandbox's endpoint, which answers a coded 404 if it is gone."""
+    from opensandbox.exceptions import SandboxApiException
+    from opensandbox.exceptions.sandbox import SandboxError
+
+    provider = _provider()
+    gone = SandboxApiException(
+        message="Get sandbox endpoint failed: sandbox sb-2 not found",
+        status_code=404,
+        error=SandboxError(code="KUBERNETES::SANDBOX_NOT_FOUND", message="sandbox sb-2 not found"),
+    )
+    _failing_create_once(monkeypatch, provider, gone)
+
+    with pytest.raises(NgFailureEvent) as raised:
+        await provider.create_from_snapshot("snap-1", SandboxSpec(image="python:3.12"))
+    assert raised.value.__cause__ is gone
+    assert not isinstance(raised.value, SandboxSnapshotNotFoundError)
 
 
 async def test_other_failures_to_create_from_a_snapshot_keep_their_type(monkeypatch: pytest.MonkeyPatch) -> None:
