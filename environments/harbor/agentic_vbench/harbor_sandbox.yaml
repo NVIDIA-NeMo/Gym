@@ -8,11 +8,14 @@
 # each judged task's `[steps.verifier.env]` as the `${NVINFERENCE_API_KEY}` template, which the server fills from
 # this secret for the verifier process only. The secret has no empty default: with neither variable set it resolves
 # to null, which the server's `secrets` table rejects, so the server does not start without a key and no repurpose
-# task can be scored 0 for want of one. The judged (repurpose) and repair tasks declare `/workspace/output` as their
-# step's artifact; `separate_verifier_for_artifacts` grades them in a fresh sandbox of the task image, so the agent's
-# sandbox never runs the verifier that holds the key, and cannot make it exit 75 ("could not grade"). Assembly and
-# sequencing declare no artifact and verify in the agent's sandbox, as upstream does. Every episode starts one
-# sandbox from a task image of a few gigabytes, so the episode cap keeps a run from starting all 100 at once.
+# task can be scored 0 for want of one. The judged (repurpose) and repair tasks declare their step's artifacts
+# (`/workspace/output`, plus `/workspace/materials` for repair); `separate_verifier_for_artifacts` grades them in a
+# fresh sandbox of the task image, so the agent's sandbox never runs the verifier process that holds the key and
+# decides the exit code: the server honors exit 75 ("could not grade") only on that path, and the verifier derives
+# it from the Hub's answers and the download's outcome, never from the agent's output. Assembly and sequencing
+# declare no artifact and verify in the agent's sandbox, as upstream does. Every episode starts one sandbox from a
+# task image of a few gigabytes, so the episode cap keeps a run from starting all 100 at once. For a run without
+# Hub access, prepare the 64 unjudged tasks and use `harbor_sandbox_no_judge.yaml` (see the README).
 harbor_environment_server:
   environment_servers:
     harbor:

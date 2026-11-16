@@ -24,8 +24,15 @@ helpers it uses live in [`benchmarks/agentic_vbench/`](../../../benchmarks/agent
 
 Both commands take the deployment overlay: it carries the judge key, the episode cap, separate verification of the
 judged and repair tasks and the harness's `image_input`, which the tasks need for the model to see the frames it
-extracts. The key is required to start the server (below), so Repurpose can only be scored with access to the NVIDIA
-Inference Hub; the other 64 tasks need no credentials.
+extracts. The key is required to start the server with that overlay (below), so Repurpose can only be scored with
+access to the NVIDIA Inference Hub. The other 64 tasks need no credentials: prepare them alone and use the overlay
+without the judge secret, which keeps separate verification, the episode cap and `image_input`:
+
+```sh
+AGENTIC_VBENCH_HARBOR_FAMILIES=repair,assembly,sequencing python -m benchmarks.agentic_vbench.prepare_harbor_env
+gym eval run agentic_vbench --agent opencode_agent --sandbox docker \
+  --config environments/harbor/agentic_vbench/harbor_sandbox_no_judge.yaml ...
+```
 
 ## What the prepare script changes
 
@@ -35,7 +42,7 @@ touch are recorded under `.records/<task>/` in this folder (`judge_protocol.json
 
 | Tasks | Change | Why |
 | --- | --- | --- |
-| Repurpose (judged by an LLM rubric) | `[environment.env]` loses the upstream `ANTHROPIC_API_KEY`/`GEMINI_API_KEY` templates; `[steps.verifier.env]` gains `NVINFERENCE_API_KEY = "${NVINFERENCE_API_KEY}"` and the `AVB_JUDGE_*` route settings of the judge protocol; `tests/judge.py` becomes `hub_judge.py` (the original is kept as `avb-original-judge.py`); the step declares `artifacts = ["/workspace/output"]` | The judge runs over the NVIDIA Inference Hub with one key that reaches only the verifier. `AGENTIC_VBENCH_JUDGE_PROTOCOL` selects `nvinference-upstream` (default: the upstream judge pair, Claude Opus 4.7 and Gemini 3.1 Pro) or `nvinference-hybrid` (Claude Opus 4.8 and Gemini 3.5 Flash). Before judging, `hub_judge.py` sends one request per route; a route the key cannot use, a missing key, a Hub transport failure or size rejection that persists, or its own deadline (1500 s, below the verifier budget) make it exit 75 without a reward, so the episode is masked instead of scoring 0. |
+| Repurpose (judged by an LLM rubric) | `[environment.env]` loses the upstream `ANTHROPIC_API_KEY`/`GEMINI_API_KEY` templates; `[steps.verifier.env]` gains `NVINFERENCE_API_KEY = "${NVINFERENCE_API_KEY}"` and the `AVB_JUDGE_*` route settings of the judge protocol; `tests/judge.py` becomes `hub_judge.py` (the original is kept as `avb-original-judge.py`); the step declares `artifacts = ["/workspace/output"]` | The judge runs over the NVIDIA Inference Hub with one key that reaches only the verifier. `AGENTIC_VBENCH_JUDGE_PROTOCOL` selects `nvinference-upstream` (default: the upstream judge pair, Claude Opus 4.7 and Gemini 3.1 Pro) or `nvinference-hybrid` (Claude Opus 4.8 and Gemini 3.5 Flash). Before its first Hub call, `hub_judge.py` sends one request per route in the judge's own request shapes; a route the key cannot use, a missing key, a Hub transport failure that persists through the retries, or its allowance of time spent waiting on the Hub (1200 s, below the verifier budget) running out make it exit 75 without a reward, so the episode is masked instead of scoring 0. What the agent's output decides never does: a request the route refuses for its size or length is that rubric item's error, as upstream, and the output clip is inlined as an ffmpeg proxy (at most 720p, audio kept) when it is over the 14 MiB inline budget, recorded in the result's provenance. |
 | Assembly | `tests/judge.py` rejects a non-object `solution.json` with reward 0 instead of crashing | The upstream judge calls `.get` on whatever JSON the model wrote; a bare list raised instead of scoring 0 like every other malformed manifest. Only the exact pinned judges (verified by digest) are patched. |
 | Repair | the verifier's golden-asset download retries longer within a bound (`--retry 12 --retry-delay 20 --retry-all-errors --max-time 300 --retry-max-time 1200`), a download that still fails exits 75, and the step declares `artifacts = ["/workspace/output", "/workspace/materials"]` (the verifier reads the materials the setup step copied into the agent's sandbox) | Hugging Face answers bursts from one egress address with 429/500 and the upstream six attempts finish in about 20 s; without the guard the verifier would write no reward and the rollout would score 0, and without the bound a stalled download would run into the verifier timeout, which is a measured 0. |
 
@@ -45,11 +52,14 @@ verifier exited 75 (`EX_TEMPFAIL`) and wrote no reward (`harbor:verifier_unavail
 wins, and any other exit without a reward is a measured 0. See
 [Task-folder verifiers](../../../fern/versions/latest/pages/data/task-folders/task-folder-verifiers.mdx).
 
-Because the exit code comes from `test.sh`, it is only trustworthy where the agent cannot run `test.sh`: the overlay's
-`separate_verifier_for_artifacts: true` grades every task that declares `artifacts`, i.e. the judged and repair
-tasks, in a fresh sandbox of the task image that receives `/workspace/output` (and, for repair, `/workspace/materials`) from the agent's sandbox. The agent's
-sandbox therefore never runs the process that holds the judge key either. Assembly and sequencing read
-`/workspace/materials`, which the image provides, and verify in the agent's sandbox as upstream does.
+Because the exit code comes from `test.sh`, the server honors it only where the agent cannot have produced it: the
+overlay's `separate_verifier_for_artifacts: true` grades every task that declares `artifacts`, i.e. the judged and
+repair tasks, in a fresh sandbox of the task image that receives `/workspace/output` (and, for repair,
+`/workspace/materials`) from the agent's sandbox; a 75 from a shared-mode verifier is ignored and measured. The
+agent's sandbox therefore never runs the process that holds the judge key either. Every task's `/workspace/materials`
+is filled by the step's `setup.sh` from the image's `/baked` folder in the agent's sandbox, which is why the repair
+verifiers, which read it, receive it as an artifact. Assembly and sequencing verify in the agent's sandbox as
+upstream does.
 
 ## Deployment
 
@@ -67,9 +77,11 @@ expressible yet, and runs through this entry use the task budgets as published.
 
 ## Scoring and validation status
 
-The reward is the task's own `reward.json`, 0..1. The leaderboard's equal-family mean is `reward x 25 / family size`
-averaged over the four families; the environment server reports the task-weighted mean, so compute the equal-family
-mean from the rows by task family (the family is the task name's prefix).
+The reward is the task's own `reward.json`, 0..1. The leaderboard score is
+`(mean_repair + mean_assembly + mean_sequencing + mean_repurpose) / 4`, using the unscaled family means;
+equivalently, over the complete 100-task set, average `reward_i x 25 / size_of_family_i` across the 100 task rows
+(the family is the task name's prefix). The environment server reports the task-weighted mean, so compute the
+leaderboard score from the rows. A subset is not the benchmark score, and a masked row is not a 0.
 
 The entry's checks so far: the prepare script writes all 100 tasks, every `task.toml` loads with Gym's Harbor
 schema, and the unit tests cover the three adjustments, the Hub judge's failure handling against a local socket
