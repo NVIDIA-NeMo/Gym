@@ -9,8 +9,8 @@ import yaml
 from omegaconf import OmegaConf
 
 from environments.pdf_analyst_qa.prepare_example import prepare_example
-from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.environment.validation import validate_environment
 from resources_servers.pdf_analyst_qa.task_data import PdfAnalystQaSeedRequest
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig

@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import FastAPI
 
-from nemo_gym.server_runtime.base_resources_server import SimpleResourcesServer
+from nemo_gym.server_runtime import SimpleResourcesServer
 
 
 @pytest.mark.parametrize(
