@@ -20,7 +20,7 @@ There are two distinct integration shapes:
 | **Gym-owned tools, auto-exposed** | The tools *and* their verification live in Gym — the Resources Server serves them as plain `POST` routes | Set `expose_tools_over_mcp: true` in the server's YAML config — Gym turns the existing routes into MCP tools and mounts a Streamable-HTTP `/mcp` endpoint on the same app as `/seed_session` and `/verify`; typically no code change |
 | **Existing / external MCP server** | The MCP server already runs outside Gym (a third-party or shared service) | Point the agent at it directly with a static `mcp_config`; write a plain `SimpleResourcesServer.verify()` that scores the resulting trajectory |
 
-The rest of this page builds the **Gym-owned** flow, then explains the **external** flow at the end.
+The rest of this page builds the **Gym-owned** flow, then explains the **external** flow at the end. An Environment Server that serves its own episode tools, with no Resources Server, can also serve them over MCP; see [Environment Servers that serve their own tools](#environment-servers-that-serve-their-own-tools).
 
 <Info>
 **Why serve MCP from the Resources Server at all?** Mounting the MCP endpoint inside the Resources Server lets a tool call be bound to the *same per-rollout session* as `/seed_session` and `/verify`. That is what makes "was this tool actually used in this episode?" a verifiable, isolated question. An external MCP server can't offer that — Gym can't observe its calls — so external-server verification has to work off the agent's trajectory instead.
@@ -66,7 +66,7 @@ from typing import Any, Optional
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
@@ -193,6 +193,28 @@ Where direct dispatch cannot be proven equivalent to a real HTTP request, exposu
 The pattern behind the two query-parameter rows: anything FastAPI would read from the **query string** — a bare scalar like `my_string: str`, with or without a default — refuses, because MCP calls carry no query string. Move such knobs into the body model, where field defaults work normally (absent fields take their Pydantic defaults). Other non-body parameter shapes — `Header(...)` / `Cookie(...)` markers, `*args`/`**kwargs`, non-`str` path parameters — also refuse at startup, each with its own named reason.
 
 Beyond signatures, startup also refuses: **non-Gym middleware** installed on the app (direct dispatch would silently skip it); **multiple parameterized catch-all routes**; a tool name outside `[A-Za-z0-9_-]+`; and a server that **already serves `/mcp`** (a hand-rolled MCP mount conflicts with the auto-exposed one).
+
+### Return images from a tool
+
+A tool can return images next to its JSON reply. List them under `tool_output_images`. Each entry is a `ToolOutputImage`: a base64 `data:` URL (PNG, JPEG, GIF or WebP) and an optional `label`.
+
+```python
+from nemo_gym.core import TOOL_OUTPUT_IMAGES_KEY, ToolOutputImage
+
+async def rotate(self, body: RotateRequest) -> dict:
+    image_url = "data:image/png;base64," + rotated_png_base64
+    return {"ok": True, TOOL_OUTPUT_IMAGES_KEY: [ToolOutputImage(image_url=image_url, label="Image 2").model_dump()]}
+```
+
+Who reads the key, and what the model gets:
+
+| Reader | What the model gets |
+|---|---|
+| The `/mcp` endpoint | The rest of the reply as text, then each label and image as MCP image content. A result with images has no `structuredContent` unless the tool declares an output schema. |
+| `simple_agent` (HTTP tools) | The rest of the reply as the tool output, then each image in a user message after the turn's tool outputs. |
+| An agent that does not read the key, such as `simple_agent_with_compaction` | The whole reply as text, base64 data included. |
+
+A reply without the key, or with `null`, has no images. A malformed list is an error of the tool. Each image is checked as prompt images are (`MediaFile`): the base64 must be valid and hold a PNG, JPEG, GIF or WebP image. The `data:` URL then names the type the content has, so a JPEG labeled `image/png` reaches the model as `image/jpeg`. An agent that puts the images inside its tool output, such as Codex, needs `inline_tool_output_images: true` on `vllm_model`; with the default setting, `vllm_model` refuses such a request.
 
 ---
 
@@ -325,6 +347,47 @@ A correct rollout shows Claude Code calling `mcp__example_mcp_weather__get_weath
 <Tip>
 To watch the MCP round-trip without a full `gym env start`, start the Resources Server on its own and drive `/seed_session → /mcp tools/call → /verify` directly (a `requests.Session` preserves the session cookie) — there is a copy-pasteable script in the [weather server's README](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_mcp_weather). This is also the fastest way to confirm the endpoint is reachable from another host.
 </Tip>
+
+---
+
+## Environment Servers that serve their own tools
+
+An Environment Server built on `BaseEnvironmentServerWithTools` serves each episode's tools itself, with no Resources Server. Its config, `BaseEnvironmentServerWithToolsConfig`, selects the transports with `tool_transports`. This is a different field from `expose_tools_over_mcp`, which only a Resources Server has. Both classes are imported from `nemo_gym.server_runtime`.
+
+```yaml
+my_environment:
+  environment_servers:
+    my_environment:
+      entrypoint: app.py
+      tool_transports: [mcp]   # default [direct_http]
+```
+
+| `tool_transports` | Grants | For agents such as |
+|---|---|---|
+| `[direct_http]` (default) | `POST /<tool name>` on the server, required | `simple_agent` |
+| `[mcp]` | `/mcp` on the server, required | Codex, Pi, Hermes |
+| `[mcp, direct_http]` | Both, in that order, each optional | An agent takes the transport it supports |
+
+With one transport, the grant is required, so an agent that cannot use it rejects the seed. Use `[mcp]` for MCP-only agents.
+
+With several workers (`num_workers`), each tool call reaches the worker that runs its episode, over either transport.
+
+In `run`, `serve_tools` returns the grants. Pass them unchanged to the agent:
+
+```python
+from nemo_gym.agents import AgentSeedSessionRequest
+from nemo_gym.server_runtime import TypedToolset
+
+served = await self.serve_tools(request, TypedToolset(my_tools), cleanup)
+seed = AgentSeedSessionRequest(
+    agent_session_id=agent_session_id,
+    episode_id=request.episode_id,
+    task_id=request.task.task_id,
+    tool_accesses=served.tool_accesses,
+)
+```
+
+Each grant carries the episode's token in the `X-NeMo-Gym-Episode-Token` header. `/mcp` lists only that episode's tools, and the grant ends when the episode's cleanup runs. A tool that returns `ToolResult(is_error=True)` gives an MCP result with `isError: true`. Over direct HTTP, the reply carries `X-NeMo-Gym-Tool-Error: true` instead.
 
 ---
 

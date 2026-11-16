@@ -21,6 +21,10 @@ inputs:
     description: Base commit or ref used to determine changed files
     required: false
     default: ""
+  head-sha:
+    description: Exact checked-out commit used to determine changed files
+    required: false
+    default: ""
   force-run-all:
     description: Run the full suite without inspecting changed files
     required: false
@@ -49,6 +53,7 @@ runs:
       uses: step-security/changed-files@3dbe17c78367e7d60f00d78ae6781a35be47b4a1 # v45.0.1
       with:
         base_sha: ${{ inputs.base-ref }}
+        sha: ${{ inputs.head-sha || github.sha }}
         # 'files' input enables global other_changed_files_count for uncategorized files.
         files: |
           **.md
@@ -58,13 +63,11 @@ runs:
           responses_api_agents/**
           responses_api_models/**
           environment_servers/**
-          benchmarks/**
         files_yaml: |
           doc:
             - '**.md'
             - fern/**
             - LICENSE
-            - benchmarks/**
           server:
             - resources_servers/**
             - responses_api_agents/**
@@ -94,9 +97,9 @@ runs:
           docs_only=true
         fi
 
-        echo "run_full=$run_full" >> "$GITHUB_OUTPUT"
-        echo "run_servers=$run_servers" >> "$GITHUB_OUTPUT"
-        echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+        echo "run_full=$run_full" | tee -a "$GITHUB_OUTPUT"
+        echo "run_servers=$run_servers" | tee -a "$GITHUB_OUTPUT"
+        echo "docs_only=$docs_only" | tee -a "$GITHUB_OUTPUT"
 
         echo "Changed files: docs=${DOC_CHANGED:-false}, servers=${SERVER_CHANGED:-false}, other=${OTHER_COUNT:-0}"
         echo "Classification: run_full=$run_full, run_servers=$run_servers, docs_only=$docs_only"

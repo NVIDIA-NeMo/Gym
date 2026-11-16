@@ -17,7 +17,6 @@ from fastapi import Body
 from pydantic import ConfigDict, Field
 
 from environment_servers.nemo_user_sim.episode_contracts import (
-    UserSimEpisodeFailure,
     UserSimEpisodeRequest,
     UserSimEpisodeResponse,
     UserSimEpisodeResult,
@@ -47,6 +46,7 @@ from nemo_gym.core import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseReasoningItem,
+    NgFailureEvent,
 )
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
@@ -54,7 +54,6 @@ from nemo_gym.server_runtime import (
     BaseEnvironmentServerConfig,
     CleanupContext,
     CleanupHandle,
-    HandledEpisodeError,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
@@ -62,7 +61,12 @@ from nemo_gym.server_runtime import (
     is_retryable_dependency_error,
     is_retryable_dependency_status,
 )
-from nemo_gym.trajectory import AgentObservationBundle, ToolCallObservation, TrajectoryRecord
+from nemo_gym.trajectory import (
+    AgentObservationBundle,
+    ToolCallObservation,
+    TrajectoryRecord,
+)
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimInvocation,
     UserSimSeedResponse,
@@ -596,8 +600,10 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
     ) -> str:
         block = self.server_client.global_config_dict.get(TOKEN_CAPTURE_BLOCK) or {}
         target_config = get_first_server_config_dict(self.server_client.global_config_dict, target_name)
+        # A request whose rollout skips capture (a validation rollout) activates no participant with the tag.
         token_capture = (
             capture_training_tokens
+            and not request.skip_token_capture
             and bool(block.get("enabled", False))
             and (bool(block.get("all_agents", False)) or bool(target_config.get("token_id_capture", False)))
         )
@@ -610,10 +616,9 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
         error: Exception,
         *,
         terminal: bool | None = None,
-    ) -> HandledEpisodeError:
+    ) -> NgFailureEvent:
         return dependency_failure(
             error,
-            failure_model=UserSimEpisodeFailure,
             stage=stage,
             terminal=not _is_retryable_dependency_error(error) if terminal is None else terminal,
             name_error_type=True,
@@ -888,3 +893,6 @@ def _is_scorable_assistant_activation_error(error: _ParticipantActivationError) 
 
 if __name__ == "__main__":
     UserSimEnvironmentServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = UserSimEnvironmentServer.run_webserver()  # noqa: F401

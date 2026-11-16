@@ -85,7 +85,7 @@ def _make_entry(
 ) -> TokenEntry:
     """Build a committed entry with the metadata that ``capture_tokens`` records."""
     entry = TokenEntry(
-        rollout_id=rollout_id,
+        capture_key=rollout_id,
         model_call_id=model_call_id,
         model="conformance-model",
         prompt_token_ids=list(prompt),

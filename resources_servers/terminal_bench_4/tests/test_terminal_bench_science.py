@@ -3,6 +3,7 @@
 """Terminal-Bench-Science on the pinned Harbor-package runtime shared with TB4."""
 
 import json
+import shlex
 from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
@@ -147,7 +148,7 @@ def test_example_rows_are_prepared_single_container_tasks_from_every_domain():
 def benchmark_config(**overrides):
     config = OmegaConf.merge(
         OmegaConf.load(BENCHMARK_DIR / "resources.yaml"),
-        OmegaConf.load(BENCHMARK_DIR / "miniswe.yaml"),
+        OmegaConf.load(BENCHMARK_DIR / "miniswe_legacy_agent.yaml"),
         overrides,
     )
     del config["config_paths"]
@@ -829,7 +830,7 @@ def test_codex_rows_embed_the_official_instruction(tmp_path, monkeypatch, timeou
 def test_codex_rows_are_prepared_in_the_server_environment_when_pathspec_is_missing(tmp_path, monkeypatch):
     from benchmarks.terminal_bench_science import prepare_codex
     from nemo_gym import PARENT_DIR
-    from nemo_gym.orchestration import server_venv as setup_command
+    from nemo_gym.server_runtime.supervisor import server_venv as setup_command
 
     monkeypatch.setattr(prepare_codex, "_needs_server_environment", lambda: True)
     monkeypatch.chdir(tmp_path)
@@ -852,14 +853,21 @@ def test_codex_rows_are_prepared_in_the_server_environment_when_pathspec_is_miss
         f" && {python} -m benchmarks.terminal_bench_science.prepare_codex --task-names {' '.join(in_manifest_order)} "
         f"--task-download-dir {tmp_path / 'packages'}"
     )
-    assert "uv pip install" in command  # sets up the server's environment as `gym env start` does
+    _, setup_command, _ = command.split(" && ", 2)
+    setup_args = shlex.split(setup_command)
+    assert Path(setup_args[1]).name == "venv_setup.py"
+    assert setup_args[setup_args.index("--venv") + 1] == str(python.parent.parent)
+    install_args = shlex.split(setup_args[setup_args.index("--command") + 1])
+    assert Path(install_args[1]).name == "_locked_env.py"
+    assert install_args[install_args.index("--project") + 1] == str(prepare_codex.SERVER_DIR)
+    assert install_args[install_args.index("--venv") + 1] == str(python.parent.parent)
     assert (working_dir, kwargs["project_root"]) == (prepare_codex.SERVER_DIR, PARENT_DIR)
     assert kwargs["extra_env"] == {prepare_codex.IN_SERVER_ENVIRONMENT_ENV_VAR: "1"}
 
 
 def test_codex_rows_fail_when_the_server_environment_run_fails(monkeypatch):
     from benchmarks.terminal_bench_science import prepare_codex
-    from nemo_gym.orchestration import server_venv as setup_command
+    from nemo_gym.server_runtime.supervisor import server_venv as setup_command
 
     monkeypatch.setattr(prepare_codex, "_needs_server_environment", lambda: True)
     monkeypatch.setattr(setup_command, "run_command", lambda *args, **kwargs: SimpleNamespace(wait=lambda: 3))
@@ -897,6 +905,14 @@ def test_codex_profile_composes_borrowing_resources_codex_and_the_environment_se
     assert agent.inherit_sandbox_environment is True
     assert (agent.timeout, agent.codex_version) == (28800, "0.155.1")
     assert (agent.verify_after_agent_error, agent.raise_oom_score_adj) == (True, True)
+
+
+def test_miniswe_profile_runs_the_harbor_entry_with_mini_swe():
+    from nemo_gym.data.tasks.harbor.prepare import harbor_benchmark
+
+    benchmark = harbor_benchmark(BENCHMARK_DIR / "miniswe.yaml")
+    assert benchmark.target == "terminal_bench_science"
+    assert (benchmark.agent.instance_name, benchmark.agent.impl_name) == ("mini_swe_agent",) * 2
 
 
 # The README's vllm_model settings for Codex in front of a chat-completions server.

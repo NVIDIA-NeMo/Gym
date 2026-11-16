@@ -5,7 +5,8 @@
 
 from typing import Any
 
-from nemo_gym.models.chat_completions_converter import ResponsesConverter
+from nemo_gym._moved_paths import moved_names_getattr
+from nemo_gym.models.chat_completions_converter import ChatCompletionsConverter
 from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint
 from nemo_gym.models.token_capture.records import response_to_output_items, strip_token_fields
 from nemo_gym.models.token_capture.replay import replay_context
@@ -18,7 +19,7 @@ def completion_items(response: dict[str, Any]) -> list[dict]:
         # The gateway has already applied its configured reasoning conversion.
         # A Chat client sees content (including literal <think> tags) as text;
         # splitting it again invents items absent from the harness's output.
-        converter = ResponsesConverter(return_token_id_information=False, uses_reasoning_parser=False)
+        converter = ChatCompletionsConverter(return_token_id_information=False, uses_reasoning_parser=False)
         items = []
         for choice in response["choices"]:
             for output in converter.postprocess_assistant_message_dict(choice["message"]):
@@ -79,3 +80,7 @@ def output_item_fingerprint(item: dict[str, Any]) -> str:
     if not result:
         raise ValueError("Expected a model-authored output item")
     return result
+
+
+# Serves the converter this module imported before it was renamed ChatCompletionsConverter, with a warning.
+__getattr__ = moved_names_getattr(__name__)

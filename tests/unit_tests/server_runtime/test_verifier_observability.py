@@ -1,18 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import ast
 import asyncio
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
 from nemo_gym.client.server_client import ServerClient
-from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER, current_verifier_invocation_id, rollout_context
+from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER, current_verifier_invocation_id, rollout_context
 from nemo_gym.core.failure_kinds import JUDGE_FAILED, SESSION_LOST, TRANSPORT_TIMEOUT, VERIFIER_ERROR
+from nemo_gym.core.failure_records import FailureBoundary
+from nemo_gym.core.failure_transport import RequestFailureLog
 from nemo_gym.models.model_call_capture import CaptureStore
 from nemo_gym.rollouts.model_calls import merge_model_call_capture_into_record
 from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
@@ -23,6 +27,7 @@ from nemo_gym.server_runtime.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.server_runtime.verifier_observability import observe_verifier
+from nemo_gym.trajectory.trajectory_record import grading_result_binding
 from nemo_gym.verification.judge import JudgeError, call_judge, judge_failsafe
 
 
@@ -136,6 +141,42 @@ async def test_verify_errors_return_evidence_in_http_failure(tmp_path, error, st
     assert invocation["status"] == status
     assert invocation["failure_kind"] == kind
     assert current_verifier_invocation_id() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error,kind,http_status",
+    [
+        (RuntimeError("scoring broke"), VERIFIER_ERROR, 500),
+        (TimeoutError("grading deadline"), TRANSPORT_TIMEOUT, 500),
+        (HTTPException(503, detail="verifier unavailable"), VERIFIER_ERROR, 503),
+    ],
+)
+async def test_verify_error_is_recorded_in_the_request_failure_report(error, kind, http_status):
+    async def verify():
+        raise error
+
+    with RequestFailureLog.capture() as log, rollout_context("error"):
+        response = await observe_verifier(verify, enabled=True)()
+    (invocation,) = json.loads(response.body)["ng_verifier_invocations"]
+    (event,) = log.report.events.values()
+    assert event.boundary == FailureBoundary.RESOURCES_SERVER
+    assert event.failure_kind == kind
+    assert event.operation == "verify"
+    assert event.operation_id == invocation["invocation_id"]
+    assert event.http_status == http_status == response.status_code
+    assert "scoring broke" not in event.failure_reason
+    assert log.report.failure_id is None
+
+
+@pytest.mark.asyncio
+async def test_successful_verify_records_no_failure():
+    async def verify():
+        return {"reward": 0.0}
+
+    with RequestFailureLog.capture() as log, rollout_context("ok"):
+        await observe_verifier(verify, enabled=True)()
+    assert log.report.events == {}
 
 
 @pytest.mark.asyncio
@@ -281,3 +322,431 @@ async def test_http_error_retains_status_headers_and_detail():
     payload = json.loads(response.body)
     assert payload["detail"] == "verifier unavailable"
     assert payload["ng_verifier_invocations"][0]["status"] == "failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reward", [0.0, 1.0])
+async def test_sandbox_lifecycle_facts_bind_to_existing_verifier_without_certifying_grade(reward):
+    from nemo_gym.server_runtime.verifier_observability import observe_verifier_sandbox
+
+    async def verify():
+        observe_verifier_sandbox(
+            {
+                "role": "agent",
+                "sandbox_id": "owner-agent",
+                "teardown_confirmed": True,
+                "cleanup_errors": ["close:TimeoutError"],
+                "observed_client_interval_s": 0.2,
+            }
+        )
+        observe_verifier_sandbox({"role": "invalid"})
+        observe_verifier_sandbox(
+            {
+                "role": "verifier",
+                "sandbox_id": "owner-verifier",
+                "teardown_confirmed": False,
+                "cleanup_errors": ["close:ConnectionError"],
+            }
+        )
+        return {"reward": reward, "evaluation_completed": True, "response": {"id": "saved"}}
+
+    with rollout_context("owner-lifecycle"):
+        result = await observe_verifier(verify, enabled=True)()
+    assert result["reward"] == reward and result["response"] == {"id": "saved"}
+    invocation = result["ng_verifier_invocations"][0]
+    assert invocation["status"] == "completed"
+    assert invocation.get("grading_operations") is None
+    assert [(x["role"], x["sandbox_id"]) for x in invocation["sandbox_observations"]] == [
+        ("agent", "owner-agent"),
+        ("verifier", "owner-verifier"),
+    ]
+    assert invocation["sandbox_observations"][0]["cleanup_errors"] == ["close:TimeoutError"]
+    record = _build_trajectory_record({"_ng_task_index": 0, "_ng_rollout_index": 0}, result)
+    assert record.verifier_invocations[0].model_dump(mode="json") == invocation
+
+
+@pytest.mark.asyncio
+async def test_malformed_sandbox_observation_does_not_replace_original_ungraded_result():
+    from nemo_gym.server_runtime.verifier_observability import observe_verifier_sandbox
+
+    async def verify():
+        observe_verifier_sandbox({"role": "invalid", "observed_client_interval_s": "not-a-time"})
+        return {
+            "reward": 0.0,
+            "evaluation_completed": False,
+            "failure_kind": "verifier_error",
+            "response": {"id": "saved"},
+        }
+
+    with rollout_context("owner-invalid"):
+        result = await observe_verifier(verify, enabled=True)()
+    invocation = result["ng_verifier_invocations"][0]
+    assert result["evaluation_completed"] is False and result["response"] == {"id": "saved"}
+    assert invocation["status"] == "incomplete" and invocation["failure_kind"] == "verifier_error"
+    assert invocation.get("sandbox_observations") is None
+
+
+def test_owner_observation_outside_verification_does_not_create_an_invocation():
+    from nemo_gym.server_runtime.verifier_observability import observe_verifier_sandbox
+
+    assert observe_verifier_sandbox({"role": "invalid"}) is None
+
+
+def _verifier_cause_chain():
+    from nemo_gym.core.failure_records import FailureBoundary
+    from nemo_gym.core.typed_exceptions import NgFailureEvent
+
+    model = NgFailureEvent(
+        boundary=FailureBoundary.MODEL,
+        failure_kind="model_request_error",
+        failure_reason="judge model HTTP 503",
+        operation="model_request",
+        http_status=503,
+    )
+    resources = NgFailureEvent(
+        boundary=FailureBoundary.RESOURCES_SERVER,
+        failure_kind="provider_unavailable",
+        failure_reason="scoring provider unavailable",
+        operation="verify",
+    )
+    resources.__cause__ = model
+    return resources, model
+
+
+@pytest.mark.asyncio
+async def test_a_verify_failure_returned_as_500_keeps_its_selected_failure_and_causes():
+    from nemo_gym.core.failure_transport import FailureHeader
+
+    resources, model = _verifier_cause_chain()
+
+    async def verify():
+        raise resources
+
+    with rollout_context("caused"):
+        response = await observe_verifier(verify, enabled=True)()
+    assert response.status_code == 500
+    (invocation,) = json.loads(response.body)["ng_verifier_invocations"]
+    assert invocation["status"] == "failed" and invocation["failure_kind"] == VERIFIER_ERROR
+    report = FailureHeader.decode(response.headers)
+    assert report is not None and report.failure_id in report.events
+    selected = report.events[report.failure_id]
+    assert selected.boundary == FailureBoundary.RESOURCES_SERVER
+    assert selected.failure_kind == VERIFIER_ERROR and selected.operation == "verify"
+    assert selected.operation_id == invocation["invocation_id"]
+    assert selected.cause_id == resources.event_id
+    assert report.events[resources.event_id].cause_id == model.event_id
+    assert list(report.events).count(model.event_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_http_exception_keeps_its_explicit_cause_and_an_existing_report():
+    from starlette.exceptions import HTTPException
+
+    from nemo_gym.core.failure_records import FailureReport
+    from nemo_gym.core.failure_transport import FailureHeader
+
+    resources, model = _verifier_cause_chain()
+
+    async def caused():
+        raise HTTPException(status_code=503, detail="busy") from resources
+
+    with rollout_context("http-caused"):
+        response = await observe_verifier(caused, enabled=True)()
+    assert response.status_code == 503 and json.loads(response.body)["detail"] == "busy"
+    report = FailureHeader.decode(response.headers)
+    (invocation,) = json.loads(response.body)["ng_verifier_invocations"]
+    assert report is not None and report.failure_id in report.events
+    selected = report.events[report.failure_id]
+    assert selected.boundary == FailureBoundary.RESOURCES_SERVER
+    assert selected.failure_kind == VERIFIER_ERROR and selected.operation == "verify"
+    assert selected.operation_id == invocation["invocation_id"]
+    assert selected.cause_id == resources.event_id
+    assert report.events[resources.event_id].cause_id == model.event_id
+
+    existing = FailureReport(failure_id=None, events={}, omitted=True)
+
+    async def reported():
+        raise HTTPException(status_code=502, detail="upstream", headers=FailureHeader.encode(existing))
+
+    with rollout_context("http-reported"):
+        response = await observe_verifier(reported, enabled=True)()
+    assert response.status_code == 502
+    assert FailureHeader.decode(response.headers).omitted, "the reply's own report is kept"
+
+
+@pytest.mark.asyncio
+async def test_a_plain_verify_error_records_only_its_observed_verify_failure():
+    from nemo_gym.core.failure_transport import FailureHeader
+
+    async def verify():
+        raise RuntimeError("scoring broke")
+
+    with rollout_context("plain"):
+        response = await observe_verifier(verify, enabled=True)()
+    assert response.status_code == 500
+    report = FailureHeader.decode(response.headers)
+    (invocation,) = json.loads(response.body)["ng_verifier_invocations"]
+    assert report is not None and len(report.events) == 1
+    selected = report.events[report.failure_id]
+    assert selected.boundary == FailureBoundary.RESOURCES_SERVER
+    assert selected.failure_kind == VERIFIER_ERROR and selected.operation == "verify"
+    assert selected.operation_id == invocation["invocation_id"]
+    assert selected.cause_id is None and selected.exception_type == "RuntimeError"
+
+
+_VERIFY_BODY = {
+    "responses_create_params": {"input": "task"},
+    "response": {
+        "id": "response",
+        "created_at": 0,
+        "model": "test",
+        "object": "response",
+        "output": [],
+        "parallel_tool_calls": True,
+        "tool_choice": "auto",
+        "tools": [],
+    },
+}
+
+
+@pytest.mark.parametrize("http", [False, True])
+def test_the_registered_verify_route_keeps_a_raised_failure_and_its_cause(tmp_path, http: bool):
+    from starlette.exceptions import HTTPException
+
+    from nemo_gym.core.failure_transport import FailureHeader
+
+    resources, model = _verifier_cause_chain()
+
+    class Resources(SimpleResourcesServer):
+        async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+            if http:
+                raise HTTPException(status_code=503, detail="busy", headers={"Retry-After": "7"}) from resources
+            raise resources
+
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {"observability_enabled": True, "model_call_capture_dir": str(tmp_path)}
+    server = Resources(
+        config=BaseResourcesServerConfig(name="programmatic", host="127.0.0.1", port=12345, entrypoint="app.py"),
+        server_client=client,
+    )
+    app = server.setup_webserver()
+    server.setup_exception_middleware(app)
+    response = TestClient(app, raise_server_exceptions=False).post(
+        "/ng-rollout/programmatic/verify", json=_VERIFY_BODY
+    )
+    assert response.status_code == (503 if http else 500), response.text
+    if http:
+        assert response.json()["detail"] == "busy" and response.headers["Retry-After"] == "7"
+    (invocation,) = response.json()["ng_verifier_invocations"]
+    assert invocation["status"] == "failed"
+    report = FailureHeader.decode(response.headers)
+    assert report is not None and report.failure_id in report.events
+    selected = report.events[report.failure_id]
+    assert selected.boundary == FailureBoundary.RESOURCES_SERVER
+    assert selected.failure_kind == VERIFIER_ERROR and selected.operation == "verify"
+    assert selected.operation_id == invocation["invocation_id"]
+    assert selected.cause_id == resources.event_id
+    assert report.events[resources.event_id].cause_id == model.event_id
+    assert list(report.events).count(model.event_id) == 1
+
+
+_GRADED = {"response": {"id": "graded-response", "output": []}, "reward": 0.25}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("masked,verdict", [(False, "scored"), (True, "masked")])
+async def test_an_in_process_verify_saves_its_own_grading_record(tmp_path, masked, verdict):
+    result = {**_GRADED, "mask_sample": masked}
+
+    async def verify():
+        return result
+
+    with rollout_context("in-process"):
+        returned = await observe_verifier(verify, enabled=True, verifier_name="metric_verifier")()
+    (invocation,) = returned["ng_verifier_invocations"]
+    assert invocation["grading_record"] == {
+        "verifier": "metric_verifier",
+        "score": 0.25,
+        "verdict": verdict,
+        "result_binding_sha256": grading_result_binding(result),
+    }
+    record = collected(tmp_path, "in-process", returned)
+    trajectory = _build_trajectory_record({"_ng_task_index": 0, "_ng_rollout_index": 0}, record)
+    assert trajectory.verifier_invocations[0].grading_record.verifier == "metric_verifier"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["judge", "direct"])
+async def test_a_verify_that_asks_a_model_saves_no_grading_record(monkeypatch, route):
+    from omegaconf import OmegaConf
+
+    transport = AsyncMock()
+    monkeypatch.setattr("nemo_gym.client.server_client.request", transport)
+    client = ServerClient(
+        head_server_config={"host": "localhost", "port": 0},
+        global_config_dict=OmegaConf.create(
+            {
+                "observability_enabled": True,
+                "judge": {"responses_api_models": {"openai_model": {"host": "localhost", "port": 9999}}},
+            }
+        ),
+    )
+
+    async def post(**kwargs):
+        response = MagicMock(ok=True, status=200)
+        response.read = AsyncMock(return_value=b'{"grade":1.0}')
+        return response
+
+    async def verify():
+        if route == "judge":
+            await call_judge(
+                MagicMock(post=post), server_name="judge", url_path="/v1/responses", json={}, response_model=Verdict
+            )
+        else:
+            await client.post(server_name="judge", url_path="/v1/responses", json={})
+        return _GRADED
+
+    with rollout_context("judged"):
+        returned = await observe_verifier(verify, enabled=True, verifier_name="judge_verifier")()
+    (invocation,) = returned["ng_verifier_invocations"]
+    assert invocation["status"] == "completed"
+    assert "grading_record" not in invocation
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result",
+    [{"reward": 1.0}, {**_GRADED, "_ng_failure_class": "verifier"}, {**_GRADED, "evaluation_completed": False}],
+)
+async def test_an_unbound_or_unfinished_grade_saves_no_grading_record(result):
+    async def verify():
+        return result
+
+    with rollout_context("unbound"):
+        returned = await observe_verifier(verify, enabled=True, verifier_name="metric_verifier")()
+    (invocation,) = returned["ng_verifier_invocations"]
+    assert "grading_record" not in invocation
+
+
+def test_the_resources_route_names_its_server_in_the_grading_record():
+    class Resources(SimpleResourcesServer):
+        async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+            return BaseVerifyResponse(**body.model_dump(), reward=1.0)
+
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {"observability_enabled": True}
+    server = Resources(
+        config=BaseResourcesServerConfig(name="metric_verifier", host="127.0.0.1", port=12345, entrypoint="app.py"),
+        server_client=client,
+    )
+    response = TestClient(server.setup_webserver()).post(
+        "/ng-rollout/metric/verify",
+        json={
+            "responses_create_params": {"input": "task"},
+            "response": {
+                "id": "response",
+                "created_at": 0,
+                "model": "test",
+                "object": "response",
+                "output": [],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+        },
+    )
+    assert response.status_code == 200, response.text
+    (invocation,) = response.json()["ng_verifier_invocations"]
+    assert invocation["grading_record"]["verifier"] == "metric_verifier"
+    assert invocation["grading_record"]["score"] == 1.0
+    assert invocation["grading_record"]["verdict"] == "scored"
+
+
+@pytest.mark.asyncio
+async def test_a_judge_request_through_nemo_gym_async_openai_saves_no_grading_record(monkeypatch):
+    from nemo_gym.client.openai_client import NeMoGymAsyncOpenAI
+
+    sent = AsyncMock()
+    monkeypatch.setattr(NeMoGymAsyncOpenAI, "_request_with_retry", sent)
+    judge = NeMoGymAsyncOpenAI(base_url="http://judge.invalid/v1", api_key="test")
+
+    async def verify():
+        await judge._request(method="POST", url="http://judge.invalid/v1/chat/completions", json={})
+        return _GRADED
+
+    with rollout_context("sdk-judged"):
+        returned = await observe_verifier(verify, enabled=True, verifier_name="judge_verifier")()
+    (invocation,) = returned["ng_verifier_invocations"]
+    sent.assert_awaited_once()
+    assert invocation["status"] == "completed"
+    assert "grading_record" not in invocation
+
+
+def _route_invocation(server_class) -> dict:
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {"observability_enabled": True}
+    server = server_class(
+        config=BaseResourcesServerConfig(name="verifier", host="127.0.0.1", port=12345, entrypoint="app.py"),
+        server_client=client,
+    )
+    response = TestClient(server.setup_webserver()).post(
+        "/ng-rollout/route/verify",
+        json={
+            "responses_create_params": {"input": "task"},
+            "response": {
+                "id": "response",
+                "created_at": 0,
+                "model": "test",
+                "object": "response",
+                "output": [],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+        },
+    )
+    assert response.status_code == 200, response.text
+    (invocation,) = response.json()["ng_verifier_invocations"]
+    return invocation
+
+
+@pytest.mark.parametrize("uninstrumented", [False, True])
+def test_a_server_whose_grading_may_use_an_uninstrumented_model_saves_no_grading_record(uninstrumented):
+    class Resources(SimpleResourcesServer):
+        grading_may_use_uninstrumented_model = uninstrumented
+
+        async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+            return BaseVerifyResponse(**body.model_dump(), reward=1.0)
+
+    invocation = _route_invocation(Resources)
+    # An unlisted programmatic verifier keeps its own grading record; a listed one is observed only otherwise.
+    assert ("grading_record" in invocation) is not uninstrumented
+
+
+def _class_attribute(source: Path, class_name: str, attribute: str) -> object:
+    """The literal a class body assigns to ``attribute``, read from the module source without importing it.
+
+    Importing a resources server's app here would put the whole server, and everything it imports, into this core
+    job's coverage; the server's own tests run in its shard.
+    """
+    for node in ast.parse(source.read_text()).body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            for item in node.body:
+                targets = item.targets if isinstance(item, ast.Assign) else [getattr(item, "target", None)]
+                if any(isinstance(target, ast.Name) and target.id == attribute for target in targets):
+                    return ast.literal_eval(item.value)
+    return None
+
+
+@pytest.mark.parametrize(
+    "app,name",
+    [
+        ("resources_servers/gdpval/app.py", "GDPValResourcesServer"),
+        ("resources_servers/job_bench/app.py", "JobBenchResourcesServer"),
+        ("resources_servers/proof_judge/app.py", "ProofWithJudgeResourcesServer"),
+        ("resources_servers/proof_verification/app.py", "ProofVerificationResourcesServer"),
+    ],
+)
+def test_the_servers_that_judge_through_an_external_sdk_are_listed(app, name):
+    source = Path(__file__).resolve().parents[3] / app
+    assert _class_attribute(source, name, "grading_may_use_uninstrumented_model") is True

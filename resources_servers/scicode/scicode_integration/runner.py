@@ -27,6 +27,7 @@ H5PY_FILE = "/data/test_data.h5"; here it is injected from config.
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -315,6 +316,23 @@ def build_test_program(full_generation: str, h5_path: str, step_number: str, san
     for idx, test in enumerate(sanitized_tests):
         program += f"target = targets[{idx}]\n\n{test}\n"
     return program
+
+
+def process_exit(result: dict) -> str:
+    """How a grading process ended, typed from `run_substep`'s result: `timeout`, `killed:<SIGNAL>` (a negative
+    return code: a signal killed the process, e.g. `killed:SIGKILL` from an out-of-memory kill), `exit:<code>`, or
+    `not_run` when no process exit code exists."""
+    if result.get("timed_out"):
+        return "timeout"
+    code = result.get("returncode")
+    if type(code) is not int:
+        return "not_run"
+    if code < 0:
+        try:
+            return f"killed:{signal.Signals(-code).name}"
+        except ValueError:
+            return f"killed:{-code}"
+    return f"exit:{code}"
 
 
 def run_substep(

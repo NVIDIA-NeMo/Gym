@@ -23,6 +23,7 @@ from unittest.mock import MagicMock
 import app as app_module
 import pytest
 from app import InteractiveBrowserConfig, InteractiveBrowserResourcesServer
+from browser import BrowserSessionHandle, BrowserSessionSpec, RemoteCDPBackend
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from itsdangerous import TimestampSigner
@@ -35,6 +36,7 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionRequest,
     check_resources_session_contract,
 )
+from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 
 
 class _Browser:
@@ -103,7 +105,7 @@ def _close_json(session_id: str = "resources-session", episode=_EPISODE) -> dict
 
 
 class TestTypedSessionsOverHttp:
-    def test_a_typed_seed_opens_the_browser_under_the_callers_id(self, browsers) -> None:
+    def test_an_episode_seed_opens_the_browser_under_the_callers_id(self, browsers) -> None:
         server = _server()
         client = TestClient(server.setup_webserver())
 
@@ -284,7 +286,7 @@ def _request() -> SimpleNamespace:
     return SimpleNamespace(session={})
 
 
-def _typed_seed(session_id: str = "resources-session") -> ResourcesSeedSessionRequest:
+def _episode_seed(session_id: str = "resources-session") -> ResourcesSeedSessionRequest:
     return ResourcesSeedSessionRequest(
         resources_session_id=session_id,
         episode_id=EpisodeId(**_EPISODE),
@@ -293,7 +295,7 @@ def _typed_seed(session_id: str = "resources-session") -> ResourcesSeedSessionRe
     )
 
 
-def _typed_close(session_id: str = "resources-session") -> dict:
+def _episode_close(session_id: str = "resources-session") -> dict:
     return ResourcesCloseSessionRequest(resources_session_id=session_id, episode_id=EpisodeId(**_EPISODE)).model_dump(
         mode="json"
     )
@@ -307,9 +309,9 @@ class TestCloseRacingTheSeed:
         server = _server()
 
         async def run():
-            seed = asyncio.create_task(server.seed_session(_request(), _typed_seed()))
+            seed = asyncio.create_task(server.seed_session(_request(), _episode_seed()))
             await asyncio.sleep(0.05)  # the browser is still opening
-            await server.close_resources_session(_request(), _typed_close())
+            await server.close_resources_session(_request(), _episode_close())
             await seed
 
         asyncio.run(run())
@@ -323,9 +325,9 @@ class TestCloseRacingTheSeed:
         server = _server()
 
         async def run():
-            await server.close_resources_session(_request(), _typed_close())
+            await server.close_resources_session(_request(), _episode_close())
             with pytest.raises(HTTPException, match="already closed") as refused:
-                await server.seed_session(_request(), _typed_seed())
+                await server.seed_session(_request(), _episode_seed())
             assert refused.value.status_code == 409
 
         asyncio.run(run())
@@ -333,26 +335,25 @@ class TestCloseRacingTheSeed:
         assert browsers.created == []
 
 
-def test_typed_sessions_follow_the_session_contract(browsers) -> None:
+def test_episode_sessions_follow_the_session_contract(browsers) -> None:
     from test_verify_reporting import _body
 
     server = _server()
     check_resources_session_contract(
         server.setup_webserver(),
-        _typed_seed("contract-session"),
+        _episode_seed("contract-session"),
         keeps_state=True,
         holds_state=lambda resources_session_id: (
-            resources_session_id in server._session_id_to_state or resources_session_id in server._typed_identity
+            resources_session_id in server._session_id_to_state or resources_session_id in server._episode_identity
         ),
         verify_body=_body().model_dump(mode="json"),
     )
     assert all(browser.closed == 1 for browser in browsers.created)
 
 
-def test_more_than_one_worker_is_refused() -> None:
-    """Browsers live in this process; a second worker would get tool calls for browsers it lacks."""
-    with pytest.raises(ValueError, match="num_workers=1"):
-        _server(num_workers=2)
+def test_several_workers_are_allowed() -> None:
+    """Session routing sends a seed and close by resources_session_id to the worker that holds the browser."""
+    refuse_unsupported_num_workers(_server(num_workers=2))
 
 
 def test_verify_after_close_is_a_masked_lost_session(browsers) -> None:
@@ -363,8 +364,8 @@ def test_verify_after_close_is_a_masked_lost_session(browsers) -> None:
 
     async def run():
         request = _request()
-        await server.seed_session(request, _typed_seed())
-        await server.close_resources_session(request, _typed_close())
+        await server.seed_session(request, _episode_seed())
+        await server.close_resources_session(request, _episode_close())
         return await server.verify(SimpleNamespace(session={SESSION_ID_KEY: "resources-session"}), _body())
 
     response = asyncio.run(run())
@@ -424,9 +425,10 @@ def test_mcp_tool_calls_reach_the_browser_opened_under_the_callers_id(browsers) 
             },
         ).json()
 
-    assert called["result"].get("isError") is not True, called
-    assert len(browsers.created) == 1
-    assert server._session_id_to_state["resources-session"].answer == "42"
+        assert called["result"].get("isError") is not True, called
+        assert len(browsers.created) == 1
+        # Read while the server runs: stopping it closes the browser.
+        assert server._session_id_to_state["resources-session"].answer == "42"
 
 
 def test_the_browser_is_tagged_with_the_episode_the_training_side_records(browsers) -> None:
@@ -449,3 +451,96 @@ def test_an_agent_run_seed_has_no_episode_to_tag(browsers) -> None:
     client.post("/seed_session", json={"initial_url": "https://example.com/"})
 
     assert set(browsers.created[0].session_metadata) == {"rollout_session_id"}
+
+
+class _RecordingProvider:
+    """A remote browser provider that records which sessions it ended.
+
+    Its release can be made slow, like a degraded service, so a cut-short release shows as a session never recorded.
+    """
+
+    name = "recording"
+
+    def __init__(self, close_delay_s: float = 0.0) -> None:
+        self.released: list[str] = []
+        self._close_delay_s = close_delay_s
+        self._ids = count(1)
+
+    async def acquire(self, spec: BrowserSessionSpec) -> BrowserSessionHandle:
+        return BrowserSessionHandle(cdp_url="ws://unused", session_id=f"remote-{next(self._ids)}")
+
+    async def release(self, handle: BrowserSessionHandle) -> None:
+        await asyncio.sleep(self._close_delay_s)
+        self.released.append(handle.session_id)
+
+
+class _HeldRemoteBrowser(RemoteCDPBackend):
+    """A remote browser that takes its provider session but skips the CDP connect.
+
+    Closing it runs the real backend close, which is what hands the session back to the provider.
+    """
+
+    async def open(self, initial_url: str) -> None:
+        self._handle = await self._provider.acquire(BrowserSessionSpec(metadata=dict(self.session_metadata)))
+
+
+class _FailingBrowser(_Browser):
+    async def close(self) -> None:
+        await super().close()
+        raise RuntimeError("provider unreachable")
+
+
+def _serve_remote_browsers(monkeypatch, provider: _RecordingProvider) -> None:
+    monkeypatch.setattr(
+        app_module,
+        "create_backend",
+        lambda config, session_metadata=None: _HeldRemoteBrowser(provider, session_metadata=session_metadata),
+    )
+
+
+class TestShutdown:
+    """Stopping the server closes the browsers it still holds; the provider would otherwise keep them running."""
+
+    def test_stopping_the_server_releases_a_held_remote_browser(self, monkeypatch) -> None:
+        provider = _RecordingProvider()
+        _serve_remote_browsers(monkeypatch, provider)
+        server = _server()
+
+        with TestClient(server.setup_webserver()) as client:
+            # An episode that never reached verify or close, as when the server stops mid-run.
+            assert client.post("/seed_session", json=_seed_json()).status_code == 200
+            assert provider.released == []
+
+        assert provider.released == ["remote-1"]
+        assert server._session_id_to_state == {}
+
+    def test_a_slow_provider_release_still_finishes(self, monkeypatch) -> None:
+        """Shutdown must not cut a release short: the step that ends the provider session comes last."""
+        provider = _RecordingProvider(close_delay_s=0.5)
+        _serve_remote_browsers(monkeypatch, provider)
+
+        with TestClient(_server().setup_webserver()) as client:
+            for session_id in ("first", "second"):
+                assert client.post("/seed_session", json=_seed_json(session_id)).status_code == 200
+
+        assert sorted(provider.released) == ["remote-1", "remote-2"]
+
+    def test_one_failed_close_does_not_keep_the_others_open(self, monkeypatch, caplog) -> None:
+        kinds = iter([_FailingBrowser, _Browser])
+        created: list[_Browser] = []
+
+        def _create_backend(config, session_metadata=None):
+            created.append(next(kinds)())
+            return created[-1]
+
+        monkeypatch.setattr(app_module, "create_backend", _create_backend)
+        server = _server()
+
+        with caplog.at_level("WARNING", logger=app_module.logger.name):
+            with TestClient(server.setup_webserver()) as client:
+                for session_id in ("failing", "healthy"):
+                    assert client.post("/seed_session", json=_seed_json(session_id)).status_code == 200
+
+        assert [browser.closed for browser in created] == [1, 1]
+        assert server._session_id_to_state == {}
+        assert "could not close the browser for session failing" in caplog.text

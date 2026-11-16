@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { readFile, rm, writeFile } from "node:fs/promises";
+import { AssistantMessageHeader } from "./assistant_message_header.mjs";
 
 // Kilo keeps its own database/config isolated, but task commands must use
 // the same home and XDG directories as the benchmark verifier.
@@ -38,6 +39,7 @@ export const TaskEnvironment = async ({ client } = {}) => {
     await (check ??= checkRequiredMcp());
   };
   const hooks = {
+    ...AssistantMessageHeader(),
     "tool.execute.before": async (input, output) => {
       if (input.tool === "background_process" && output.args?.action === "start") {
         // Verification runs after Kilo exits. The task sandbox owns these

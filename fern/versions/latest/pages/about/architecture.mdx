@@ -14,13 +14,13 @@ position: 2.5
 
 ## How NeMo Gym Implements Environments
 
-NeMo Gym implements environments as composable FastAPI servers that communicate over async HTTP:
+NeMo Gym implements environments as composable FastAPI servers that communicate over async HTTP. The server composition depends on the integration:
 
 | Concept | NeMo Gym Component Implementation |
 |---------|---------------|
-| Dataset | JSONL: Responses API input — each row is a task (a single problem or challenge) for the agent to solve |
+| Dataset | JSONL: Responses API input — each row is a task (a single problem or challenge) for the agent to solve. Rows can be supplied directly or generated from Harbor-format task folders. |
 | Agent Harness | FastAPI Agent Server |
-| Verifier + State | FastAPI Resources Server |
+| Verifier + State | FastAPI Resources Server, or a task folder's own verifier, run by the `harbor` Environment Server |
 | Model | FastAPI Model Server or managed by your own agent harness |
 | Episode orchestration | FastAPI Environment Server, which receives each episode and either decides the order of its calls or relays it to the agent |
 
@@ -39,7 +39,7 @@ Each task attempt is an *episode*. Rollout collection sends every episode to an 
 1. **Seed** — The Environment Server receives a task row from the dataset and seeds a session on the Resources Server, which sets up isolated state for this task. It then seeds a session on the Agent Server, passing along any tool and sandbox access that the Resources Server returned.
 2. **Agent Loop** — The Environment Server activates the agent session. The agent calls a model for inference, then routes tool calls to either its own tools or the Resources Server. This repeats until the agent decides the task is complete.
 3. **Close and Verify** — The Environment Server closes the agent session, then asks the Resources Server to score the attempt. The verifier inspects the final state and returns a reward signal.
-4. **Clean up** — The Environment Server closes the Resources Server session, which releases per-task state such as sandboxes.
+4. **Clean up** — The Environment Server closes the resources session, which releases per-task state such as sandboxes.
 
 ```mermaid
 sequenceDiagram
@@ -69,11 +69,13 @@ When an Environment Server drives agent sessions, the Agent Server does not deci
 
 Most shipped `simple_agent` configurations use `single_agent_turn_legacy`, which drives these steps for the flat rows that rollout collection sends to `/run`. A crash then repeats only the current step, not the whole episode. The rest stay on the `legacy_agent` relay below, because their Resources Server's `seed_session` takes only the legacy body or its `/verify` reads the row's rollout coordinates. Agents that still run the whole episode in their own `/run` use the `legacy_agent` Environment Server, which Gym also generates by default for any agent that no Environment Server names. It relays `/run` to the agent, and the agent runs the whole episode itself, including any `seed_session` and `verify` calls. Cleanup then depends on the agent, so Resources Servers on this path usually release per-task state in `verify()` (see [Session Cleanup](/main/environment-tutorials/resources-server-apis#session-cleanup)). For that request flow, see [System Design](/main/infrastructure/engineering-notes/system-design).
 
+The `harbor` Environment Server runs tasks defined as task folders in the Harbor format, and no Resources Server takes part. It keeps the same order: seed, activate, close, verify, clean up. A multi-step task repeats the agent turn and its verification per step, in a fresh agent session each unless the server sets `turn_sessions: continue`. At seed it starts the task's sandbox itself and hands the agent access to it. After it closes the agent session, it runs the task's own verifier from `tests/` in that sandbox, or in a fresh one, and reads the reward the verifier wrote. It then stops every sandbox it started. To choose between Environment Servers, see [Design Agent-Environment Interactions](/main/agent-interactions).
+
 ## Server Types
 
 ### Environment Server
 
-Receives each episode: rollout collection submits tasks to its `/run` endpoint. An Environment Server that drives agent sessions, such as `single_agent_turn`, binds an agent and a Resources Server by reference and decides the order of calls: it seeds the Resources Server and Agent Server sessions, activates the agent, closes the agent session, verifies, and cleans up, including on failure. `legacy_agent` binds only an agent and relays `/run` to it. An Environment Server does not implement tools, agent logic, or scoring.
+Receives each episode: rollout collection submits tasks to its `/run` endpoint. An Environment Server that drives agent sessions, such as `single_agent_turn`, binds an agent and a Resources Server by reference and decides the order of calls: it seeds the Resources Server and Agent Server sessions, activates the agent, closes the agent session, verifies, and cleans up, including on failure. `legacy_agent` binds only an agent and relays `/run` to it. `harbor` also binds only an agent: it owns the task's sandbox and runs the task folder's own verifier. An Environment Server implements no tools, agent logic, or scoring of its own. See [Design Agent-Environment Interactions](/main/agent-interactions).
 
 ### Agent Server
 
@@ -85,7 +87,7 @@ A stateless LLM inference endpoint that standardizes different model providers b
 
 ### Resources Server
 
-Manages environment-specific tools, per-task state isolation, and verification:
+Manages environment-specific tools, per-task state isolation, and verification for tasks defined as JSONL rows. Task folders carry their own verifier and need no Resources Server. For JSONL rows, the Resources Server provides:
 
 - **Environment-Specific Tools** — capabilities the environment provides to any agent (e.g., code execution, database queries, API calls)
 - **State Isolation** — each rollout gets its own session, so attempts never interfere with each other. Environments range from lightweight (verify a math answer, no setup needed) to heavyweight (provision a Docker container with a specific repo checkout for SWE-Bench-style tasks).
@@ -97,7 +99,7 @@ Manages environment-specific tools, per-task state isolation, and verification:
 Tools exist on a spectrum — some belong to the agent and can be used with any environment, some belong to the environment and can be used with any agent:
 
 - **Agent-specific tools** are part of the agent harness. They're capabilities the agent brings regardless of which environment it runs in (e.g., OpenHands brings file editing and terminal tools).
-- **Environment-specific tools** are part of the Resources Server. They're capabilities the environment provides to any agent that connects (e.g., a `run_tests` endpoint, a database query tool, a sandbox execution API).
+- **Environment-specific tools** can be provided by the Resources Server. They're capabilities the environment provides to any agent that connects (e.g., a `run_tests` endpoint, a database query tool, a sandbox execution API).
 
 An agent can use both simultaneously — its own tools and the environment's tools in the same task. NeMo Gym's server split reflects this: agent-specific logic in the harness, environment-specific logic in the Resources Server.
 
@@ -109,6 +111,10 @@ Gym servers communicate over async HTTP (aiohttp) with:
 - **Connection pooling** via a singleton aiohttp client for high-concurrency workloads
 
 Sandbox execution and file transfer are not Gym HTTP calls. They use the configured sandbox provider's transport, such as HTTP, gRPC, a Docker CLI, or a local subprocess.
+
+## Where the Code Lives
+
+Each server type has its own top-level directory: `resources_servers/`, `responses_api_agents/`, `responses_api_models/`, and `environment_servers/`. What they share lives in the `nemo_gym` library, which is split into layered packages. For the full map, see [Repository Layout](/api/reference/api-reference#repository-layout).
 
 ## Next Steps
 

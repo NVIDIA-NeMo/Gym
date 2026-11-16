@@ -77,6 +77,7 @@ async def collect(environment, directory, diagnostics):
                         shared_archive = (
                             shared_logs.collection_archive(artifact, collected_artifacts) if shared_logs else None
                         )
+                        refused = []
                         digest = await download_dir(
                             sandbox,
                             artifact.source,
@@ -84,7 +85,10 @@ async def collect(environment, directory, diagnostics):
                             exclude=artifact.exclude,
                             exec_command=partial(environment.exec, service=artifact.service),
                             shared_archive=shared_archive,
+                            refused=refused,
                         )
+                        if refused:
+                            record["refused"] = refused
                         if shared_archive:
                             shared_logs.retain_archive(digest, target)
                     else:

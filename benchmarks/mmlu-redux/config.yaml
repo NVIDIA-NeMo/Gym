@@ -26,5 +26,8 @@ mmlu-redux_mcqa_environment_server:
   _inherit_from: mcqa_environment_server
   environment_servers:
     single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: mmlu-redux_mcqa_resources_server
       agent_server:
         name: mmlu-redux_mcqa_simple_agent

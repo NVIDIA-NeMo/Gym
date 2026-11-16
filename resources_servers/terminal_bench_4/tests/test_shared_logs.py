@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.sandbox import SandboxSpec
+from nemo_gym.sandbox import PLACEMENT_GROUP_KEY, SandboxSpec
 from resources_servers.terminal_bench_4 import shared_logs as module
 from resources_servers.terminal_bench_4.collection import collect
 from resources_servers.terminal_bench_4.shared_logs import SharedLogs
@@ -89,6 +89,11 @@ async def test_efs_snapshot_matches_host_restore_and_survives_agent_deletion(tmp
     box.path("/logs/artifacts/report.txt").write_bytes(b"original\x00bytes")
     box.path("/logs/artifacts/report.txt").chmod(0o751)
     box.path("/logs/artifacts/link").symlink_to("report.txt")
+    box.path("/logs/artifacts/escape").symlink_to("/etc/passwd")
+    os.link(box.path("/logs/artifacts/escape"), box.path("/logs/artifacts/escape-hardlink"), follow_symlinks=False)
+    os.mkfifo(box.path("/logs/artifacts/pipe"))
+    box.path("/logs/artifacts/tool").write_text("#!/bin/sh\n")
+    box.path("/logs/artifacts/tool").chmod(0o6755)
     box.path("/logs/artifacts/empty").mkdir()
     box.path("/logs/artifacts/omit.secret").write_text("excluded")
     box.path("/app/source.txt").write_text("normal artifact")
@@ -110,6 +115,10 @@ async def test_efs_snapshot_matches_host_restore_and_survives_agent_deletion(tmp
     assert target.path("/logs/artifacts/link").is_symlink()
     assert target.path("/logs/artifacts/link").read_bytes() == b"original\x00bytes"
     assert target.path("/logs/artifacts/empty").is_dir()
+    for name in ("escape", "escape-hardlink", "pipe"):
+        assert not target.path(f"/logs/artifacts/{name}").is_symlink()
+        assert not target.path(f"/logs/artifacts/{name}").exists()
+    assert target.path("/logs/artifacts/tool").stat().st_mode & 0o7777 == 0o755
     assert not target.path("/logs/artifacts/omit.secret").exists()
     assert not target.path("/logs/undeclared.txt").exists()
     assert not list(target.path("/logs/agent").iterdir())
@@ -342,6 +351,7 @@ def test_logs_helper_uses_task_deployment_and_independent_role_mounts(
     assert cfg["opensandbox"]["connection"]["domain"] == pool + ".invalid"
     assert cfg["opensandbox"]["connection"]["api_key"] == pool.upper() + "-credential"
     assert spec.metadata["nemo-gym.nvidia.com/resource-pool"] == pool
+    assert spec.metadata[PLACEMENT_GROUP_KEY] == env.build_spec().metadata[PLACEMENT_GROUP_KEY]
     assert spec.resources.gpu is None and not spec.env
     assert env.provider_config["opensandbox"]["connection"]["domain"] == pool + ".invalid"
     env.shared_logs = logs

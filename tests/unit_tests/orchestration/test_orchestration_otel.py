@@ -13,7 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import glob
+import os
 import re
+import shlex
+import shutil
+import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -34,8 +40,9 @@ from nemo_gym.orchestration.executors.otel import (
     resolve_token,
     scrape_targets,
 )
+from nemo_gym.orchestration.executors.resume_script import render_resume_epilogue
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
-from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
+from nemo_gym.orchestration.executors.slurm_script import _collector_command, build_sbatch_script
 from nemo_gym.orchestration.jobs import RESOLVED_CONFIG_NAME
 
 
@@ -53,6 +60,13 @@ def _config(**overrides):
     if "otel" in overrides:
         overrides = {**overrides, "otel": {**base["otel"], **overrides["otel"]}}
     return SubmitConfig.model_validate({**base, **overrides})
+
+
+def _sync_extras(script: str) -> str:
+    """The extras the driver install requests of uv; the checkout's pyproject.toml decides which of them it keeps."""
+    match = re.search(r'_gym_sync_extras="\$\(_gym_declared_extras((?: --extra [\w-]+)+)\)"', script)
+    assert match, "the driver install requests no extras"
+    return match.group(1)
 
 
 def _script(config, bench_dir=BENCH_DIR):
@@ -344,7 +358,8 @@ def test_collector_token_reference_follows_token_env():
 
 def test_collector_writes_a_local_copy_next_to_the_managed_export():
     doc = _rendered()
-    assert doc["exporters"]["file/metrics"]["path"] == str(BENCH_DIR / "otel" / "metrics.jsonl")
+    # Node-local while the job runs; the collector's step appends it into the job directory when it stops.
+    assert doc["exporters"]["file/metrics"]["path"] == "${env:GYM_OTEL_LOCAL_DIR}/metrics.jsonl"
     for signal in ("metrics", "traces", "logs"):
         managed, local = doc["service"]["pipelines"][signal], doc["service"]["pipelines"][f"{signal}/local"]
         assert managed["exporters"] == ["otlp_http/managed"]
@@ -363,11 +378,17 @@ def test_local_only_collector_needs_no_destination_or_token():
     for signal in ("metrics", "traces", "logs"):
         local = doc["service"]["pipelines"][f"{signal}/local"]
         assert f"file/{signal}" in local["exporters"]
-        assert doc["exporters"][f"file/{signal}"]["path"] == str(BENCH_DIR / "otel" / f"{signal}.jsonl")
+        assert doc["exporters"][f"file/{signal}"]["path"] == f"${{env:GYM_OTEL_LOCAL_DIR}}/{signal}.jsonl"
     rendered = yaml.safe_dump(doc)
     assert "OTEL_TOKEN" not in rendered
     assert "Authorization" not in rendered
     assert "managed" not in rendered
+
+
+def test_collector_for_a_job_script_without_the_copy_writes_into_the_job_directory():
+    doc = yaml.safe_load(render_collector_config(_config(), "scicode", BENCH_DIR, node_local=False))
+    for signal in ("metrics", "traces", "logs"):
+        assert doc["exporters"][f"file/{signal}"]["path"] == str(BENCH_DIR / "otel" / f"{signal}.jsonl")
 
 
 def test_the_token_never_reaches_the_job_directory_copies():
@@ -439,27 +460,97 @@ def test_script_pins_the_collector_to_one_node_of_a_multi_node_job():
 
 
 def test_script_runs_the_collector_on_the_node_by_default():
-    line = next(
-        line for line in _script(_config()).splitlines() if "--output=logs/otel_collector-$SLURM_JOB_ID.log" in line
-    )
+    line = _collector_line(_script(_config()))
     assert "--container" not in line
     assert line.startswith("env ")
-    assert (
-        f" srun --overlap --output=logs/otel_collector-$SLURM_JOB_ID.log otelcol-contrib --config {collector_config_path(BENCH_DIR)} &"
-        in line
+    assert " srun --overlap --account=acct --output=logs/otel_collector-$SLURM_JOB_ID.log sh -c " in line
+    # A node-local copy of the binary runs, with its jsonl written beside it.
+    assert "src=$(command -v otelcol-contrib)" in line
+    assert 'dir=$(mktemp -d "/tmp/gym-otel-$SLURM_JOB_ID.XXXXXX") && cp "$src" "$dir"/otelcol-contrib' in line
+    assert 'export GYM_OTEL_LOCAL_DIR="$dir"' in line
+    assert f'"$dir"/otelcol-contrib --config {collector_config_path(BENCH_DIR)} & pid=$!' in line
+    assert line.rstrip().endswith("&")
+
+
+def test_script_appends_the_node_local_jsonl_into_the_job_directory_once_the_collector_stops():
+    line = _collector_line(_script(_config()))
+    copy = f'cat "$dir/$s.jsonl" >> {BENCH_DIR / "otel"}/"$s.jsonl" && rm -f "$dir/$s.jsonl"'
+    assert f'for s in metrics traces logs; do if [ -e "$dir/$s.jsonl" ]; then {copy}; fi; done' in line
+    assert line.index("wait $pid") < line.index('trap "" TERM INT') < line.index(copy)
+    assert line.rstrip(" &'").endswith("exit $rc")
+
+
+def _run_collector_step(config, bench_dir, job_id, *, stop):
+    """Run the collector step's own command as srun would, then `stop` it; returns its exit code and leftovers."""
+    local_dirs = f"/tmp/gym-otel-{job_id}.*"
+    step = subprocess.Popen(
+        shlex.split(_collector_command(config, bench_dir)), env={**os.environ, "SLURM_JOB_ID": job_id}
     )
+    try:
+        deadline = time.monotonic() + 10
+        while not glob.glob(f"{local_dirs}/traces.jsonl") and time.monotonic() < deadline:
+            time.sleep(0.05)
+        stop(step)
+        return step.wait(timeout=10), glob.glob(local_dirs)
+    finally:
+        step.kill()
+        for leftover in glob.glob(local_dirs):
+            shutil.rmtree(leftover, ignore_errors=True)
+
+
+def _fake_collector(tmp_path):
+    """Writes one span node-local at start and one more when TERM asks it to flush, like the collector's exporter."""
+    fake = tmp_path / "bin" / "otelcol-contrib"
+    fake.parent.mkdir()
+    fake.write_text(
+        "#!/bin/sh\n"
+        'echo start >> "$GYM_OTEL_LOCAL_DIR/traces.jsonl"\n'
+        "trap 'echo flushed >> \"$GYM_OTEL_LOCAL_DIR/traces.jsonl\"; exit 0' TERM\n"
+        "while :; do sleep 0.05; done\n"
+    )
+    fake.chmod(0o755)
+    return fake
+
+
+@pytest.mark.skipif(shutil.which("sh") is None or shutil.which("mktemp") is None, reason="sh and mktemp needed")
+def test_collector_step_appends_after_an_earlier_segment_when_slurm_terms_the_step(tmp_path):
+    # At the time limit Slurm sends TERM to every process of the step: the shell passes it on, waits, then copies.
+    bench_dir = tmp_path / "gym-job-x" / "scicode"
+    (bench_dir / "otel").mkdir(parents=True)
+    (bench_dir / "otel" / "traces.jsonl").write_text("earlier segment\n")
+    config = _config(otel={"binary": str(_fake_collector(tmp_path))})
+
+    rc, leftovers = _run_collector_step(config, bench_dir, f"t{os.getpid()}", stop=lambda p: p.send_signal(15))
+
+    assert rc == 0
+    assert (bench_dir / "otel" / "traces.jsonl").read_text() == "earlier segment\nstart\nflushed\n"
+    assert not (bench_dir / "otel" / "metrics.jsonl").exists()
+    assert leftovers == []
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="sh needed")
+def test_collector_step_fails_clearly_without_its_binary(tmp_path):
+    config = _config(otel={"binary": str(tmp_path / "missing" / "otelcol-contrib")})
+    step = subprocess.run(
+        shlex.split(_collector_command(config, BENCH_DIR)),
+        env={**os.environ, "SLURM_JOB_ID": "1"},
+        capture_output=True,
+        text=True,
+    )
+    assert step.returncode == 127
+    assert "OTel collector binary not found" in step.stderr
 
 
 def test_script_runs_the_collector_in_a_container_with_the_job_dir_mounted_when_one_is_set():
     config = _config(otel={"container": "/shared/images/otelcol.sqsh", "binary": "/otelcol-contrib"})
-    line = next(
-        line for line in _script(config).splitlines() if "--output=logs/otel_collector-$SLURM_JOB_ID.log" in line
-    )
+    line = _collector_line(_script(config))
     assert "--container-image=/shared/images/otelcol.sqsh" in line
     assert "--no-container-mount-home" in line
+    # The job dir holds the config and receives the copied jsonl; the node-local dir is the container's own /tmp.
     assert f"--container-mounts={BENCH_DIR}:{BENCH_DIR}" in line
     assert f"--container-workdir={BENCH_DIR}" in line
-    assert f"/otelcol-contrib --config {collector_config_path(BENCH_DIR)}" in line
+    assert "src=$(command -v /otelcol-contrib)" in line
+    assert f'"$dir"/otelcol-contrib --config {collector_config_path(BENCH_DIR)}' in line
     assert line.rstrip().endswith("&")
 
 
@@ -482,12 +573,12 @@ def test_local_only_script_keeps_collection_without_forwarding_the_token():
     assert "DRIVER_RC=$?" in script
 
 
-def test_script_honours_a_binary_path_on_shared_storage():
+def test_script_copies_a_binary_on_shared_storage_and_never_runs_it_there():
     config = _config(otel={"binary": "/shared/tools/otelcol-contrib"})
-    line = next(
-        line for line in _script(config).splitlines() if "--output=logs/otel_collector-$SLURM_JOB_ID.log" in line
-    )
-    assert " /shared/tools/otelcol-contrib --config " in line
+    line = _collector_line(_script(config))
+    assert "src=$(command -v /shared/tools/otelcol-contrib)" in line
+    assert "/shared/tools/otelcol-contrib --config" not in line
+    assert f'"$dir"/otelcol-contrib --config {collector_config_path(BENCH_DIR)}' in line
     assert "--container" not in line
 
 
@@ -502,14 +593,48 @@ def test_script_flushes_the_collector_after_the_driver_and_keeps_the_driver_exit
     script = _script(_config())
     tail = script[script.index("--output=logs/driver-$SLURM_JOB_ID.log") :]
     assert "DRIVER_RC=$?" in tail
-    # Anchored to the binary so the launching srun, whose command line also carries the path, is
-    # not signalled: TERM to srun kills the step before the collector can flush.
-    expected = re.escape("otelcol-contrib") + " --config " + re.escape(str(collector_config_path(BENCH_DIR)))
-    assert f"pkill -TERM -u \"$USER\" -f -- '^{expected}'" in tail
+    assert 'pkill -TERM -u "$USER" -f -- ' in tail
     assert tail.rstrip().endswith("exit $DRIVER_RC")
     assert tail.index("sleep 20") < tail.index("pkill -TERM") < tail.index("kill -0 $OTEL_COLLECTOR_PID")
     # srun only gets TERM as a last resort, after the collector had its chance to flush.
     assert tail.index("kill -0 $OTEL_COLLECTOR_PID") < tail.index("kill -TERM $OTEL_COLLECTOR_PID")
+
+
+def _pkill_regex(script, job_id):
+    """The regular expression pkill receives once the batch shell has expanded the pattern's words."""
+    line = next(line for line in script.splitlines() if "pkill -TERM" in line)
+    words = line[line.index(" -- ") + len(" -- ") : line.index(" || true")]
+    printed = subprocess.run(
+        ["bash", "-c", f"printf %s {words}"],
+        env={**os.environ, "SLURM_JOB_ID": job_id},
+        capture_output=True,
+        text=True,
+    )
+    return printed.stdout
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash needed")
+def test_the_shutdown_signals_only_this_jobs_node_local_collector():
+    # The srun and the shell that launched the collector carry the same `--config <path>`; a TERM to srun makes
+    # Slurm kill the step before the flush and the copy complete.
+    script = _script(_config())
+    regex = _pkill_regex(script, "4242")
+    config_arg = f"--config {collector_config_path(BENCH_DIR)}"
+    assert re.search(regex, f"/tmp/gym-otel-4242.Xy12Ab/otelcol-contrib {config_arg}")
+    assert not re.search(regex, f"/tmp/gym-otel-4243.Xy12Ab/otelcol-contrib {config_arg}")
+    assert not re.search(regex, f"otelcol-contrib {config_arg}")
+    collector_step = _collector_line(script)
+    assert not re.search(regex, collector_step[collector_step.index("srun") :])
+    assert not re.search(regex, " ".join(shlex.split(_collector_command(_config(), BENCH_DIR))))
+
+
+def test_a_resumable_script_ends_its_own_chain_before_the_flush_reads_the_driver_status():
+    driver = {"container": "gym:latest", "policy_model": "policy", "benchmarks": {"scicode": {"resumable": {}}}}
+    script = _script(_config(driver=driver))
+    tail = script[script.index("--output=logs/driver-$SLURM_JOB_ID.log") :]
+    # The epilogue returns the driver's status, which the flush keeps as the job's.
+    assert render_resume_epilogue() + "\nDRIVER_RC=$?" in tail
+    assert tail.rstrip().endswith("exit $DRIVER_RC")
 
 
 def _driver_line(script):
@@ -532,7 +657,7 @@ def test_script_switches_on_gym_lens_telemetry_toward_the_collector():
     assert "NEMO_GYM_OTEL_SPAN_GROUPS=default,verify" in line
     assert "OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318" in line
     assert "OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf" in line
-    assert 'uv pip install -e ".[telemetry,ray]"' in script
+    assert _sync_extras(script) == " --extra telemetry --extra ray"
 
 
 def test_script_installs_the_sdk_of_a_configured_exporter():
@@ -542,13 +667,13 @@ def test_script_installs_the_sdk_of_a_configured_exporter():
         "mlflow_run_name": "run",
     }
     driver = {**_DRIVER_WITH_INSTALL, "benchmarks": {"scicode": {"run": run}}}
-    assert 'uv pip install -e ".[telemetry,mlflow,ray]"' in _script(_config(driver=driver))
+    assert _sync_extras(_script(_config(driver=driver))) == " --extra telemetry --extra mlflow --extra ray"
 
 
 def test_script_skips_the_sdk_of_a_partly_configured_exporter():
     # A tracking URI alone (a registry lookup) opens no exporter, so needs no SDK.
     driver = {**_DRIVER_WITH_INSTALL, "benchmarks": {"scicode": {"run": {"mlflow_tracking_uri": "https://x"}}}}
-    assert 'uv pip install -e ".[telemetry,ray]"' in _script(_config(driver=driver))
+    assert _sync_extras(_script(_config(driver=driver))) == " --extra telemetry --extra ray"
 
 
 @pytest.mark.parametrize("section", ["prepare", "run"])
@@ -556,7 +681,9 @@ def test_script_installs_mlflow_for_gitlab_dataset_storage(section):
     # A tracking URI and token without an experiment open no exporter, but a GitLab download needs mlflow.
     creds = {"mlflow_tracking_uri": "https://gitlab.example", "mlflow_tracking_token": "token"}
     driver = {**_DRIVER_WITH_INSTALL, "benchmarks": {"scicode": {section: creds}}}
-    assert 'uv pip install -e ".[telemetry,mlflow,ray]"' in _script(_config(driver=driver))
+    script = _script(_config(driver=driver))
+    assert _sync_extras(script) == " --extra telemetry --extra mlflow --extra ray"
+    assert "uv pip install" not in script
 
 
 def test_script_installs_mlflow_once_for_an_exporter_and_gitlab_storage():
@@ -567,7 +694,10 @@ def test_script_installs_mlflow_once_for_an_exporter_and_gitlab_storage():
         "mlflow_run_name": "run",
     }
     driver = {**_DRIVER_WITH_INSTALL, "benchmarks": {"scicode": {"prepare": run, "run": run}}}
-    assert 'uv pip install -e ".[telemetry,mlflow,ray]"' in _script(_config(driver=driver))
+    script = _script(_config(driver=driver))
+    assert _sync_extras(script) == " --extra telemetry --extra mlflow --extra ray"
+    assert script.count("--extra mlflow") == 1
+    assert "uv pip install" not in script
 
 
 def test_script_lets_an_explicit_driver_env_win_over_telemetry_defaults():
@@ -667,7 +797,8 @@ def test_vllm_traces_skip_a_tier_whose_api_server_is_on_another_node():
 def test_script_leaves_the_driver_alone_when_disabled():
     script = _script(_config(otel={"enabled": False}, driver=_DRIVER_WITH_INSTALL))
     assert "NEMO_GYM_OTEL" not in script
-    assert 'uv pip install -e ".[ray]"' in script
+    assert "uv sync --locked" in script
+    assert "[telemetry]" not in script
 
 
 def test_script_has_no_collector_when_disabled():
@@ -727,7 +858,7 @@ def test_gym_telemetry_off_keeps_the_collector_and_skips_lens():
     script = _script(_config(otel={"gym_telemetry": False}, driver=_DRIVER_WITH_INSTALL))
     assert "--output=logs/otel_collector-$SLURM_JOB_ID.log" in script
     assert "NEMO_GYM_OTEL_ENABLED" not in script
-    assert 'uv pip install -e ".[ray]"' in script
+    assert _sync_extras(script) == " --extra ray"
 
 
 def test_submit_without_a_token_stages_and_persists_local_only_collection(tmp_path, monkeypatch, caplog):

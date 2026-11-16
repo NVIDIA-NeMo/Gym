@@ -35,6 +35,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
 )
+from nemo_gym.verification import JudgeError, judge_failsafe
 from resources_servers.arena.app import (
     ArenaResourcesServer,
     ArenaResourcesServerConfig,
@@ -800,14 +801,76 @@ class TestArenaResourcesServer:
             await asyncio.wait_for(server.verify(self._make_verify_request("My answer.")), timeout=2)
         assert state == {"calls": 2, "cancelled": True}
 
-    async def test_verify_unparseable_judge_output(self, server: ArenaResourcesServer):
-        # Judge doesn't output a valid verdict label → 0.0 for both rounds
-        self._setup_judge_responses(server, ["I cannot decide.", "unclear"])
+    def _setup_judge_texts(
+        self, server: ArenaResourcesServer, texts: list[str], incomplete_reasons: list[str | None] | None = None
+    ) -> None:
+        """Mock the judge with raw reply texts; a reason marks that reply as cut (``incomplete``)."""
+        post_mocks = []
+        for i, text in enumerate(texts):
+            reply = _make_response(f"judge-{i}", _make_output_message(text))
+            reason = incomplete_reasons[i] if incomplete_reasons else None
+            if reason:
+                reply |= {"status": "incomplete", "incomplete_details": {"reason": reason}}
+            post_mocks.append(_make_post_mock(json.dumps(reply)))
+        server.server_client.post = AsyncMock(side_effect=post_mocks)
+
+    @mark.parametrize(
+        "texts,reasons,expected",
+        [
+            (
+                ["I cannot decide.", "unclear"],
+                None,
+                "game 1 (no verdict label in the judge output) and game 2 (no verdict label in the judge output)",
+            ),
+            (
+                ["[[A>B]]", "The answer is [[B"],
+                [None, "max_output_tokens"],
+                "game 2 (judge output incomplete: max_output_tokens)",
+            ),
+            (["", "[[B>A]]"], ["content_filter", None], "game 1 (judge output incomplete: content_filter)"),
+        ],
+    )
+    async def test_verify_a_game_without_verdict_is_a_judge_failure_not_a_loss(
+        self, server: ArenaResourcesServer, texts, reasons, expected
+    ):
+        self._setup_judge_texts(server, texts, reasons)
+
+        with raises(JudgeError) as failure:
+            await server.verify(self._make_verify_request("Answer."))
+
+        assert str(failure.value) == f"The judge gave no verdict for {expected}"
+
+    async def test_verify_a_game_without_verdict_is_masked_and_typed_judge_failed(self, server: ArenaResourcesServer):
+        request = self._make_verify_request("Answer.")
+        self._setup_judge_texts(server, ["[[A>B]]", "cut off mid-sentence"], [None, "max_output_tokens"])
+
+        result = await judge_failsafe(server.verify)(body=request)
+
+        data = json.loads(result.body)
+        assert data["_ng_failure_class"] == "judge_failed"
+        assert data["failure_kind"] == "judge_failed"
+        assert data["mask_sample"] is True
+        assert data["reward"] == 0.0
+        assert "game 2 (judge output incomplete: max_output_tokens)" in data["failure_reason"]
+        assert data["response"] == request.response.model_dump(mode="json")  # kept for re-judging
+
+    @mark.parametrize(
+        "texts,reward",
+        [
+            (["[[A>B]]", "[[B>A]]"], 1.0),
+            (["[[A=B]]", "[[A=B]]"], 0.5),
+            (["[[BB]]", "[[BB]]"], 0.5),
+            (["[[B>A]]", "[[A>B]]"], 0.0),
+            (["[[A>B]]", "[[A>B]]"], 0.5),
+        ],
+    )
+    async def test_verify_genuine_verdicts_keep_their_scores(self, server: ArenaResourcesServer, texts, reward):
+        self._setup_judge_texts(server, texts)
 
         result = await server.verify(self._make_verify_request("Answer."))
-        assert result.reward == approx(0.0)
-        assert result.games[0].verdict is None
-        assert result.games[1].verdict is None
+
+        assert result.reward == approx(reward)
+        assert all(game.verdict is not None for game in result.games)
 
     async def test_verify_generation_only_skips_judge(self, server: ArenaResourcesServer):
         server.config.generation_only = True
@@ -1687,14 +1750,17 @@ class TestJudgeHttpError:
     _make_verify_request = TestArenaResourcesServer._make_verify_request
 
     async def test_a_judge_500_is_a_judge_failure_with_its_status_and_body_not_a_parse_error(
-        self, server: ArenaResourcesServer
+        self, server: ArenaResourcesServer, monkeypatch
     ):
         import aiohttp
         from aiohttp import web
         from aiohttp.test_utils import TestServer
 
+        from nemo_gym.verification import judge as judge_module
         from nemo_gym.verification import judge_failsafe
 
+        monkeypatch.setattr(judge_module, "_judge_retry_wait_s", lambda attempt: 0)
+        attempts = judge_module.JUDGE_CALL_MAX_ATTEMPTS
         body = "Error code: 429 - rate limit exceeded"
         hits = []
 
@@ -1719,4 +1785,6 @@ class TestJudgeHttpError:
         # The judge's real status and body are kept; the 429 in the body text classifies nothing.
         assert "ClientResponseError" in error and "500" in error and "ValidationError" not in error
         assert row["response"] == request.response.model_dump(mode="json")  # the saved answer is kept
-        assert len(hits) == 2  # one call per ordering, no extra request
+        # A 500 is retried up to the bounded attempts of one call; the ordering that exhausts them
+        # first cancels its sibling, so two orderings never make more than twice that bound.
+        assert attempts <= len(hits) <= 2 * attempts

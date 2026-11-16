@@ -1,0 +1,1066 @@
+{
+ "case": "derived-descriptions-pointers-history",
+ "kind": "gateway",
+ "notes": "",
+ "spec": {
+  "schema_version": 1,
+  "harness": "opencode",
+  "task_backend": "swe",
+  "tools": {
+   "tool_names": {
+    "bash": "bash",
+    "read": "read"
+   },
+   "tool_descriptions": {
+    "read": "Read {{literal}} exactly",
+    "bash": "Run one command."
+   },
+   "tool_parameter_descriptions": {
+    "read": {
+     "path": "Path exactly"
+    },
+    "bash": {
+     "/properties/command": "The command line",
+     "/properties/options/properties/env/items": "One pair",
+     "/properties/mode/anyOf/0": "Speed",
+     "/properties/paths/items/1": "Second path",
+     "/$defs/pair/properties/key": "Pair key",
+     "/properties/options": "Options object"
+    }
+   },
+   "tool_interfaces": {}
+  },
+  "workspace_files": {},
+  "events": [],
+  "checks": [],
+  "provenance": {}
+ },
+ "params": {
+  "input": [
+   {
+    "content": "Literal system é ✓",
+    "role": "system",
+    "type": "message"
+   },
+   {
+    "content": "Fix it",
+    "role": "user",
+    "type": "message"
+   }
+  ],
+  "parallel_tool_calls": true,
+  "tool_choice": "auto",
+  "tools": []
+ },
+ "calls": [
+  {
+   "headers": {
+    "x-session-id": "root",
+    "x-opencode-assistant-message-id": "a1"
+   },
+   "opencode_request": {
+    "stream": true,
+    "messages": [
+     {
+      "role": "system",
+      "content": "Native"
+     },
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "bash",
+       "description": "Native bash",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "command": {
+          "type": "string",
+          "description": "native command"
+         },
+         "options": {
+          "type": "object",
+          "properties": {
+           "timeout": {
+            "type": "integer"
+           },
+           "env": {
+            "type": "array",
+            "items": {
+             "$ref": "#/$defs/pair"
+            }
+           }
+          }
+         },
+         "mode": {
+          "anyOf": [
+           {
+            "type": "string",
+            "enum": [
+             "fast",
+             "slow"
+            ]
+           },
+           {
+            "type": "null"
+           }
+          ]
+         },
+         "paths": {
+          "type": "array",
+          "items": [
+           {
+            "type": "string"
+           },
+           {
+            "type": "string"
+           }
+          ]
+         }
+        },
+        "required": [
+         "command"
+        ],
+        "$defs": {
+         "pair": {
+          "type": "object",
+          "properties": {
+           "key": {
+            "type": "string"
+           }
+          },
+          "default": {
+           "type": "x"
+          }
+         }
+        },
+        "additionalProperties": false
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "description": "Native",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "path"
+        ],
+        "additionalProperties": false
+       }
+      }
+     }
+    ],
+    "tool_choice": {
+     "type": "function",
+     "function": {
+      "name": "bash"
+     }
+    }
+   },
+   "upstream_reply": {
+    "sse_events": [
+     {
+      "id": "chatcmpl-1",
+      "object": "chat.completion.chunk",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "role": "assistant",
+         "content": "Looking"
+        },
+        "finish_reason": null
+       }
+      ]
+     },
+     {
+      "id": "chatcmpl-1",
+      "object": "chat.completion.chunk",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "tool_calls": [
+          {
+           "index": 0,
+           "id": "c-1",
+           "type": "function",
+           "function": {
+            "name": "bash"
+           }
+          }
+         ]
+        },
+        "finish_reason": null
+       }
+      ]
+     },
+     {
+      "id": "chatcmpl-1",
+      "object": "chat.completion.chunk",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "tool_calls": [
+          {
+           "index": 0,
+           "function": {
+            "arguments": "{ \"command\" : \"ls"
+           }
+          }
+         ]
+        },
+        "finish_reason": null
+       }
+      ]
+     },
+     {
+      "id": "chatcmpl-1",
+      "object": "chat.completion.chunk",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "tool_calls": [
+          {
+           "index": 0,
+           "function": {
+            "arguments": " -la\",  \"options\""
+           }
+          }
+         ]
+        },
+        "finish_reason": null
+       }
+      ]
+     },
+     {
+      "id": "chatcmpl-1",
+      "object": "chat.completion.chunk",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "tool_calls": [
+          {
+           "index": 0,
+           "function": {
+            "arguments": ": {\"timeout\": 5} "
+           }
+          }
+         ]
+        },
+        "finish_reason": null
+       }
+      ]
+     },
+     {
+      "id": "chatcmpl-1",
+      "object": "chat.completion.chunk",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "tool_calls": [
+          {
+           "index": 0,
+           "function": {
+            "arguments": "}"
+           }
+          }
+         ]
+        },
+        "finish_reason": null
+       }
+      ]
+     },
+     {
+      "id": "chatcmpl-1",
+      "object": "chat.completion.chunk",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {},
+        "finish_reason": "tool_calls"
+       }
+      ]
+     },
+     {
+      "id": "chatcmpl-1",
+      "object": "chat.completion.chunk",
+      "choices": [],
+      "usage": {
+       "prompt_tokens": 100,
+       "completion_tokens": 10,
+       "total_tokens": 110
+      }
+     }
+    ],
+    "sse_wire": "data: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"Looking\"}, \"finish_reason\": null}]}\r\n\r\ndata: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"id\": \"c-1\", \"type\": \"function\", \"function\": {\"name\": \"bash\"}}]}, \"finish_reason\": null}]}\r\n\r\ndata: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"{ \\\"command\\\" : \\\"ls\"}}]}, \"finish_reason\": null}]}\r\n\r\ndata: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \" -la\\\",  \\\"options\\\"\"}}]}, \"finish_reason\": null}]}\r\n\r\ndata: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \": {\\\"timeout\\\": 5} \"}}]}, \"finish_reason\": null}]}\r\n\r\ndata: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"}\"}}]}, \"finish_reason\": null}]}\r\n\r\ndata: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"tool_calls\"}]}\r\n\r\ndata: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [], \"usage\": {\"prompt_tokens\": 100, \"completion_tokens\": 10, \"total_tokens\": 110}}\r\n\r\ndata: [DONE]\r\n\r\n"
+   },
+   "returned": {
+    "sse_text": "data: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"Looking\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"name\": \"bash\", \"arguments\": \"{ \\\"command\\\" : \\\"ls\"}, \"id\": \"c-1\", \"type\": \"function\"}]}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \" -la\\\",  \\\"options\\\"\"}}]}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \": {\\\"timeout\\\": 5} \"}}]}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"}\"}}]}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"tool_calls\"}]}\n\ndata: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [], \"usage\": {\"prompt_tokens\": 100, \"completion_tokens\": 10, \"total_tokens\": 110}}\n\ndata: [DONE]\n\n"
+   },
+   "error": null,
+   "outgoing_request": {
+    "stream": true,
+    "messages": [
+     {
+      "role": "system",
+      "content": "Literal system é ✓"
+     },
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "bash",
+       "description": "Run one command.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "command": {
+          "type": "string",
+          "description": "The command line"
+         },
+         "options": {
+          "type": "object",
+          "properties": {
+           "timeout": {
+            "type": "integer"
+           },
+           "env": {
+            "type": "array",
+            "items": {
+             "$ref": "#/$defs/pair",
+             "description": "One pair"
+            }
+           }
+          },
+          "description": "Options object"
+         },
+         "mode": {
+          "anyOf": [
+           {
+            "type": "string",
+            "enum": [
+             "fast",
+             "slow"
+            ],
+            "description": "Speed"
+           },
+           {
+            "type": "null"
+           }
+          ]
+         },
+         "paths": {
+          "type": "array",
+          "items": [
+           {
+            "type": "string"
+           },
+           {
+            "type": "string",
+            "description": "Second path"
+           }
+          ]
+         }
+        },
+        "required": [
+         "command"
+        ],
+        "$defs": {
+         "pair": {
+          "type": "object",
+          "properties": {
+           "key": {
+            "type": "string",
+            "description": "Pair key"
+           }
+          },
+          "default": {
+           "type": "x"
+          }
+         }
+        },
+        "additionalProperties": false
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "description": "Read {{literal}} exactly",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string",
+          "description": "Path exactly"
+         }
+        },
+        "required": [
+         "path"
+        ],
+        "additionalProperties": false
+       }
+      }
+     }
+    ],
+    "tool_choice": {
+     "type": "function",
+     "function": {
+      "name": "bash"
+     }
+    }
+   },
+   "opencode_request_unchanged": true
+  },
+  {
+   "headers": {
+    "x-session-id": "root",
+    "x-opencode-assistant-message-id": "a2"
+   },
+   "opencode_request": {
+    "stream": true,
+    "messages": [
+     {
+      "role": "system",
+      "content": "Native"
+     },
+     {
+      "role": "user",
+      "content": "Fix it"
+     },
+     {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "c-1",
+        "type": "function",
+        "function": {
+         "name": "bash",
+         "arguments": "{\"command\":\"ls -la\",\"options\":{\"timeout\":5}}"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "tool_call_id": "c-1",
+      "name": "bash",
+      "content": "a.py\n"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "bash",
+       "description": "Native bash",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "command": {
+          "type": "string",
+          "description": "native command"
+         },
+         "options": {
+          "type": "object",
+          "properties": {
+           "timeout": {
+            "type": "integer"
+           },
+           "env": {
+            "type": "array",
+            "items": {
+             "$ref": "#/$defs/pair"
+            }
+           }
+          }
+         },
+         "mode": {
+          "anyOf": [
+           {
+            "type": "string",
+            "enum": [
+             "fast",
+             "slow"
+            ]
+           },
+           {
+            "type": "null"
+           }
+          ]
+         },
+         "paths": {
+          "type": "array",
+          "items": [
+           {
+            "type": "string"
+           },
+           {
+            "type": "string"
+           }
+          ]
+         }
+        },
+        "required": [
+         "command"
+        ],
+        "$defs": {
+         "pair": {
+          "type": "object",
+          "properties": {
+           "key": {
+            "type": "string"
+           }
+          },
+          "default": {
+           "type": "x"
+          }
+         }
+        },
+        "additionalProperties": false
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "description": "Native",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "path"
+        ],
+        "additionalProperties": false
+       }
+      }
+     }
+    ]
+   },
+   "upstream_reply": {
+    "sse_events": [
+     {
+      "id": "chatcmpl-1",
+      "object": "chat.completion.chunk",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "role": "assistant",
+         "content": "Done"
+        },
+        "finish_reason": null
+       }
+      ]
+     },
+     {
+      "id": "chatcmpl-1",
+      "object": "chat.completion.chunk",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {},
+        "finish_reason": "stop"
+       }
+      ]
+     },
+     {
+      "id": "chatcmpl-1",
+      "object": "chat.completion.chunk",
+      "choices": [],
+      "usage": {
+       "prompt_tokens": 100,
+       "completion_tokens": 10,
+       "total_tokens": 110
+      }
+     }
+    ],
+    "sse_wire": "data: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"Done\"}, \"finish_reason\": null}]}\r\n\r\ndata: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}]}\r\n\r\ndata: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [], \"usage\": {\"prompt_tokens\": 100, \"completion_tokens\": 10, \"total_tokens\": 110}}\r\n\r\ndata: [DONE]\r\n\r\n"
+   },
+   "returned": {
+    "sse_text": "data: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {\"role\": \"assistant\", \"content\": \"Done\"}, \"finish_reason\": null}]}\n\ndata: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"stop\"}]}\n\ndata: {\"id\": \"chatcmpl-1\", \"object\": \"chat.completion.chunk\", \"choices\": [], \"usage\": {\"prompt_tokens\": 100, \"completion_tokens\": 10, \"total_tokens\": 110}}\n\ndata: [DONE]\n\n"
+   },
+   "error": null,
+   "outgoing_request": {
+    "stream": true,
+    "messages": [
+     {
+      "role": "system",
+      "content": "Literal system é ✓"
+     },
+     {
+      "role": "user",
+      "content": "Fix it"
+     },
+     {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "c-1",
+        "type": "function",
+        "function": {
+         "name": "bash",
+         "arguments": "{ \"command\" : \"ls -la\",  \"options\": {\"timeout\": 5} }"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "tool_call_id": "c-1",
+      "content": "a.py\n"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "bash",
+       "description": "Run one command.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "command": {
+          "type": "string",
+          "description": "The command line"
+         },
+         "options": {
+          "type": "object",
+          "properties": {
+           "timeout": {
+            "type": "integer"
+           },
+           "env": {
+            "type": "array",
+            "items": {
+             "$ref": "#/$defs/pair",
+             "description": "One pair"
+            }
+           }
+          },
+          "description": "Options object"
+         },
+         "mode": {
+          "anyOf": [
+           {
+            "type": "string",
+            "enum": [
+             "fast",
+             "slow"
+            ],
+            "description": "Speed"
+           },
+           {
+            "type": "null"
+           }
+          ]
+         },
+         "paths": {
+          "type": "array",
+          "items": [
+           {
+            "type": "string"
+           },
+           {
+            "type": "string",
+            "description": "Second path"
+           }
+          ]
+         }
+        },
+        "required": [
+         "command"
+        ],
+        "$defs": {
+         "pair": {
+          "type": "object",
+          "properties": {
+           "key": {
+            "type": "string",
+            "description": "Pair key"
+           }
+          },
+          "default": {
+           "type": "x"
+          }
+         }
+        },
+        "additionalProperties": false
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "description": "Read {{literal}} exactly",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string",
+          "description": "Path exactly"
+         }
+        },
+        "required": [
+         "path"
+        ],
+        "additionalProperties": false
+       }
+      }
+     }
+    ]
+   },
+   "opencode_request_unchanged": true
+  }
+ ],
+ "observations": [
+  {
+   "source": "model",
+   "session_id": "root",
+   "assistant_message_id": "a1",
+   "request": {
+    "stream": true,
+    "messages": [
+     {
+      "role": "system",
+      "content": "Literal system é ✓"
+     },
+     {
+      "role": "user",
+      "content": "Fix it"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "bash",
+       "description": "Run one command.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "command": {
+          "type": "string",
+          "description": "The command line"
+         },
+         "options": {
+          "type": "object",
+          "properties": {
+           "timeout": {
+            "type": "integer"
+           },
+           "env": {
+            "type": "array",
+            "items": {
+             "$ref": "#/$defs/pair",
+             "description": "One pair"
+            }
+           }
+          },
+          "description": "Options object"
+         },
+         "mode": {
+          "anyOf": [
+           {
+            "type": "string",
+            "enum": [
+             "fast",
+             "slow"
+            ],
+            "description": "Speed"
+           },
+           {
+            "type": "null"
+           }
+          ]
+         },
+         "paths": {
+          "type": "array",
+          "items": [
+           {
+            "type": "string"
+           },
+           {
+            "type": "string",
+            "description": "Second path"
+           }
+          ]
+         }
+        },
+        "required": [
+         "command"
+        ],
+        "$defs": {
+         "pair": {
+          "type": "object",
+          "properties": {
+           "key": {
+            "type": "string",
+            "description": "Pair key"
+           }
+          },
+          "default": {
+           "type": "x"
+          }
+         }
+        },
+        "additionalProperties": false
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "description": "Read {{literal}} exactly",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string",
+          "description": "Path exactly"
+         }
+        },
+        "required": [
+         "path"
+        ],
+        "additionalProperties": false
+       }
+      }
+     }
+    ],
+    "tool_choice": {
+     "type": "function",
+     "function": {
+      "name": "bash"
+     }
+    }
+   },
+   "execution_tools": {
+    "bash": "bash",
+    "read": "read"
+   },
+   "response": {
+    "id": "chatcmpl-1",
+    "object": "chat.completion",
+    "usage": {
+     "prompt_tokens": 100,
+     "completion_tokens": 10,
+     "total_tokens": 110
+    },
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "Looking",
+       "tool_calls": [
+        {
+         "function": {
+          "name": "bash",
+          "arguments": "{ \"command\" : \"ls -la\",  \"options\": {\"timeout\": 5} }"
+         },
+         "id": "c-1",
+         "type": "function"
+        }
+       ]
+      },
+      "finish_reason": "tool_calls"
+     }
+    ]
+   }
+  },
+  {
+   "source": "model",
+   "session_id": "root",
+   "assistant_message_id": "a2",
+   "request": {
+    "stream": true,
+    "messages": [
+     {
+      "role": "system",
+      "content": "Literal system é ✓"
+     },
+     {
+      "role": "user",
+      "content": "Fix it"
+     },
+     {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "c-1",
+        "type": "function",
+        "function": {
+         "name": "bash",
+         "arguments": "{ \"command\" : \"ls -la\",  \"options\": {\"timeout\": 5} }"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "tool_call_id": "c-1",
+      "content": "a.py\n"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "bash",
+       "description": "Run one command.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "command": {
+          "type": "string",
+          "description": "The command line"
+         },
+         "options": {
+          "type": "object",
+          "properties": {
+           "timeout": {
+            "type": "integer"
+           },
+           "env": {
+            "type": "array",
+            "items": {
+             "$ref": "#/$defs/pair",
+             "description": "One pair"
+            }
+           }
+          },
+          "description": "Options object"
+         },
+         "mode": {
+          "anyOf": [
+           {
+            "type": "string",
+            "enum": [
+             "fast",
+             "slow"
+            ],
+            "description": "Speed"
+           },
+           {
+            "type": "null"
+           }
+          ]
+         },
+         "paths": {
+          "type": "array",
+          "items": [
+           {
+            "type": "string"
+           },
+           {
+            "type": "string",
+            "description": "Second path"
+           }
+          ]
+         }
+        },
+        "required": [
+         "command"
+        ],
+        "$defs": {
+         "pair": {
+          "type": "object",
+          "properties": {
+           "key": {
+            "type": "string",
+            "description": "Pair key"
+           }
+          },
+          "default": {
+           "type": "x"
+          }
+         }
+        },
+        "additionalProperties": false
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "description": "Read {{literal}} exactly",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string",
+          "description": "Path exactly"
+         }
+        },
+        "required": [
+         "path"
+        ],
+        "additionalProperties": false
+       }
+      }
+     }
+    ]
+   },
+   "execution_tools": {
+    "bash": "bash",
+    "read": "read"
+   },
+   "response": {
+    "id": "chatcmpl-1",
+    "object": "chat.completion",
+    "usage": {
+     "prompt_tokens": 100,
+     "completion_tokens": 10,
+     "total_tokens": 110
+    },
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "Done"
+      },
+      "finish_reason": "stop"
+     }
+    ]
+   }
+  }
+ ],
+ "issues": []
+}

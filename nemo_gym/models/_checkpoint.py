@@ -48,7 +48,7 @@ from typing import Any, Optional, Protocol, runtime_checkable
 from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.core.responses_api_types import SSE_KEEPALIVE
 from nemo_gym.models.responses_streaming import is_responses_lifecycle_chunk
 from nemo_gym.models.token_capture.config import token_capture_enabled_for_agent
@@ -129,11 +129,11 @@ class CheckpointableLedger(Protocol):
 
     def import_rows(self, rollout_id: str, rows: list[dict]) -> None: ...
 
-    async def retire(self, rollout_ids: Sequence[str]) -> dict: ...
+    async def retire(self, capture_keys: Sequence[str]) -> dict: ...
 
     def mark_started(self, rollout_id: str) -> None: ...
 
-    async def delete_unstarted(self, rollout_ids: Sequence[str]) -> dict: ...
+    async def delete_unstarted(self, capture_keys: Sequence[str]) -> dict: ...
 
 
 class EpisodeCut(BaseModel):
@@ -225,7 +225,7 @@ class LocalRestoredCuts:
     def supersede(self, ticket: "_Ticket", record: GenerationCutRecord) -> None:
         # The checkpoint exports the newer cut and retains only its staged rows,
         # so a retry of the call must continue from it rather than from the restored one.
-        # The ticket claims it, so delivering the call's response frees it and an interruption keeps it.
+        # The ticket claims it, so delivering the call's response releases it and an interruption keeps it.
         if ticket.capture_key in self.records:
             self.records[ticket.capture_key] = record
             ticket.claimed_cut, ticket.claimed_cut_used = record, True
@@ -451,7 +451,7 @@ class PolicyGate:
             if ticket.cut_regenerate_reason is not None:
                 return admission
             digest = conversation_digest(list(context.request_items or []))
-            record = self.restored_cuts.take(ticket, context.rollout_id, digest)
+            record = self.restored_cuts.take(ticket, context.capture_key, digest)
             if record is None:
                 return admission
             return admission.model_copy(update={"generation_cut": record.continuation})
@@ -838,7 +838,7 @@ class PolicyModelParticipant(CheckpointParticipant):
             return []
         return export_model_records(self.ledger, episode_ids, [self.gate.snapshot()], self._restored_cuts)
 
-    async def export(self, episode_ids: Optional[list[EpisodeId]]) -> list[CheckpointRecord]:
+    async def export(self, episode_ids: Optional[list[EpisodeId]], *, checkpoint_id: str) -> list[CheckpointRecord]:
         if self.ledger is None:
             return []
         # Snapshot on the event loop, then read every episode's ledger off it.

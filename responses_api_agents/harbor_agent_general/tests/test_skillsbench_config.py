@@ -3,12 +3,14 @@
 
 import asyncio
 import json
+import pickle
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
 from omegaconf import OmegaConf
+from ray.exceptions import RayTaskError
 
 from nemo_gym.models import CaptureStore, ModelCallCaptureConfig, install_model_call_capture
 from nemo_gym.server_runtime import entrypoint_ray_enabled
@@ -23,12 +25,47 @@ from responses_api_agents.harbor_agent_general.skillsbench_app import (
 ROOT = Path(__file__).resolve().parents[3]
 
 
-def _config(opensandbox: bool, max_input_tokens: int = 131072) -> SkillsBenchHarborAgentConfig:
+@pytest.mark.parametrize(
+    "exception_type",
+    [
+        "AgentTimeoutError",
+        "VerifierTimeoutError",
+        "EnvironmentStartTimeoutError",
+        "RuntimeError",
+        "SkillsBenchSandboxError",
+        "VerifierInfrastructureError",
+        "AddTestsDirError",
+        "DownloadVerifierDirError",
+    ],
+)
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_failure_classification_keeps_infrastructure_out_of_timeout_scores(monkeypatch, exception_type, wrapped):
+    monkeypatch.setattr(app, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(SkillsBenchHarborAgent, "model_post_init", lambda self, context: None)
+    agent = SkillsBenchHarborAgent.model_construct(config=_config(opensandbox=False))
+    # The misleading text must not turn a transport failure into a task zero.
+    error = app.HarborTrialError(exception_type, "AgentTimeoutError mentioned by provider", "/evidence/trial")
+    error = pickle.loads(pickle.dumps(error))
+    if wrapped:
+        error = RayTaskError("worker", "traceback", error).as_instanceof_cause()
+    body = HarborRunRequest(task_name="task", task_index=1, rollout_index=2, responses_create_params={"input": []})
+    result = agent.failure_response(body, error).model_dump()
+    deadline = exception_type == "AgentTimeoutError"
+    assert result.get("_ng_failure_class") == (None if deadline else "skillsbench_infrastructure")
+    assert bool(result.get("evaluation_completed")) == deadline
+    assert not result.get("_ng_failure_terminal")
+    assert result["evaluation_outcome"]["verification_completed"] is False
+    assert result["evaluation_outcome"]["exception_type"] == exception_type
+    assert result["evaluation_outcome"]["trial_dir"] == "/evidence/trial"
+    assert (result["evaluation_outcome"].get("score_origin") == "timeout_policy") == deadline
+
+
+def _config(opensandbox: bool, max_input_tokens: int = 131072, **overrides) -> SkillsBenchHarborAgentConfig:
     configs = [OmegaConf.load(ROOT / "benchmarks/skillsbench/harbor.yaml")]
     if opensandbox:
         configs.append(OmegaConf.load(ROOT / "benchmarks/skillsbench/harbor_opensandbox.yaml"))
     merged = OmegaConf.merge(
-        *configs, {"policy_model_name": "test-policy", "skillsbench_max_input_tokens": max_input_tokens}
+        *configs, {"policy_model_name": "test-policy", "skillsbench_max_input_tokens": max_input_tokens, **overrides}
     )
     raw = OmegaConf.to_container(
         merged.skillsbench_harbor_agent.responses_api_agents.harbor_agent_general, resolve=True
@@ -36,6 +73,88 @@ def _config(opensandbox: bool, max_input_tokens: int = 131072) -> SkillsBenchHar
     return SkillsBenchHarborAgentConfig.model_validate(
         raw | {"name": "skillsbench_harbor_agent", "host": "127.0.0.1", "port": 8080}
     )
+
+
+def test_opensandbox_omits_unrelated_platform_s3_mount():
+    config = _config(opensandbox=True)
+    assert config.job.environment.kwargs["sandbox_metadata"]["nemo.nvidia.com/s3-hostpath"] == "false"
+
+
+@pytest.mark.parametrize("failure", ["status: 429", "Attempted read from closed stream", "status code: 503"])
+def test_verifier_transfer_failure_preserves_evidence_and_becomes_retryable(tmp_path, monkeypatch, failure):
+    monkeypatch.setattr(SkillsBenchHarborAgent, "model_post_init", lambda self, context: None)
+    agent = SkillsBenchHarborAgent.model_construct(config=_config(opensandbox=False))
+    body = HarborRunRequest(
+        task_name="flink-query", task_index=32, rollout_index=0, responses_create_params={"input": []}
+    )
+    (tmp_path / "verifier").mkdir()
+    (tmp_path / "verifier" / "ctrf.json").write_text(
+        json.dumps(
+            {
+                "results": {
+                    "tests": [
+                        {
+                            "name": "test_maven_build",
+                            "status": "failed",
+                            "trace": f"E         stdout: Could not transfer artifact example:jar:1 from/to central: {failure}",
+                        }
+                    ]
+                }
+            }
+        )
+    )
+    original = '{"verifier_result": {"rewards": {"reward": 0.0}}}'
+    (tmp_path / "result.json").write_text(original)
+    with pytest.raises(app.HarborTrialError) as raised:
+        agent.success_response(body, tmp_path)
+    response = agent.failure_response(body, raised.value).model_dump()
+    assert response["_ng_failure_class"] == "skillsbench_infrastructure"
+    assert not response.get("_ng_failure_terminal")
+    assert response["evaluation_outcome"]["exception_type"] == "VerifierInfrastructureError"
+    assert not response["evaluation_outcome"]["verification_completed"]
+    assert (tmp_path / "result.failed.json").read_text() == original
+    assert not (tmp_path / "result.json").exists()
+
+
+@pytest.mark.parametrize(
+    "status,trace",
+    [
+        ("failed", "E AssertionError: expected 11 answers, got 4"),
+        ("failed", "E Could not transfer artifact wrong:jar:1 from/to central: status: 404"),
+        ("failed", "E Compilation failure: cannot find symbol"),
+        ("passed", "E Could not transfer artifact example:jar:1 from/to central: status: 429"),
+        ("failed", "print('Could not transfer artifact example:jar:1 from/to central: status: 429')"),
+    ],
+)
+def test_verifier_guard_preserves_task_failures_and_ignores_unrelated_output(tmp_path, monkeypatch, status, trace):
+    monkeypatch.setattr(SkillsBenchHarborAgent, "model_post_init", lambda self, context: None)
+    agent = SkillsBenchHarborAgent.model_construct(config=_config(opensandbox=False))
+    (tmp_path / "verifier").mkdir()
+    (tmp_path / "verifier" / "ctrf.json").write_text(
+        json.dumps(
+            {
+                "results": {
+                    "tests": [
+                        {
+                            "name": "test_output",
+                            "status": status,
+                            "trace": trace,
+                        }
+                    ]
+                }
+            }
+        )
+    )
+    body = HarborRunRequest(task_name="task", task_index=0, rollout_index=0, responses_create_params={"input": []})
+    official = app.HarborVerifyResponse.model_construct(reward=0.0)
+    (tmp_path / "result.json").write_text("{}")
+    trial = SimpleNamespace(step_results=[], verifier_result=None)
+    with (
+        patch.object(app.HarborAgent, "success_response", return_value=official) as parent,
+        patch.object(app.TrialResult, "model_validate_json", return_value=trial),
+    ):
+        assert agent.success_response(body, tmp_path).reward == 0.0
+    parent.assert_called_once_with(body, tmp_path)
 
 
 @pytest.mark.parametrize("opensandbox", [False, True])
@@ -93,6 +212,16 @@ def test_flat_context_limit_override_reaches_native_agent_list():
     config = _config(opensandbox=True, max_input_tokens=65536)
     job = config.build_job_config("example-task", "t0-r0")
     assert job.agents[0].kwargs["model_info"]["max_input_tokens"] == 65536
+
+
+def test_long_generation_limits_reach_native_agent_list():
+    config = _config(opensandbox=True, skillsbench_max_output_tokens=131072, skillsbench_llm_timeout_s=1800)
+    kwargs = config.build_job_config("example-task", "t0-r0").agents[0].kwargs
+    assert kwargs["model_info"] == {"max_input_tokens": 131072, "max_output_tokens": 131072}
+    assert kwargs["llm_timeout_s"] == 1800
+    defaults = _config(opensandbox=True).job.agents[0].kwargs
+    assert defaults["model_info"]["max_output_tokens"] == 32768
+    assert defaults["llm_timeout_s"] == 3600
 
 
 def test_opensandbox_profile_inherits_shared_aiohttp_transport(monkeypatch):
@@ -153,6 +282,7 @@ async def test_concurrent_dispatch_uses_per_row_model_capture_urls(tmp_path, mon
     bodies[0].responses_create_params.temperature = 0
     bodies[0].responses_create_params.top_p = 1
     bodies[0].responses_create_params.max_output_tokens = 1024
+    bodies[0].responses_create_params.metadata = {"extra_body": '{"seed": 0, "unrelated": "not forwarded"}'}
     assert await asyncio.gather(*(agent.run(body) for body in bodies)) == bodies
     assert len(submitted) == 4
     assert len({job["job_name"] for job in submitted}) == 4
@@ -161,6 +291,7 @@ async def test_concurrent_dispatch_uses_per_row_model_capture_urls(tmp_path, mon
         "temperature": 0,
         "top_p": 1,
         "max_output_tokens": 1024,
+        "seed": 0,
     }
     for job in submitted[1:]:
         kwargs = job["agents"][0]["kwargs"]
@@ -189,3 +320,48 @@ async def test_concurrent_dispatch_uses_per_row_model_capture_urls(tmp_path, mon
             assert response.status_code == 200
             records = CaptureStore(tmp_path).read(capture_key)
             assert len(records) == (1 if enabled else 0)
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+@pytest.mark.parametrize(
+    "exception_type,failure_class",
+    [
+        ("SkillsBenchResourceUnattributedError", "skillsbench_resource_unattributed"),
+    ],
+)
+def test_resource_failures_are_terminal_without_fabricating_verifier_reward(
+    monkeypatch, wrapped, exception_type, failure_class
+):
+    monkeypatch.setattr(app, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(SkillsBenchHarborAgent, "model_post_init", lambda self, context: None)
+    agent = SkillsBenchHarborAgent.model_construct(config=_config(opensandbox=False))
+    error = pickle.loads(pickle.dumps(app.HarborTrialError(exception_type, "evidence", "/trial")))
+    if wrapped:
+        error = RayTaskError("worker", "traceback", error).as_instanceof_cause()
+    body = HarborRunRequest(task_name="task", task_index=1, rollout_index=0, responses_create_params={"input": []})
+    result = agent.failure_response(body, error).model_dump()
+    assert result["_ng_failure_class"] == failure_class
+    assert result["_ng_failure_terminal"]
+    assert result["mask_sample"]
+    assert not result["evaluation_outcome"]["verification_completed"]
+    if failure_class == "skillsbench_resource_unattributed":
+        assert result["evaluation_outcome"]["requires_review"]
+        assert "score_origin" not in result["evaluation_outcome"]
+
+
+def test_the_leaf_sets_the_llm_request_timeout_and_keeps_the_task_agent_budgets():
+    config = OmegaConf.load(ROOT / "benchmarks/skillsbench/harbor.yaml")
+    job = config.skillsbench_harbor_agent.responses_api_agents.harbor_agent_general.job
+    kwargs = job.agents[0].kwargs
+    assert (kwargs.llm_timeout_s, kwargs.llm_num_retries) == (3600, 5)
+    # Each task's own [agent] timeout_sec is the benchmark's budget; Harbor scales it by this unchanged multiplier.
+    assert job.agent_timeout_multiplier == 1.0 and "override_timeout_sec" not in job.agents[0]
+
+
+def test_opensandbox_recovers_process_oom_without_changing_task_limits():
+    config = _config(opensandbox=True)
+    metadata = config.job.environment.kwargs["sandbox_metadata"]
+    assert metadata["nemo.nvidia.com/oom-kill"] == "process"
+    raw = OmegaConf.load(ROOT / "benchmarks/skillsbench/harbor_opensandbox.yaml")
+    assert raw.sandbox.opensandbox.setup.commands == ['test "$(cat /sys/fs/cgroup/memory.oom.group)" = 0']
+    assert not set(config.job.environment.kwargs) & {"cpus", "memory_mb", "storage_mb"}

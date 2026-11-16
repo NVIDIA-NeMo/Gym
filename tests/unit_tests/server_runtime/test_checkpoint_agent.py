@@ -23,7 +23,7 @@ from nemo_gym.agents.base_responses_api_agent import (
 )
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime._checkpoint.agent import (
     AgentSessionParticipant,
     AgentSessionRecord,
@@ -49,7 +49,9 @@ class Hooks:
         self.restored: list[RestoredAgentSession] = []
         self.retired: list[str] = []
 
-    async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+    async def export_agent_sessions(
+        self, session_keys: list[str], *, checkpoint_id: str
+    ) -> dict[str, dict[str, JsonValue]]:
         return {session_key: self.sessions.get(session_key, {}) for session_key in session_keys}
 
     async def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:
@@ -90,7 +92,7 @@ async def test_activation_parks_at_its_next_boundary_and_resumes() -> None:
 
     step_done.set()
     prepared = await prepare
-    records = await participant.export(None)
+    records = await participant.export(None, checkpoint_id="c")
     await controller.resume(CheckpointRequest(**control()))
     for _ in range(2):
         await asyncio.sleep(0.01)
@@ -135,7 +137,7 @@ async def test_legacy_run_steps_block_prepare_only_when_waited_on() -> None:
             assert participant.readiness().blockers == ["r"]
         async with run.step("replay"):
             assert participant.readiness().ready
-            [record] = await participant.export(None)
+            [record] = await participant.export(None, checkpoint_id="c")
 
     assert participant.readiness().ready
     assert record.episode == {"next": "verify"}
@@ -307,7 +309,7 @@ async def test_awaiting_a_model_call_counts_as_parked_at_the_last_boundary() -> 
     task = asyncio.create_task(loop())
     await asyncio.sleep(0.01)
     prepared = await controller.prepare(CheckpointRequest(**control()))
-    [record] = await participant.export(None)
+    [record] = await participant.export(None, checkpoint_id="c")
     response.set()
     await asyncio.sleep(0.01)
     # The call returned during the checkpoint, so the activation parks at its next boundary.
@@ -409,7 +411,7 @@ async def test_an_agent_without_session_hooks_reports_its_rollouts_as_restarts_t
     assert refused.json()["error"]["code"] == "checkpoint_restart_in_scope"
     assert committed.status_code == 200
     assert running and stopped
-    assert await agent._restart_only.export(None) == []
+    assert await agent._restart_only.export(None, checkpoint_id="c") == []
 
 
 async def test_status_reports_an_agents_checkpoint_mode() -> None:
@@ -563,14 +565,16 @@ async def test_a_session_woken_by_resume_stays_parked_if_a_new_checkpoint_closes
 
 async def test_an_agent_that_leaves_a_session_out_of_its_export_fails_the_commit() -> None:
     class ForgetfulHooks(Hooks):
-        async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+        async def export_agent_sessions(
+            self, session_keys: list[str], *, checkpoint_id: str
+        ) -> dict[str, dict[str, JsonValue]]:
             return {}
 
     participant = AgentSessionParticipant(ForgetfulHooks())
     participant.open_session("s", EpisodeId(rollout_id="r"))
 
     with pytest.raises(ControlError, match="did not export sessions"):
-        await participant.export(None)
+        await participant.export(None, checkpoint_id="c")
 
 
 async def test_closing_a_session_stops_its_running_activation() -> None:
@@ -660,7 +664,7 @@ async def test_a_retire_cut_short_keeps_the_session_until_its_activation_stops()
     assert hooks.retired == ["s"]
 
 
-async def test_a_session_whose_retire_hook_was_cut_short_stays_blocking_until_a_retry_frees_it() -> None:
+async def test_a_session_whose_retire_hook_was_cut_short_stays_blocking_until_a_retry_releases_it() -> None:
     release = asyncio.Event()
 
     class SlowRetireHooks(Hooks):
@@ -671,13 +675,13 @@ async def test_a_session_whose_retire_hook_was_cut_short_stays_blocking_until_a_
     hooks = SlowRetireHooks()
     participant = AgentSessionParticipant(hooks)
     episode_id = EpisodeId(rollout_id="r")
-    # Between activations: no task is running, so the retire goes straight to freeing the session.
+    # Between activations: no task is running, so the retire goes straight to releasing the session.
     participant.open_session("s", episode_id)
     with pytest.raises(TimeoutError):
         await asyncio.wait_for(participant.retire(episode_id), 0.05)
 
     report = participant.readiness()
-    exported = await participant.export(None)
+    exported = await participant.export(None, checkpoint_id="c")
     release.set()
     await participant.retire(episode_id)
 
@@ -707,7 +711,7 @@ async def test_a_seed_arriving_during_an_open_checkpoint_waits_for_resume() -> N
     assert waited and participant.has_session("late")
 
 
-async def test_a_seed_in_progress_when_admission_closes_holds_up_prepare_and_is_exported() -> None:
+async def test_a_first_seed_in_progress_when_admission_closes_is_a_restart_of_that_checkpoint() -> None:
     participant = AgentSessionParticipant(Hooks())
     built = asyncio.Event()
 
@@ -720,14 +724,73 @@ async def test_a_seed_in_progress_when_admission_closes_holds_up_prepare_and_is_
     seeding = asyncio.create_task(seed())
     await asyncio.sleep(0.01)
     await participant.close_admission(CLOSE)
-    blocked = participant.readiness()
+    while_seeding = participant.readiness()
+    ready_while_seeding = participant.ready()
     built.set()
     await asyncio.wait_for(seeding, 5)
+    after_seed = participant.readiness()
+    # The seed registered its session while the checkpoint was open: the commit leaves it out.
+    exported_now = [record.session_key for record in await participant.export(None, checkpoint_id="c")]
+    await participant.open_admission()
+    await participant.close_admission(CLOSE)
+    # The next checkpoint captures the session like any other.
+    exported_next = [record.session_key for record in await participant.export(None, checkpoint_id="d")]
 
-    assert not blocked.ready and blocked.blockers == ["r"]
+    assert while_seeding.ready and ready_while_seeding and while_seeding.blockers == []
+    assert while_seeding.restarts == ["r"]
+    # The restarts do not change before the commit.
+    assert after_seed.ready and after_seed.restarts == ["r"]
+    assert exported_now == []
+    assert exported_next == ["s"]
+
+
+async def test_a_first_seed_that_fails_while_the_checkpoint_is_open_leaves_nothing_behind() -> None:
+    participant = AgentSessionParticipant(Hooks())
+    failing = asyncio.Event()
+
+    async def seed() -> None:
+        async with participant.seeding("s", EpisodeId(rollout_id="r")):
+            await failing.wait()
+            raise RuntimeError("the sandbox setup failed")
+
+    seeding = asyncio.create_task(seed())
+    await asyncio.sleep(0.01)
+    await participant.close_admission(CLOSE)
+    failing.set()
+    with pytest.raises(RuntimeError, match="setup failed"):
+        await asyncio.wait_for(seeding, 5)
+    during = participant.readiness()
+    exported = await participant.export(None, checkpoint_id="c")
+    await participant.open_admission()
+
+    # Still a restart of this checkpoint: the controller re-sends the rollout either way.
+    assert during.ready and during.restarts == ["r"]
+    assert exported == [] and not participant.has_session("s")
+    assert participant.readiness().restarts == []
+
+
+async def test_a_seed_of_a_session_that_exists_still_holds_up_prepare_and_is_exported() -> None:
+    participant = AgentSessionParticipant(Hooks())
+    episode_id = EpisodeId(rollout_id="r")
+    participant.open_session("s", episode_id)
+    rebound = asyncio.Event()
+
+    async def reseed() -> None:
+        # The environment seeds again, for example to re-bind a restored session to its rebuilt sandbox.
+        async with participant.seeding("s", episode_id):
+            await rebound.wait()
+            participant.open_session("s", episode_id, seed=True)
+
+    reseeding = asyncio.create_task(reseed())
+    await asyncio.sleep(0.01)
+    await participant.close_admission(CLOSE)
+    blocked = participant.readiness()
+    rebound.set()
+    await asyncio.wait_for(reseeding, 5)
+
+    assert not blocked.ready and blocked.blockers == ["r"] and blocked.restarts == []
     assert participant.readiness().ready
-    # The environment may record its boundary after the seed before the commit, so the session is exported.
-    assert [record.session_key for record in await participant.export(None)] == ["s"]
+    assert [record.session_key for record in await participant.export(None, checkpoint_id="c")] == ["s"]
 
 
 async def _until(condition: Any) -> None:
@@ -839,7 +902,7 @@ async def test_a_close_after_a_retire_cut_short_does_not_cancel_the_activation_a
     await _until(lambda: participant._sessions["s"].closing)
     cleaned_up.set()
     await asyncio.wait_for(closing, 5)
-    # The retired session stays until a retried retire frees it.
+    # The retired session stays until a retried retire releases it.
     left_for_the_retire = participant.has_session("s")
     await participant.retire(episode_id)
 
@@ -988,18 +1051,20 @@ class _SandboxAgent(SimpleResponsesAPIAgent):
         await self.release.wait()
         return AgentSessionState(request=body)
 
-    async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
+    async def export_agent_sessions(
+        self, session_keys: list[str], *, checkpoint_id: str
+    ) -> dict[str, dict[str, JsonValue]]:
         return {session_key: {} for session_key in session_keys}
 
     async def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:
         pass
 
     async def retire_agent_session(self, session_key: str) -> None:
-        self.events.append(f"freed {session_key}")
-        self._free_session(session_key)
+        self.events.append(f"released {session_key}")
+        self._release_retired_session(session_key)
 
 
-async def test_a_retire_waits_for_a_seed_in_progress_which_frees_what_it_built() -> None:
+async def test_a_retire_waits_for_a_seed_in_progress_which_releases_what_it_built() -> None:
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = {"checkpoint": {"enabled": True, "control_auth_token": "t"}}
     agent = _SandboxAgent(
@@ -1033,7 +1098,7 @@ async def test_a_retire_waits_for_a_seed_in_progress_which_frees_what_it_built()
     assert not done
     assert retired.status_code == 200
     assert seeded.status_code == 409 and seeded.json()["error"]["code"] == "checkpoint_stale_attempt"
-    assert agent.events == ["freed s", "retire replied"]
+    assert agent.events == ["released s", "retire replied"]
     assert "s" not in agent._session_records and not participant.has_session("s") and participant.ready()
 
 
@@ -1125,7 +1190,7 @@ async def test_live_sessions_outside_the_commit_scope_are_not_exported() -> None
     participant.open_session("t", EpisodeId(rollout_id="q"))
 
     # Another participant reported q as a restart, so the coordinator commits r alone.
-    records = await participant.export([EpisodeId(rollout_id="r")])
+    records = await participant.export([EpisodeId(rollout_id="r")], checkpoint_id="c")
 
     assert [record.session_key for record in records] == ["s"]
 
@@ -1166,7 +1231,7 @@ class _RestartOnlySandboxAgent(_UnsupportedAgent):
         return AgentCloseSessionResponse(agent_session_id=state.request.agent_session_id)
 
 
-async def test_a_restart_only_retire_frees_its_rollout_s_sessions_and_waits_for_a_seed_in_progress() -> None:
+async def test_a_restart_only_retire_releases_its_rollout_s_sessions_and_waits_for_a_seed_in_progress() -> None:
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = {"checkpoint": {"enabled": True, "control_auth_token": "t"}}
     agent = _RestartOnlySandboxAgent(
@@ -1265,7 +1330,7 @@ class _EpisodeClient(ServerClient):
     tool_calls: int = 0
 
     async def post(self, server_name: str, url_path: str, **kwargs: Any) -> Any:
-        from nemo_gym.core.episode import current_rollout_id
+        from nemo_gym.core.episode_context import current_rollout_id
 
         body = kwargs.get("json") or {}
         rollout = current_rollout_id()
@@ -1338,11 +1403,10 @@ async def test_an_episode_the_environment_reports_as_a_restart_does_not_hold_up_
         SingleAgentTurnEnvironmentServerConfig,
     )
     from nemo_gym.config.config_types import AgentServerRef, ResourcesServerRef
-    from nemo_gym.core.episode import TaskId
+    from nemo_gym.core.episode_types import MaterializedTask, TaskId
     from nemo_gym.server_runtime._checkpoint import coordination
     from nemo_gym.server_runtime._checkpoint.control import install_participant
     from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
-    from nemo_gym.server_runtime.episode_types import MaterializedTask
     from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnTaskInput
     from tests.unit_tests.server_runtime.test_checkpoint_coordination import InProcessClient, Recorder
     from tests.unit_tests.server_runtime.test_checkpoint_resources import RestartOnlyServer, make_server, until
@@ -1426,3 +1490,165 @@ async def test_an_episode_the_environment_reports_as_a_restart_does_not_hold_up_
     }
     assert in_tool_call_through_the_commit
     assert response.result.reward == 1.0
+
+
+async def test_a_restart_uses_a_slot_or_a_policy_reply_it_gets_during_a_checkpoint_at_once() -> None:
+    participant = AgentSessionParticipant(Hooks())
+    episode_ids = {"restart": EpisodeId(rollout_id="restart"), "saved": EpisodeId(rollout_id="saved")}
+    participant.open_session("restart", episode_ids["restart"], restart=True)
+    participant.open_session("saved", episode_ids["saved"])
+    slot, reply = asyncio.Semaphore(0), asyncio.Event()
+    progress: dict[str, list[str]] = {"restart": [], "saved": []}
+
+    async def activation(key: str) -> None:
+        async with participant.activation(key, episode_ids[key]) as running:
+            async with running.queued():
+                await slot.acquire()
+            progress[key].append("slot")
+            async with running.awaiting_model():
+                await reply.wait()
+            progress[key].append("reply")
+
+    tasks = [asyncio.create_task(activation(key)) for key in progress]
+    await asyncio.sleep(0.01)
+    await participant.close_admission(CLOSE)
+    slot.release()
+    slot.release()
+    # Nothing of the restart is in the checkpoint, so it starts work with its slot, and uses its reply, at once.
+    await _until(lambda: progress["restart"] == ["slot"])
+    reply.set()
+    await _until(lambda: progress["restart"] == ["slot", "reply"])
+    await asyncio.sleep(0.05)
+    held = list(progress["saved"])
+    ready = participant.ready()
+    await participant.open_admission()
+    await asyncio.wait_for(asyncio.gather(*tasks), 5)
+
+    # The checkpoint may have counted the saved session as parked while it queued: it stays parked until resume.
+    assert held == [] and ready
+    assert progress["saved"] == ["slot", "reply"]
+
+
+async def test_a_policy_reply_held_for_a_checkpoint_still_parks_a_session_the_checkpoint_saves() -> None:
+    participant = AgentSessionParticipant(Hooks())
+    episode_id = EpisodeId(rollout_id="r")
+    participant.open_session("s", episode_id)
+    reply = asyncio.Event()
+    replied: list[str] = []
+
+    async def activation() -> None:
+        async with participant.activation("s", episode_id) as running:
+            await running.boundary(lambda: {"step": 1})
+            async with running.awaiting_model():
+                await reply.wait()
+            replied.append("reply")
+
+    task = asyncio.create_task(activation())
+    await asyncio.sleep(0.01)
+    await participant.close_admission(CLOSE)
+    reply.set()
+    await asyncio.sleep(0.05)
+    held = list(replied)
+    await participant.open_admission()
+    await asyncio.wait_for(task, 5)
+
+    assert held == [] and replied == ["reply"]
+
+
+@pytest.mark.parametrize("ending", ["retire", "close"])
+async def test_a_slot_taken_while_a_checkpoint_is_open_is_given_back_when_the_parked_session_ends(ending: str) -> None:
+    participant = AgentSessionParticipant(Hooks())
+    episode_id = EpisodeId(rollout_id="r")
+    participant.open_session("s", episode_id)
+    slot = asyncio.Semaphore(1)
+    await slot.acquire()  # Held by another activation.
+    worked: list[str] = []
+
+    async def activation() -> None:
+        async with participant.activation("s", episode_id) as running:
+            async with running.slot(slot):
+                worked.append("work")
+
+    task = asyncio.create_task(activation())
+    await asyncio.sleep(0.01)
+    await participant.close_admission(CLOSE)
+    # The other activation finishes while the checkpoint is open: this one takes the slot, and parks with it.
+    slot.release()
+    await asyncio.sleep(0.05)
+    taken_and_parked = slot.locked() and participant.ready() and not worked
+    if ending == "retire":
+        await participant.mark_retired([episode_id])
+        await participant.retire(episode_id)
+    else:
+        await participant.close_session("s")
+    await asyncio.wait([task])
+
+    assert taken_and_parked and worked == []
+    # The slot came back: the next activation takes it at once.
+    await asyncio.wait_for(slot.acquire(), 1)
+
+
+async def test_a_slot_is_given_back_after_the_work_and_its_wait_ends_at_the_deadline() -> None:
+    participant = AgentSessionParticipant(Hooks())
+    episode_id = EpisodeId(rollout_id="r")
+    participant.open_session("s", episode_id)
+    slot = asyncio.Semaphore(1)
+
+    async with participant.activation("s", episode_id) as running:
+        async with running.slot(slot):
+            assert slot.locked()
+        assert not slot.locked()
+        await slot.acquire()
+        with pytest.raises(TimeoutError):
+            async with running.slot(slot, deadline=asyncio.get_running_loop().time() + 0.05):
+                pass
+        slot.release()
+
+    assert not slot.locked()
+
+
+@pytest.mark.parametrize("wait", ["queued", "awaiting_model"])
+async def test_a_restored_session_waiting_before_its_first_boundary_is_exported_at_its_restored_one(wait: str) -> None:
+    participant = AgentSessionParticipant(Hooks())
+    first_attempt = EpisodeId(rollout_id="r", attempt=1)
+    await participant.install(
+        [AgentSessionRecord(session_key="s", episode_id=first_attempt, session={}, boundary={"step": 4})],
+        [first_attempt],
+    )
+    replacement = EpisodeId(rollout_id="r", attempt=2)
+    participant.open_session("new", EpisodeId(rollout_id="new"))
+    waited, finished = asyncio.Event(), asyncio.Event()
+    stepped: list[str] = []
+
+    async def activation(key: str, episode_id: EpisodeId) -> None:
+        async with participant.activation(key, episode_id) as running:
+            async with getattr(running, wait)():
+                await waited.wait()
+            await running.boundary(lambda: {"step": 5})
+            async with running.awaiting_model():
+                stepped.append(key)
+                await finished.wait()
+
+    tasks = [
+        asyncio.create_task(activation("s", replacement)),
+        asyncio.create_task(activation("new", EpisodeId(rollout_id="new"))),
+    ]
+    await asyncio.sleep(0.01)
+    await participant.close_admission(CLOSE)
+    while_waiting = {
+        record.session_key: record.boundary for record in await participant.export(None, checkpoint_id="c")
+    }
+    await participant.open_admission()
+    waited.set()
+    await _until(lambda: len(stepped) == 2)
+    await participant.close_admission(CLOSE)
+    after_its_own = {
+        record.session_key: record.boundary for record in await participant.export(None, checkpoint_id="c")
+    }
+    await participant.open_admission()
+    finished.set()
+    await asyncio.wait_for(asyncio.gather(*tasks), 5)
+
+    # A restore after the first checkpoint continues the restored session from step 4 again, not from its input.
+    assert while_waiting == {"s": {"step": 4}, "new": None}
+    assert after_its_own == {"s": {"step": 5}, "new": {"step": 5}}

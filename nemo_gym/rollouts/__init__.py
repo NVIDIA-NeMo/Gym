@@ -19,6 +19,7 @@ if TYPE_CHECKING:
         merge_model_call_capture_into_record,
         model_call_capture_dirs_from_config,
         observability_enabled_from_config,
+        read_available_model_call_records,
         read_model_call_records,
     )
     from nemo_gym.rollouts.rollout_collection import (
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
         RolloutCollectionConfig,
         RolloutCollectionHelper,
         SharedRolloutCollectionConfig,
+        enrich_run_result,
         get_max_rollout_attempts,
     )
     from nemo_gym.rollouts.rollout_health import run_health_checks
@@ -56,6 +58,7 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "enrich_run_result": "rollout_collection",
     "AGENT_REQUEST_FAILED_FAILURE_CLASS": "rollout_collection",
     "DispatchLatencyTracker": "rollout_perf",
     "ELAPSED_S_KEY": "health.timeouts",
@@ -86,6 +89,7 @@ _PUBLIC_API = {
     "model_call_capture_dirs_from_config": "model_calls",
     "observability_enabled_from_config": "model_calls",
     "observed_elapsed": "rollout_recovery",
+    "read_available_model_call_records": "model_calls",
     "read_model_call_records": "model_calls",
     "read_rollout_timing": "health.timeouts",
     "record_resubmit_offset": "rollout_recovery",

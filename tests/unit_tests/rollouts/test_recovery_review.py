@@ -13,13 +13,16 @@ from unittest.mock import AsyncMock
 
 import orjson
 import pytest
+from omegaconf import OmegaConf
 
 import nemo_gym.cli.eval as cli_eval
 import nemo_gym.rollouts.rollout_collection as collection
 from nemo_gym.cli.eval import _check_saved_completion
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId
+from nemo_gym.core.failure_records import EpisodeFailure
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.rollouts.rollout_records import (
     coverage_path_for,
@@ -30,7 +33,6 @@ from nemo_gym.rollouts.rollout_records import (
 )
 from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError, RunManifest, manifest_path_for, run_lock
 from nemo_gym.rollouts.rollout_store import RolloutStore
-from nemo_gym.server_runtime.episode_types import EpisodeFailure
 from nemo_gym.utils.path_utils import failures_path_for
 from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, install_fake_server_client
 from tests.unit_tests.rollouts.test_rollout_recovery import runner_config  # noqa: F401
@@ -707,7 +709,7 @@ def test_health_only_accepts_already_selected_rows(prepared_run, newer):
     from scripts.harness_conformance.runner import inspect_episode
     from scripts.harness_conformance.scenarios import SCENARIOS
 
-    from nemo_gym.rollouts.rollout_health import JournalHealthUnavailable, run_health_checks
+    from nemo_gym.rollouts.rollout_health import run_health_checks
 
     output, prepare = prepared_run
     with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
@@ -735,13 +737,13 @@ def test_health_only_accepts_already_selected_rows(prepared_run, newer):
         report = inspect_episode(SCENARIOS[0], output.parent, {})
         assert report is not None
     else:
-        with pytest.raises(JournalHealthUnavailable, match="superseded outcomes"):
-            run_health_checks(output, workers=1)
+        result = run_health_checks(output, workers=1)
+        assert len(result.rollouts) == int(newer == "succeeded")
     assert before == (output.read_bytes(), failures_path_for(output).read_bytes())
 
 
 async def test_ordinary_reverification_reads_fresh_manifest_without_changing_source(prepared_run, monkeypatch):
-    import nemo_gym.rollout_reverification as reverify
+    import nemo_gym.eval.rollout_reverification as reverify
 
     output, prepare = prepared_run
     with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
@@ -857,7 +859,7 @@ async def test_aggregate_output_alias_remains_readable_with_health_enabled(tmp_p
 
 @pytest.fixture
 def fake_reverification(monkeypatch):
-    import nemo_gym.rollout_reverification as reverify
+    import nemo_gym.eval.rollout_reverification as reverify
 
     monkeypatch.setattr(reverify, "get_exporters", list)
     monkeypatch.setattr(reverify, "_guard_reverify_mode", AsyncMock(return_value=None))
@@ -927,7 +929,7 @@ def test_alias_readers_refuse_ambiguous_or_established_history(prepared_run, com
         raw_outcomes_are_selected(alias)
     with pytest.raises(ConfigError, match="beside the rollout alias"):
         collection._expand_input_glob(str(alias))
-    from nemo_gym.rollout_reverification import _prepare_output_fpaths
+    from nemo_gym.eval.rollout_reverification import _prepare_output_fpaths
 
     for resume, append in ((True, False), (False, True)):
         with pytest.raises(ConfigError, match="beside the rollout alias|Manifest-backed"):
@@ -1054,7 +1056,7 @@ def test_incomplete_legacy_cache_never_erases_nonempty_outcomes(prepared_run, ar
 
 
 def test_output_named_failures_checks_its_own_history(prepared_run):
-    from nemo_gym.rollouts.rollout_health import JournalHealthUnavailable, run_health_checks
+    from nemo_gym.rollouts.rollout_health import run_health_checks
     from nemo_gym.rollouts.rollout_store import raw_outcomes_are_selected
 
     original, prepare = prepared_run
@@ -1067,16 +1069,19 @@ def test_output_named_failures_checks_its_own_history(prepared_run):
         store.record_outcome(row | {"reward": 0.0, "response": {}})
     assert collection._expand_input_glob(str(output)) == [str(output)]
     assert not raw_outcomes_are_selected(output)
-    with pytest.raises(JournalHealthUnavailable, match="superseded"):
-        run_health_checks(output, workers=1)
+    result = run_health_checks(output, workers=1)
+    assert len(result.rollouts) == 1
+    assert result.summary["run"]["issues"]["rollout_duplicate_identity"] == 0
 
 
 async def test_no_progress_resume_uses_bounded_infrastructure_retries(runner_config, monkeypatch, tmp_path):
     from nemo_gym.cli.eval import _check_saved_completion
     from nemo_gym.orchestration.api import ResumeConfig
-    from tests.unit_tests.test_resume_script import _run_prologue
+    from tests.unit_tests.orchestration.test_resume_script import _run_prologue
 
     client = install_fake_server_client(monkeypatch, AsyncMock())
+    (tmp_path / "artifacts").mkdir()
+    runner_config.output_jsonl_fpath = str(tmp_path / "artifacts" / "rollouts.jsonl")
     runner_config.dispatch_budget_s = 0
     runner_config.num_samples_in_parallel = 1
     for attempt in range(3):
@@ -1602,7 +1607,7 @@ async def test_legacy_reply_cleanup_preserves_declared_failure_diagnostics(runne
 
 @pytest.mark.parametrize("destination_kind", ["alias", "alias_failures", "alias_materialized_inputs"])
 def test_reverify_fresh_overwrite_refuses_competing_legacy_alias_companions(tmp_path, destination_kind):
-    from nemo_gym.rollout_reverification import _prepare_output_fpaths
+    from nemo_gym.eval.rollout_reverification import _prepare_output_fpaths
 
     target = tmp_path / "target.jsonl"
     alias = tmp_path / "alias.jsonl"
@@ -1712,3 +1717,119 @@ def test_h_collect_rollouts_cli_reads_real_coverage_writer(prepared_run, monkeyp
         with pytest.raises(SystemExit) as error:
             cli_eval.collect_rollouts()
         assert error.value.code == 75
+
+
+def _flat_reply_row() -> dict:
+    return {
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+        "task_id": {"taskset": "native", "task_id": "0"},
+        "task_input": {},
+    }
+
+
+@pytest.mark.parametrize("reply", [{"reward": 1.0, "agent_ref": {"name": "a"}}, [], None])
+def test_reply_without_episode_result_or_failure_carries_a_typed_cause(reply):
+    with pytest.raises(collection.InvalidRolloutResult) as error:
+        collection._native_episode_record(_flat_reply_row(), reply)
+    cause = error.value.__cause__
+    assert isinstance(cause, NgFailureEvent)
+    assert cause.failure_kind == "environment_protocol_violation"
+    assert cause.boundary == "collection"
+    if isinstance(reply, dict):
+        assert "['agent_ref', 'reward']" in cause.failure_reason
+        assert "1.0" not in cause.failure_reason
+    else:
+        assert type(reply).__name__ in cause.failure_reason
+
+
+async def test_flat_reply_to_an_episode_request_becomes_a_typed_failure_row(runner_config, monkeypatch):
+    runner_config.route_failures_to_sidecar = True
+    Path(runner_config.input_jsonl_fpath).write_text(
+        orjson.dumps({"task_id": {"taskset": "native", "task_id": "0"}, "task_input": {}}).decode() + "\n"
+    )
+    runner_config.environment_server_routes = {"native": "environment"}
+    client = install_fake_server_client(
+        monkeypatch, AsyncMock(return_value=FakeResponse(200, {"reward": 1.0, "agent_ref": {"name": "a"}}))
+    )
+    client.global_config_dict = OmegaConf.create({"environment": {"environment_servers": {"custom": {}}}})
+    with pytest.raises((IncompleteEvaluationError, RuntimeError)):
+        await collection.RolloutCollectionHelper().run_from_config(runner_config)
+    rows = RolloutStore.read(Path(runner_config.output_jsonl_fpath)).failures()
+    assert rows
+    for row in rows:
+        assert row["_ng_failure_record"]["failure"]["failure_kind"] == "environment_protocol_violation"
+        events = row["_ng_failure_events"].values()
+        assert any(
+            event["boundary"] == "collection" and "['agent_ref', 'reward']" in event["failure_reason"]
+            for event in events
+        )
+
+
+def _native_run(runner_config, monkeypatch, tasks, reply_for):
+    runner_config.route_failures_to_sidecar = True
+    Path(runner_config.input_jsonl_fpath).write_text(
+        "".join(
+            orjson.dumps({"task_id": {"taskset": "native", "task_id": str(i)}, "task_input": {}}).decode() + chr(10)
+            for i in range(tasks)
+        )
+    )
+    runner_config.environment_server_routes = {"native": "environment"}
+    runner_config.num_samples_in_parallel = 1
+
+    async def post(**kwargs):
+        return FakeResponse(200, reply_for(kwargs["json"]))
+
+    client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    client.global_config_dict = OmegaConf.create({"environment": {"environment_servers": {"custom": {}}}})
+    return client
+
+
+def _flat(request):
+    return {"reward": 1.0}
+
+
+def _episode_reply(request):
+    return {"episode_id": request["episode_id"], "task_id": request["task"]["task_id"], "result": {"reward": 1.0}}
+
+
+async def test_every_reply_unusable_stops_the_run_after_the_configured_count(runner_config, monkeypatch):
+    client = _native_run(runner_config, monkeypatch, 6, _flat)
+    with pytest.raises(IncompleteEvaluationError) as error:
+        await collection.RolloutCollectionHelper().run_from_config(runner_config)
+    stop = error.value
+    assert stop.failure_kind == "environment_protocol_violation" and stop.exit_code == 76
+    assert "EVAL STOPPED: the environment server environment answered 3 of 3 requests" in str(stop)
+    assert "producer bug, retrying cannot help" in str(stop) and "gym eval submit" in str(stop)
+    assert client.post.await_count == 3
+    rows = RolloutStore.read(Path(runner_config.output_jsonl_fpath)).failures()
+    assert len(rows) == 3
+    assert all(
+        row["_ng_failure_record"]["failure"]["failure_kind"] == "environment_protocol_violation" for row in rows
+    )
+
+
+async def test_fewer_tasks_than_the_count_stop_once_all_answered_unusably(runner_config, monkeypatch):
+    _native_run(runner_config, monkeypatch, 2, _flat)
+    with pytest.raises(IncompleteEvaluationError) as error:
+        await collection.RolloutCollectionHelper().run_from_config(runner_config)
+    assert "answered 2 of 2 requests" in str(error.value)
+
+
+async def test_one_unusable_reply_among_good_rows_is_a_typed_row_and_no_stop(runner_config, monkeypatch):
+    def reply(request):
+        return _flat(request) if request["task"]["task_id"]["task_id"] == "1" else _episode_reply(request)
+
+    client = _native_run(runner_config, monkeypatch, 5, reply)
+    await collection.RolloutCollectionHelper().run_from_config(runner_config)
+    assert client.post.await_count == 5
+    rows = RolloutStore.read(Path(runner_config.output_jsonl_fpath)).failures()
+    assert [row["_ng_failure_record"]["failure"]["failure_kind"] for row in rows] == ["environment_protocol_violation"]
+
+
+async def test_the_stop_can_be_turned_off(runner_config, monkeypatch):
+    runner_config.environment_protocol_violation_stop_after = 0
+    client = _native_run(runner_config, monkeypatch, 5, _flat)
+    with pytest.raises(IncompleteEvaluationError) as error:
+        await collection.RolloutCollectionHelper().run_from_config(runner_config)
+    assert "EVAL STOPPED" not in str(error.value) and client.post.await_count == 5

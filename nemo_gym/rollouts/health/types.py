@@ -164,15 +164,26 @@ class RolloutDigest(BaseModel):
     policy_calls_observed: bool = False
     model_calls: int = 0
     successful_model_calls: int = 0
+    # The response gate's population: call ids of the verified successful raw responses bound to agent turns and
+    # of the faulted ones among them; None when the rollout's call scope or a bound call's evidence is not verified.
+    responses: dict[str, list[str]] | None = None
+    upstream_recovery_observations: dict[str, int] | None = None
     model_call_errors: int = 0
     model_call_errors_usage_unknown: int = 0
     errors_by_status: dict[str, int] = Field(default_factory=dict)
     ended_on_error: bool = False
+    # The row's own `verification_skipped` when written as a boolean, else None (absent is not False).
+    verification_skipped: bool | None = None
+    # Whether a sub-step of the row's `step_usage` (scicode_agent) has status `context_window_exceeded`, a
+    # signal, not proof of input clipping; None when the row has no well-formed `step_usage`.
+    context_window_exceeded: bool | None = None
     duplicated_calls: int = 0
     transcript_prompt_tokens: int = 0
     transcript_completion_tokens: int = 0
     capture_prompt_tokens: int = 0
     capture_completion_tokens: int = 0
+    # The record carries a numeric reward and is not masked, as the rollout store's `measured` count reads it.
+    scored: bool = False
     # What this rollout contributes to `run.stats.timeouts`.
     timing: RolloutTiming | None = None
 
@@ -192,6 +203,9 @@ class _LineSlice:
     ordinal: int
     source_index: int
     line_number: int
+    file_identity: tuple[int, int]
+    expected_identity: tuple[str | None, str, int] | None = None
+    legacy_attempt_index: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

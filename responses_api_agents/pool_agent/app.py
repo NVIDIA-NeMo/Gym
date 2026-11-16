@@ -39,7 +39,6 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, SandboxObservation
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.pool_agent.configuration import pool_config
@@ -314,6 +313,7 @@ class PoolAgent(SimpleResponsesAPIAgent):
                 LOG.exception("Could not preserve Pool failure artifacts")
 
     async def _activate(self, state: PoolSession, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+        """Run Pool and classify timeouts from confirmed cleanup and model-call evidence."""
         timeout = resolve_agent_timeout(
             body.metadata, ceiling=min(self.config.timeout, state.request.agent_timeout_sec or self.config.timeout)
         )
@@ -332,19 +332,21 @@ class PoolAgent(SimpleResponsesAPIAgent):
                 timeout=timeout,
                 close_timeout=self.config.session_close_timeout_seconds,
             )
-            if artifacts.trajectory_error:
-                raise RuntimeError("Pool did not produce a readable root trajectory")
-            parsed = parse_trajectory(artifacts.trajectory)
             cleanup = state.session.cleanup
             if cleanup is None or not cleanup["cleanup_confirmed"]:
                 raise RuntimeError("Pool ended without confirmed supervisor cleanup")
             if cleanup["error"]:
                 raise RuntimeError(f"Pool supervision failed: {cleanup['error']}")
+            timed_out = cleanup["timed_out"]
+            if artifacts.trajectory_error:
+                if timed_out and not artifacts.completed_model_calls:
+                    raise RuntimeError("Pool timed out before any model response completed")
+                raise RuntimeError("Pool did not produce a readable root trajectory")
+            parsed = parse_trajectory(artifacts.trajectory)
             if parsed.errors:
                 raise RuntimeError("Pool session failed: " + "; ".join(parsed.errors))
             if parsed.exit_reason == "model_next_tool_call_http_error":
                 raise RuntimeError("Pool model request failed: " + parsed.exit_reason)
-            timed_out = cleanup["timed_out"]
             if parsed.exit_reason not in (None, "exit_tool_called"):
                 raise RuntimeError(f"Pool failed: reason={parsed.exit_reason}")
             if timed_out and not parsed.output and not artifacts.completed_model_calls:
@@ -410,10 +412,6 @@ class PoolAgent(SimpleResponsesAPIAgent):
         elif state.activation_request != body:
             raise HTTPException(409, "Pool sessions support one activation; retries must use the same input")
         return (await asyncio.shield(state.task)).model_copy(deep=True)
-
-    async def run(self, body: BaseRunRequest = Body()) -> BaseVerifyResponse:
-        """Require Environment Server orchestration instead of owning benchmark verification."""
-        raise HTTPException(422, "Run Pool through an Environment Server such as single_agent_turn")
 
 
 if __name__ == "__main__":

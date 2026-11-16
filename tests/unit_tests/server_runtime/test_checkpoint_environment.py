@@ -3,11 +3,13 @@
 import asyncio
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime._checkpoint.control import (
+    CheckpointRecord,
     CheckpointRequest,
     CommitRequest,
     ParticipantControlPlane,
@@ -15,7 +17,12 @@ from nemo_gym.server_runtime._checkpoint.control import (
     RetireRequest,
 )
 from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
-from nemo_gym.server_runtime._checkpoint.errors import AdmissionClosedError, ControlError, StaleAttemptError
+from nemo_gym.server_runtime._checkpoint.errors import (
+    AdmissionClosedError,
+    ControlError,
+    ExportFailedError,
+    StaleAttemptError,
+)
 
 
 TASK = {"task_id": "t"}
@@ -601,3 +608,109 @@ async def test_after_a_restore_a_late_start_of_the_replaced_attempt_is_refused(t
             restored.begin(late, TASK, None)
     restored.begin(EpisodeId(rollout_id="r", attempt=1), TASK, None)
     assert restored.steps.keys() == ["r-a1"]
+
+
+async def test_an_expired_retire_cannot_be_exported_by_a_later_checkpoint(tmp_path: Path) -> None:
+    participant = EnvironmentParticipant(mode="exported")
+    controller = controller_for(participant)
+    episode_id = EpisodeId(rollout_id="r")
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def episode() -> None:
+        participant.begin(episode_id, TASK, None)
+        try:
+            await participant.boundary(episode_id, {"step": 1})
+            async with participant.step(episode_id, "replay"):
+                started.set()
+                await release.wait()
+        finally:
+            await participant.end(episode_id)
+
+    task = asyncio.create_task(episode())
+    await started.wait()
+    try:
+        # Marks are applied even when there is no budget left to stop the episode.
+        with pytest.raises(ControlError, match="deadline"):
+            await controller.retire(
+                RetireRequest(checkpoint_id="retire", deadline_ts=time.time() - 1, episode_ids=[episode_id])
+            )
+        assert not task.done()
+        await controller.prepare(CheckpointRequest(**request()))
+        commit = CommitRequest(**request(checkpoint_dir=str(tmp_path)))
+        failures = []
+        for _ in range(2):
+            with pytest.raises(ExportFailedError, match="resume, retry the retire") as caught:
+                await controller.commit(commit)
+            failures.append(str(caught.value))
+        assert failures[0] == failures[1]
+        assert not list(tmp_path.rglob("manifest.json"))
+    finally:
+        await controller.resume(CheckpointRequest(**request()))
+        release.set()
+        await task
+
+
+async def test_the_budget_an_episode_spent_is_sampled_at_export_and_charged_to_its_replacement(
+    tmp_path: Path,
+) -> None:
+    """Sampled when the commit exports the episode, so a step in flight then counts in full;
+    time parked for the checkpoint does not."""
+    source = EnvironmentParticipant(mode="exported")
+    source_controller = controller_for(source)
+    episode_id = EpisodeId(rollout_id="r", attempt=1)
+    release = asyncio.Event()
+
+    async def episode() -> None:
+        async with asyncio.timeout(30) as deadline:
+            source.begin(episode_id, TASK, deadline)
+            await source.boundary(episode_id, {"next": "invoke_agent"})
+            # The boundary was recorded before the step, which then runs for a while before the checkpoint.
+            async with source.step(episode_id, "replay"):
+                await release.wait()
+
+    task = asyncio.create_task(episode())
+    await asyncio.sleep(0.3)
+    await source_controller.prepare(CheckpointRequest(**request()))
+    [at_prepare] = source.export_records(None)
+    await asyncio.sleep(0.7)
+    await source_controller.commit(CommitRequest(**request(checkpoint_dir=str(tmp_path))))
+    [at_commit] = source.export_records(None)
+    await source_controller.resume(CheckpointRequest(**request()))
+    release.set()
+    await task
+
+    restored = EnvironmentParticipant(mode="exported")
+    controller = controller_for(restored)
+    await controller.restore(RestoreRequest(**request("r1", checkpoint_dir=str(tmp_path), episode_ids=[episode_id])))
+    await controller.resume(CheckpointRequest(**request("r1")))
+    replacement = EpisodeId(rollout_id="r", attempt=2)
+    async with asyncio.timeout(30) as deadline:
+        restored.begin(replacement, TASK, deadline)
+        charged = restored.steps.elapsed(replacement.capture_key)
+        remaining = deadline.when() - asyncio.get_running_loop().time()
+        await restored.end(replacement)
+
+    assert 0.3 <= at_prepare.elapsed_s < 1.0
+    # Frozen while parked.
+    assert at_commit.elapsed_s == at_prepare.elapsed_s
+    # The replacement has only what is left; a later checkpoint of it records the earlier spend too.
+    assert at_prepare.elapsed_s <= charged < at_prepare.elapsed_s + 0.5
+    assert remaining < 30 - at_prepare.elapsed_s + 0.01
+    # A record written before the field existed loads as nothing spent.
+    assert EpisodeRecord(episode_id=episode_id, task_digest="d", boundary=None).elapsed_s == 0.0
+
+
+def test_a_record_with_nothing_spent_is_written_without_the_field_so_an_earlier_gym_restores_it() -> None:
+    class RecordBeforeTheField(CheckpointRecord):
+        task_digest: str
+        boundary: Any
+
+    episode_id = EpisodeId(rollout_id="r")
+    unspent = EpisodeRecord(episode_id=episode_id, task_digest="d", boundary=None).to_json_record()
+    spent = EpisodeRecord(episode_id=episode_id, task_digest="d", boundary=None, elapsed_s=1.5).to_json_record()
+
+    assert "elapsed_s" not in unspent
+    # Records forbid unknown fields, so this is what a Gym from before the field accepts.
+    assert RecordBeforeTheField.model_validate(unspent).episode_id == episode_id
+    assert EpisodeRecord.model_validate(unspent).elapsed_s == 0.0
+    assert spent["elapsed_s"] == 1.5 and EpisodeRecord.model_validate(spent).elapsed_s == 1.5

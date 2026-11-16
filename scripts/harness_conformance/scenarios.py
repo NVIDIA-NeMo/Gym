@@ -6,9 +6,10 @@
 from dataclasses import asdict, dataclass, field
 
 from nemo_gym.rollouts import Verdict
+from nemo_gym.rollouts.harness_capabilities import PriorityTier
 
 
-SUITE = "harness-p0-probes/v1"
+SUITE = "harness-probes/v2"
 ALL_EVIDENCE = tuple(f"TE-{i}" for i in range(1, 10))
 
 
@@ -26,6 +27,8 @@ class Scenario:
     steps: bool = True
     judge_verifier: bool = False
     health_expectations: dict[str, Verdict] = field(default_factory=dict)
+    tier: PriorityTier = "P0"
+    compaction: bool | None = None
 
     def task(self) -> dict:
         """Only the task reaches the harness; expectations stay in the runner."""
@@ -87,6 +90,15 @@ SCENARIOS = (
         judge_verifier=True,
     ),
     Scenario("verifier_failure", "A completed trajectory receives a known zero reward.", expected_reward=0.0),
+    Scenario(
+        "context_compaction",
+        "Automatic compaction during shell actions; retain the helper without creating a policy turn.",
+        # Hermes protects the first three and last twenty messages. Build enough
+        # real tool history for its automatic summarizer to have an eligible span.
+        tool_steps=14,
+        tier="P1",
+        compaction=True,
+    ),
 )
 
 

@@ -37,10 +37,12 @@ from uuid import uuid4
 
 import orjson
 from fastapi import Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, model_validator
 
-from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
-from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER, rollout_context
+from nemo_gym.core.correlation import CorrelationPathError, resolve
+from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER, rollout_context
+from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.core.responses_api_types import SSE_KEEPALIVE
 from nemo_gym.models._checkpoint import (
     attach_capture_context,
@@ -49,13 +51,6 @@ from nemo_gym.models._checkpoint import (
 from nemo_gym.models.responses_streaming import (
     is_responses_lifecycle_chunk,
 )
-from nemo_gym.models.token_capture import (
-    CaptureContext,
-    installed_lineage_store,
-    installed_token_sink,
-    reset_token_sink,
-    set_token_sink,
-)
 from nemo_gym.models.token_capture.config import token_capture_config
 from nemo_gym.models.token_capture.control_routes import install_rollout_control_routes
 from nemo_gym.models.token_capture.lineage import FileLineageStore, InMemoryLineageStore
@@ -63,8 +58,11 @@ from nemo_gym.models.token_capture.protocols import (
     CaptureLedger,
     LineageResolver,
     ParentResolutionMode,
+    installed_lineage_store,
+    installed_token_sink,
 )
 from nemo_gym.models.token_capture.records import UNCOMMITTED_CALL_REASON
+from nemo_gym.models.token_capture.sink import CaptureContext, reset_token_sink, set_token_sink
 from nemo_gym.models.token_capture.store import make_token_store
 from nemo_gym.server_runtime.request_handling.rollout_context import scope_with_routed_path
 
@@ -81,6 +79,13 @@ class ModelExecutionOutcome(TypedDict):
     response_source: Literal["upstream", "local"] | None
     upstream_status_code: int | None
     local_response_reason: str | None
+    # Why generation stopped, as the chat backend reported it: a Responses payload cannot say it unless cut short.
+    finish_reason: NotRequired[str]
+    # Set when the adapter lowered the call's output budget to fit the engine's context window and sent it again.
+    requested_max_tokens: NotRequired[int]
+    applied_max_tokens: NotRequired[int]
+    # The same refit as one event: ``requested_max_tokens``, the engine's ``window`` and ``applied_max_tokens``.
+    output_budget_refit: NotRequired[dict[str, int]]
 
 
 def start_model_execution(request: Request, *, upstream_attempted: bool) -> ModelExecutionOutcome:
@@ -95,10 +100,24 @@ def start_model_execution(request: Request, *, upstream_attempted: bool) -> Mode
     return outcome
 
 
+def note_finish_reason(request: Request, finish_reason: str | None) -> None:
+    """Note why a chat backend stopped generating with the call's execution facts, which capture saves.
+
+    A Responses payload converted from a chat completion cannot say it unless generation was cut short.
+    """
+    if finish_reason is None:
+        return
+    execution = getattr(request.state, "nemo_gym_model_execution", None)
+    if not isinstance(execution, dict):
+        execution = start_model_execution(request, upstream_attempted=True)
+    execution["finish_reason"] = finish_reason
+
+
 class ModelCallCaptureConfig(BaseModel):
     """Run-wide model-call capture settings from Gym's global config."""
 
     observability_enabled: bool = False
+    trajectory_schema_version: Literal["1.0", "2.0"] = "1.0"
     model_call_capture_dir: Optional[Path] = None
 
     @model_validator(mode="after")
@@ -343,15 +362,6 @@ def _consume_terminal_sse_event(buffer: bytearray, dialect: str) -> Optional[str
     return None
 
 
-# Consumer side of the URL-prefix protocol: strip /ng-rollout/<id> before routing, key capture by
-# <id>. The constant + producer (apply_rollout_prefix) are in server_utils.
-_ROLLOUT_PATH_RE = re.compile(
-    rf"^/{re.escape(ROLLOUT_PATH_PREFIX)}/(?P<rollout_id>[^/]+)"
-    rf"(?:/(?P<token_capture>{re.escape(TOKEN_CAPTURE_PATH_SEGMENT)}))?"
-    rf"(?P<rest>/.*)$"
-)
-
-
 def make_capture_store(config: ModelCallCaptureConfig) -> Optional[CaptureStore]:
     """Build a CaptureStore when observability is enabled; otherwise None."""
     if not config.observability_enabled:
@@ -450,7 +460,11 @@ def _reconstruct_anthropic_sse(events: list[dict[str, Any]]) -> Optional[dict[st
         etype = event.get("type")
         if etype == "message_start":
             msg = event.get("message") or {}
-            message = {k: msg.get(k) for k in ("id", "type", "role", "model", "stop_reason") if msg.get(k) is not None}
+            message = {
+                k: msg.get(k)
+                for k in ("id", "type", "role", "model", "stop_reason", "native_stop_reason", "native_finish_reason")
+                if msg.get(k) is not None
+            }
             usage.update(msg.get("usage") or {})
         elif etype == "content_block_start":
             blocks[event.get("index", len(blocks))] = dict(event.get("content_block") or {})
@@ -500,6 +514,8 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
     response_id: Optional[str] = None
     role = "assistant"
     finish_reason: Optional[str] = None
+    stop_reason: Optional[str | int] = None
+    native_finish_reason: Optional[str] = None
     saw_choice = False
     for chunk in events:
         model = chunk.get("model") or model
@@ -533,6 +549,10 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
                     slot["function"]["arguments"] += fn["arguments"]
             if choice.get("finish_reason"):
                 finish_reason = choice["finish_reason"]
+            if choice.get("stop_reason") is not None:
+                stop_reason = choice["stop_reason"]
+            if choice.get("native_finish_reason") is not None:
+                native_finish_reason = choice["native_finish_reason"]
     if not saw_choice:
         return None
     message: dict[str, Any] = {"role": role, "content": "".join(content_parts) or None}
@@ -547,11 +567,50 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
         "model": model,
         "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
     }
+    if stop_reason is not None:
+        result["choices"][0]["stop_reason"] = stop_reason
+    if native_finish_reason is not None:
+        result["choices"][0]["native_finish_reason"] = native_finish_reason
     if response_id is not None:
         result["id"] = response_id
     if usage:
         result["usage"] = usage
     return result
+
+
+def _stream_report(failure_log: Optional[RequestFailureLog], error: BaseException | None) -> Optional[dict]:
+    """The bounded ``FailureHeader.STREAM_FIELD`` value for a stream's request log; ``None`` with nothing to report."""
+    return FailureHeader.stream_value(failure_log.reply_report(error)) if failure_log is not None else None
+
+
+def _with_report_field(payload: dict[str, Any], report: Optional[dict]) -> dict[str, Any]:
+    return payload if report is None else {**payload, FailureHeader.STREAM_FIELD: report}
+
+
+_RESPONSES_TERMINAL_EVENTS = frozenset({"response.completed", "response.incomplete", "response.failed"})
+
+
+def _is_chat_done(event: str | bytes) -> bool:
+    text = event.decode("utf-8", errors="replace") if isinstance(event, bytes) else event
+    return text.strip() == "data: [DONE]"
+
+
+def _with_stream_report(event: str | bytes, report: Optional[dict]) -> str | bytes:
+    """``event`` with the report added to its data object when it is a terminal Responses event or a Chat chunk."""
+    if report is None:
+        return event
+    text = event.decode("utf-8") if isinstance(event, bytes) else event
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        if not line.startswith("data: ") or line == "data: [DONE]":
+            continue
+        payload = json.loads(line[len("data: ") :])
+        if payload.get("type", "chat.completion.chunk") not in _RESPONSES_TERMINAL_EVENTS and "choices" not in payload:
+            return event
+        lines[index] = "data: " + json.dumps(_with_report_field(payload, report))
+        joined = "\n".join(lines)
+        return joined.encode("utf-8") if isinstance(event, bytes) else joined
+    return event
 
 
 def _reconstruct_responses_sse(events: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
@@ -599,6 +658,7 @@ def _record(
     ttft_ms: Optional[float] = None,
     response_raw: Optional[str] = None,
     execution: Optional[ModelExecutionOutcome] = None,
+    failure: BaseException | None = None,
 ) -> None:
     """Append one exchange (success or failure). Best-effort: never raises."""
     request_body = None
@@ -641,6 +701,10 @@ def _record(
             exchange["request_raw"] = request_raw
         if response_raw is not None:
             exchange["response_raw"] = response_raw
+        observations = RequestFailureLog.current()
+        if observations is not None:
+            exchange["failure_report"] = observations.reply_report(failure).model_dump(mode="json")
+            exchange["model_operations"] = [o.model_dump(mode="json") for o in observations.model_operations.values()]
         store.record(rollout_id, exchange)
     except Exception:
         logger.warning("Model-call capture failed for one %s call.", dialect, exc_info=True)
@@ -674,17 +738,19 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
         logger.error(
             "Cannot poison uncommitted call %s for rollout %s: the lineage resolver is not a CaptureLedger.",
             context.model_call_id,
-            context.rollout_id,
+            context.capture_key,
         )
         return
     try:
         # A disconnected caller must not cancel the write before it reaches the ledger.
-        await asyncio.shield(ledger.record_failure(context.rollout_id, context.model_call_id, UNCOMMITTED_CALL_REASON))
+        await asyncio.shield(
+            ledger.record_failure(context.capture_key, context.model_call_id, UNCOMMITTED_CALL_REASON)
+        )
     except Exception:
         logger.exception(
             "Could not poison uncommitted call %s for rollout %s.",
             context.model_call_id,
-            context.rollout_id,
+            context.capture_key,
         )
 
 
@@ -751,12 +817,21 @@ class _CaptureMiddleware:
         rollout_from_path: Optional[str] = None
         token_capture_requested = False
         capture_prefix = ""
-        prefix_match = _ROLLOUT_PATH_RE.match(path)
-        if prefix_match:
-            rollout_from_path = prefix_match.group("rollout_id")
-            token_capture_requested = prefix_match.group("token_capture") is not None
-            capture_prefix = path[: prefix_match.start("rest")]
-            path = prefix_match.group("rest")
+        try:
+            # Under run_webserver the trace middleware has already resolved this path, so this reads its result;
+            # a stack without it resolves here.
+            resolved = resolve(scope)
+        except CorrelationPathError as error:
+            # 404, not 400: the agent outcome policy grades a 400 as the model's request error.
+            logger.warning(f"Refusing a malformed correlation prefix: {error}")
+            await JSONResponse({"detail": str(error)}, status_code=404)(scope, receive, send)
+            return
+        if resolved is not None and resolved[0].capture_key is not None:
+            correlation, rest = resolved
+            rollout_from_path = correlation.capture_key
+            token_capture_requested = correlation.token_capture
+            capture_prefix = path[: len(path) - len(rest)]
+            path = rest
             scope = scope_with_routed_path(scope, path)
 
         method = str(scope.get("method") or "").upper()
@@ -869,7 +944,7 @@ class _CaptureMiddleware:
         capture_context = None
         if capture_wanted:
             capture_context = CaptureContext(
-                rollout_id=rollout_id,
+                capture_key=rollout_id,
                 model_call_id=model_call_id,
                 token_sink=token_sink,
                 lineage_store=self._capture_ledger if self._external_staging else self._lineage_store,
@@ -999,6 +1074,7 @@ class _CaptureMiddleware:
                     ttft_ms=state["ttft_ms"],
                     response_raw=upstream_body.decode("utf-8", errors="replace") if upstream_body else None,
                     execution=request_state.get("nemo_gym_model_execution"),
+                    failure=exc,
                 )
             except Exception:
                 logger.warning("Model-call capture finalization failed.", exc_info=True)

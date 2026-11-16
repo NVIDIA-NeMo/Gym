@@ -14,11 +14,7 @@ biomnibench_da:
           type: benchmark
           jsonl_fpath: ${prepare_script_args.output_dir}/gym.jsonl
           prepare_script: benchmarks/biomnibench_da/harbor/adapter.py
-          prepare_dependencies:
-            - huggingface_hub
-            - tomli_w
-            - tqdm
-            - tyro
+          prepare_project: benchmarks/biomnibench_da
           num_repeats: 4
 
       # Native harbor.models.job.config.JobConfig fields.

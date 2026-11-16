@@ -21,6 +21,7 @@ from nemo_gym.models import (
     ModelCallCaptureConfig,
     flatten_namespace_tools,
     install_model_call_capture,
+    message_content_to_text,
     restore_namespace_tool_calls,
     synthesize_chat_completion_sse,
     synthesize_responses_sse,
@@ -36,10 +37,29 @@ from nemo_gym.verification import call_judge
 from .scenarios import Scenario
 
 
-SHELL_TOOLS = ("bash", "terminal", "shell", "shell_command", "exec_command", "code_exec", "exec")
+SHELL_TOOLS = ("bash", "terminal", "shell", "shell_command", "exec_command", "code_exec", "exec", "python_cell")
 # Harnesses that end an episode on a tool call rather than on a text answer.
 FINISH_TOOLS = ("finish", "submit")
 ANSWER = "CONFORMANCE_DONE"
+
+
+# Identify the actual summary instruction, never the availability of tools or a
+# token threshold. These prefixes are exercised against the pinned CLI requests.
+SUMMARY_PROMPTS = (
+    "Create a new anchored summary from the conversation history.",
+    "Update the existing anchored summary using the new conversation history.",
+    "You are performing a CONTEXT CHECKPOINT COMPACTION.",
+    "The context window is approaching its limit. Please create a concise summary",
+    "Create a structured handoff summary for a later assistant",
+)
+
+
+def is_compaction_request(body: dict) -> bool:
+    messages = body.get("messages", body.get("input", []))
+    if not isinstance(messages, list) or not messages or not isinstance(messages[-1], dict):
+        return False
+    last = messages[-1]
+    return last.get("role") == "user" and message_content_to_text(last.get("content")).startswith(SUMMARY_PROMPTS)
 
 
 @dataclass
@@ -56,6 +76,10 @@ class Probe:
     closed: int = 0
     finished: bool = False
     finish_call: dict | None = None
+    compaction_summary: str = field(
+        default_factory=lambda: f"COMPACTION_SUMMARY_{uuid4().hex}: continue the shell checks."
+    )
+    compaction_response_ids: list[str] = field(default_factory=list)
 
     def save(self) -> None:
         """Persist independent observations even if collection fails."""
@@ -71,7 +95,19 @@ class Probe:
             "finished": self.finished,
             "finish_call": self.finish_call,
         }
+        if self.scenario.compaction is not None:
+            witness["compaction"] = {
+                "summary": self.compaction_summary,
+                "response_ids": self.compaction_response_ids,
+            }
         (self.directory / "witness.json").write_text(json.dumps(witness, indent=2) + "\n")
+
+    async def seed_sandbox(self) -> dict:
+        """Optional Resources-owned sandbox for harnesses that borrow their task environment."""
+        return {}
+
+    async def close_sandbox(self) -> None:
+        """Release a task sandbox, when the probe owns one."""
 
     def _tool(self, body: dict) -> tuple[str, dict, dict]:
         tools, namespaces = flatten_namespace_tools(body.get("tools"))
@@ -86,7 +122,16 @@ class Probe:
                 marker = self.directory / f"tool-{index}.txt"
                 code = self.scenario.tool_exit_code if index == 0 else 0
                 command = f"printf %s {shlex.quote(token)} > {shlex.quote(str(marker))}; printf %s {shlex.quote(token)}; exit {code}"
-                if "cmd" in properties:
+                if bare == "python_cell" and "code" in properties:
+                    args = {
+                        "code": (
+                            f"result = await self.shell.run({('sh -c ' + shlex.quote(command))!r})\n"
+                            "print(result.stdout, end='')\n"
+                            "if result.returncode:\n"
+                            "    raise RuntimeError(f'shell exited with code {result.returncode}')"
+                        )
+                    }
+                elif "cmd" in properties:
                     args = {"cmd": command}
                 elif "command" in properties:
                     command_type = properties["command"].get("type")
@@ -116,6 +161,18 @@ class Probe:
         for tool in tools:
             function = tool.get("function", tool)
             name = function.get("name", "")
+            if name.rsplit("__", 1)[-1] == "python_cell":
+                return (
+                    name,
+                    {
+                        "code": (
+                            "from nooa_bench.bench_agent import TaskResult\n"
+                            f"return_result(TaskResult(solution_description={ANSWER!r}, "
+                            f"evidence={ANSWER!r}, how_to_verify={ANSWER!r}))"
+                        )
+                    },
+                    namespaces,
+                )
             if name.rsplit("__", 1)[-1] not in FINISH_TOOLS:
                 continue
             parameters = function.get("parameters") or {}
@@ -175,6 +232,7 @@ class Probe:
             status = self.scenario.http_errors[-1]
         response_id = f"resp_{uuid4().hex}"
         namespaces = {}
+        compacting = self.scenario.compaction is not None and is_compaction_request(body)
         if status != 200:
             payload = {
                 "error": {"message": "controlled model failure", "type": "conformance_error", "code": str(status)}
@@ -183,9 +241,25 @@ class Probe:
             try:
                 if self.finished:
                     raise ValueError("unexpected model request after the scripted final answer")
-                if any(not call["result_seen"] or not call.get("executed") for call in self.tool_calls):
+                # A summary can cover only older history. Policy requests must still
+                # show every executed result before receiving the next scripted action.
+                if not compacting and any(
+                    not call["result_seen"] or not call.get("executed") for call in self.tool_calls
+                ):
                     raise ValueError("tool execution or model-visible result was not witnessed")
-                if len(self.tool_calls) < self.scenario.tool_steps:
+                if compacting:
+                    if self.scenario.compaction is not True or not self.tool_calls or self.compaction_response_ids:
+                        raise ValueError("unexpected compaction request outside the single summary stage")
+                    output = [
+                        {
+                            "type": "message",
+                            "id": f"msg_{uuid4().hex}",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [{"type": "output_text", "text": self.compaction_summary, "annotations": []}],
+                        }
+                    ]
+                elif len(self.tool_calls) < self.scenario.tool_steps:
                     name, arguments, namespaces = self._tool(body)
                     call = self.tool_calls[-1]
                     output = [
@@ -224,12 +298,24 @@ class Probe:
                     ]
                     self.finished = True
                 calls_tool = output[0]["type"] == "function_call"
+                prompt_tokens = 20 + index
+                completion_tokens = 11 if compacting else 8
+                if self.scenario.compaction is not None:
+                    policy_index = index - len(self.compaction_response_ids)
+                    prompt_tokens = (
+                        500
+                        if compacting
+                        else 27000 + policy_index
+                        if not self.compaction_response_ids
+                        else 100 + policy_index
+                    )
                 if request.url.path.endswith("/chat/completions"):
                     message = {
                         "role": "assistant",
-                        "content": None if calls_tool else ANSWER,
-                        "reasoning_content": "Perform the prescribed check.",
+                        "content": None if calls_tool else output[0]["content"][0]["text"],
                     }
+                    if not compacting:
+                        message["reasoning_content"] = "Perform the prescribed check."
                     if calls_tool:
                         message["tool_calls"] = [
                             {
@@ -242,7 +328,7 @@ class Probe:
                         "id": response_id,
                         "object": "chat.completion",
                         "created": 1,
-                        "model": body["model"],
+                        "model": body.get("model") or "conformance-model",
                         "choices": [
                             {
                                 "index": 0,
@@ -253,11 +339,11 @@ class Probe:
                     }
                     if self.scenario.usage:
                         payload["usage"] = {
-                            "prompt_tokens": 20 + index,
-                            "completion_tokens": 8,
-                            "total_tokens": 28 + index,
+                            "prompt_tokens": prompt_tokens,
+                            "completion_tokens": completion_tokens,
+                            "total_tokens": prompt_tokens + completion_tokens,
                             "prompt_tokens_details": {"cached_tokens": 3},
-                            "completion_tokens_details": {"reasoning_tokens": 2},
+                            "completion_tokens_details": {"reasoning_tokens": 0 if compacting else 2},
                         }
                 else:
                     payload = {
@@ -267,20 +353,22 @@ class Probe:
                         "status": "completed",
                         "error": None,
                         "incomplete_details": None,
-                        "model": body["model"],
+                        "model": body.get("model") or "conformance-model",
+                        "output": restore_namespace_tool_calls(output, namespaces),
                         "parallel_tool_calls": body.get("parallel_tool_calls", False),
                         "tool_choice": body.get("tool_choice", "auto"),
                         "tools": body.get("tools", []),
-                        "output": restore_namespace_tool_calls(output, namespaces),
                     }
                     if self.scenario.usage:
                         payload["usage"] = {
-                            "input_tokens": 20 + index,
-                            "output_tokens": 8,
-                            "total_tokens": 28 + index,
+                            "input_tokens": prompt_tokens,
+                            "output_tokens": completion_tokens,
+                            "total_tokens": prompt_tokens + completion_tokens,
                             "input_tokens_details": {"cached_tokens": 3},
-                            "output_tokens_details": {"reasoning_tokens": 2},
+                            "output_tokens_details": {"reasoning_tokens": 0 if compacting else 2},
                         }
+                if compacting:
+                    self.compaction_response_ids.append(response_id)
             except ValueError as exc:
                 status = 409
                 self.violations.append(str(exc))
@@ -348,9 +436,13 @@ class Probe:
                 request.session["resources_session_id"] = session.resources_session_id
             self.seeded += 1
             self.save()
-            return {"resources_session_id": session.resources_session_id} if "resources_session_id" in body else {}
+            result = {"resources_session_id": session.resources_session_id} if "resources_session_id" in body else {}
+            if "resources_session_id" in body:
+                result.update(await self.seed_sandbox())
+            return result
 
         async def close(body: ResourcesCloseSessionRequest) -> dict:
+            await self.close_sandbox()
             self.closed += 1
             self.save()
             return {"resources_session_id": body.resources_session_id}

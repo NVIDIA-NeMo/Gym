@@ -28,6 +28,19 @@ from nemo_gym.config.config_types import RunExportConfig
 UPLOAD_ALLOWANCE_S = 3600
 
 
+def _dotted_keys(meta: dict[str, Any], prefix: str = "") -> dict[str, Any]:
+    """Fold nested mappings of `meta` into dotted keys: `{"model": {"version": "v"}}` is `{"model.version": "v"}`."""
+    flat: dict[str, Any] = {}
+    for key, value in meta.items():
+        path = f"{prefix}.{key}" if prefix else key
+        leaves = _dotted_keys(value, path) if isinstance(value, dict) else {path: value}
+        repeated = sorted(flat.keys() & leaves.keys())
+        if repeated:
+            raise ValueError(f"`meta` sets the annotation {repeated[0]!r} twice.")
+        flat.update(leaves)
+    return flat
+
+
 class EvalRDLExportConfig(RunExportConfig):
     """Configuration for `gym eval export evalrdl`.
 
@@ -41,17 +54,32 @@ class EvalRDLExportConfig(RunExportConfig):
     parallel: int = Field(default=4, ge=1, description="Number of parallel upload parts.")
     wait: bool = Field(default=True, description="Block until EvalRDL has a verdict on the upload.")
     timeout: float = Field(default=1800, gt=0, description="Seconds to wait for the verdict.")
+    run_dir: Optional[Path] = Field(
+        default=None,
+        description=(
+            "Directory to upload as the run; it must contain the rollouts file. "
+            "Defaults to the directory the rollouts file is in."
+        ),
+    )
     url: Optional[str] = Field(
         default=None, description="EvalRDL service: `prod`, `stg` or a URL. Defaults to the SDK's own choice."
     )
     requirement: str = Field(
-        default="evalrdl", description="pip requirement for the EvalRDL SDK, for example a pinned version."
+        default="evalrdl>=0.0.241",
+        description="pip requirement for the EvalRDL SDK, for example a pinned version. 0.0.241 adds `upload_plan`.",
     )
 
     @field_validator("tags", "meta", mode="before")
     @classmethod
     def plain_containers(cls, value: Any) -> Any:
         return OmegaConf.to_container(value, resolve=True) if isinstance(value, (DictConfig, ListConfig)) else value
+
+    @field_validator("meta")
+    @classmethod
+    def dotted_annotation_keys(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """EvalRDL annotations are flat keys such as `model.version`, which a Hydra override can only write as nested
+        settings (`+meta.model.version=m`); the nested form is folded into the dotted key."""
+        return _dotted_keys(value)
 
 
 class EvalRDLExporter(IsolatedExporter):
@@ -87,6 +115,9 @@ class EvalRDLExporter(IsolatedExporter):
             raise ExportPreparationError(unexportable)
         # `absolute`, not `resolve`: a symlinked rollouts file must not move the upload to its target's directory.
         rollouts = artifacts.rollouts_jsonl_fpath.absolute()
+        run_dir = self.config.run_dir.absolute() if self.config.run_dir is not None else rollouts.parent
+        if not rollouts.is_relative_to(run_dir):
+            raise ExportPreparationError(f"`run_dir` {run_dir} does not contain the rollouts file {rollouts}.")
         others = sorted(
             path.name
             for path in rollouts.parent.glob("*rollouts.jsonl")
@@ -99,7 +130,7 @@ class EvalRDLExporter(IsolatedExporter):
             )
         config = self.config
         return {
-            "run_dir": str(rollouts.parent),
+            "run_dir": str(run_dir),
             "label": config.label,
             "tags": list(config.tags),
             "meta": config.meta,

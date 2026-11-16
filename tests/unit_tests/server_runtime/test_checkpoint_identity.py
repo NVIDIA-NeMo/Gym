@@ -3,14 +3,15 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from aiohttp import ClientConnectorError, ClientOSError, ServerDisconnectedError
+from aiohttp import ClientConnectorError, ClientOSError, ClientTimeout, ServerDisconnectedError
 from omegaconf import DictConfig
 from pydantic import ValidationError
 
 import nemo_gym.server_runtime.base_server
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig
-from nemo_gym.core.episode import EpisodeId, current_episode_id, rollout_context
+from nemo_gym.core.episode_context import current_episode_id, rollout_context
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 
 
@@ -57,6 +58,7 @@ def _client(monkeypatch: pytest.MonkeyPatch, extra: dict) -> tuple[ServerClient,
     request_mock = AsyncMock(return_value="response")
     client_mock = MagicMock()
     client_mock.return_value.request = request_mock
+    client_mock.return_value.timeout = ClientTimeout()
     monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", client_mock)
     return client, request_mock
 

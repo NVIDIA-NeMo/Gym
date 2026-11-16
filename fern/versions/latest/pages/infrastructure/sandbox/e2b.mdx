@@ -80,6 +80,9 @@ sandbox:
       retries: 2
       retry_delay_s: 0.5
       retry_max_delay_s: 8.0
+    attribution:
+      enabled: true
+      key_prefix: nemo-gym.nvidia.com/
 ```
 
 Pass the provider config beside the agent and model configs:
@@ -139,7 +142,7 @@ builds to finish; pass `--continue-on-error` to keep building the remaining imag
 | `workdir` | Used by the NeMo Gym facade as the default command working directory. |
 | `env` | Passed to E2B when the sandbox is created. |
 | `files` | Uploaded after creation and before `start()` returns. |
-| `metadata` | Passed to E2B as string metadata. |
+| `metadata` | Passed to E2B as string metadata, merged over the [job attribution](#job-attribution) keys. |
 | `resources` | Fixed by the template rather than applied per sandbox. Requests warn, or raise when `create.strict_resources` is true. |
 | `entrypoint` | Unsupported and rejected before allocation; define it in the E2B template. |
 | `provider_options` | Supports only `template`; unknown or invalid values are rejected before allocation. |
@@ -180,6 +183,42 @@ carry the E2B sandbox ID for reconnection through another configured provider in
 public connect operation may extend a near-expiry sandbox to its SDK-default connection lifetime
 (300 seconds in E2B 2.36).
 
+`status()` reads the sandbox record from E2B's control plane (`GET /sandboxes/{id}`): `RUNNING`
+means the service reports the sandbox as running, not that the guest passed a health check.
+An E2B-compatible gateway must serve that endpoint, or status cannot report the real state.
+
+## Pause and Resume
+
+The E2B provider supports the public async and sync sandbox lifecycle methods:
+
+```python
+from nemo_gym.sandbox import SandboxStatus
+
+await sandbox.pause()
+assert await sandbox.status() == SandboxStatus.PAUSED
+await sandbox.resume()
+result = await sandbox.exec("cat /tmp/checkpoint.txt")
+```
+
+For the synchronous `Sandbox`, call the same methods without `await`. Pause uses
+E2B's default memory-preserving snapshot. Resume connects to the same sandbox ID
+and refreshes the SDK handle so subsequent commands and file operations use the
+resumed connection. Resume restarts the sandbox lifetime at `create.timeout_s`, the
+provider default; a per-sandbox `SandboxSpec.ttl_s` is not reapplied. Pause raises on a
+409 Conflict. E2B cloud sends one for an already-paused sandbox or one in a transitional
+state, and AgentENV during a snapshot or fork, which status reports as paused although the
+sandbox then runs again.
+
+Status reads the control plane without waking the guest. The provider does not
+retry failed pause/resume calls; a timeout or transport failure can leave the
+remote state unknown. Check status before retrying. Closing a paused sandbox
+still deletes it. This capability requires a service that implements E2B's public
+pause/connect endpoints.
+
+A paused sandbox does not count down its timeout, so pausing turns off the `ttl_s` cleanup
+backstop: if the process exits between `pause()` and `close()`, nothing deletes the sandbox
+(AgentENV never evicts paused sandboxes). Close paused sandboxes in a `finally` block.
+
 ## Security and Isolation
 
 E2B supplies the sandbox isolation boundary; when using a compatible gateway, its operator is
@@ -207,12 +246,73 @@ per-instance worker YAML. It passes them through the worker environment, then re
 header mappings only in worker memory. The API key stays out of the serializable provider config
 and is read directly from `E2B_API_KEY` by the E2B SDK.
 
+## Job Attribution
+
+The provider merges `nemo-gym.nvidia.com/team`, `nemo-gym.nvidia.com/user`,
+`nemo-gym.nvidia.com/workload`, and `nemo-gym.nvidia.com/run` keys into each sandbox's
+metadata when they can be resolved. E2B and AgentENV return sandbox metadata from their list
+API and filter on it with `GET /v2/sandboxes?metadata=k=v` (AgentENV's gateway applies the
+filter across its clusters), so running sandboxes are attributable to the team, user, and
+workload that created them:
+
+```bash
+curl -sG "${E2B_API_URL:-https://api.e2b.app}/v2/sandboxes" \
+  -H "X-API-KEY: $E2B_API_KEY" \
+  --data-urlencode "metadata=nemo-gym.nvidia.com/team=my-team"
+```
+
+A gateway may need its own authentication headers instead (see `connection.api_headers`).
+
+Each field resolves in order: the provider's `attribution` config, then `NEMO_GYM_TEAM` /
+`NEMO_GYM_USER` / `NEMO_GYM_WORKLOAD` environment variables, then Slurm job environment
+variables (`SLURM_JOB_ACCOUNT` / `SLURM_JOB_USER` / `SLURM_JOB_NAME`). `user` additionally
+falls back to the OS login name (`root` is ignored — containers run as root by default, so
+it would attribute the image, not a person), and `workload` to `NEMO_GYM_CONFIG_PATH`, the
+server instance name the gym CLI sets on every server process it spawns. Fields that cannot
+be resolved are omitted. Explicit `sandbox_spec.metadata` and `default_metadata` keys always
+take precedence over attribution keys.
+
+`run` identifies one launch of the creating process: `NEMO_GYM_RUN_ID` if set, else an id
+generated per process. The resolved attribution is logged once at the first sandbox create —
+note the `run` value from the logs to list or clean up exactly that run's sandboxes (for
+example after killing a run partway through), which `team` / `user` / `workload` cannot do
+when the same user launches the same workload twice:
+
+```python
+from e2b import AsyncSandbox, SandboxQuery
+
+paginator = AsyncSandbox.list(query=SandboxQuery(metadata={"nemo-gym.nvidia.com/run": "<run-id>"}))
+while paginator.has_next:
+    for info in await paginator.next_items():
+        await AsyncSandbox.kill(info.sandbox_id)
+```
+
+The SDK reads `E2B_API_KEY`, `E2B_API_URL`, and `E2B_SANDBOX_URL` from the environment, as
+the provider does.
+
+```yaml
+sandbox:
+  e2b:
+    attribution:
+      enabled: true                       # set false to disable automatic attribution
+      key_prefix: nemo-gym.nvidia.com/    # key namespace; "" for bare team/user/workload/run keys
+      # team: my-team                     # override auto-detection
+      # user: my-user
+      # workload: my-benchmark
+      # run: my-run-id
+```
+
+When the gym servers themselves run in Kubernetes, none of the automatic sources resolve:
+there are no Slurm variables, and the container's OS login is typically `root`, which is
+ignored. Set the `NEMO_GYM_*` variables on the pod spec, as described in
+[Attribution in Kubernetes deployments](/infrastructure/sandbox/opensandbox#attribution-in-kubernetes-deployments).
+
 ## Integration Attribution
 
 NeMo Gym appends `nemo-gym/<version>` to the E2B SDK `User-Agent` for both runtime sandbox
-requests and template provisioning. This lets E2B distinguish NeMo Gym traffic without adding
-metadata to the sandbox itself. An explicit custom `User-Agent` in connection headers takes
-precedence in the E2B SDK and can hide this attribution.
+requests and template provisioning. This lets E2B distinguish NeMo Gym traffic; it is separate
+from the [job attribution](#job-attribution) metadata on each sandbox. An explicit custom
+`User-Agent` in connection headers takes precedence in the E2B SDK and can hide this attribution.
 
 Sandbox and template operations use the E2B SDK's public high-level APIs; attribution uses
 E2B's set-once integration hook. Because E2B 2.x does not expose transport injection on those

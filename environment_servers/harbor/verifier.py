@@ -48,7 +48,7 @@ from environment_servers.harbor.session import (
     resolve_env_templates,
 )
 from nemo_gym import __version__
-from nemo_gym.core import NeMoGymResponse, failure_kinds
+from nemo_gym.core import BaseEpisodeRequest, NeMoGymResponse, failure_kinds
 from nemo_gym.data.tasks.harbor import (
     HarborArtifact,
     HarborTask,
@@ -72,7 +72,6 @@ from nemo_gym.sandbox import (
     upload_dir,
     upload_path,
 )
-from nemo_gym.server_runtime import BaseEpisodeRequest
 from nemo_gym.trajectory import encode_atif_trajectory, transcript_to_atif
 
 

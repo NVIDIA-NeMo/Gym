@@ -14,8 +14,9 @@ from omegaconf import DictConfig
 from pydantic import JsonValue
 
 from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime._checkpoint.control import CheckpointRequest
+from nemo_gym.server_runtime._checkpoint.resources import ResourcesParticipant
 from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER
 from nemo_gym.server_runtime.base_resources_server import (
     BaseResourcesServerConfig,
@@ -65,7 +66,7 @@ class CounterServer(SimpleResourcesServer):
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
         return BaseVerifyResponse(**body.model_dump(), reward=1.0)
 
-    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
         return {
             session_id: {"count": self.counters[session_id]}
             for session_id in session_ids
@@ -352,10 +353,10 @@ async def test_a_declared_session_start_during_a_commit_s_export_waits_for_resum
     exporting, release_export = asyncio.Event(), asyncio.Event()
     export = participant.export
 
-    async def held_export(episode_ids: Any) -> Any:
+    async def held_export(episode_ids: Any, *, checkpoint_id: str) -> Any:
         exporting.set()
         await release_export.wait()
-        return await export(episode_ids)
+        return await export(episode_ids, checkpoint_id=checkpoint_id)
 
     participant.export = held_export
     async with client:
@@ -494,7 +495,7 @@ async def test_a_seed_arriving_during_an_open_checkpoint_waits_for_resume(
     assert later.json()["phase"] == "prepared"
 
 
-async def test_a_seed_in_flight_when_admission_closes_holds_up_prepare_and_is_exported(tmp_path: Path) -> None:
+async def test_a_first_seed_in_flight_when_admission_closes_is_a_restart_of_that_checkpoint(tmp_path: Path) -> None:
     class SlowSeedServer(CounterServer):
         release: Any = None
 
@@ -507,19 +508,77 @@ async def test_a_seed_in_flight_when_admission_closes_holds_up_prepare_and_is_ex
     async with client:
         seed = asyncio.create_task(client.post("/ng-rollout/r/seed_session", json=SEED))
         await until(lambda: server._checkpoint.inflight == 1)
-        missed = await client.post("/ng-control/v1/checkpoint/prepare", json=control(timeout=0.1), headers=AUTH)
+        # Prepare does not wait for the seed: its rollout has done nothing worth saving.
+        prepared = await client.post("/ng-control/v1/checkpoint/prepare", json=control(timeout=0.1), headers=AUTH)
         server.release.set()
-        await seed
-        prepared = await client.post("/ng-control/v1/checkpoint/prepare", json=control(), headers=AUTH)
+        seeded = await seed
         commit = await client.post(
             "/ng-control/v1/checkpoint/commit", json=control(checkpoint_dir=str(tmp_path)), headers=AUTH
         )
         await client.post("/ng-control/v1/checkpoint/resume", json=control(), headers=AUTH)
+        resumed = (await client.get("/ng-control/v1/checkpoint/status", headers=AUTH)).json()
+        # After resume the session is checkpointed like any other.
+        prepared_next = await client.post("/ng-control/v1/checkpoint/prepare", json=control("c2"), headers=AUTH)
+        commit_next = await client.post(
+            "/ng-control/v1/checkpoint/commit",
+            json=control("c2", checkpoint_dir=str(tmp_path / "next")),
+            headers=AUTH,
+        )
+        await client.post("/ng-control/v1/checkpoint/resume", json=control("c2"), headers=AUTH)
 
-    assert missed.json()["phase"] == "preparing"
+    assert seeded.status_code == 200
     assert prepared.json()["phase"] == "prepared"
-    # The environment may record its boundary after the seed before the commit, so the session is exported.
-    assert commit.json()["manifest"]["record_count"] == 1
+    assert prepared.json()["report"]["restarts"] == ["r"]
+    # The session the seed created while the checkpoint was open is left out with its episode.
+    assert commit.json()["manifest"]["record_count"] == 0
+    # Resume clears the restarts of the checkpoint it ends: the rollout is no restart between checkpoints.
+    assert resumed["report"]["restarts"] == []
+    assert prepared_next.json()["phase"] == "prepared" and prepared_next.json()["report"]["restarts"] == []
+    assert commit_next.json()["manifest"]["record_count"] == 1
+
+
+async def test_a_seed_that_claims_a_restored_session_blocks_prepare_and_is_not_a_first_seed_restart(
+    tmp_path: Path,
+) -> None:
+    class HeldSeedServer(CounterServer):
+        held: Any = None
+
+        async def seed_session(self, request: Request, body: BaseSeedSessionRequest) -> BaseSeedSessionResponse:
+            await self.held.wait()
+            return await super().seed_session(request, body)
+
+    _, client = make_server()
+    async with client:
+        await client.post("/ng-rollout/r/seed_session", json=SEED)
+        await client.post("/ng-control/v1/checkpoint/prepare", json=control(), headers=AUTH)
+        await client.post("/ng-control/v1/checkpoint/commit", json=control(checkpoint_dir=str(tmp_path)), headers=AUTH)
+
+    restored, fresh = make_server(HeldSeedServer)
+    restored.held = asyncio.Event()
+    async with fresh:
+        await fresh.post(
+            "/ng-control/v1/checkpoint/restore",
+            json=control("r1", checkpoint_dir=str(tmp_path), episode_ids=[{"rollout_id": "r"}]),
+            headers=AUTH,
+        )
+        await fresh.post("/ng-control/v1/checkpoint/resume", json=control("r1"), headers=AUTH)
+        # The replacement attempt's seed continues the restored session: its rollout has work worth saving.
+        seed = asyncio.create_task(fresh.post("/ng-rollout/r-a1/seed_session", json=SEED))
+        await until(lambda: restored._checkpoint.inflight == 1)
+        cut_short = await fresh.post(
+            "/ng-control/v1/checkpoint/prepare", json=control("c2", timeout=0.2), headers=AUTH
+        )
+        waiting = (await fresh.get("/ng-control/v1/checkpoint/status", headers=AUTH)).json()
+        restored.held.set()
+        seeded = await seed
+        prepared = await fresh.post("/ng-control/v1/checkpoint/prepare", json=control("c2"), headers=AUTH)
+        await fresh.post("/ng-control/v1/checkpoint/resume", json=control("c2"), headers=AUTH)
+
+    # Prepare waits for the seed instead of reporting its rollout as a restart, which would discard the session.
+    assert cut_short.json()["phase"] == "preparing" and cut_short.json()["report"]["restarts"] == []
+    assert waiting["phase"] == "preparing" and waiting["report"]["restarts"] == []
+    assert seeded.status_code == 200
+    assert prepared.json()["phase"] == "prepared" and prepared.json()["report"]["restarts"] == []
 
 
 class ReplayVerifyServer(CounterServer):
@@ -604,7 +663,7 @@ async def test_a_retire_waits_for_the_sessions_request_in_flight() -> None:
                 headers=AUTH,
             )
         )
-        # The retire refuses the session, then waits for the request in flight before freeing it.
+        # The retire refuses the session, then waits for the request in flight before releasing it.
         await until(lambda: server._checkpoint.status_extra()["retired_sessions"] == 1)
         waited = not retire.done() and server._checkpoint.readiness().counts["sessions"] == 1
         # A new request for the session while it stops is refused.
@@ -661,7 +720,7 @@ async def test_late_requests_of_a_retired_attempt_are_refused_until_forget_but_a
         )
         # A tool call its caller sent before its own retire, carrying only the session cookie.
         late_tool = await client.post("/increment")
-        # A seed for the retired attempt would create session state nothing frees.
+        # A seed for the retired attempt would create session state nothing releases.
         late_seed = await client.post("/ng-rollout/r/seed_session", json=SEED)
         close = await client.post(
             "/ng-rollout/r/close_session", json={"resources_session_id": "s", "episode_id": {"rollout_id": "r"}}
@@ -711,7 +770,7 @@ async def retire_cut_short_in_its_hook(
     pytest.fail("the retire never reached its hook")
 
 
-async def test_a_session_whose_retire_was_cut_short_stays_until_a_retry_frees_it_and_blocks_meanwhile(
+async def test_a_session_whose_retire_was_cut_short_stays_until_a_retry_releases_it_and_blocks_meanwhile(
     tmp_path: Path,
 ) -> None:
     server, client = make_server(SlowRetireServer)
@@ -720,7 +779,7 @@ async def test_a_session_whose_retire_was_cut_short_stays_until_a_retry_frees_it
     async with client:
         await client.post("/ng-rollout/r/seed_session", json=SEED)
         cut_short = await retire_cut_short_in_its_hook(client, server, retire)
-        # The session is still being freed: the next checkpoint waits for it and does not export it.
+        # The session is still being released: the next checkpoint waits for it and does not export it.
         prepared = await client.post("/ng-control/v1/checkpoint/prepare", json=control(timeout=0.1), headers=AUTH)
         await client.post("/ng-control/v1/checkpoint/resume", json=control(), headers=AUTH)
         server.release.set()
@@ -787,7 +846,7 @@ class GatedSeedServer(CounterServer):
         return await super().seed_session(request, body)
 
 
-async def test_a_retire_waits_for_a_seed_of_its_attempt_and_frees_the_session_it_creates() -> None:
+async def test_a_retire_waits_for_a_seed_of_its_attempt_and_releases_the_session_it_creates() -> None:
     server, client = make_server(GatedSeedServer)
     server.seed_gate, server.seeding = asyncio.Event(), asyncio.Event()
     async with client:
@@ -806,7 +865,7 @@ async def test_a_retire_waits_for_a_seed_of_its_attempt_and_frees_the_session_it
 
     assert waited
     assert retired.status_code == 200
-    # Nothing of the retired attempt is left: the session the seed created was freed.
+    # Nothing of the retired attempt is left: the session the seed created was released.
     assert server._checkpoint.readiness().counts["sessions"] == 0 and server.counters == {}
 
 
@@ -831,7 +890,7 @@ async def test_a_seed_that_finishes_after_its_retire_was_cut_short_registers_its
         seeded = await seed
         # A tool call without a rollout prefix names only its session.
         late = await client.post("/increment")
-        exported = await server._checkpoint.export(None)
+        exported = await server._checkpoint.export(None, checkpoint_id="c")
         refused = await client.post("/ng-control/v1/checkpoint/forget", json=forget, headers=AUTH)
         retried = await client.post("/ng-control/v1/checkpoint/retire", json=retire, headers=AUTH)
         forgotten = await client.post("/ng-control/v1/checkpoint/forget", json=forget, headers=AUTH)
@@ -840,7 +899,7 @@ async def test_a_seed_that_finishes_after_its_retire_was_cut_short_registers_its
     assert late.status_code == 409 and late.json()["error"]["code"] == "checkpoint_stale_attempt"
     assert exported == []
     assert refused.status_code == 409 and refused.json()["error"]["code"] == "checkpoint_retire_incomplete"
-    # The retried retire frees the session the seed created.
+    # The retried retire releases the session the seed created.
     assert retried.status_code == 200 and server.counters == {}
     assert forgotten.status_code == 200 and server._checkpoint.readiness().counts["sessions"] == 0
 
@@ -894,7 +953,7 @@ async def test_a_retire_that_arrives_after_its_deadline_still_marks_the_attempt_
     server, client = make_server()
     async with client:
         await client.post("/ng-rollout/r/seed_session", json=SEED)
-        # A retire that arrives after its deadline only marks the attempt: it stops and frees nothing.
+        # A retire that arrives after its deadline only marks the attempt: it stops and releases nothing.
         late_retire = await client.post(
             "/ng-control/v1/checkpoint/retire",
             json=control("retire", timeout=-1, episode_ids=[{"rollout_id": "r"}]),
@@ -929,7 +988,7 @@ async def test_a_session_is_open_from_its_seed_until_a_close_or_a_verify_ends_it
     assert not participant.is_open("never-seeded")
 
 
-async def test_a_session_is_not_open_once_a_retire_marks_it_even_before_it_is_freed() -> None:
+async def test_a_session_is_not_open_once_a_retire_marks_it_even_before_it_is_released() -> None:
     server, client = make_server()
     async with client:
         await client.post("/ng-rollout/r/seed_session", json=SEED)
@@ -980,7 +1039,7 @@ async def test_forget_is_refused_while_a_seed_of_a_retired_attempt_is_in_flight(
     assert late.status_code == 409 and late.json()["error"]["code"] == "checkpoint_stale_attempt"
 
 
-async def test_forget_is_refused_while_a_retire_has_not_freed_its_sessions() -> None:
+async def test_forget_is_refused_while_a_retire_has_not_released_its_sessions() -> None:
     server, client = make_server(SlowRetireServer)
     server.release, server.entered = asyncio.Event(), asyncio.Event()
     retire = control("retire", episode_ids=[{"rollout_id": "r"}])
@@ -1413,7 +1472,7 @@ async def test_a_restart_only_seed_waits_again_when_a_new_checkpoint_closes_befo
 
 @pytest.mark.parametrize("path", ["/ng-rollout/r/seed_session", "/close_session", "/verify"])
 async def test_a_session_change_survives_a_disconnect_once_the_reply_has_started(path: str) -> None:
-    from nemo_gym.core.episode import rollout_context
+    from nemo_gym.core.episode_context import rollout_context
     from nemo_gym.server_runtime._checkpoint.resources import ResourcesCheckpointMiddleware
 
     server, _ = make_server()
@@ -1460,7 +1519,7 @@ def test_an_unknown_checkpoint_declaration_fails_at_startup(name: str, value: st
 
 
 @pytest.mark.parametrize("server_type", [RestartOnlyServer, StatelessServer])
-async def test_a_retire_frees_the_sessions_of_a_server_that_does_not_export_them(
+async def test_a_retire_releases_the_sessions_of_a_server_that_does_not_export_them(
     server_type: type[CounterServer],
 ) -> None:
     server, client = make_server(server_type)
@@ -1475,7 +1534,7 @@ async def test_a_retire_frees_the_sessions_of_a_server_that_does_not_export_them
 
     assert retired.status_code == 200
     assert late.json()["error"]["code"] == "checkpoint_stale_attempt"
-    # Nothing else would free it: the late request that would have ended the session is refused.
+    # Nothing else would release it: the late request that would have ended the session is refused.
     assert server.counters == {}
 
 
@@ -1499,10 +1558,10 @@ async def test_live_sessions_outside_the_commit_scope_are_not_exported(tmp_path:
 
 class GatedVerifyServer(ReplayVerifyServer):
     verify_gate: Any = None
-    verifying: Any = None
+    verify_started: Any = None
 
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
-        self.verifying.set()
+        self.verify_started.set()
         await self.verify_gate.wait()
         return await super().verify(body)
 
@@ -1511,13 +1570,13 @@ async def test_a_replayable_verify_that_ends_between_environment_and_resources_p
     tmp_path: Path,
 ) -> None:
     server, client = make_server(GatedVerifyServer)
-    server.verify_gate, server.verifying = asyncio.Event(), asyncio.Event()
+    server.verify_gate, server.verify_started = asyncio.Event(), asyncio.Event()
     close = {"resources_session_id": "s", "episode_id": {"rollout_id": "r", "attempt": 1}}
     async with client:
         await client.post("/ng-rollout/r/seed_session", json=SEED)
         cookies = dict(client.cookies)
         verify = asyncio.create_task(client.post("/ng-rollout/r/verify", json=VERIFY, headers=CLOSE_FOLLOWS))
-        await server.verifying.wait()
+        await server.verify_started.wait()
         # Coordination prepares the environment first.
         # It records the episode's boundary before this verification, which a restore runs again,
         # and it does not reach this server, whose admission is still open.
@@ -1530,7 +1589,7 @@ async def test_a_replayable_verify_that_ends_between_environment_and_resources_p
         await client.post("/ng-control/v1/checkpoint/resume", json=control(), headers=AUTH)
 
     restored, fresh = make_server(GatedVerifyServer)
-    restored.verify_gate, restored.verifying = asyncio.Event(), asyncio.Event()
+    restored.verify_gate, restored.verify_started = asyncio.Event(), asyncio.Event()
     restored.verify_gate.set()
     async with fresh:
         fresh.cookies.update(cookies)
@@ -1731,3 +1790,122 @@ async def test_a_request_in_flight_for_a_restart_an_earlier_stage_reported_does_
     assert commit["episode_ids"] == ["q"]
     assert running_through_the_commit
     assert missed["phase"] == "preparing" and missed["report"]["counts"]["inflight"] == 1
+
+
+class ReleasingServer(CounterServer):
+    """Records the checkpoint IDs its exports were for and the retention sets its releases were given."""
+
+    exported_for: list[str] = []
+    released: list[frozenset[str]] = []
+
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
+        self.exported_for.append(checkpoint_id)
+        return await super().export_session_states(session_ids, checkpoint_id=checkpoint_id)
+
+    async def delete_external_state(self, kept: frozenset[str]) -> None:
+        self.released.append(kept)
+
+
+class StatelessReleasingServer(ReleasingServer):
+    checkpoint_mode: ClassVar[str] = "stateless"
+
+
+class RestartOnlyReleasingServer(ReleasingServer):
+    checkpoint_mode: ClassVar[str] = "restart_only"
+
+
+@pytest.mark.parametrize(
+    ("server_type", "releases"),
+    [(ReleasingServer, True), (StatelessReleasingServer, False), (RestartOnlyReleasingServer, False)],
+    ids=["exported", "stateless", "restart_only"],
+)
+async def test_a_release_reaches_the_server_s_hook_with_the_kept_set_only_in_the_exported_mode(
+    server_type: type[ReleasingServer], releases: bool, tmp_path: Path
+) -> None:
+    server, client = make_server(server_type)
+    server.exported_for, server.released = [], []
+    async with client:
+        await client.post("/ng-rollout/r/seed_session", json=SEED)
+        for operation, body in (
+            ("prepare", control("c7")),
+            ("commit", control("c7", checkpoint_dir=str(tmp_path))),
+            ("resume", control("c7")),
+            ("release", control("c7", kept=["c6", "c7"])),
+        ):
+            reply = await client.post(f"/ng-control/v1/checkpoint/{operation}", json=body, headers=AUTH)
+            assert reply.status_code == 200, reply.text
+
+    assert server.released == ([frozenset({"c6", "c7"})] if releases else [])
+    # The export learned the ID of the checkpoint it wrote, so its snapshots can be labelled with it.
+    assert server.exported_for == (["c7"] if releases else [])
+
+
+async def test_a_release_is_refused_between_a_restore_and_its_resume(tmp_path: Path) -> None:
+    _, client = make_server(ReleasingServer)
+    async with client:
+        await client.post("/ng-rollout/r/seed_session", json=SEED)
+        await client.post("/ng-control/v1/checkpoint/prepare", json=control(), headers=AUTH)
+        await client.post("/ng-control/v1/checkpoint/commit", json=control(checkpoint_dir=str(tmp_path)), headers=AUTH)
+
+    restored, fresh = make_server(ReleasingServer)
+    restored.exported_for, restored.released = [], []
+    async with fresh:
+        await fresh.post(
+            "/ng-control/v1/checkpoint/restore",
+            json=control("r1", checkpoint_dir=str(tmp_path), episode_ids=[{"rollout_id": "r"}]),
+            headers=AUTH,
+        )
+        # The restore is not settled until resume: a retention list from before it must not delete anything.
+        early = await fresh.post("/ng-control/v1/checkpoint/release", json=control("r1", kept=["c1"]), headers=AUTH)
+        released_early = list(restored.released)
+        await fresh.post("/ng-control/v1/checkpoint/resume", json=control("r1"), headers=AUTH)
+        after = await fresh.post("/ng-control/v1/checkpoint/release", json=control("r1", kept=["c1"]), headers=AUTH)
+
+    assert early.json()["error"]["code"] == "checkpoint_invalid_phase" and released_early == []
+    assert after.status_code == 200, after.text
+    assert restored.released == [frozenset({"c1"})]
+
+
+@pytest.mark.parametrize(
+    ("server_type", "keeps"),
+    [(ReleasingServer, True), (CounterServer, False), (RestartOnlyReleasingServer, False)],
+)
+async def test_status_reports_whether_the_server_s_checkpoints_keep_state_outside_gym(
+    server_type: type[CounterServer], keeps: bool
+) -> None:
+    _, client = make_server(server_type)
+    async with client:
+        status = (await client.get("/ng-control/v1/checkpoint/status", headers=AUTH)).json()
+
+    # Only an exported server that overrides the hook keeps such state: a controller that never releases can tell.
+    assert status["keeps_external_state"] is keeps
+
+
+def test_a_resources_participant_refuses_an_export_hook_that_cannot_take_the_checkpoint_id() -> None:
+    class HooksWithoutTheId:
+        async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+            return {}
+
+    # Code that builds the participant around its own hooks learns it here, not at the first commit.
+    with pytest.raises(ValueError, match="HooksWithoutTheId.export_session_states must accept .*checkpoint_id"):
+        ResourcesParticipant(HooksWithoutTheId(), "exported")
+    # A server that never exports is not asked for the keyword.
+    assert not ResourcesParticipant(HooksWithoutTheId(), "restart_only").keeps_external_state
+
+
+def test_an_exported_server_whose_export_hook_cannot_take_the_checkpoint_id_fails_at_startup() -> None:
+    class ExportsWithoutTheId(CounterServer):
+        async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+            return {}
+
+    class ExportsWithKeywords(CounterServer):
+        async def export_session_states(self, session_ids: list[str], **kwargs: Any) -> dict[str, JsonValue]:
+            return {}
+
+    server_client = MagicMock(spec=ServerClient)
+    server_client.global_config_dict = DictConfig({"checkpoint": {"enabled": True, "control_auth_token": "t"}})
+    config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="counter")
+    with pytest.raises(ValueError, match="ExportsWithoutTheId.export_session_states must accept .*checkpoint_id"):
+        ExportsWithoutTheId(config=config, server_client=server_client, counters={}).setup_webserver()
+    ExportsWithKeywords(config=config, server_client=server_client, counters={}).setup_webserver()
+    CounterServer(config=config, server_client=server_client, counters={}).setup_webserver()

@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from nemo_gym.models.token_capture.external_capture import (
+    DynamoWorkerCaptureHandler,
     MegatronWorkerCaptureHandler,
     VLLMWorkerCaptureHandler,
     make_external_capture_handler,
@@ -30,14 +31,14 @@ from nemo_gym.models.token_capture.staging.records import (
 
 HANDLER_CLASSES = pytest.mark.parametrize(
     "handler_cls",
-    [VLLMWorkerCaptureHandler, MegatronWorkerCaptureHandler],
-    ids=["vllm", "megatron"],
+    [VLLMWorkerCaptureHandler, MegatronWorkerCaptureHandler, DynamoWorkerCaptureHandler],
+    ids=["vllm", "megatron", "dynamo"],
 )
 
 
 def _root_context(store: InMemoryLineageStore) -> CaptureContext:
     return CaptureContext(
-        rollout_id="rollout-1",
+        capture_key="rollout-1",
         model_call_id="c1",
         token_sink=None,
         lineage_store=store,
@@ -255,7 +256,7 @@ async def test_only_framework_capture_persists_selection_and_validation_evidence
         assert context.committed
         await store.close()
         reopened = FileLineageStore(tmp_path)
-        row = (await reopened.manifest(context.rollout_id))["records"][0]
+        row = (await reopened.manifest(context.capture_key))["records"][0]
         assert bool(row["output_items"]) is framework
         assert row["response_status"] == ("completed" if framework else None)
         assert bool(row["last_output_item"]) is framework
@@ -492,8 +493,8 @@ async def test_handler_logs_and_continues_when_poisoning_also_fails(handler_cls,
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "handler",
-    [VLLMWorkerCaptureHandler(), MegatronWorkerCaptureHandler()],
-    ids=["vllm", "megatron"],
+    [VLLMWorkerCaptureHandler(), MegatronWorkerCaptureHandler(), DynamoWorkerCaptureHandler()],
+    ids=["vllm", "megatron", "dynamo"],
 )
 async def test_handlers_strip_unadmitted_capture_responses(handler) -> None:
     store = InMemoryLineageStore()
@@ -515,8 +516,8 @@ async def test_handlers_strip_unadmitted_capture_responses(handler) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "handler",
-    [VLLMWorkerCaptureHandler(), MegatronWorkerCaptureHandler()],
-    ids=["vllm", "megatron"],
+    [VLLMWorkerCaptureHandler(), MegatronWorkerCaptureHandler(), DynamoWorkerCaptureHandler()],
+    ids=["vllm", "megatron", "dynamo"],
 )
 async def test_handlers_leave_uncorrelated_traffic_untouched(handler) -> None:
     payload = _transport_payload()
@@ -528,7 +529,11 @@ async def test_handlers_leave_uncorrelated_traffic_untouched(handler) -> None:
 
 @pytest.mark.parametrize(
     ("backend", "handler_type"),
-    [("vllm_worker", VLLMWorkerCaptureHandler), ("megatron_worker", MegatronWorkerCaptureHandler)],
+    [
+        ("vllm_worker", VLLMWorkerCaptureHandler),
+        ("megatron_worker", MegatronWorkerCaptureHandler),
+        ("dynamo_worker", DynamoWorkerCaptureHandler),
+    ],
 )
 def test_factory_selects_the_typed_backend_strategy(backend, handler_type) -> None:
     assert isinstance(make_external_capture_handler(backend), handler_type)

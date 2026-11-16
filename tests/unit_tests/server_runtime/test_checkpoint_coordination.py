@@ -12,7 +12,7 @@ from omegaconf import OmegaConf
 
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime._checkpoint import coordination
 from nemo_gym.server_runtime._checkpoint.control import (
     CheckpointParticipant,
@@ -143,6 +143,21 @@ async def test_discover_orders_participants_and_skips_servers_without_control_ro
         ("agent", "agent"),
         ("res", "resources"),
     ]
+
+
+async def test_discover_carries_whether_a_server_s_checkpoints_keep_state_outside_gym() -> None:
+    client, recorders, _ = deployment(*FULL)
+    recorders["res"].keeps_external_state = True
+
+    participants = await coordination.discover(client, auth_token=TOKEN)
+
+    # The controller reads here which servers it has to release.
+    assert {member.server_name: member.keeps_external_state for member in participants.members} == {
+        "env": False,
+        "policy": False,
+        "agent": False,
+        "res": True,
+    }
 
 
 async def test_discover_refuses_a_deployment_without_a_policy_model() -> None:
@@ -488,3 +503,35 @@ async def test_a_fan_out_encodes_its_body_once_and_sends_every_participant_the_s
     assert len(sent) == len(participants.members) and len(encoded) == 1
     assert all("json" not in kwargs and kwargs["data"] is sent[0]["data"] for kwargs in sent)
     assert all(kwargs["headers"]["Content-Type"] == "application/json" for kwargs in sent)
+
+
+async def test_release_reaches_every_participant_and_returns_failures_instead_of_raising() -> None:
+    client, recorders, _ = deployment(*FULL)
+    participants = await coordination.discover(client, auth_token=TOKEN)
+    released: dict[str, frozenset[str]] = {}
+    for name, recorder in recorders.items():
+
+        async def record(kept: frozenset[str], name: str = name) -> None:
+            if name == "res":
+                raise RuntimeError("snapshot service unavailable")
+            released[name] = kept
+
+        recorder.release = record
+
+    failures = await coordination.release(participants, "c2", ["c2", "c1", "c2"], deadline_ts=deadline())
+
+    # Every participant was asked at once, and the one that failed is named without stopping the others.
+    assert released == {name: frozenset({"c1", "c2"}) for name in ("agent", "policy", "env")}
+    assert list(failures) == ["res"] and "snapshot service unavailable" in failures["res"]
+
+
+async def test_release_is_refused_while_a_checkpoint_is_open() -> None:
+    client, recorders, _ = deployment(*FULL)
+    participants = await coordination.discover(client, auth_token=TOKEN)
+    await coordination.prepare(participants, "c2", deadline_ts=deadline())
+
+    failures = await coordination.release(participants, "c1", ["c1"], deadline_ts=deadline())
+    await coordination.resume(participants, "c2", deadline_ts=deadline())
+
+    assert set(failures) == set(recorders)
+    assert all("checkpoint_invalid_phase" in failure for failure in failures.values())

@@ -395,6 +395,8 @@ async def test_wrong_rollout_and_stale_cookie_never_execute_locally() -> None:
         {"max_output_tokens": 10},
         {"reasoning": {"effort": "high"}},
         {"input": [{"role": "assistant", "content": "past"}, {"role": "user", "content": "hi"}]},
+        {"metadata": {"task": "t1"}},
+        {"metadata": {"agent_timeout_sec": "60", "task": "t1"}},
     ],
 )
 def test_unsupported_request_semantics_are_rejected(params: dict) -> None:
@@ -402,6 +404,43 @@ def test_unsupported_request_semantics_are_rejected(params: dict) -> None:
     with pytest.raises(HTTPException) as error:
         KiloCodeAgent._validate_sandbox_request(body)
     assert error.value.status_code == 422
+
+
+async def test_task_timeout_metadata_reaches_activation() -> None:
+    """A Harbor task row carries `metadata.agent_timeout_sec`; Kilo activates it instead of refusing it."""
+    agent = _make_model_server_agent(model="m")
+    body = NeMoGymResponseCreateParamsNonStreaming(input="hi", metadata={"agent_timeout_sec": "600"})
+    response = agent._build_response(body, [], {"input_tokens": 0, "output_tokens": 0}, "m")
+    with (
+        patch.object(agent, "_require_agent_session", return_value=state()),
+        patch.object(agent, "_sandbox_response", AsyncMock(return_value=response)) as run,
+    ):
+        await agent.responses(request(), body)
+    assert run.await_args.args[1].metadata == {"agent_timeout_sec": "600"}
+
+
+@pytest.mark.parametrize(
+    "metadata,budget",
+    [
+        (None, 900.0),
+        ({"agent_timeout_sec": "600"}, 600.0),
+        ({"agent_timeout_sec": "5000"}, 900.0),
+        ({"agent_timeout_sec": "not-a-number"}, 900.0),
+    ],
+)
+async def test_task_timeout_shortens_but_never_extends_the_configured_budget(
+    metadata: dict | None, budget: float
+) -> None:
+    agent = _make_model_server_agent(model="m", timeout=900)
+    session = state()
+    session.session.execute = AsyncMock(
+        return_value=KiloArtifacts(task_environment_ready=True, stdout=TEXT, stderr="", exit_code=0)
+    )
+    response = await agent._sandbox_response(
+        session, NeMoGymResponseCreateParamsNonStreaming(input="hi", metadata=metadata), rollout_id="rollout-1-a2"
+    )
+    assert session.session.execute.await_args.kwargs["timeout"] == budget
+    assert response.metadata["agent_timeout_sec"] == str(budget)
 
 
 TEXT = '{"type":"text","part":{"text":"partial"}}'
@@ -451,6 +490,65 @@ async def test_sandbox_output_and_failures(
 
 
 CONNECT_ERROR = 'level=ERROR message="stream error" error.error="AI_APICallError: Cannot connect to API"'
+
+
+@pytest.mark.parametrize("status_code", [400, 429, 503])
+@pytest.mark.parametrize("exit_code", [0, 1])
+async def test_model_http_error_reaches_environment(status_code: int, exit_code: int) -> None:
+    agent = _make_model_server_agent(model="m")
+    session = state()
+    session.session.cleanup = receipt(return_code=exit_code)
+    session.mcp_header_values = ("test-mcp-credential",)
+    error = {"name": "APIError", "data": {"message": "controlled model failure", "statusCode": status_code}}
+    session.session.execute = AsyncMock(
+        return_value=KiloArtifacts(
+            task_environment_ready=True,
+            stdout=json.dumps({"type": "error", "error": error}),
+            stderr="test-mcp-credential",
+            exit_code=exit_code,
+        )
+    )
+    response = await agent._sandbox_response(
+        session, NeMoGymResponseCreateParamsNonStreaming(input="hi"), rollout_id="rollout-1-a2"
+    )
+    assert response.status == "failed"
+    assert "controlled model failure" in response.error.message
+    assert "test-mcp-credential" not in response.error.message
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {
+        "failure_kind": "model_request_error",
+        "status_code": status_code,
+    }
+    assert response.metadata["harness_execution"] == "sandbox"
+
+
+@pytest.mark.parametrize(
+    "cleanup,exit_code,ready",
+    [
+        (receipt(return_code=125), 125, True),
+        (receipt(return_code=127), 127, True),
+        (receipt(return_code=1), 125, True),
+        (receipt(return_code=1, timed_out=True), 1, True),
+        (receipt(error="cleanup failed"), 0, True),
+        (None, 0, True),
+        (receipt(), 0, False),
+    ],
+)
+async def test_model_error_does_not_hide_runtime_failure(cleanup: dict | None, exit_code: int, ready: bool) -> None:
+    agent = _make_model_server_agent(model="m")
+    session = state()
+    session.session.cleanup = cleanup
+    session.session.execute = AsyncMock(
+        return_value=KiloArtifacts(
+            task_environment_ready=ready,
+            stdout=json.dumps({"type": "error", "error": {"name": "APIError", "data": {"statusCode": 400}}}),
+            stderr="",
+            exit_code=exit_code,
+        )
+    )
+    with pytest.raises(RuntimeError):
+        await agent._sandbox_response(
+            session, NeMoGymResponseCreateParamsNonStreaming(input="hi"), rollout_id="rollout-1-a2"
+        )
 
 
 @pytest.mark.parametrize(
@@ -507,6 +605,7 @@ async def test_runner_identity_reaches_response_metadata() -> None:
         "harness_hostname": "sandbox-7",
         "harness_pid": "42",
         "kilo_version": "7.4.15",
+        "agent_timeout_sec": "900.0",
     }
     session.sandbox_id = "sbx-1"
     observations = agent._sandbox_observations(session)

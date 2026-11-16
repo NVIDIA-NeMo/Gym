@@ -17,5 +17,8 @@ longmemeval_benchmark_environment_server:
   _inherit_from: longmemeval_environment_server
   environment_servers:
     single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: longmemeval
       agent_server:
         name: longmemeval_benchmark_simple_agent

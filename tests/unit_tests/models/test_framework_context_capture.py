@@ -28,7 +28,7 @@ def ledger(request, tmp_path):
 
 async def _serve(ledger, call_id, items, *, ordinary=False, splice=False, started=None, finish=None, model="model"):
     context = CaptureContext(
-        rollout_id="rollout-1",
+        capture_key="rollout-1",
         model_call_id=call_id,
         token_sink=None,
         lineage_store=ledger,
@@ -289,7 +289,7 @@ async def test_selected_candidate_survives_an_unrelated_commit(ledger, raced):
     await _serve(ledger, "accepted", items)
     await _serve(ledger, "rejected", [{"role": "user", "content": "another branch"}])
     context = CaptureContext(
-        rollout_id="rollout-1",
+        capture_key="rollout-1",
         model_call_id="next",
         token_sink=None,
         lineage_store=ledger,
@@ -318,7 +318,7 @@ async def test_selected_candidate_survives_an_unrelated_commit(ledger, raced):
 async def test_candidate_lookup_is_scoped_to_this_attempt(ledger):
     await _serve(ledger, "accepted", [{"role": "user", "content": "question"}])
     context = CaptureContext(
-        rollout_id="other-attempt",
+        capture_key="other-attempt",
         model_call_id="next",
         token_sink=None,
         lineage_store=ledger,
@@ -355,7 +355,7 @@ async def test_empty_tool_content_candidate_is_not_just_latest_call(ledger, ambi
         {"role": "user", "content": "continue"},
     ]
     context = CaptureContext(
-        rollout_id="rollout-1",
+        capture_key="rollout-1",
         model_call_id="next",
         token_sink=None,
         lineage_store=ledger,
@@ -528,7 +528,7 @@ async def test_source_and_effective_options_choose_root_or_proven_candidate(ledg
     elif edit in ("text", "whitespace"):
         current[1]["content"] = "new text" if edit == "text" else " "
     context = CaptureContext(
-        rollout_id="rollout-1",
+        capture_key="rollout-1",
         model_call_id="b",
         token_sink=None,
         lineage_store=ledger,
@@ -572,7 +572,7 @@ async def test_source_and_effective_options_choose_root_or_proven_candidate(ledg
 @pytest.mark.parametrize("option", ["truncate_prompt_tokens", "continue_final_message"])
 async def test_framework_direct_root_keeps_unsupported_option_guard(ledger, option):
     context = CaptureContext(
-        rollout_id="rollout-1",
+        capture_key="rollout-1",
         model_call_id="root",
         token_sink=None,
         lineage_store=ledger,
@@ -599,7 +599,7 @@ async def test_framework_ack_cannot_change_the_admitted_parent(ledger, continuat
             {"role": "user", "content": "next"},
         ]
     context = CaptureContext(
-        rollout_id="rollout-1",
+        capture_key="rollout-1",
         model_call_id="b",
         token_sink=None,
         lineage_store=ledger,

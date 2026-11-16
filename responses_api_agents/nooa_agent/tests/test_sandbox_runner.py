@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.agents import CleanupReceipt, HarnessTerminationError
+from nemo_gym.agents import CleanupReceipt
+from nemo_gym.core import NgFailureEvent
 from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.nooa_agent.result import finalize_run_result
 from responses_api_agents.nooa_agent.runner import NOOARunFailure
@@ -50,6 +51,7 @@ def runner() -> tuple[SandboxNOOARunner, MemorySandbox]:
         model_base_url=str(p.model_base_url),
         model_server_name=p.model_server_name,
         max_policy_calls=3,
+        context_window=p.context_window,
     ), sandbox
 
 
@@ -98,6 +100,7 @@ async def test_launch_quotes_paths_runs_in_task_and_preserves_cookies(limit: int
     assert launch.max_policy_calls == limit
     assert launch.request.rollout_id == request.rollout_id
     assert launch.request.model_url_path == request.model_url_path
+    assert launch.context_window == 262144
     assert request.resource_cookies == result.resource_cookies == {"resource": "new"}
     assert request.model_cookies == {"model": "new"}
     assert r.session.cleanup == cleanup_receipt()
@@ -163,6 +166,7 @@ async def test_terminal_result_waits_for_cleanup_before_capture_and_return() -> 
         NOOATerminationReason.POLICY_BUDGET_EXCEEDED,
         NOOATerminationReason.MAX_ITERATIONS_EXCEEDED,
         NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED,
+        NOOATerminationReason.LOOP_DETECTED,
     ],
 )
 async def test_limit_result_survives_worker_boundary_and_cleanup(reason: NOOATerminationReason) -> None:
@@ -339,7 +343,7 @@ async def test_definitive_negative_receipt_skips_capture_and_releases_for_resour
     )
     download = AsyncMock(wraps=s.download)
     s.download = download
-    with pytest.raises(HarnessTerminationError):
+    with pytest.raises(NgFailureEvent):
         await r.run(payload().request)
     await r.close()
     assert r.artifact is None
@@ -443,7 +447,8 @@ async def test_optional_diagnostics_preserve_recovered_evidence(
     final: str | None, has_checkpoint: bool, log_kind: str
 ) -> None:
     r, s = runner()
-    r.close_timeout = 0.05
+    # Lifecycle capture must finish before the separate diagnostic deadline is exercised.
+    r.close_timeout = 5
     s.files[r.directory + "/cleanup.json"] = json.dumps(cleanup_receipt())
     if final is not None:
         s.files[r.directory + "/result.json"] = final
@@ -452,13 +457,17 @@ async def test_optional_diagnostics_preserve_recovered_evidence(
     if log_kind == "available":
         s.files[r.directory + "/output.log"] = "diagnostic " * 250
     events = []
+    diagnostic_cancelled = asyncio.Event()
     original_download = s.download
 
     async def download(source: str, destination: Path) -> None:
         events.append(Path(source).name)
         if source.endswith("/output.log"):
             if log_kind == "slow":
-                await asyncio.Event().wait()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    diagnostic_cancelled.set()
             if log_kind == "error":
                 raise ConnectionError("log download failed")
         await original_download(source, destination)
@@ -473,8 +482,9 @@ async def test_optional_diagnostics_preserve_recovered_evidence(
     s.exec.side_effect = execute
     request = payload().request
     with pytest.raises(RuntimeError) as caught:
-        await asyncio.wait_for(r.run(request), timeout=0.5)
+        await asyncio.wait_for(r.run(request), timeout=10)
     assert events.index("checkpoint.json") < events.index("output.log")
+    assert diagnostic_cancelled.is_set() is (log_kind == "slow")
     assert r.session.capture_error is None
     expected_gaps = {"sandbox_result_unavailable"}
     if has_checkpoint:
@@ -666,9 +676,9 @@ async def test_recovered_checkpoint_skips_environment_verification(monkeypatch, 
     assert response.result is None
     assert "/verify" not in _paths(client)
     assert _paths(client)[-2:] == ["/v1/agent_sessions/close", "/close_session"]
-    receipt = next(iter(instance._closed_session_records.values())).close_response
+    saved_reply = next(iter(instance._fenced_session_records.values())).close_response
     assert {"partial_checkpoint", "sandbox_result_unavailable", NOOATerminationReason.INFRASTRUCTURE_ERROR} <= {
-        gap.code for gap in receipt.agent_observations.gaps
+        gap.code for gap in saved_reply.agent_observations.gaps
     }
     await r.close()
 

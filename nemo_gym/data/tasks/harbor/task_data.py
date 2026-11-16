@@ -43,9 +43,9 @@ from typing import Any, Mapping
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
+from nemo_gym.core.episode_types import is_materialized_task_row
 from nemo_gym.data.task_data import TaskDataValidationReport, TaskDataValidator
 from nemo_gym.data.tasks.harbor.errors import HarborTaskError
-from nemo_gym.server_runtime.episode_types import is_materialized_task_row
 
 
 # Beside dataset.toml at the dataset root: the module exporting ``TaskData``.
