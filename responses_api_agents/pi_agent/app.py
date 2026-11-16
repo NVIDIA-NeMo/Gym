@@ -245,12 +245,15 @@ fi
     return bootstrap + f"mkdir -p {shlex.quote(directory + '/home/.pi/agent')}"
 
 
-def parse_pi_events(stdout: str | bytes) -> tuple[list[Any], dict[str, int]]:
+def parse_pi_events(stdout: str | bytes) -> tuple[list[Any], dict[str, int | None]]:
     if isinstance(stdout, bytes):
         stdout = stdout.decode(errors="replace")
     output_items: list[Any] = []
     input_tokens = 0
     output_tokens = 0
+    # Unknown until every assistant message reports a positive cacheRead; see the loop below.
+    cached_tokens: int | None = None
+    cache_measured = True
 
     for line in stdout.split("\n"):
         line = line.strip()
@@ -280,6 +283,11 @@ def parse_pi_events(stdout: str | bytes) -> tuple[list[Any], dict[str, int]]:
             input_tokens += int(usage.get("input") or 0)
             if type(cache_read) is int and cache_read >= 0:
                 input_tokens += cache_read
+            # Pi also emits zero when backend cache details are absent; zero has no measured provenance.
+            if type(cache_read) is not int or cache_read <= 0:
+                cache_measured = False
+            elif cache_measured:
+                cached_tokens = (cached_tokens or 0) + cache_read
             output_tokens += int(usage.get("output") or 0)
             texts = [b["text"] for b in content if isinstance(b, dict) and (b.get("text") or "").strip()]
             if texts:
@@ -321,7 +329,11 @@ def parse_pi_events(stdout: str | bytes) -> tuple[list[Any], dict[str, int]]:
                 )
             )
 
-    return output_items, {"input_tokens": input_tokens, "output_tokens": output_tokens}
+    return output_items, {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cached_tokens": cached_tokens if cache_measured else None,
+    }
 
 
 def _parse_recorded_events(raw: str) -> list[tuple[float, dict[str, Any]]]:
@@ -1518,7 +1530,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
             usage=NeMoGymResponseUsage(
                 input_tokens=input_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=usage.get("cached_tokens")),
                 output_tokens=output_tokens,
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
                 total_tokens=input_tokens + output_tokens,

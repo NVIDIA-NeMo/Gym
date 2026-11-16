@@ -178,3 +178,28 @@ Deployments requiring an additional policy must supply their combined policy fil
 through the Tavily resource's `exclude_domains_file_path`; keep private policies
 outside the public repository. This list reduces answer exposure but cannot
 guarantee that every answer-bearing page is excluded.
+
+### Domain metrics
+
+Text and vision preparation write `category`, `raw_subject`, and `modality`
+(`text` or `vision`). Re-prepare older cached datasets to include these labels.
+The shared equivalence judge uses generic configuration:
+
+```yaml
+report_slice_fields: [category, raw_subject, modality]
+report_slice_cross_fields: [[modality, category], [modality, raw_subject]]
+```
+
+Metrics use `slices/<field>/<URL-encoded-label>/...`; cross-slices use
+`slices/<field1>/<field2>/<label1>/<label2>/...`. For example,
+`slices/modality/category/text/Math/mean/reward` reports text-only Math accuracy.
+Other benchmarks can configure any row labels with the same statistics.
+
+Each slice reports question/rollout counts, `mean/reward`, `mean/output_tokens`,
+and Student-t intervals across repeat-level means from Gym's public aggregator.
+Intervals require at least two repeats covering the same questions;
+`ci_available/<metric>` and `ci_unavailable_reason/<metric>` explain omissions.
+Bounds are not clipped. These intervals measure generation variability on a
+fixed benchmark. Missing labels are counted, and incomplete token observations
+suppress their mean and interval. Masked rows are excluded by normal aggregation.
+The overall reward is unchanged; configured slice accuracies also appear in key metrics.

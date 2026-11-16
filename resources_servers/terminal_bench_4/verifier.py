@@ -240,6 +240,20 @@ async def run_verifier(environment, directory, diagnostics, timeout_sec=None):
             )
     except Exception as error:
         _record_verifier_error(diagnostics, f"verifier_{phase}", error)
+        if isinstance(error, RewardFileNotFoundError):
+            # The verifier's own output is the only record of why it wrote no reward.
+            # Best effort inside the verifier deadline: a stalled download must not outlive it.
+            try:
+                async with asyncio.timeout_at(deadline):
+                    await download_dir(
+                        environment.main,
+                        "/logs/verifier",
+                        logs,
+                        exclude=["reward.json", "reward.txt"],
+                        deadline=deadline,
+                    )
+            except Exception as transfer_error:
+                _record_verifier_error(diagnostics, "verifier_artifact_transfer", transfer_error)
         if rewards is None:
             if isinstance(error, TimeoutError):
                 if budget.expired() or asyncio.get_running_loop().time() >= deadline:

@@ -32,6 +32,7 @@ if TYPE_CHECKING:
         agent_outcome_policy,
         confirmed_policy_response_timeout,
         failure_outcome_policy,
+        queued_policy_response_timeout,
     )
     from nemo_gym.agents.agent_tools import (
         restricted_network_policy,
@@ -62,6 +63,7 @@ if TYPE_CHECKING:
     from nemo_gym.agents.skills import stage_skills
     from nemo_gym.agents.testing.agent_session_conformance import check_agent_seed_rejected
     from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
+    from nemo_gym.agents.utils.agent_context import resolve_agent_context_artifact
     from nemo_gym.agents.utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
     from nemo_gym.agents.utils.sandbox_network import SandboxNetworkAccess, restrict_sandbox_network
     from nemo_gym.agents.utils.sandbox_observation import lifecycle_observation
@@ -140,6 +142,7 @@ _PUBLIC_API = {
     "assert_model_url_reachable_from_sandbox": "base_responses_api_agent",
     "check_agent_seed_rejected": "testing.agent_session_conformance",
     "confirmed_policy_response_timeout": "agent_outcome",
+    "queued_policy_response_timeout": "agent_outcome",
     "exec_timeout": "utils.supervisor_client",
     "failure_outcome_policy": "agent_outcome",
     "harness_termination_failure": "utils.supervisor_client",
@@ -148,6 +151,7 @@ _PUBLIC_API = {
     "parse_cleanup_receipt": "utils.supervisor_client",
     "probe_sandbox_platform": "utils.sandbox_python",
     "raises_agent_failure": "testing.failure_assertions",
+    "resolve_agent_context_artifact": "utils.agent_context",
     "resolve_agent_timeout": "utils.task_timeout",
     "restrict_sandbox_network": "utils.sandbox_network",
     "restricted_network_policy": "agent_tools",

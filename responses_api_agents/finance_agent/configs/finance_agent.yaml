@@ -19,6 +19,8 @@ finance_agent:
       max_steps: 50
       truncate_on_overflow: false
       tool_call_timeout: 300
+      resources_server_retries: 0
+      keep_response_on_verify_failure: false
       resources_server:
         type: resources_servers
         name: ???
