@@ -628,7 +628,7 @@ class PrefixPassKAgent(SimpleResponsesAPIAgent):
                 reason=f"worktree commit failed: {type(exc).__name__}: {exc}"[:500],
                 cause=exc,
             ) from exc
-        if result.error_type:
+        if result.error_type is not None:
             raise sandbox_failure(
                 operation="exec",
                 failure_kind=PROVIDER_IO_TIMEOUT if result.error_type == "timeout" else PROVIDER_REQUEST_FAILED,

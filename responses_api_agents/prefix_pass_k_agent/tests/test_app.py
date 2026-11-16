@@ -902,6 +902,7 @@ class TestSandboxIsReleasedOnEveryExit:
     "failure,kind",
     [
         (_result(stderr="provider error", error_type="sandbox"), "provider_request_failed"),
+        (_result(stderr="empty provider error marker", error_type=""), "provider_request_failed"),
         (_result(stderr="timed out", error_type="timeout"), "provider_io_timeout"),
         (ConnectionResetError("peer reset"), "transport_peer_drop"),
         (RuntimeError("provider error"), "provider_request_failed"),
