@@ -107,6 +107,7 @@ from resources_servers.gdpval.task_sandbox import (
     start_task_sandbox,
 )
 from resources_servers.gdpval.tavily_search import TavilySearch, fetch_web_page, web_client
+from resources_servers.gdpval.web_guard import BLOCKED_MESSAGE, DEFAULT_BLOCKED_WEB_PATTERNS, WebGuard
 
 
 LOGGER = logging.getLogger(__name__)
@@ -449,6 +450,10 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     # attempts at most, rotating keys on 401/403/429 and 5xx.
     tavily_api_key: Union[str, List[str]]
     tavily_max_sweeps: int = Field(default=1, ge=1)
+    # Case-insensitive regexes that web_search and fetch_web_page refuse in a query or URL and drop
+    # from search results, so the agent cannot look up GDPval's published answers. The current
+    # task's id is always added. An empty list leaves only the task id. See web_guard.py.
+    blocked_web_patterns: List[str] = Field(default_factory=lambda: list(DEFAULT_BLOCKED_WEB_PATTERNS))
 
     # /verify writes each rollout's files to ``<persist_deliverables_dir>/task_<task_id>/repeat_<n>/``.
     persist_deliverables_dir: str
@@ -974,12 +979,22 @@ class GDPValResourcesServer(SimpleResourcesServer):
         self._get_session(request).finish_call = {"tool": "abandon_task_finish", **body.model_dump()}
         return body.reason
 
-    async def web_search(self, body: WebSearchRequest) -> str:
-        async with web_client() as client:
-            return await self._tavily.search(body.query, client)
+    def _web_guard(self, request: Request) -> WebGuard:
+        # A call outside a seeded session still gets the pattern guard, just without a task id.
+        session = self._sessions.get(request.session.get(SESSION_ID_KEY))
+        return WebGuard(self.config.blocked_web_patterns, session.task_id.task_id if session else None)
 
-    async def fetch_web_page(self, body: FetchWebPageRequest) -> str:
+    async def web_search(self, request: Request, body: WebSearchRequest) -> str:
+        guard = self._web_guard(request)
+        if guard.blocks(body.query):
+            return f"<error>{BLOCKED_MESSAGE}</error>"
         async with web_client() as client:
+            return await self._tavily.search(body.query, client, guard)
+
+    async def fetch_web_page(self, request: Request, body: FetchWebPageRequest) -> str:
+        guard = self._web_guard(request)
+        async with web_client() as client:
+            client.event_hooks["request"].append(guard.check_request)
             return await fetch_web_page(body.url, client)
 
     async def _collect_deliverables(self, session: _TaskSession) -> str:

@@ -151,3 +151,72 @@ def test_malformed_tool_arguments_are_rejected_before_any_web_call(monkeypatch, 
 
     assert response.status_code == 422
     assert requests == []
+
+
+_TASK_ID = "11dcc268-cb07-4d3a-a184-c6d7a19349bc"
+
+
+@pytest.mark.parametrize("query", ["gdpval inventory location report", "GDP-Val deliverables", "gdp_val"])
+def test_web_search_refuses_queries_about_the_benchmark(monkeypatch, query):
+    requests = _tavily_upstream(monkeypatch, lambda request: httpx.Response(200, json={"results": []}))
+
+    response = TestClient(_server().setup_webserver()).post("/web_search", json={"query": query})
+
+    assert response.json() == f"<error>{app.BLOCKED_MESSAGE}</error>"
+    assert requests == []
+
+
+def test_web_search_drops_results_that_lead_to_published_answers_and_the_answer_built_on_them(monkeypatch):
+    reply = {
+        "answer": "The UUID is part of a benchmark and appears in multiple datasets.",
+        "results": [
+            {"title": "kenzie524/gdpval-gpt4o-exp", "url": "https://huggingface.co/datasets/k/x", "content": "c"},
+            {"title": "Copy", "url": "https://huggingface.co/datasets/n/q/tree/main/deliverable_files", "content": ""},
+            {"title": "Bin Location Report", "url": "https://help.example/bin-location", "content": "How to."},
+        ],
+    }
+    _tavily_upstream(monkeypatch, lambda request: httpx.Response(200, json=reply))
+
+    response = TestClient(_server().setup_webserver()).post("/web_search", json={"query": "location report excel"})
+
+    assert response.json() == (
+        "<results>\n<result>\n<title>Bin Location Report</title>\n"
+        "<url>https://help.example/bin-location</url>\n<content>How to.</content>\n</result>\n</results>"
+    )
+
+
+def test_fetch_web_page_refuses_a_blocked_url_without_requesting_it(monkeypatch):
+    requests = _tavily_upstream(monkeypatch, lambda request: httpx.Response(200, text="<p>answer</p>"))
+    url = f"https://huggingface.co/api/datasets/openai/gdpval/tree/main/deliverable_files/{_TASK_ID}"
+
+    response = TestClient(_server().setup_webserver()).post("/fetch_web_page", json={"url": url})
+
+    assert requests == []
+    assert response.json() == f"<web_fetch><url>{url}</url><error>{app.BLOCKED_MESSAGE}</error></web_fetch>"
+
+
+def test_fetch_web_page_refuses_a_redirect_to_a_blocked_url(monkeypatch):
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.host == "short.test":
+            return httpx.Response(302, headers={"Location": "https://huggingface.co/datasets/x/gdpval"})
+        return httpx.Response(200, text="<p>answer</p>")
+
+    transport = httpx.MockTransport(respond)
+    monkeypatch.setattr(app, "web_client", lambda: httpx.AsyncClient(transport=transport, follow_redirects=True))
+
+    response = TestClient(_server().setup_webserver()).post("/fetch_web_page", json={"url": "https://short.test/a"})
+
+    assert [str(r.url) for r in requests] == ["https://short.test/a"]
+    assert app.BLOCKED_MESSAGE in response.json()
+
+
+def test_an_empty_pattern_list_still_blocks_the_current_task_id(monkeypatch):
+    server = _server(blocked_web_patterns=[])
+    monkeypatch.setattr(server, "_sessions", {"s": MagicMock(task_id=MagicMock(task_id=_TASK_ID))})
+    guard = server._web_guard(MagicMock(session={app.SESSION_ID_KEY: "s"}))
+
+    assert guard.blocks(f"site:huggingface.co {_TASK_ID.upper()}")
+    assert not guard.blocks("gdpval")

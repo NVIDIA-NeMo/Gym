@@ -36,6 +36,16 @@ The server serves the agent's task tools as `POST` routes. `finish` and `abandon
 agent ended the task. `web_search` searches with Tavily and `fetch_web_page` extracts a page as markdown.
 Set `tavily_api_key` (the shipped configs read `TAVILY_API_KEY`).
 
+GDPval's gold deliverables and many models' submissions are public, so an agent with web access can find the
+task and copy its answer (seen with Kimi K2.6 on task `11dcc268`, which found other submissions on Hugging Face).
+`web_search` and `fetch_web_page` therefore refuse queries and URLs that match `blocked_web_patterns`
+(by default the benchmark's name in any spelling and `deliverable_files`) or contain the current task id, and
+drop matching search results. Redirects are checked too.
+
+This does not cover the sandbox: commands the agent runs there still reach the open internet, which is how
+that agent downloaded the files once it had found them. Gym's sandbox providers have no egress control, so
+block these hosts at the sandbox's network layer where the result must be trusted.
+
 ## Sandbox image
 
 Each task runs in its own sandbox, started from `sandbox_config.image` through the provider named by
