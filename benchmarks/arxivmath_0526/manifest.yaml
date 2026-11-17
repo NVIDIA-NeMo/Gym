@@ -4,7 +4,8 @@ experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
 domain: math
-description: OpenMathReasoning math dataset with math-verify and LLM-as-a-judge
+description: ArXivMath May 2026 with symbolic-first grading and a Luna judge fallback
+  with swapped-answer confirmation.
 modality: text
 licensing: unknown
 authors:
