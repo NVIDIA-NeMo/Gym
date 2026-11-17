@@ -144,6 +144,10 @@ def render_repeat_planning_markdown(result: RepeatPlanningResult) -> str:
             "Approximate planning power uses the supplied SDs. Simulated power below evaluates actual Welch decisions; "
             "it can differ from the planning approximation.",
             "",
+            "Planning and simulation hold the supplied SD forecasts fixed. Actual repeat-to-repeat variability "
+            "may differ; simulation intervals do not include uncertainty in these forecasts. If the SDs are "
+            "uncertain, rerun planning with plausible alternative values to assess sensitivity of the repeat budget.",
+            "",
             "## Simulation validation",
             "",
         ]
