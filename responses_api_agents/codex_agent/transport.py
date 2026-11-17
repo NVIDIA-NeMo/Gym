@@ -14,7 +14,7 @@ import socket
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from aiohttp import ClientConnectionError, web
+from aiohttp import ClientConnectionError, ClientPayloadError, web
 
 from nemo_gym.client import request
 from nemo_gym.core import StreamFailureReportReader
@@ -58,7 +58,11 @@ async def model_retry_proxy(base_url: str, invocation_id: str, *, max_retries: i
                 continue
             try:
                 if is_retryable_dependency_status(upstream.status) and not last:
-                    await upstream.read()
+                    try:
+                        await upstream.read()
+                    except (ClientPayloadError, ClientConnectionError):
+                        # The retryable status still applies when its error body is cut short.
+                        pass
                     await asyncio.sleep(retry_delay(upstream.headers.get("Retry-After"), attempt))
                     continue
                 response = web.StreamResponse(
@@ -87,7 +91,7 @@ async def model_retry_proxy(base_url: str, invocation_id: str, *, max_retries: i
 
     app = web.Application(client_max_size=128 * 1024 * 1024)
     app.router.add_post("/responses", forward)
-    runner = web.AppRunner(app, shutdown_timeout=1)
+    runner = web.AppRunner(app, shutdown_timeout=1, handler_cancellation=True)
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         await runner.setup()

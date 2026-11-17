@@ -21,6 +21,7 @@ import { pathToFileURL } from "node:url";
 // Resends of one model request, for 408, 425, 429, 5xx and a connection that was refused or dropped.
 const MAX_MODEL_RETRIES = 2;
 const MAX_RETRY_DELAY_S = 10;
+const RETRYABLE_CONNECTION_ERRORS = new Set(["ECONNREFUSED", "ECONNRESET", "EPIPE", "ETIMEDOUT", "EAI_AGAIN"]);
 // Adapter-chosen memory cap for helper evidence, not a Codex protocol limit.
 // Larger responses still forward in full; only the buffered evidence is dropped.
 const MAX_COMPACTION_RESPONSE_BYTES = 8 * 1024 * 1024;
@@ -183,13 +184,15 @@ async function forward(incoming, outgoing, url, invocationId, record, timeoutMs)
     headers["content-length"] = body.length;
     headers["x-session-id"] = invocationId;
     for (let attempt = 0; ; attempt++) {
+        if (outgoing.destroyed) return;
         let upstream;
         try {
             upstream = await post(url, headers, body, timeoutMs);
         } catch (error) {
             record({ status: null, error: error.message });
-            // A refused or dropped connection carries a system error code; a timed-out request has used its time.
-            if (error.code && attempt < MAX_MODEL_RETRIES) {
+            // Retry temporary connection failures, not HTTP parser or TLS certificate errors. The idle timeout
+            // above has no system error code: a request that used its time is not resent.
+            if (RETRYABLE_CONNECTION_ERRORS.has(error.code) && attempt < MAX_MODEL_RETRIES) {
                 await sleep(retryDelay(undefined, attempt) * 1000);
                 continue;
             }

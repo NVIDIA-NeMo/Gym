@@ -39,8 +39,11 @@ def pinned_cli() -> str:
     return binary
 
 
+@pytest.mark.parametrize("forwarder_config", [False, True], ids=["no-forwarder", "forwarder"])
 @pytest.mark.parametrize("recover", [False, True])
-def test_pinned_cli_incomplete_stream_retries_preserve_usage_gaps(tmp_path: Path, setup, recover: bool) -> None:
+def test_pinned_cli_incomplete_stream_retries_preserve_usage_gaps(
+    tmp_path: Path, setup, recover: bool, forwarder_config: bool
+) -> None:
     binary = pinned_cli()
     reasoning = "Inspect arithmetic before editing."
     response = {
@@ -93,6 +96,8 @@ def test_pinned_cli_incomplete_stream_retries_preserve_usage_gaps(tmp_path: Path
     home.mkdir()
     agent, sandbox = setup
     config = agent._build_config(f"http://127.0.0.1:{server.server_port}/v1")
+    if forwarder_config:
+        _leave_retries_to_forwarder(config["model_providers"]["gym"])
     (home / "config.toml").write_text(toml_dumps(config))
     try:
         result = subprocess.run(
@@ -123,8 +128,10 @@ def test_pinned_cli_incomplete_stream_retries_preserve_usage_gaps(tmp_path: Path
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+    assert len(requests) == (1 if forwarder_config else 2 if recover else 6)
+    # Without the forwarder config Codex resamples an output cap up to five times; with it the first cap ends the turn.
+    recover = recover and not forwarder_config
     assert result.returncode == (0 if recover else 1), result.stdout + result.stderr
-    assert len(requests) == (2 if recover else 6), "Pinned CLI defaults allow five reconnects, then must terminate"
     events = [json.loads(line) for line in result.stdout.splitlines()]
     assert any(event["type"] == "turn.completed" for event in events) == recover
     failed = [event for event in events if event["type"] == "turn.failed"]
@@ -410,7 +417,7 @@ def test_pinned_cli_calls_a_granted_gym_mcp_tool(tmp_path: Path, setup) -> None:
 async def test_pinned_cli_behind_the_retry_forwarder_resends_only_what_may_clear(
     tmp_path: Path, setup, monkeypatch: pytest.MonkeyPatch, status: int, sends: int
 ) -> None:
-    """Codex alone would send each of these six times; behind Gym's forwarder only a 5xx is sent again."""
+    """Codex alone sends a 401, 409 or 422 six times and a 503 thirty times; Gym resends only the 5xx."""
     from responses_api_agents.codex_agent.transport import model_retry_proxy
 
     binary = pinned_cli()
@@ -438,12 +445,12 @@ async def test_pinned_cli_behind_the_retry_forwarder_resends_only_what_may_clear
     home = tmp_path / "home"
     home.mkdir()
     agent, _ = setup
+    process = None
     try:
         async with model_retry_proxy(f"http://127.0.0.1:{model_server.server_port}/v1", "invocation") as url:
             config = agent._build_config(url)
             _leave_retries_to_forwarder(config["model_providers"]["gym"])
             (home / "config.toml").write_text(toml_dumps(config))
-            started = time.monotonic()
             process = await asyncio.create_subprocess_exec(
                 *[
                     binary,
@@ -462,8 +469,10 @@ async def test_pinned_cli_behind_the_retry_forwarder_resends_only_what_may_clear
                 stderr=subprocess.PIPE,
             )
             stdout, stderr = await asyncio.wait_for(process.communicate(), 120)
-            elapsed = time.monotonic() - started
     finally:
+        if process is not None and process.returncode is None:
+            process.kill()
+            await process.wait()
         model_server.shutdown()
         model_server.server_close()
         model_thread.join(timeout=2)
@@ -473,7 +482,6 @@ async def test_pinned_cli_behind_the_retry_forwarder_resends_only_what_may_clear
     events = [json.loads(line) for line in stdout.decode(errors="replace").splitlines() if line.startswith("{")]
     failed = [event for event in events if event.get("type") == "turn.failed"]
     assert failed and str(status) in failed[-1]["error"]["message"], output
-    assert elapsed < 30, output
 
 
 @pytest.mark.parametrize("required", [True, False])

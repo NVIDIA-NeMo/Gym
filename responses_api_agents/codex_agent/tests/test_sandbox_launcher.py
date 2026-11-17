@@ -250,6 +250,92 @@ def test_refused_connection_is_retried_twice_then_answers_502(tmp_path):
     assert all(record["status"] is None and "ECONNREFUSED" in record["error"] for record in records[1:])
 
 
+@pytest.mark.parametrize("failure", ["drop", "stall", "malformed"])
+def test_transport_failures_are_retried_only_when_they_may_clear(tmp_path, failure):
+    requests = []
+    release = Event()
+
+    class Upstream(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            requests.append(self.rfile.read(int(self.headers["Content-Length"])))
+            if failure == "stall":
+                release.wait(10)
+            elif failure == "malformed":
+                self.wfile.write(b"not an HTTP response\r\n\r\n")
+            self.close_connection = True
+
+    attempts = tmp_path / "attempts.jsonl"
+    with upstream_server(Upstream) as upstream:
+        try:
+            with model_retry_proxy(upstream, attempts, timeout=0.1) as proxy:
+                with pytest.raises(HTTPError) as reported:
+                    urlopen(Request(f"{proxy}/responses", data=b"{}"), timeout=10)
+                assert reported.value.code == 502
+        finally:
+            release.set()
+    records = [json.loads(line) for line in attempts.read_text().splitlines()]
+    assert len(records) == len(requests) == (3 if failure == "drop" else 1)
+    assert all(record["status"] is None for record in records)
+    if failure == "stall":
+        assert records[0]["error"] == "timed out after 0.1 seconds"
+
+
+def test_retry_after_controls_the_actual_wait(tmp_path):
+    timestamps = []
+
+    class Upstream(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            timestamps.append(time.monotonic())
+            self.send_response(503 if len(timestamps) == 1 else 200)
+            self.send_header("Retry-After", "1.5")
+            self.end_headers()
+            self.wfile.write(b"done")
+
+    with (
+        upstream_server(Upstream) as upstream,
+        model_retry_proxy(upstream, tmp_path / "attempts.jsonl", timeout=10) as proxy,
+        urlopen(Request(f"{proxy}/responses", data=b"{}"), timeout=10) as response,
+    ):
+        assert response.status == 200
+        assert response.read() == b"done"
+    assert len(timestamps) == 2
+    assert timestamps[1] - timestamps[0] >= 1.5
+
+
+def test_caller_disconnect_stops_resends(tmp_path):
+    requests = []
+    received = Event()
+
+    class Upstream(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            requests.append(self.rfile.read(int(self.headers["Content-Length"])))
+            self.send_response(503)
+            self.send_header("Retry-After", "1.5")
+            self.end_headers()
+            received.set()
+
+    with (
+        upstream_server(Upstream) as upstream,
+        model_retry_proxy(upstream, tmp_path / "attempts.jsonl", timeout=10) as proxy,
+    ):
+        port = int(proxy.rsplit(":", 1)[1])
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as caller:
+            caller.sendall(b"POST /responses HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}")
+            assert received.wait(5)
+        time.sleep(1.7)
+        assert requests == [b"{}"]
+
+
 def test_launcher_starts_codex_behind_the_forwarder(tmp_path):
     requests = []
 

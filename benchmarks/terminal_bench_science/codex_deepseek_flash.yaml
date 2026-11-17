@@ -1,9 +1,11 @@
-# Terminal-Bench-Science v0.1 with Codex and a self-hosted DeepSeek V4.1 Flash, set up as the run that
-# reproduces the leaderboard's DeepSeek V4.1 Flash / Codex / effort max row: Codex 0.154.0 with no
+# Terminal-Bench-Science v0.1 with Codex and a self-hosted DeepSeek V4.1 Flash, based on the
+# leaderboard's DeepSeek V4.1 Flash / Codex / effort max row: Codex 0.154.0 with no
 # model catalog, effort max and the full 8-hour agent budget. Gym's vllm_model is the policy model
 # server: it turns Codex's Responses requests into chat completions for a chat-completions server
 # that serves the model as `deepseek-flash` (vLLM with DeepSeek's tokenizer, tool and reasoning
 # parsers). Sampling and output limits belong to that server; Codex sends none.
+# Gym now owns model retries (Codex 0/0): output caps end the turn, and in-stream infrastructure
+# failures retry the episode. This differs from Codex's retry defaults and can affect scores/cost.
 # Load this file as a run config, without --model-type:
 #
 #   export POLICY_API_KEY=...  # the server's key (any string if it has no auth)

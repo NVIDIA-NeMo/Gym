@@ -19,7 +19,7 @@ from nemo_gym.trajectory import AgentObservationBundle
 
 
 LOG = logging.getLogger(__name__)
-# Uploaded beside the runner; runs Codex behind the 429 forwarder on the runtime's Node.
+# Uploaded beside the runner; runs Codex behind the model retry forwarder on the runtime's Node.
 LAUNCHER_FILE = "sandbox_launcher.mjs"
 # The longest the optional session-rollout copy may take, and the part of the capture budget kept free after it.
 _ARCHIVE_TIMEOUT_S = 120.0

@@ -745,7 +745,10 @@ class TestRolloutCorrelation:
             captured["retries"] = (provider.get("request_max_retries"), provider.get("stream_max_retries"))
             if run_kwargs.get("rollout_id"):
                 assert "--ephemeral" not in cmd
-                assert config["model_providers"]["gym"]["http_headers"]["x-session-id"] == run_kwargs["rollout_id"]
+                if agent.config.model_server is not None:
+                    assert provider["http_headers"]["x-session-id"] == run_kwargs["rollout_id"]
+                else:
+                    assert "http_headers" not in provider
             return self._fake_proc()
 
         def fake_resolve(name, rollout_id=None):
@@ -759,7 +762,10 @@ class TestRolloutCorrelation:
             patch("responses_api_agents.codex_agent.app.model_retry_proxy", proxy),
         ):
             asyncio.run(agent._run_codex("hi", **run_kwargs))
-        assert captured["upstream"] == captured["base_url"]
+        if run_kwargs.get("rollout_id") is not None and agent.config.model_server is not None:
+            assert captured["upstream"] == captured["base_url"]
+        else:
+            assert "upstream" not in captured
         self.retries = captured["retries"]
         return captured["base_url"]
 
@@ -782,6 +788,14 @@ class TestRolloutCorrelation:
         # so a prefix would 404 every /v1/responses call.
         direct = _make_agent(openai_base_url="https://api.openai.com/v1")
         assert direct._resolve_call_base_url("t3-r1") == "https://api.openai.com/v1"
+
+    @pytest.mark.parametrize("use_model_server", [False, True])
+    def test_codex_keeps_its_own_retries_without_the_forwarder(self, tmp_path: Path, use_model_server: bool) -> None:
+        agent = _make_agent(
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model") if use_model_server else None
+        )
+        self._run_and_capture_base_url(agent, tmp_path, rollout_id=None if use_model_server else "task3-roll1")
+        assert self.retries == (None, None)
 
     def test_defaults_to_openai_when_nothing_configured(self) -> None:
         agent = _make_agent()
