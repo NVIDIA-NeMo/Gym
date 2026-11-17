@@ -238,15 +238,30 @@ model's other arguments (`workdir`, `yield_time_ms`), `write_stdin` polls merged
 listed by completion rather than by when the model made them, and display IDs (`item_0`) for call IDs. The record holds
 each `function_call` and `custom_tool_call` as the model sent it, with its `name`, `namespace`, arguments (for
 `exec_command`, the `cmd` and `workdir` as written) and `call_id`, in the model's order, with each result under its call's ID,
-and the assistant messages and reasoning text between them. The Harbor Environment Server exports exactly this to
-`/logs/agent/trajectory.json` for a task folder's verifier, as Harbor's own Codex agent does. Results are the text the model
-read, including Codex's `Chunk ID` / `Process exited with code` envelope; an image result is written as `[image]`, and
-encrypted reasoning is left in the observations. An MCP call keeps its bare tool name, and a free-form `apply_patch` call is a
-`custom_tool_call`. `response.output` falls back to the CLI events when the record cannot stand in for them: it is missing
-or unreadable (including a line whose values have a shape Codex does not write), holds a second session or an item type
-with no mapping, has a call with a blank ID or name (the export of the trajectory rejects one), or has a result without
-an open call or a call ID used twice. The observations then carry a `tool_calls_in_executed_form` gap naming the reason,
-when that output has tool calls. Local `/run` execution still builds its output from the CLI events.
+and the assistant messages and reasoning text between them. Results are the text the model read, including Codex's
+`Chunk ID` / `Process exited with code` envelope. Encrypted reasoning is left in the observations.
+
+The Harbor Environment Server exports these items to `/logs/agent/trajectory.json` for a task folder's verifier. For a call
+whose arguments are JSON, the name, arguments, call ID, order and result are those Harbor's own Codex agent exports from the
+same record: an MCP call keeps its bare tool name (the namespace is in `extra.nemo_gym.namespace`), a free-form
+`apply_patch` call (a `custom_tool_call`) has its text as the argument `input`, and a web search is a `web_search_call` call
+with the arguments `action_type` and the action's `query`, `queries` or `url`. The rest of the trajectory differs from
+Harbor's:
+
+- An assistant message is a step of its own, not grouped with the calls of the same model request.
+- Steps carry no timestamps or per-request metrics.
+- Reasoning that has both text and a summary exports the text; Harbor exports the summary.
+- Arguments that are not JSON export as `{}`, with the raw text in `extra.nemo_gym.raw_arguments`; Harbor exports
+  `{"input": <raw text>}`.
+- An image result is `[image]`, not an image part.
+- A web search has an empty result; Harbor's has no content.
+
+`response.output` falls back to the CLI events when the record cannot stand in for them: it is missing or unreadable
+(including a line whose values have a shape Codex does not write), holds a second session or an item type with no
+mapping, has a call with a blank ID or name (the export of the trajectory rejects one), or has a result without an open
+call or a call ID used twice. When that output has tool calls, the observations carry a `tool_calls_in_executed_form` gap
+naming the reason, and the agent server logs a warning with it. The exported trajectory does not mark the fallback. Local
+`/run` execution still builds its output from the CLI events.
 
 Native session transcripts supply tool-call IDs and outcomes. Codex disables its native HTTP 429 retries, so `sandbox_launcher.mjs` runs it behind a loopback forwarder on the runtime's Node that retries a 429 twice, honoring `Retry-After` up to 30 seconds. The forwarder retains request statuses and invocation correlation across retries; native cumulative usage supplements CLI totals when a failed turn omits them. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
 Compare CLI totals with captured model calls; do not interpret unavailable usage as zero.

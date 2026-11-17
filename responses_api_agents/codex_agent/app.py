@@ -1202,6 +1202,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
         except CodexOutputUnavailable as exc:
             if any(getattr(item, "type", None) == "function_call" for item in output):
                 executed_form_gap = ObservationGap(code=_EXECUTED_FORM_GAP, detail=str(exc))
+                # The exported trajectory carries no mark of this, so the server log says it next to the gap.
+                LOG.warning("Codex tool calls are kept in the executed form the CLI shows: %s", exc)
         error = cleanup["error"] if cleanup else "Codex runner result unavailable"
         errors = usage.get("errors") or []
         output_limited = (

@@ -345,15 +345,22 @@ def _session_output_items(payload: dict[str, Any], position: int) -> list[dict[s
         return [result]
     if kind == "web_search_call":
         # Codex runs this search on the model's side and reports no result, so it is a call with an empty result.
+        # Its name and arguments are those Harbor's own Codex agent exports, which graders read to tell a search from
+        # a page open (action_type).
         call_id = payload.get("id")
         if not isinstance(call_id, str) or not call_id.strip():
             call_id = f"ws_{position}"
+        action = payload.get("action") or {}
+        if not isinstance(action, dict):
+            raise CodexOutputUnavailable("a web_search_call record has an action that is not an object")
+        arguments = {"action_type": action.get("type", "")}
+        arguments |= {key: action[key] for key in ("query", "queries", "url") if key in action}
         return [
             {
                 "type": "function_call",
                 "call_id": call_id,
-                "name": "web_search",
-                "arguments": json.dumps(payload.get("action") or {}),
+                "name": "web_search_call",
+                "arguments": json.dumps(arguments),
             },
             {"type": "function_call_output", "call_id": call_id, "output": ""},
         ]
@@ -411,12 +418,15 @@ def parse_codex_output(transcript: str | None) -> list[NeMoGymResponseOutputItem
     ``response.output`` and the trajectory exported from it show the model's calls.
 
     Reasoning is kept as text only, and a content-item result as its text with ``[image]`` for each image.
-    A web search, which Codex runs on the model's side and reports without a result, becomes a ``web_search`` call
-    with an empty result. Raises :class:`CodexOutputUnavailable`, and nothing else, when the record is missing, holds
-    no model output, cannot be read or has a shape this does not expect, holds a session other than the first or an
-    item type with no mapping, or has a call with a blank ID or name, a result with no open call or a call ID used
-    twice: output built from it would misstate the run, or fail the export that reads it. A call ID is not reused
-    even after its result, because the observations key each tool by it.
+    A web search, which Codex runs on the model's side and reports without a result, becomes a ``web_search_call``
+    call with the arguments ``action_type`` and the action's ``query``, ``queries`` or ``url``, as Harbor's own Codex
+    agent exports it, and an empty result.
+
+    Raises :class:`CodexOutputUnavailable`, and nothing else, when the record is missing, holds no model output, cannot
+    be read or has a shape this does not expect, holds a session other than the first or an item type with no mapping,
+    or has a call with a blank ID or name, a result with no open call or a call ID used twice: output built from it
+    would misstate the run, or fail the export that reads it. A call ID is not reused even after its result, because
+    the observations key each tool by it.
     """
     try:
         return [_OUTPUT_ITEM.validate_python(item) for item in _session_items(transcript)]

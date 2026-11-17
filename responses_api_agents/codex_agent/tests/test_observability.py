@@ -534,11 +534,31 @@ def test_output_keeps_what_the_model_said_and_not_what_it_was_told() -> None:
     assert anonymous.id and anonymous.content[0].text == "Without an ID."
 
 
-def test_output_turns_a_web_search_into_a_call_with_no_result() -> None:
-    action = {"type": "search", "query": "Gym"}
+@pytest.mark.parametrize(
+    ("action", "arguments"),
+    [
+        (
+            {"type": "search", "query": "Gym", "queries": ["Gym", "NeMo Gym"]},
+            {"action_type": "search", "query": "Gym", "queries": ["Gym", "NeMo Gym"]},
+        ),
+        (
+            {"type": "open_page", "url": "https://example.com"},
+            {"action_type": "open_page", "url": "https://example.com"},
+        ),
+        (
+            {"type": "find_in_page", "url": "https://example.com", "pattern": "Gym"},
+            {"action_type": "find_in_page", "url": "https://example.com"},
+        ),
+        (None, {"action_type": ""}),
+    ],
+    ids=["search", "open-page", "find-in-page", "no-action"],
+)
+def test_output_turns_a_web_search_into_the_call_harbor_exports_with_no_result(action, arguments) -> None:
+    """Harbor's own Codex agent exports a web search as ``web_search_call`` with ``action_type``: a grader reads that
+    name and argument to tell a search from a page open."""
     transcript = _session({"type": "web_search_call", "id": "ws-1", "status": "completed", "action": action})
     call, result = parse_codex_output(transcript)
-    assert (call.name, call.call_id, json.loads(call.arguments)) == ("web_search", "ws-1", action)
+    assert (call.name, call.call_id, json.loads(call.arguments)) == ("web_search_call", "ws-1", arguments)
     assert (result.call_id, result.output) == ("ws-1", "")
 
 
@@ -574,6 +594,7 @@ def test_a_call_without_its_result_stays_open() -> None:
         (_session({"type": "message", "role": "assistant", "content": 5}), "unexpected shape: TypeError"),
         (_session({"type": "reasoning", "summary": 5}), "unexpected shape: TypeError"),
         (_session({"type": "reasoning", "summary": [], "content": 5}), "unexpected shape: TypeError"),
+        (_session({"type": "web_search_call", "id": "ws-1", "action": "search"}), "action that is not an object"),
         (json.dumps({"type": ["response_item"], "payload": {}}), "unexpected shape: TypeError"),
         (
             _session({"type": "message", "role": "assistant", "content": [{"type": "input_image"}]}),

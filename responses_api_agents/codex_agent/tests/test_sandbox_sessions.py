@@ -5,6 +5,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import os
 import re
 import shlex
@@ -3634,7 +3635,9 @@ def test_session_output_holds_the_models_calls_not_the_cli_display(setup):
     ],
     ids=["missing", "orphan-result", "unsupported-item", "blank-tool-name", "malformed-record"],
 )
-def test_session_output_without_a_usable_session_record_keeps_the_cli_events_and_says_so(setup, record, reason):
+def test_session_output_without_a_usable_session_record_keeps_the_cli_events_and_says_so(
+    setup, caplog, record, reason
+):
     agent, sandbox = setup
     if record is not None:
         publish_session_record(sandbox, record)
@@ -3648,9 +3651,16 @@ def test_session_output_without_a_usable_session_record_keeps_the_cli_events_and
     assert (call["call_id"], call["arguments"]) == ("tool-1", '{"cmd": "pwd"}')
     gaps = [gap for gap in closed["agent_observations"]["gaps"] if gap["code"] == "tool_calls_in_executed_form"]
     assert [gap["detail"] for gap in gaps] == [reason]
+    # The exported trajectory does not show the fallback, so the server log names it and why.
+    warnings = [
+        entry.getMessage()
+        for entry in caplog.records
+        if entry.name == "responses_api_agents.codex_agent.app" and entry.levelno == logging.WARNING
+    ]
+    assert f"Codex tool calls are kept in the executed form the CLI shows: {reason}" in warnings
 
 
-def test_session_without_tool_calls_has_nothing_to_note_when_the_record_is_missing(setup):
+def test_session_without_tool_calls_has_nothing_to_note_when_the_record_is_missing(setup, caplog):
     agent, sandbox = setup
     sandbox.events = "\n".join(
         json.dumps([float(index), event])
@@ -3669,6 +3679,7 @@ def test_session_without_tool_calls_has_nothing_to_note_when_the_record_is_missi
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id)).json()
     assert [item["type"] for item in response.json()["output"]] == ["message"]
     assert "tool_calls_in_executed_form" not in [gap["code"] for gap in closed["agent_observations"]["gaps"]]
+    assert "executed form" not in caplog.text
 
 
 @pytest.mark.parametrize(
