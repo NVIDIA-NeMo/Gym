@@ -5,12 +5,12 @@ import json
 import shutil
 import zipfile
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated
 
 import tyro
-from huggingface_hub import snapshot_download
+from huggingface_hub import hf_hub_download
 from tqdm.auto import tqdm
 
 
@@ -40,9 +40,6 @@ class BMBTask:
             reader = csv.DictReader(problems_file)
 
             for row in reader:
-                if not (data_dir / f"{row['id']}.zip").is_file():
-                    raise FileNotFoundError(f"Task data archive does not exist for ID: {row['id']}")
-
                 yield cls(**row, data=data_dir / f"{row['id']}.zip")
 
 
@@ -69,40 +66,54 @@ class HarborBMBTask:
             allowed_domains=json.dumps(allowed_domains),
         )
 
-    @property
-    def instruction(self) -> str:
+    def environment_data(self, *, skip_data: bool) -> str:
+        """Return the task data path visible to the agent."""
+        if skip_data:
+            return f"/mnt/s3-data/nemotron-life-science/harbor-data/biomysterybench/{self.id}/environment/data"
+        return "/app/data"
+
+    def render_instruction(self, *, skip_data: bool) -> str:
+        """Render the task question with the data location visible to the agent."""
         instruction_template = (self.template_dir / "instruction.md").read_text().strip()
-        return instruction_template.format(question=self.source.question)
+        return instruction_template.format(
+            question=self.source.question, data_path=self.environment_data(skip_data=skip_data)
+        )
 
     @property
     def task_data(self) -> dict[str, str]:
         """Return the question and private rubric used by the verifier."""
         return {"question": self.source.question, "answer_rubric": self.source.answer_rubric}
 
-    @property
-    def gym_input(self) -> dict:
-        return {"task_name": self.id, "responses_create_params": {"input": []}}
-
-    def write(self, output_dir: Path, force: bool = False) -> Path:
+    def write(
+        self, output_dir: Path, force: bool = False, *, skip_data: bool = False, data_repo_id: str | None = None
+    ) -> Path:
         """Reuse completed tasks unless forced, rebuilding incomplete task directories."""
         task_dir = output_dir / self.id
         done_marker = task_dir / ".done"
 
         if task_dir.exists():
-            if not force and done_marker.is_file():
+            if not force and done_marker.is_file() and (skip_data or (task_dir / "environment/data").is_dir()):
                 return task_dir
             shutil.rmtree(task_dir)
 
         shutil.copytree(self.template_dir, task_dir, dirs_exist_ok=True)
 
         (task_dir / "task.toml").write_text(self.toml + "\n")
-        (task_dir / "instruction.md").write_text(self.instruction + "\n")
-        (task_dir / "environment/data").mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(self.source.data) as data_zip:
-            data_zip.extractall(task_dir / "environment/data")
+        (task_dir / "instruction.md").write_text(self.render_instruction(skip_data=skip_data) + "\n")
+        if not skip_data:
+            archive_path = Path(self.source.data)
+            if data_repo_id is not None:
+                archive_path = Path(
+                    hf_hub_download(data_repo_id, filename=f"data/{self.source.id}.zip", repo_type="dataset")
+                )
+            if not archive_path.is_file():
+                raise FileNotFoundError(f"Task data archive does not exist for ID: {self.source.id}")
+            (task_dir / "environment/data").mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(archive_path) as data_zip:
+                data_zip.extractall(task_dir / "environment/data")
         (task_dir / "tests/task_data.json").write_text(json.dumps(self.task_data) + "\n")
 
-        # Only mark success after every template and archive file has been written.
+        # Only mark success after every requested file has been written.
         done_marker.touch()
 
         return task_dir
@@ -125,13 +136,21 @@ class HarborBMB:
     overwrite: bool = False
     """Rebuild completed tasks too; incomplete tasks are always rebuilt."""
 
+    skip_data: bool = False
+    """Skip downloading and extracting data archives; fetch only problems.csv and supply task data separately."""
+
+    _data_repo_id: str | None = field(default=None, init=False, repr=False)
+
     def __post_init__(self):
         self.output_dir = Path(self.output_dir).expanduser()
 
         self.data_dir = Path(self.data_dir).expanduser()
 
         if not self.data_dir.is_dir():
-            self.data_dir = Path(snapshot_download(str(self.data_dir), repo_type="dataset"))
+            self._data_repo_id = str(self.data_dir)
+            self.data_dir = Path(
+                hf_hub_download(self._data_repo_id, filename="problems.csv", repo_type="dataset")
+            ).parent
 
     @property
     def tasks(self) -> Iterator[HarborBMBTask]:
@@ -141,19 +160,21 @@ class HarborBMB:
     def write(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        gym_rows: list[str] = []
+        task_count = 0
 
         for task in tqdm(self.tasks, desc="bmb"):
-            if self.limit is not None and len(gym_rows) >= self.limit:
+            if self.limit is not None and task_count >= self.limit:
                 break
 
-            task.write(self.output_dir, force=self.overwrite)
-            gym_rows.append(json.dumps(task.gym_input) + "\n")
+            task.write(
+                self.output_dir,
+                data_repo_id=self._data_repo_id,
+                force=self.overwrite,
+                skip_data=self.skip_data,
+            )
+            task_count += 1
 
-        with (self.output_dir / "gym.jsonl").open("w") as gym_file:
-            gym_file.writelines(gym_rows)
-
-        print(f"Adapted {len(gym_rows)} tasks to {self.output_dir}")
+        print(f"Adapted {task_count} tasks to {self.output_dir}")
 
 
 def prepare(
@@ -163,17 +184,19 @@ def prepare(
     data_dir: str | Path = "Anthropic/BioMysteryBench-full",
     limit: int | None = None,
     overwrite: bool = False,
+    skip_data: bool = False,
 ) -> Path:
-    """Prepare Harbor tasks and return their Gym JSONL index path."""
+    """Prepare Harbor tasks and return their output directory."""
     benchmark = HarborBMB(
         docker_image=docker_image,
         output_dir=output_dir,
         data_dir=data_dir,
         limit=limit,
         overwrite=overwrite,
+        skip_data=skip_data,
     )
     benchmark.write()
-    return Path(benchmark.output_dir) / "gym.jsonl"
+    return Path(benchmark.output_dir)
 
 
 if __name__ == "__main__":
