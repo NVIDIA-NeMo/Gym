@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -77,6 +78,10 @@ def test_added_and_removed_lines_count(tmp_path: Path) -> None:
         "mid",
         ["120 changed lines in 2 non-doc files"],
     )
+
+
+def test_non_utf8_filename_is_counted(tmp_path: Path) -> None:
+    assert grade(tmp_path, {}, {os.fsdecode(b"scripts/bad\xff.py"): lines(401)})[0] == "high"
 
 
 def test_docs_lockfiles_and_data_are_not_counted(tmp_path: Path) -> None:

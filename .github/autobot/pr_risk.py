@@ -27,12 +27,15 @@ It prints the tier on stdout and its evidence on stderr. The agent may raise the
 
 Changed lines are git's added plus removed lines outside docs, lockfiles and JSONL data. Protected files are the
 globs listed in ``protected_files.yaml`` next to this file. The public surface is each ``nemo_gym`` package
-``__init__.py`` that assigns ``_PUBLIC_API`` (or the root's ``_LAZY_EXPORTS``) and every submodule it lists. Scoring
-is the resources servers and the verification, verifiers and metrics packages, outside their tests and data.
+``__init__.py`` that assigns ``_PUBLIC_API`` or ``_LAZY_EXPORTS`` at the top level, plus both ``<submodule>.py`` and
+``<submodule>/__init__.py`` for every submodule any such assignment lists. That rule is deliberately coarse: it does
+not model which mapping the loader ends up using, so it can over-count but does not miss a listed file. Scoring is the
+resources servers and the verification, verifiers and metrics packages, outside their tests and data.
 """
 
 import argparse
 import ast
+import os
 import subprocess
 import sys
 from fnmatch import fnmatch
@@ -56,7 +59,7 @@ def matches(path: str, patterns: tuple[str, ...]) -> bool:
 
 def git(tree: Path, *args: str) -> str:
     """Run git in ``tree`` and return its stdout."""
-    return subprocess.run(["git", "-C", str(tree), *args], check=True, capture_output=True, text=True).stdout
+    return os.fsdecode(subprocess.run(["git", "-C", str(tree), *args], check=True, capture_output=True).stdout)
 
 
 def changed_lines(base: Path, head: Path) -> dict[str, int]:
@@ -75,7 +78,7 @@ def public_surface(tree: Path) -> set[str]:
     files = set()
     for init in (tree / "nemo_gym").rglob("__init__.py"):
         try:
-            body = ast.parse(init.read_text()).body
+            body = ast.parse(init.read_bytes()).body
         except (OSError, SyntaxError, ValueError):
             continue
         package = init.parent.relative_to(tree).as_posix()
