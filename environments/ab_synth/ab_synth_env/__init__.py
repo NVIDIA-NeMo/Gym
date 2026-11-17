@@ -107,7 +107,8 @@ def _as_json_text(value) -> str:
 def _text(content) -> str:
     """Visible text of a message: list content joined, reasoning dropped."""
     if isinstance(content, list):
-        content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+        # Parts are dicts or, once verifiers normalizes them, objects: read `text` from either.
+        content = " ".join(_get(p, "text") or "" for p in content)
     return THINK.sub("", content or "").split("</think>")[-1].strip()
 
 
@@ -546,6 +547,11 @@ def load_environment(
             raise RequesterUnavailable("the requester kept calling tools after tool_choice=none")
 
     def wait(until: str, clock: Clock) -> str:
+        try:
+            _time(until)
+        except (TypeError, ValueError):
+            # A malformed time is the policy's mistake: report it to the agent, do not mask the rollout.
+            return json.dumps({"error": f"invalid until {until!r}: expected an ISO 8601 time"})
         try:
             return clock.wait(until)
         except Exception as e:  # noqa: BLE001  a broken event row, reported as a requester failure and masked

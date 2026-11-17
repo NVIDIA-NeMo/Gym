@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 import ab_synth_env as env
 import verifiers as vf
 from automationbench.schema.world import WorldState
-from verifiers.legacy.types import AssistantMessage, ToolCall
+from verifiers.legacy.types import AssistantMessage, GenericContentPart, TextContentPart, ToolCall
 
 
 INITIAL_STATE = {
@@ -62,6 +62,11 @@ class VisibleTextTest(unittest.TestCase):
         self.assertEqual(env._text("private</think>Visible question?"), "Visible question?")
         self.assertEqual(env._text("Visible question?<think>private notes, never closed"), "Visible question?")
         self.assertEqual(env._text("Plain speech stays."), "Plain speech stays.")
+
+    def test_normalized_content_parts_keep_their_text(self):
+        parts = [TextContentPart(text="Set contact 101"), GenericContentPart(type="input_text", text="to customer.")]
+        self.assertEqual(env._text(parts), "Set contact 101 to customer.")
+        self.assertEqual(env._text([{"type": "input_text", "text": "Dict parts stay."}]), "Dict parts stay.")
 
 
 class NamesTest(unittest.TestCase):
@@ -416,6 +421,14 @@ class RequesterTest(unittest.TestCase):
         with self.assertRaises(vf.ToolCallError):
             asyncio.run(vf_env.env_response([AssistantMessage(content="", tool_calls=[call])], state))
         self.assertEqual(state["requester_failed"], 1)
+
+    def test_a_malformed_wait_time_is_returned_to_the_agent_not_masked(self):
+        vf_env, state = load(INFO)
+        call = ToolCall(id="w1", name="wait", arguments=json.dumps({"until": "tomorrow"}))
+
+        out = asyncio.run(vf_env.env_response([AssistantMessage(content="", tool_calls=[call])], state))
+        self.assertIn("invalid until", str(out))
+        self.assertNotIn("requester_failed", state)
 
 
 if __name__ == "__main__":
