@@ -434,6 +434,29 @@ def test_kubernetes_pvc_name_is_required():
 
 
 # ---------------------------------------------------------------------------
+# job.lustre_md_stats
+# ---------------------------------------------------------------------------
+
+
+def test_lustre_md_stats_off_leaves_the_saved_config_as_before():
+    config = SubmitConfig.model_validate(_config())
+    assert config.job.lustre_md_stats is False
+    assert config.model_dump(mode="json")["job"] == {"output_path": "/tmp/gym-jobs", "export": {}}
+
+
+def test_lustre_md_stats_on_is_saved_and_read_back():
+    config = SubmitConfig.model_validate(_config(job={**JOB, "lustre_md_stats": True}))
+    saved = config.model_dump(mode="json")
+    assert saved["job"]["lustre_md_stats"] is True
+    assert SubmitConfig.model_validate(saved).job.lustre_md_stats is True
+
+
+def test_lustre_md_stats_on_kubernetes_is_refused():
+    with pytest.raises(ValidationError, match="job.lustre_md_stats is supported on Slurm compute only"):
+        SubmitConfig.model_validate(_config(compute=COMPUTE_K8S, job={**JOB, "lustre_md_stats": True}))
+
+
+# ---------------------------------------------------------------------------
 # resumable / ResumeConfig
 # ---------------------------------------------------------------------------
 
