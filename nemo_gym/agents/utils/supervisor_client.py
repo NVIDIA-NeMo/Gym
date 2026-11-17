@@ -194,6 +194,15 @@ def supervised_launch_command(
     )
 
 
+def control_cwd(*, session_dir: str, workdir: str | None) -> str | None:
+    """Working directory for a lifecycle command that addresses only ``session_dir`` files.
+
+    A task can move or delete its workdir, and providers such as Docker refuse to exec in a missing directory.
+    An absolute session directory needs no workdir, so its stop, probe and removal commands run from ``/``.
+    """
+    return "/" if Path(session_dir).is_absolute() else workdir
+
+
 async def stop_and_confirm_cleanup(
     sandbox: AsyncSandbox, *, session_dir: str, workdir: str | None, timeout: float, harness: str
 ) -> CleanupReceipt:
@@ -224,7 +233,7 @@ async def stop_and_confirm_cleanup(
             f"for _ in $(seq 1 {max(1, int(timeout))}); do "
             f"[ -f {quote(receipt_path)} ] && exit 0; sleep 1; done; exit 1"
         )
-        await sandbox.exec(script, cwd=workdir, timeout_s=timeout + 5)
+        await sandbox.exec(script, cwd=control_cwd(session_dir=session_dir, workdir=workdir), timeout_s=timeout + 5)
         try:
             receipt = json.loads(await read_text(sandbox, path=receipt_path))
         except Exception as error:
@@ -249,7 +258,7 @@ async def remove_session_directory(
     result = await sandbox.exec(
         f"if [ -d {quote(session_dir)} ]; then "
         f"mv {quote(session_dir)} {quote(retired)} || exit 1; fi; rm -rf -- {quote(retired)}",
-        cwd=workdir,
+        cwd=control_cwd(session_dir=session_dir, workdir=workdir),
         timeout_s=timeout,
     )
     if result.return_code != 0 or result.error_type:

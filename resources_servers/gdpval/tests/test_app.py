@@ -17,7 +17,7 @@ import json
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
@@ -330,6 +330,47 @@ class TestStrictComparisonTrials:
             assert response.model_dump()["_ng_failure_terminal"] is True
             assert "manual_imputation" not in response.judge_response
 
+    @pytest.mark.asyncio
+    async def test_an_agent_timeout_is_a_lost_battle_not_a_masked_row(self, tmp_path) -> None:
+        server, body = self._comparison_server_and_body(tmp_path, strict=False)
+        body.response.metadata = {"stop_reason": "wall_time"}
+        with patch("resources_servers.gdpval.comparison.run_trials") as judge:
+            response = await server.verify(_NO_SESSION, body)
+        judge.assert_not_called()
+        dumped = response.model_dump()
+        assert "_ng_failure_class" not in dumped
+        assert response.mask_sample is False and response.reward == 0.0
+        assert response.failure_kind == "agent_timeout"
+        assert response.failure_outcome_attribution == "model"
+        assert (response.total_wins, response.total_losses, response.total_ties) == (0, 4, 0)
+        assert response.loss is True
+        assert response.judge_response["manual_imputation"] == "model_failure_as_loss"
+        assert [counts["losses"] for counts in response.per_reference.values()] == [4]
+
+    @pytest.mark.parametrize(
+        ("stop_reason", "kind"),
+        [("context_limit", "model_context_limit"), ("max_iterations", "agent_limit"), ("max_turns", "agent_limit")],
+    )
+    @pytest.mark.asyncio
+    async def test_a_model_limit_without_a_deliverable_is_a_counted_loss(self, tmp_path, stop_reason, kind) -> None:
+        server, body = self._missing_artifact_server_and_body(tmp_path, missing="eval", strict=False)
+        body.response.metadata = {"stop_reason": stop_reason}
+        response = await server.verify(_NO_SESSION, body)
+        assert response.mask_sample is False and response.loss is True and response.total_losses == 4
+        assert response.failure_kind == kind
+        assert (response.failure_outcome_action, response.failure_outcome_attribution) == ("count_as_zero", "model")
+
+    @pytest.mark.parametrize("metadata", [None, {"stop_reason": "completed"}, {"stop_reason": "error"}])
+    @pytest.mark.asyncio
+    async def test_a_missing_deliverable_without_a_model_stop_stays_a_terminal_failure(
+        self, tmp_path, metadata
+    ) -> None:
+        server, body = self._missing_artifact_server_and_body(tmp_path, missing="eval", strict=False)
+        body.response.metadata = metadata
+        response = await server.verify(_NO_SESSION, body)
+        assert response.model_dump()["_ng_failure_class"] == "eval_missing"
+        assert response.mask_sample is True and response.loss is None
+
     @pytest.mark.parametrize("marker", ["null", "{}"])
     @pytest.mark.asyncio
     async def test_existing_finish_marker_is_judged_with_loss_policy(self, tmp_path, marker) -> None:
@@ -502,6 +543,57 @@ class TestApp:
             # Both the eval and the reference report reach the judge as the rendered PDF.
             assert json.dumps(call.kwargs["messages"]).count(render) == 2
         assert (eval_dir / "report.pdf").is_file() and (ref_dir / "report.pdf").is_file()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("reference_has_pdf", [False, True])
+    async def test_verify_comparison_with_sandbox_rendering_never_converts_on_the_host(
+        self, tmp_path, monkeypatch, reference_has_pdf
+    ) -> None:
+        import fitz
+
+        eval_dir = tmp_path / "eval" / "task_task-1" / "repeat_0"
+        ref_root = tmp_path / "ref"
+        ref_dir = ref_root / "task_task-1" / "repeat_0"
+        for directory in (eval_dir, ref_dir):
+            directory.mkdir(parents=True)
+            (directory / "finish_params.json").write_text("{}")
+            (directory / "report.docx").write_bytes(b"office source")
+        # The sandbox rendered the eval submission; the reference carries its PDF or not.
+        renders = [eval_dir / "report.docx.pdf"] + ([ref_dir / "report.pdf"] if reference_has_pdf else [])
+        for render in renders:
+            document = fitz.open()
+            document.new_page().insert_text((72, 72), "render")
+            document.save(render)
+            document.close()
+        host_convert = AsyncMock(return_value=(0, 0, []))
+        monkeypatch.setattr("resources_servers.gdpval.preconvert.preconvert_dir_async", host_convert)
+        with patch("resources_servers.gdpval.setup_libreoffice.ensure_libreoffice", return_value=True):
+            server = _server(
+                reward_mode="comparison",
+                reference_deliverables_dir=str(ref_root),
+                preconvert_office_to_pdf=True,
+                sandbox_libreoffice_command=["libreoffice"],
+                persist_deliverables_dir=str(tmp_path / "persist"),
+            )
+        client = MagicMock()
+        client.chat.completions.create.return_value.choices = [MagicMock(message=MagicMock(content="BOXED[B]"))]
+        monkeypatch.setattr("resources_servers.gdpval.app.get_server_url", lambda _: "http://localhost:9999")
+        monkeypatch.setattr("openai.OpenAI", lambda **_: client)
+
+        response = await server.verify(_NO_SESSION, _verify_request(deliverables_dir=str(eval_dir)))
+
+        host_convert.assert_not_called()
+        if reference_has_pdf:
+            assert response.judge_response["total_judged"] == 4
+        else:
+            # Judging would have shown the judge an empty reference.
+            client.chat.completions.create.assert_not_called()
+            assert response.judge_response == {
+                "error": "reference_unrendered",
+                "unrendered": [str(ref_dir / "report.docx")],
+            }
+            dumped = response.model_dump()
+            assert (dumped["_ng_failure_class"], dumped["_ng_failure_terminal"]) == ("reference_unrendered", True)
 
     @pytest.mark.asyncio
     async def test_verify_rubric_renders_office_with_configured_command(self, tmp_path, monkeypatch) -> None:
@@ -1774,6 +1866,47 @@ class TestMultiReference:
         assert staged["comparison/stage_0/eval_elo"] == unstaged["comparison/eval_elo"]
         # Untagged run carries no stage_* keys at all.
         assert not any(k.startswith("comparison/stage_") for k in unstaged)
+
+    @pytest.mark.asyncio
+    async def test_a_no_deliverable_row_lowers_the_win_rate_and_elo_versus_the_masked_row(self) -> None:
+        from nemo_gym.config import AggregateMetricsRequest
+
+        server = _server(
+            reward_mode="comparison",
+            reference_models={"ref": {"deliverables_dir": "/tmp/ref", "elo": 1000.0}},
+        )
+
+        def judged(index: int) -> dict:
+            return {
+                "_ng_task_index": index,
+                "_ng_rollout_index": 0,
+                "task_id": f"t{index}",
+                "reward": 0.75,
+                "total_wins": 3,
+                "total_losses": 1,
+                "total_ties": 0,
+                "per_reference": {"ref": {"wins": 3, "losses": 1, "ties": 0}},
+                "response": {},
+            }
+
+        no_deliverable = {
+            **judged(3),
+            "reward": 0.0,
+            "total_wins": 0,
+            "total_losses": 4,
+            "per_reference": {"ref": {"wins": 0, "losses": 4, "ties": 0}},
+            "failure_kind": "agent_timeout",
+            "judge_response": {"manual_imputation": "model_failure_as_loss"},
+        }
+        rows = [judged(0), judged(1), judged(2)]
+        # Before: the row was masked, so the Elo fit and the win rate never saw it.
+        masked = (await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))).agent_metrics
+        counted = (
+            await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[*rows, no_deliverable]))
+        ).agent_metrics
+        assert masked["comparison/win_rate"] == pytest.approx(0.75)
+        assert counted["comparison/win_rate"] == pytest.approx(9 / 16)
+        assert counted["comparison/eval_elo"] < masked["comparison/eval_elo"]
 
     @pytest.mark.asyncio
     async def test_imputed_loss_coverage_is_separate_from_judgments(self) -> None:

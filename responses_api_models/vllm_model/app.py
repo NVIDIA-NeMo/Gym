@@ -77,7 +77,7 @@ from nemo_gym.models import (
     validate_framework_context_options,
 )
 from nemo_gym.models.base_responses_api_model import _request_messages, _validate_responses_params
-from nemo_gym.models.model_call_capture import note_finish_reason
+from nemo_gym.models.model_call_capture import AGENT_INSTANCE_STATE_KEY, note_finish_reason
 from nemo_gym.models.token_capture import (
     CAPTURE_REFUSAL_HEADER,
     CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
@@ -92,6 +92,7 @@ from nemo_gym.models.token_capture import (
     set_token_sink,
     token_capture_config,
 )
+from nemo_gym.models.token_capture.records import ModelRef
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.tar_audio import TarAudioReader, resolve_archive_path, validate_relative_path
 
@@ -689,6 +690,7 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # since a pin that covers some endpoints and not others is off-policy while reporting that sampling is pinned.
     #
     # Unset means no pin.
+    # A null value for a parameter removes it from the request, so the engine applies its own default.
     sampling_overrides: Optional[Dict[str, Any]] = None
 
     # Corresponds to the extra_body of OpenAI Client.
@@ -937,7 +939,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         ):
             refuse = getattr(context.lineage_store, "refuse_call", None)
             if refuse is not None:
-                await refuse(context.capture_key, context.model_call_id)
+                await refuse(context.capture_key, context.model_call_id, identity=context.identity)
                 context.refused = True
         if source_history or self.config.propagate_context_overflow_errors:
             code = _mark_propagated_overflow(error)
@@ -1070,6 +1072,9 @@ class VLLMModel(SimpleResponsesAPIModel):
             lineage_store=self._capture_lineage,
             external_staging=True,
             parent_resolution_mode="source_history",
+            # The same identity a generation call of this agent instance on this server resolves under.
+            agent_instance=request.scope.get("state", {}).get(AGENT_INSTANCE_STATE_KEY),
+            model_ref=ModelRef(name=self.config.name),
         )
         token = set_token_sink(context)
         try:
@@ -1147,12 +1152,15 @@ class VLLMModel(SimpleResponsesAPIModel):
                 if key in self.config.sampling_overrides
             ]
             if any(value != pinned_limits[0][1] for _, value in pinned_limits[1:]):
+                first_name, first_value = pinned_limits[0]
                 LOG.warning(
                     "`%s` pins the output-token limit to different values under different names %s; "
-                    "every endpoint sends %s=%s",
+                    "every endpoint sends %s",
                     self.config.name,
                     dict(pinned_limits),
-                    *pinned_limits[0],
+                    f"no limit, because {first_name} is null"
+                    if first_value is None
+                    else f"{first_name}={first_value}",
                 )
 
         self._clients = [
@@ -1169,6 +1177,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                     else None
                 ),
                 request_timeout_seconds=self.config.request_timeout_seconds,
+                # A timed-out policy request records whether this server was queueing requests.
+                record_server_queue=True,
                 # The wait budget is for outside providers; a job must notice a down model server quickly.
                 max_rate_limit_wait_seconds=0,
                 max_http_attempts=self.config.max_http_attempts,
@@ -1320,6 +1330,12 @@ class VLLMModel(SimpleResponsesAPIModel):
         from the pin reaches the engine with both, and the engine may read the request's. A pin that
         names the limit more than once sends the value of the first name in ``_OUTPUT_BUDGET_KEYS``
         order on every endpoint, so one config caps a run alike whichever endpoint serves it.
+
+        A null pin removes the parameter from the body instead of sending ``null``, so the engine
+        applies its own default. A null limit removes the request's limit under every name and
+        sends none. On Chat and Responses the engine then sets no limit of its own. On
+        ``/v1/completions`` its default for a request without ``max_tokens`` is 16 tokens, so a
+        null limit does not lift the limit on that endpoint.
         """
         if not self.config.sampling_overrides:
             return body_dict
@@ -1335,7 +1351,11 @@ class VLLMModel(SimpleResponsesAPIModel):
             )
         overrides = dict(self.config.sampling_overrides)
         pinned_limits = {key: overrides.pop(key) for key in _OUTPUT_BUDGET_KEYS if key in overrides}
-        body_dict.update(overrides)
+        for key, value in overrides.items():
+            if value is None:
+                body_dict.pop(key, None)
+            else:
+                body_dict[key] = value
         if pinned_limits:
             for key in _OUTPUT_BUDGET_KEYS:
                 body_dict.pop(key, None)
@@ -1343,7 +1363,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                 limit_key = next((key for key in _CHAT_BUDGET_KEYS if key in pinned_limits), "max_tokens")
             else:
                 limit_key = _OUTPUT_BUDGET_KEY_BY_API[api]
-            body_dict[limit_key] = next(iter(pinned_limits.values()))
+            limit = next(iter(pinned_limits.values()))
+            if limit is not None:
+                body_dict[limit_key] = limit
         return body_dict
 
     async def _responses_native(
@@ -2772,6 +2794,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 max_http_attempts=self.config.max_http_attempts,
                 max_num_tries=self.config.max_num_tries,
                 request_timeout_seconds=self.config.request_timeout_seconds,
+                record_server_queue=True,
                 connection_retry_timeout_s=self.config.endpoint_connection_retry_timeout_s,
             )
         ]

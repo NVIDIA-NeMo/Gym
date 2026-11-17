@@ -1,0 +1,46 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+export SAAS_FAKE_ID=1
+user=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --reuid)
+      user="${2:-}"
+      shift 2
+      ;;
+    --reuid=*)
+      user="${1#--reuid=}"
+      shift
+      ;;
+    --regid|--groups)
+      shift 2
+      ;;
+    --init-groups|--clear-groups|--no-new-privs)
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+# Report the uid the image gave that account, and export it so forked children
+# inherit it rather than falling back to real root.
+case "$user" in
+  ''|*[!0-9]*)
+    uid="$(awk -F: -v u="$user" '$1 == u { print $3 }' /etc/passwd 2>/dev/null)"
+    ;;
+  *) uid="$user" ;;
+esac
+export SAAS_FORCE_UID="${uid:-999}"
+echo "$SAAS_FORCE_UID" > "/tmp/.saas-euid-$$"
+
+exec "$@"
