@@ -715,7 +715,7 @@ class TestNemoRLUsage:
             import nemo_gym.rollout_collection as gym_rollout_collection
 
         fake_helper, fake_collection = object(), object()
-        # `RunHelper` reaches nemo_gym.cli through the CLI refactor's `__getattr__` shim. Patch the module's namespace,
+        # `RunHelper` reaches nemo_gym.cli through the module's `__getattr__`. Patch the module's namespace,
         # so undoing the patch removes the name again; restoring it with setattr would leave it set for later tests.
         monkeypatch.setitem(vars(gym_cli), "RunHelper", fake_helper)
         monkeypatch.setattr(gym_rollout_collection, "RolloutCollectionHelper", fake_collection)
@@ -735,6 +735,36 @@ if __name__ == "__main__":
     IMPORT_SURFACE_PATH.write_text(
         "{\n" + ",\n".join(f"{json.dumps(k)}: {json.dumps(v)}" for k, v in sorted(surface.items())) + "\n}\n"
     )
+
+
+@pytest.mark.parametrize("old_module", ["nemo_gym.cli", "nemo_gym.cli.env", "nemo_gym.cli.eval"])
+def test_run_helper_resolves_to_server_supervisor_with_a_warning(old_module: str) -> None:
+    # `RunHelper` shipped at each of these paths before its rename. In a fresh interpreter, so no earlier access in
+    # this process has used up the once-per-path warning.
+    code = textwrap.dedent(
+        f"""
+        import importlib
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            old = importlib.import_module("{old_module}")
+        from nemo_gym.server_runtime.supervisor.server_supervisor import ServerSupervisor
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            assert old.RunHelper is ServerSupervisor
+        messages = [str(w.message) for w in caught if w.category is DeprecationWarning]
+        assert len(messages) == 1, messages
+        expected = (
+            "`{old_module}.RunHelper` moved to "
+            "`nemo_gym.server_runtime.supervisor.server_supervisor.ServerSupervisor`"
+        )
+        assert expected in messages[0], messages
+        assert "removed in nemo_gym 0.10.0" in messages[0], messages
+        """
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
 
 
 @pytest.mark.parametrize("first", ["", "import nemo_gym.data.tasks.harbor\n"])
