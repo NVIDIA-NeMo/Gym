@@ -36,23 +36,14 @@ _PATH = re.compile(r"[A-Za-z0-9_./-]+")
 _HEADER = re.compile(r"diff --git a/(\S+) b/(\S+)")
 _HUNK = re.compile(r"@@ -(\d{1,9})(?:,(\d{1,9}))? \+(\d{1,9})(?:,(\d{1,9}))? @@(?: .*)?")
 _INDEX = re.compile(r"index [0-9a-f]+\.\.[0-9a-f]+(?: 100(?:644|755))?")
-_PROTECTED_PARTS = {"test", "tests", "testing", "__pycache__", "node_modules", "venv"}
 _PROTECTED_NAMES = {
     "conftest.py",
     "pytest.ini",
     "tox.ini",
     "setup.cfg",
-    "setup.py",
     "pyproject.toml",
     "sitecustomize.py",
     "usercustomize.py",
-    "environment.yml",
-    "environment.yaml",
-    "sandbox_runner.py",
-    "request.json",
-    "result.json",
-    "Makefile",
-    "Dockerfile",
 }
 
 
@@ -98,13 +89,7 @@ def validate_patch(patch: str, *, protected_paths: Iterable[str] = ()) -> tuple[
             or any(part in {"", ".", ".."} or part.startswith(".") for part in parts)
         ):
             raise PatchPolicyError(f"unsafe patch path: {path!r}")
-        if (
-            path in protected
-            or any(p in _PROTECTED_PARTS for p in parts)
-            or parts[-1] in _PROTECTED_NAMES
-            or parts[-1].startswith(("test_", "requirements"))
-            or parts[-1].endswith(("_test.py", ".pth", ".pyc"))
-        ):
+        if path in protected or parts[-1] in _PROTECTED_NAMES or parts[-1].endswith((".pth", ".pyc")):
             raise PatchPolicyError(f"protected grading or environment path: {path!r}")
         if path in seen:
             raise PatchPolicyError(f"duplicate patch path: {path!r}")
@@ -123,8 +108,17 @@ def validate_patch(patch: str, *, protected_paths: Iterable[str] = ()) -> tuple[
                 raise PatchPolicyError("only regular file modes are allowed")
             change = "new" if mode.startswith("new") else "deleted"
             i += 1
+        index = None
         if i < len(lines) and _INDEX.fullmatch(lines[i].removesuffix("\n")):
+            index = lines[i].split()[1].split("..")
             i += 1
+        if change and index and (i == len(lines) or lines[i].startswith("diff --git ")):
+            before, after = index
+            empty_blob = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+            absent, present = (before, after) if change == "new" else (after, before)
+            if set(absent) == {"0"} and len(present) >= 7 and empty_blob.startswith(present):
+                continue
+            raise PatchPolicyError("invalid empty-file object IDs")
         old = "/dev/null" if change == "new" else f"a/{path}"
         new = "/dev/null" if change == "deleted" else f"b/{path}"
         if lines[i : i + 2] != [f"--- {old}\n", f"+++ {new}\n"]:

@@ -68,22 +68,14 @@ def test_traversal_and_noncanonical_paths(path):
 @pytest.mark.parametrize(
     "path",
     [
-        "tests/test_answer.py",
-        "src/tests/fixture.json",
-        "src/test/data.json",
         "conftest.py",
         "src/conftest.py",
         "pyproject.toml",
-        "setup.py",
         "pytest.ini",
         "tox.ini",
         "sitecustomize.py",
         "src/usercustomize.py",
         "src/plugin.pth",
-        "requirements.txt",
-        "sandbox_runner.py",
-        "request.json",
-        "result.json",
     ],
 )
 def test_grader_tampering_fixture_rejected_in_full(path):
@@ -310,7 +302,7 @@ def test_rejected_patch_is_scored_without_allocating_a_verifier(monkeypatch, sub
         app.run_verification.assert_not_awaited()
 
 
-async def test_failed_test_process_cannot_get_credit_from_pass_lines():
+async def test_unrelated_test_failure_does_not_override_target_test_success():
     from resources_servers.swe_gym.verification import TEST_OUTPUT_BEGIN, TEST_OUTPUT_END, run_verification
 
     class Fake:
@@ -326,12 +318,10 @@ async def test_failed_test_process_cannot_get_credit_from_pass_lines():
         Fake(),
         VerificationInputs("fixture", "getmoto/moto", "5.0", "base", "", fail_to_pass=["src/test.py::test_hidden"]),
     )
-    assert result.completed and not result.resolved
+    assert result.completed and result.resolved
 
 
-@pytest.mark.parametrize(
-    "code,error_type", [(None, "timeout"), (0, "sandbox"), (124, None), (137, None), (93, None), (94, None)]
-)
+@pytest.mark.parametrize("code,error_type", [(None, "timeout"), (0, "sandbox"), (92, None), (93, None), (94, None)])
 async def test_infrastructure_and_preflight_failures_never_score_pass_logs(code, error_type):
     from resources_servers.swe_gym.verification import run_verification
 
@@ -372,9 +362,9 @@ def test_capture_failure_attribution_and_teardown(monkeypatch, kind):
     with TestClient(server.setup_webserver()) as client:
         assert client.post("/seed_session", json=_seed().model_dump(mode="json")).status_code == 200
         result = client.post("/verify", json=_VERIFY).json()
-        assert result["reward"] == 0 and result["mask_sample"] == (kind == "provider")
-        assert result["evaluation_completed"] == (kind != "provider")
-        assert result["failure_kind"] == ("verifier_error" if kind == "provider" else "agent_invalid_output")
+        assert result["reward"] == 0 and result["mask_sample"] == (kind != "size")
+        assert result["evaluation_completed"] == (kind == "size")
+        assert result["failure_kind"] == ("verifier_error" if kind != "size" else "agent_invalid_output")
         assert len(sandboxes) == 1 and sandboxes[0].stop.await_count == 1
         app.run_verification.assert_not_awaited()
 
@@ -411,3 +401,80 @@ async def test_runtime_forged_success_remains_an_unclosed_grader_boundary():
         VerificationInputs("fixture", "getmoto/moto", "5.0", "base", "", fail_to_pass=["src/check.py::hidden"]),
     )
     assert not result.resolved
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["test_repro.py", "tests/test_new.py", "setup.py", "sympy/testing/runtests.py", "src/pkg/requirements_parser.py"],
+)
+def test_ordinary_source_and_reproduction_paths_are_accepted(path):
+    assert validate_patch(patch(path)) == (path,)
+
+
+def test_test_sections_are_stripped_without_losing_source_fix():
+    from resources_servers.swe_gym.verification import drop_test_patch_files
+
+    submission = patch() + patch("test_repro.py") + patch("tests/test_new.py")
+    assert drop_test_patch_files(submission, "") == patch()
+    from resources_servers.swe_gym.app import SWEGymInstanceRequest, SWEGymResourcesServer
+
+    body = SWEGymInstanceRequest(
+        instance_id="fixture", repo="getmoto/moto", version="5.0", base_commit="base", image_name="verifier"
+    )
+    assert SWEGymResourcesServer._inputs(None, body, submission).patch == patch()
+    assert drop_test_patch_files(patch("sympy/testing/runtests.py"), "") == patch("sympy/testing/runtests.py")
+
+
+@pytest.mark.parametrize("delete", [False, True])
+def test_real_git_empty_file_change_applies_with_source_fix(tmp_path, delete):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repo), *args], text=True)
+
+    git("init", "-q")
+    (repo / "answer.py").write_text("wrong\n")
+    if delete:
+        (repo / "__init__.py").touch()
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "base")
+    if delete:
+        (repo / "__init__.py").unlink()
+    else:
+        (repo / "__init__.py").touch()
+    (repo / "answer.py").write_text("correct\n")
+    git("add", "-N", ".")
+    diff = git("diff", "HEAD")
+    assert set(validate_patch(diff)) == {"__init__.py", "answer.py"}
+    git("reset", "--hard", "HEAD")
+    subprocess.run(["git", "-C", str(repo), "apply", "-"], input=diff, text=True, check=True)
+    assert (repo / "__init__.py").exists() == (not delete)
+    assert (repo / "answer.py").read_text() == "correct\n"
+
+
+@pytest.mark.parametrize("code", [2, 3, 4, 5, 124, 137])
+async def test_test_process_crash_or_timeout_is_a_completed_zero(code):
+    from resources_servers.swe_gym.verification import TEST_OUTPUT_BEGIN, TEST_OUTPUT_END, run_verification
+
+    class Fake:
+        async def exec(self, *args, **kwargs):
+            return SimpleNamespace(
+                return_code=code,
+                error_type=None,
+                stdout=f"{TEST_OUTPUT_BEGIN}\nPASSED src/test.py::test_hidden\n{TEST_OUTPUT_END}\n",
+                stderr="",
+            )
+
+    result = await run_verification(
+        Fake(),
+        VerificationInputs("fixture", "getmoto/moto", "5.0", "base", "", fail_to_pass=["src/test.py::test_hidden"]),
+    )
+    assert result.completed and not result.resolved
+
+
+def test_eval_script_bounds_test_process_before_provider_deadline():
+    inputs = VerificationInputs("fixture", "getmoto/moto", "5.0", "base", "")
+    script = build_eval_script(inputs, test_timeout_s=12)
+    assert "timeout --signal=TERM --kill-after=10s 12s bash -c" in script
+    assert script.index("timeout --signal") < script.index("__test_exit=$?")

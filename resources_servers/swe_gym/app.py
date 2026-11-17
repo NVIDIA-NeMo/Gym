@@ -77,6 +77,7 @@ from resources_servers.swe_gym.verification import (
     VerificationResult,
     as_list,
     drop_patch_sections,
+    drop_test_patch_files,
     run_verification,
     verification_files,
 )
@@ -188,7 +189,7 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
             repo=body.repo,
             version=str(body.version),
             base_commit=body.base_commit,
-            patch=patch,
+            patch=drop_test_patch_files(patch, body.test_patch),
             test_patch=body.test_patch,
             fail_to_pass=as_list(body.FAIL_TO_PASS),
             pass_to_pass=as_list(body.PASS_TO_PASS),
@@ -376,10 +377,6 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
                 try:
                     return await self._extract_model_patch(session_id, REPO_DIRECTORY, body.base_commit), None
                 except CaptureCommandError as exc:
-                    # The bounded diff command uses 91 only when Git itself failed.
-                    # Missing interpreters and provider failures remain inconclusive.
-                    if exc.error_type is None and exc.return_code == 91:
-                        return PatchCapture.static("", mode, "rejected"), str(exc)
                     return PatchCapture.static("", mode, "none"), f"Failed to extract model patch: {exc}"
                 except PatchSizeError as exc:
                     # Preserve the classified failure across session retries without transferring the patch.
@@ -394,8 +391,7 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
         try:
             if capture.source == "rejected":
                 raise PatchPolicyError(extraction_error or "patch exceeds size limit")
-            # Check the complete declared submission before dropping any sections. Silently
-            # removing a test edit would hide an attributable tampering attempt.
+            # Reject hidden-test and grader edits before stripping ordinary test sections.
             validate_patch(patch, protected_paths=trusted_test_paths(body.test_patch))
         except PatchPolicyError as exc:
             return self._response(
@@ -455,7 +451,7 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
 
         inputs = self._inputs(body, patch)
         log_dir = Path(__file__).parent / "logs" / body.instance_id
-        files = verification_files(inputs)
+        files = verification_files(inputs, test_timeout_s=self.config.evaluation_timeout)
         attempts = 1 + max(self.config.inconclusive_verification_retries, 0)
         start_time_taken = 0.0
         verification_time_taken = 0.0
@@ -468,7 +464,7 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
                 start_time_taken = time() - started
                 verification_started = time()
                 result = await run_verification(
-                    sandbox=sandbox, inputs=inputs, timeout_s=self.config.evaluation_timeout, log_dir=log_dir
+                    sandbox=sandbox, inputs=inputs, timeout_s=self.config.evaluation_timeout + 300, log_dir=log_dir
                 )
                 verification_time_taken = time() - verification_started
             except asyncio.CancelledError:

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -60,6 +61,7 @@ TEST_PATCH_FAILED = "___NEMO_GYM_SWE_GYM_TEST_PATCH_FAILED___"
 EXIT_NO_REPO = 97
 EXIT_NO_CONDA = 96
 EXIT_PREFLIGHT_FAILED = 93
+EXIT_NO_TIMEOUT = 92
 
 
 def as_list(value: Any) -> list[str]:
@@ -137,15 +139,27 @@ def drop_patch_sections(patch: str, paths: Iterable[str]) -> str:
 
 def drop_test_patch_files(patch: str, test_patch: str) -> str:
     """A model may not edit the held-out tests: its sections for those files are discarded before
-    the test patch is applied, exactly as the SWE-bench harness resets them."""
-    return drop_patch_sections(patch, [p for p in map(patch_section_path, _sections(test_patch)) if p])
+    the test patch is applied. Ordinary test/reproduction sections are also omitted so
+    they cannot affect grading, while accompanying source fixes are preserved."""
+    hidden = {p for p in map(patch_section_path, _sections(test_patch)) if p}
+    ordinary_tests = {
+        path
+        for section in _sections(patch)
+        if (path := patch_section_path(section))
+        and (
+            set(path.split("/")[:-1]) & {"test", "tests"}
+            or Path(path).name.startswith("test_")
+            or Path(path).name.endswith("_test.py")
+        )
+    }
+    return drop_patch_sections(patch, hidden | ordinary_tests)
 
 
 def _sections(patch: str) -> list[str]:
     return ["diff --git " + s for s in patch.split("diff --git ") if s.strip()]
 
 
-def build_eval_script(inputs: VerificationInputs) -> str:
+def build_eval_script(inputs: VerificationInputs, *, test_timeout_s: float = 3600) -> str:
     """The SWE-bench eval recipe as one bash script, run from a sandbox created for grading.
 
     The candidate patch is applied strictly with ``git apply``;
@@ -153,6 +167,8 @@ def build_eval_script(inputs: VerificationInputs) -> str:
     rather than by exiting, so the caller still gets the log. The install step is advisory (``set +e``)
     because on a prebuilt image it mostly re-confirms what is already there.
     """
+    if test_timeout_s <= 0 or not math.isfinite(test_timeout_s):
+        raise ValueError("test_timeout_s must be finite and positive")
     spec = spec_for(inputs.repo, inputs.version)
     test_files = touched_test_files(inputs.repo, inputs.test_patch)
     reset_tests = f"git checkout {shlex.quote(inputs.base_commit)} {' '.join(shlex.quote(f) for f in test_files)}"
@@ -180,6 +196,7 @@ set +u
 source /opt/miniconda3/bin/activate >/dev/null 2>&1 || exit {EXIT_NO_CONDA}
 conda activate {CONDA_ENV} >/dev/null 2>&1 || exit {EXIT_NO_CONDA}
 cd {REPO_DIRECTORY} || exit {EXIT_NO_REPO}
+command -v timeout >/dev/null 2>&1 || exit {EXIT_NO_TIMEOUT}
 git config --global --add safe.directory {REPO_DIRECTORY} >/dev/null 2>&1
 python3 -I /tmp/nemo_gym_preflight.py /tmp/nemo_gym_preflight.json
 __preflight_exit=$?
@@ -199,7 +216,7 @@ set +e
 {reset_tests}
 {apply_test_patch}
 echo "{TEST_OUTPUT_BEGIN}"
-{run_tests}
+timeout --signal=TERM --kill-after=10s {test_timeout_s}s bash -c {shlex.quote(run_tests)}
 __test_exit=$?
 echo "{TEST_OUTPUT_END}"
 {reset_tests}
@@ -242,11 +259,11 @@ def grade(statuses: dict[str, str], fail_to_pass: Iterable[str], pass_to_pass: I
     }
 
 
-def verification_files(inputs: VerificationInputs) -> dict[str, str]:
+def verification_files(inputs: VerificationInputs, *, test_timeout_s: float = 3600) -> dict[str, str]:
     """Files the grading sandbox is created with (one provider round trip, large patches included)."""
     paths = validate_patch(inputs.patch, protected_paths=trusted_test_paths(inputs.test_patch))
     files = {
-        "/tmp/nemo_gym_eval.sh": build_eval_script(inputs),
+        "/tmp/nemo_gym_eval.sh": build_eval_script(inputs, test_timeout_s=test_timeout_s),
         "/tmp/nemo_gym_preflight.py": Path(__file__).with_name("patch_preflight.py").read_text(encoding="utf-8"),
         "/tmp/nemo_gym_preflight.json": json.dumps(
             {"repo": REPO_DIRECTORY, "base_commit": inputs.base_commit, "paths": paths}
@@ -280,7 +297,7 @@ async def run_verification(
 
         await asyncio.to_thread(_persist_log)
 
-    if getattr(result, "error_type", None) is not None or result.return_code in {None, 124, 137}:
+    if getattr(result, "error_type", None) is not None or result.return_code is None:
         return VerificationResult(False, False, False, None, output, "provider did not report a process exit")
     if result.return_code == EXIT_UNSAFE_PATH:
         return VerificationResult(
@@ -292,6 +309,8 @@ async def run_verification(
             "patch targets a symlink or special file",
             failure_kind=AGENT_INVALID_OUTPUT,
         )
+    if result.return_code == EXIT_NO_TIMEOUT:
+        return VerificationResult(False, False, False, None, output, "verifier image is missing GNU timeout")
     if result.return_code == EXIT_PREFLIGHT_FAILED:
         return VerificationResult(False, False, False, None, output, "trusted patch preflight failed")
     if result.return_code == EXIT_WRONG_BASE:
@@ -306,12 +325,15 @@ async def run_verification(
             True, False, False, None, output, "patch does not apply", failure_kind=AGENT_INVALID_OUTPUT
         )
 
+    if result.return_code not in {0, 1}:
+        return VerificationResult(True, False, True, None, output, "test process failed or exceeded its deadline")
+
     statuses = await asyncio.to_thread(parse_log_pytest, slice_test_output(output))
     report = grade(statuses, inputs.fail_to_pass, inputs.pass_to_pass)
     test_patch_failed = TEST_PATCH_FAILED in output
     return VerificationResult(
         completed=not test_patch_failed,
-        resolved=bool(report["resolved"]) and not test_patch_failed and result.return_code == 0,
+        resolved=bool(report["resolved"]) and not test_patch_failed,
         patch_applied=True,
         test_results=report,
         test_output=output,
