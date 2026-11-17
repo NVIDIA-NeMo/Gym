@@ -278,6 +278,33 @@ def test_seed_response_carries_the_harness_task_tool_context_declaration() -> No
     assert AgentSeedSessionResponse.model_validate({"agent_session_id": "x"}).supports_task_tool_context is False
 
 
+def test_seed_response_carries_the_harness_task_skills_declaration() -> None:
+    """The environment server admits a task whose only tool declaration is ``skills_dir`` to a harness that answers
+    True here, because it staged the folder for its CLI during the seed."""
+
+    class _Seeded(_Agent):
+        async def _seed_agent_session_state(self, body):
+            return AgentSessionState(request=body)
+
+    class _StagesTaskSkills(_Seeded):
+        def supports_task_skills(self) -> bool:
+            return True
+
+    for agent_cls, declared in ((_Seeded, False), (_StagesTaskSkills, True)):
+        agent = agent_cls.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
+        response = asyncio.run(agent.seed_agent_session(MagicMock(session={}), _seed_request()))
+        assert response.supports_task_skills is declared
+        # The declaration does not stand for the MCP servers, which `supports_task_tool_context` answers for.
+        assert response.supports_task_tool_context is False
+        # Sent only when declared: every other harness's seed reply is as it was before the field existed.
+        wire = response.model_dump(mode="json")
+        assert ("supports_task_skills" in wire) is declared
+        assert AgentSeedSessionResponse.model_validate(wire) == response
+        reply = TestClient(agent.setup_webserver()).get("/v1/agent_sessions/capabilities")
+        assert AgentSessionCapabilitiesResponse.model_validate(reply.json()).supports_task_skills is declared
+    assert AgentSeedSessionResponse.model_validate({"agent_session_id": "x"}).supports_task_skills is False
+
+
 def test_agent_session_seed_carries_the_tasks_agent_timeout() -> None:
     """The environment server hands the task's `[agent].timeout_sec` to the harness in the seed."""
     seed = _seed_request()

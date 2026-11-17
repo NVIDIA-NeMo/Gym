@@ -78,6 +78,74 @@ def test_session_warns_about_untested_codex_version(setup, caplog, version, warn
     assert ("error classification and transcript parsing are validated on 0.144.4" in caplog.text) == warn
 
 
+def hold_task_context(sandbox, context: str, *, copy_code: int = 0) -> None:
+    """Make ``sandbox`` hold ``context`` as ``/tmp/.nemo-gym/task.json``, and answer the copy of the task's skills
+    with exit code ``copy_code``; every other command is answered as before."""
+    answer = sandbox.execute
+
+    async def run(command, **kwargs):
+        if "task.json" in command:
+            return SimpleNamespace(error_type=None, return_code=0, stdout=context, stderr="")
+        if " cp -R -- " in command:
+            return SimpleNamespace(error_type=None, return_code=copy_code, stdout="", stderr="cp: not allowed")
+        return await answer(command, **kwargs)
+
+    sandbox.exec.side_effect = run
+
+
+def test_a_task_that_declares_skills_gets_them_in_codex_home_before_the_cli_runs(setup):
+    agent, sandbox = setup
+    hold_task_context(sandbox, json.dumps({"mcp_servers": [], "skills_dir": "/workspace/skills"}))
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        # The seed answers for the task's skills only; the MCP servers stay with grants.
+        assert created.json()["supports_task_skills"] is True and created.json()["supports_task_tool_context"] is False
+        session_id = created.json()["agent_session_id"]
+        directory = agent._session_records[session_id].state.session.session_dir
+        commands = [call.args[0] for call in sandbox.exec.await_args_list]
+        (copy,) = [command for command in commands if " cp -R -- " in command]
+        assert f"mkdir -p -- {directory}/home/.codex/skills && cp -R -- /workspace/skills/. " in copy
+        assert copy.endswith(f" {directory}/home/.codex/skills/")
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Read the skill"})
+        assert result.status_code == 200, result.text
+        # Codex discovers user skills in CODEX_HOME/skills, the folder the seed filled.
+        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        assert payload["env"]["CODEX_HOME"] == f"{directory}/home/.codex"
+        client.post("/v1/agent_sessions/close", json=close_body(session_id)).raise_for_status()
+
+
+@pytest.mark.parametrize("context", ["", json.dumps({"mcp_servers": [{"name": "search"}], "skills_dir": None})])
+def test_a_task_without_skills_copies_nothing(setup, context):
+    agent, sandbox = setup
+    hold_task_context(sandbox, context)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).raise_for_status()
+    assert not any(" cp -R -- " in call.args[0] for call in sandbox.exec.await_args_list)
+
+
+def test_skills_that_cannot_be_staged_refuse_the_seed_and_release_the_sandbox(setup):
+    agent, sandbox = setup
+    hold_task_context(sandbox, json.dumps({"skills_dir": "/workspace/skills"}), copy_code=2)
+    with TestClient(agent.setup_webserver()) as client:
+        refused = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+    assert refused.status_code == 422
+    assert "Could not stage the task's skills_dir '/workspace/skills'" in refused.json()["detail"]
+    assert "cp: not allowed" in refused.json()["detail"]
+    sandbox.disconnect.assert_awaited_once()
+    assert agent._session_records == {}
+
+
+def test_the_harness_declares_that_it_stages_task_skills(setup):
+    agent, _ = setup
+
+    assert agent.supports_task_skills() is True
+    assert asyncio.run(agent.agent_session_capabilities()).supports_task_skills is True
+    assert agent.supports_task_tool_context() is False
+
+
 def events(*, stop_reason="stop") -> str:
     items = [
         {"type": "item.completed", "item": {"id": "think-1", "type": "reasoning", "text": "Inspect the repository"}},

@@ -1222,7 +1222,9 @@ class HarborEnvironmentServer(
             if agent_session.agent_session_id != handle.agent_session_id:
                 raise ValueError("Agent seed returned a different agent_session_id")
             handle.cookies = _cookies(agent_create_http_response)
-            unreached = self._unreached_task_tools(task, mcp_servers, tool_accesses)
+            unreached = self._unreached_task_tools(
+                task, mcp_servers, tool_accesses, skills_staged=agent_session.supports_task_skills
+            )
             if unreached and not agent_session.supports_task_tool_context:
                 # The task's tools would never reach this harness, and the run would score a silent zero.
                 # Advice only when following it would clear the refusal: every unreached entry is a grantable
@@ -1237,11 +1239,17 @@ class HarborEnvironmentServer(
                     if grantable and self.config.task_mcp_grants != "required"
                     else ""
                 )
+                # A skills directory alone is also taken by a harness that stages task skills.
+                declares = (
+                    "supports_task_skills or supports_task_tool_context"
+                    if unreached == ["skills_dir"]
+                    else "supports_task_tool_context"
+                )
                 raise HTTPException(
                     422,
                     f"Task {task.task_id!r} declares MCP servers or a skills directory, which the agent "
                     f"{self.config.agent_server.name!r} does not support ({', '.join(unreached)}); run it with a "
-                    f"harness that declares supports_task_tool_context in its seed response{hint}",
+                    f"harness that declares {declares} in its seed response{hint}",
                 )
         except HTTPException as error:
             # The configured harness cannot take this task; a retry would be refused the same way.
@@ -1686,19 +1694,25 @@ class HarborEnvironmentServer(
 
     @staticmethod
     def _unreached_task_tools(
-        task: HarborTask, mcp_servers: list[HarborMCPServer], tool_accesses: list[ToolAccess]
+        task: HarborTask,
+        mcp_servers: list[HarborMCPServer],
+        tool_accesses: list[ToolAccess],
+        *,
+        skills_staged: bool,
     ) -> list[str]:
         """The task's tool declarations a harness reaches only through ``/tmp/.nemo-gym/task.json``.
 
         ``mcp_servers`` is the list the grants were built from, so both sides of the check see the same servers.
         An MCP server granted as required reaches any harness that accepted the grant: by the tool-access contract
         a harness that cannot establish a required server fails its seed or its first turn (Hermes and Pi connect
-        at the first activation) rather than running without it. Optional grants may be skipped, and a skills
-        directory has no grant at all, so those stay unreached.
+        at the first activation) rather than running without it. Optional grants may be skipped, so those stay
+        unreached. A skills directory has no grant at all: it is reached when the harness declared
+        ``supports_task_skills`` (``skills_staged``), because it copied the folder to where its CLI finds skills
+        during its seed, and otherwise stays unreached. The two parts are judged separately.
         """
         granted = {access.name for access in tool_accesses if isinstance(access, MCPToolAccess) and access.required}
         unreached = [f"MCP server {server.name!r}" for server in mcp_servers if server.name not in granted]
-        if task.config.environment.skills_dir:
+        if task.config.environment.skills_dir and not skills_staged:
             unreached.append("skills_dir")
         return unreached
 
