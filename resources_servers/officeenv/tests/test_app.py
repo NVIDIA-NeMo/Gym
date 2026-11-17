@@ -12,6 +12,8 @@ import asyncio
 import base64
 import json
 import shutil
+import threading
+import time
 from http.cookiejar import CookieJar
 from pathlib import Path
 from typing import Any
@@ -782,3 +784,128 @@ def test_the_length_penalty_spares_low_rewards_and_is_capped() -> None:
 def test_model_turns_count_the_model_responses() -> None:
     assert model_turns(NeMoGymResponse.model_validate(RESPONSE | {"output": EPISODE})) == 3
     assert model_turns(NeMoGymResponse.model_validate(RESPONSE)) == 0
+
+
+# A watched session (GET /task_state?watch=true): the environment server stops the session's run once its task ends,
+# so the call that ends the task is answered only once that server releases it (POST /task_state/release).
+def _in_thread(call: Any) -> tuple[threading.Thread, list[Any]]:
+    """Run ``call`` in a thread of its own (a request the server holds): its result lands in the returned list."""
+    results: list[Any] = []
+    thread = threading.Thread(target=lambda: results.append(call()), daemon=True)
+    thread.start()
+    return thread, results
+
+
+def test_the_call_that_ends_a_watched_task_is_answered_once_the_environment_server_releases_it() -> None:
+    with TestClient(make_server().setup_webserver(), cookies=StatelessCookieJar()) as client:
+        seeded = client.post("/seed_session", json=gym_row(DONE_SPEC, PROMPT))
+        assert client.get("/task_state", params={"watch": "true"}, cookies=seeded.cookies).json() == {
+            "task_ended": False
+        }
+
+        ending, answers = _in_thread(
+            lambda: client.post("/user_complete_task", json={"answer": "done"}, cookies=seeded.cookies)
+        )
+        # A read waiting for the end answers once the call has ended the task, while the call itself is held.
+        waited = client.get("/task_state", params={"watch": "true", "wait_s": "5"}, cookies=seeded.cookies)
+        assert waited.json() == {"task_ended": True}
+        ending.join(0.3)
+        assert ending.is_alive() and answers == []
+
+        assert client.post("/task_state/release", cookies=seeded.cookies).json() == {"released": True}
+        ending.join(5)
+        assert answers[0].status_code == 200 and answers[0].json()["status"] == "success"
+        # Nothing waits any more, and the session is no longer watched.
+        assert client.post("/task_state/release", cookies=seeded.cookies).json() == {"released": False}
+
+
+def test_an_unwatched_sessions_ending_call_is_answered_at_once() -> None:
+    server = make_server(task_end_hold_seconds=30)
+    client = TestClient(server.setup_webserver(), cookies=StatelessCookieJar())
+    seeded = client.post("/seed_session", json=gym_row(DONE_SPEC, PROMPT))
+
+    assert client.post("/user_complete_task", json={"answer": "done"}, cookies=seeded.cookies).status_code == 200
+    assert client.get("/task_state", cookies=seeded.cookies).json() == {"task_ended": True}
+    assert client.post("/task_state/release", cookies=seeded.cookies).json() == {"released": False}
+    assert server._task_end_releases == {}
+
+
+def test_a_held_call_is_answered_after_the_hold_bound() -> None:
+    with TestClient(make_server(task_end_hold_seconds=0.2).setup_webserver(), cookies=StatelessCookieJar()) as client:
+        seeded = client.post("/seed_session", json=gym_row(DONE_SPEC, PROMPT))
+        client.get("/task_state", params={"watch": "true"}, cookies=seeded.cookies)
+
+        started = time.monotonic()
+        answer = client.post("/user_complete_task", json={"answer": "done"}, cookies=seeded.cookies)
+
+        assert answer.status_code == 200
+        assert time.monotonic() - started >= 0.15
+        assert client.post("/task_state/release", cookies=seeded.cookies).json() == {"released": False}
+
+
+@pytest.mark.parametrize("ending", ["verify", "close"])
+def test_a_held_call_and_a_waiting_read_are_answered_when_the_sessions_world_goes(ending: str) -> None:
+    with TestClient(make_server().setup_webserver(), cookies=StatelessCookieJar()) as client:
+        seed = seed_request(dict(DONE_SPEC))
+        seeded = client.post("/seed_session", json=seed.model_dump(mode="json"))
+        client.get("/task_state", params={"watch": "true"}, cookies=seeded.cookies)
+        held, answers = _in_thread(
+            lambda: client.post("/user_complete_task", json={"answer": "done"}, cookies=seeded.cookies)
+        )
+        assert client.get("/task_state", params={"wait_s": "5"}, cookies=seeded.cookies).json() == {"task_ended": True}
+
+        if ending == "verify":
+            client.post("/verify", json=environment_verify_body(seed), cookies=seeded.cookies)
+        else:
+            client.post("/close_session", json=close_body(seed), cookies=seeded.cookies)
+        held.join(5)
+        assert not held.is_alive() and answers[0].status_code == 200
+        # A read that waits on a session the server no longer holds is refused as lost.
+        assert client.get("/task_state", params={"wait_s": "5"}, cookies=seeded.cookies).status_code == 404
+
+
+def test_a_waiting_read_answers_when_its_session_goes_before_the_task_ends() -> None:
+    with TestClient(make_server().setup_webserver(), cookies=StatelessCookieJar()) as client:
+        seed = seed_request(dict(DONE_SPEC))
+        seeded = client.post("/seed_session", json=seed.model_dump(mode="json"))
+        reading, answers = _in_thread(
+            lambda: client.get("/task_state", params={"watch": "true", "wait_s": "5"}, cookies=seeded.cookies)
+        )
+        reading.join(0.2)
+        assert reading.is_alive()
+
+        client.post("/close_session", json=close_body(seed), cookies=seeded.cookies)
+        reading.join(5)
+        assert answers[0].status_code == 404
+
+
+def test_a_waiting_read_answers_the_state_once_its_wait_runs_out() -> None:
+    client = TestClient(make_server().setup_webserver(), cookies=StatelessCookieJar())
+    seeded = client.post("/seed_session", json=gym_row(DONE_SPEC, PROMPT))
+
+    started = time.monotonic()
+    assert client.get("/task_state", params={"wait_s": "0.1"}, cookies=seeded.cookies).json() == {"task_ended": False}
+    assert time.monotonic() - started >= 0.08
+    assert client.get("/task_state", params={"wait_s": "61"}, cookies=seeded.cookies).status_code == 422
+
+
+def test_a_reopened_task_is_waited_for_again(
+    server: OfficeEnvResourcesServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = TestClient(server.setup_webserver(), cookies=StatelessCookieJar())
+    seeded = client.post("/seed_session", json=gym_row(DONE_SPEC, PROMPT))
+    (session_id,) = server.service.store.sessions
+    state = {"ended": True}
+    monkeypatch.setattr(OfficeEnvResourcesServer, "_task_ended", lambda self, session: state["ended"])
+
+    async def scenario() -> None:
+        server._watched.add(session_id)
+        assert server._publish_task_state(session_id) is True  # the call that ended it, held for the release
+        assert server._task_end_signals[session_id].is_set() and session_id in server._task_end_releases
+        assert server._publish_task_state(session_id) is False  # a later call leaves it ended
+        state["ended"] = False
+        assert server._publish_task_state(session_id) is False  # ... and one reopens it: a read waits again
+        assert session_id not in server._task_end_signals
+
+    asyncio.run(scenario())
+    assert client.get("/task_state", cookies=seeded.cookies).json() == {"task_ended": False}

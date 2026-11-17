@@ -157,7 +157,8 @@ AGENT_EPISODE_STEP_LIMIT_HEADER = "x-ng-agent-episode-step-limit"
 # Bounds the sandbox command that asks a running harness's supervisor to end it.
 ROLLOUT_STOP_TIMEOUT_SECONDS = 60.0
 # Response metadata that marks a run POST /rollouts/{rollout_id}/stop ended: a JSON object with the caller's
-# reason. It is not a failure: the run keeps a timeout's ``incomplete`` status and is verified like one.
+# reason. It is not a failure: the run keeps a timeout's ``incomplete`` status and is verified like one. A stop with
+# ``completed`` (a run whose task has ended) answers as completed instead, and the object says ``"completed": true``.
 ROLLOUT_STOP_METADATA_KEY = "ng_rollout_stop"
 LOG = logging.getLogger(__name__)
 
@@ -320,6 +321,13 @@ class RolloutStopRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reason: str | None = Field(default=None, max_length=200)
+    completed: bool = Field(
+        default=False,
+        description=(
+            "The run's task has ended, so the run stops as completed rather than as a timeout: an environment server "
+            "that ends an episode once its task has ended (single_agent_turn's end_on_task_state) stops it so"
+        ),
+    )
 
 
 class RolloutStopResponse(BaseModel):
@@ -508,9 +516,11 @@ class _AgentSessionRecord:
     expires_at: float = float("inf")
     activations: OrderedOperationLedger[NeMoGymResponse] = field(default_factory=OrderedOperationLedger)
     close_task: asyncio.Task[AgentCloseSessionResponse] | None = None
-    # A rollout stop that arrived while the session was still seeding, and the caller's reason.
+    # A rollout stop that arrived while the session was still seeding, the caller's reason, and whether it said the
+    # run's task had ended.
     stop_requested: bool = False
     stop_reason: str | None = None
+    stop_completed: bool = False
     # Installed by a checkpoint restore and not yet seeded again by its replacement attempt.
     restored: bool = False
 
@@ -1087,7 +1097,11 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                     await self._undo_seed(body.agent_session_id, record)
                     raise
                 if record.stop_requested and (session := self._rollout_sandbox_session(record.state)) is not None:
-                    await session.expire(timeout=ROLLOUT_STOP_TIMEOUT_SECONDS, reason=record.stop_reason)
+                    await session.expire(
+                        timeout=ROLLOUT_STOP_TIMEOUT_SECONDS,
+                        reason=record.stop_reason,
+                        completed=record.stop_completed,
+                    )
             elif record.state.request != body or (record.restored and self._rebinds_restored_sessions()):
                 # An agent that re-binds restored sessions does so even for an unchanged seed:
                 # its restore installed the session without a connection to the sandbox the seed names.
@@ -1387,7 +1401,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     async def stop_rollout(self, rollout_id: str, body: RolloutStopRequest | None = None) -> RolloutStopResponse:
         """End a rollout's harness as at its time limit, so the episode is verified and graded as a timeout.
 
-        For a caller that enforces its own budget (agent time, tokens, cost) or an operator's cancel.
+        For a caller that enforces its own budget (agent time, tokens, cost) or an operator's cancel. With
+        ``completed`` the run's task has ended, and the run answers as completed (``report_rollout_stop``).
         ``rollout_id`` is the id in ``/ng-rollout/<id>``. A stop that arrives while the session is still
         seeding takes effect when the harness would launch. With several workers, the request reaches the
         worker running the rollout without the session cookie (see nemo_gym.server_runtime.request_handling.session_routing).
@@ -1398,21 +1413,22 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         if record is None:
             raise HTTPException(404, f"No open agent session runs rollout {rollout_id}")
         reason = body.reason if body else None
+        completed = bool(body and body.completed)
         if record.state is None:
             stopped = not record.stop_requested
             if stopped:
-                record.stop_requested, record.stop_reason = True, reason
+                record.stop_requested, record.stop_reason, record.stop_completed = True, reason, completed
         else:
             session = self._rollout_sandbox_session(record.state)
             try:
                 stopped = session is not None and await session.expire(
-                    timeout=ROLLOUT_STOP_TIMEOUT_SECONDS, reason=reason
+                    timeout=ROLLOUT_STOP_TIMEOUT_SECONDS, reason=reason, completed=completed
                 )
             except ExpiryUnsupportedError as error:
                 raise HTTPException(501, f"Cannot stop rollout {rollout_id}: {error}") from error
             except RuntimeError as error:
                 raise HTTPException(502, f"Could not stop rollout {rollout_id}: {error}") from error
-        LOG.info("Rollout %s stop (stopped=%s, reason=%s)", rollout_id, stopped, reason)
+        LOG.info("Rollout %s stop (stopped=%s, reason=%s, completed=%s)", rollout_id, stopped, reason, completed)
         return RolloutStopResponse(rollout_id=rollout_id, stopped=stopped)
 
     def _capture_correlation_enabled(self) -> bool:
@@ -1660,13 +1676,24 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
         The response keeps a timeout's ``incomplete`` status, so it is verified like one, and gains the
         ``ng_rollout_stop`` marker that tells it apart from a timeout or a cancellation. A stop is not a
-        failure, so the response carries no failure kind.
+        failure, so the response carries no failure kind. A stop that said the run's task had ended
+        (``completed``) answers as completed, with no incomplete details, and its marker says so.
         """
         if not session.expired or response.status != "incomplete":
             return response
-        marker = json.dumps({"reason": session.expire_reason}, separators=(",", ":"))
+        marker = {"reason": session.expire_reason}
+        update: dict[str, Any] = {}
+        if session.expire_completed:
+            marker["completed"] = True
+            update = {"status": "completed", "incomplete_details": None}
         return response.model_copy(
-            update={"metadata": {**(response.metadata or {}), ROLLOUT_STOP_METADATA_KEY: marker}}
+            update={
+                **update,
+                "metadata": {
+                    **(response.metadata or {}),
+                    ROLLOUT_STOP_METADATA_KEY: json.dumps(marker, separators=(",", ":")),
+                },
+            }
         )
 
 

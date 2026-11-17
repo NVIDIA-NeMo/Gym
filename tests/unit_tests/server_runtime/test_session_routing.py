@@ -370,7 +370,7 @@ class _FakeSandboxSession:
     def __init__(self) -> None:
         self.reasons: list[Optional[str]] = []
 
-    async def expire(self, *, timeout: float, reason: Optional[str] = None) -> bool:
+    async def expire(self, *, timeout: float, reason: Optional[str] = None, completed: bool = False) -> bool:
         self.reasons.append(reason)
         return len(self.reasons) == 1
 

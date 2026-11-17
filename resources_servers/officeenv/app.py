@@ -40,20 +40,23 @@ penalty from the reward and reports the two terms as ``reward_components``, so a
 schedule the penalty on its own (NeMo RL ``grpo.phasic_reward_components``).
 """
 
+import asyncio
 import contextvars
 import importlib.util
+import logging
 import os
 from dataclasses import dataclass, field
 from functools import cache
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import EpisodeId, NeMoGymResponse, TaskId
 from nemo_gym.server_runtime import (
     RESOURCES_TASK_STATE_PATH,
+    RESOURCES_TASK_STATE_RELEASE_PATH,
     BaseMultiRewardVerifyResponse,
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
@@ -68,12 +71,17 @@ from nemo_gym.server_runtime import (
     ResourcesSessionFences,
     ResourcesSessionLostError,
     ResourcesTaskState,
+    ResourcesTaskStateRelease,
     ReverifyMode,
     SimpleResourcesServer,
     lost_session_verification,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
+
+LOGGER = logging.getLogger(__name__)
+# The longest a watching read of the task state (GET /task_state's wait_s) waits for the task to end.
+MAX_TASK_STATE_WAIT_SECONDS = 60.0
 
 # OfficeEnv installs apart from this server's locked dependencies until it is published (README.md, "The OfficeEnv
 # version"): without it the server stops here, naming the step that installs it.
@@ -141,6 +149,16 @@ class OfficeEnvResourcesServerConfig(BaseResourcesServerConfig):
             "Refuse a tool call (409) once a call has returned with the episode's task ended (GET /task_state), so "
             "the calls a turn makes after the one that ended it change nothing; the environment server that ends "
             "episodes there sets it"
+        ),
+    )
+    task_end_hold_seconds: float = Field(
+        default=180.0,
+        ge=0,
+        description=(
+            "For a session an environment server watches (GET /task_state?watch=true: it stops the session's run once "
+            "the task ends), the longest the call that ends the task waits for that server to release it (POST "
+            "/task_state/release) before it is answered anyway. The harness reads the answer only after its run has "
+            "stopped, so no model call follows the call that ended the task"
         ),
     )
 
@@ -268,6 +286,12 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
     # Whether each session's task had ended when its last tool call returned (GET /task_state,
     # close_tools_on_task_end). Published once a whole call is over, so no read sees a state the same call reverses.
     _task_ends: dict[str, bool] = PrivateAttr(default_factory=dict)
+    # The sessions an environment server watches (GET /task_state?watch=true), and for each session the event a
+    # waiting read waits on (set once its task ends or its world goes) and the one the call that ended its task waits
+    # on (set by POST /task_state/release, or when its world goes).
+    _watched: set[str] = PrivateAttr(default_factory=set)
+    _task_end_signals: dict[str, asyncio.Event] = PrivateAttr(default_factory=dict)
+    _task_end_releases: dict[str, asyncio.Event] = PrivateAttr(default_factory=dict)
     _fences: ResourcesSessionFences[EpisodeId] = PrivateAttr()
 
     def model_post_init(self, context: Any) -> None:
@@ -280,6 +304,7 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         app = super().setup_webserver()
         app.get("/officeenv/apps")(self.list_apps)
         app.get(RESOURCES_TASK_STATE_PATH)(self.task_state)
+        app.post(RESOURCES_TASK_STATE_RELEASE_PATH)(self.release_task_end)
         app.post("/{tool_name}")(self.tool_call)  # registered last: fixed routes win
         return app
 
@@ -382,6 +407,7 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         self.service.store.sessions.pop(session_id, None)
         self.service.notes.pop(session_id, None)
         self._task_ends.pop(session_id, None)
+        self._forget_watch(session_id)
 
     async def tool_call(self, request: Request, tool_name: str) -> Response:
         # app-level errors are tool outputs the model sees (200); only a body that is no JSON
@@ -393,12 +419,72 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         reply = await self._episode_call(session_id, self._episodes.get(session_id), tool_name, body)
         return Response(content=reply.text(), media_type="application/json", status_code=reply.status)
 
-    async def task_state(self, request: Request) -> OfficeEnvTaskState:
-        """Whether the session's task has ended, for an environment server that ends its episode there."""
+    async def task_state(
+        self,
+        request: Request,
+        watch: bool = False,
+        wait_s: Annotated[float, Query(ge=0, le=MAX_TASK_STATE_WAIT_SECONDS)] = 0.0,
+    ) -> OfficeEnvTaskState:
+        """Whether the session's task has ended, for an environment server that ends its episode there. With ``watch``
+        the caller stops the session's run once the task ends, so the call that ends it is answered only after the
+        caller releases it (``release_task_end``, at most ``task_end_hold_seconds`` later); with ``wait_s`` the read
+        waits up to that long for the task to end."""
         session_id = request.session.get(SESSION_ID_KEY)
         if session_id is None or self.service.store.get(session_id) is None:
             raise ResourcesSessionLostError("This session has ended.")
+        if watch:
+            self._watched.add(session_id)
+        if wait_s and not self._task_ends.get(session_id, False):
+            signal = self._task_end_signals.setdefault(session_id, asyncio.Event())
+            try:
+                async with asyncio.timeout(wait_s):
+                    await signal.wait()
+            except TimeoutError:
+                pass
+            if self.service.store.get(session_id) is None:
+                raise ResourcesSessionLostError("This session has ended.")
         return OfficeEnvTaskState(task_ended=self._task_ends.get(session_id, False))
+
+    async def release_task_end(self, request: Request) -> ResourcesTaskStateRelease:
+        """The watching environment server has stopped the session's run, or stops watching it: answer the call that
+        ended its task, if one waits, and hold none of its calls again."""
+        session_id = request.session.get(SESSION_ID_KEY)
+        released = self._task_end_releases.pop(session_id, None) if session_id is not None else None
+        if session_id is not None:
+            self._watched.discard(session_id)
+        if released is None:
+            return ResourcesTaskStateRelease(released=False)
+        released.set()
+        return ResourcesTaskStateRelease(released=True)
+
+    async def _hold_task_end(self, session_id: str) -> None:
+        """Wait, before the call that ended a watched session's task is answered, until the watching environment
+        server has stopped the session's run and released the call (``release_task_end``), at most
+        ``task_end_hold_seconds``: the harness then reads the answer only once its run is over."""
+        released = self._task_end_releases.get(session_id)
+        if released is None:
+            return
+        try:
+            async with asyncio.timeout(self.config.task_end_hold_seconds):
+                await released.wait()
+        except TimeoutError:
+            LOGGER.warning(
+                "No environment server released the task end of OfficeEnv session %s within %g s; the call that "
+                "ended it is answered anyway",
+                session_id,
+                self.config.task_end_hold_seconds,
+            )
+        finally:
+            if self._task_end_releases.get(session_id) is released:
+                del self._task_end_releases[session_id]
+
+    def _forget_watch(self, session_id: str) -> None:
+        """The session's world is gone: wake a read that waits for its task's end, and answer a held call."""
+        self._watched.discard(session_id)
+        for events in (self._task_end_signals, self._task_end_releases):
+            event = events.pop(session_id, None)
+            if event is not None:
+                event.set()
 
     def _task_ended(self, session_id: str) -> bool:
         """Whether the episode's task has ended: the user app's task row left ``pending`` (``complete_task``
@@ -414,22 +500,39 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         self, session_id: str, episode: _Episode | None, tool_name: str, body: bytes | str
     ) -> Reply:
         """Call ``tool_name`` with ``body``. The task state the call leaves is published once the whole call is over
-        (``_task_ends``), and with ``close_tools_on_task_end`` a call after a published end is refused."""
+        (``_task_ends``), and with ``close_tools_on_task_end`` a call after a published end is refused. The call that
+        ends a watched session's task is answered once the watching environment server releases it
+        (``_hold_task_end``)."""
         try:
             self._refuse_after_task_end(session_id)
             return self.service.call(session_id, tool_name, body)
         finally:
-            self._publish_task_state(session_id)
+            if self._publish_task_state(session_id):
+                await self._hold_task_end(session_id)
 
     def _refuse_after_task_end(self, session_id: str) -> None:
         """With ``close_tools_on_task_end``, refuse a call once one has returned with the episode's task ended."""
         if self.config.close_tools_on_task_end and self._task_ends.get(session_id, False):
             raise HTTPException(status_code=409, detail="The task has ended: its tools are closed")
 
-    def _publish_task_state(self, session_id: str) -> None:
-        """Publish the task state a whole call left (``GET /task_state``), while the session holds its world."""
-        if self.service.store.get(session_id) is not None:
-            self._task_ends[session_id] = self._task_ended(session_id)
+    def _publish_task_state(self, session_id: str) -> bool:
+        """Publish the task state a whole call left (``GET /task_state``), while the session holds its world: whether
+        the call ended the task. Then a read waiting for the end answers, and for a watched session the call is held
+        until the watching environment server releases it (``_hold_task_end``)."""
+        if self.service.store.get(session_id) is None:
+            return False
+        ended, before = self._task_ended(session_id), self._task_ends.get(session_id, False)
+        self._task_ends[session_id] = ended
+        if ended == before:
+            return False
+        if not ended:
+            # The task is open again (a later call reopened it): a read waits for its next end.
+            self._task_end_signals.pop(session_id, None)
+            return False
+        if session_id in self._watched:
+            self._task_end_releases[session_id] = asyncio.Event()
+        self._task_end_signals.setdefault(session_id, asyncio.Event()).set()
+        return True
 
     async def verify(
         self, request: Request, body: OfficeEnvVerifyRequest
@@ -448,6 +551,7 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         """OfficeEnv's verification of the session, which grades its world and releases it."""
         result = self.service.verify(session_id)
         self._task_ends.pop(session_id, None)  # verification releases the world, and its tools are closed
+        self._forget_watch(session_id)
         return result
 
     def mcp_tools(self, harvested: list["MCPTool"], catchall: Any | None) -> list["MCPTool"] | None:

@@ -280,6 +280,26 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
 # another session agent runs its whole loop in an activation. A subset of AGENT_SESSION_AGENT_TYPES; a unit test keeps
 # it in step with the agent apps.
 STEP_DRIVEN_AGENT_TYPES = frozenset({"simple_agent"})
+# Agent types whose runs an environment server can stop in flight (POST /rollouts/{rollout_id}/stop, which ends the
+# harness in its sandbox): single_agent_turn's end_on_task_state without max_episode_steps stops a run so once its task
+# has ended. A subset of AGENT_SESSION_AGENT_TYPES; a unit test keeps it in step with the agent apps that return their
+# sandbox session for a stop (`_rollout_sandbox_session`).
+ROLLOUT_STOP_AGENT_TYPES = frozenset(
+    {
+        "cline_agent",
+        "codex_agent",
+        "crewai_agent",
+        "droid_agent",
+        "goose_agent",
+        "kimi_code_agent",
+        "langchain_deepagents_agent",
+        "mini_swe_agent",
+        "openhands_agent",
+        "prime_agent",
+        "qwen_code_agent",
+        "terminus_2_agent",
+    }
+)
 # Session agents whose swap-source template (`resources_server.name: ???`) runs on the host through /run.
 # Their sessions need an explicitly bound sandbox template, so a swap keeps the legacy_agent relay.
 HOST_RUN_SWAP_AGENT_TYPES = frozenset({"prime_agent", "simple_strands_agent"})

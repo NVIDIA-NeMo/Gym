@@ -268,9 +268,12 @@ class SandboxSession[Artifacts]:
     _expire_requested: bool = field(default=False, init=False)
     # The caller's reason for the expiry ``expire`` requested, if it gave one.
     expire_reason: str | None = field(default=None, init=False)
-    # An expiry whose marker write failed, possibly after the marker reached the sandbox, and its reason.
+    # Whether that expiry ends a run whose task has ended, which then answers as completed rather than as a timeout.
+    expire_completed: bool = field(default=False, init=False)
+    # An expiry whose marker write failed, possibly after the marker reached the sandbox, its reason and kind.
     _unconfirmed_expiry: bool = field(default=False, init=False)
     _unconfirmed_expire_reason: str | None = field(default=None, init=False)
+    _unconfirmed_expire_completed: bool = field(default=False, init=False)
     _expire_write: asyncio.Task[None] | None = field(default=None, init=False)
     # Sequence numbers of the latest pause and continue requested of the current launch's supervisor,
     # and of the latest continue it confirmed.
@@ -720,6 +723,7 @@ class SandboxSession[Artifacts]:
             # An expiry applies to the activation it was requested for; one requested before the first launch stays.
             self._expire_requested = False
             self.expire_reason = None
+            self.expire_completed = False
             self._unconfirmed_expiry = False
             self._expire_write = None
         if self._session_root is None:
@@ -863,10 +867,11 @@ class SandboxSession[Artifacts]:
             self._continued_seq = self._continue_seq
         return result
 
-    async def expire(self, *, timeout: float, reason: str | None = None) -> bool:
+    async def expire(self, *, timeout: float, reason: str | None = None, completed: bool = False) -> bool:
         """End the harness as at its time limit, so its receipt records ``timed_out``.
 
-        Unlike ``stop_harness`` (a cancellation), the activation is then graded like a timeout.
+        Unlike ``stop_harness`` (a cancellation), the activation is then graded like a timeout, or with ``completed``,
+        for a run whose task has ended, as a completed run (``SimpleResponsesAPIAgent.report_rollout_stop``).
         A request made before launch ends the harness as it would launch. Returns False when the
         activation already finished, the session is closing, or expiry was already requested.
 
@@ -885,23 +890,28 @@ class SandboxSession[Artifacts]:
             )
         self._expire_requested = True
         self.expire_reason = reason
+        self.expire_completed = completed
         if self.launch_started:
             # A task, so that finalization can wait for a write still in flight before it checks the marker.
-            self._expire_write = asyncio.create_task(self._write_expiry(timeout=timeout, reason=reason))
+            self._expire_write = asyncio.create_task(
+                self._write_expiry(timeout=timeout, reason=reason, completed=completed)
+            )
             # Shielded, so a caller that stops waiting (a disconnected stop request) cannot cancel the write before
             # it starts and leave the stop requested but never delivered. The write is bounded by ``timeout`` and,
             # if it fails, makes the stop retryable again.
             await asyncio.shield(self._expire_write)
         return True
 
-    async def _write_expiry(self, *, timeout: float, reason: str | None) -> None:
+    async def _write_expiry(self, *, timeout: float, reason: str | None, completed: bool) -> None:
         try:
             await self._request_expiry(timeout=timeout)
         except BaseException:
             self._expire_requested = False
             self.expire_reason = None
+            self.expire_completed = False
             # The marker may have landed before the write failed; finalization keeps the stop only if it did.
             self._unconfirmed_expiry, self._unconfirmed_expire_reason = True, reason
+            self._unconfirmed_expire_completed = completed
             raise
 
     async def _request_expiry(self, *, timeout: float) -> None:
@@ -1030,13 +1040,14 @@ class SandboxSession[Artifacts]:
                 )
         except Exception:
             if self._expire_write is not None and not self._expire_write.done():
-                self._expire_requested, self.expire_reason = False, None
+                self._expire_requested, self.expire_reason, self.expire_completed = False, None, False
             LOG.warning(
                 "Could not confirm the %s expiry marker; the stop stays unattributed", self.harness, exc_info=True
             )
             return
         if probe.return_code == 0 and not probe.error_type and probe.stdout.strip() == "present":
             self._expire_requested, self.expire_reason = True, self._unconfirmed_expire_reason
+            self.expire_completed = self._unconfirmed_expire_completed
 
     async def _release_exec(self, *, timeout: float) -> None:
         if (

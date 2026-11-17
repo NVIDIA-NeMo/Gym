@@ -58,6 +58,7 @@ if TYPE_CHECKING:
         BaseResponsesAPIAgentConfig,
         Body,
         RolloutStopRequest,
+        RolloutStopResponse,
         SimpleResponsesAPIAgent,
         assert_model_url_reachable_from_sandbox,
     )
@@ -150,6 +151,7 @@ _PUBLIC_API = {
     "ParkingActivation": "utils.run_with_checkpoint_pauses",
     "ROLLOUT_STOP_METADATA_KEY": "base_responses_api_agent",
     "RolloutStopRequest": "base_responses_api_agent",
+    "RolloutStopResponse": "base_responses_api_agent",
     "STOP_REQUEST_FILE": "utils.supervisor_client",
     "SUPERVISOR_FILE": "utils.supervisor_client",
     "SUPERVISOR_SCRIPT": "utils.supervisor_client",
