@@ -302,6 +302,21 @@ def patch_swebench_verified_env_vars(repo: str, env: Dict[str, Any]) -> None:
         env["CONDA_PREFIX_1"] = "/opt/miniconda3"
 
 
+# Make every pytest run in a Python evaluation script print the per-test result lines (-rA) the log parsers read. Some
+# repos run pytest through another tool without the flag: a SWE-bench Verified Sphinx run goes through tox, whose
+# commands line has no -rA when the image's tox.ini edit is missing. tox passes PYTEST_ADDOPTS on to pytest.
+PYTEST_RESULT_SUMMARY = 'export PYTEST_ADDOPTS="-rA ${PYTEST_ADDOPTS:-}"'
+
+
+def patch_swebench_pytest_result_summary(test_spec: TestSpec) -> None:
+    if MAP_REPO_TO_EXT.get(test_spec.repo) != "py" or PYTEST_RESULT_SUMMARY in test_spec.eval_script_list:
+        return
+    start = f": '{START_TEST_OUTPUT}'"
+    if start not in test_spec.eval_script_list:
+        raise ValueError(f"The evaluation script of {test_spec.instance_id} has no start-of-test-output marker")
+    test_spec.eval_script_list.insert(test_spec.eval_script_list.index(start), PYTEST_RESULT_SUMMARY)
+
+
 ########################################
 # START SWE Bench Multilingual instance patches
 ########################################

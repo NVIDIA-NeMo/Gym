@@ -306,7 +306,9 @@ class TestApp:
         assert response.group_id == "42"
         assert len(response.output) == 2
         # Usage covers every model call in the episode, not just the last one.
-        assert response.usage.model_dump() == _usage(2118, 1424, cached=400, reasoning=1200)
+        expected_usage = _usage(2118, 1424, cached=400, reasoning=1200)
+        expected_usage["input_tokens_details"]["cache_write_tokens"] = None
+        assert response.usage.model_dump() == expected_usage
 
         calls = agent.server_client.post.await_args_list
         assert len(calls) == 6
@@ -432,7 +434,9 @@ class TestApp:
         if return_transitions:
             assert len(response.output) == (2 if has_final_response else 1)
         # The post-terminal model call is billed like any other turn.
-        assert response.usage.model_dump() == (_usage(1100, 48) if has_final_response else _usage(500, 40))
+        expected_usage = _usage(1100, 48) if has_final_response else _usage(500, 40)
+        expected_usage["input_tokens_details"]["cache_write_tokens"] = None
+        assert response.usage.model_dump() == expected_usage
 
         calls = agent.server_client.post.await_args_list
         model_path = agent.url_path_for_run("/v1/responses", request)
@@ -762,6 +766,7 @@ class TestApp:
                                 "id": None,
                                 "status": None,
                                 "namespace": None,
+                                "caller": None,
                             }
                         ],
                         "env_id": env_id,
