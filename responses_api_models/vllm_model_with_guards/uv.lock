@@ -2565,7 +2565,7 @@ wheels = [
 ]
 
 [[package]]
-name = "vllm-model-with-compaction"
+name = "vllm-model-with-guards"
 version = "0.2.0rc0"
 source = { editable = "." }
 dependencies = [
