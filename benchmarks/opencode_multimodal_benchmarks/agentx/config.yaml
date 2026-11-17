@@ -8,6 +8,7 @@ opencode_multimodal_benchmarks:
   resources_servers:
     opencode_multimodal_benchmarks:
       entrypoint: agentx.py
+      allowed_agents: [opencode_agent]
       judge_model: gpt-5.5
       judge_max_tokens: 4096
       judge_required: true

@@ -589,6 +589,32 @@ def test_configured_shell_name_preserves_reward_schedule(status, exit_code, base
     assert actual == expected
 
 
+@pytest.mark.parametrize(
+    "settings,eligible,penalty",
+    [
+        ({}, ("shell",), -0.05),
+        ({"invalid_tool_call_names": None}, None, -0.05),
+        ({"invalid_tool_call_names": ("bash",)}, ("bash",), 0.0),
+        ({"invalid_tool_call_names": ()}, (), 0.0),
+    ],
+)
+def test_renamed_shell_failure_filter_and_serialization(settings, eligible, penalty):
+    config = OpenCodeToolRewardConfig(shell_tool_name="shell", **settings)
+    calls = [call("1", "shell")]
+    records = execution_records(calls, statuses={"1": ("error", 7)})
+    for parsed in [config, OpenCodeToolRewardConfig.model_validate_json(config.model_dump_json())]:
+        assert parsed.invalid_tool_call_names == eligible
+        result = score_opencode_tools(records, calls, 1.0, parsed)
+        assert result.tool_error_count == 1
+        assert result.bash_call_count == 1
+        assert result.auxiliary_reward == penalty
+
+
+@pytest.mark.parametrize("settings", [{}, {"shell_tool_name": None}])
+def test_default_failure_filter_retains_bash_without_a_renamed_shell(settings):
+    assert OpenCodeToolRewardConfig(**settings).invalid_tool_call_names == ("bash",)
+
+
 def test_configured_search_name_and_error_pattern_preserve_exemption():
     original = [
         call("1", name="websearch"),

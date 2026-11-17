@@ -6,7 +6,7 @@ import json
 import re
 from typing import Annotated, Any, ClassVar, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.server_runtime import BaseVerifyResponse
@@ -69,8 +69,14 @@ class OpenCodeToolRewardConfig(BaseModel, extra="forbid"):
     )
     invalid_tool_call_names: tuple[str, ...] | None = Field(
         default=("bash",),
-        description="Tools eligible for failure penalties; None includes all tools.",
+        description="Tools eligible for failure penalties; defaults to the configured shell. None includes all tools.",
     )
+
+    @model_validator(mode="after")
+    def default_failure_filter_to_shell(self) -> "OpenCodeToolRewardConfig":
+        if "invalid_tool_call_names" not in self.model_fields_set and self.shell_tool_name is not None:
+            self.invalid_tool_call_names = (self.shell_tool_name,)
+        return self
 
     @field_validator("correct_tool_call_bonuses", "correct_bash_call_penalties")
     @classmethod

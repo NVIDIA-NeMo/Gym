@@ -342,6 +342,7 @@ def test_training_recipe_enables_capture_rewards_and_evidence_without_changing_e
         assert agent["token_id_capture"] is training
         assert environment.get("forward_agent_evidence", False) is training
         assert bool(resources.get("tool_rewards")) is training
+        assert resources["allowed_agents"] == ["opencode_agent"]
         if training:
             assert resources["tool_rewards"]["penalty_mode"] == "proportional"
         assert resources["judge_model"] == ("gpt-4o-mini" if training else "gpt-5.5")
