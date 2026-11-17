@@ -28,7 +28,7 @@ def test_prospective_welch_uses_same_uncertainty_as_gym_and_hand_arithmetic() ->
     cells = [PlanningCell("model", "one", 9.0, 4.5), PlanningCell("model", "two", 18.0, 27.0)]
     parameters = PlanningParameters(margin_points=0.5, expected_delta_points=-0.25)
     result = power_for_counts(cells, [3, 6], [3, 6], parameters=parameters, weights=[1 / 3, 2 / 3])
-    gym = aggregate_welch(
+    comparison_statistics = aggregate_welch(
         [
             BenchmarkSamples(SampleSummary(3, 0.0, 9.0), SampleSummary(3, 0.0, 4.5)),
             BenchmarkSamples(SampleSummary(6, 0.0, 18.0), SampleSummary(6, 0.0, 27.0)),
@@ -38,8 +38,8 @@ def test_prospective_welch_uses_same_uncertainty_as_gym_and_hand_arithmetic() ->
     )
     assert result.variance == pytest.approx(23 / 6)
     assert result.degrees_of_freedom == pytest.approx(5290 / 441)
-    assert result.standard_error == gym.standard_error
-    assert result.half_width == gym.ci_high
+    assert result.standard_error == comparison_statistics.standard_error
+    assert result.half_width == comparison_statistics.ci_high
     assert result.critical_value == pytest.approx(t.isf(0.05, 5290 / 441))
     assert result.power == pytest.approx(nct.sf(result.critical_value, 5290 / 441, 0.25 / sqrt(23 / 6)))
 
@@ -119,8 +119,8 @@ def test_existing_baseline_search_returns_the_first_feasible_candidate_count() -
     candidates = np.arange(2, 65)
     baseline_variance, candidate_variance = 1 / 50, 1.5 / candidates
     total_variance = baseline_variance + candidate_variance
-    degrees = total_variance**2 / (baseline_variance**2 / 49 + candidate_variance**2 / (candidates - 1))
-    independent_power = nct.sf(t.isf(0.05, degrees), degrees, 1 / np.sqrt(total_variance))
+    degrees_of_freedom = total_variance**2 / (baseline_variance**2 / 49 + candidate_variance**2 / (candidates - 1))
+    independent_power = nct.sf(t.isf(0.05, degrees_of_freedom), degrees_of_freedom, 1 / np.sqrt(total_variance))
     expected = candidates[np.flatnonzero(independent_power >= parameters.target_power)[0]]
     result = plan_repeats([cell], parameters=parameters)
     assert result.baseline_counts == (50,)

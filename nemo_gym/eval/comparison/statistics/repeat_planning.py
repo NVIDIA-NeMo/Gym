@@ -546,8 +546,8 @@ def plan_repeats(
         candidate_counts
     )
     total_cost = fsum(
-        cell.repeat_cost * (baseline_count + parameters.candidate_experiments * candidate_count)
-        for cell, baseline_count, candidate_count in zip(
+        cell.repeat_cost * (additional_baseline_count + parameters.candidate_experiments * candidate_count)
+        for cell, additional_baseline_count, candidate_count in zip(
             cells, additional_baseline_counts, candidate_counts, strict=True
         )
     )
