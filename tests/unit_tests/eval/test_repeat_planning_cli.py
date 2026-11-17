@@ -137,8 +137,6 @@ def test_manifest_rejects_invalid_or_unsupported_controls(overrides: dict[str, o
         ({"repeat_step": 1.5}, "valid integer"),
         ({"repeat_cost": 0}, "greater than 0"),
         ({"existing_baseline_repeats": 10}, "only allowed"),
-        ({"metrics": []}, "at least 1 item"),
-        ({"metrics": [{"name": "accuracy", "baseline_std_points": 1}]}, "either scalar"),
     ],
 )
 def test_manifest_rejects_invalid_cell_inputs(cell_changes: dict[str, object], message: str) -> None:
@@ -147,7 +145,15 @@ def test_manifest_rejects_invalid_cell_inputs(cell_changes: dict[str, object], m
         RepeatPlanningManifest.model_validate(payload)
 
 
-def test_manifest_enforces_cell_identity_scope_and_shared_metric_order() -> None:
+def test_manifest_requires_a_baseline_score_sd() -> None:
+    with pytest.raises(ValidationError) as error:
+        RepeatPlanningManifest.model_validate(_manifest(cells=[{"model": "a", "benchmark": "gpqa"}]))
+    assert [(item["loc"], item["type"]) for item in error.value.errors()] == [
+        (("cells", 0, "baseline_std_points"), "missing")
+    ]
+
+
+def test_manifest_enforces_cell_identity_and_aggregation_scope() -> None:
     first = {"model": "a", "benchmark": "omni", "baseline_std_points": 1}
     with pytest.raises(ValidationError, match="unique"):
         RepeatPlanningManifest.model_validate(_manifest(aggregation_level="suite", cells=[first, first]))
@@ -156,24 +162,9 @@ def test_manifest_enforces_cell_identity_scope_and_shared_metric_order() -> None
         RepeatPlanningManifest.model_validate(_manifest(cells=[first, second]))
     with pytest.raises(ValidationError, match="same model"):
         RepeatPlanningManifest.model_validate(_manifest(aggregation_level="model", cells=[first, second]))
-    metrics = [{"name": name, "baseline_std_points": 1} for name in ("accuracy", "non-hallucination")]
-    with pytest.raises(ValidationError, match="same metric names and order"):
-        RepeatPlanningManifest.model_validate(
-            _manifest(
-                aggregation_level="suite",
-                cells=[
-                    {"model": "a", "benchmark": "omni", "baseline_std_points": 1, "metrics": metrics},
-                    {"model": "b", "benchmark": "omni", "baseline_std_points": 1, "metrics": list(reversed(metrics))},
-                ],
-            )
-        )
-    with pytest.raises(ValidationError, match="Metric names must be unique"):
-        RepeatPlanningManifest.model_validate(
-            _manifest(cells=[{"model": "a", "benchmark": "omni", "metrics": [metrics[0], metrics[0]]}])
-        )
 
 
-def test_real_cli_plans_metric_composites_and_preserves_full_precision(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_real_cli_plans_score_sds_and_preserves_full_precision(tmp_path: Path, monkeypatch, capsys) -> None:
     plan = _write_plan(
         tmp_path / "plan [v1].yaml",
         _manifest(
@@ -186,10 +177,6 @@ def test_real_cli_plans_metric_composites_and_preserves_full_precision(tmp_path:
                     "repeat_cost": 2.5,
                     "baseline_std_points": math.sqrt(5),
                     "candidate_std_points": 3.0,
-                    "metrics": [
-                        {"name": "accuracy", "baseline_std_points": 2.0, "candidate_std_points": 3.0},
-                        {"name": "non-hallucination", "baseline_std_points": 4.0},
-                    ],
                 }
             ],
         ),
@@ -201,8 +188,6 @@ def test_real_cli_plans_metric_composites_and_preserves_full_precision(tmp_path:
     result = _run_cli(plan, output, monkeypatch, "++policy_api_key=sk-private-example")
     cell = result.cells[0]
     assert cell.weight == 1
-    assert [metric.weight for metric in cell.metrics] == [0.5, 0.5]
-    assert [metric.candidate_std_defaulted for metric in cell.metrics] == [False, True]
     assert cell.baseline_std_points == pytest.approx(math.sqrt(5))
     assert cell.candidate_std_points == 3.0
     assert cell.baseline_repeats % 4 == cell.candidate_repeats_per_experiment % 4 == 0
@@ -218,11 +203,13 @@ def test_real_cli_plans_metric_composites_and_preserves_full_precision(tmp_path:
     assert (output / "compare_report.md").read_text() == "existing comparison"
     payload = json.loads((output / "repeat_planning_report.json").read_text())
     assert payload["cells"][0]["baseline_std_points"] != 2.236
+    assert "metrics" not in payload["cells"][0]
+    assert "metrics" not in payload["settings"]["cells"][0]
     markdown = (output / "repeat_planning_report.md").read_text()
+    assert "## Benchmark score inputs" in markdown
     assert "| model-a | omniscience | 1.000 | 2.236 | 3.000 |" in markdown
     assert "Approximate planning power" in markdown
     assert "Simulation validation is disabled" in markdown
-    assert "Omitted candidate SDs default" in markdown
     assert "sk-private-example" not in markdown
     assert "sk-private-example" not in result.command
     assert "++policy_api_key=****" in result.command
@@ -258,7 +245,7 @@ def test_real_cli_reuses_existing_baseline_and_counts_candidate_experiments(tmp_
     assert not (tmp_path / "reports" / "repeat_planning_report.md").exists()
 
 
-def test_cli_metric_composites_match_gym_on_orthogonal_repeat_observations(tmp_path: Path, monkeypatch) -> None:
+def test_cli_measured_score_sds_match_gym_on_orthogonal_metric_observations(tmp_path: Path, monkeypatch) -> None:
     plan = _write_plan(
         tmp_path / "orthogonal.yaml",
         _manifest(
@@ -268,10 +255,6 @@ def test_cli_metric_composites_match_gym_on_orthogonal_repeat_observations(tmp_p
                     "benchmark": "omniscience",
                     "baseline_std_points": math.sqrt(5),
                     "candidate_std_points": 2.5,
-                    "metrics": [
-                        {"name": "accuracy", "baseline_std_points": 2.0, "candidate_std_points": 3.0},
-                        {"name": "non-hallucination", "baseline_std_points": 4.0},
-                    ],
                 }
             ]
         ),
@@ -311,7 +294,7 @@ def test_cli_metric_composites_match_gym_on_orthogonal_repeat_observations(tmp_p
 
 
 @pytest.mark.parametrize("level", ["model", "suite"])
-def test_real_cli_keeps_benchmark_weights_equal_with_unequal_metric_counts(
+def test_real_cli_keeps_equal_benchmark_weights_with_different_score_sds(
     tmp_path: Path, monkeypatch, level: str
 ) -> None:
     plan = _write_plan(
@@ -325,10 +308,6 @@ def test_real_cli_keeps_benchmark_weights_equal_with_unequal_metric_counts(
                     "benchmark": "omniscience",
                     "repeat_cost": 3.0,
                     "baseline_std_points": math.sqrt(2),
-                    "metrics": [
-                        {"name": "accuracy", "baseline_std_points": 2.0},
-                        {"name": "non-hallucination", "baseline_std_points": 2.0},
-                    ],
                 },
             ],
         ),
@@ -336,8 +315,6 @@ def test_real_cli_keeps_benchmark_weights_equal_with_unequal_metric_counts(
     result = _run_cli(plan, tmp_path / "reports", monkeypatch)
     first, second = result.cells
     assert [cell.weight for cell in result.cells] == [0.5, 0.5]
-    assert [metric.weight for metric in first.metrics] == [1.0]
-    assert [metric.weight for metric in second.metrics] == [0.5, 0.5]
     expected_variance = 0.25 * (
         4 / first.baseline_repeats
         + 4 / first.candidate_repeats_per_experiment
@@ -354,18 +331,29 @@ def test_real_cli_keeps_benchmark_weights_equal_with_unequal_metric_counts(
     assert result.allocation.statistics.power >= result.settings.target_power
 
 
-def test_cli_rejects_multiple_metric_sds_without_the_composite_sd(tmp_path: Path, monkeypatch, capsys) -> None:
+@pytest.mark.parametrize(
+    "metrics",
+    [
+        [],
+        [{"name": "accuracy", "baseline_std_points": 2.0}],
+        [
+            {"name": "accuracy", "baseline_std_points": 2.0},
+            {"name": "non-hallucination", "baseline_std_points": 2.0},
+        ],
+    ],
+)
+def test_cli_rejects_metric_lists_with_an_actionable_input_error(
+    tmp_path: Path, monkeypatch, capsys, metrics: list[dict[str, object]]
+) -> None:
     plan = _write_plan(
-        tmp_path / "missing-composite.yaml",
+        tmp_path / "metric-list.yaml",
         _manifest(
             cells=[
                 {
                     "model": "a",
                     "benchmark": "omniscience",
-                    "metrics": [
-                        {"name": "accuracy", "baseline_std_points": 2.0},
-                        {"name": "non-hallucination", "baseline_std_points": 2.0},
-                    ],
+                    "baseline_std_points": 2.0,
+                    "metrics": metrics,
                 }
             ]
         ),
@@ -375,13 +363,13 @@ def test_cli_rejects_multiple_metric_sds_without_the_composite_sd(tmp_path: Path
         _run_cli(plan, output, monkeypatch)
     assert error.value.code == 1
     message = " ".join(capsys.readouterr().out.split())
-    assert "Multiple metrics require cell-level baseline_std_points" in message
-    assert "averaging the selected metrics within each repeat" in message
+    assert "cells.0.metrics" in message
+    assert "Extra inputs are not permitted" in message
     assert not output.exists()
 
 
 @pytest.mark.parametrize("second_sign, composite_variance", [(1, 4.0), (-1, 0.0)])
-def test_cli_measured_composite_sds_match_gym_for_related_metric_scores(
+def test_cli_measured_score_sds_match_gym_for_related_metric_observations(
     tmp_path: Path, monkeypatch, second_sign: int, composite_variance: float
 ) -> None:
     scales = [MetricScale(0, 100), MetricScale(0, 100)]
@@ -398,10 +386,6 @@ def test_cli_measured_composite_sds_match_gym_for_related_metric_scores(
                     "model": "a",
                     "benchmark": "omniscience",
                     "baseline_std_points": math.sqrt(composite.sample_variance),
-                    "metrics": [
-                        {"name": "accuracy", "baseline_std_points": 2.0},
-                        {"name": "non-hallucination", "baseline_std_points": 2.0},
-                    ],
                 },
             ],
         ),
@@ -410,7 +394,6 @@ def test_cli_measured_composite_sds_match_gym_for_related_metric_scores(
     control, measured = result.cells
     assert measured.baseline_std_points**2 == measured.candidate_std_points**2 == composite_variance
     assert [cell.weight for cell in result.cells] == [0.5, 0.5]
-    assert [metric.weight for metric in measured.metrics] == [0.5, 0.5]
 
     def observations(count: int, std: float, sign: int) -> list[list[float]]:
         distance = std * math.sqrt((count - 1) / 2)
@@ -438,7 +421,7 @@ def test_cli_measured_composite_sds_match_gym_for_related_metric_scores(
     assert statistics.half_width == pytest.approx(gym.ci_high)
 
 
-def test_cli_rejects_an_entirely_constant_metric_composite(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_cli_rejects_an_entirely_constant_score(tmp_path: Path, monkeypatch, capsys) -> None:
     plan = _write_plan(
         tmp_path / "constant.yaml",
         _manifest(
@@ -447,10 +430,6 @@ def test_cli_rejects_an_entirely_constant_metric_composite(tmp_path: Path, monke
                     "model": "a",
                     "benchmark": "omniscience",
                     "baseline_std_points": 0.0,
-                    "metrics": [
-                        {"name": "accuracy", "baseline_std_points": 2.0},
-                        {"name": "non-hallucination", "baseline_std_points": 2.0},
-                    ],
                 }
             ]
         ),
@@ -463,51 +442,27 @@ def test_cli_rejects_an_entirely_constant_metric_composite(tmp_path: Path, monke
     assert not output.exists()
 
 
-def test_cli_preserves_single_metric_sd_inputs(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("candidate_std", [None, 0.0, 3.0])
+def test_cli_uses_the_explicit_candidate_sd_or_defaults_to_the_baseline(
+    tmp_path: Path, monkeypatch, candidate_std: float | None
+) -> None:
+    cell_input = {"model": "a", "benchmark": "gpqa", "baseline_std_points": 2.0}
+    if candidate_std is not None:
+        cell_input["candidate_std_points"] = candidate_std
     plan = _write_plan(
-        tmp_path / "single-metric.yaml",
-        _manifest(
-            cells=[
-                {
-                    "model": "a",
-                    "benchmark": "gpqa",
-                    "metrics": [{"name": "accuracy", "baseline_std_points": 2.0, "candidate_std_points": 3.0}],
-                }
-            ]
-        ),
+        tmp_path / "score.yaml",
+        _manifest(cells=[cell_input]),
     )
     result = _run_cli(plan, tmp_path / "reports", monkeypatch)
     cell = result.cells[0]
     assert cell.baseline_std_points == 2.0
-    assert cell.candidate_std_points == 3.0
+    expected_candidate_std = 2.0 if candidate_std is None else candidate_std
+    assert cell.candidate_std_points == expected_candidate_std
     assert result.allocation.statistics.variance == pytest.approx(
-        4 / cell.baseline_repeats + 9 / cell.candidate_repeats_per_experiment
+        4 / cell.baseline_repeats + expected_candidate_std**2 / cell.candidate_repeats_per_experiment
     )
-
-
-def test_cli_plans_from_composite_sds_and_keeps_metric_sds_descriptive(tmp_path: Path, monkeypatch) -> None:
-    cell = {
-        "model": "a",
-        "benchmark": "omniscience",
-        "baseline_std_points": 1.0,
-        "metrics": [
-            {"name": "accuracy", "baseline_std_points": 2.0, "candidate_std_points": 3.0},
-            {"name": "non-hallucination", "baseline_std_points": 2.0, "candidate_std_points": 3.0},
-        ],
-    }
-    plan = _write_plan(tmp_path / "composite.yaml", _manifest(cells=[cell]))
-    first = _run_cli(plan, tmp_path / "first", monkeypatch)
-    assert first.cells[0].baseline_std_points == first.cells[0].candidate_std_points == 1.0
-    assert [metric.candidate_std_points for metric in first.cells[0].metrics] == [3.0, 3.0]
-    assert "Omitted candidate SDs default" in (tmp_path / "first" / "repeat_planning_report.md").read_text()
-    for metric in cell["metrics"]:
-        metric["baseline_std_points"] = 4.0
-        metric["candidate_std_points"] = 5.0
-    _write_plan(plan, _manifest(cells=[cell]))
-    second = _run_cli(plan, tmp_path / "second", monkeypatch)
-    assert second.allocation == first.allocation
-    assert [metric.baseline_std_points for metric in second.cells[0].metrics] == [4.0, 4.0]
-    assert [metric.candidate_std_points for metric in second.cells[0].metrics] == [5.0, 5.0]
+    markdown = (tmp_path / "reports" / "repeat_planning_report.md").read_text()
+    assert ("Omitted candidate SDs default" in markdown) == (candidate_std is None)
 
 
 @pytest.mark.parametrize(

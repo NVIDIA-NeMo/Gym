@@ -53,7 +53,7 @@ def render_repeat_planning_summary(result: RepeatPlanningResult) -> str:
 
 
 def render_repeat_planning_markdown(result: RepeatPlanningResult) -> str:
-    """Render settings, metric weights, allocation, and completed validation statistics."""
+    """Render benchmark score inputs, weights, allocation, and validation statistics."""
     settings = result.settings
     statistics = result.allocation.statistics
     lines = [
@@ -79,38 +79,20 @@ def render_repeat_planning_markdown(result: RepeatPlanningResult) -> str:
         "Counts are fixed before collecting the planned runs. Validation does not adjust them.",
         "Repeat costs share one user-chosen unit and apply once per complete benchmark repeat.",
         "",
-        "## Metric inputs",
+        "## Benchmark score inputs",
         "",
-        "| Model | Benchmark | Metric | Metric weight | Baseline SD | Candidate SD |",
-        "| --- | --- | --- | ---: | ---: | ---: |",
+        "One complete-repeat score per model/benchmark; SDs are measured across those scores.",
+        "",
+        "| Model | Benchmark | Cell weight | Baseline SD | Candidate SD |",
+        "| --- | --- | ---: | ---: | ---: |",
     ]
-    for cell in result.cells:
-        for metric in cell.metrics:
-            lines.append(
-                f"| {_text(cell.model)} | {_text(cell.benchmark)} | {_text(metric.name)} | {_number(metric.weight)} "
-                f"| {_number(metric.baseline_std_points)} | {_number(metric.candidate_std_points)} |"
-            )
-    if any(
-        cell.baseline_std_points is not None and cell.candidate_std_points is None for cell in settings.cells
-    ) or any(metric.candidate_std_defaulted for cell in result.cells for metric in cell.metrics):
-        lines.extend(["", "Omitted candidate SDs default to the corresponding baseline SDs."])
-    lines.extend(
-        [
-            "",
-            "## Benchmark composites",
-            "",
-            "Multi-metric cells use the supplied SD of the normalized, equally averaged complete-repeat scores. "
-            "Their individual metric SDs above are descriptive inputs; they do not determine the composite SD.",
-            "",
-            "| Model | Benchmark | Cell weight | Baseline SD | Candidate SD |",
-            "| --- | --- | ---: | ---: | ---: |",
-        ]
-    )
     for cell in result.cells:
         lines.append(
             f"| {_text(cell.model)} | {_text(cell.benchmark)} | {_number(cell.weight)} "
             f"| {_number(cell.baseline_std_points)} | {_number(cell.candidate_std_points)} |"
         )
+    if any(cell.candidate_std_points is None for cell in settings.cells):
+        lines.extend(["", "Omitted candidate SDs default to the corresponding baseline SDs."])
     lines.extend(
         [
             "",

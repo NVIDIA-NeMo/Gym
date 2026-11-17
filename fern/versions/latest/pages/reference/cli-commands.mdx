@@ -1357,7 +1357,7 @@ Writes `suite_compare_report.md` and/or `suite_compare_report.json`. The suite J
 
 ### `gym eval plan-repeats`
 
-Plan new repeats from directly supplied complete-pass standard deviations. One YAML file defines one benchmark, model, or suite aggregate, with equal benchmark weights and equal metric weights within each benchmark. Keep an existing baseline fixed or jointly plan a baseline reused across a configurable number of distinct candidate checkpoints.
+Plan new repeats from directly supplied complete-pass standard deviations. One YAML file defines one benchmark, model, or suite aggregate, with equal weights across its model × benchmark entries; each entry supplies the SD of one complete-repeat benchmark score. Keep an existing baseline fixed or jointly plan a baseline reused across a configurable number of distinct candidate checkpoints.
 
 ```bash
 gym eval plan-repeats \

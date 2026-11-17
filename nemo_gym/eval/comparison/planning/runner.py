@@ -29,7 +29,6 @@ from nemo_gym.eval.comparison.planning.schema import (
     RepeatPlanningCellResult,
     RepeatPlanningCLIConfig,
     RepeatPlanningManifest,
-    RepeatPlanningMetricResult,
     RepeatPlanningResult,
     RepeatPlanningTotals,
 )
@@ -59,8 +58,6 @@ def build_repeat_planning_result(config: RepeatPlanningCLIConfig, command: str) 
     """Plan one aggregate and validate its fixed counts against simulated Welch decisions."""
     path = Path(config.repeat_plan_fpath).resolve()
     manifest = load_repeat_planning_manifest(path)
-    cells = []
-    resolved_metrics = []
     try:
         parameters = PlanningParameters(
             baseline_mode=manifest.baseline.mode,
@@ -71,42 +68,21 @@ def build_repeat_planning_result(config: RepeatPlanningCLIConfig, command: str) 
             expected_delta_points=manifest.expected_delta_points,
             max_repeats=manifest.max_repeats,
         )
-        for cell in manifest.cells:
-            definitions = cell.metric_definitions()
-            metrics = [
-                RepeatPlanningMetricResult(
-                    name=metric.name,
-                    weight=1 / len(definitions),
-                    baseline_std_points=metric.baseline_std_points,
-                    candidate_std_points=(
-                        metric.baseline_std_points
-                        if metric.candidate_std_points is None
-                        else metric.candidate_std_points
-                    ),
-                    candidate_std_defaulted=metric.candidate_std_points is None,
+        cells = [
+            PlanningCell(
+                model=cell.model,
+                benchmark=cell.benchmark,
+                baseline_variance=cell.baseline_std_points**2,
+                candidate_variance=(
+                    cell.baseline_std_points if cell.candidate_std_points is None else cell.candidate_std_points
                 )
-                for metric in definitions
-            ]
-            resolved_metrics.append(metrics)
-            # A multi-metric cell supplies the SD of its per-repeat average.
-            # Marginal metric SDs alone do not determine that composite SD.
-            baseline_std = cell.baseline_std_points
-            if baseline_std is None:
-                baseline_std = metrics[0].baseline_std_points
-                candidate_std = metrics[0].candidate_std_points
-            else:
-                candidate_std = baseline_std if cell.candidate_std_points is None else cell.candidate_std_points
-            cells.append(
-                PlanningCell(
-                    model=cell.model,
-                    benchmark=cell.benchmark,
-                    baseline_variance=baseline_std**2,
-                    candidate_variance=candidate_std**2,
-                    repeat_step=cell.repeat_step,
-                    repeat_cost=cell.repeat_cost,
-                    existing_baseline_repeats=cell.existing_baseline_repeats,
-                )
+                ** 2,
+                repeat_step=cell.repeat_step,
+                repeat_cost=cell.repeat_cost,
+                existing_baseline_repeats=cell.existing_baseline_repeats,
             )
+            for cell in manifest.cells
+        ]
         allocation = plan_repeats(cells, parameters=parameters)
         simulation = (
             simulate_plan(
@@ -123,7 +99,7 @@ def build_repeat_planning_result(config: RepeatPlanningCLIConfig, command: str) 
         raise ConfigError(f"Cannot plan repeats for '{path}': {error}") from error
 
     results = []
-    for index, (cell, metrics) in enumerate(zip(cells, resolved_metrics, strict=True)):
+    for index, cell in enumerate(cells):
         baseline = allocation.baseline_counts[index]
         candidate = allocation.candidate_counts[index]
         new_baseline = allocation.additional_baseline_counts[index]
@@ -132,7 +108,6 @@ def build_repeat_planning_result(config: RepeatPlanningCLIConfig, command: str) 
                 model=cell.model,
                 benchmark=cell.benchmark,
                 weight=1 / len(cells),
-                metrics=metrics,
                 baseline_std_points=sqrt(cell.baseline_variance),
                 candidate_std_points=sqrt(cell.candidate_variance),
                 repeat_step=cell.repeat_step,

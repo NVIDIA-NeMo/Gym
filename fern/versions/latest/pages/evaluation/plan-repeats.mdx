@@ -4,13 +4,13 @@ description: "Plan benchmark and suite repeat counts from complete-pass standard
 position: 7
 ---
 
-# Plan Repeats
-
 Use `gym eval plan-repeats` before running evaluation benchmarks with NeMo Gym. Its goal is to choose appropriate repeat counts for your statistical requirements, such as acceptable loss and target power. Historical standard deviations can inform this planning. Plan one benchmark, a model's selected benchmarks, or a suite average. The command reads a small YAML file; it does not start evaluations or access a cluster.
 
 For a step-by-step example with expected counts, reports, baseline reuse, and multiple metrics, follow [Plan a Comparison Budget](/main/tutorials/evaluation-tutorials/plan-repeats).
 
 One repeat means one complete pass over the fixed benchmark task population. Supply the standard deviation of those complete-pass scores, rather than the standard deviation across tasks or the standard error of an existing average. Scores and standard deviations use the same normalized 0–100 scale as [suite comparison](/main/evaluation/compare-results#compare-a-benchmark-suite), with all selected metrics oriented so higher scores are better.
+
+Each model × benchmark entry represents one score. Supply its `baseline_std_points`; omit `candidate_std_points` to reuse that baseline SD forecast. If the score averages several metrics, construct one score within each repeat before estimating its SD. The planning YAML contains the resulting scalar SDs; keep metric definitions and extraction evidence with the source data.
 
 ## Plan against an existing baseline
 
@@ -45,7 +45,7 @@ cells:
 gym eval plan-repeats --plan planning.yaml --output-dir results/repeat-planning
 ```
 
-Runnable examples are checked in under [`examples/repeat-planning/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/examples/repeat-planning): a single benchmark, the existing-baseline suite above, and a suite with multiple metrics in one benchmark. Their SDs are illustrative rather than measurements.
+Runnable examples are checked in under [`examples/repeat-planning/`](https://github.com/NVIDIA-NeMo/Gym/tree/main/examples/repeat-planning): a single benchmark, the existing-baseline suite above, and a suite whose Omniscience entry supplies the SD of an illustrative two-metric score. Their SDs are illustrative rather than measurements.
 
 `baseline.mode: existing` keeps each cell's available baseline count fixed and plans additional candidate repeats. The baseline's uncertainty stays in the calculation, while its collection cost is already paid. Existing counts need not be multiples of the current `repeat_step`.
 
@@ -83,9 +83,15 @@ The planner pays for the baseline once and for each candidate's planned passes 4
 
 `repeat_cost` optionally supplies a positive cost for one complete pass in a cell, using common units across all cells and the same per-pass cost in both arms. It defaults to one, which minimizes new pass count. With measured GPU-hours per pass, the result is projected additional GPU-hours. Candidate experiment count affects cost, not the variance or marginal power of one candidate comparison. Shared-baseline comparisons do not provide a simultaneous all-candidates guarantee.
 
-## Select multiple metrics within a benchmark
+## Prepare one score from several metrics
 
-A benchmark's metrics each receive weight `1 / number_of_metrics`. Its overall benchmark weight and repeat count stay unchanged. Define the same ordered metric names for that benchmark across models. For example:
+Prepare the same benchmark score that the final comparison will evaluate:
+
+1. Normalize each selected metric to 0–100 using its theoretical bounds, reversing lower-is-better metrics so higher scores are better. Use the same definitions, bounds, and directions across models and checkpoints.
+2. Within each complete repeat, average the `M` selected normalized metrics with weight `1 / M` each.
+3. Calculate sample SD across those repeat averages, using divisor `number_of_repeats - 1`. Supply this one scalar as `baseline_std_points`. Estimate the candidate SD separately when data are available, or omit `candidate_std_points` to forecast the same SD as baseline.
+
+The planning YAML does not accept a `metrics` list. Supply the scalar SD of the prepared benchmark score. For example, this entry supplies an illustrative 0.9-point SD:
 
 ```yaml
 cells:
@@ -96,22 +102,13 @@ cells:
     # SD across complete-repeat scores after equally averaging the two metrics.
     baseline_std_points: 0.9
     candidate_std_points: 0.9
-    metrics:
-      - name: accuracy
-        baseline_std_points: 1.0
-        candidate_std_points: 1.0
-      - name: non-hallucination
-        baseline_std_points: 1.0
-        candidate_std_points: 1.0
 ```
 
-For multiple metrics, supply the cell-level `baseline_std_points` as the SD **across complete-repeat scores after equally averaging the normalized metrics within each repeat**. This is the same observation used by suite comparison. Individual metric SDs cannot determine the SD of their average. The `metrics` list records their names, weights, and individual SDs for inspection; the planner uses the supplied cell-level composite SD. The example's composite SD is illustrative, not calculated from its individual metric SDs.
-
-Omit cell-level `candidate_std_points` to use the baseline composite SD forecast. An omitted candidate SD inside `metrics` defaults only that metric's descriptive SD; it does not determine the candidate composite. For one metric, use either the scalar cell-level shorthand or a one-entry `metrics` list. Supply normalized SDs; metric labels alone do not convert raw scoring units or reverse a metric's direction.
+Every listed model × benchmark entry receives weight `1 / N` in a plan with `N` entries, regardless of how many metrics formed its score. All selected metrics share that benchmark's repeat count and cost. Define metric selection in the final `compare-suite` manifest; planning inputs contain one SD per benchmark score. The [walkthrough](/main/tutorials/evaluation-tutorials/plan-repeats) shows a complete numerical example of preparing this SD.
 
 ## Inspect the result
 
-The command writes `repeat_planning_report.md` and `repeat_planning_report.json`. The Markdown report shows inputs, metric and benchmark weights, resolved benchmark SDs, baseline and per-candidate counts, additional work and cost, analytic power, and validation results. JSON retains full precision. Neither report includes worked arithmetic.
+The command writes `repeat_planning_report.md` and `repeat_planning_report.json`. The Markdown report shows benchmark score inputs, equal entry weights, baseline and per-candidate counts, additional work and cost, analytic power, and validation results. JSON retains full precision. Neither report includes worked arithmetic.
 
 The analytic power calculation uses forecast variances, Welch–Satterthwaite degrees of freedom, and a noncentral-t tail. Its numerical implementation shares the uncertainty calculation with NeMo Gym's existing Welch comparison. This prospective power is approximate: the actual future comparison recalculates variances and degrees of freedom from collected scores.
 

@@ -46,62 +46,21 @@ class RepeatPlanningBaseline(_PlanningModel):
     mode: Literal["optimize", "existing"] = "optimize"
 
 
-class RepeatPlanningMetric(_PlanningModel):
-    """Repeat SDs in normalized score points for one selected benchmark metric."""
-
-    name: Name
-    baseline_std_points: StandardDeviation
-    candidate_std_points: StandardDeviation | None = None
-
-
 class RepeatPlanningCell(_PlanningModel):
-    """One model and benchmark, with one shared repeat count for its selected metrics.
+    """One normalized complete-repeat benchmark score for one model.
 
-    Multi-metric cells require cell-level SDs of the normalized, equally averaged
-    complete-repeat scores. Their individual metric SDs are descriptive inputs.
-    An omitted candidate composite SD defaults to the baseline composite SD.
+    For a multi-metric benchmark, normalize and equally average its metrics
+    within each repeat before estimating this score's SD across repeats.
+    An omitted candidate SD defaults to the baseline SD.
     """
 
     model: Name
     benchmark: Name
-    baseline_std_points: StandardDeviation | None = None
+    baseline_std_points: StandardDeviation
     candidate_std_points: StandardDeviation | None = None
-    metrics: list[RepeatPlanningMetric] | None = Field(default=None, min_length=1)
     repeat_step: int = Field(default=1, strict=True, ge=1)
     repeat_cost: float = Field(default=1.0, strict=True, gt=0, allow_inf_nan=False)
     existing_baseline_repeats: int | None = Field(default=None, strict=True, ge=2)
-
-    @model_validator(mode="after")
-    def validate_metrics(self) -> "RepeatPlanningCell":
-        if self.metrics is not None:
-            names = [metric.name for metric in self.metrics]
-            if len(names) != len(set(names)):
-                raise ValueError("Metric names must be unique within a benchmark cell.")
-            if len(self.metrics) > 1:
-                if self.baseline_std_points is None:
-                    raise ValueError(
-                        "Multiple metrics require cell-level baseline_std_points: supply the SD across complete-repeat "
-                        "scores after normalizing and averaging the selected metrics within each repeat. "
-                        "Individual metric SDs cannot determine the SD of their average. "
-                        "Omit cell-level candidate_std_points to use that baseline composite SD."
-                    )
-            elif self.baseline_std_points is not None or self.candidate_std_points is not None:
-                raise ValueError("For one metric, use either scalar standard deviations or metrics, not both.")
-        elif self.baseline_std_points is None:
-            raise ValueError("Provide baseline_std_points or a nonempty metrics list.")
-        return self
-
-    def metric_definitions(self) -> tuple[RepeatPlanningMetric, ...]:
-        """Return the selected metrics, giving scalar inputs the common name ``score``."""
-        if self.metrics is not None:
-            return tuple(self.metrics)
-        return (
-            RepeatPlanningMetric(
-                name="score",
-                baseline_std_points=self.baseline_std_points,
-                candidate_std_points=self.candidate_std_points,
-            ),
-        )
 
 
 class RepeatPlanningManifest(_PlanningModel):
@@ -109,7 +68,7 @@ class RepeatPlanningManifest(_PlanningModel):
 
     ``benchmark`` selects one model/benchmark cell, ``model`` selects cells of a
     single model, and ``suite`` selects all declared cells. Every cell has equal
-    aggregate weight, and its selected metrics have equal within-cell weights.
+    aggregate weight and supplies the SD of one complete-repeat benchmark score.
     """
 
     schema_version: Literal[1]
@@ -141,14 +100,7 @@ class RepeatPlanningManifest(_PlanningModel):
             raise ValueError("aggregation_level benchmark requires exactly one model/benchmark cell.")
         if self.aggregation_level == "model" and len({cell.model for cell in self.cells}) != 1:
             raise ValueError("aggregation_level model requires every cell to have the same model.")
-        metric_names: dict[str, tuple[str, ...]] = {}
         for cell in self.cells:
-            names = tuple(metric.name for metric in cell.metric_definitions())
-            previous = metric_names.setdefault(cell.benchmark, names)
-            if names != previous:
-                raise ValueError(
-                    f"Benchmark '{cell.benchmark}' must select the same metric names and order for all models."
-                )
             if self.baseline.mode == "existing" and cell.existing_baseline_repeats is None:
                 raise ValueError(f"Cell '{cell.model}/{cell.benchmark}' requires existing_baseline_repeats.")
             if self.baseline.mode == "optimize" and cell.existing_baseline_repeats is not None:
@@ -156,19 +108,10 @@ class RepeatPlanningManifest(_PlanningModel):
         return self
 
 
-class RepeatPlanningMetricResult(_PlanningModel):
-    name: str
-    weight: float
-    baseline_std_points: float
-    candidate_std_points: float
-    candidate_std_defaulted: bool
-
-
 class RepeatPlanningCellResult(_PlanningModel):
     model: str
     benchmark: str
     weight: float
-    metrics: list[RepeatPlanningMetricResult]
     baseline_std_points: float
     candidate_std_points: float
     repeat_step: int

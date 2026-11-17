@@ -23,10 +23,3 @@ cells:
     # SD across complete-repeat scores after equally averaging the two metrics.
     baseline_std_points: 0.9
     candidate_std_points: 0.9
-    metrics:
-      - name: accuracy
-        baseline_std_points: 1.0
-        candidate_std_points: 1.0
-      - name: non-hallucination
-        baseline_std_points: 1.0
-        candidate_std_points: 1.0

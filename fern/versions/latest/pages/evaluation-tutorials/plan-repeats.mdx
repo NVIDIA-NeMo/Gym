@@ -4,8 +4,6 @@ description: "Choose benchmark and suite repeat counts, inspect a complete plann
 position: 7
 ---
 
-# Plan a Comparison Budget
-
 Suppose you want to compare a quantized checkpoint with a baseline. You have historical repeat-level standard deviations and want to know how many complete benchmark passes to collect before deciding whether the candidate's quality loss is acceptable.
 
 This walkthrough uses `gym eval plan-repeats` to plan one benchmark, reuse a baseline across several candidates, and plan a suite with an existing baseline. It also shows how a benchmark with two metrics keeps the same weight as a benchmark with one. All SDs here are illustrative; the commands perform CPU-only statistical calculations and do not start model inference.
@@ -136,9 +134,34 @@ The runtime multiplier column shows how to apply the counts when prepared copies
 
 This suite plan supports an average-quality claim. It does not independently power GPQA and AA-LCR at 80%. To plan a separate benchmark claim, make a separate file with `aggregation_level: benchmark` and only that benchmark's entry. Use `aggregation_level: model` when averaging selected benchmarks of one model; each file still describes one aggregate.
 
-## 5. Give a two-metric benchmark the same weight
+## 5. Prepare one score per benchmark
 
-Run the complete example that combines one GPQA metric with two AA Omniscience metrics:
+The planner accepts one score per model × benchmark entry, even when that score combines several metrics. Normalize each selected metric to 0–100 using its theoretical bounds and direction, then equally average the normalized metrics **within each complete repeat**. Calculate sample SD across those averages. Use the same score definition for both checkpoints; estimate their SDs separately, or omit `candidate_std_points` to reuse the baseline SD forecast.
+
+The following three-repeat calculation illustrates this preparation for accuracy and a lower-is-better hallucination rate. It is not measured AA Omniscience data or a definition of its published index. Use the exact metric definitions, including their denominators, selected in your final comparison.
+
+| Complete repeat | Accuracy (0–1) | Hallucination rate (%) | Normalized accuracy | Normalized non-hallucination | Equal average |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.80 | 21.8 | 80 | 78.2 | 79.1 |
+| 2 | 0.82 | 22.0 | 82 | 78.0 | 80.0 |
+| 3 | 0.84 | 22.2 | 84 | 77.8 | 80.9 |
+
+Accuracy uses bounds 0–1 with higher scores better. The illustrative rate uses bounds 0–100 with lower values better, so its normalized score is `100 - rate`. Python's `statistics.stdev` calculates sample SD with divisor `number_of_repeats - 1`:
+
+```python
+from statistics import stdev
+
+accuracy = [0.80, 0.82, 0.84]
+hallucination_percent = [21.8, 22.0, 22.2]
+repeat_scores = [
+    (100 * correct + (100 - hallucinated)) / 2
+    for correct, hallucinated in zip(accuracy, hallucination_percent, strict=True)
+]
+baseline_std_points = stdev(repeat_scores)
+print(f"{baseline_std_points:.4f}")  # 0.9000
+```
+
+Run the complete suite example, which supplies one scalar SD for GPQA and one for an illustrative two-metric Omniscience score:
 
 ```bash
 cp examples/repeat-planning/multiple-metrics.yaml \
@@ -148,15 +171,14 @@ gym eval plan-repeats \
     --output-dir results/repeat-planning-walkthrough/multiple-metrics
 ```
 
-This example supplies one-point SDs for every selected metric and explicitly supplies Omniscience's composite SD as 0.9 points. Obtain a measured composite SD by equally averaging the normalized metrics within each complete repeat, then calculating SD across those averaged scores. The individual metric SDs alone cannot determine it. Its existing baseline counts and repeat increments are eight for GPQA and ten for Omniscience. Each benchmark has suite weight 0.5. Inspect the report's metric inputs and benchmark composites:
+Its existing baseline counts and repeat increments are eight for GPQA and ten for Omniscience. Each entry receives weight `1 / N`, where `N = 2` is the number of model × benchmark entries. Within an average of `M` metrics, each metric has weight `1 / M`:
 
-| Benchmark | Selected metric | Within-benchmark weight | Metric's overall suite weight |
-| --- | --- | ---: | ---: |
-| GPQA | score | 1 | 0.5 |
-| AA Omniscience | accuracy | 0.5 | 0.25 |
-| AA Omniscience | non-hallucination | 0.5 | 0.25 |
+| Benchmark score | Selected metrics, M | Within-repeat metric weight | Suite entry weight | Supplied baseline / candidate SD |
+| --- | ---: | ---: | ---: | ---: |
+| GPQA | 1 | 1 | 0.5 | 1 / 1 point |
+| Illustrative Omniscience average | 2 | 0.5 | 0.5 | 0.9 / 0.9 points |
 
-The two Omniscience rows describe a single benchmark with total suite weight 0.5. Its supplied baseline and candidate composite SDs are both **0.9 points**, while GPQA's are one point. The report retains the individual metric SDs as descriptive inputs. All Omniscience metrics share one repeat count and one repeat cost.
+Omniscience's two metrics form one benchmark score with one repeat count and one repeat cost. For this illustrative plan, the candidate uses the same **0.9-point SD forecast** as baseline. The planning file and report contain only the scalar benchmark score SDs; the final comparison manifest records the selected metrics, normalization bounds, and directions.
 
 The minimum allowed new counts already meet the target: **eight GPQA passes and ten Omniscience passes per candidate**, 18 new passes in total, with approximate suite power **91.87%**. These results use this example's SDs and existing counts; they are not measured AA Omniscience or GPQA budgets.
 
