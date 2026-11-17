@@ -44,8 +44,12 @@ alias is a fraction; `/raw_acc` is a percentage. There is no nonlinear metric.
 This adapter uses no audio or external subtitles. Its prompt asks for a boxed
 letter, and the default `boxed_only_v1` policy scores an unboxed answer as 0;
 upstream asks for a bare letter. These scores are therefore not comparable to
-official Video-MME results. Frame sampling is left to the serving side (vLLM's
-`--media-io-kwargs`, or a VideoAnyRes preparation upstream of Gym).
+official Video-MME results. For bare-letter answers, prepare the rows with
+`--prompt videomme_v1` (the README prompt) and a `llm_extraction_v1` cohort, and
+run `configs/videomme_v1_single_turn_llm_extraction.yaml`; see
+[answer extraction](../video_mcqa/README.md#answer-extraction-by-a-judge-model).
+Frame sampling is left to the serving side (vLLM's `--media-io-kwargs`, or a
+VideoAnyRes preparation upstream of Gym).
 
 Reference: official repository commit
 `06c2315b892f88578f81d73205d07cf576f292b9`; reference annotation snapshot:

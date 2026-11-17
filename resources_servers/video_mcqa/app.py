@@ -18,6 +18,7 @@ from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, AggregateMetrics, AggregateM
 from nemo_gym.core import NeMoGymResponse
 from nemo_gym.server_runtime import BaseVerifyRequest, BaseVerifyResponse, ReverifyMode
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from resources_servers.video_mcqa.answer_judge import AnswerJudgeConfig, grade_final_answer
 from resources_servers.video_mcqa.dataset import SOURCES, Benchmark, validate_subsets
 from resources_servers.video_mcqa.sandbox import VideoSandboxServer, VideoSandboxServerConfig
 from resources_servers.video_mcqa.scoring import (
@@ -61,7 +62,7 @@ class AccuracyCohort(BaseModel):
         return self
 
 
-class VideoMCQAResourcesServerConfig(VideoSandboxServerConfig):
+class VideoMCQAResourcesServerConfig(VideoSandboxServerConfig, AnswerJudgeConfig):
     """The task cohort is a required input, not inferred from returned results."""
 
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
@@ -135,6 +136,7 @@ class VideoMCQAResourcesServer(VideoSandboxServer):
         self._cohort = AccuracyCohort.model_validate_json(self.config.cohort_manifest.read_text(encoding="utf-8"))
         if self.benchmark is not None and self._cohort.benchmark != self.benchmark:
             raise ValueError("Cohort belongs to a different benchmark resources server")
+        self.config.check_answer_judge(self._cohort.answer_policy)
 
     def _validate_metadata(self, metadata: VerifierMetadata, *, setting: str) -> None:
         cohort = self._cohort
@@ -152,13 +154,21 @@ class VideoMCQAResourcesServer(VideoSandboxServer):
         """Score final answers only; masked infrastructure failures remain inconclusive."""
         self._validate_metadata(body.verifier_metadata, setting=body.setting)
         failure, reason = response_failure(body.response, setting=body.setting)
-        score = grade_answer(
+        return await grade_final_answer(
+            self.server_client,
+            self.config,
+            body.responses_create_params,
             final_assistant_text(body.response),
             body.verifier_metadata,
             setting=body.setting,
             answer_policy=self._cohort.answer_policy,
             failure=failure,
+            respond=lambda score: self._verify_response(body, score, failure, reason),
         )
+
+    def _verify_response(
+        self, body: VideoMCQAVerifyRequest, score: QuestionScore, failure: Failure | None, reason: str | None
+    ) -> VideoMCQAVerifyResponse:
         payload = body.model_dump(
             exclude={
                 "reward",

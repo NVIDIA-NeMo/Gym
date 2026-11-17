@@ -50,7 +50,10 @@ an additional video-type breakdown. Category scores are not macro-averaged.
 
 The prompt asks for a boxed letter, and the default `boxed_only_v1` policy
 scores an unboxed answer as 0, unlike upstream's bare-letter answers, so these
-scores are not comparable to official LVBench results.
+scores are not comparable to official LVBench results. For bare-letter answers,
+prepare the rows with `--prompt lvbench` and a `llm_extraction_v1` cohort, and
+run `configs/lvbench_single_turn_llm_extraction.yaml`; see
+[answer extraction](../video_mcqa/README.md#answer-extraction-by-a-judge-model).
 
 Reference scorer: `lvbench/metrics/compute_accuracy.py` at official commit
 `518df47219862534dad39fa1373b4e7c862a4cd5`. Reference annotation snapshot:

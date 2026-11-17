@@ -17,6 +17,7 @@ from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, AggregateMetrics, AggregateM
 from nemo_gym.core import NeMoGymResponse
 from nemo_gym.server_runtime import BaseVerifyRequest, BaseVerifyResponse, ReverifyMode
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from resources_servers.video_mcqa.answer_judge import AnswerJudgeConfig, grade_final_answer
 from resources_servers.video_mcqa.app import response_failure
 from resources_servers.video_mcqa.sandbox import VideoSandboxServer, VideoSandboxServerConfig
 from resources_servers.videomme_v2.metrics import (
@@ -57,7 +58,7 @@ class CohortManifest(BaseModel):
         return self
 
 
-class VideoMMEV2ResourcesServerConfig(VideoSandboxServerConfig):
+class VideoMMEV2ResourcesServerConfig(VideoSandboxServerConfig, AnswerJudgeConfig):
     """A run must declare its cohort before any results are collected."""
 
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
@@ -97,7 +98,8 @@ def final_assistant_text(response: NeMoGymResponse) -> str:
 
 
 class VideoMMEV2ResourcesServer(VideoSandboxServer):
-    """No tools, LLM judge or answer repair; the only session state is the agentic setting's lent sandbox."""
+    """No tools or answer repair; the only session state is the agentic setting's lent sandbox, and a judge model
+    reads only llm_extraction_v1 answers."""
 
     config: VideoMMEV2ResourcesServerConfig
     checkpoint_verify: ClassVar[Literal["replay"]] = "replay"
@@ -112,6 +114,7 @@ class VideoMMEV2ResourcesServer(VideoSandboxServer):
             self._cohort.task_ids, groups=self._cohort.groups, task_levels=self._cohort.task_levels
         )
         self._task_groups = {task_id: group for group in self._cohort.groups for task_id in group.task_ids}
+        self.config.check_answer_judge(self._cohort.answer_policy)
 
     def _validate_metadata(self, metadata: VerifierMetadata) -> None:
         if metadata.task_id not in self._cohort.task_ids or metadata.dataset_revision != self._cohort.dataset_revision:
@@ -130,13 +133,21 @@ class VideoMMEV2ResourcesServer(VideoSandboxServer):
         if body.setting != cohort.setting:
             raise ValueError("Result setting differs from the frozen cohort")
         failure, failure_reason = response_failure(body.response, setting=body.setting)
-        score = grade_answer(
+        return await grade_final_answer(
+            self.server_client,
+            self.config,
+            body.responses_create_params,
             final_assistant_text(body.response),
             body.verifier_metadata,
             setting=body.setting,
             answer_policy=cohort.answer_policy,
             failure=failure,
+            respond=lambda score: self._verify_response(body, score, failure, failure_reason),
         )
+
+    def _verify_response(
+        self, body: VideoMMEV2VerifyRequest, score: QuestionScore, failure: str | None, failure_reason: str | None
+    ) -> VideoMMEV2VerifyResponse:
         # Gym requires a numeric reward. Its mask flag carries the inconclusive
         # status; the fixed-cohort aggregation does not silently shrink the denominator.
         payload = body.model_dump(

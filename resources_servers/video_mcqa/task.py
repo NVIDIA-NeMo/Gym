@@ -5,11 +5,15 @@
 
 import re
 from dataclasses import asdict, dataclass
-from typing import Literal, NotRequired, TypedDict
+from typing import Literal, NotRequired, TypedDict, get_args
 
 
 Setting = Literal["single_turn", "agentic"]
 LABELS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+# How a single-turn question asks for its answer. boxed (the default) asks for \boxed{letter}, which the rule-based
+# answer policies read. Each other style asks for the bare letter in the words of that benchmark's reference
+# evaluation (sources in the video_mcqa README); answers to it are read with answer_policy llm_extraction_v1.
+PromptStyle = Literal["boxed", "videomme_v2", "videomme_v1", "lvbench"]
 
 
 def _text(value: str, name: str) -> None:
@@ -154,9 +158,37 @@ def _question_text(question: VideoQuestion, *, video_path: str | None = None) ->
     return text + "\n".join(f"{label}. {option}" for label, option in zip(LABELS, question.options))
 
 
-def prepare_single_turn(question: VideoQuestion, *, expected_answer: str, video_url: str) -> PreparedTask:
+def _letter_question_text(question: VideoQuestion, prompt: PromptStyle) -> str:
+    options = [f"{label}. {option}" for label, option in zip(LABELS, question.options)]
+    if prompt == "videomme_v2":
+        letters = LABELS[: len(question.options)]
+        return "\n".join(
+            (
+                question.question,
+                *options,
+                f"Respond with only the letter ({', '.join(letters[:-1])}, or {letters[-1]}) of the correct option.",
+                "Answer: ",
+            )
+        )
+    if prompt == "videomme_v1":
+        if len(question.options) != 4:
+            raise ValueError("The videomme_v1 prompt names exactly four options")
+        instruction = (
+            "Select the best answer to the following multiple-choice question based on the video. "
+            "Respond with only the letter (A, B, C, or D) of the correct option."
+        )
+        return "\n".join((instruction, question.question, *options, "The best answer is:"))
+    options = [f"({label}) {option}" for label, option in zip(LABELS, question.options)]
+    return "\n".join((question.question, *options, "Answer with the option's letter from the given choices directly."))
+
+
+def prepare_single_turn(
+    question: VideoQuestion, *, expected_answer: str, video_url: str, prompt: PromptStyle = "boxed"
+) -> PreparedTask:
     """Attach prepared video once; sampling remains an explicit external step."""
     _text(video_url, "video_url")
+    if prompt not in get_args(PromptStyle):
+        raise ValueError(f"Unknown prompt style {prompt!r}")
     metadata = VerifierMetadata.from_question(question, expected_answer=expected_answer)
     return {
         "task_id": question.task_id,
@@ -169,7 +201,12 @@ def prepare_single_turn(question: VideoQuestion, *, expected_answer: str, video_
                     "role": "user",
                     "content": [
                         {"type": "input_video", "video_url": video_url},
-                        {"type": "input_text", "text": _question_text(question)},
+                        {
+                            "type": "input_text",
+                            "text": _question_text(question)
+                            if prompt == "boxed"
+                            else _letter_question_text(question, prompt),
+                        },
                     ],
                 }
             ],

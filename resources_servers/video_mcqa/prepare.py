@@ -9,7 +9,7 @@ import json
 from collections import Counter
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
-from typing import cast
+from typing import cast, get_args
 
 from resources_servers.video_mcqa.app import AccuracyCohort
 from resources_servers.video_mcqa.dataset import (
@@ -20,7 +20,7 @@ from resources_servers.video_mcqa.dataset import (
     load_videomme_v1,
 )
 from resources_servers.video_mcqa.scoring import AnswerPolicy
-from resources_servers.video_mcqa.task import Setting, prepare_agentic, prepare_single_turn
+from resources_servers.video_mcqa.task import PromptStyle, Setting, prepare_agentic, prepare_single_turn
 
 
 def sha256_file(path: Path) -> str:
@@ -58,6 +58,7 @@ def prepare_dataset(
     dataset_revision: str,
     media: Mapping[str, VideoSource],
     setting: Setting,
+    prompt: PromptStyle = "boxed",
     answer_policy: AnswerPolicy = "boxed_only_v1",
     num_repeats: int = 1,
     sandbox_root: str = "/testbed",
@@ -75,6 +76,8 @@ def prepare_dataset(
         raise ValueError("sandbox_root must be an absolute sandbox directory")
     if benchmark not in SOURCES or setting not in ("single_turn", "agentic"):
         raise ValueError("Unknown benchmark or setting")
+    if prompt not in ("boxed", benchmark) or (prompt != "boxed" and setting != "single_turn"):
+        raise ValueError("Single-turn rows take the boxed prompt or their own benchmark's; agentic rows the boxed one")
     loader = load_videomme_v1 if benchmark == "videomme_v1" else load_lvbench
     annotations = loader(records, dataset_revision=dataset_revision, media=media)
     rows = []
@@ -85,7 +88,7 @@ def prepare_dataset(
             if not binding.video_url:
                 raise ValueError(f"Video {question.video_id!r} needs a prepared VideoAnyRes video_url")
             prepared = prepare_single_turn(
-                question, expected_answer=annotation.expected_answer, video_url=binding.video_url
+                question, expected_answer=annotation.expected_answer, video_url=binding.video_url, prompt=prompt
             )
             row = cast(dict[str, object], dict(prepared))
         else:
@@ -121,6 +124,7 @@ def prepare_files(
     benchmark: Benchmark,
     dataset_revision: str,
     setting: Setting,
+    prompt: PromptStyle = "boxed",
     answer_policy: AnswerPolicy = "boxed_only_v1",
     num_repeats: int = 1,
     sandbox_root: str = "/testbed",
@@ -143,6 +147,7 @@ def prepare_files(
         dataset_revision=dataset_revision,
         media=media,
         setting=setting,
+        prompt=prompt,
         answer_policy=answer_policy,
         num_repeats=num_repeats,
         sandbox_root=sandbox_root,
@@ -172,6 +177,7 @@ def prepare_files(
         "original_videos_hashed": len(checked),
         "audio": False,
         "subtitles": False,
+        "prompt": prompt,
         "evaluation_only": True,
         "annotation_warning_counts": dict(
             Counter(warning for row in rows for warning in row.get("annotation_warnings", []))
@@ -198,7 +204,8 @@ def main() -> None:
     parser.add_argument("--dataset-revision", required=True)
     parser.add_argument("--media-manifest", type=Path, required=True)
     parser.add_argument("--setting", choices=("single_turn", "agentic"), required=True)
-    parser.add_argument("--answer-policy", choices=("boxed_only_v1", "boxed_or_letter_v1"), default="boxed_only_v1")
+    parser.add_argument("--prompt", choices=("boxed", "videomme_v1", "lvbench"), default="boxed")
+    parser.add_argument("--answer-policy", choices=get_args(AnswerPolicy), default="boxed_only_v1")
     parser.add_argument("--num-repeats", type=int, default=1)
     parser.add_argument(
         "--sandbox-root", default="/testbed", help="agentic: the sandbox_media_root that prompts name the video under"
