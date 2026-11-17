@@ -20,9 +20,11 @@ from nemo_gym.core.failure_kinds import (
 )
 from nemo_gym.core.outcome_policy import (
     OutcomeAction,
+    OutcomePolicyConfig,
     StageOutcomePolicyConfig,
     StagePolicyConfig,
     choose_stage_outcome,
+    declare_action_kind,
 )
 from nemo_gym.trajectory.trajectory_record import SandboxObservation
 
@@ -238,3 +240,41 @@ def test_event_adapter_uses_supplied_classification_without_mutating_event():
     assert failure_outcome_policy(failure, config=policy) == "fail"
     assert failure_outcome_policy(failure, config=policy, classification=classification) == "retry"
     assert failure.to_record() == before
+
+
+def test_a_boundary_overlay_keeps_its_default_classification_under_a_partial_override() -> None:
+    defaults = StageOutcomePolicyConfig(
+        classification={
+            "by_stage": {"agent": {"by_failure_kind": {"demo:cut_off": "evaluation", "demo:other": "model"}}}
+        },
+        by_stage={"agent": {"by_failure_class": {"evaluation": "retry"}}},
+    )
+    override = {"classification": {"by_stage": {"agent": {"by_failure_kind": {"demo:cut_off": "model"}}}}}
+
+    policy = StageOutcomePolicyConfig.model_validate(StageOutcomePolicyConfig.overlay(defaults, override))
+
+    kinds = policy.classification.by_stage["agent"].by_failure_kind
+    assert (kinds["demo:cut_off"], kinds["demo:other"]) == ("model", "model")
+    assert kinds[PROVIDER_OOM_KILLED] == "model"  # the shared default stays
+    assert policy.by_stage["agent"].by_failure_class == {"evaluation": "retry"}
+    # With no classification override at all, the boundary's classification stands.
+    untouched = StageOutcomePolicyConfig.model_validate(StageOutcomePolicyConfig.overlay(defaults, {}))
+    assert untouched.classification.by_stage["agent"].by_failure_kind["demo:cut_off"] == "evaluation"
+    # The boundary's own rules still select the action, and the attribution follows the classification.
+    cut_off = choose_stage_outcome(failure_kind="demo:cut_off", http_status=None, stage="agent", config=untouched)
+    assert (cut_off.action, cut_off.attribution) == ("retry", "evaluation")
+    other = choose_stage_outcome(failure_kind="demo:other", http_status=None, stage="agent", config=untouched)
+    assert (other.action, other.attribution) == ("fail", "model")
+
+
+def test_an_action_rule_names_only_the_namespaced_kinds_a_boundary_declared() -> None:
+    kind = declare_action_kind("demo:declared_cut_off")
+
+    assert StagePolicyConfig(by_failure_kind={kind: "retry"}).by_failure_kind[kind] == "retry"
+    assert OutcomePolicyConfig(default_action="fail", by_failure_kind={kind: "retry"}).by_failure_kind[kind] == "retry"
+    # An undeclared name, a misspelled registered one and a name that is not namespaced stay rejected.
+    for name in ("demo:undeclared", "provider_oom_kild"):
+        with pytest.raises(ValidationError, match="Unregistered failure kinds"):
+            StagePolicyConfig(by_failure_kind={name: "retry"})
+    with pytest.raises(ValueError, match="not a namespaced"):
+        declare_action_kind("provider_oom_killed")

@@ -21,6 +21,7 @@ from nemo_gym.core.failure_kinds import (
     FailureStage,
     _merge_stage_overrides,
     classify_failure,
+    is_namespaced,
 )
 
 
@@ -54,8 +55,22 @@ def is_policy_counted_zero(row: Mapping[str, object]) -> bool:
     )
 
 
+_DECLARED_ACTION_KINDS: set[str] = set()
+
+
+def declare_action_kind(kind: str) -> str:
+    """Let a boundary's action rules select its own ``<server>:<kind>``, as its classification already can.
+
+    Only the kinds a boundary declares are accepted; a misspelled name is still rejected at configuration load.
+    """
+    if not is_namespaced(kind):
+        raise ValueError(f"{kind!r} is not a namespaced <server>:<kind> failure kind")
+    _DECLARED_ACTION_KINDS.add(kind)
+    return kind
+
+
 def _require_registered_kinds[T](value: dict[str, T]) -> dict[str, T]:
-    invalid = value.keys() - FAILURE_KINDS - {"unknown"}
+    invalid = value.keys() - FAILURE_KINDS - {"unknown"} - _DECLARED_ACTION_KINDS
     if invalid:
         raise ValueError(f"Unregistered failure kinds: {sorted(invalid)}")
     return value
@@ -204,15 +219,28 @@ class StageOutcomePolicyConfig(BaseModel):
     def overlay(cls, defaults: "StageOutcomePolicyConfig", override: object) -> object:
         """Merge an explicit override over a boundary's own defaults instead of the shared ones.
 
-        Rules the override does not mention keep the boundary's default. Anything that is not a policy mapping or
-        model is returned unchanged for validation to reject.
+        Rules the override does not mention keep the boundary's default, in the classification as in the stage
+        policies. Anything that is not a policy mapping or model is returned unchanged for validation to reject.
         """
         if isinstance(override, StageOutcomePolicyConfig):
             override = override.model_dump(exclude_unset=True)
         if not isinstance(override, dict):
             return override
+        classification = override.get("classification", {})
+        if isinstance(classification, FailureClassificationConfig):
+            classification = classification.model_dump(exclude_unset=True)
         return {
             **override,
+            "classification": {
+                **classification,
+                "by_stage": _merge_stage_overrides(
+                    defaults.classification.by_stage,
+                    classification.get("by_stage", {}),
+                    dict_fields=("by_failure_kind",),
+                ),
+            }
+            if isinstance(classification, dict)
+            else classification,
             "by_stage": _merge_stage_overrides(
                 defaults.by_stage,
                 override.get("by_stage", {}),
