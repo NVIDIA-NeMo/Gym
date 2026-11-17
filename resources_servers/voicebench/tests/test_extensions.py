@@ -6,7 +6,7 @@ import asyncio
 import json
 import random
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -23,7 +23,7 @@ from resources_servers.voicebench.app import (
 from resources_servers.voicebench.scorers import bbh, mcq
 from resources_servers.voicebench.scorers.pedant import PortableLinearClassifier, load_pedant, pedant_correct
 from resources_servers.voicebench.scorers.reference_qa import ReferenceQAScorer
-from resources_servers.voicebench.tests.test_app import candidate, request, server
+from resources_servers.voicebench.tests.test_app import _global_config, candidate, request, server
 from resources_servers.voicebench.tests.test_judge import client, judge_settings
 
 
@@ -37,11 +37,14 @@ def reasoning_only(text: str = "so the answer is C"):
 # ---- Message-text answers ----------------------------------------------------------------------------------------
 
 
-def test_message_text_is_the_assistant_message_as_returned():
+def test_message_text_is_the_last_assistant_message_as_returned():
     assert message_text(candidate("\nThe answer is: C\n")) == "\nThe answer is: C\n"
     assert message_text(reasoning_only()) == ""
-    two = candidate("first").output[0].model_dump(), candidate("second").output[0].model_dump()
-    assert message_text(candidate(output=list(two))) == "firstsecond"
+    two = candidate("Maybe A").output[0].model_dump(), candidate("The answer is B").output[0].model_dump()
+    # An earlier (commentary) message is not fused into the answer: "Maybe AThe answer is B" would let the MCQ and BBH
+    # parsers pick up the commentary's letter.
+    response = candidate(output=list(two))
+    assert message_text(response) == final_answer(response) == "The answer is B"
 
 
 def test_message_mode_scores_a_response_without_final_message_as_empty(tmp_path):
@@ -236,7 +239,9 @@ def write_prompts(tmp_path: Path) -> dict[str, str]:
     return paths
 
 
-def all_server(tmp_path: Path, subsets: dict[str, int] | None = None, **overrides) -> VoiceBenchServer:
+def all_server(
+    tmp_path: Path, subsets: dict[str, int] | None = None, *, replies: tuple[str, ...] = ("4", "4", "4"), **overrides
+) -> VoiceBenchServer:
     config = VoiceBenchConfig(
         name="voicebench_all",
         host="127.0.0.1",
@@ -248,7 +253,7 @@ def all_server(tmp_path: Path, subsets: dict[str, int] | None = None, **override
         judge_prompt_files=write_prompts(tmp_path),
         **overrides,
     )
-    return VoiceBenchServer(config=config, server_client=client(["4", "4", "4"]))
+    return VoiceBenchServer(config=config, server_client=client(list(replies)))
 
 
 def test_all_mode_validates_its_configuration(tmp_path):
@@ -328,3 +333,131 @@ def test_judge_prompt_is_resolved_against_the_install_when_relative(tmp_path, mo
 
     scorer = OpenJudgeScorer(settings, client())
     assert scorer.prompt.system == "fixture judge"
+
+
+# ---- Reviewed paths: subset failures, replay, startup check, PEDANT through the server, fixture --------------------------
+
+
+def verified(svc: VoiceBenchServer, index: int, subset: str, **kwargs) -> dict:
+    """A verify row as the aggregator receives it: JSON-shaped, with Gym's source task index."""
+    row = asyncio.run(svc.verify(request(str(index), subset=subset, **kwargs))).model_dump(mode="json")
+    return row | {"_ng_task_index": index, "_ng_rollout_index": 0}
+
+
+def test_message_mode_scores_the_last_message_not_a_commentary_before_it(tmp_path):
+    two = candidate("Maybe A").output[0].model_dump(), candidate("The answer is B").output[0].model_dump()
+    svc = server(tmp_path, subset="mmsu", scoring_type="mcq", answer_extraction="message")
+    result = asyncio.run(svc.verify(request(subset="mmsu", response=candidate(output=list(two)), reference="B")))
+    assert result.scoring_answer == "The answer is B" and result.reward == 1
+
+
+def test_one_unparseable_judge_grade_costs_only_its_subset(tmp_path):
+    svc = all_server(tmp_path, {"alpacaeval": 1, "mmsu": 1}, replies=("Great answer",) * 3)
+    rows = [
+        verified(svc, 0, "alpacaeval"),
+        verified(svc, 1, "mmsu", response=candidate("The answer is C"), reference="C"),
+    ]
+    assert not rows[0]["score_valid"] and rows[0]["legacy_scoring_error"]
+    for aggregated in (
+        svc.compute_metrics([rows]),
+        asyncio.run(svc.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))).agent_metrics,
+    ):
+        assert "legacy VoiceBench evaluation failed" in aggregated["voicebench/alpacaeval/aggregation_error"]
+        assert not [key for key in aggregated if key.startswith("voicebench/alpacaeval/legacy/")]
+        assert aggregated["voicebench/mmsu/legacy/acc"] == 100 and aggregated["voicebench/mmsu/complete"]
+        assert "voicebench/mmsu/aggregation_error" not in aggregated
+    # A single-subset runtime still refuses, as the reference evaluator does.
+    single = server(tmp_path, expected=1)
+    row = asyncio.run(single.verify(request(subset="alpacaeval_full"))).model_dump(mode="json")
+    with pytest.raises(ValueError, match="legacy VoiceBench evaluation failed"):
+        single.compute_metrics([[row | {"legacy_scoring_error": "unparseable grade"}]])
+
+
+def test_all_mode_replays_random_fallback_guesses_like_a_single_subset_run(tmp_path):
+    """Seed 2 guesses A, A, A, C for four unparsed answers; the reference is A, so each subset scores 75."""
+    subsets = ("mmsu", "openbookqa")
+    svc = all_server(tmp_path, {name: 4 for name in subsets}, seed=2)
+    rows = [
+        verified(svc, 2 * position + offset, name, response=candidate("I do not know"), reference="A")
+        for position in range(4)
+        for offset, name in enumerate(subsets)
+    ]
+    metrics = svc.compute_metrics([rows])
+    single = server(tmp_path, subset="openbookqa", scoring_type="mcq", expected=4, seed=2)
+    single_metrics = single.compute_metrics(
+        [[verified(single, i, "openbookqa", response=candidate("I do not know"), reference="A") for i in range(4)]]
+    )
+    assert single_metrics["voicebench/legacy/acc"] == 75
+    for name in subsets:
+        assert metrics[f"voicebench/{name}/legacy/acc"] == 75
+        assert metrics[f"voicebench/{name}/legacy/acc_unparsed_wrong"] == 0
+        assert metrics[f"voicebench/{name}/legacy/acc"] == single_metrics["voicebench/legacy/acc"]
+    # Arrival order does not matter: replay follows the source task index within each subset.
+    assert svc.compute_metrics([list(reversed(rows))]) == metrics
+
+
+def test_all_mode_startup_rejects_an_unset_judge_endpoint(tmp_path):
+    unset = "resources_servers.voicebench.app.get_global_config_dict"
+    with patch(unset, return_value=_global_config("http://unset.local/v1")):
+        for subsets in ({"alpacaeval": 1}, {"sd-qa": 1}, {"mmsu": 1, "alpacaeval": 1, "sd-qa": 1}):
+            with pytest.raises(ValueError, match="judge_base_url"):
+                all_server(tmp_path, subsets)
+        # Rule-scored subsets never read the judge endpoint.
+        all_server(tmp_path, {"mmsu": 1, "advbench": 1})
+    with patch(unset, return_value=_global_config("http://judge/v1")):
+        all_server(tmp_path, {"mmsu": 1, "alpacaeval": 1, "sd-qa": 1})
+
+
+def test_sd_qa_pedant_through_the_server_in_all_mode(tmp_path):
+    pytest.importorskip("qa_metrics")
+    pytest.importorskip("sklearn")
+    svc = all_server(tmp_path, {"sd-qa": 2}, replies=("Yes", "Yes", "Yes"), sdqa_pedant=True)
+    question = "What is the capital of France?"
+    rows = [
+        verified(
+            svc,
+            0,
+            "sd-qa",
+            response=candidate("The capital is Paris."),
+            reference="Paris",
+            prompt=question,
+            split="aus",
+        ),
+        verified(
+            svc, 1, "sd-qa", response=candidate("It is London."), reference="Paris", prompt=question, split="usa"
+        ),
+    ]
+    metrics = svc.compute_metrics([rows])
+    assert metrics["voicebench/sd-qa/legacy/gpt"] == 100 and metrics["voicebench/sd-qa/legacy/panda"] == 50
+    assert metrics["voicebench/sd-qa/split/aus/legacy/panda"] == 100
+    assert metrics["voicebench/sd-qa/split/usa/legacy/panda"] == 0
+
+
+def test_pedant_verdict_that_only_the_classifier_can_give():
+    pytest.importorskip("qa_metrics")
+    pytest.importorskip("sklearn")
+    # "quick fox" is not a substring of the answer, so qa-metrics' substring shortcut does not apply.
+    pedant = load_pedant()
+    assert pedant_correct(pedant, reference="quick fox", answer="the quick brown fox", question="summarize the phrase")
+
+
+def test_the_verifier_fixture_runs_its_cases():
+    from nemo_gym.verification import exercise_verifier_fixture
+    from resources_servers.voicebench.app import VERIFIER_FIXTURE
+
+    results = asyncio.run(exercise_verifier_fixture(VERIFIER_FIXTURE, reward_range=(0.0, 1.0), determinism="unknown"))
+    assert {result.kind for result in results} >= {"full_reward", "zero_reward", "malformed"}
+
+
+def test_shipped_config_defaults_serve_all_mode_and_single_subsets_still_fail_fast():
+    path = Path(__file__).resolve().parents[1] / "configs" / "voicebench.yaml"
+    shipped = yaml.safe_load(path.read_text())["voicebench"]["resources_servers"]["voicebench"]
+    assert shipped["scoring_type"] is None and shipped["expected_num_rows"] is None
+    base = {key: value for key, value in shipped.items() if key in VoiceBenchConfig.model_fields}
+    base |= {"name": "voicebench", "host": "127.0.0.1", "port": 1, "entrypoint": "app.py"}
+    # `subset: all` works with the shipped defaults, as the YAML comment says.
+    config = VoiceBenchConfig(**(base | {"subset": "all", "expected_rows": {"mmsu": 1, "advbench": 1}}))
+    assert config.subsets == ["mmsu", "advbench"]
+    # A single subset still reports the missing values.
+    with pytest.raises(ValidationError, match="scoring_type and expected_num_rows"):
+        VoiceBenchConfig(**(base | {"subset": "mmsu"}))

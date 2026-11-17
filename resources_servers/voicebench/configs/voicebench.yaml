@@ -5,12 +5,13 @@ voicebench:
       domain: e2e
       verified: false
       description: VoiceBench audio response evaluation with versioned subset-specific scorers
-      # One subset per runtime, or `all` to score every subset in `expected_rows` (see README.md).
+      # One subset per runtime, or `all` to score every subset in `expected_rows` (see README.md). A single subset
+      # requires `scoring_type` and `expected_num_rows`; `all` takes neither (the server validates both cases).
       subset: ???
-      scoring_type: ???
+      scoring_type: null
       scoring_version: legacy_v1
       seed: null
-      expected_num_rows: ???
+      expected_num_rows: null
       expected_rows: null
       expected_sample_ids_file: null
       answer_extraction: vlmeval

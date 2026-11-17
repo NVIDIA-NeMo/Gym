@@ -24,7 +24,13 @@ from pydantic import (
 
 from nemo_gym import CACHE_DIR
 from nemo_gym.client import ServerClient
-from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, get_global_config_dict
+from nemo_gym.config import (
+    CACHE_DIR_KEY_NAME,
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    get_global_config_dict,
+    maybe_get_global_config_dict,
+)
 from nemo_gym.core import JUDGE_UNPARSEABLE, NeMoGymResponse
 from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.server_runtime import (
@@ -66,7 +72,7 @@ class VoiceBenchConfig(BaseResourcesServerConfig, JudgeSettings):
     nltk_data_dir: str | None = None
     judge_prompt_files: dict[ScoringType, str] | None = None
     # "vlmeval": reference audio adapter answer (last message, empty answer falls back to reasoning, blank is "nan").
-    # "message": the assistant message text as returned, so a response without one is scored as empty.
+    # "message": the last assistant message's text as returned, so a response without one is scored as empty.
     answer_extraction: Literal["vlmeval", "message"] = "vlmeval"
 
     @property
@@ -158,14 +164,15 @@ def final_answer(response: NeMoGymResponse) -> str:
 
 
 def message_text(response: NeMoGymResponse) -> str:
-    """The assistant message text as returned; a response that never reached its final message is empty."""
-    return "".join(
-        part.text
-        for item in response.output
-        if item.type == "message" and item.role == "assistant"
-        for part in item.content
-        if part.type == "output_text"
-    )
+    """The last assistant message's text, as returned; a response that never reached its final message is empty.
+
+    Like ``final_answer`` this reads only the last assistant message, so an earlier commentary message is not fused
+    into the answer. Its ``output_text`` parts are joined without a separator, as returned.
+    """
+    for item in reversed(response.output):
+        if item.type == "message" and item.role == "assistant":
+            return "".join(part.text for part in item.content if part.type == "output_text")
+    return ""
 
 
 def _expected_ids(path: str, subset: str) -> set[str]:
@@ -197,7 +204,11 @@ def _ensure_nltk(data_dir: str | None) -> None:
     import nltk
 
     if data_dir is None:
-        data_dir = os.environ.get("NLTK_DATA", "").split(os.pathsep)[0] or str(CACHE_DIR / "voicebench" / "nltk_data")
+        # Consult the global config only when this process already has one: a bare process never parses a CLI.
+        cache_dir = (maybe_get_global_config_dict() or {}).get(CACHE_DIR_KEY_NAME) or CACHE_DIR
+        data_dir = os.environ.get("NLTK_DATA", "").split(os.pathsep)[0] or str(
+            Path(cache_dir) / "voicebench" / "nltk_data"
+        )
     Path(data_dir).mkdir(parents=True, exist_ok=True, mode=0o700)
     nltk.data.path.insert(0, data_dir)
     for name in ("punkt", "punkt_tab"):
@@ -338,7 +349,12 @@ class VoiceBenchServer(SimpleResourcesServer):
             by_subset[name].append(row)
         metrics: dict[str, MetricValue] = {}
         for name, rows in by_subset.items():
-            metrics |= self._subset_metrics([rows], name)
+            try:
+                metrics |= self._subset_metrics([rows], name)
+            except ValueError as error:
+                # A subset refuses to aggregate when one of its rows could not be scored (for example an unparseable
+                # judge grade). That is that subset's failure, not the whole benchmark's: keep every other subset.
+                metrics[f"voicebench/{name}/aggregation_error"] = str(error)
         return metrics
 
     def get_key_metrics(self, agent_metrics: dict[str, MetricValue]) -> dict[str, MetricValue]:

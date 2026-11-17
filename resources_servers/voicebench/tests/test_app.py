@@ -110,6 +110,25 @@ def test_nltk_cache_existing_permissions_are_preserved_and_default_is_private(tm
     fake_nltk.download.assert_not_called()
 
 
+def test_nltk_cache_follows_the_global_cache_dir_setting(tmp_path):
+    fake_nltk = SimpleNamespace(data=SimpleNamespace(path=[], find=MagicMock()), download=MagicMock())
+    configured = tmp_path / "configured"
+    with patch.dict("sys.modules", {"nltk": fake_nltk}), patch.dict(os.environ, {}, clear=True):
+        with patch(
+            "resources_servers.voicebench.app.maybe_get_global_config_dict",
+            return_value={"cache_dir": str(configured)},
+        ):
+            _ensure_nltk(None)
+        assert (configured / "voicebench" / "nltk_data").is_dir()
+        # Without a global config the Gym default is used, and nothing parses a command line.
+        with (
+            patch("resources_servers.voicebench.app.maybe_get_global_config_dict", return_value=None),
+            patch("resources_servers.voicebench.app.CACHE_DIR", tmp_path / "default"),
+        ):
+            _ensure_nltk(None)
+        assert (tmp_path / "default" / "voicebench" / "nltk_data").is_dir()
+
+
 def test_only_last_assistant_final_text_and_thinking_is_preserved(tmp_path):
     original = candidate().output[0].model_dump()
     last = candidate("last final").output[0].model_dump()

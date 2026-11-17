@@ -14,8 +14,8 @@ the candidate sees only `responses_create_params` and the external audio referen
 | advbench | refusal | Refusal rate × 100 |
 | sd-qa | reference_qa | Reference-grounded Yes/No majority accuracy × 100 |
 
-`subset`, `scoring_type`, and positive `expected_num_rows` are required. Unknown combinations fail
-validation. `scoring_version: legacy_v1` identifies the pinned public VoiceBench parser profile
+In single-subset mode `subset`, `scoring_type`, and positive `expected_num_rows` are required (`subset: all`, below,
+takes `expected_rows` instead). Unknown combinations fail validation. `scoring_version: legacy_v1` identifies the pinned public VoiceBench parser profile
 plus NVIDIA answer-format extensions for the `mcq` and `refusal` scorers: LaTeX `\boxed{}` and
 Markdown-bold answers, and curly-apostrophe refusals. They recover answers the public parsers miss,
 so OpenBookQA, MMSU and AdvBench can score higher than the public evaluator. See
@@ -64,13 +64,14 @@ Full completion requires exactly `expected_num_rows` distinct source sample IDs,
 completed candidate responses. Optional `expected_sample_ids_file` accepts a JSON array of source
 sample IDs, one ID per line, or dataset JSONL with `verifier_metadata.sample_id`; its count must
 match the configured expected count. Missing, unexpected and duplicate IDs prevent full completion.
-Each runtime reports one subset; suite weighting belongs to the suite configuration, not a pooled
-row-reward average. IFEval aggregate uses the four original denominator-aware ratios rather than
+A single-subset runtime reports one subset (`subset: all` reports each subset separately, below); suite weighting
+belongs to the suite configuration, not a pooled row-reward average. IFEval aggregate uses the four original denominator-aware ratios rather than
 mean per-row rewards.
 
 Rule modules and vendored source are imported only for the selected scorer. Only IFEval provisions
 NLTK punkt/punkt_tab when missing; `nltk_data_dir` or `NLTK_DATA` selects the cache location,
-otherwise the private Gym cache directory (`nemo_gym.CACHE_DIR/voicebench/nltk_data`) is used.
+otherwise `voicebench/nltk_data` under the private Gym cache directory (the global `cache_dir` setting, or
+`nemo_gym.CACHE_DIR` when it is unset) is used.
 External audio is resolved by the model adapter, so scoring saved final outputs through `/verify`
 does not require an audio/model call. `scorers.open_judge.score_outputs` also parses cached judge
 grades without HTTP for offline score parity.
@@ -104,7 +105,10 @@ These options are off by default; the single-subset behavior above is unchanged.
   `verifier_metadata.subset` selects its scorer, the open and reference-QA judges take `judge_prompt_files`
   (`{open: ..., reference_qa: ...}`) and share one `judge_max_concurrency` budget, and every metric moves under
   `voicebench/<subset>/` (`voicebench/<subset>/legacy/gpt`, `voicebench/<subset>/complete`, ...). Relative prompt paths
-  resolve against the working directory, then the Gym install.
+  resolve against the working directory, then the Gym install. The config's `scoring_type` and `expected_num_rows`
+  default to `null`, which is what `all` mode requires. A subset that cannot aggregate (for example one unparseable
+  open-judge grade, which a single-subset runtime refuses as described above) reports
+  `voicebench/<subset>/aggregation_error` with the reason and leaves every other subset's metrics intact.
 - `verifier_metadata.split` (SD-QA region, AlpacaEval speaker voice, MMSU category) adds per-split metrics,
   `voicebench/split/<split>/legacy/...` (`voicebench/<subset>/split/<split>/...` in `subset: all` mode), when a
   subset has two or more splits.
@@ -112,9 +116,13 @@ These options are off by default; the single-subset behavior above is unchanged.
   instead of a random guess, and `legacy/parse_rate`. The legacy `acc` is unchanged.
 - `sdqa_pedant: true` scores SD-QA's PEDANT metric locally (`legacy/panda`, otherwise the placeholder -100). It needs
   `qa-metrics` and uses the classifier export in [vendor/pedant](vendor/pedant/README.md).
-- `answer_extraction: message` scores the assistant message text as returned and leaves a blank answer blank: a
+- `answer_extraction: message` scores the last assistant message's text as returned (like the default, only the last
+  message counts, so an earlier commentary message is never fused into the answer) and leaves a blank answer blank: a
   response that never reached its final message (for example a reasoning model that hit the token limit) is
   scored as empty. The default, `vlmeval`, scores the reasoning of such a response and sends `nan` for a blank one.
+  The AdvBench refusal rule counts an empty response as refused, so such a response scores 1 on `advbench` in
+  `message` mode and 0 in `vlmeval` mode (`nan`); this follows the reference rule. Use the `status_safe_*` rewards,
+  which are zero for an incomplete candidate, when those rows should not count.
 - The pinned public evaluators map a bare `b` answer to Hyperbaton option (a), which VoiceBench later fixed
   (`4c3aac9`); `legacy_v1` keeps the pinned behavior.
 
