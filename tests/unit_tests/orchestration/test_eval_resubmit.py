@@ -34,7 +34,7 @@ from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
 from nemo_gym.orchestration.executors.otel import render_collector_config
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.executors.slurm.resume_script import RETRY_FILE_NAME, render_resume_prologue
-from nemo_gym.orchestration.executors.slurm.script import build_sbatch_script
+from nemo_gym.orchestration.executors.slurm.script import COLLECTOR_LOCAL_DIR_MARKER, build_sbatch_script
 from nemo_gym.orchestration.jobs import (
     INDEX_RESTORE_JOURNAL_NAME,
     MANIFEST_NAME,
@@ -894,6 +894,25 @@ def test_a_saved_command_without_a_policy_model_still_refuses_run(tmp_path: Path
 def test_a_hand_written_command_with_run_is_still_refused(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="sets both `command` and `run`"):
         SubmitConfig.model_validate(_command_policy_config(tmp_path, dict(_DERIVED_POLICY_RUN)))
+
+
+def test_resubmit_points_the_collector_files_where_the_queued_job_sh_expects_them(
+    tmp_path: Path, slurm_bin: Path, ssh_like_shell: None
+) -> None:
+    job_dir = _staged_run(tmp_path, config=_config(tmp_path, otel={"remote_export": False}))
+    collector_path = job_dir / "otel" / "collector.yaml"
+
+    def file_paths() -> set[str]:
+        exporters = yaml.safe_load(collector_path.read_text())["exporters"]
+        return {exporter["path"] for name, exporter in exporters.items() if name.startswith("file/")}
+
+    # A job.sh from before the node-local copy never moves files into the job dir, so its collector writes there.
+    assert resubmit(*_handle(job_dir)).job_id == "4242"
+    assert file_paths() == {str(job_dir / "otel" / f"{signal}.jsonl") for signal in ("metrics", "traces", "logs")}
+
+    (job_dir / "job.sh").write_text(_JOB_SH + f"sh -c '{COLLECTOR_LOCAL_DIR_MARKER}\"$dir\"' &\n")
+    assert resubmit(*_handle(job_dir)).job_id == "4242"
+    assert file_paths() == {f"${{env:GYM_OTEL_LOCAL_DIR}}/{signal}.jsonl" for signal in ("metrics", "traces", "logs")}
 
 
 def test_resubmit_without_auth_updates_the_collector_and_can_restore_remote_export(

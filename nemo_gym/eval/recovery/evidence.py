@@ -42,6 +42,7 @@ from nemo_gym.eval.recovery.markers import (
     CANCELLED_FOLLOWUP_MARKER,
     FOLLOW_UP_SUBMISSION_REFUSED,
     GUARDED_DRIVER_FAILURE_KINDS,
+    NO_ELIGIBLE_RETRY_REASON,
     PROVISIONAL_MARKER_PREFIX,
 )
 
@@ -99,6 +100,9 @@ COLLECT_SCRIPT = (
     + "\n"
     + "FOLLOW_UP_SUBMISSION_REFUSED = "
     + repr(FOLLOW_UP_SUBMISSION_REFUSED)
+    + "\n"
+    + "NO_ELIGIBLE_RETRY_REASON = "
+    + repr(NO_ELIGIBLE_RETRY_REASON)
     + "\n"
     + "TASK_ID_FIELDS = "
     + repr(TASK_ID_FIELDS)
@@ -1118,12 +1122,15 @@ if len(sys.argv) > 2:
     except (OSError, ValueError, KeyError, TypeError, IndexError):
         pass
 coverage_allocation_id = None
+coverage_writer_unrecorded = False
 coverage_scored = None
 try:
     # The allocation that last opened the Store for writing; only its id leaves the run host.
     report = json.load(open(os.path.join(a, "rollouts_coverage.json")))
     value = report.get("allocation_id")
     coverage_allocation_id = value if isinstance(value, str) and value.isascii() and value.isdecimal() else None
+    # A worker older than allocation_id leaves the key out; a writer outside Slurm records null.
+    coverage_writer_unrecorded = "allocation_id" not in report
     # Collection's own count of the rollouts whose score entered the metrics, and its expected count.
     if all(type(report.get(k)) is int and report[k] >= 0 for k in ("scored", "expected")):
         coverage_scored = [report["scored"], report["expected"]]
@@ -1151,7 +1158,8 @@ collected = {"materialized": rows("rollouts_materialized_inputs.jsonl"), "result
                   "walltime_state": "unknown" if unknown_accounting else num(".gym_accumulated_walltime")[1], "job_chain": chain,
                   "chain_incomplete": os.path.exists(os.path.join(d, ".gym_chain_incomplete")),
                   "quality": quality, "score": score, "mlflow": mlflow, "managed_store": any(managed_store),
-                  "coverage_allocation_id": coverage_allocation_id, "coverage_scored": coverage_scored,
+                  "coverage_allocation_id": coverage_allocation_id, "coverage_writer_unrecorded": coverage_writer_unrecorded,
+                  "coverage_scored": coverage_scored,
                   "benchmark_metric_coverage": benchmark_metric_coverage, "task_selection": task_selection}
 # One closing snapshot: every source hash above is the opening one, so a change during collection shows up here.
 closing_snapshot = {name: sha256(os.path.join(a, name)) for name in source_files}
@@ -1240,6 +1248,16 @@ def chain_continuation_note():
         line = head + DRIVER_INSTALL_FAILED + ": (error text omitted)" + (sep + tail if sep else "")
     return line[:500] if named else None
 collected["chain_continuation_note"] = chain_continuation_note()
+def chain_ended_itself():
+    # True when the marker is the line a job writes when it ends its own chain with nothing eligible for another
+    # attempt (resume_script's NO_ELIGIBLE_RETRY_REASON): the chain stopped there with its accounting written, as a
+    # run whose only open rows are judge failures ends.
+    try:
+        text = open(os.path.join(d, ".gym_chain_incomplete")).read(2000)
+    except OSError:
+        return False
+    return text.strip().splitlines()[:1] == [NO_ELIGIBLE_RETRY_REASON]
+collected["chain_ended_itself"] = chain_ended_itself()
 collected["unreadable_files"] = sorted(unreadable)
 def judge_jobs():
     # The judge-only jobs queued for this run's saved answers (JUDGE_JOB_JOURNAL_NAME, oldest first), each with its
@@ -1380,6 +1398,8 @@ class CollectedEvidence(BaseModel):
     unreadable_files: list[str] = Field(default_factory=list)
     # rollouts_coverage.json's allocation_id: the scheduler allocation that last opened the Store for writing.
     coverage_allocation_id: str | None = None
+    # True when rollouts_coverage.json has no allocation_id key: a worker older than that field wrote it.
+    coverage_writer_unrecorded: bool = False
     # rollouts_coverage.json's (scored, expected): the rollouts collection scored into the metrics, of those expected.
     coverage_scored: tuple[int, int] | None = None
     # The aggregate's own (metric_coverage/trials, metric_coverage/expected, metric_coverage/name or None): the trials
@@ -1424,6 +1444,9 @@ class CollectedEvidence(BaseModel):
     infra_retries_configured: int | None = None
     # The marker line of a continuation that ended before it queued its follow-up, None when there is none.
     chain_continuation_note: str | None = None
+    # True when the marker is the line a job writes when it ends its own chain with nothing eligible for another
+    # attempt (NO_ELIGIBLE_RETRY_REASON): the chain stopped there with its accounting written.
+    chain_ended_itself: bool = False
     # The judge-only jobs queued for the run's saved answers (JUDGE_JOB_JOURNAL_NAME), oldest first: id, partition,
     # profile kind and the services it starts, walltime, rows, receipt path and ``state`` ("queued" without a receipt,
     # else the receipt's "completed" or "failed" with its counts); the executor adds the scheduler's state of a job

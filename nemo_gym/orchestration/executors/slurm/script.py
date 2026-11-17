@@ -38,7 +38,11 @@ from nemo_gym.orchestration.api import (
     effective_ray_serve,
 )
 from nemo_gym.orchestration.executors.otel import (
+    COLLECTOR_DIR,
+    COLLECTOR_FILE_SIGNALS,
     COLLECTOR_HEALTH_PORT,
+    COLLECTOR_LOCAL_DIR_ENV,
+    COLLECTOR_LOCAL_DIR_PREFIX,
     COLLECTOR_SERVICE_NAME,
     FINAL_SCRAPE_GRACE_SECONDS,
     GYM_TELEMETRY_EXTRA,
@@ -195,6 +199,8 @@ def _render_service_command(
     single_node: bool = False,
     nodelist: str | None = None,
     end_step_on_task_exit: bool = True,
+    *,
+    account: str | None = None,
 ) -> str:
     var = bash_var(name)
     env_prefix = _resolve_env(env) if env else ""
@@ -229,9 +235,12 @@ def _render_service_command(
     # cluster's KillOnBadExit and WaitTime defaults, so a multi-task service (vllm_pd tiers, Ray workers) cannot
     # lose a task while its srun stays alive and the driver's watch sees nothing.
     step_flags = " --kill-on-bad-exit=1 --wait=1" if end_step_on_task_exit else ""
+    # Some sites validate each step against the user default account unless it is explicit.
+    # Use the owning allocation account consistently for services, telemetry and drivers.
+    account_flag = f" --account={shlex.quote(account)}" if account else ""
     return (
         f"# service: {name}\n"
-        f"{env_prefix}srun --overlap{node_flags}{container_flags}{step_flags}"
+        f"{env_prefix}srun --overlap{node_flags}{container_flags}{step_flags}{account_flag}"
         f" --output={LOGS_DIRNAME}/{name}-$SLURM_JOB_ID.log {command} &\n"
         f"{var}_PID=$!"
     )
@@ -614,6 +623,7 @@ def _render_ray_service(
             ntasks=_srun_ntasks(service, compute, total_nodes, total_ntasks),
             pre_command=service.pre_command,
             nodelist=_service_nodelist(service, driver_node, total_nodes),
+            account=compute.account,
         )
     ]
     # A worker only joins a running head, and the head may still be installing.
@@ -630,6 +640,7 @@ def _render_ray_service(
                 ntasks=count,
                 pre_command=f"{service.pre_command.rstrip()}\n{wait_for_head}".lstrip(),
                 nodelist=ray_workers_var(name, pool),
+                account=compute.account,
             )
         )
     return "\n\n".join(steps)
@@ -719,8 +730,47 @@ def _with_vllm_traces(
     return service.model_copy(update={"extra_args": extra_args, "env": env})
 
 
+# Only a job.sh whose collector step copies its node-local jsonl into the job directory has this text.
+COLLECTOR_LOCAL_DIR_MARKER = f"export {COLLECTOR_LOCAL_DIR_ENV}="
+
+
+def _collector_command(config: SubmitConfig, remote_bench_dir: Path) -> str:
+    """Run a node-local copy of the collector binary, then append its node-local jsonl into `<job dir>/otel/`.
+
+    The copy-out runs in the collector's own step, the one place that sees its node-local directory: the
+    collector may run on another node than the batch script, or in a container.
+    """
+    binary = shlex.quote(config.otel.binary)
+    name = shlex.quote(Path(config.otel.binary).name)
+    otel_dir = shlex.quote(str(remote_bench_dir / COLLECTOR_DIR))
+    script = "; ".join(
+        [
+            f'src=$(command -v {binary}) || {{ echo "OTel collector binary not found: "{binary} >&2; exit 127; }}',
+            f'dir=$(mktemp -d "{COLLECTOR_LOCAL_DIR_PREFIX}$SLURM_JOB_ID.XXXXXX") && cp "$src" "$dir"/{name} || exit 1',
+            f'{COLLECTOR_LOCAL_DIR_MARKER}"$dir"',
+            # Slurm's TERM at the time limit reaches this shell too: pass it on and wait for the flush.
+            'trap "kill -TERM \\$pid 2>/dev/null" TERM INT',
+            f'"$dir"/{name} --config {shlex.quote(str(collector_config_path(remote_bench_dir)))} & pid=$!',
+            "wait $pid; rc=$?",
+            "while kill -0 $pid 2>/dev/null; do wait $pid; rc=$?; done",
+            # Appended, so the files keep every segment of a resumed run; ignoring TERM keeps the copy whole.
+            'trap "" TERM INT',
+            f'for s in {" ".join(COLLECTOR_FILE_SIGNALS)}; do if [ -e "$dir/$s.jsonl" ]; then '
+            f'cat "$dir/$s.jsonl" >> {otel_dir}/"$s.jsonl" && rm -f "$dir/$s.jsonl"; fi; done',
+            f'rm -f "$dir"/{name}; rmdir "$dir" 2>/dev/null',
+            "exit $rc",
+        ]
+    )
+    return f"sh -c {shlex.quote(script)}"
+
+
 def _render_collector_service(
-    config: SubmitConfig, remote_bench_dir: Path, *, is_multi_node: bool, driver_node: int | None = None
+    config: SubmitConfig,
+    remote_bench_dir: Path,
+    *,
+    is_multi_node: bool,
+    driver_node: int | None = None,
+    account: str | None = None,
 ) -> str:
     """The collector's srun step. Started before the model services so the scrape covers their
     startup.
@@ -728,11 +778,11 @@ def _render_collector_service(
     Runs on exactly one node, the batch host. That is the first node of the allocation, which is
     also where the Ray prelude puts the head of a multi-node vLLM service and where the driver runs,
     so `localhost:<port>` reaches the API server and the OTLP endpoints from the same node. In a
-    container the job directory is mounted for the config and the local `otel/*.jsonl` output; on
-    the node it is simply there, so no mounts or workdir are passed.
+    container the job directory is mounted for the config and the copied `otel/*.jsonl`; on the
+    node it is simply there, so no mounts or workdir are passed.
     """
     obs = config.otel
-    command = f"{shlex.quote(obs.binary)} --config {shlex.quote(str(collector_config_path(remote_bench_dir)))}"
+    command = _collector_command(config, remote_bench_dir)
     container_kwargs = (
         {"mounts": [f"{remote_bench_dir}:{remote_bench_dir}"], "workdir": str(remote_bench_dir)}
         if obs.container is not None
@@ -753,6 +803,7 @@ def _render_collector_service(
         ntasks=1 if driver_node is not None else None,
         # Not watched: losing the collector costs telemetry, not the run, so its step keeps Slurm's defaults.
         end_step_on_task_exit=False,
+        account=account,
         **container_kwargs,
     )
 
@@ -768,23 +819,32 @@ def _render_collector_health_check(config: SubmitConfig, driver_node: int | None
     )
 
 
-def _render_collector_shutdown(config: SubmitConfig, remote_bench_dir: Path) -> str:
+def _render_collector_shutdown(config: SubmitConfig, remote_bench_dir: Path, driver_node: int | None = None) -> str:
     """Run after the driver: one more scrape interval so the final counters are seen, then a
     graceful stop, keeping the driver's exit code.
 
     The TERM goes to the collector process itself, matched by its unique `--config` path. Sent to
     `srun` instead, TERM makes Slurm kill the step outright and INT is treated as a console
-    interrupt; neither reaches the collector, so its final batch would be lost.
+    interrupt; neither reaches the collector, so its final batch and the copy of its jsonl would be lost.
     """
     pid = f"${bash_var(COLLECTOR_SERVICE_NAME)}_PID"
-    # Anchored to the binary: the srun that launched it carries the same `--config <path>` on its
-    # own command line, and a TERM to srun makes Slurm kill the step before the flush completes.
-    binary = re.escape(config.otel.binary)
-    pattern = shlex.quote(f"^{binary} --config {re.escape(str(collector_config_path(remote_bench_dir)))}")
+    # Anchored to the node-local copy of the binary: the srun and the shell that launched it carry the same
+    # `--config <path>` on their own command lines, and a TERM to srun makes Slurm kill the step outright.
+    name = re.escape(Path(config.otel.binary).name)
+    config_path = re.escape(str(collector_config_path(remote_bench_dir)))
+    pattern = (
+        shlex.quote(f"^{re.escape(COLLECTOR_LOCAL_DIR_PREFIX)}")
+        + '"$SLURM_JOB_ID"'
+        + shlex.quote(f"\\.[^/]+/{name} --config {config_path}")
+    )
+    signal = f'pkill -TERM -u "$USER" -f -- {pattern}'
+    if driver_node:
+        # pkill sees only its own node, and the collector runs beside the driver, here not on the batch host.
+        signal = f'srun --overlap --nodelist="${{gym_nodes[{driver_node}]}}" --nodes=1 --ntasks=1 {signal}'
     return (
         "DRIVER_RC=$?\n"
         f"sleep {FINAL_SCRAPE_GRACE_SECONDS}\n"
-        f'pkill -TERM -u "$USER" -f -- {pattern} || true\n'
+        f"{signal} || true\n"
         f"for _i in $(seq 1 {SHUTDOWN_WAIT_SECONDS}); do kill -0 {pid} 2>/dev/null || break; sleep 1; done\n"
         f"kill -TERM {pid} 2>/dev/null || true\n"
         "exit $DRIVER_RC"
@@ -1044,7 +1104,15 @@ def build_sbatch_script(
     driver_node = _driver_node(config, compute) if is_multi_node else None
     service_commands = "\n\n".join(
         (
-            [_render_collector_service(config, remote_bench_dir, is_multi_node=is_multi_node, driver_node=driver_node)]
+            [
+                _render_collector_service(
+                    config,
+                    remote_bench_dir,
+                    is_multi_node=is_multi_node,
+                    driver_node=driver_node,
+                    account=compute.account,
+                )
+            ]
             if observed
             else []
         )
@@ -1068,6 +1136,7 @@ def build_sbatch_script(
                 ntasks=_srun_ntasks(service, compute, total_nodes, total_ntasks),
                 pre_command=_service_pre_command(service),
                 nodelist=_service_nodelist(service, driver_node, total_nodes),
+                account=compute.account,
             )
             for name, service in (
                 (name, _with_vllm_traces(name, service, config, compute, driver_node))
@@ -1154,6 +1223,8 @@ def build_sbatch_script(
         # as a calling convention it would have to parse.
         gym_cmd = ""
         driver_env |= _command_env(benchmark, remote_bench_dir)
+    # Host PWD can resolve to an alias that is absent from the container bind mounts.
+    driver_env["NEMO_GYM_BENCH_DIR"] = str(remote_bench_dir)
     exports = effective_exports(config, benchmark_name)
     export_tail = (
         render_export_tail(
@@ -1222,7 +1293,7 @@ def build_sbatch_script(
     driver_mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in driver_mounts)}"
     driver_srun = (
         f"{driver_env_prefix}{failure_file}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
-        f" --container-image={shlex.quote(config.driver.container)} "
+        f" --account={shlex.quote(compute.account)} --container-image={shlex.quote(config.driver.container)} "
         f"--output={LOGS_DIRNAME}/driver-$SLURM_JOB_ID.log {entrypoint}"
     )
     if resume and benchmark.command is None:
@@ -1253,7 +1324,7 @@ def build_sbatch_script(
         )
         admission_command = (
             f'{driver_env_prefix}GYM_PREVIOUS_STATE="$_prev_state" GYM_PREVIOUS_JOB_ID="$_prev_slurm_job_id" GYM_PREVIOUS_EXIT_CODE="$_gym_exit_code" srun --overlap --nodes=1 --ntasks=1 '
-            f"--no-container-mount-home{driver_mounts_flag} "
+            f"--no-container-mount-home{driver_mounts_flag} --account={shlex.quote(compute.account)} "
             f"--container-image={shlex.quote(config.driver.container)} {admission_entrypoint}"
         )
         resume_prologue = render_resume_prologue(resume, admission_command=admission_command)
@@ -1276,7 +1347,7 @@ def build_sbatch_script(
         # A job that finished the run cancels the follow-up and sentinel it queued; its status stays the driver's.
         driver_command += "\n" + render_resume_epilogue()
     if observed:
-        driver_command += "\n" + _render_collector_shutdown(config, remote_bench_dir)
+        driver_command += "\n" + _render_collector_shutdown(config, remote_bench_dir, driver_node)
 
     return _SCRIPT_TEMPLATE.format(
         directives=directives,

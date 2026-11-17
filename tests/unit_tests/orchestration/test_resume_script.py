@@ -1505,7 +1505,7 @@ def test_inspection_names_a_chain_stopped_on_rejected_sandbox_credentials(tmp_pa
 
 def test_inspection_names_a_chain_stopped_on_a_producer_protocol_violation(tmp_path):
     from nemo_gym.eval.recovery.planner import decide_from_collected
-    from nemo_gym.orchestration.executors.resume_script import PROTOCOL_VIOLATION_REASON
+    from nemo_gym.orchestration.executors.slurm.resume_script import PROTOCOL_VIOLATION_REASON
     from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect, ident, write_job_dir
 
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
@@ -1520,7 +1520,7 @@ def test_inspection_names_a_chain_stopped_on_a_producer_protocol_violation(tmp_p
 
 def test_inspection_names_a_chain_stopped_on_an_exhausted_grading_quota(tmp_path):
     from nemo_gym.eval.recovery.planner import decide_from_collected
-    from nemo_gym.orchestration.executors.resume_script import QUOTA_EXHAUSTED_REASON
+    from nemo_gym.orchestration.executors.slurm.resume_script import QUOTA_EXHAUSTED_REASON
     from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect, ident, write_job_dir
 
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
@@ -2228,7 +2228,7 @@ def _timeout_on_job_path() -> bool:
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 @pytest.mark.skipif(not _timeout_on_job_path(), reason="coreutils timeout not installed")
 def test_stalled_allocation_accounting_is_cut_off_and_the_chain_continues(tmp_path, monkeypatch):
-    monkeypatch.setattr("nemo_gym.orchestration.executors.resume_script.JOB_ALLOCATIONS_BUDGET_S", 2)
+    monkeypatch.setattr("nemo_gym.orchestration.executors.slurm.resume_script.JOB_ALLOCATIONS_BUDGET_S", 2)
     (tmp_path / ".gym_job_chain").write_text("100\n")
 
     started = time.monotonic()
@@ -2250,7 +2250,7 @@ def test_stalled_allocation_accounting_is_cut_off_and_the_chain_continues(tmp_pa
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 @pytest.mark.skipif(not _timeout_on_job_path(), reason="coreutils timeout not installed")
 def test_stalled_allocation_accounting_does_not_hold_up_the_end_of_the_chain(tmp_path, monkeypatch):
-    monkeypatch.setattr("nemo_gym.orchestration.executors.resume_script.JOB_ALLOCATIONS_BUDGET_S", 2)
+    monkeypatch.setattr("nemo_gym.orchestration.executors.slurm.resume_script.JOB_ALLOCATIONS_BUDGET_S", 2)
     _segment_finishing_the_run(tmp_path, monkeypatch)
     driver = f"{_FINISHES_THE_RUN}; ( exit 0 )"
 

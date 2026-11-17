@@ -93,3 +93,11 @@ def record_failure_kind(error: BaseException) -> None:
     except OSError as write_error:
         # The next segment then reads the saved state as it would without the kind.
         logger.warning("Cannot record failure kind %s in %s: %s", kind, path, write_error)
+
+
+# What a job that ends its own chain with nothing eligible for another attempt writes and journals (the chain's
+# NO_ELIGIBLE_RETRY stop), and what the evidence reader recognizes it by.
+NO_ELIGIBLE_RETRY_REASON = (
+    "No tasks are eligible for retry: the job ended its chain itself, with nothing queued after it; inspect "
+    "terminal failures, omissions and exhausted budgets, then continue with gym eval resubmit --recover."
+)

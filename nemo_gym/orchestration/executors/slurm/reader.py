@@ -813,6 +813,7 @@ def _remote_managed_evidence(
         host_owned = (
             "accounting_snapshot",
             "coverage_allocation_id",
+            "coverage_writer_unrecorded",
             "accounting_unknown_reason",
             "counter_states",
             *READER_PLACEMENT_FIELDS,

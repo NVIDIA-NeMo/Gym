@@ -48,6 +48,7 @@ from nemo_gym.eval.recovery.markers import (
     CONTINUATION_REASON_PREFIX,
     FOLLOW_UP_SUBMISSION_REFUSED,
     GUARDED_DRIVER_FAILURE_KINDS,
+    NO_ELIGIBLE_RETRY_REASON,
     PROVISIONAL_MARKER_PREFIX,
     REQUEUE_RECONCILE_STATE,
     REQUEUE_UNKNOWN_REASON,
@@ -160,10 +161,6 @@ CHAIN_END_JOURNAL_NAME = "chain-end-journal.jsonl"
 # that exits with it writes and journals when it ends its own chain.
 NO_ELIGIBLE_RETRY_EXIT = 76
 NO_ELIGIBLE_RETRY = "no_eligible_retry"
-NO_ELIGIBLE_RETRY_REASON = (
-    "No tasks are eligible for retry: the job ended its chain itself, with nothing queued after it; inspect "
-    "terminal failures, omissions and exhausted budgets, then continue with gym eval resubmit --recover."
-)
 # The files an export receipt binds (`_artifact_version` in the exporters), by receipt key, in the job's artifacts.
 _RECEIPT_ARTIFACTS = (
     ("rollouts_jsonl_fpath", "rollouts.jsonl"),

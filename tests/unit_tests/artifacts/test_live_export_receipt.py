@@ -14,6 +14,7 @@
 # limitations under the License.
 """Same-run live delivery certification through the actual SDK exporter and managed Store."""
 
+import hashlib
 import json
 import stat
 from concurrent.futures import Future
@@ -27,7 +28,7 @@ from omegaconf import OmegaConf
 
 import nemo_gym.artifacts.exporters as registry
 import nemo_gym.artifacts.exporters.mlflow as module
-from nemo_gym.artifacts.exporters.base import _artifact_version
+from nemo_gym.artifacts.exporters.base import ExportState, _artifact_version
 from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics
 from nemo_gym.artifacts.resolved_config import write_resolved_config
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
@@ -42,6 +43,7 @@ class Client:
     def __init__(self):
         self.artifacts = {}
         self.metrics = {}
+        self.params = {}
         self.tags = {}
         self.status = "RUNNING"
         self.futures = []
@@ -58,6 +60,7 @@ class Client:
         self.artifacts[path] = value
 
     def log_batch(self, run_id, params=(), metrics=(), tags=(), **kwargs):
+        self.params.update({p.key: p.value for p in params})
         self.metrics.update({m.key: m.value for m in metrics})
         self.tags.update({t.key: t.value for t in tags})
         future = Future()
@@ -78,7 +81,7 @@ class Client:
     def get_run(self, run_id):
         return SimpleNamespace(
             info=SimpleNamespace(run_id=run_id, status=self.status),
-            data=SimpleNamespace(metrics=self.metrics, tags=self.tags),
+            data=SimpleNamespace(metrics=self.metrics, params=self.params, tags=self.tags),
         )
 
     def set_terminated(self, run_id, status):
@@ -89,7 +92,7 @@ class Client:
 
 
 @pytest.fixture
-def live(tmp_path, monkeypatch):
+def live(tmp_path, monkeypatch, request):
     output = tmp_path / "artifacts" / "rollouts.jsonl"
     output.parent.mkdir()
     source = tmp_path / "inputs.jsonl"
@@ -135,6 +138,7 @@ def live(tmp_path, monkeypatch):
             "mlflow_run_name": "run",
         }
     )
+    config = OmegaConf.merge(config, getattr(request, "param", {}))
     write_resolved_config(config, output)
     aggregate = [{"agent_ref": {"name": "agent"}, "agent_metrics": {"mean/reward": 0.5}, "key_metrics": {}}]
     artifacts.aggregate_metrics_json_fpath.write_bytes(orjson.dumps(aggregate))
@@ -145,10 +149,164 @@ def live(tmp_path, monkeypatch):
     exporter.setup()
     exporter.export_config()
     exporter.export_metrics(flatten_aggregate_metrics(aggregate))
-    exporter.export_rollouts(exporter._read_rollouts(artifacts))
+    if config.upload_rollouts:
+        exporter.export_rollouts(exporter._read_rollouts(artifacts))
     monkeypatch.setattr(registry, "_EXPORTERS", [exporter])
     monkeypatch.setattr(registry, "_RUN_FAILED", False)
     return artifacts, exporter, client
+
+
+HTTP_STATUS_CONFIG = {"agent_outcome_policy": {"by_status_code": {400: "fail", 413: "fail", 422: "fail"}}}
+
+
+@pytest.mark.parametrize(
+    "live",
+    [HTTP_STATUS_CONFIG, HTTP_STATUS_CONFIG | {"upload_rollouts": False}],
+    ids=["with-rollouts", "metadata-only"],
+    indirect=True,
+)
+def test_live_delivery_with_integer_config_keys_certifies_the_delivered_json(live, monkeypatch):
+    artifacts, exporter, client = live
+    post = _post_run_client(monkeypatch)
+    saved_config = artifacts.resolved_config_yaml_fpath.read_bytes()
+    scientific = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
+    _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+
+    receipt = orjson.loads(artifacts.export_done_fpath("mlflow").read_bytes())
+    assert receipt["run_id"] == "live-run"
+    assert receipt["artifacts"] == _artifact_version(artifacts)
+    assert receipt["uploaded_rollouts"] is exporter.global_config_dict.upload_rollouts
+    assert client.status == "FINISHED"
+    assert post.runs == []
+    assert ("rollouts.json" in client.artifacts) is exporter.global_config_dict.upload_rollouts
+    assert client.artifacts["global_config.json"]["agent_outcome_policy"]["by_status_code"] == {
+        "400": "fail",
+        "413": "fail",
+        "422": "fail",
+    }
+    assert artifacts.resolved_config_yaml_fpath.read_bytes() == saved_config
+    assert OmegaConf.load(artifacts.resolved_config_yaml_fpath).agent_outcome_policy.by_status_code == {
+        400: "fail",
+        413: "fail",
+        422: "fail",
+    }
+    changed = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
+    changed[0].pop("_ng_run_health_metrics")
+    assert changed == scientific
+    assert _collected_mlflow(artifacts)["receipt"]["current"] is True
+
+
+@pytest.mark.parametrize(
+    "live",
+    [HTTP_STATUS_CONFIG, HTTP_STATUS_CONFIG | {"upload_rollouts": False}],
+    ids=["with-rollouts", "metadata-only"],
+    indirect=True,
+)
+def test_post_run_export_with_integer_config_keys_preserves_saved_artifacts(live, monkeypatch):
+    artifacts, live_exporter, _ = live
+    before = _artifact_version(artifacts)
+    post = _post_run_client(monkeypatch)
+    settings = OmegaConf.create(
+        {key: value for key, value in live_exporter.global_config_dict.items() if key.startswith("mlflow_")}
+    )
+    result = module.MLflowExporter(settings).export(artifacts)
+
+    assert result.state is ExportState.SUCCEEDED
+    upload = live_exporter.global_config_dict.upload_rollouts
+    assert result.detail == {"run_id": "post-run", "uploaded_rollouts": upload, "live_run_id": "live-run"}
+    assert post.runs == ["post-run"] and post.status == "FINISHED"
+    assert ("rollouts.json" in post.artifacts) is upload
+    assert post.artifacts["global_config.json"]["agent_outcome_policy"]["by_status_code"] == {
+        "400": "fail",
+        "413": "fail",
+        "422": "fail",
+    }
+    assert _artifact_version(artifacts) == before
+    receipt = orjson.loads(artifacts.export_done_fpath("mlflow").read_bytes())
+    assert receipt == {
+        "version": 1,
+        "run_id": "post-run",
+        "artifacts": before,
+        "uploaded_rollouts": upload,
+        "rollout_projection_version": 1,
+    }
+    assert _collected_mlflow(artifacts)["receipt"]["current"] is True
+
+
+@pytest.mark.parametrize("post_run", [False, True], ids=["live", "post-run"])
+def test_config_key_collisions_are_rejected_before_opening_a_backend(live, monkeypatch, post_run):
+    artifacts, live_exporter, _ = live
+    config = OmegaConf.create(live_exporter.global_config_dict)
+    config["nested"] = [{"statuses": {400: "fail", "400": "retry"}}]
+    settings = OmegaConf.create({key: value for key, value in config.items() if key.startswith("mlflow_")})
+    if post_run:
+        OmegaConf.save(config, artifacts.resolved_config_yaml_fpath)
+    else:
+        settings = config
+        settings.output_jsonl_fpath = str(artifacts.rollouts_jsonl_fpath.with_stem("collision"))
+    before = _artifact_version(artifacts)
+    connections = []
+
+    def connect(**kwargs):
+        connections.append(kwargs)
+        return Client()
+
+    monkeypatch.setattr(module, "MlflowClient", connect)
+    exporter = module.MLflowExporter(settings)
+    if post_run:
+        result = exporter.export(artifacts)
+        assert result.state is ExportState.FAILED and "collid" in result.error
+    else:
+        with pytest.raises(ValueError, match="collid"):
+            exporter.setup()
+        assert not artifacts.rollouts_jsonl_fpath.with_name("collision_mlflow_run_id").exists()
+    assert connections == []
+    assert not artifacts.export_done_fpath("mlflow").exists()
+    assert _artifact_version(artifacts) == before
+
+
+@pytest.mark.parametrize(
+    "live",
+    [{"sampling": {"temperature": 0.95, "seed": 7, "choices": [1, None, "café", False]}}],
+    indirect=True,
+)
+def test_string_config_digest_and_strict_rollout_json_are_unchanged(live):
+    _, exporter, client = live
+    original = OmegaConf.to_container(exporter.global_config_dict, resolve=False)
+    assert client.artifacts["global_config.json"] == original
+    assert (
+        exporter._delivered_config_digest
+        == hashlib.sha256(orjson.dumps(original, option=orjson.OPT_SORT_KEYS)).digest()
+    )
+    table = client.artifacts["rollouts.json"]
+    with pytest.raises(TypeError, match="Dict key must be str"):
+        exporter._log_rollouts([{"reward": 1.0, "nested": {400: "fail"}}])
+    assert client.artifacts["rollouts.json"] == table
+
+
+@pytest.mark.parametrize("live", [{"secrets": {"opaque": 2**70}}], indirect=True)
+def test_live_setup_validates_the_credential_safe_configuration(live, monkeypatch):
+    artifacts, exporter, client = live
+    post = _post_run_client(monkeypatch)
+    _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+
+    assert exporter.global_config_dict.secrets.opaque == 2**70
+    assert client.artifacts["global_config.json"]["secrets"] == {"opaque": "****"}
+    assert client.status == "FINISHED" and post.runs == []
+    assert orjson.loads(artifacts.export_done_fpath("mlflow").read_bytes())["run_id"] == "live-run"
+
+
+def test_a_reopened_run_logs_integer_config_keys_in_its_segment(live):
+    _, exporter, client = live
+    exporter.reopened = True
+    exporter.global_config_dict["agent_outcome_policy"] = HTTP_STATUS_CONFIG["agent_outcome_policy"]
+    exporter.export_config()
+    exporter.export_metrics({})
+
+    segments = [value for path, value in client.artifacts.items() if path.startswith("config/segment_")]
+    assert len(segments) == 1
+    assert segments[0]["agent_outcome_policy"]["by_status_code"] == {"400": "fail", "413": "fail", "422": "fail"}
+    assert not exporter._delivery_failed
 
 
 def test_final_live_delivery_uses_same_run_and_existing_consumer(live):

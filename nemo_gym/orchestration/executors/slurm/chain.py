@@ -36,11 +36,11 @@ from nemo_gym.eval.recovery.budgets import OperatorBudget
 from nemo_gym.eval.recovery.continuation import (
     FOLLOWUP_ACCOUNTING_FORMAT,
     accounted_chain_walltime,
-    allocation_cut_from_accounting,
     chain_accounting,
     reconcile_requeued_chain,
     requeue_note,
     stopped_followup,
+    store_writer_cut_from_accounting,
 )
 from nemo_gym.eval.recovery.decision import (
     LIVE_JOB_STATES,
@@ -117,6 +117,7 @@ from nemo_gym.orchestration.executors.slurm.scheduler import (
     _submission_exports,
 )
 from nemo_gym.orchestration.executors.slurm.script import (
+    COLLECTOR_LOCAL_DIR_MARKER,
     build_sbatch_script,
 )
 from nemo_gym.orchestration.jobs import (
@@ -495,7 +496,7 @@ class ChainRecovery:
                 live_job_name = judge_live
             if collected.job_chain and workdirs is not None and str(job_dir) not in workdirs and live_job_name is None:
                 if rows is not None:
-                    allocation_cut = allocation_cut_from_accounting(rows, collected.coverage_allocation_id)
+                    allocation_cut = store_writer_cut_from_accounting(rows, collected)
                     collected = reconcile_requeued_chain(collected, rows)
                 if resume.max_walltime is not None and not collected.accounting_reconciled:
                     # Unavailable accounting cannot grant fresh walltime; a requeued id has two rows and stays unknown.
@@ -722,10 +723,16 @@ class ChainRecovery:
             # collector config, inside the lock and after refusing any active job in its dir.
             collector_update = []
             if otel_active(config):
-                collector_yaml = render_collector_config(config, benchmark, job_dir)
                 collector_path = shlex.quote(str(collector_config_path(job_dir)))
+
+                def write_collector_config(node_local: bool) -> str:
+                    collector_yaml = render_collector_config(config, benchmark, job_dir, node_local=node_local)
+                    return f"printf %s {shlex.quote(collector_yaml)} > {collector_path} || fail 'cannot update collector config'"
+
+                # An older job.sh never copies node-local jsonl into the job dir, so its collector writes there.
                 collector_update = [
-                    f"printf %s {shlex.quote(collector_yaml)} > {collector_path} || fail 'cannot update collector config'"
+                    f"if grep -qF -- {shlex.quote(COLLECTOR_LOCAL_DIR_MARKER)} job.sh; "
+                    f"then {write_collector_config(True)}; else {write_collector_config(False)}; fi"
                 ]
             snapshot_check = []
             reconciled = keep_budget and accounting_reconciled and accounted_walltime_s is not None
@@ -1254,6 +1261,19 @@ class ChainRecovery:
             for kind in kinds
         ]
         restore = f"mv -f {kept[0][0]} job.sh 2>/dev/null; mv -f {kept[0][1]} {old_config} 2>/dev/null"
+        # The collector config's exporter paths must match the job.sh they run under, so it is restored with it.
+        # A job dir without one (staged with OTel off) gets none back.
+        collector_backup = []
+        if otel_active(config):
+            collector = shlex.quote(str(collector_config_path(job_dir)))
+            kept_collector = shlex.quote(f"{collector_config_path(job_dir)}.pre-{kinds[0]}-{stamp}")
+            collector_backup = [
+                f"if [ -e {collector} ]; then cp -p {collector} {kept_collector} "
+                "|| fail 'cannot keep the collector config before it is rendered again'; fi"
+            ]
+            restore += (
+                f"; if [ -e {kept_collector} ]; then mv -f {kept_collector} {collector}; else rm -f {collector}; fi"
+            )
         commands = [
             *(
                 command
@@ -1263,6 +1283,7 @@ class ChainRecovery:
                     f"cp -p {old_config} {kept_config} || fail 'cannot keep the resolved config before it is rendered again'",
                 )
             ),
+            *collector_backup,
             # Restored by the exit trap below unless sbatch confirms the queued job.
             f'_gym_restore_repin() {{ [[ "$_gym_submit_confirmed" == 1 ]] || {{ {restore}; }}; }}',
             f"(umask 077; printf %s {shlex.quote(script)} > job.sh.repin) && mv -f job.sh.repin job.sh "

@@ -8,6 +8,7 @@ import pytest
 import scicode_integration.sandbox_runner as runner
 
 import resources_servers.scicode.app as app
+from nemo_gym.core import PROVIDER_OOM_KILLED, PROVIDER_UNAVAILABLE, FailureHeader, NgFailureEvent, RequestFailureLog
 from nemo_gym.sandbox import SandboxExecResult
 from resources_servers.scicode.tests.test_app import _request, _server
 
@@ -34,6 +35,10 @@ async def test_remote_result_and_cleanup(outcome):
         sandbox.exec.side_effect = asyncio.CancelledError()
     if outcome == "create_failure":
         sandbox.start.side_effect = RuntimeError("create failed")
+    sandbox.exec.side_effect = [
+        SandboxExecResult(stdout="", stderr="", return_code=0),
+        sandbox.exec.side_effect or sandbox.exec.return_value,
+    ]
     with (
         patch.object(runner, "get_global_config_dict", return_value={"sandbox": {"opensandbox": {}}}),
         patch.object(runner, "AsyncSandbox", return_value=sandbox) as factory,
@@ -246,3 +251,144 @@ async def test_repeated_cancellation_awaits_remote_deletion(through_verify):
                 await asyncio.wait_for(task, 2)
     assert deleted.is_set()
     sandbox.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("during_preflight", [False, True])
+@pytest.mark.parametrize("confirmed_oom", [False, True])
+async def test_oom_counts_only_during_test_execution(during_preflight, confirmed_oom):
+    error = NgFailureEvent(
+        boundary="sandbox",
+        failure_kind=PROVIDER_OOM_KILLED if confirmed_oom else PROVIDER_UNAVAILABLE,
+        failure_reason="Sandbox OOMKilled" if confirmed_oom else "Unconfirmed termination mentioning OOMKilled",
+    )
+    sandbox = MagicMock(start=AsyncMock(), stop=AsyncMock())
+    ok = SandboxExecResult(stdout="", stderr="", return_code=0)
+    sandbox.exec = AsyncMock(side_effect=[error] if during_preflight else [ok, error])
+    with (
+        patch.object(runner, "get_global_config_dict", return_value={"sandbox": {"opensandbox": {}}}),
+        patch.object(runner, "AsyncSandbox", return_value=sandbox),
+    ):
+        call = runner.run_sandbox_substep(
+            "assert True",
+            config=runner.ScicodeSandboxConfig(image="test-image"),
+            python_executable="/opt/python",
+            timeout_secs=30,
+            test_data_path="/data/targets.h5",
+            test_data_md5=None,
+            output_tail_chars=40,
+        )
+        if confirmed_oom and not during_preflight:
+            result = await call
+            assert result["passed"] is False
+            assert result["returncode"] is None
+            assert result["exit_unknown"]
+            assert result["exception_class"] == "MemoryLimitExceeded"
+        else:
+            with pytest.raises(NgFailureEvent):
+                await call
+    sandbox.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_confirmed_test_oom_scores_step_without_aborting_other_steps():
+    server = _server(
+        "/data/targets.h5",
+        sandbox={"image": "test-image"},
+        num_processes=1,
+        grading_interpreters=[{"name": "2024", "python_executable": "/opt/python"}],
+        record_step_outputs=True,
+    )
+    ok = SandboxExecResult(stdout="", stderr="", return_code=0)
+    oom = MagicMock(start=AsyncMock(), stop=AsyncMock())
+    oom.exec = AsyncMock(
+        side_effect=[
+            ok,
+            NgFailureEvent(
+                boundary="sandbox",
+                failure_kind=PROVIDER_OOM_KILLED,
+                failure_reason="Provider confirmed execution-time OOM",
+            ),
+        ]
+    )
+    healthy = MagicMock(start=AsyncMock(), stop=AsyncMock())
+    healthy.exec = AsyncMock(
+        side_effect=[
+            ok,
+            SandboxExecResult(
+                stdout=json.dumps({"passed": True, "error": ""}),
+                stderr="",
+                return_code=0,
+            ),
+        ]
+    )
+    with (
+        patch.object(runner, "get_global_config_dict", return_value={"sandbox": {"opensandbox": {}}}),
+        patch.object(runner, "AsyncSandbox", side_effect=[oom, healthy]),
+    ):
+        result = await server.verify(_request({"1.1": "allocates too much", "1.2": "valid"}))
+    assert result.reward == 0
+    assert result.step_results == [False, True]
+    assert result.num_steps_passed == 1
+    assert result.num_steps_total == 2
+    assert result.step_outputs[0]["exception_class"] == "MemoryLimitExceeded"
+    assert result.step_exits[0] == {"returncode": None, "timed_out": False, "exit": "unknown"}
+    oom.stop.assert_awaited_once()
+    healthy.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second_interpreter_passes", [False, True])
+async def test_scored_oom_retains_failure_report(second_interpreter_passes):
+    server = _server(
+        "/data/targets.h5",
+        sandbox={"image": "test-image"},
+        num_processes=1,
+        grading_interpreters=[
+            {"name": "2024", "python_executable": "/opt/2024/python"},
+            {"name": "2025", "python_executable": "/opt/2025/python"},
+        ],
+        record_step_outputs=True,
+    )
+    error = NgFailureEvent(
+        boundary="sandbox",
+        failure_kind=PROVIDER_OOM_KILLED,
+        failure_reason="Confirmed container OOM",
+        operation="exec",
+        operation_id="sandbox-exec-1",
+    )
+    ok = SandboxExecResult(stdout="", stderr="", return_code=0)
+    first = MagicMock(start=AsyncMock(), stop=AsyncMock())
+    first.exec = AsyncMock(side_effect=[ok, error])
+    second = MagicMock(start=AsyncMock(), stop=AsyncMock())
+    second.exec = AsyncMock(
+        side_effect=[
+            ok,
+            SandboxExecResult(
+                stdout=json.dumps(
+                    {
+                        "passed": second_interpreter_passes,
+                        "error": "",
+                        "returncode": 0 if second_interpreter_passes else 1,
+                    }
+                ),
+                stderr="",
+                return_code=0,
+            ),
+        ]
+    )
+    with (
+        patch.object(runner, "get_global_config_dict", return_value={"sandbox": {"opensandbox": {}}}),
+        patch.object(runner, "AsyncSandbox", side_effect=[first, second]),
+        RequestFailureLog.capture() as log,
+    ):
+        result = await server.verify(_request({"1.1": "candidate"}, n_steps=1))
+        report = log.reply_report(None)
+    assert result.reward == float(second_interpreter_passes)
+    assert not result.mask_sample
+    assert report.failure_id is None
+    assert report.events[error.event.event_id].failure_kind == PROVIDER_OOM_KILLED
+    assert report.events[error.event.event_id].operation_id == "sandbox-exec-1"
+    assert FailureHeader.encode(report)
+    first.stop.assert_awaited_once()
+    second.stop.assert_awaited_once()

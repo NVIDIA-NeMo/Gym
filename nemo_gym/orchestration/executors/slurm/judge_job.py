@@ -196,7 +196,9 @@ class JudgeJobs:
             if resume is None or resume.max_walltime is None or evidence.accounting_snapshot is None:
                 return _stopped(decision, "saved rejudge walltime or accounting owner is unknown")
             used = evidence.accounted_walltime_s
-            retries = evidence.infra_retries_used
+            # As the recovery decision counts them: resume_script creates .gym_infra_retries on the first infra retry,
+            # so an absent file means none ran; a malformed or unknown one stays unknown.
+            retries = {"absent": 0.0, "ok": evidence.infra_retries_used}.get(evidence.infra_retries_state)
             if (
                 used is None
                 or not math.isfinite(used)
@@ -232,6 +234,12 @@ class JudgeJobs:
             queued_snapshot = {k: v for k, v in evidence.source_digests.items() if Path(k).name == k}
             nonce = new_gym_job_id(utc_now())
             output = job_dir / "reverification" / nonce / "rollouts.jsonl"
+            # The receipt makes the job recompute the run's aggregate metrics and quality summary from the settled
+            # rows (``_reverify_with_receipt``), as the judge-only job of a GPU run does.
+            receipt = output.parent / "receipt.json"
+            # The receipt makes the job recompute the run's aggregate metrics and quality summary from the settled
+            # rows (``_reverify_with_receipt``), as the judge-only job of a GPU run does.
+            receipt = output.parent / "receipt.json"
             # Observability is on by default, and it needs a capture directory: the job's own folder, as a submitted
             # evaluation captures into its benchmark directory.
             run = _with_default_capture_dir(run, output.parent)
@@ -250,6 +258,8 @@ class JudgeJobs:
                     shlex.quote(str(job_dir / "artifacts/rollouts_materialized_inputs.jsonl")),
                     "--output",
                     shlex.quote(str(output)),
+                    "--settle-receipt",
+                    shlex.quote(str(receipt)),
                     *flatten_run_args(run),
                 ]
             )

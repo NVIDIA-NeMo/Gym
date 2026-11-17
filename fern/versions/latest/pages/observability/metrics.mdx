@@ -267,6 +267,16 @@ Each key becomes one gauge: `coverage/scored` is `gym.run.coverage.scored`, and 
 
 A key is recorded only when the run reports it. An unknown count is left out rather than recorded as 0: an aggregation of shards without attempt history, for example, has no `gym.run.coverage.expected`.
 
+### Tool Metrics and Spans
+
+When a rollout's trajectory is a v2 record (see [Rollout Evidence](/main/observability/rollout-evidence)), the collection driver reads the tool executions the harness recorded; nothing is measured again.
+
+- `gym.tool.calls_total` counts executions by `nemo.gym.tool.name` and `nemo.gym.tool.status`.
+- `gym.tool.duration_ms` records each measured duration, with `nemo.gym.tool.timing_boundary` saying what it measures (`executor`, `lifecycle`, `transcript` or `event_receipt`). A boundary without a duration records nothing, so a missing measurement never reads as 0 ms.
+- With a trace exporter and the `rollout` span group on, each execution with both recorded endpoints becomes a `gym.tool` span under the rollout's dispatch span, or under its parent tool's span (the nearest ancestor with a span, when its parent has no endpoints). The span takes the boundary closest to the execution itself and carries the full tool name, the boundary, the timing source and `nemo.gym.tool.clock_domain`. An `unknown` clock domain means the endpoints come from the harness's own clock, which may be skewed against Gym's.
+
+Tool names are free-form, so the metrics keep the first 64 names a process sees, up to 128 characters each, and count the rest as `other`; a missing name is `unknown`. Spans keep every name.
+
 ### Memory Metrics
 
 Memory metrics are emitted only when `telemetry.memory_profiling.enabled` is true. Server points carry `nemo.gym.server.name`, `nemo.gym.server.type`, and the root `process.pid`; server memory gauges also carry `memory.type`, which is `rss` or `pss`. Host points rely on the existing `host.name` resource attribute and carry no per-sample attributes.

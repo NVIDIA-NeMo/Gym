@@ -16,6 +16,7 @@
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -25,12 +26,13 @@ import nemo_gym.orchestration.executors.slurm as slurm_executor
 from nemo_gym.cli.main import build_parser
 from nemo_gym.orchestration.api import ResumeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.connection import LocalConnection
+from nemo_gym.orchestration.executors.otel import collector_config_path, render_collector_config
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
 from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
 from nemo_gym.orchestration.executors.slurm import judge_job as slurm_judge_job
 from nemo_gym.orchestration.executors.slurm.chain import REPIN_JOURNAL_NAME
-from nemo_gym.orchestration.executors.slurm.script import build_sbatch_script
+from nemo_gym.orchestration.executors.slurm.script import COLLECTOR_LOCAL_DIR_MARKER, build_sbatch_script
 from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord
 from tests.unit_tests.orchestration.test_eval_resubmit import _handle
 from tests.unit_tests.orchestration.test_eval_resubmit import _local_index as _local_index
@@ -40,8 +42,12 @@ from tests.unit_tests.orchestration.test_eval_resubmit import slurm_bin as slurm
 OLD, NEW = "a" * 40, "d" * 40
 
 
-def _repinnable_run(tmp_path: Path) -> Path:
-    """One benchmark staged on Gym OLD with its MLflow pin tags, one saved row, one missing row and spent budgets."""
+def _repinnable_run(tmp_path: Path, *, otel: bool = False) -> Path:
+    """One benchmark staged on Gym OLD with its MLflow pin tags, one saved row, one missing row and spent budgets.
+
+    With `otel`, the staged job.sh and collector config predate the node-local collector: the collector runs from
+    `binary` and its exporters write straight into the job directory.
+    """
     config = SubmitConfig.model_validate(
         {
             "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
@@ -57,7 +63,7 @@ def _repinnable_run(tmp_path: Path) -> Path:
                 },
             },
             "job": {"output_path": str(tmp_path)},
-            "otel": {"enabled": False},
+            "otel": {"remote_export": False} if otel else {"enabled": False},
         }
     )
     run_dir = tmp_path / "gym-job-x"
@@ -75,9 +81,14 @@ def _repinnable_run(tmp_path: Path) -> Path:
     )
     SlurmExecutor().persist(record, config, LocalConnection().write_text)
     compute = next(iter(config.compute.values()))
-    (job_dir / "job.sh").write_text(
-        build_sbatch_script(config, "gsm8k", config.driver.benchmarks["gsm8k"], compute, job_dir)
-    )
+    script = build_sbatch_script(config, "gsm8k", config.driver.benchmarks["gsm8k"], compute, job_dir)
+    if otel:
+        collector = collector_config_path(job_dir)
+        script = re.sub(r"sh -c '.*' &$", f"otelcol-contrib --config {collector} &", script, flags=re.MULTILINE)
+        assert COLLECTOR_LOCAL_DIR_MARKER not in script
+        collector.parent.mkdir()
+        collector.write_text(render_collector_config(config, "gsm8k", job_dir, node_local=False))
+    (job_dir / "job.sh").write_text(script)
     rows = [{"_ng_task_index": t, "_ng_rollout_index": 0} for t in range(2)]
     (job_dir / "artifacts" / "rollouts_materialized_inputs.jsonl").write_text(
         "".join(json.dumps(r) + "\n" for r in rows)
@@ -164,12 +175,15 @@ def test_a_repin_is_refused_before_anything_changes(tmp_path, slurm_bin, launche
     assert not (job_dir.parent / REPIN_JOURNAL_NAME).exists()
 
 
-def test_a_repin_whose_job_is_not_queued_restores_both_files(tmp_path, slurm_bin, launcher_at):
+@pytest.mark.parametrize("otel", [False, True], ids=["no-otel", "pre-node-local-otel"])
+def test_a_repin_whose_job_is_not_queued_restores_its_files(tmp_path, slurm_bin, launcher_at, otel):
+    # The restored job.sh runs with the collector config it was rendered for, never the refused render's.
     from nemo_gym.orchestration.submit import recover
 
     launcher_at(NEW)
-    job_dir = _repinnable_run(tmp_path)
-    files = {path: path.read_bytes() for path in [job_dir / "job.sh", job_dir.parent / "resolved-config.yaml"]}
+    job_dir = _repinnable_run(tmp_path, otel=otel)
+    paths = [job_dir / "job.sh", job_dir.parent / "resolved-config.yaml"]
+    files = {path: path.read_bytes() for path in paths + ([collector_config_path(job_dir)] if otel else [])}
     (slurm_bin / "sbatch").write_text("#!/bin/bash\necho 'sbatch: error: Batch job submission failed'; exit 1\n")
     out = recover(*_handle(job_dir), repin=NEW, repin_reason="reason")
     assert not out.ok and out.dispatched is None
@@ -177,6 +191,50 @@ def test_a_repin_whose_job_is_not_queued_restores_both_files(tmp_path, slurm_bin
     assert out.scheduler_refusal["job_dir_restored"] is True
     assert {path: path.read_bytes() for path in files} == files
     assert not (job_dir.parent / REPIN_JOURNAL_NAME).exists()
+
+
+def test_a_queued_repin_of_a_pre_node_local_run_moves_its_collector_files_node_local(tmp_path, slurm_bin, launcher_at):
+    from nemo_gym.orchestration.submit import recover
+
+    launcher_at(NEW)
+    job_dir = _repinnable_run(tmp_path, otel=True)
+    collector = collector_config_path(job_dir)
+    old_collector = collector.read_text()
+    out = recover(*_handle(job_dir), repin=NEW, repin_reason="reason")
+    assert out.dispatched == "resubmit", out.decision.reason
+
+    assert COLLECTOR_LOCAL_DIR_MARKER in (job_dir / "job.sh").read_text()
+    exporters = yaml.safe_load(collector.read_text())["exporters"]
+    assert {name: exporter["path"] for name, exporter in exporters.items() if name.startswith("file/")} == {
+        f"file/{signal}": f"${{env:GYM_OTEL_LOCAL_DIR}}/{signal}.jsonl" for signal in ("metrics", "traces", "logs")
+    }
+    [kept_collector] = collector.parent.glob("collector.yaml.pre-repin-*")
+    assert kept_collector.read_text() == old_collector
+
+
+@pytest.mark.parametrize("queued", [False, True], ids=["refused", "queued"])
+def test_a_repin_of_a_run_without_a_collector_config_writes_one_only_if_queued(
+    tmp_path, slurm_bin, launcher_at, queued
+):
+    # OTel is on in the saved config but the job dir has no collector config yet: a refusal must leave none behind.
+    from nemo_gym.orchestration.submit import recover
+
+    launcher_at(NEW)
+    job_dir = _repinnable_run(tmp_path, otel=True)
+    collector = collector_config_path(job_dir)
+    collector.unlink()
+    if not queued:
+        (slurm_bin / "sbatch").write_text("#!/bin/bash\necho 'sbatch: error: Batch job submission failed'; exit 1\n")
+    out = recover(*_handle(job_dir), repin=NEW, repin_reason="reason")
+
+    if queued:
+        assert out.dispatched == "resubmit", out.decision.reason
+        exporters = yaml.safe_load(collector.read_text())["exporters"]
+        assert exporters["file/traces"]["path"] == "${env:GYM_OTEL_LOCAL_DIR}/traces.jsonl"
+    else:
+        assert out.scheduler_refusal["job_dir_restored"] is True
+        assert not collector.exists()
+    assert not list(collector.parent.glob("collector.yaml.pre-*"))
 
 
 def test_the_resubmit_help_lists_repin_and_a_repin_needs_recover(capsys):

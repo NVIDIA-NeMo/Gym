@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from nemo_gym.orchestration.collect_evidence import COLLECT_SCRIPT
+from nemo_gym.eval.recovery.evidence import COLLECT_SCRIPT
 
 
 resource = pytest.importorskip("resource")
