@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.core.filesystems import _filesystem_type, warn_if_unsuitable
+from nemo_gym.utils.filesystems import _filesystem_type, warn_if_unsuitable
 
 
 MOUNTS = """\

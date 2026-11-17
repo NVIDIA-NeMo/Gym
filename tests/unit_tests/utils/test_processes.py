@@ -18,7 +18,7 @@ import sys
 
 import pytest
 
-from nemo_gym.core.processes import process_may_be_running
+from nemo_gym.utils.processes import process_may_be_running
 
 
 def test_this_process_is_running() -> None:

@@ -35,30 +35,6 @@ _MOUNTINFO = Path("/proc/self/mountinfo")
 _OCTAL_ESCAPE = re.compile(r"\\([0-7]{3})")
 
 
-def _filesystem_type(path: str | Path, *, mountinfo: Path = _MOUNTINFO) -> str | None:
-    """The type of the filesystem ``path`` is on, from the mount table, or ``None`` where there is none to read.
-
-    ``path`` need not exist yet: its location is resolved as far as it goes, and the deepest mount above it wins.
-    """
-    try:
-        lines = mountinfo.read_text().splitlines()
-    except OSError:
-        return None
-    target = os.path.realpath(path)
-    best_mount, best_type = "", None
-    for line in lines:
-        fields, _, after = line.partition(" - ")
-        parts = fields.split()
-        if len(parts) < 5 or not after:
-            continue
-        # The kernel escapes spaces and other special characters in mount points as octal.
-        mount = _OCTAL_ESCAPE.sub(lambda match: chr(int(match.group(1), 8)), parts[4])
-        inside = target == mount or target.startswith(mount.rstrip("/") + "/")
-        if inside and len(mount) >= len(best_mount):
-            best_mount, best_type = mount, after.split()[0]
-    return best_type
-
-
 def warn_if_unsuitable(
     setting: str,
     path: str | Path | None,
@@ -90,3 +66,27 @@ def warn_if_unsuitable(
             path,
             found,
         )
+
+
+def _filesystem_type(path: str | Path, *, mountinfo: Path = _MOUNTINFO) -> str | None:
+    """The type of the filesystem ``path`` is on, from the mount table, or ``None`` where there is none to read.
+
+    ``path`` need not exist yet: its location is resolved as far as it goes, and the deepest mount above it wins.
+    """
+    try:
+        lines = mountinfo.read_text().splitlines()
+    except OSError:
+        return None
+    target = os.path.realpath(path)
+    best_mount, best_type = "", None
+    for line in lines:
+        fields, _, after = line.partition(" - ")
+        parts = fields.split()
+        if len(parts) < 5 or not after:
+            continue
+        # The kernel escapes spaces and other special characters in mount points as octal.
+        mount = _OCTAL_ESCAPE.sub(lambda match: chr(int(match.group(1), 8)), parts[4])
+        inside = target == mount or target.startswith(mount.rstrip("/") + "/")
+        if inside and len(mount) >= len(best_mount):
+            best_mount, best_type = mount, after.split()[0]
+    return best_type
