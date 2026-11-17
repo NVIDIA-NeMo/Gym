@@ -34,6 +34,7 @@ from nemo_gym.agents import (
     AgentCloseSessionResponse,
     AgentOutcome,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
@@ -999,7 +1000,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
 
                 state.task = asyncio.create_task(activate())
             elif body != state.activation_request:
-                raise HTTPException(409, "Terminus 2 sessions support one activation; retry the same request")
+                raise AgentSessionConflictError("Terminus 2 sessions support one activation; retry the same request")
             # A disconnected HTTP waiter must not cancel the shared run; close owns cancellation, and
             # identical retries join this task or replay its result or error.
             return (await asyncio.shield(state.task)).model_copy(deep=True)

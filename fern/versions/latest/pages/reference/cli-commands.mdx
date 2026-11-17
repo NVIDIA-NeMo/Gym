@@ -123,13 +123,24 @@ gym eval run \
 ```
 
 Available on `gym env start`, `gym env validate`, `gym env prefetch`, and `gym eval run`. For benchmarks that
-compose their own servers, the selectors are pure shorthand, so `--agent-type terminus_2_sandboxed_agent` and
-`--config <that file>` behave identically. A Harbor-backed benchmark (one whose config sets `harbor_target`) runs only
+compose their own servers, `--agent-type terminus_2_sandboxed_agent` loads the same config as `--config <that file>`,
+and also checks that the run uses it. A Harbor-backed benchmark (one whose config sets `harbor_target`) runs only
 through `gym eval run --benchmark`; there, use `--agent-type` to swap the harness, since loading an agent config with
 `--config` does not select it. `gym env start`, `gym env prefetch`, `gym eval reverify` and `gym eval submit` do not
 compose its Harbor environment server.
 
 Run `gym list agents` to see the harnesses you can pass.
+
+`--agent-type` puts the selected harness in place of the benchmark's own only when the selected config leaves
+`resources_server.name` unset (`???`), as `terminus_2_sandboxed_agent` and `simple_agent` do, or is a LangGraph agent.
+Session agents such as `codex_agent`, `hermes_agent`, and `opencode_agent` set `resources_server: null`, so they run
+only where a config binds them, for example in an Environment Server's `agent_server`. When a task of the run would
+still run on another agent, all four commands refuse the selection before they prepare data or start servers. The
+error lists where each task runs and, for a taskset route, the override that binds the selected agent. To run a
+session agent on such a benchmark, use a benchmark config that already pairs them (`gym list benchmarks`), or bind it
+as [Swap the agent or the benchmark](/main/agent-server/integrate-existing-agents#swap-the-agent-or-the-benchmark)
+shows. A `--config` file merges before `--benchmark`, so a binding in it must list the benchmark config in its own
+`config_paths` and take the place of `--benchmark`.
 
 For a benchmark whose config names a Harbor target (`harbor_target`), `--agent-type` on `gym eval run` selects the
 harness the per-taskset environment server binds, in place of the benchmark's own agent instance; no composition or
@@ -892,7 +903,7 @@ In place of `--benchmark`, a positional `TARGET` runs a dataset in the Harbor ta
 | `--search-dir DIR` | Extra root directory to search for named components. Repeatable. |
 | `--no-serve` | Collect against already-running servers instead of starting them. |
 | `--resume` | Resume from cached rollouts instead of recollecting. Maps to legacy `+resume_from_cache=true`. Refer to [Resume interrupted runs](#resume-interrupted-runs). |
-| `--agent-type NAME[/FLAVOR]` | Compose the environment with the named agent harness. Rejected with `--no-serve`. Refer to [Swapping the agent](#swapping-the-agent). |
+| `--agent-type NAME[/FLAVOR]` | Compose the environment with the named agent harness. Rejected with `--no-serve`, and when a task of the run would still run on another agent. Refer to [Swapping the agent](#swapping-the-agent). |
 | `--agent`, `-a` | Agent instance to collect rollouts with. |
 | `--allow-unsupported-pairing` | Run even if the environment's resources server does not declare support for the selected agent or model type. |
 | `--input`, `-i` | Input tasks JSONL file. |
@@ -1354,6 +1365,26 @@ gym eval compare-suite \
 Run paths and optional agent or environment-server selectors come from the suite YAML. See [Compare Results](/main/evaluation/compare-results#compare-a-benchmark-suite) for a complete multi-model suite YAML, source options, theoretical metric bounds, normalization, equal weighting, statistical assumptions, and coverage/exclusion behavior.
 
 Writes `suite_compare_report.md` and/or `suite_compare_report.json`. The suite JSON format is versioned independently with `"schema_version": "1"` and has no `level` field. A pooled side's path and identity fields represent its first source; its ordered `sources` list contains complete provenance. The separate [`gym eval compare`](#gym-eval-compare) command keeps its run-level reports and defaults to 95% difference intervals.
+
+### `gym eval plan-repeats`
+
+Plan new repeats from directly supplied complete-pass standard deviations. One YAML file defines one benchmark, model, or suite aggregate, with equal weights across its model × benchmark entries; each entry supplies the SD of one complete-repeat benchmark score. Keep an existing baseline fixed or jointly plan a baseline reused across a configurable number of distinct candidate checkpoints.
+
+```bash
+gym eval plan-repeats \
+    --plan planning.yaml \
+    --output-dir results/repeat-planning
+```
+
+| Option | Description |
+| --- | --- |
+| `--plan PATH` | Required planning YAML containing direct SD inputs, aggregation level, baseline mode, and statistical targets. |
+| `--output-dir DIR`, `-o` | Report directory; defaults to the planning YAML's directory. |
+| `--report-format` | `md`, `json`, or `both` (default). |
+
+Writes `repeat_planning_report.md` and/or `repeat_planning_report.json`, with full-precision numerical evidence in JSON. Statistical targets, candidate experiment count, repeat increments, costs, search bounds, and optional simulation validation are configured in YAML. See [Plan Repeats](/main/evaluation/plan-repeats) for complete examples and the distinction between analytic power and validation through the comparison procedure.
+
+Follow [Plan a Comparison Budget](/main/tutorials/evaluation-tutorials/plan-repeats) for a walkthrough from SD inputs to verified example allocations and the final comparison decision.
 
 ### `gym eval reverify`
 

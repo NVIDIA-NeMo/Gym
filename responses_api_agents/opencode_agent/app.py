@@ -49,6 +49,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -487,6 +488,9 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # Either is a file already inside the sandbox and requires its SHA-256, which is checked there.
     sandbox_ripgrep_path: str | None = None
     sandbox_ripgrep_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
+    # Sandbox sessions only. Without a pinned rg or one on the task PATH, setup fails; true lets OpenCode download
+    # ripgrep on demand instead, which works only where the sandbox can reach GitHub.
+    sandbox_ripgrep_download: bool = False
     sandbox_plugin_dependencies_path: str | None = None
     sandbox_plugin_dependencies_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
     # Sandbox sessions only. Absolute sandbox directory, outside the task workdir, where each activation's capture
@@ -972,7 +976,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 verification_failure_fields(response)
                 return response
             if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
-                raise HTTPException(409, "OpenCode activation does not match the seeded session and rollout")
+                raise AgentSessionConflictError("OpenCode activation does not match the seeded session and rollout")
             if state.task is None:
                 # Parse only for a new activation: a retry is compared with the stored request instead,
                 # so its media are never decoded again.
@@ -982,7 +986,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     self._session_response(state, state.activation_request, prompt=prompt, system=system, media=media)
                 )
             elif body != state.activation_request:
-                raise HTTPException(409, "OpenCode sandbox sessions support one activation; retry the same request")
+                raise AgentSessionConflictError(
+                    "OpenCode sandbox sessions support one activation; retry the same request"
+                )
             response = (await asyncio.shield(state.task)).model_copy(deep=True)
             verification_failure_fields(response)
             return response
@@ -1195,8 +1201,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 self._check_sandbox_setup(command, result)
             installer = f"{directory}/{RUNTIME_INSTALLER_FILE}"
             await sandbox.upload(RUNTIME_INSTALLER_SOURCE, installer)
-            # A pinned rg (below) replaces the installer's best-effort package install of ripgrep.
-            command = "NG_OPENCODE_SKIP_RIPGREP=1 " if ripgrep is not None else ""
+            # A pinned rg (below) replaces the installer's package install of ripgrep.
+            if ripgrep is not None:
+                command = "NG_OPENCODE_SKIP_RIPGREP=1 "
+            elif self.config.sandbox_ripgrep_download:
+                command = "NG_OPENCODE_ALLOW_RIPGREP_DOWNLOAD=1 "
+            else:
+                command = ""
             command += "bash " + " ".join(
                 quote(arg)
                 for arg in (
