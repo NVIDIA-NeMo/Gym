@@ -153,3 +153,51 @@ def test_successful_submission_is_not_repeated(tmp_path):
         result = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
     assert counter.read_text().splitlines() == ["call"]
+
+
+@pytest.mark.parametrize(
+    "directive",
+    [
+        "wrap",
+        "gpus-per-socket",
+        "gpu-bind",
+        "mem",
+        "ntasks",
+        "dependency",
+        "chdir",
+    ],
+)
+def test_export_job_rejects_unsupported_directives(directive):
+    with pytest.raises(ValueError, match="Unsupported Slurm export extra argument"):
+        render_export_job(
+            bench_dir=Path("/tmp/gym-export-test"),
+            partition="cpu",
+            account="research",
+            walltime="00:30:00",
+            export_command="true",
+            extra_args={directive: "1"},
+        )
+
+
+@pytest.mark.parametrize(
+    "directive",
+    [
+        "wrap",
+        "gpus-per-socket",
+        "gpu-bind",
+        "mem",
+        "ntasks",
+        "dependency",
+        "chdir",
+    ],
+)
+def test_export_job_rejects_unsupported_directives(directive):
+    with pytest.raises(ValueError, match="Unsupported Slurm export extra argument"):
+        render_export_job(
+            bench_dir=Path("/tmp/gym-export-test"),
+            partition="cpu",
+            account="research",
+            walltime="00:30:00",
+            export_command="true",
+            extra_args={directive: "1"},
+        )

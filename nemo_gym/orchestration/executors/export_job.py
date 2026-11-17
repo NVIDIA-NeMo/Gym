@@ -32,21 +32,16 @@ def render_export_job(
     for key, value in (extra_args or {}).items():
         if not re.fullmatch(r"[a-z][a-z0-9-]*", key) or not re.fullmatch(r"[^\r\n\x00]*", value):
             raise ValueError("Invalid Slurm export extra argument")
-        if key in {
-            "partition",
-            "account",
-            "time",
-            "nodes",
-            "ntasks",
-            "cpus-per-task",
-            "gpus",
-            "gres",
-            "gpus-per-node",
-            "gpus-per-task",
-            "dependency",
-            "chdir",
-        }:
-            raise ValueError("Reserved Slurm export extra argument")
+        allowed_extra_args = {
+            "constraint",
+            "qos",
+            "reservation",
+            "mail-type",
+            "mail-user",
+            "comment",
+        }
+        if key not in allowed_extra_args:
+            raise ValueError("Unsupported Slurm export extra argument")
         extra_directives.append(f"#SBATCH --{key}={value}")
 
     if not export_command.strip():
