@@ -179,6 +179,30 @@ async def test_each_step_is_a_turn_in_a_fresh_session_on_one_sandbox(tmp_path, m
     ]
 
 
+async def test_each_steps_harness_is_seeded_after_task_json_is_written_again(tmp_path, monkeypatch):
+    """Claude Code and Codex copy the skills that task.json names at their seed, and a fresh session seeds every step:
+    the previous step's agent or verifier, or the step's setup.sh, may have removed the file the episode's seed wrote,
+    and the harness would then copy nothing and run the step without its skills. Each step's preparation writes it
+    again, after the step's setup."""
+    steps = '\n[[steps]]\nname = "one"\n\n[[steps]]\nname = "two"\n'
+    server, task, sandbox, _ = multi_turn_server(
+        tmp_path, monkeypatch, steps, {"one": "a", "two": "b"}, base=TASK_TOML + 'skills_dir = "/app/.skills"\n'
+    )
+    server.server_client.supports_task_tool_context = False
+    server.server_client.supports_task_skills = True
+    activations: list[int] = []
+    server.server_client.turn_hooks.append(lambda: activations.append(len(sandbox.execs)))
+
+    response = await server.run_request(request_for(task))
+
+    assert response.failure is None, response.failure
+    assert [turn.reward for turn in response.result.turns] == [1.0, 1.0]
+    writes = [i for i, call in enumerate(sandbox.execs) if "/tmp/.nemo-gym/task.json" in call["command"]]
+    assert all('"skills_dir": "/app/.skills"' in sandbox.execs[i]["command"] for i in writes)
+    # Step two's harness starts from a task.json written after step one's turn, not only from the episode seed's.
+    assert len(activations) == 2 and any(activations[0] <= i < activations[1] for i in writes)
+
+
 async def test_a_multi_step_episode_traces_its_final_score_at_debug_level_only(tmp_path, monkeypatch, caplog):
     """Review (round 38, non-blocking): the multi-step branch returned from `_run_turns` before the single-turn
     path's final-score DEBUG trace, so a `--verbose` run traced every single-turn episode's score but no multi-step

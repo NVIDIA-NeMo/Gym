@@ -1651,6 +1651,9 @@ class HarborEnvironmentServer(
         process it left behind can touch the working directory, ``setup.sh`` included, before the script runs; a
         step that takes root after a step that had less is where that matters (see :meth:`_prepare_step_workdir`).
         The oracle alone then gets the step's ``solution/`` at ``/solution`` (:meth:`_place_turn_solution`).
+        Last, ``/tmp/.nemo-gym/task.json`` is written again as the seed wrote it (:meth:`_write_task_context`): a
+        fresh session's harness reads the task's MCP servers and ``skills_dir`` there at its seed, and the previous
+        turn's agent or verifier, or the step's ``setup.sh``, may have removed or changed it.
         """
         task = session.task
         index = next(i for i, candidate in enumerate(task.turns) if candidate is turn)
@@ -1664,6 +1667,9 @@ class HarborEnvironmentServer(
         await self._prepare_step_workdir(session, turn)
         await self._run_step_healthcheck(session, turn)
         await self._place_turn_solution(session, turn)
+        # Claude Code and Codex are admitted to a skills_dir task because they copy what task.json names at seed;
+        # with the file gone they would copy nothing and run the step without its skills.
+        await self._write_task_context(session.sandbox, task, session.workdir)
         return access
 
     async def _apply_turn_user(self, session: HarborSession, user: str | None) -> None:
