@@ -30,6 +30,7 @@ def test_example_rows_are_valid_task_data_for_the_example_profile() -> None:
         row = TaskData.model_validate(json.loads(line))
         assert row.benchmark_profile in profiles
         assert row.ng_source_row_sha256 == source_hash(row.ng_source_row)
+        assert row.task_id == row.sample_id
 
 
 def test_example_audio_is_a_short_silent_wav_data_uri() -> None:

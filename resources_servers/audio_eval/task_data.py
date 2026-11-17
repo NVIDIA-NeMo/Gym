@@ -23,6 +23,11 @@ class TaskData(BaseModel):
         description="``<profile>:<1-based index>``; unique within the benchmark file.",
         json_schema_extra={"consumed_by": ["verify", "provenance"]},
     )
+    task_id: str = Field(
+        description="Stable task identity, equal to ``sample_id``: Gym keys resume and comparison on it, not on the "
+        "row position, which shifts when a benchmark is re-prepared, narrowed or reordered.",
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )
     ng_source_row: dict = Field(
         description="Immutable source row the scorer reads (reference, subset, scorer fields).",
         json_schema_extra={"consumed_by": ["verify", "metrics"]},

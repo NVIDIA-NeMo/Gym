@@ -3,8 +3,8 @@
 """Text helpers shared by the audio scorers: whitespace and compound-word handling, CER whitespace modes and the
 generation-loop guardrail.
 
-The ``asr_with_pc`` server scores with the same definitions; each server is its own package with its own
-environment, so this server keeps its own copy instead of importing the other one.
+Each resources server is its own package with its own environment, so these helpers are a copy of the
+definitions the other speech server uses, not an import of them.
 """
 
 from __future__ import annotations

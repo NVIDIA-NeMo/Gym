@@ -34,6 +34,25 @@ def test_evaluator_settings_parse_the_profile_arguments():
     assert evaluator_settings({"skills": {}}) == (None, {})
 
 
+@pytest.mark.parametrize(
+    "arg",
+    [
+        "++eval_conifg.x=1",
+        "eval_type=audio",
+        "++eval_type",
+        "++eval_type=",
+        "++eval_config.=1",
+        "++eval_config.x",
+        "--flag",
+    ],
+)
+def test_an_unrecognized_profile_argument_raises_instead_of_being_ignored(arg):
+    with pytest.raises(ValueError, match="Unrecognized argument"):
+        evaluator_settings({"skills": {"EVAL_ARGS": f"++eval_type=audio {arg}"}})
+    with pytest.raises(ValueError, match="Unrecognized argument"):
+        evaluator_settings({"skills": {"GENERATION_ARGS": arg}})
+
+
 def test_check_finite_rejects_nonfinite_values_anywhere():
     check_finite({"a": [1.0, {"b": 2}]})
     with pytest.raises(ValueError, match=r"metrics.a\[1\]"):
@@ -82,6 +101,19 @@ def test_generation_failure_and_assistant_text():
     )
     assert "incomplete response (None)" == generation_failure({"status": "incomplete"})
     assert "failed" in generation_failure({"status": "failed"})
+    assert "cancelled" in generation_failure({"status": "cancelled"})
+    # The model ended its turn with reasoning only, or with nothing: a measurement (an empty hypothesis).
+    for reason in ("incomplete_reasoning", "empty_output"):
+        assert generation_failure({"status": "incomplete", "metadata": {"ng_termination_reason": reason}}) is None
+    other = {"status": "incomplete", "metadata": {"ng_termination_reason": "other"}}
+    assert "incomplete response" in generation_failure(other)
+    # A content filter is not made a measurement by a stale termination reason.
+    filtered = {
+        "status": "incomplete",
+        "incomplete_details": {"reason": "content_filter"},
+        "metadata": {"ng_termination_reason": "empty_output"},
+    }
+    assert "content_filter" in generation_failure(filtered)
     output = [
         {"type": "reasoning"},
         {
@@ -125,9 +157,29 @@ def test_every_scoring_module_resolves_by_its_file_name(kind, directory, suffix)
             assert callable(found) and (not isinstance(found, type) or issubclass(found, base)), spelling
 
 
-def test_a_metrics_name_may_carry_a_variant_suffix():
+@pytest.fixture
+def declared_variants(monkeypatch):
+    """The audio metrics module declares the variant suffixes its benchmarks use."""
+    module = locate("metrics", "audio")[0]
+    monkeypatch.setattr(module, "VARIANTS", ("open_ended", "instruction_following_v2"), raising=False)
+
+
+def test_a_metrics_name_may_carry_a_variant_suffix_the_module_declares(declared_variants):
     assert resolve("metrics", "audio_open_ended") is AudioMetrics
     assert resolve("metrics", "audio_instruction_following_v2") is AudioMetrics
+    assert resolve("metrics", "audio") is AudioMetrics
+
+
+@pytest.mark.parametrize("name", ["audio_wer", "audio_open", "audio_open_ended_extra"])
+def test_an_undeclared_metrics_variant_is_a_key_error_not_a_silent_fallback(declared_variants, name):
+    """A typo, or a benchmark whose own metrics module has not merged yet, must not resolve to the generic class."""
+    with pytest.raises(KeyError, match="does not declare the variant"):
+        resolve("metrics", name)
+
+
+def test_a_module_that_declares_no_variants_rejects_every_suffix():
+    with pytest.raises(KeyError, match="declared: none"):
+        resolve("metrics", "audio_open_ended")
 
 
 @pytest.mark.parametrize(

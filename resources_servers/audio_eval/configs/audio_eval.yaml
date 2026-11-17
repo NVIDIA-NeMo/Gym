@@ -4,7 +4,7 @@ audio_eval:
       entrypoint: app.py
       domain: other
       description: Shared corpus-level scorer behind the speech and audio benchmarks listed under "Speech and audio benchmarks" below
-      value: Evaluate speech recognition, translation, language identification, and audio understanding
+      value: Evaluate speech recognition, translation, and audio understanding (evaluation only)
       verified: false
       profile_contracts: ""
       allowed_model_types:

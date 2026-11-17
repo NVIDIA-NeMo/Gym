@@ -54,6 +54,7 @@ def test_build_row_stores_request_prompt_and_source() -> None:
     assert (params["temperature"], params["top_p"], params["max_output_tokens"]) == (0.0, 1.0, 256)
     assert json.loads(params["metadata"]["extra_body"])["seed"] == 0
     assert row["benchmark_profile"] == "demo" and row["sample_id"] == "demo:3"
+    assert row["task_id"] == row["sample_id"]
     assert row["ng_source_row"] == snapshot
     assert (
         row["ng_source_row_sha256"]
@@ -62,6 +63,24 @@ def test_build_row_stores_request_prompt_and_source() -> None:
         ).hexdigest()
     )
     assert row["id"] == "utt-1" and row["expected_answer"] == "hello" and "messages" not in row
+
+
+def test_the_row_is_stable_under_a_jsonl_round_trip_and_its_digest_matches_the_stored_source() -> None:
+    """An integer mapping key is a string once written to JSONL: hashing the in-memory dict would then mismatch."""
+    source = _source(per_speaker={2: "b", 10: "a"})
+    row = am.build_row(source, profile="demo", contract=_contract(), index=1)
+    assert row["ng_source_row"]["per_speaker"] == {"2": "b", "10": "a"}
+    read_back = json.loads(json.dumps(row))
+    assert (
+        am.source_hash(read_back["ng_source_row"]) == read_back["ng_source_row_sha256"] == row["ng_source_row_sha256"]
+    )
+    assert source["per_speaker"] == {2: "b", 10: "a"}, "the caller's source row is not modified"
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_a_source_row_that_cannot_be_hashed_reliably_fails_at_prepare_time(bad: float) -> None:
+    with pytest.raises(ValueError, match="Out of range float|not JSON compliant"):
+        am.build_row(_source(score=bad), profile="demo", contract=_contract(), index=1)
 
 
 def test_prompt_override_system_handling() -> None:
@@ -206,6 +225,7 @@ def test_profile_rows_index_each_profile_from_one_for_shared_or_mapped_sources(t
 
     shared = list(am.profile_rows(path, sources))
     assert [row["sample_id"] for row in shared] == ["a:1", "a:2", "b:1", "b:2"]
+    assert [row["task_id"] for row in shared] == [row["sample_id"] for row in shared]
     mapped = list(am.profile_rows(path, {"b": iter(sources[:1]), "a": sources}))
     assert [row["sample_id"] for row in mapped] == ["b:1", "a:1", "a:2"]
     assert shared[0]["ng_source_row_sha256"] == am.source_hash(sources[0])

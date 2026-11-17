@@ -5,12 +5,15 @@
 from __future__ import annotations
 
 import asyncio
-from collections import defaultdict
+import inspect
+import logging
+from collections import Counter, defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar, Optional
 
+from fastapi import HTTPException
 from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, get_global_config_dict
@@ -39,11 +42,13 @@ from resources_servers.audio_eval.score import (
     flatten_metrics,
     generation_failure,
     locate,
+    resolve,
     score_rows,
 )
 from resources_servers.audio_eval.verifier_fixture import create_server
 
 
+LOG = logging.getLogger(__name__)
 GENERATION_FAILED = "audio_eval:generation_failed"
 
 
@@ -91,16 +96,30 @@ class AudioEvalResourcesServer(SimpleResourcesServer):
     _judge_slots: asyncio.Semaphore = PrivateAttr()
 
     def model_post_init(self, context: Any) -> None:
-        """Load and validate the profile contracts; fail at startup for a judged profile without a usable judge."""
+        """Load the profile contracts and resolve everything they name, so that a bad profile fails at startup.
+
+        For every profile this resolves the evaluator module and the metrics class, builds the evaluator once (which
+        rejects an unknown ``++eval_config.*`` key or ``normalization_mode``), and, for a judged profile, requires a
+        usable ``judge_model_server``.
+        """
         if not self.config.profile_contracts:
             raise ValueError("profile_contracts must name a benchmark's profiles.json")
         contracts = load_profiles(resolve_repo_path(self.config.profile_contracts))["profiles"]
         for name, contract in contracts.items():
-            evaluator, settings = evaluator_settings(contract)
-            hooks = None
-            if evaluator is not None and "judge_prompt_template" not in contract:
-                hooks = getattr(locate("evaluators", evaluator)[0], "JUDGE", None)
-            judge = judge_kind(contract, hooks, settings)
+            try:
+                evaluator_name, settings = evaluator_settings(contract)
+                hooks = None
+                if evaluator_name is not None:
+                    module, evaluator = locate("evaluators", evaluator_name)
+                    if "judge_prompt_template" not in contract:
+                        hooks = getattr(module, "JUDGE", None)
+                    if inspect.isclass(evaluator):
+                        # ``score_rows`` applies this setting itself; the evaluator never sees it.
+                        evaluator({key: value for key, value in settings.items() if key != "cleanup_generation_loops"})
+                resolve("metrics", contract["skills"]["METRICS_TYPE"])
+                judge = judge_kind(contract, hooks, settings)
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError(f"Profile {name} is invalid: {error}") from error
             if judge is not None and self.config.judge_model_server is None:
                 raise ValueError(f"Profile {name} is judged: set judge_model_server")
             if judge is not None:
@@ -124,10 +143,17 @@ class AudioEvalResourcesServer(SimpleResourcesServer):
         """The row fields a judge call contributes (empty for judge-free profiles)."""
         if profile.judge is None:
             return {}
-        if profile.judge == TEMPLATE_JUDGE:
-            request = template_request(row, profile.contract)
-        else:
-            request = profile.hooks.request(row)
+        try:
+            request = (
+                template_request(row, profile.contract)
+                if profile.judge == TEMPLATE_JUDGE
+                else profile.hooks.request(row)
+            )
+        except (KeyError, IndexError) as error:
+            # A deterministic row/profile mismatch: retrying the rollout cannot fix it.
+            raise HTTPException(
+                status_code=422, detail=f"The judge request names a field the row does not have: {error}"
+            ) from error
         async with self._judge_slots:
             completion = await call_judge(
                 self.server_client,
@@ -143,14 +169,20 @@ class AudioEvalResourcesServer(SimpleResourcesServer):
     async def verify(self, body: AudioEvalVerifyRequest) -> AudioEvalVerifyResponse:
         """Check the request against its source row, extract the generation and run the judge call, if any.
 
-        The reward is a placeholder of 0.0; a generation that is neither complete nor truncated at the output limit
-        is masked. The corpus metrics come from :meth:`compute_metrics`.
+        The reward is a constant placeholder of 0.0 (this server is for evaluation only: a constant reward gives a
+        trainer no signal). A response that is a measurement is scored, even when the model produced no answer
+        (see :func:`resources_servers.audio_eval.score.generation_failure`); only an infrastructure outcome is
+        masked. A request that cannot be scored whatever happens on a retry (an unknown profile, a changed source
+        row, a judge template that names a field the row lacks) is answered with HTTP 422, which is not retried.
+        The corpus metrics come from :meth:`compute_metrics`.
         """
         profile = self._profiles.get(body.benchmark_profile)
         if profile is None:
-            raise ValueError(f"Profile is not configured for this benchmark: {body.benchmark_profile}")
+            raise HTTPException(
+                status_code=422, detail=f"Profile is not configured for this benchmark: {body.benchmark_profile}"
+            )
         if source_hash(body.ng_source_row) != body.ng_source_row_sha256:
-            raise ValueError("Immutable source row hash mismatch")
+            raise HTTPException(status_code=422, detail="Immutable source row hash mismatch")
         result = body.model_dump(mode="json")
         response = result["response"]
         failure = generation_failure(response)
@@ -160,15 +192,19 @@ class AudioEvalResourcesServer(SimpleResourcesServer):
                 | {"reward": 0.0, "mask_sample": True, "failure_kind": GENERATION_FAILED, "failure_reason": failure}
             )
         generation = assistant_text(response)
-        row = dict(body.ng_source_row)
-        row.update(
-            sample_id=body.sample_id,
-            benchmark_profile=body.benchmark_profile,
-            generation=cleanup_generation_loops(generation) if profile.cleanup_loops else generation,
-        )
-        judged = await self._judge(profile, row)
-        # Corpus metrics are computed in aggregate_metrics. The reward is a placeholder
-        # (a completed-generation indicator), not a task-quality score.
+        judged = {}
+        if profile.judge is not None:
+            row = dict(body.ng_source_row)
+            row.update(
+                sample_id=body.sample_id,
+                benchmark_profile=body.benchmark_profile,
+                # The cleaned text is only for the judge request; the regex can take seconds on a long output.
+                generation=await asyncio.to_thread(cleanup_generation_loops, generation)
+                if profile.cleanup_loops
+                else generation,
+            )
+            judged = await self._judge(profile, row)
+        # Corpus metrics are computed in aggregate_metrics; the reward is a constant placeholder.
         return AudioEvalVerifyResponse.model_validate(
             result | {"generation": generation, "audio_judge": judged, "reward": 0.0}
         )
@@ -176,10 +212,15 @@ class AudioEvalResourcesServer(SimpleResourcesServer):
     def compute_metrics(self, tasks: list[list[dict]]) -> dict:
         """Corpus metrics per profile as flat ``audio/<profile>/pass@1/<metric>`` keys.
 
-        Masked rows are skipped; every task must have exactly one rollout.
+        Masked rows are skipped; every task must have exactly one rollout (:meth:`aggregate_metrics` checks the
+        unfiltered rollouts, since masked ones are already gone here). A verified row whose ``sample_id`` repeats, or
+        whose source row no longer matches its digest, is left out of the corpus and counted in
+        ``audio/skipped_rows/duplicate_sample_id`` and ``audio/skipped_rows/changed_source_row``, instead of voiding
+        every profile's metrics after the run (``verify`` already rejects a changed source row per request).
         """
         grouped: dict[str, list[dict]] = defaultdict(list)
         identities: set[str] = set()
+        skipped = Counter()
         for task in tasks:
             if len(task) != 1:
                 raise ValueError("Audio corpus scoring requires exactly one rollout per source task (num_repeats=1)")
@@ -190,8 +231,14 @@ class AudioEvalResourcesServer(SimpleResourcesServer):
             if profile not in self._profiles:
                 raise ValueError(f"Unknown audio benchmark profile: {profile}")
             identity = verified["sample_id"]
-            if identity in identities or source_hash(verified["ng_source_row"]) != verified["ng_source_row_sha256"]:
-                raise ValueError("Duplicate identity or changed audio source row")
+            if source_hash(verified["ng_source_row"]) != verified["ng_source_row_sha256"]:
+                skipped["changed_source_row"] += 1
+                LOG.warning("Skipping %s: the source row no longer matches its digest", identity)
+                continue
+            if identity in identities:
+                skipped["duplicate_sample_id"] += 1
+                LOG.warning("Skipping a repeated sample_id: %s", identity)
+                continue
             identities.add(identity)
             row = dict(verified["ng_source_row"])
             row.update(sample_id=identity, benchmark_profile=profile, generation=verified["generation"])
@@ -201,6 +248,7 @@ class AudioEvalResourcesServer(SimpleResourcesServer):
         for profile, rows in grouped.items():
             _, results = score_rows(rows, profile=profile, contract=self._profiles[profile].contract)
             metrics.update(flatten_metrics(results))
+        metrics.update({f"audio/skipped_rows/{reason}": count for reason, count in skipped.items()})
         return metrics
 
     def get_key_metrics(self, agent_metrics: dict) -> dict:
@@ -209,6 +257,10 @@ class AudioEvalResourcesServer(SimpleResourcesServer):
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
         """Score the verified rollouts in a worker thread."""
+        # Masked rollouts are removed before ``compute_metrics``, so the one-rollout-per-task rule is checked here.
+        rollouts = Counter(row.get("_ng_task_index", 0) for row in body.verify_responses)
+        if any(count != 1 for count in rollouts.values()):
+            raise ValueError("Audio corpus scoring requires exactly one rollout per source task (num_repeats=1)")
         # Corpus BLEU and session merging can take minutes; keep the event loop free.
         return await asyncio.to_thread(
             compute_aggregate_metrics,

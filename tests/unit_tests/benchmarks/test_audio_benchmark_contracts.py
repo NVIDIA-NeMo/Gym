@@ -36,7 +36,16 @@ def discover() -> dict[str, str]:
 
 
 AUDIO_BENCHMARKS = discover()
-WITH_PROFILES = sorted(name for name in AUDIO_BENCHMARKS if (ROOT / "benchmarks" / name / "profiles.json").exists())
+# Every profile file the contract tests check: the benchmarks' own, plus the audio_eval server's example profile, so the
+# two profile tests below exercise a real file even where no benchmark has merged yet.
+PROFILE_FILES = {
+    **{
+        name: ROOT / "benchmarks" / name / "profiles.json"
+        for name in sorted(AUDIO_BENCHMARKS)
+        if (ROOT / "benchmarks" / name / "profiles.json").exists()
+    },
+    "audio_eval-example": ROOT / "resources_servers" / "audio_eval" / "data" / "example_profiles.json",
+}
 
 
 def test_the_audio_benchmark_names_are_unique_directories() -> None:
@@ -81,9 +90,9 @@ def test_declaration_is_discovered_and_consistent(name: str) -> None:
         assert Path(dataset.jsonl_fpath).absolute() == output.absolute()
 
 
-@pytest.mark.parametrize("name", WITH_PROFILES)
+@pytest.mark.parametrize("name", sorted(PROFILE_FILES))
 def test_profile_contracts_resolve_and_have_no_unread_keys(name: str) -> None:
-    profiles = audio_manifest.load_profiles(ROOT / "benchmarks" / name / "profiles.json")["profiles"]
+    profiles = audio_manifest.load_profiles(PROFILE_FILES[name])["profiles"]
     assert profiles
     for profile, contract in profiles.items():
         judged = "judge_prompt_template" in contract
@@ -96,10 +105,10 @@ def test_profile_contracts_resolve_and_have_no_unread_keys(name: str) -> None:
         assert isinstance(audio_manifest.request_controls(contract)["max_output_tokens"], int), profile
 
 
-@pytest.mark.parametrize("name", WITH_PROFILES)
+@pytest.mark.parametrize("name", sorted(PROFILE_FILES))
 def test_profile_scorers_are_found_by_name(name: str) -> None:
     """The evaluator and metrics a profile names exist as modules (a missing third-party library is not an error here)."""
-    profiles = audio_manifest.load_profiles(ROOT / "benchmarks" / name / "profiles.json")["profiles"]
+    profiles = audio_manifest.load_profiles(PROFILE_FILES[name])["profiles"]
     for profile, contract in profiles.items():
         evaluator, _ = evaluator_settings(contract)
         for kind, scorer in (("evaluators", evaluator), ("metrics", contract["skills"]["METRICS_TYPE"])):

@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from hydra.core.override_parser.overrides_parser import OverridesParser
@@ -45,6 +46,27 @@ def test_a_bare_comma_separated_override_is_a_hydra_sweep_so_lists_need_brackets
     override = OverridesParser.create().parse_override("+prepare_script_args.subsets=a,b")
     assert override.is_sweep_override()
     assert _parsed("[a,b]") == ["a", "b"]
+
+
+def test_the_plugin_fails_a_run_that_wrapped_prepare_but_never_called_a_wrapper(monkeypatch) -> None:
+    """A test that imported ``prepare`` by name holds the unwrapped function and would bypass the re-run unnoticed."""
+    monkeypatch.setattr(plugin, "WRAPPED_MODULES", ["benchmarks.x.prepare"])
+    monkeypatch.setattr(plugin, "CALLS", [])
+    session = SimpleNamespace(testscollected=3, exitstatus=0)
+    plugin.pytest_sessionfinish(session, 0)
+    assert session.exitstatus == pytest.ExitCode.TESTS_FAILED
+    # A wrapped call, nothing wrapped, a failed run and an empty run are all left alone.
+    for wrapped, calls, collected, status in (
+        (["benchmarks.x.prepare"], ["benchmarks.x.prepare"], 3, 0),
+        ([], [], 3, 0),
+        (["benchmarks.x.prepare"], [], 3, 1),
+        (["benchmarks.x.prepare"], [], 0, 0),
+    ):
+        monkeypatch.setattr(plugin, "WRAPPED_MODULES", wrapped)
+        monkeypatch.setattr(plugin, "CALLS", calls)
+        session = SimpleNamespace(testscollected=collected, exitstatus=status)
+        plugin.pytest_sessionfinish(session, status)
+        assert session.exitstatus == status
 
 
 def test_every_offline_prepare_test_passes_with_hydra_typed_arguments() -> None:

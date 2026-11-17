@@ -3,6 +3,11 @@
 #
 # Adapted from NVIDIA-NeMo/Skills (Apache-2.0), nemo_skills/evaluation/metrics/audio_metrics.py
 # at commit da85a881d972e6fec847b90cf553a0bf9bf10638: https://github.com/NVIDIA-NeMo/Skills
+# Modifications (NVIDIA-authored; no addition is taken from another source): `get_incorrect_sample` is removed and
+# the `nemo_skills` imports are replaced by this package's own base class and a module logger. Added: per-subset
+# corpus totals for WER, CER and BLEU inputs, cpWER accumulators (overall and per subset), the WER-C/WER-PC and
+# punctuation error totals, structured-WER streams, and the corresponding keys in `get_metrics`; the judge-rating
+# parsing is unchanged apart from comments.
 
 """Audio metrics: Metrics aggregation for audio evaluation tasks.
 

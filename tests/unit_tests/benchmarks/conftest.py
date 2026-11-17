@@ -15,17 +15,21 @@ def mock_port_allocation(monkeypatch):
     monkeypatch.setattr(global_config_module, "_find_open_port_using_range", lambda **_: 12345)
 
 
+def _opted_in(request) -> bool:
+    return getattr(request.module, "USES_AUDIO_LIBRARIES", False) is True
+
+
 @pytest.fixture(autouse=True)
 def _audio_libraries(request, monkeypatch):
     """The ``prepare()`` tests of the audio benchmarks need ``soundfile`` and ``soxr``, which the core environment lacks:
-    use the stdlib stand-ins. Only ``test_<name>_benchmark.py`` modules and modules that set
-    ``USES_AUDIO_LIBRARIES = True`` are affected."""
-    if request.module.__name__.endswith("_benchmark") or getattr(request.module, "USES_AUDIO_LIBRARIES", False):
+    use the stdlib stand-ins. This folder also holds many non-audio tests, so a module opts in explicitly with
+    ``USES_AUDIO_LIBRARIES = True`` (a module name is not a reliable signal); no other module is affected."""
+    if _opted_in(request):
         stdlib_audio.install(monkeypatch)
 
 
 @pytest.fixture(autouse=True)
-def _mock_port_allocation_for_benchmark_tests(request):
-    """Every ``test_<name>_benchmark.py`` module parses benchmark declarations; no other test is affected."""
-    if request.module.__name__.endswith("_benchmark"):
+def _mock_port_allocation_for_audio_benchmark_tests(request):
+    """An audio benchmark test module (``USES_AUDIO_LIBRARIES = True``) parses benchmark declarations: pin the ports."""
+    if _opted_in(request):
         request.getfixturevalue("mock_port_allocation")

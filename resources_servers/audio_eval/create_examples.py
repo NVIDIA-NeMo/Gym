@@ -51,7 +51,7 @@ def make_row(index: int, transcript: str) -> dict:
     Unlike a prepared benchmark row, the source fields are not copied to the top level: the example dataset is checked
     against the server's task-data schema, which declares only the keys below.
     """
-    source = {"expected_answer": transcript, "task_type": "ASR"}
+    source = json.loads(json.dumps({"expected_answer": transcript, "task_type": "ASR"}, allow_nan=False))
     return {
         "responses_create_params": {
             "input": [{"role": "user", "content": PROMPT}],
@@ -62,6 +62,7 @@ def make_row(index: int, transcript: str) -> dict:
         },
         "benchmark_profile": PROFILE,
         "sample_id": f"{PROFILE}:{index}",
+        "task_id": f"{PROFILE}:{index}",
         "ng_source_row": source,
         "ng_source_row_sha256": source_hash(source),
     }

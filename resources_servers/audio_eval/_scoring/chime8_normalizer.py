@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 Samuele Cornell
 # SPDX-FileCopyrightText: Copyright (c) 2022 OpenAI
-# SPDX-FileCopyrightText: Modifications Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: MIT
+#
+# SPDX-FileCopyrightText: Modifications Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# The upstream portions above remain under the MIT license (CHIME_UTILS_LICENSE); NVIDIA's changes to this file are
+# licensed under Apache-2.0.
 #
 # Adapted from https://github.com/chimechallenge/chime-utils/blob/152882404f572d40769ef02bf91c5a9a9cfc9c78/chime_utils/text_norm/whisper_like/english.py
 # (with ``remove_symbols_and_diacritics`` from ``basic.py`` in the same directory). chime-utils is MIT

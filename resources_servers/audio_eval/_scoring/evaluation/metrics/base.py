@@ -3,6 +3,9 @@
 #
 # Adapted from NVIDIA-NeMo/Skills (Apache-2.0), nemo_skills/evaluation/metrics/base.py
 # at commit da85a881d972e6fec847b90cf553a0bf9bf10638: https://github.com/NVIDIA-NeMo/Skills
+# Modifications: the console-formatting helpers (`as_percentage`, `as_int`, `as_float`, `default_formatting`) and
+# the `get_incorrect_sample`, `setup`, `metrics_to_print` and `evaluations_to_print` hooks are removed; the
+# accumulation interface (`reset`, `update`, `get_metrics`) is unchanged.
 
 import abc
 import math

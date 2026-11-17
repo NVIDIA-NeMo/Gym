@@ -24,8 +24,13 @@ def hydra_typed(value):
     return value
 
 
+WRAPPED_MODULES: list[str] = []
+CALLS: list[str] = []
+
+
 def _wrap(prepare):
     def prepare_as_hydra(*args, **kwargs):
+        CALLS.append(prepare.__module__)
         output = prepare(*args, **{key: hydra_typed(value) for key, value in kwargs.items()})
         if isinstance(output, Path) and output.is_file():
             assert output.read_text().strip(), f"{output} has no rows"
@@ -43,3 +48,18 @@ def pytest_collection_finish(session):
         if name.startswith("benchmarks.") and name.endswith(".prepare") and callable(getattr(module, "prepare", None)):
             if not hasattr(module.prepare, "__wrapped__"):
                 module.prepare = _wrap(module.prepare)
+                WRAPPED_MODULES.append(name)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Fail a run that wrapped ``prepare()`` yet never went through a wrapper.
+
+    A test that did ``from benchmarks.x.prepare import prepare`` at import time holds the unwrapped function, so it
+    would silently bypass the ``ListConfig`` re-run; the run must then fail instead of passing without checking.
+    """
+    if session.testscollected and WRAPPED_MODULES and not CALLS and exitstatus == 0:
+        print(
+            "hydra_prepare_plugin: no test called a wrapped prepare(); import it as a module attribute",
+            file=sys.stderr,
+        )
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED

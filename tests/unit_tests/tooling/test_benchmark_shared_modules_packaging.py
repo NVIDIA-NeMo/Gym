@@ -5,9 +5,7 @@
 import tomllib
 from pathlib import Path
 
-from setuptools import find_namespace_packages
-from setuptools.command.build_py import build_py
-from setuptools.dist import Distribution
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -16,6 +14,12 @@ SHARED_MODULES = {path.stem for path in (ROOT / "benchmarks").glob("*.py") if pa
 
 
 def test_shared_benchmark_modules_are_packaged() -> None:
+    # ``setuptools`` is not in the locked dev environment (only the ``vllm`` extra reaches it).
+    pytest.importorskip("setuptools")
+    from setuptools import find_namespace_packages
+    from setuptools.command.build_py import build_py
+    from setuptools.dist import Distribution
+
     discovery = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["setuptools"]["packages"]["find"]
     packages = find_namespace_packages(where=str(ROOT), include=discovery["include"], exclude=discovery["exclude"])
     assert "benchmarks" in packages

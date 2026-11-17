@@ -44,6 +44,10 @@
         "unique_count": 5,
         "total_count": 5
     },
+    "task_id": {
+        "unique_count": 5,
+        "total_count": 5
+    },
     "ng_source_row_sha256": {
         "unique_count": 5,
         "total_count": 5

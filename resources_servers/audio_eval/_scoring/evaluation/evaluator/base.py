@@ -3,6 +3,8 @@
 #
 # Adapted from NVIDIA-NeMo/Skills (Apache-2.0), nemo_skills/evaluation/evaluator/base.py
 # at commit da85a881d972e6fec847b90cf553a0bf9bf10638: https://github.com/NVIDIA-NeMo/Skills
+# Modifications: the batch path (`eval_full`, with its `tqdm` dependency) and `supports_single_eval` are removed,
+# and `nested_dataclass` from `nemo_skills.utils` is replaced by `dataclass`; the rest is unchanged.
 
 from abc import ABC
 from dataclasses import dataclass

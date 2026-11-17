@@ -768,9 +768,6 @@ omit = [
     "benchmarks/*",
     "environments/*",
     "scripts/*",
-    # Vendored third-party scorer source (see ATTRIBUTIONS.md); the NVIDIA-authored scorers around it are measured.
-    "resources_servers/audio_eval/_scoring/evaluation/metrics/cpwer_utils.py",
-    "resources_servers/audio_eval/_scoring/chime8_normalizer.py",
 ]
 data_file = "results/.coverage"
 concurrency = ["thread", "multiprocessing"]

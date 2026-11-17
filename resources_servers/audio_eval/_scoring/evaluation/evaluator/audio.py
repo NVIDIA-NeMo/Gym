@@ -3,6 +3,16 @@
 #
 # Adapted from NVIDIA-NeMo/Skills (Apache-2.0), nemo_skills/evaluation/evaluator/audio.py
 # at commit da85a881d972e6fec847b90cf553a0bf9bf10638: https://github.com/NVIDIA-NeMo/Skills
+# Modifications (NVIDIA-authored; no addition is taken from another source): the file-level `eval_audio` entry point
+# and the helpers `calculate_per`, `extract_punctuation`, `split_tokens`, `_expand_contractions`,
+# `_normalize_digits_to_words` and `_remove_non_speech_elements` are removed, and whitespace and compound-word
+# helpers moved to `_scoring/text.py`. Added: mixed error rate (`evaluate_mer`, `mixed_segment`), multi-speaker
+# cpWER (`evaluate_msasr`, speaker-tag parsing and normalization; the counts come from `metrics/cpwer_utils.py` and
+# the `chime8` normalization from `_scoring/chime8_normalizer.py`), punctuation error counts, CER whitespace modes,
+# `register_normalization_mode` and `register_task_type` (a benchmark's scorer module adds its own), `coerce_text_field`,
+# the `lower_nopunct` normalization and the per-row edit counts that corpus aggregation sums. `evaluate_asr`,
+# `evaluate_asr_pc`, `evaluate_cer`, `evaluate_sample`, the multilingual normalizer and `AudioEvaluator` (which now
+# validates its settings when built) are changed accordingly.
 
 """Audio evaluation framework supporting ASR, ASR-PC, Translation, CER, and more."""
 
@@ -1099,6 +1109,17 @@ class AudioEvaluator(BaseEvaluator):
     def __init__(self, config: dict, num_parallel_requests=10):
         super().__init__(config, num_parallel_requests)
         self.eval_config = AudioEvaluatorConfig(**self.config)
+        # Fail when the evaluator is built (at server startup), not per row at scoring time.
+        if self.eval_config.normalization_mode not in valid_normalization_modes():
+            raise ValueError(
+                f"Invalid normalization_mode '{self.eval_config.normalization_mode}'. "
+                f"Available options: {', '.join(valid_normalization_modes())}"
+            )
+        if self.eval_config.cpwer_normalization not in VALID_CPWER_NORMALIZATION_MODES:
+            raise ValueError(
+                f"Invalid cpwer_normalization '{self.eval_config.cpwer_normalization}'. "
+                f"Available options: {', '.join(VALID_CPWER_NORMALIZATION_MODES)}"
+            )
 
     async def eval_single(self, data_point: dict[str, any]) -> dict[str, any]:
         """Evaluate single audio sample - can be called during generation.

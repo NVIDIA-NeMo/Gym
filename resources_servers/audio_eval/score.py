@@ -66,8 +66,10 @@ def locate(kind: str, name: str) -> tuple[ModuleType, Any]:
     * ``foo-bar`` or ``foo_bar`` -> ``_scoring/evaluation/evaluator/foo_bar.py``, which defines a function
       ``eval_foo_bar`` or exactly one ``BaseEvaluator`` subclass.
     * ``foo-bar`` or ``foo_bar`` -> ``_scoring/evaluation/metrics/foo_bar_metrics.py``, which defines exactly one
-      ``BaseMetrics`` subclass. A metrics name may carry a variant suffix (``foo_bar_open_ended`` finds
-      ``foo_bar_metrics.py`` when no module matches the full name; the longest matching prefix wins).
+      ``BaseMetrics`` subclass. A metrics name may carry a variant suffix: ``foo_bar_open_ended`` finds
+      ``foo_bar_metrics.py`` when no module matches the full name (the longest matching prefix wins), and only when
+      that module declares the suffix in a module-level ``VARIANTS`` (``VARIANTS = ("open_ended",)``). A name whose
+      suffix the module does not declare, such as the typo ``audio_wer``, is a ``KeyError``.
     * ``nemo_skills.dataset.<dataset>.scorer::<Class>`` -> ``_scoring/dataset/<dataset>/scorer.py``, attribute
       ``<Class>`` (the dataset-scoped scorers of the Skills layout).
     """
@@ -98,6 +100,13 @@ def locate(kind: str, name: str) -> tuple[ModuleType, Any]:
             break
     else:
         raise KeyError(f"Unknown {kind[:-1]} {name!r}: no module {package}.{candidates[0]}")
+    if kind == "metrics" and candidate != candidates[0]:
+        variant = stem.removeprefix(candidate.removesuffix("_metrics")).lstrip("_")
+        if variant not in getattr(module, "VARIANTS", ()):
+            raise KeyError(
+                f"Unknown {kind[:-1]} {name!r}: {module.__name__} does not declare the variant {variant!r} "
+                f"(declared: {', '.join(getattr(module, 'VARIANTS', ())) or 'none'})"
+            )
     if kind == "evaluators" and callable(function := getattr(module, f"eval_{stem}", None)):
         return module, function
     classes = _defined_in(module, base)
@@ -112,16 +121,26 @@ def resolve(kind: str, name: str) -> Any:
 
 
 def evaluator_settings(contract: dict) -> tuple[str | None, dict]:
-    """The evaluator name and ``++eval_config.*`` settings a profile contract declares."""
+    """The evaluator name and ``++eval_config.*`` settings a profile contract declares.
+
+    The contract keeps NeMo Skills' command-line strings, but only two token forms mean anything here:
+    ``++eval_type=<name>`` and ``++eval_config.<key>=<value>``. Any other token (a typo such as
+    ``++eval_conifg.x=1``, a bare ``eval_type=audio``) raises ``ValueError`` instead of being ignored.
+    """
     settings = {}
     evaluator = None
     skills = contract["skills"]
     for arg in shlex.split((skills.get("GENERATION_ARGS") or "") + " " + (skills.get("EVAL_ARGS") or "")):
-        if arg.startswith("++eval_type="):
+        if arg.startswith("++eval_type=") and len(arg) > len("++eval_type="):
             evaluator = arg.split("=", 1)[1]
-        elif arg.startswith("++eval_config."):
+        elif arg.startswith("++eval_config.") and "=" in arg and arg.split("=", 1)[0] != "++eval_config.":
             key, value = arg.removeprefix("++eval_config.").split("=", 1)
             settings[key] = yaml.safe_load(value)
+        else:
+            raise ValueError(
+                f"Unrecognized argument {arg!r} in the profile's EVAL_ARGS/GENERATION_ARGS: "
+                "use ++eval_type=<name> and ++eval_config.<key>=<value>"
+            )
     return evaluator, settings
 
 
@@ -245,18 +264,30 @@ def score_rows(rows: list[dict], *, profile: str, contract: dict, concurrency: i
     return scored, aggregate(scored, profile, contract)
 
 
+# ``ng_termination_reason`` values the agent sets when the model ended its turn without an answer.
+_NO_ANSWER_REASONS = ("incomplete_reasoning", "empty_output")
+
+
 def generation_failure(response: dict) -> str | None:
     """Why a Gym response carries no measurable generation, or None when it does.
 
-    A response truncated at the output-token limit is still a measurement; any other unsuccessful
-    status is an infrastructure outcome, not a transcription error.
+    These are measurements, not infrastructure outcomes, and are scored: a completed response, a response truncated
+    at the output-token limit, and an ``incomplete`` response the agent marked ``incomplete_reasoning`` or
+    ``empty_output`` (the model ended its turn with reasoning only, or with nothing; the hypothesis is empty, as in
+    NeMo Skills). Masking those would drop exactly the rows the model failed and improve the headline metric.
+    Everything else (``failed``, ``cancelled``, or an ``incomplete`` response with another reason such as
+    ``content_filter``) is an infrastructure outcome and is masked.
     """
     status = response.get("status")
     if status == "completed":
         return None
     if status == "incomplete":
         reason = (response.get("incomplete_details") or {}).get("reason")
-        return None if reason == "max_output_tokens" else f"incomplete response ({reason})"
+        if reason == "max_output_tokens":
+            return None
+        if reason is None and (response.get("metadata") or {}).get("ng_termination_reason") in _NO_ANSWER_REASONS:
+            return None
+        return f"incomplete response ({reason})"
     return f"unsuccessful response status {status}"
 
 

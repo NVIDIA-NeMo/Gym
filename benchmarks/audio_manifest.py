@@ -99,11 +99,16 @@ def build_row(source: dict, *, profile: str, contract: dict, index: int) -> dict
     """Build one Gym row from a source row.
 
     ``source`` holds the example's fields plus ``messages``: chat messages whose audio is attached as
-    ``{"audio": {"path": ...}}`` or ``{"audios": [{"path": ...}, ...]}``. It is stored unchanged as
-    ``ng_source_row`` (the scorer's input); the row's own fields are the source fields, the profile's prompt
-    override and request controls applied. ``index`` is the 1-based position of the row within its profile and
-    makes ``sample_id`` unique.
+    ``{"audio": {"path": ...}}`` or ``{"audios": [{"path": ...}, ...]}``. It is stored as ``ng_source_row`` (the
+    scorer's input) after a JSON round trip, and ``ng_source_row_sha256`` is the digest of that stored form, so the
+    digest still matches once the row has been written to JSONL and read back: an integer mapping key is already a
+    string, and a NaN or an integer beyond 64 bits (which cannot be hashed and compared reliably) fails here, at
+    prepare time, instead of failing every verify of the row. The row's own fields are the source fields, the
+    profile's prompt override and request controls applied. ``index`` is the 1-based position of the row within its
+    profile; it makes ``sample_id`` unique, and ``task_id`` is the same value, the stable identity Gym keeps for
+    resume and comparison when a benchmark is re-prepared, narrowed or reordered.
     """
+    source = json.loads(json.dumps(source, allow_nan=False))
     messages, audio_paths = _split_audio(deepcopy(source["messages"]))
     if not audio_paths:
         raise ValueError(f"{profile}:{index} has no audio path")
@@ -128,6 +133,7 @@ def build_row(source: dict, *, profile: str, contract: dict, index: int) -> dict
     }
     row["benchmark_profile"] = profile
     row["sample_id"] = f"{profile}:{index}"
+    row["task_id"] = row["sample_id"]
     row["ng_source_row"] = deepcopy(source)
     row["ng_source_row_sha256"] = source_hash(source)
     return row

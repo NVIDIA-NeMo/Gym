@@ -6,14 +6,17 @@ import asyncio
 import importlib.machinery
 import json
 import sys
+import threading
 import types
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest
+from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming
 from nemo_gym.verification import judge_failsafe
 from resources_servers.audio_eval._scoring.evaluation.evaluator.base import BaseEvaluator
@@ -53,22 +56,29 @@ def make_server(tmp_path: Path, profiles: dict | None = None, **config) -> Audio
     )
 
 
-def response(text: str = "hello world", status: str = "completed", reason: str | None = None) -> dict:
+def response(
+    text: str = "hello world",
+    status: str = "completed",
+    reason: str | None = None,
+    *,
+    metadata: dict | None = None,
+    output: list | None = None,
+) -> dict:
+    message = {
+        "id": "m1",
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": text, "annotations": []}],
+    }
     return {
         "id": "r",
         "created_at": 0,
         "model": "m",
         "object": "response",
-        "output": [
-            {
-                "id": "m1",
-                "type": "message",
-                "role": "assistant",
-                "status": "completed",
-                "content": [{"type": "output_text", "text": text, "annotations": []}],
-            }
-        ],
+        "output": [message] if output is None else output,
         "status": status,
+        "metadata": metadata,
         "incomplete_details": {"reason": reason} if reason else None,
         "parallel_tool_calls": False,
         "tool_choice": "none",
@@ -116,6 +126,45 @@ def test_startup_rejects_missing_empty_and_unjudged_configuration(tmp_path):
     make_server(tmp_path, judged, judge_model_server=JUDGE_SERVER)
 
 
+@pytest.mark.parametrize(
+    "skills, message",
+    [
+        ({"EVAL_ARGS": "++eval_type=audio", "METRICS_TYPE": "no_such_metrics"}, "Unknown metric"),
+        ({"EVAL_ARGS": "++eval_type=audio", "METRICS_TYPE": "audio_wer"}, "does not declare the variant"),
+        ({"EVAL_ARGS": "++eval_type=no_such_scorer", "METRICS_TYPE": "audio"}, "Unknown evaluator"),
+        (
+            {"EVAL_ARGS": "++eval_type=audio ++eval_config.normalisation_mode=none", "METRICS_TYPE": "audio"},
+            "normalisation_mode",
+        ),
+        (
+            {"EVAL_ARGS": "++eval_type=audio ++eval_config.normalization_mode=bogus", "METRICS_TYPE": "audio"},
+            "Invalid normalization_mode",
+        ),
+        (
+            {"EVAL_ARGS": "++eval_type=audio ++eval_config.cpwer_normalization=bogus", "METRICS_TYPE": "audio"},
+            "Invalid cpwer_normalization",
+        ),
+        (
+            {"EVAL_ARGS": "++eval_type=audio ++eval_conifg.normalization_mode=none", "METRICS_TYPE": "audio"},
+            "Unrecognized argument",
+        ),
+        ({"EVAL_ARGS": "eval_type=audio", "METRICS_TYPE": "audio"}, "Unrecognized argument"),
+    ],
+)
+def test_a_bad_profile_fails_at_startup_not_after_the_run(tmp_path, skills, message):
+    with pytest.raises(ValueError, match=f"Profile bad is invalid: .*{message}"):
+        make_server(tmp_path, {"bad": {"skills": skills}})
+
+
+def test_a_valid_profile_with_every_setting_kind_starts(tmp_path):
+    skills = {
+        "EVAL_ARGS": "++eval_type=audio ++eval_config.normalization_mode=lower_nopunct "
+        "++eval_config.cleanup_generation_loops=true",
+        "METRICS_TYPE": "audio",
+    }
+    make_server(tmp_path, {"ok": {"skills": skills}})
+
+
 def test_startup_rejects_a_judge_endpoint_left_at_the_unset_placeholder(tmp_path):
     judged = {"j": {"skills": {"METRICS_TYPE": "audio"}, "judge_prompt_template": {"user": "{generation}"}}}
 
@@ -152,24 +201,74 @@ def test_verify_returns_placeholder_reward_and_raw_generation(tmp_path):
     assert result["generation"] == "hello world" and result["audio_judge"] == {}
 
 
-def test_verify_rejects_unknown_profile_and_changed_source(tmp_path):
+def test_verify_answers_422_for_an_unknown_profile_and_a_changed_source_row(tmp_path):
+    """Deterministic input errors are not infrastructure failures: a 5xx would be retried (and re-run the audio model)."""
     server = make_server(tmp_path)
-    with pytest.raises(ValueError, match="not configured"):
+    with pytest.raises(HTTPException, match="not configured") as unknown:
         verify(server, request("other", ASR_SOURCE))
+    assert unknown.value.status_code == 422
     body = request("wer", ASR_SOURCE)
     body.ng_source_row["expected_answer"] = "changed"
-    with pytest.raises(ValueError, match="hash mismatch"):
+    with pytest.raises(HTTPException, match="hash mismatch") as changed:
         verify(server, body)
+    assert changed.value.status_code == 422
+
+
+def test_a_judge_template_naming_a_field_the_row_lacks_answers_422(tmp_path):
+    server = make_server(tmp_path, OPEN_ENDED, judge_model_server=JUDGE_SERVER)
+    source = {key: value for key, value in OPEN_SOURCE.items() if key != "question"}
+    with pytest.raises(HTTPException, match="question") as missing:
+        verify(server, request("open", source, generated="a dog"))
+    assert missing.value.status_code == 422
+    server.server_client.post.assert_not_called()
 
 
 def test_truncated_generation_is_measured_but_other_failures_are_masked(tmp_path):
     server = make_server(tmp_path)
     truncated = verify(server, request("wer", ASR_SOURCE, status="incomplete", reason="max_output_tokens"))
     assert not truncated["mask_sample"]
-    for kwargs in ({"status": "incomplete", "reason": "content_filter"}, {"status": "failed"}):
+    for kwargs in (
+        {"status": "incomplete", "reason": "content_filter"},
+        {"status": "failed"},
+        {"status": "cancelled"},
+    ):
         masked = verify(server, request("wer", ASR_SOURCE, **kwargs))
         assert masked["mask_sample"] and masked["failure_kind"] == GENERATION_FAILED
         assert masked["failure_reason"] and masked["reward"] == 0.0
+
+
+REASONING_ONLY = [{"id": "rs", "type": "reasoning", "summary": []}]
+
+
+@pytest.mark.parametrize(
+    "reason, output", [("incomplete_reasoning", REASONING_ONLY), ("empty_output", [])], ids=["reasoning", "empty"]
+)
+def test_a_model_that_answers_with_reasoning_only_or_nothing_is_scored_as_an_empty_hypothesis(
+    tmp_path, reason, output
+):
+    """Masking these rows would drop exactly the clips the model failed and improve the headline metric."""
+    server = make_server(tmp_path)
+    good = verify(server, request("wer", ASR_SOURCE, index=0, generated="hello world"))
+    silent = verify(
+        server,
+        request(
+            "wer", ASR_SOURCE, index=1, status="incomplete", metadata={"ng_termination_reason": reason}, output=output
+        ),
+    )
+    assert not silent["mask_sample"] and silent["generation"] == ""
+    metrics = server.compute_metrics([[good], [silent]])
+    assert metrics["audio/wer/pass@1/num_entries"] == 2
+    assert metrics["audio/wer/pass@1/wer"] == pytest.approx(50.0)  # 0% and 100%
+    rows = [row | {TASK_INDEX_KEY_NAME: i, ROLLOUT_INDEX_KEY_NAME: 0} for i, row in enumerate((good, silent))]
+    aggregated = asyncio.run(server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows)))
+    assert aggregated.key_metrics["audio/wer/pass@1/num_entries"] == 2
+
+
+def test_an_incomplete_response_without_a_no_answer_reason_is_still_masked(tmp_path):
+    server = make_server(tmp_path)
+    for metadata in (None, {}, {"ng_termination_reason": "something_else"}):
+        masked = verify(server, request("wer", ASR_SOURCE, status="incomplete", metadata=metadata))
+        assert masked["mask_sample"] and masked["failure_kind"] == GENERATION_FAILED, metadata
 
 
 def tasks(server, bodies):
@@ -187,27 +286,91 @@ def test_compute_metrics_scores_wer_and_skips_masked_rows(tmp_path):
     assert server.get_key_metrics(metrics | {"other": 1}) == metrics
 
 
-def test_compute_metrics_rejects_repeats_duplicates_changes_and_unknown_profiles(tmp_path):
+def test_compute_metrics_rejects_repeats_and_unknown_profiles(tmp_path):
     server = make_server(tmp_path)
     one = verify(server, request("wer", ASR_SOURCE))
     with pytest.raises(ValueError, match="num_repeats=1"):
         server.compute_metrics([[one, one]])
-    with pytest.raises(ValueError, match="Duplicate identity"):
-        server.compute_metrics([[one], [one]])
-    with pytest.raises(ValueError, match="changed audio source"):
-        server.compute_metrics([[one | {"ng_source_row": {"expected_answer": "x"}}]])
     with pytest.raises(ValueError, match="Unknown audio benchmark profile"):
         server.compute_metrics([[one | {"benchmark_profile": "nope"}]])
     assert server.compute_metrics([]) == {}
 
 
-def test_cleanup_generation_loops_is_applied_to_scoring_only(tmp_path):
+def test_a_repeated_sample_id_or_a_changed_source_row_is_skipped_and_counted_not_fatal(tmp_path):
+    """One bad row must not void the metrics of every profile after the whole run (``verify`` already checks per row)."""
     server = make_server(tmp_path)
-    looped = "hello world " + "a" * 40
-    result = verify(server, request("wer-loops", ASR_SOURCE, generated=looped))
-    assert result["generation"] == looped
-    metrics = server.compute_metrics([[result]])
-    assert metrics["audio/wer-loops/pass@1/wer"] == pytest.approx(50.0)
+    one = verify(server, request("wer", ASR_SOURCE, index=0))
+    other = verify(server, request("wer", ASR_SOURCE, index=1, generated="hello"))
+    metrics = server.compute_metrics([[one], [one], [other]])
+    assert metrics["audio/wer/pass@1/num_entries"] == 2
+    assert metrics["audio/skipped_rows/duplicate_sample_id"] == 1
+    assert "audio/skipped_rows/changed_source_row" not in metrics
+    changed = one | {"ng_source_row": {"expected_answer": "x"}}
+    metrics = server.compute_metrics([[changed], [other]])
+    assert metrics["audio/wer/pass@1/num_entries"] == 1
+    assert metrics["audio/skipped_rows/changed_source_row"] == 1
+    assert server.compute_metrics([[changed]]) == {"audio/skipped_rows/changed_source_row": 1}
+
+
+def test_aggregate_rejects_repeats_even_when_the_extra_repeat_was_masked(tmp_path):
+    """Masked rollouts are removed before ``compute_metrics``, so a repeat check there would never see them."""
+    server = make_server(tmp_path)
+    scored = verify(server, request("wer", ASR_SOURCE, index=0))
+    masked = verify(server, request("wer", ASR_SOURCE, index=0, status="failed"))
+    rows = [
+        scored | {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0},
+        masked | {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1},
+    ]
+    with pytest.raises(ValueError, match="num_repeats=1"):
+        asyncio.run(server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows)))
+
+
+def test_cleanup_generation_loops_is_applied_to_scoring_only(tmp_path):
+    """``"hello world " * 21`` collapses to ``hello world`` (WER 0); uncleaned it is 40 insertions over 2 words (2000)."""
+    server = make_server(tmp_path)
+    looped = "hello world " * 21
+    cleaned = verify(server, request("wer-loops", ASR_SOURCE, generated=looped))
+    raw = verify(server, request("wer", ASR_SOURCE, generated=looped))
+    assert cleaned["generation"] == looped and raw["generation"] == looped
+    assert server.compute_metrics([[cleaned]])["audio/wer-loops/pass@1/wer"] == pytest.approx(0.0)
+    assert server.compute_metrics([[raw]])["audio/wer/pass@1/wer"] == pytest.approx(2000.0)
+
+
+def test_loop_cleanup_in_verify_only_serves_a_judge_request_and_runs_in_a_worker_thread(tmp_path, monkeypatch):
+    seen = []
+
+    def spy(text):
+        seen.append(threading.current_thread() is not threading.main_thread())
+        return "cleaned"
+
+    monkeypatch.setattr("resources_servers.audio_eval.app.cleanup_generation_loops", spy)
+    # A judge-free profile never needs the cleaned text in ``verify`` (scoring cleans it again).
+    server = make_server(tmp_path)
+    verify(server, request("wer-loops", ASR_SOURCE, generated="a a a"))
+    assert seen == []
+    judged = {
+        "open": OPEN_ENDED["open"]
+        | {"skills": {"METRICS_TYPE": "audio", "EVAL_ARGS": "++eval_config.cleanup_generation_loops=true"}}
+    }
+    server = make_server(tmp_path, judged, judge_model_server=JUDGE_SERVER)
+    server.server_client.post.return_value = chat_completion("Rating: 5")
+    result = verify(server, request("open", OPEN_SOURCE, generated="a dog a dog a dog"))
+    assert seen == [True] and result["generation"] == "a dog a dog a dog"
+    body = server.server_client.post.call_args.kwargs["json"].model_dump(exclude_unset=True)
+    assert body["messages"][1]["content"] == "Q: What? A: cleaned R: a dog"
+
+
+def test_published_groups_follow_subset_for_metrics(tmp_path):
+    server = make_server(tmp_path)
+    rows = [
+        verify(server, request("wer", ASR_SOURCE | {"subset_for_metrics": subset}, index=index, generated=generated))
+        for index, (subset, generated) in enumerate([("a", "hello world"), ("b", "hello"), ("b", "hello world")])
+    ]
+    metrics = server.compute_metrics([[row] for row in rows])
+    assert metrics["audio/wer/pass@1/num_entries"] == 3
+    assert metrics["audio/wer-a/pass@1/num_entries"] == 1 and metrics["audio/wer-a/pass@1/wer"] == pytest.approx(0.0)
+    assert metrics["audio/wer-b/pass@1/num_entries"] == 2 and metrics["audio/wer-b/pass@1/wer"] == pytest.approx(25.0)
+    assert metrics["audio/wer/pass@1/wer"] == pytest.approx(16.67)
 
 
 def test_aggregate_metrics_end_to_end_with_wer_and_bleu(tmp_path):

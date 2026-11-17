@@ -205,6 +205,21 @@ def test_evaluate_msasr_counts_and_empty_reference():
     assert empty == {"cpwer": None, "is_correct": None, "text": "", "pred_text": "x"}
 
 
+def test_evaluate_msasr_pairs_reference_and_hypothesis_speakers_by_the_best_permutation():
+    """cpWER is invariant to the speaker labels: the hypothesis labels need not match the reference labels."""
+    ref = "<spk:0> hello there <spk:1> good day to you"
+    # The labels are swapped: matched by label every word is wrong, matched by the best permutation none is.
+    swapped = A.evaluate_msasr(ref, "<spk:0> good day to you <spk:1> hello there", cpwer_normalization="none")
+    assert swapped["cpwer_errors"] == 0 and swapped["cpwer"] == 0.0 and swapped["is_correct"] is True
+    aligned_wrong = A.evaluate_msasr(ref, "<spk:0> good day to you <spk:1> hello", cpwer_normalization="none")
+    assert aligned_wrong["cpwer_errors"] == 1 and aligned_wrong["cpwer_deletions"] == 1
+    # One more hypothesis speaker than reference speakers: the surplus stream is paid for as insertions.
+    split = A.evaluate_msasr(ref, "<spk:0> good day to you <spk:1> hello <spk:2> there", cpwer_normalization="none")
+    assert split["cpwer_ref_words"] == 6
+    assert split["cpwer_errors"] == 2 and split["cpwer_insertions"] == 1 and split["cpwer_deletions"] == 1
+    assert split["cpwer"] == pytest.approx(2 / 6)
+
+
 # ----------------------------------------------------------------------------- normalization / WER
 
 
