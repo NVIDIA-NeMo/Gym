@@ -145,10 +145,12 @@ use the same base images and cocotb compatibility setting.
 gym eval prepare --benchmark cvdp_v110
 gym eval run --benchmark cvdp_v110 \
   --model-type vllm_model --model-url http://MODEL_HOST:8000/v1 --model MODEL_NAME \
-  --num-repeats 32 --output results/cvdp_v110/rollouts.jsonl
+  --num-repeats 4 --output results/cvdp_v110/rollouts.jsonl
 ```
 
-The default is 32 samples per task (9,664 total). Use `--num-repeats 1` only for a
+The default is four samples per task (1,208 total). Use `--num-repeats 32`
+for more sampling precision at eight times the rollout count; record the repeat
+count when comparing results. Use `--num-repeats 1` only for a
 single-sample smoke run. Smoke results do not establish full benchmark qualification;
 the public dataset has no populated official reference implementations. The general
 [CVDP workflow](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/cvdp/README.md)

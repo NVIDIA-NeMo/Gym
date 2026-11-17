@@ -22,7 +22,7 @@ cvdp_v110_agent:
           prepare_script: benchmarks/cvdp_v110/prepare.py
           prepare_dependencies: [huggingface_hub]
           prompt_config: null
-          num_repeats: 32
+          num_repeats: 4
 
 cvdp_v110_environment_server:
   _inherit_from: cvdp_agent_environment_server

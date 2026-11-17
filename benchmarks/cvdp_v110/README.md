@@ -42,11 +42,14 @@ python -m benchmarks.cvdp_v110.prepare --raw /path/to/cvdp_v1.1.0_nonagentic_cod
 `--output-dir /path/to/output` selects the destination. Set `HF_HOME` to control
 Hugging Face download/cache storage. The default output path is consumed by
 `gym eval prepare --benchmark cvdp_v110` and the benchmark configuration.
-The dataset default is 32 samples per task. For end-to-end `gym eval run`, omit
-`--num-repeats` to retain that default, or set `--num-repeats 32` explicitly.
+The dataset default is four samples per task (1,208 rollouts across 302 tasks). For end-to-end `gym eval run`, omit
+`--num-repeats` to retain that default, or set `--num-repeats 4` explicitly.
 Use `--num-repeats 1` for a one-sample-per-task smoke run. With `--no-serve`,
-use 32 collection repeats for the unexpanded preparation output, or one repeat
-for an input file that already contains 32 copies per task.
+use four collection repeats for the unexpanded preparation output, or one repeat
+for an input file that already contains four copies per task.
+Use `--num-repeats 32` explicitly for more sampling precision (9,664 rollouts).
+Record the repeat count when comparing results; four repeats reduce sampling
+cost but increase uncertainty relative to 32 repeats.
 
 ## Verification runtime
 
