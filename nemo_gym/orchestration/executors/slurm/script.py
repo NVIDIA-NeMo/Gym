@@ -68,6 +68,14 @@ from nemo_gym.orchestration.executors.script_templates import (
     render_vllm_ray_symmetric_run,
     render_write_file_from_base64,
 )
+from nemo_gym.orchestration.executors.slurm.lustre_md_stats import (
+    DRIVER_END,
+    END,
+    SERVICES_READY,
+    START,
+    STATS_FILE_PREFIX,
+    STATS_FILE_SUFFIX,
+)
 from nemo_gym.orchestration.executors.slurm.resume_script import (
     DRIVER_FAILURE_NAME,
     KEEP_BUDGET_ENV,
@@ -79,14 +87,6 @@ from nemo_gym.orchestration.executors.slurm.resume_script import (
 from nemo_gym.orchestration.executors.utils import flatten_export_args, flatten_run_args
 from nemo_gym.orchestration.exports import effective_exports, export_install_extras, export_run_settings
 from nemo_gym.orchestration.jobs import ARTIFACTS_DIRNAME, EVAL_SUCCEEDED_FILENAME, LOGS_DIRNAME, ROLLOUTS_FILENAME
-from nemo_gym.orchestration.lustre_md_stats import (
-    DRIVER_END,
-    END,
-    SERVICES_READY,
-    START,
-    STATS_FILE_PREFIX,
-    STATS_FILE_SUFFIX,
-)
 
 
 _SCRIPT_TEMPLATE = """\

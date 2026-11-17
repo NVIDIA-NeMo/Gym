@@ -949,7 +949,7 @@ def _eval_lustre_stats(args: argparse.Namespace, overrides: list[str]) -> None:
         expected_overrides.append("+json=true")
     if overrides != expected_overrides:
         args._parser.error("lustre-stats does not accept Hydra overrides")
-    from nemo_gym.orchestration.lustre_md_stats import print_lustre_md_stats
+    from nemo_gym.orchestration.executors.slurm.lustre_md_stats import print_lustre_md_stats
 
     try:
         print_lustre_md_stats(Path(args.target), json_output=args.json)

@@ -26,8 +26,8 @@ import pytest
 
 from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors import script_templates
+from nemo_gym.orchestration.executors.slurm.lustre_md_stats import analyze
 from nemo_gym.orchestration.executors.slurm.script import build_sbatch_script
-from nemo_gym.orchestration.lustre_md_stats import analyze
 
 
 _SERVICE = {"type": "vllm", "container": "vllm:latest", "model": "org/model"}

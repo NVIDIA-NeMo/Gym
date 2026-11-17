@@ -15,11 +15,13 @@
 
 import json
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from nemo_gym.orchestration.lustre_md_stats import analyze, print_lustre_md_stats, stats_files
+from nemo_gym.orchestration.executors.slurm.lustre_md_stats import analyze, print_lustre_md_stats, stats_files
 
 
 def _write(path: Path, rows: list[tuple]) -> Path:
@@ -212,3 +214,17 @@ def test_a_benchmark_dir_yields_every_job_in_job_id_order(tmp_path):
 def test_a_dir_without_stats_names_the_setting(tmp_path):
     with pytest.raises(FileNotFoundError, match="job.lustre_md_stats: true"):
         stats_files(tmp_path)
+
+
+def test_the_reader_imports_without_the_executor():
+    # In a fresh interpreter: this test module's own imports would hide what the reader pulls in.
+    probe = (
+        "import sys;"
+        "import nemo_gym.orchestration.executors.slurm.lustre_md_stats;"
+        "print(','.join(sorted(m for m in sys.modules if m.startswith('nemo_gym.orchestration.executors.'))))"
+    )
+    result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True)
+    assert result.stdout.strip().split(",") == [
+        "nemo_gym.orchestration.executors.slurm",
+        "nemo_gym.orchestration.executors.slurm.lustre_md_stats",
+    ]
