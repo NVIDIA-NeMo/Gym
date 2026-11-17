@@ -20,8 +20,8 @@ from pathlib import Path
 import uvicorn
 import yaml
 
-from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY
-from nemo_gym.core import NeMoGymResponse
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcomePolicyConfig
+from nemo_gym.core import MODEL_REQUEST_REJECTED, NeMoGymResponse, OutcomeAction
 from nemo_gym.rollouts.harness_capabilities import digest_file
 
 from .provider import OpenClawProbe, Probe
@@ -154,6 +154,14 @@ def _config(
             resources_tool_transports=["direct_http"] if harness == "simple" else [],
             default_episode_timeout_seconds=timeout,
             cleanup_timeout_seconds=10,
+            # The suite checks how a harness reports a terminal HTTP 400, not how the environment grades it. Grading a
+            # request the endpoint rejected before the model answered keeps model_error's row, and its health, observable.
+            agent_outcome_policy={
+                "by_failure_kind": {
+                    **AgentOutcomePolicyConfig().by_failure_kind,
+                    MODEL_REQUEST_REJECTED: OutcomeAction.VERIFY,
+                }
+            },
         )
     config = {
         "head_server": {"host": "127.0.0.1", "port": ports["policy_model"]},
