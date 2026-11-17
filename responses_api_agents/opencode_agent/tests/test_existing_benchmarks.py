@@ -8,7 +8,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig, get_first_server_config_dict
 from nemo_gym.environment import discover_agents
-from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig
+from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig, _session_opencode_config_error
 from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgentConfig
 
 
@@ -62,6 +62,19 @@ def test_permission_profile_loads_with_cli_override(override: bool, monkeypatch:
     assert list(permissions).index("*") < list(permissions).index("webfetch")
     assert "tools" not in settings.opencode_config
     assert "opencode_version" not in settings
+
+
+@pytest.mark.parametrize("recipe", ["opencode", "opencode_server_tools"])
+def test_agentic_mme_sessions_turn_off_automatic_compaction(recipe: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(Path(__file__).resolve().parents[3])
+    _, configs = GlobalConfigDictParser().load_extra_config_paths([f"benchmarks/agentic_mme/{recipe}.yaml"])
+    agent = OmegaConf.merge(*configs).agentic_mme_opencode_agent.responses_api_agents.opencode_agent
+    opencode_config = OmegaConf.to_container(agent.opencode_config, resolve=True)
+    assert opencode_config["compaction"] == {"auto": False}
+    assert opencode_config["tools"]["task"] is False
+    # The server-tools recipe adds its tool switches to the base recipe's settings.
+    assert ("bash" in opencode_config["tools"]) == (recipe == "opencode_server_tools")
+    assert _session_opencode_config_error(opencode_config) is None
 
 
 def test_permission_profile_is_not_a_standalone_agent_variant(monkeypatch: pytest.MonkeyPatch) -> None:

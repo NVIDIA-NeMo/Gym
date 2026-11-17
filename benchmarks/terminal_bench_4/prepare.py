@@ -15,7 +15,7 @@ def prepare(task_names: list[str] | None = None, category: str | None = None) ->
     manifest = json.loads((BENCHMARK_DIR / "manifest.json").read_text())
     tasks = manifest["tasks"]
     if len(tasks) != 66 or len({task["name"] for task in tasks}) != 66:
-        raise ValueError("Terminal-Bench 4.0 must contain 66 unique tasks")
+        raise ValueError("Terminal-Bench 4.1 must contain 66 unique tasks")
     if task_names is not None:
         unknown = set(task_names) - {task["name"] for task in tasks}
         if unknown:

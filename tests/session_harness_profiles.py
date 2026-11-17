@@ -60,6 +60,7 @@ HARNESSES = {
     "openclaw_agent": ("OpenClawAgent", "OpenClawAgentConfig"),
     "hermes_agent": ("HermesAgent", "HermesAgentConfig"),
     "claude_code_agent": ("ClaudeCodeAgent", "ClaudeCodeAgentConfig"),
+    "terminus_2_agent": ("Terminus2Agent", "Terminus2AgentConfig"),
 }
 
 

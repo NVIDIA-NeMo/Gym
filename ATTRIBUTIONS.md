@@ -11,6 +11,14 @@ All third-party software is used without modification unless otherwise noted
 
 ---
 
+## WildClawBench instruction prefix
+
+`responses_api_agents/wildclawbench_agent/worker.py` retains the actor instruction
+prefix from `eval/run_batch.py` in [internlm/WildClawBench](https://github.com/internlm/WildClawBench),
+revision `0c6551f798f8028bdfdd065f10d8d6b048a7fd06`, under MIT.
+The benchmark license and notice are in `benchmarks/wildclawbench/third-party-notices.md`.
+Native task execution is an external dependency, not vendored here.
+
 ## MiMo music scorer
 
 `resources_servers/mimo_music/scorer/` vendors the music scorer and
@@ -22623,3 +22631,7 @@ VLMEvalKit source file with that name records helper-code provenance only.
 revision `7b9a3c154ef9fb40215bb67934afc43e6799de16`, under Apache-2.0.
 The scorer header retains the Databricks copyright, applicable upstream notice,
 and modification record. The scoring behavior is unchanged.
+
+## SaaS-Bench
+
+Source: https://github.com/UniPat-AI/SaaS-Bench at `48c22deb18b98c0ed78f81e7f3be82bc162de2c8`. Runtime: Apache-2.0; task data and verifiers: CC-BY-4.0. Original copyright: SaaS-Bench Authors. NVIDIA modifications are identified in each changed file; NVIDIA extensions are Apache-2.0. See [vendoring details](responses_api_agents/saas_bench_agent/benchmark/VENDORING.md).

@@ -27,6 +27,12 @@ def flatten_run_args(run: dict[str, Any], prefix: str = "") -> list[str]:
         full_key = f"{prefix}.{key}" if prefix else key
         if isinstance(value, dict):
             args.extend(flatten_run_args(value, full_key))
+        elif isinstance(value, list) and any(isinstance(v, (dict, list, tuple)) for v in value):
+            try:
+                text = hydra_literal(value)
+            except ValueError as error:
+                raise ValueError(f"The `run` override {full_key!r} cannot be passed to the job: {error}") from error
+            args.append(shlex.quote(f"+{full_key}={text}"))
         elif isinstance(value, list):
             items = ",".join(str(v) for v in value)
             args.append(shlex.quote(f"+{full_key}=[{items}]"))
@@ -43,9 +49,9 @@ _EXPORT_SETTING_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_\-]*")
 def flatten_export_args(settings: dict[str, Any], prefix: str = "") -> list[str]:
     """Flatten export settings into shell-quoted `+key.path=value` tokens that Hydra reads back unchanged.
 
-    Unlike `flatten_run_args`, which only shell-quotes, each value is encoded for Hydra first, so a string keeps
-    its type and its characters, and numbers, booleans and null keep theirs. The shell quotes are gone by the time
-    Hydra parses the argument, which is why shell quoting alone is not enough.
+    Unlike `flatten_run_args`, which shell-quotes scalars and flat lists as they are, each value is encoded for
+    Hydra first, so a string keeps its type and its characters, and numbers, booleans and null keep theirs. The
+    shell quotes are gone by the time Hydra parses the argument, which is why shell quoting alone is not enough.
     """
     args = []
     for key, value in settings.items():
