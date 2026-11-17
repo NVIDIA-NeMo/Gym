@@ -110,29 +110,42 @@ def test_export_submission_is_locked_and_persists_job_id(tmp_path):
     assert "echo exported" in (tmp_path / "benchmark" / ".exports.sbatch").read_text()
 
 
-def test_failed_submission_does_not_fail_eval_and_can_retry(tmp_path):
+def test_failed_submission_requires_reconciliation_and_is_not_retried(tmp_path):
     import os
     import subprocess
 
     from nemo_gym.orchestration.executors.export_job import render_export_submission
 
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    fake = bin_dir / "sbatch"
-    fake.write_text("#!/bin/sh\nexit 1\n")
-    fake.chmod(0o755)
     bench = tmp_path / "benchmark"
-    script = render_export_submission(bench_dir=bench, job_script="#!/bin/bash\ntrue\n")
-    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
-    first = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
-    assert first.returncode == 0
-    assert not (bench / "exports.job_id").exists()
-    assert not (bench / ".exports.submit.lock").exists()
+    bench.mkdir()
+    bins = tmp_path / "bin"
+    bins.mkdir()
 
-    fake.write_text("#!/bin/sh\necho 45678\n")
-    second = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
-    assert second.returncode == 0, second.stderr
-    assert (bench / "exports.job_id").read_text() == "45678\n"
+    calls = tmp_path / "sbatch_calls"
+    sbatch = bins / "sbatch"
+    sbatch.write_text(f'#!/bin/bash\necho called >> "{calls}"\nexit 1\n')
+    sbatch.chmod(0o755)
+
+    script = render_export_submission(
+        bench_dir=bench,
+        job_script="#!/bin/bash\ntrue\n",
+    )
+    env = {**os.environ, "PATH": f"{bins}:{os.environ['PATH']}"}
+
+    for _ in range(2):
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+
+    assert calls.exists(), f"Fake sbatch was not called: {result.stderr}\nFake script: {sbatch.read_text()}"
+    assert calls.read_text().splitlines() == ["called"]
+    assert (bench / ".exports.submission_unknown").exists()
+    assert not (bench / "exports.job_id").exists()
 
 
 def test_successful_submission_is_not_repeated(tmp_path):
