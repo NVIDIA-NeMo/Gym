@@ -56,7 +56,7 @@ from uuid import uuid4
 
 from aiohttp import ClientResponseError
 from fastapi import Body, FastAPI, HTTPException
-from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, ValidationError, model_validator
 
 from environment_servers.harbor.entrypoint import (
     ENTRYPOINT_FAILED_KIND,
@@ -1195,9 +1195,8 @@ class HarborEnvironmentServer(
 
         # One source for the task's MCP declarations: what is granted and what the refusal below checks.
         mcp_servers = self._task_mcp_servers(task)
+        tool_accesses = self._task_tool_accesses(task, mcp_servers)
         try:
-            # Inside the try: a declaration the grant schema rejects is a staged terminal agent failure, not a 500.
-            tool_accesses = self._task_tool_accesses(task, mcp_servers)
             agent_create_http_response = await self.server_client.post(
                 server_name=self.config.agent_server.name,
                 url_path="/v1/agent_sessions",
@@ -1692,38 +1691,46 @@ class HarborEnvironmentServer(
         granted server fails its seed or its first turn, and one that cannot take required grants refuses the seed,
         so a task's tools never go missing without a failure.
 
-        Only URL entries reached over streamable HTTP can be granted; a Compose sidecar's URL names its
-        service host, which resolves inside the task's sandbox group, where the harness runs. An entry that cannot
-        be granted still reaches the harness in ``/tmp/.nemo-gym/task.json``; a task's own such entry is warned about
-        at every seed (the task author's signal), the job-level overlay's once per run, by name (the operator's
-        choice, the memory team's Redis stack being ``sse`` by design, which would otherwise print one line per turn
-        of every episode of the run).
+        Only URL entries reached over streamable HTTP, with a name and an absolute http(s) URL the tool-access schema
+        accepts, can be granted; a Compose sidecar's URL names its service host, which resolves inside the task's
+        sandbox group, where the harness runs. An entry that cannot be granted still reaches the harness in
+        ``/tmp/.nemo-gym/task.json``; a task's own such entry is warned about at every seed (the task author's
+        signal), the job-level overlay's once per run, by name (the operator's choice, the memory team's Redis stack
+        being ``sse`` by design, which would otherwise print one line per turn of every episode of the run).
         """
         overlay = self.config.compose_overlay
         job_entries = {server.name for server in overlay.mcp_servers} if overlay is not None else set()
         accesses: list[ToolAccess] = []
         for server in mcp_servers:
             if server.transport != "streamable-http" or not server.url:
-                if server.name not in job_entries:
-                    LOGGER.warning(
-                        f"{task.task_id}: MCP server {server.name!r} ({server.transport}) cannot be granted; "
-                        "only streamable-http URL entries can"
+                reason = "only streamable-http URL entries can"
+            else:
+                try:
+                    access = MCPToolAccess(
+                        name=server.name,
+                        required=True,
+                        connection=MCPStreamableHTTPConnection(url=server.url),
                     )
-                elif server.name not in self._ungrantable_overlay_servers:
-                    self._ungrantable_overlay_servers.add(server.name)
-                    LOGGER.warning(
-                        f"compose_overlay: MCP server {server.name!r} ({server.transport}) cannot be granted; only "
-                        "streamable-http URL entries can; it reaches the harness in /tmp/.nemo-gym/task.json "
-                        "(said once per run)"
-                    )
-                continue
-            accesses.append(
-                MCPToolAccess(
-                    name=server.name,
-                    required=True,
-                    connection=MCPStreamableHTTPConnection(url=server.url),
+                except ValidationError as error:
+                    # Harbor takes any name and any URL string, the grant schema only a name an agent session can
+                    # address and an absolute http(s) URL. Such an entry is treated as an SSE one is: it stays in
+                    # task.json and a harness that cannot read it is refused, while the oracle and the harnesses
+                    # that read it still take the task.
+                    problems = "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in error.errors())
+                    reason = f"the tool grant schema rejects it ({problems})"
+                else:
+                    accesses.append(access)
+                    continue
+            if server.name not in job_entries:
+                LOGGER.warning(
+                    f"{task.task_id}: MCP server {server.name!r} ({server.transport}) cannot be granted; {reason}"
                 )
-            )
+            elif server.name not in self._ungrantable_overlay_servers:
+                self._ungrantable_overlay_servers.add(server.name)
+                LOGGER.warning(
+                    f"compose_overlay: MCP server {server.name!r} ({server.transport}) cannot be granted; {reason}; "
+                    "it reaches the harness in /tmp/.nemo-gym/task.json (said once per run)"
+                )
         return accesses
 
     def _check_seed_trajectory(self, task: HarborTask) -> None:

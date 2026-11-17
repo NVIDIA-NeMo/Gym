@@ -49,8 +49,9 @@ session seed and leave the sandbox to the server when the session closes. The se
 MCP server of the task, and of the job-level `compose_overlay`, to the agent as a required tool grant: an agent that
 cannot connect fails its seed or first turn, and one that cannot take a required grant refuses the seed with a
 terminal `stage: agent` failure. A task with a `skills_dir`, or with an MCP server that cannot be granted (`stdio`,
-`sse`), also needs a harness that reports `supports_task_tool_context`, or it fails terminally at `stage: agent`;
-`turn_sessions: continue` needs one that declares multi-turn continuation. `harbor_agent` and `harbor_agent_general` are separate Agent Servers that run
+`sse`, or a `streamable-http` entry whose name or URL the grant rejects), also needs a harness that reports
+`supports_task_tool_context`, or it fails terminally at `stage: agent`; `turn_sessions: continue` needs one that
+declares multi-turn continuation. `harbor_agent` and `harbor_agent_general` are separate Agent Servers that run
 Harbor's own runtime; they are not this path.
 
 ## Run it

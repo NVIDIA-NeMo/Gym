@@ -1162,13 +1162,21 @@ class TestSeedWorkdirAndResources:
         assert api.env == {} and api.resources.cpu is None
 
 
-# The declarations no grant covers: an SSE or stdio MCP server and a skills directory reach a harness only through
+# The declarations no grant covers: an SSE or stdio MCP server, a streamable-http one the tool-access schema rejects
+# (Harbor takes any name and any URL string) and a skills directory reach a harness only through
 # /tmp/.nemo-gym/task.json.
 TASK_TOOL_CONTEXT_DECLARATIONS = {
     "mcp_servers": '[[environment.mcp_servers]]\nname = "playwright"\ntransport = "sse"\nurl = "http://api:3080/sse"\n',
     "stdio_mcp_server": (
         '[[environment.mcp_servers]]\nname = "hello-tools"\ntransport = "stdio"\ncommand = "python"\n'
         'args = ["/opt/hello-tools/server.py"]\n'
+    ),
+    "mcp_server_name_with_a_space": (
+        '[[environment.mcp_servers]]\nname = "user server"\ntransport = "streamable-http"\n'
+        'url = "http://user-server:8000/mcp"\n'
+    ),
+    "mcp_server_url_without_a_scheme": (
+        '[[environment.mcp_servers]]\nname = "tools"\ntransport = "streamable-http"\nurl = "tools:8000/mcp"\n'
     ),
     "skills_dir": 'skills_dir = "/app/.skills"\n',
 }
@@ -1288,19 +1296,34 @@ class TestAgentStage:
             }
         ]
 
-    async def test_a_grant_the_tool_access_schema_rejects_is_a_staged_terminal_failure(self, tmp_path, monkeypatch):
-        """The grant lookup runs inside the seed's try: a declaration the grant schema refuses (a name the session
-        contract does not accept) fails the episode at stage agent, terminal, instead of escaping as a 500."""
-        bad = GRANTABLE_MCP_SERVER.replace('name = "user-server"', 'name = "user server"')
-        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=TASK_TOML + bad)
-        server.server_client.supports_task_tool_context = False
+    @pytest.mark.parametrize(
+        ("declaration", "problem"),
+        [
+            ("mcp_server_name_with_a_space", "name: String should match pattern"),
+            ("mcp_server_url_without_a_scheme", "url: URL scheme should be 'http' or 'https'"),
+        ],
+    )
+    async def test_a_streamable_http_entry_the_grant_schema_rejects_is_left_ungranted_with_a_warning(
+        self, tmp_path, monkeypatch, caplog, declaration, problem
+    ):
+        """HarborMCPServer takes any name and any URL string; the grant schema does not. Such an entry is not granted
+        and not an error of its own: it is warned about with the schema's reason and stays in task.json, so a harness
+        that reads it takes the task as it did before grants were always handed out."""
+        caplog.set_level("WARNING", logger="environment_servers.harbor.app")
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=task_tool_context_toml(declaration))
+        assert server.server_client.supports_task_tool_context is True
 
         response = await run_episode(server, task)
 
-        failure = response.failure
-        assert response.result is None and failure.stage == "agent" and failure.terminal
-        assert not server.server_client.seed_bodies()
-        assert not any("test.sh" in call["command"] for call in sandbox.execs)
+        assert response.failure is None, response.failure
+        assert response.result.reward == 1.0
+        (seed,) = server.server_client.seed_bodies()
+        assert seed["tool_accesses"] == []
+        (warning,) = [r.getMessage() for r in caplog.records if "cannot be granted" in r.getMessage()]
+        assert "(streamable-http) cannot be granted; the tool grant schema rejects it (" in warning
+        assert problem in warning
+        (context_write,) = [c["command"] for c in sandbox.execs if "/tmp/.nemo-gym/task.json" in c["command"]]
+        assert "streamable-http" in context_write
 
     @pytest.mark.parametrize(
         ("declaration", "unreached"),
@@ -1308,6 +1331,9 @@ class TestAgentStage:
             # Only streamable-http entries can be granted; an SSE or stdio server still needs task.json.
             ("mcp_servers", "MCP server 'playwright'"),
             ("stdio_mcp_server", "MCP server 'hello-tools'"),
+            # A streamable-http entry the tool-access schema rejects cannot be granted either.
+            ("mcp_server_name_with_a_space", "MCP server 'user server'"),
+            ("mcp_server_url_without_a_scheme", "MCP server 'tools'"),
             # A skills directory has no grant at all.
             ("skills_dir", "skills_dir"),
         ],

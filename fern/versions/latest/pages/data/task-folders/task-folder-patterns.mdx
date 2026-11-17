@@ -130,11 +130,13 @@ the task with a terminal failure that names the reason, rather than run without 
 `gym dataset validate` always takes the task.
 
 The server also grants every `streamable-http` server with a `url`, from the task and from the `compose_overlay`, to
-the agent's session as a required MCP tool grant. A harness that does not start servers itself can take a task whose
-MCP servers are all `streamable-http` and that has no `skills_dir`, because it gets the tools from the grant. An agent
-that cannot connect to a granted server fails its seed or first turn, and a harness that cannot take required grants,
-such as `terminus_2_sandboxed_agent`, refuses the task at seed with a terminal failure. A `stdio` or `sse` server and
-`skills_dir` have no grant, so they follow the rule above.
+the agent's session as a required MCP tool grant. The grant takes a name of letters, digits, `.`, `_` and `-` that
+starts with a letter or digit, and an absolute `http` or `https` URL; a `streamable-http` entry that is not of that
+form is warned about and not granted. A harness that does not start servers itself can take a task whose MCP servers
+are all granted and that has no `skills_dir`, because it gets the tools from the grant. An agent that cannot connect to
+a granted server fails its seed or first turn, and a harness that cannot take required grants, such as
+`terminus_2_sandboxed_agent`, refuses the task at seed with a terminal failure. A `stdio` or `sse` server, a
+`streamable-http` entry that is not granted, and `skills_dir` follow the rule above.
 
 The example's Dockerfile has `RUN` and `COPY` lines, so prepare builds it. With `--sandbox docker`, Gym builds it into
 the local Docker daemon. With OpenSandbox, the image must be pushed to a registry, so set `builds.repository` (see

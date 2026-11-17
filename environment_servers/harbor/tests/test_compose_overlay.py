@@ -1064,6 +1064,30 @@ class TestMcpGrants:
         writes = [c["command"] for c in sandbox.execs if "/tmp/.nemo-gym/task.json" in c["command"]]
         assert len(writes) == 3 and all("http://mcp:9000/sse" in w and "http://legacy:9000/sse" in w for w in writes)
 
+    async def test_an_overlay_entry_the_grant_schema_rejects_is_warned_about_once_per_run_and_left_ungranted(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """A job-level `streamable-http` entry whose URL has no scheme cannot be granted, like an `sse` one: one warning
+        per run with the schema's reason, no grant, and the harness that reads task.json still takes the task."""
+        overlay = HarborComposeOverlay(
+            mcp_servers=[{"name": "memory", "transport": "streamable-http", "url": "memory:9000/mcp"}]
+        )
+        server, task, sandbox, _, _ = overlay_server(tmp_path, monkeypatch, overlay=overlay)
+        caplog.set_level("WARNING", logger="environment_servers.harbor.app")
+
+        for rollout in ("r1", "r2"):
+            assert (await run_episode(server, task, rollout=rollout)).failure is None
+
+        (warning,) = [r.getMessage() for r in caplog.records if "cannot be granted" in r.getMessage()]
+        assert warning.startswith(
+            "compose_overlay: MCP server 'memory' (streamable-http) cannot be granted; the tool grant schema rejects it ("
+        )
+        assert "url: URL scheme should be 'http' or 'https'" in warning
+        assert warning.endswith("; it reaches the harness in /tmp/.nemo-gym/task.json (said once per run)")
+        assert [seed["tool_accesses"] for seed in server.server_client.seed_bodies()] == [[], []]
+        writes = [c["command"] for c in sandbox.execs if "/tmp/.nemo-gym/task.json" in c["command"]]
+        assert len(writes) == 2 and all("memory:9000/mcp" in w for w in writes)
+
     async def test_overlay_entries_alone_make_the_task_one_with_tools(self, tmp_path, monkeypatch):
         """An overlay entry counts as the task's own: with only an `sse` one, a harness that cannot read task.json is
         refused exactly as for a task's own entry, and one that declares support gets it there."""
