@@ -100,7 +100,8 @@ async def responses(request: Request):
             "input_tokens": 1,
             "output_tokens": 1,
             "total_tokens": 2,
-            "input_tokens_details": {"cached_tokens": 0},
+            # This scripted stand-in has no prompt cache, so it never reads cached tokens.
+            "input_tokens_details": {"cached_tokens": 0},  # known-zero
             "output_tokens_details": {"reasoning_tokens": 0},
         },
     }
