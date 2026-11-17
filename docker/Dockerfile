@@ -104,7 +104,7 @@ apt-get clean
 rm -rf /var/lib/apt/lists/*
 EOF
 
-ARG UV_VERSION=0.13.4
+ARG UV_VERSION=0.13.8
 ARG PYTHON_VERSION=3.13.14
 ARG TARGETARCH
 ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
