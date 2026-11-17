@@ -411,3 +411,31 @@ masked failures. Shell/search tool names and rate-limit matching are configurabl
 the shipped settings are OpenCode-compatible. Other harnesses must provide matching
 tool settings and canonical execution observations; OpenCode is the currently
 validated tool-using pairing.
+
+For a harness exposing several shell tools, set `tool_rewards.shell_tool_names`
+instead of `shell_tool_name`. They share the shell-use penalty schedule and success
+bonus cap; duplicate detection still distinguishes tool names. When omitted,
+`invalid_tool_call_names` follows the configured shell names. An explicit list
+limits failure penalties to those tools, `[]` disables failure penalties, and
+`null` includes every tool. Setting both singular and non-null plural shell fields
+is rejected.
+
+The shipped LLM-judge config explicitly sets `shell_tool_name: bash` and
+`invalid_tool_call_names: [bash]`. Config overlays merge fields, so adding plural
+shell names alone would leave both settings in place. This overlay removes the
+inherited singular name and explicitly enables failure penalties for all tools:
+
+```yaml
+llm_judge_with_tools:
+  resources_servers:
+    llm_judge_tool_rewards:
+      tool_rewards:
+        _delete_key: shell_tool_name
+        shell_tool_names: [terminal, bash, shell, exec, exec_command]
+        invalid_tool_call_names: null
+```
+
+Choose shell names that match the harness's actual tools. Existing search-name and
+rate-limit settings remain inherited. Each harness must still supply canonical
+execution observations; this configuration does not add tools to the harness or
+change its network access.

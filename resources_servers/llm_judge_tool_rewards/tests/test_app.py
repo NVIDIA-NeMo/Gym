@@ -81,6 +81,62 @@ async def test_judge_failure_is_not_replaced_with_tool_credit(judge_server, monk
         await judge_server.verify(body())
 
 
+@pytest.mark.parametrize("correct", [True, False])
+@pytest.mark.parametrize("failed", [True, False])
+async def test_plural_shell_rewards_preserve_judging_and_response(judge_server, monkeypatch, correct, failed):
+    import json
+
+    from resources_servers.opencode_multimodal_benchmarks.rewards import OpenCodeToolRewardConfig
+
+    monkeypatch.setattr(
+        judge_app, "call_judge", AsyncMock(return_value=tool_response("[[A=B]]" if correct else "[[A!=B]]"))
+    )
+    judge_server.config.tool_rewards = OpenCodeToolRewardConfig(shell_tool_names=["terminal", "exec"])
+    judge_server.config = ToolRewardConfig.model_validate_json(judge_server.config.model_dump_json())
+    assert judge_server.config.tool_rewards.invalid_tool_call_names == ("terminal", "exec")
+    request = body()
+    output = []
+    evidence = request.ng_trajectory.model_dump()
+    template = evidence["tool_calls"][0]
+    evidence["tool_calls"] = []
+    for index, name in enumerate(["terminal", "terminal", "exec"]):
+        call_id = f"call-{index}"
+        output.extend(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": json.dumps({"command": "echo Paris", "description": str(index)}),
+                },
+                {"type": "function_call_output", "call_id": call_id, "output": "Paris"},
+            ]
+        )
+        evidence["tool_calls"].append(
+            template
+            | {
+                "tool_call_id": call_id,
+                "native_tool_call_id": call_id,
+                "span_id": f"span-{index}",
+                "tool_name": name,
+                "status": "failed" if failed and name == "exec" else "completed",
+            }
+        )
+    output.append(request.response.model_dump()["output"][-1])
+    request.response = type(request.response).model_validate(request.response.model_dump() | {"output": output})
+    request.ng_trajectory = type(request.ng_trajectory).model_validate(evidence)
+    original = request.model_dump()
+    result = await judge_server.verify(request)
+    penalty = (-0.025 - 0.02 - (0.05 if failed else 0)) if correct else 0
+    assert result.reward == pytest.approx(float(correct) + penalty)
+    assert result.reward_components == {"verifier": float(correct), "opencode_tool_reward": pytest.approx(penalty)}
+    assert result.opencode_tool_reward.bash_call_count == 3
+    assert result.opencode_tool_reward.duplicate_tool_call_count == 1
+    assert result.opencode_tool_reward.tool_error_count == int(failed)
+    assert result.response == request.response
+    assert request.model_dump() == original
+
+
 @pytest.mark.parametrize("swap,last,base,calls", [(False, "[[A=B]]", 1.0, 1), (True, "[[A!=B]]", 0.0, 2)])
 async def test_final_shaped_grade_binds_original_response_and_all_judge_passes(judge_server, swap, last, base, calls):
     from nemo_gym.trajectory import grading_result_binding

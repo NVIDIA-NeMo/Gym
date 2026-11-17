@@ -6,7 +6,14 @@ import json
 import re
 from typing import Annotated, Any, ClassVar, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.server_runtime import BaseVerifyResponse
@@ -28,7 +35,16 @@ class ToolEvidenceError(ValueError):
 
 
 class OpenCodeToolRewardConfig(BaseModel, extra="forbid"):
-    shell_tool_name: str | None = "bash"
+    shell_tool_name: str | None = Field(
+        default="bash",
+        min_length=1,
+        description="Shell tool used for call counts, duplicate normalization and bonuses.",
+    )
+    shell_tool_names: tuple[Annotated[str, Field(min_length=1)], ...] | None = Field(
+        default=None,
+        min_length=1,
+        description="Shell tools sharing one count and bonus schedule. Set this or shell_tool_name, not both.",
+    )
     search_tool_name: str | None = "websearch"
     rate_limit_error_pattern: str | None = r"StatusCode: non 2xx status code \(429 POST https?://[^\s()]+\)"
 
@@ -65,18 +81,34 @@ class OpenCodeToolRewardConfig(BaseModel, extra="forbid"):
     correct_bash_call_penalties: tuple[Annotated[float, Field(le=0, allow_inf_nan=False)], ...] = Field(
         default=(0.0, 0.0, 0.0, -0.025, -0.05, -0.075, -0.10),
         min_length=1,
-        description="Penalty by total bash attempts on correct answers; the final entry caps the schedule.",
+        description="Penalty by total configured shell attempts on correct answers; the final entry caps the schedule.",
     )
     invalid_tool_call_names: tuple[str, ...] | None = Field(
         default=("bash",),
-        description="Tools eligible for failure penalties; defaults to the configured shell. None includes all tools.",
+        description="Tools eligible for failure penalties; defaults to the configured shell names. None includes all tools.",
     )
+
+    @property
+    def effective_shell_tool_names(self) -> tuple[str, ...]:
+        if self.shell_tool_names is not None:
+            return self.shell_tool_names
+        return (self.shell_tool_name,) if self.shell_tool_name is not None else ()
 
     @model_validator(mode="after")
     def default_failure_filter_to_shell(self) -> "OpenCodeToolRewardConfig":
-        if "invalid_tool_call_names" not in self.model_fields_set and self.shell_tool_name is not None:
-            self.invalid_tool_call_names = (self.shell_tool_name,)
+        if self.shell_tool_names is not None and "shell_tool_name" in self.model_fields_set:
+            raise ValueError("Set either shell_tool_name or shell_tool_names, not both")
+        if "invalid_tool_call_names" not in self.model_fields_set and self.effective_shell_tool_names:
+            self.invalid_tool_call_names = self.effective_shell_tool_names
         return self
+
+    @model_serializer(mode="wrap")
+    def serialize_shell_selection(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data = handler(self)
+        if self.shell_tool_names is not None:
+            # A serialized plural config must not turn the unused singular default into an explicit conflict.
+            data.pop("shell_tool_name", None)
+        return data
 
     @field_validator("correct_tool_call_bonuses", "correct_bash_call_penalties")
     @classmethod
@@ -133,7 +165,7 @@ def _identity(item: dict, config: OpenCodeToolRewardConfig) -> tuple[str, str]:
         return item["name"], item["arguments"].strip()
     if not isinstance(arguments, dict):
         return item["name"], json.dumps(arguments, sort_keys=True)
-    if item["name"] == config.shell_tool_name:
+    if item["name"] in config.effective_shell_tool_names:
         # Descriptions do not change the command that is executed.
         arguments.pop("description", None)
         if isinstance(arguments.get("command"), str):
@@ -176,11 +208,11 @@ def score_opencode_tools(
         if record is None or record[0] != item["name"] or record[1] not in ("completed", "error"):
             raise ToolEvidenceError(f"Missing or unfinished OpenCode tool record: {item['call_id']}")
         tool, status, exit_code = record
-        if tool == config.shell_tool_name and status == "completed" and not isinstance(exit_code, int):
+        if tool in config.effective_shell_tool_names and status == "completed" and not isinstance(exit_code, int):
             # Timeout/abort has a null exit code in OpenCode's shell tool.
             failed = True
         else:
-            failed = status == "error" or (tool == config.shell_tool_name and exit_code != 0)
+            failed = status == "error" or (tool in config.effective_shell_tool_names and exit_code != 0)
         results = tool_outputs.get(item["call_id"], [])
         # This is OpenCode's native error envelope, matched only for a recorded failed websearch.
         # Neither prose mentioning 429 nor a successful tool result supplies an exemption.
@@ -207,7 +239,7 @@ def score_opencode_tools(
             duplicates += 1
             penalties += config.duplicate_tool_call_penalty
             exploration += config.duplicate_tool_call_penalty
-        elif tool == config.shell_tool_name:
+        elif tool in config.effective_shell_tool_names:
             successes += 1
             exploration = min(exploration + config.tool_success_reward, config.tool_success_reward_cap)
     return OpenCodeToolReward(
@@ -221,7 +253,7 @@ def score_opencode_tools(
         tool_call_count=len(calls),
         tool_error_count=errors,
         duplicate_tool_call_count=duplicates,
-        bash_call_count=sum(item["name"] == config.shell_tool_name for item in calls),
+        bash_call_count=sum(item["name"] in config.effective_shell_tool_names for item in calls),
     ).for_answer(base_reward, config)
 
 
