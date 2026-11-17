@@ -62,6 +62,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
+    current_agent_instance,
 )
 from nemo_gym.models import CaptureStore
 from nemo_gym.rollouts import (
@@ -215,18 +216,23 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             return self.server_client._build_server_base_url(cfg)
         return self.config.anthropic_base_url or ""
 
-    def _resolve_call_base_url(self, rollout_id: Optional[str]) -> str:
+    def _resolve_call_base_url(self, rollout_id: Optional[str], *, agent_instance: Optional[str] = None) -> str:
         """Return the CLI model-call URL with its rollout prefix.
 
         Apply the prefix only for a configured Gym model server.
         A real Anthropic endpoint has no prefix-stripping middleware.
+        The URL names the agent instance the CLI's calls are made as: ``agent_instance`` (a session's seeded
+        name), else the name the current request runs under. Its training tag follows ``training_tag_for``.
         """
         base_url = self._resolve_base_url()
         if base_url and self.config.model_server:
+            if agent_instance is None:
+                agent_instance = current_agent_instance()
             base_url = apply_rollout_prefix(
                 base_url,
                 rollout_id,
-                token_capture=self._token_id_capture_enabled(),
+                token_capture=self.training_tag_for(agent_instance),
+                agent_instance=agent_instance,
             )
         return base_url
 
@@ -760,7 +766,10 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         system: str | None,
     ) -> NeMoGymResponse:
         directory = state.session.session_dir
-        base_url = self._resolve_call_base_url(state.request.episode_id.capture_key)
+        # The session's own seeded name, so the URL does not depend on the context the activation task was created in.
+        base_url = self._resolve_call_base_url(
+            state.request.episode_id.capture_key, agent_instance=state.request.agent_instance
+        )
         model = self.config.model if base_url else self.config.model.split("/")[-1]
         env = {
             "CLAUDE_CONFIG_DIR": directory + "/config",

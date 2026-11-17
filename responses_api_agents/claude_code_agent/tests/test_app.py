@@ -33,6 +33,7 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
+    agent_instance_context,
     skip_token_capture_context,
 )
 from nemo_gym.models import AnthropicConverter
@@ -911,6 +912,49 @@ class TestRolloutCorrelation:
             )
 
         assert captured["base_url"] == base_url
+
+    def test_a_named_request_s_cli_base_url_names_its_agent_instance(self, tmp_path: Path) -> None:
+        agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy_model"))
+
+        # The base agent sets the name while a request on a named path runs.
+        with agent_instance_context("judge"):
+            base_url = self._run_and_capture_base_url(agent, tmp_path, rollout_id="task3-roll1")
+            with patch.object(agent, "_resolve_base_url", return_value="http://model-server:9000"):
+                no_rollout = agent._resolve_call_base_url(None)
+                # An explicit name, as a session passes its seeded one, wins over the request's.
+                explicit = agent._resolve_call_base_url("task3-roll1", agent_instance="user")
+            # A real Anthropic endpoint has no prefix-stripping middleware, named or not.
+            anthropic = _make_agent(anthropic_base_url="https://api.anthropic.com")
+            assert anthropic._resolve_call_base_url("t3-r1") == "https://api.anthropic.com"
+
+        assert base_url == "http://model-server:9000/ng-rollout/task3-roll1/ng-agent-instance/judge"
+        assert no_rollout == "http://model-server:9000"
+        assert explicit == "http://model-server:9000/ng-rollout/task3-roll1/ng-agent-instance/user"
+
+    @pytest.mark.parametrize(
+        "agent_instance, selected, expected",
+        [
+            # Only the agent instances ``training_agent_instances`` selects carry the tag: by default the assistant.
+            ("judge", None, "/ng-rollout/r/ng-agent-instance/judge"),
+            ("judge", ["assistant", "judge"], "/ng-rollout/r/ng-agent-instance/judge/training-token-capture"),
+            ("assistant", None, "/ng-rollout/r/ng-agent-instance/assistant/training-token-capture"),
+            # The unnamed agent of a single-agent episode follows the agent's own setting, whatever is selected.
+            (None, [], "/ng-rollout/r/training-token-capture"),
+        ],
+    )
+    def test_a_named_cli_base_url_carries_the_training_tag_only_when_selected(
+        self, agent_instance: str | None, selected: list[str] | None, expected: str
+    ) -> None:
+        agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy_model"))
+        capture: dict = {"enabled": True, "all_agents": True, "dir": "/capture"}
+        if selected is not None:
+            capture["training_agent_instances"] = selected
+        agent.server_client.global_config_dict = {"token_id_capture": capture}
+
+        with patch.object(agent, "_resolve_base_url", return_value="http://model-server:9000"):
+            base_url = agent._resolve_call_base_url("r", agent_instance=agent_instance)
+
+        assert base_url == f"http://model-server:9000{expected}"
 
 
 class TestExtractInstruction:

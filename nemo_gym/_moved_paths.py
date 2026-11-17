@@ -807,6 +807,10 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         # Renamed when Environment Servers started to build MCP results with it.
         "_to_result": MovedPath(new="nemo_gym.server_runtime.mcp_auto_exposure:to_call_tool_result", since="0.8.0"),
     },
+    "nemo_gym._checkpoint.agent": {
+        # _checkpoint.agent imported this and it stays importable through it.
+        **_names("nemo_gym.server_runtime.request_handling.rollout_context", "0.8.0", "RolloutContextMiddleware"),
+    },
 }
 
 # Names renamed with the token capture package (token_id_capture -> token_capture), at each old module path that

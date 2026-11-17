@@ -17,7 +17,11 @@ from environment_servers.swe_together.task import TaskData
 from nemo_gym.trajectory import TrajectoryRecord
 
 
-SEED, ACTIVATE, CLOSE = "/v1/agent_sessions", "/ng-rollout/one-judge-test/v1/responses", "/v1/agent_sessions/close"
+SEED, ACTIVATE, CLOSE = (
+    "/v1/agent_sessions",
+    "/ng-rollout/one/ng-agent-instance/judge/v1/responses",
+    "/v1/agent_sessions/close",
+)
 CONFIRMED = {"agent_session_id": "judge-test", "cleanup_confirmed": True}
 UNCONFIRMED = {"agent_session_id": "judge-test"}
 
@@ -63,6 +67,7 @@ async def run_judge(tmp_path, monkeypatch, *, failures, close, verdict=None):
         patch="patch",
         workdir="/workspace",
         episode=req.episode_id,
+        activation_path=ACTIVATE,
         task_id=req.task.task_id,
         timeout=100,
         cookies={},
@@ -135,9 +140,8 @@ async def test_successful_judge_is_unchanged(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("attempt", [0, 2])
-async def test_each_physical_judge_session_collects_only_its_own_capture(tmp_path, monkeypatch, attempt):
-    identities = iter(["first", "second"])
-    monkeypatch.setattr(evaluation, "uuid4", lambda: SimpleNamespace(hex=next(identities)))
+async def test_the_judge_session_collects_only_its_own_calls_from_the_episode_capture(tmp_path, monkeypatch, attempt):
+    monkeypatch.setattr(evaluation, "uuid4", lambda: SimpleNamespace(hex="first"))
     monkeypatch.setattr(evaluation, "stage_judge", AsyncMock(return_value="judge"))
     monkeypatch.setattr(evaluation, "raise_for_status", AsyncMock())
     monkeypatch.setattr(evaluation, "read_test_reward", AsyncMock(return_value={}))
@@ -153,22 +157,41 @@ async def test_each_physical_judge_session_collects_only_its_own_capture(tmp_pat
             "task_input": {"task_data": TaskData(task_id="task", image="image", image_digest="sha256:" + "1" * 64)},
         },
     )
+    key = req.episode_id.capture_key
     model = {"type": "responses_api_models", "name": "judge"}
-    old_path = tmp_path / f"{req.episode_id.capture_key}-judge.capture.jsonl"
+    # A judge capture under the old ``<key>-judge`` episode is left alone.
+    old_path = tmp_path / f"{key}-judge.capture.jsonl"
     old_bytes = json.dumps({"model_call_id": "old-session", "request": {}, "response": {}})
     old_path.write_text(old_bytes)
+    capture = tmp_path / f"{key}.capture.jsonl"
+    # The assistant's calls share the episode's capture key and are not judge evidence.
+    capture.write_text(
+        json.dumps(
+            {
+                "model_call_id": "assistant-call",
+                "agent_instance": "assistant",
+                "agent_kind": "assistant",
+                "model_ref": {"type": "responses_api_models", "name": "policy"},
+                "request": {"messages": []},
+                "response": {"id": "assistant-call", "content": []},
+                "status_code": 200,
+            }
+        )
+        + "\n"
+    )
+    activation_path = f"/ng-rollout/{key}/ng-agent-instance/judge/v1/responses"
+    seen = []
     session = None
-    keys = {}
     encode = json.dumps
 
     async def post(name, path, *, json, cookies, _control=False):
         nonlocal session
         if path == SEED:
             session = json.agent_session_id
-            keys[session] = [json.episode_id.capture_key]
+            seen.append((json.episode_id.capture_key, json.agent_instance))
             payload = {}
         elif path == CLOSE:
-            keys[session].append(json.episode_id.capture_key)
+            seen.append((json.episode_id.capture_key, None))
             payload = {
                 "agent_session_id": session,
                 "cleanup_confirmed": True,
@@ -185,48 +208,48 @@ async def test_each_physical_judge_session_collects_only_its_own_capture(tmp_pat
                 },
             }
         else:
-            key = path.removeprefix("/ng-rollout/").removesuffix("/v1/responses")
-            keys[session].append(key)
+            assert path == activation_path
             exchange = {
                 "model_call_id": session,
+                "agent_instance": "judge",
+                "agent_kind": "judge",
                 "model_ref": model,
                 "request": {"messages": []},
                 "response": {"id": session, "content": []},
                 "status_code": 200,
             }
-            with (tmp_path / f"{key}.capture.jsonl").open("a") as handle:
+            with capture.open("a") as handle:
                 handle.write(encode(exchange) + "\n")
             payload = {"status": "completed", "output": []}
         return SimpleNamespace(cookies={}, payload=payload)
 
-    child_keys = []
-    for identity in ["first", "second"]:
-        evidence = {}
-        verdict = await evaluation.run_judge(
-            client=SimpleNamespace(post=post),
-            agent=SimpleNamespace(name="judge"),
-            sandbox=SimpleNamespace(serialize=AsyncMock(return_value={})),
-            provider="sandbox",
-            task_dir=tmp_path,
-            patch="patch",
-            workdir="/workspace",
-            episode=req.episode_id,
-            task_id=req.task.task_id,
-            timeout=100,
-            cookies={},
-            artifact_dir=tmp_path,
-            evidence=evidence,
-        )
-        key = evidence["judge_capture_episode"]
-        child_keys.append(key)
-        assert keys[f"judge-{identity}"] == [key, key, key]
-        assert key.startswith(req.episode_id.capture_key + "-")
-        assert verdict["judge_score"] == 1 and verdict["judge_close"]["cleanup_confirmed"] is True
-        parent = TrajectoryRecord(task_id="task", rollout_id=req.episode_id.capture_key)
-        result = await collect_judge_evidence(
-            parent, evidence, {"observability_enabled": True, "model_call_capture_dir": str(tmp_path)}, tmp_path
-        )
-        assert [call.model_call_id for call in result.model_calls] == [f"judge-{identity}"]
-        assert not result.gaps
-    assert child_keys[0] != child_keys[1]
+    evidence = {}
+    verdict = await evaluation.run_judge(
+        client=SimpleNamespace(post=post),
+        agent=SimpleNamespace(name="judge"),
+        sandbox=SimpleNamespace(serialize=AsyncMock(return_value={})),
+        provider="sandbox",
+        task_dir=tmp_path,
+        patch="patch",
+        workdir="/workspace",
+        episode=req.episode_id,
+        activation_path=activation_path,
+        task_id=req.task.task_id,
+        timeout=100,
+        cookies={},
+        artifact_dir=tmp_path,
+        evidence=evidence,
+    )
+
+    assert seen == [(key, "judge"), (key, None)]
+    assert (evidence["judge_capture_episode"], evidence["judge_agent_instance"]) == (key, "judge")
+    assert verdict["judge_score"] == 1 and verdict["judge_close"]["cleanup_confirmed"] is True
+    parent = TrajectoryRecord(task_id="task", rollout_id=key)
+    result = await collect_judge_evidence(
+        parent, evidence, {"observability_enabled": True, "model_call_capture_dir": str(tmp_path)}, tmp_path
+    )
+    assert [call.model_call_id for call in result.model_calls] == ["judge-first"]
+    assert not result.gaps
+    raw = (tmp_path / "judge-model-calls.capture.jsonl").read_text().splitlines()
+    assert [json.loads(line)["model_call_id"] for line in raw] == ["judge-first"]
     assert old_path.read_text() == old_bytes
