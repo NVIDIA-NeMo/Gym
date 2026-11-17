@@ -187,7 +187,8 @@ ENVIRONMENT_PREPARE_FAILED = "environment_prepare_failed"
 COLLECTION_RESUME_REFUSED = "collection_resume_refused"
 # A rollout was in flight when its allocation ended (a walltime cut, a preemption, a node failure or a driver that
 # ended) for a second or later time. The first such end re-runs for free; each later one spends an attempt. The
-# allocation's limits are the evaluation's setup, not the model's outcome.
+# allocation's limits are the evaluation's setup, not the model's outcome. An eligible unanswered route-failure
+# diagnostic also closes with this kind at its first end, once recovery confirms the end, and spends one attempt.
 ROLLOUT_ALLOCATION_ENDED = "rollout_allocation_ended"
 
 # --- producer labels older than the layer-prefix rule ------------------------------------------ #
