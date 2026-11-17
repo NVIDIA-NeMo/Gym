@@ -68,9 +68,35 @@ logger = logging.getLogger(__name__)
 
 _HEALTH_POLL = 2.0
 _BOOT_TIMEOUT_S = 300.0
-_WATCHDOG_INTERVAL = 120.0  # matches sandbox_launcher.py's post-incident value -- avoid
-# killing a healthy-but-briefly-slow-to-respond VM under load.
 _SSH_CONNECT_TIMEOUT_S = 5
+
+# [CUSTOM-VM-WATCHDOG-TOLERANCE 2026-11-09] A failed SSH health check used to be enough to kill
+# qemu and rebuild the VM (watchdog: one failed 5 s check + one immediate re-check under the
+# spawn lock; ensure_vm: the same). Under load sshd in the guest can stall for longer than that
+# while qemu is perfectly alive -- job 63909244 lost every node's VM this way (each restart
+# killed a live qemu, "Killing stale VM process", then hit the lib.sh key-regen bug), and every
+# restart also kills every SWE rollout in flight on that node. Now:
+#   * qemu exited (nothing holds the overlay disk) -> genuinely dead, restart right away;
+#   * qemu alive -> restart only once the VM has been unreachable for _UNREACHABLE_RESTART_S,
+#     measured from this process's last successful check (the latest proof of life), so a
+#     stalled-but-alive VM is never left unusable for much more than that either. The watchdog
+#     polls every _WATCHDOG_INTERVAL; while the VM is failing it times its re-checks to land on
+#     the deadline. ensure_vm re-checks every _PATIENT_RETRY_GAP_S up to the same deadline
+#     instead of spawning over a live qemu.
+_WATCHDOG_INTERVAL = 30.0
+_UNREACHABLE_RESTART_S = float(os.environ.get("VM_LAUNCHER_UNREACHABLE_RESTART_S", "180"))
+_PATIENT_SSH_TIMEOUT_S = float(os.environ.get("VM_LAUNCHER_HEALTH_TIMEOUT_S", "15"))
+_PATIENT_RETRY_GAP_S = 10.0
+# time.monotonic() of this process's last successful health check / first failure since then
+_last_healthy_at: Optional[float] = None
+_first_failure_at: Optional[float] = None
+
+# [CUSTOM-VM-WATCHDOG-ONCE 2026-11-09] ensure_vm() used to start a new watchdog thread on every
+# call (every SWE container command), and Ray reuses runner worker processes, so threads piled
+# up (>=13 firing in the same tick in one process in 63909244), multiplying SSH probes and the
+# chances of a false "unhealthy". One watchdog per process is enough: it watches the node's VM.
+_watchdog_lock = threading.Lock()
+_watchdog_started = False
 
 # The default assumes this file's actual location in the domyn-rl repo
 # (RL/3rdparty/Gym-workspace/Gym/nemo_gym/vm_launcher.py, six levels under the repo root where
@@ -180,6 +206,57 @@ def _check_health(info: VMConnectionInfo, timeout_s: float = _SSH_CONNECT_TIMEOU
         return result.returncode == 0
     except (subprocess.SubprocessError, OSError):
         return False
+
+
+def _qemu_alive() -> bool:
+    """True if some process (the VM's qemu) still holds this node's overlay disk open."""
+    return bool(_fuser_pids(_overlay_disk_path()))
+
+
+def _mark_healthy() -> None:
+    global _last_healthy_at, _first_failure_at
+    _last_healthy_at = time.monotonic()
+    _first_failure_at = None
+
+
+def _probe(info: Optional[VMConnectionInfo], timeout_s: float = _SSH_CONNECT_TIMEOUT_S) -> bool:
+    """_check_health that also records this process's last success / first failure."""
+    global _first_failure_at
+    if info is not None and _check_health(info, timeout_s=timeout_s):
+        _mark_healthy()
+        return True
+    if _first_failure_at is None:
+        _first_failure_at = time.monotonic()
+    return False
+
+
+def _unreachable_for() -> float:
+    """Seconds since the VM was last known reachable from this process (since the first failure
+    if this process never saw it healthy)."""
+    ref = _last_healthy_at if _last_healthy_at is not None else _first_failure_at
+    return 0.0 if ref is None else time.monotonic() - ref
+
+
+def _healthy_or_patient(info: Optional[VMConnectionInfo]) -> bool:
+    """Health check for ensure_vm(): quick check first; if that fails while qemu is still alive,
+    keep re-checking until the VM has been unreachable for _UNREACHABLE_RESTART_S before
+    declaring it unhealthy -- see [CUSTOM-VM-WATCHDOG-TOLERANCE]. A VM whose qemu exited fails
+    immediately."""
+    if info is None:
+        return False
+    if _probe(info):
+        return True
+    while _qemu_alive() and _unreachable_for() < _UNREACHABLE_RESTART_S:
+        logger.warning(
+            "VM health check failed on %s but qemu is alive -- unreachable for %.0fs (limit %.0fs), re-checking",
+            _hostname(),
+            _unreachable_for(),
+            _UNREACHABLE_RESTART_S,
+        )
+        time.sleep(_PATIENT_RETRY_GAP_S)
+        if _probe(info, timeout_s=_PATIENT_SSH_TIMEOUT_S):
+            return True
+    return False
 
 
 def _tail_log(n: int = 60) -> str:
@@ -430,7 +507,7 @@ def ensure_vm(
     lustre_share_roots = lustre_share_roots or []
     block_device_mounts = block_device_mounts or []
     info = _current_connection_info()
-    if info is not None and _check_health(info):
+    if _healthy_or_patient(info):
         logger.info("VM already healthy on 127.0.0.1:%d, nothing to do", info.ssh_port)
     else:
         lock_path = _spawn_lock_path()
@@ -438,7 +515,7 @@ def ensure_vm(
             fcntl.flock(lock_file, fcntl.LOCK_EX)
             try:
                 info = _current_connection_info()
-                if info is not None and _check_health(info):
+                if _probe(info):
                     logger.info("VM became healthy while waiting for the spawn lock, skipping spawn")
                 else:
                     # [CUSTOM-VM-BOOT-JITTER-RETRY 2026-11-03] Every node's first rollout tends to
@@ -474,7 +551,7 @@ def ensure_vm(
                         try:
                             _spawn(golden_image_dir, lustre_share_roots, block_device_mounts)
                             info = _current_connection_info()
-                            if info is not None and _check_health(info):
+                            if _probe(info):
                                 last_error = None
                                 break
                             last_error = RuntimeError(
@@ -487,13 +564,7 @@ def ensure_vm(
             finally:
                 fcntl.flock(lock_file, fcntl.LOCK_UN)
 
-    watchdog = threading.Thread(
-        target=_watchdog,
-        args=(golden_image_dir, lustre_share_roots, block_device_mounts),
-        daemon=True,
-        name="vm-watchdog",
-    )
-    watchdog.start()
+    _start_watchdog_once(golden_image_dir, lustre_share_roots, block_device_mounts)
 
     logger.info("VM ready on 127.0.0.1:%d", info.ssh_port)
     return info
@@ -510,26 +581,81 @@ def _watchdog(
     this design's main accepted cost (one VM restart affects every rollout in flight on that
     node) by making a VM failure self-healing rather than silently wedging the node.
     """
+    delay = _WATCHDOG_INTERVAL
     while True:
-        time.sleep(_WATCHDOG_INTERVAL)
-        info = _current_connection_info()
-        if info is not None and _check_health(info):
-            continue
-        logger.warning("VM unhealthy or not yet booted -- attempting restart...")
-        lock_path = _spawn_lock_path()
-        with open(lock_path, "w") as lock_file:
-            fcntl.flock(lock_file, fcntl.LOCK_EX)
-            try:
-                info = _current_connection_info()
-                if info is not None and _check_health(info):
-                    logger.info("VM recovered via another caller, no restart needed")
-                    continue
-                _spawn(golden_image_dir, lustre_share_roots, block_device_mounts)
-                logger.info("VM recovered")
-            except (RuntimeError, OSError):
-                logger.exception("VM failed to recover after restart")
-            finally:
-                fcntl.flock(lock_file, fcntl.LOCK_UN)
+        time.sleep(delay)
+        delay = _watchdog_step(golden_image_dir, lustre_share_roots, block_device_mounts)
+
+
+def _start_watchdog_once(
+    golden_image_dir: str,
+    lustre_share_roots: list[str],
+    block_device_mounts: Optional[list[tuple[str, str]]],
+) -> None:
+    """Start this process's single watchdog thread -- see [CUSTOM-VM-WATCHDOG-ONCE]."""
+    global _watchdog_started
+    with _watchdog_lock:
+        if _watchdog_started:
+            return
+        threading.Thread(
+            target=_watchdog,
+            args=(golden_image_dir, lustre_share_roots, block_device_mounts),
+            daemon=True,
+            name="vm-watchdog",
+        ).start()
+        _watchdog_started = True
+
+
+def _watchdog_step(
+    golden_image_dir: str,
+    lustre_share_roots: list[str],
+    block_device_mounts: Optional[list[tuple[str, str]]],
+) -> float:
+    """One watchdog tick; returns how long to sleep before the next one.
+
+    [CUSTOM-VM-WATCHDOG-TOLERANCE] Restarts right away when qemu has exited (or the VM was never
+    booted); a live qemu only once the VM has been unreachable for _UNREACHABLE_RESTART_S. While
+    it is failing, the next check is scheduled so that it completes around that deadline.
+    """
+    info = _current_connection_info()
+    was_failing = _first_failure_at is not None
+    if _probe(info, timeout_s=_PATIENT_SSH_TIMEOUT_S):
+        if was_failing:
+            logger.warning("VM on %s responsive again", _hostname())
+        return _WATCHDOG_INTERVAL
+    down = _unreachable_for()
+    qemu_alive = _qemu_alive()
+    if info is not None and qemu_alive and down < _UNREACHABLE_RESTART_S:
+        logger.warning(
+            "VM on %s unreachable for %.0fs (limit %.0fs) but qemu is alive -- not restarting yet",
+            _hostname(),
+            down,
+            _UNREACHABLE_RESTART_S,
+        )
+        check_duration = _PATIENT_SSH_TIMEOUT_S + 5  # _check_health's own subprocess timeout
+        return max(1.0, min(_WATCHDOG_INTERVAL, _UNREACHABLE_RESTART_S - down - check_duration))
+    logger.warning(
+        "VM unhealthy or not yet booted on %s (unreachable for %.0fs, qemu alive: %s) -- attempting restart...",
+        _hostname(),
+        down,
+        qemu_alive,
+    )
+    lock_path = _spawn_lock_path()
+    with open(lock_path, "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            info = _current_connection_info()
+            if _probe(info):
+                logger.warning("VM on %s recovered via another caller, no restart needed", _hostname())
+                return _WATCHDOG_INTERVAL
+            _spawn(golden_image_dir, lustre_share_roots, block_device_mounts)
+            _mark_healthy()  # _spawn returns only once vm_wait_ssh succeeded
+            logger.warning("VM on %s restarted and healthy", _hostname())
+        except (RuntimeError, OSError):
+            logger.exception("VM failed to recover after restart")
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+    return _WATCHDOG_INTERVAL
 
 
 async def run_in_vm(
