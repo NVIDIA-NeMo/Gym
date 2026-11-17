@@ -28,6 +28,7 @@ from subprocess import PIPE, Popen, TimeoutExpired
 from threading import Lock, Thread
 from time import monotonic, sleep, time
 from typing import IO, Dict, Iterator, List, NamedTuple, Optional, Tuple
+from uuid import uuid4
 
 import requests
 import uvicorn
@@ -465,6 +466,72 @@ def _ray_server_names(configured_servers: List[_ConfiguredServer]) -> List[str]:
     return ray_server_names
 
 
+def _setup_server_venvs_on_this_node(  # pragma: no cover
+    servers: List[Tuple[str, Path, Path]], global_config_dict: DictConfig
+) -> None:
+    """Set up each server's venv on the node this runs on, skipping venvs on storage shared with the head node."""
+    for server_name, dir_path, probe_path in servers:
+        if probe_path.exists():
+            continue
+        command = setup_env_command(dir_path, global_config_dict, server_name)
+        process = run_command(command, dir_path, server_name, global_config_dict=global_config_dict)
+        if process.wait():
+            raise RuntimeError(f"Setting up the venv of `{server_name}` failed with exit code {process.returncode}.")
+
+
+def _setup_server_venvs_on_other_nodes(  # pragma: no cover
+    configured_servers: List[_ConfiguredServer],
+    ray_server_names: List[str],
+    global_config_dict: DictConfig,
+    timeout_seconds: float,
+) -> None:
+    """Set up the venvs of servers that use Ray on every other node of the Ray cluster.
+
+    These servers run Ray tasks on other nodes with their venv's interpreter, so the venv must exist there too.
+    The launch loop sets it up on this node.
+    """
+    import ray
+    from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+    this_node_id = ray.get_runtime_context().get_node_id()
+    node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["NodeID"] != this_node_id]
+    if not node_ids:
+        return
+
+    # A node that sees a probe file written here shares the venv's storage with this node, so it skips that venv.
+    servers: Dict[Path, Tuple[str, Path, Path]] = {}
+    for server in configured_servers:
+        if server.top_level_path in ray_server_names and server.dir_path not in servers:
+            venv_path = get_venv_path(server.dir_path, global_config_dict)
+            probe_path = venv_path.with_name(f"{venv_path.name}.{uuid4().hex}.probe")
+            servers[server.dir_path] = (server.top_level_path, server.dir_path, probe_path)
+    env_vars = {key: value for key, value in os.environ.items() if key.startswith(("UV_", "NEMO_GYM_"))}
+
+    print(f"Setting up venvs on {len(node_ids)} other Ray node(s) for: {', '.join(ray_server_names)}")
+    refs = []
+    try:
+        for _, _, probe_path in servers.values():
+            probe_path.parent.mkdir(parents=True, exist_ok=True)
+            probe_path.touch()
+        # num_cpus=0 so a node whose CPUs are all reserved still runs its setup.
+        setup_task = ray.remote(num_cpus=0)(_setup_server_venvs_on_this_node)
+        refs = [
+            setup_task.options(
+                scheduling_strategy=NodeAffinitySchedulingStrategy(node_id, soft=False),
+                runtime_env={"py_executable": sys.executable, "env_vars": env_vars},
+            ).remote(list(servers.values()), global_config_dict)
+            for node_id in node_ids
+        ]
+        ray.get(refs, timeout=timeout_seconds if timeout_seconds > 0 else None)
+    except BaseException:
+        for ref in refs:
+            ray.cancel(ref, force=True)
+        raise
+    finally:
+        for _, _, probe_path in servers.values():
+            probe_path.unlink(missing_ok=True)
+
+
 def _server_launch_command(
     dir_path: Path,
     global_config_dict: DictConfig,
@@ -729,6 +796,10 @@ class ServerSupervisor:  # pragma: no cover
             print(f"Initializing Ray for servers that use it: {', '.join(ray_server_names)}")
             initialize_ray()
             self._startup.mark("init_ray")
+            _setup_server_venvs_on_other_nodes(
+                configured_servers, ray_server_names, global_config_dict, self._server_spinup_timeout_seconds
+            )
+            self._startup.mark("setup_venvs_on_other_ray_nodes")
 
         # Start the HTTP/2 PING sidecar (if `sidecar.enabled`) and point model URLs at it. This
         # must come before the config is serialized below, which is how every server learns its URLs.
