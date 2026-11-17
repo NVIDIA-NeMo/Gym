@@ -63,7 +63,9 @@ The collector is the first `srun --overlap` step of the sbatch script and must a
 check before the services start. By default it runs as a host process from `binary`; the upstream
 collector image is distroless and cannot start under enroot, so use `container` only with an image
 that has a shell. The step copies `binary` into a node-local `/tmp/gym-otel-<slurm job id>.*` directory and runs
-the copy, so nothing executes from shared storage.
+the copy, so nothing executes from shared storage. When the benchmark sets
+[`node_local`](/orchestration/configuration#node_local), that directory is under its `base_dir` instead of `/tmp`, and a
+collector `container` gets `base_dir` mounted.
 
 Gym's own telemetry needs `driver.gym_install`: the `telemetry` extra is installed with that checkout, and a
 container's preinstalled Gym is left alone. The submit fails when `gym_telemetry` is on without it; set
@@ -111,9 +113,10 @@ defaults), and the node scrapes carry `dcgm` and `node`.
 
 Telemetry is always written to `<job dir>/otel/{metrics,traces,logs}.jsonl` while the collector is enabled, so a run can be
 inspected without backend access. The collector writes them node-local and its step appends them to the job directory
-when it stops, once per Slurm job, so a resumed run's segments follow one another in the same files. Node `/tmp` must
-hold a whole job's files: in one measured run `metrics.jsonl` alone grew by about 23 MB a minute. The rendered
-collector configuration is at `<job dir>/otel/collector.yaml`; `gym eval submit --dry-run` prints it without submitting.
+when it stops, once per Slurm job, so a resumed run's segments follow one another in the same files. Node `/tmp` (or
+`node_local.base_dir`) must hold a whole job's files: in one measured run `metrics.jsonl` alone grew by about 23 MB
+a minute. The rendered collector configuration is at `<job dir>/otel/collector.yaml`; `gym eval submit --dry-run`
+prints it without submitting.
 
 ## The token
 

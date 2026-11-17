@@ -45,6 +45,7 @@ COLLECTOR_DIR = "otel"
 COLLECTOR_CONFIG_NAME = "collector.yaml"
 # The collector runs a node-local copy of its binary and writes its jsonl there, never on shared storage;
 # its step appends the files into `<job dir>/otel/` when it stops. The step exports the directory in this variable.
+# Under node `/tmp`, or under `node_local.base_dir` when the benchmark sets one (collector_local_dir_prefix).
 COLLECTOR_LOCAL_DIR_PREFIX = "/tmp/gym-otel-"
 COLLECTOR_LOCAL_DIR_ENV = "GYM_OTEL_LOCAL_DIR"
 COLLECTOR_FILE_SIGNALS = ("metrics", "traces", "logs")
@@ -156,6 +157,13 @@ def resolve_token(config: SubmitConfig) -> str | None:
             name,
         )
     return token or None
+
+
+def collector_local_dir_prefix(node_local_base_dir: str | None) -> str:
+    """Where the collector's node directory goes: one setting, `node_local.base_dir`, places all the job's node files."""
+    if node_local_base_dir is None:
+        return COLLECTOR_LOCAL_DIR_PREFIX
+    return f"{node_local_base_dir.rstrip('/')}/gym-otel-"
 
 
 def collector_config_path(remote_bench_dir: Path) -> Path:

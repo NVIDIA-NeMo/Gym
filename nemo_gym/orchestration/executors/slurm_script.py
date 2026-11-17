@@ -48,6 +48,7 @@ from nemo_gym.orchestration.executors.otel import (
     GYM_TELEMETRY_EXTRA,
     SHUTDOWN_WAIT_SECONDS,
     collector_config_path,
+    collector_local_dir_prefix,
     driver_telemetry_env,
     gym_telemetry_active,
     otel_active,
@@ -735,11 +736,14 @@ def _with_vllm_traces(
 COLLECTOR_LOCAL_DIR_MARKER = f"export {COLLECTOR_LOCAL_DIR_ENV}="
 
 
-def _collector_command(config: SubmitConfig, remote_bench_dir: Path) -> str:
+def _collector_command(
+    config: SubmitConfig, remote_bench_dir: Path, local_dir_prefix: str = COLLECTOR_LOCAL_DIR_PREFIX
+) -> str:
     """Run a node-local copy of the collector binary, then append its node-local jsonl into `<job dir>/otel/`.
 
     The copy-out runs in the collector's own step, the one place that sees its node-local directory: the
-    collector may run on another node than the batch script, or in a container.
+    collector may run on another node than the batch script, or in a container. The directory is
+    `<local_dir_prefix><SLURM_JOB_ID>.XXXXXX`.
     """
     binary = shlex.quote(config.otel.binary)
     name = shlex.quote(Path(config.otel.binary).name)
@@ -747,7 +751,7 @@ def _collector_command(config: SubmitConfig, remote_bench_dir: Path) -> str:
     script = "; ".join(
         [
             f'src=$(command -v {binary}) || {{ echo "OTel collector binary not found: "{binary} >&2; exit 127; }}',
-            f'dir=$(mktemp -d "{COLLECTOR_LOCAL_DIR_PREFIX}$SLURM_JOB_ID.XXXXXX") && cp "$src" "$dir"/{name} || exit 1',
+            f'dir=$(mktemp -d "{local_dir_prefix}$SLURM_JOB_ID.XXXXXX") && cp "$src" "$dir"/{name} || exit 1',
             f'{COLLECTOR_LOCAL_DIR_MARKER}"$dir"',
             # Slurm's TERM at the time limit reaches this shell too: pass it on and wait for the flush.
             'trap "kill -TERM \\$pid 2>/dev/null" TERM INT',
@@ -772,6 +776,7 @@ def _render_collector_service(
     is_multi_node: bool,
     driver_node: int | None = None,
     account: str | None = None,
+    node_local_base_dir: str | None = None,
 ) -> str:
     """The collector's srun step. Started before the model services so the scrape covers their
     startup.
@@ -780,12 +785,15 @@ def _render_collector_service(
     also where the Ray prelude puts the head of a multi-node vLLM service and where the driver runs,
     so `localhost:<port>` reaches the API server and the OTLP endpoints from the same node. In a
     container the job directory is mounted for the config and the copied `otel/*.jsonl`; on the
-    node it is simply there, so no mounts or workdir are passed.
+    node it is simply there, so no mounts or workdir are passed. With `node_local_base_dir` (the
+    benchmark's `node_local.base_dir`) the collector's node directory goes there instead of `/tmp`,
+    and a container gets that directory mounted too.
     """
     obs = config.otel
-    command = _collector_command(config, remote_bench_dir)
+    command = _collector_command(config, remote_bench_dir, collector_local_dir_prefix(node_local_base_dir))
+    node_mounts = [f"{node_local_base_dir}:{node_local_base_dir}"] if node_local_base_dir is not None else []
     container_kwargs = (
-        {"mounts": [f"{remote_bench_dir}:{remote_bench_dir}"], "workdir": str(remote_bench_dir)}
+        {"mounts": [f"{remote_bench_dir}:{remote_bench_dir}", *node_mounts], "workdir": str(remote_bench_dir)}
         if obs.container is not None
         else {}
     )
@@ -820,7 +828,13 @@ def _render_collector_health_check(config: SubmitConfig, driver_node: int | None
     )
 
 
-def _render_collector_shutdown(config: SubmitConfig, remote_bench_dir: Path, driver_node: int | None = None) -> str:
+def _render_collector_shutdown(
+    config: SubmitConfig,
+    remote_bench_dir: Path,
+    driver_node: int | None = None,
+    *,
+    local_dir_prefix: str = COLLECTOR_LOCAL_DIR_PREFIX,
+) -> str:
     """Run after the driver: one more scrape interval so the final counters are seen, then a
     graceful stop, keeping the driver's exit code.
 
@@ -834,7 +848,7 @@ def _render_collector_shutdown(config: SubmitConfig, remote_bench_dir: Path, dri
     name = re.escape(Path(config.otel.binary).name)
     config_path = re.escape(str(collector_config_path(remote_bench_dir)))
     pattern = (
-        shlex.quote(f"^{re.escape(COLLECTOR_LOCAL_DIR_PREFIX)}")
+        shlex.quote(f"^{re.escape(local_dir_prefix)}")
         + '"$SLURM_JOB_ID"'
         + shlex.quote(f"\\.[^/]+/{name} --config {config_path}")
     )
@@ -1092,6 +1106,8 @@ def build_sbatch_script(
     remote_bench_dir: Path,
 ) -> str:
     directives = _render_directives(compute, remote_bench_dir, benchmark_name)
+    node_local = benchmark.node_local_config
+    collector_prefix = collector_local_dir_prefix(node_local.base_dir if node_local is not None else None)
 
     resume = benchmark.resume_config
     resume_prologue = render_resume_prologue(resume) if resume else ""
@@ -1128,6 +1144,7 @@ def build_sbatch_script(
                     is_multi_node=is_multi_node,
                     driver_node=driver_node,
                     account=compute.account,
+                    node_local_base_dir=node_local.base_dir if node_local is not None else None,
                 )
             ]
             if observed
@@ -1219,7 +1236,6 @@ def build_sbatch_script(
             ),
             **driver_env,
         }
-    node_local = benchmark.node_local_config
     if benchmark.command is None:
         # With a node-local dir, the per-call capture files stay on the driver's disk and reach the job dir archived.
         capture_root = node_local_script.container_dir(remote_bench_dir) if node_local is not None else None
@@ -1382,7 +1398,9 @@ def build_sbatch_script(
         # A job that finished the run cancels the follow-up and sentinel it queued; its status stays the driver's.
         driver_command += "\n" + render_resume_epilogue()
     if observed:
-        driver_command += "\n" + _render_collector_shutdown(config, remote_bench_dir, driver_node)
+        driver_command += "\n" + _render_collector_shutdown(
+            config, remote_bench_dir, driver_node, local_dir_prefix=collector_prefix
+        )
 
     return _SCRIPT_TEMPLATE.format(
         directives=directives,

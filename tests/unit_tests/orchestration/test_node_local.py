@@ -16,6 +16,7 @@
 import contextlib
 import io
 import os
+import re
 import signal
 import subprocess
 import tarfile
@@ -42,7 +43,7 @@ _TWO_POOLS = {
 }
 
 
-def _config(node_local=None, *, services=None, pools=None, policy=None, exports=False) -> SubmitConfig:
+def _config(node_local=None, *, services=None, pools=None, policy=None, exports=False, otel=None) -> SubmitConfig:
     benchmark = {"run": {}, **({"node_local": node_local} if node_local is not None else {})}
     compute = {"type": "slurm", "account": "acct", **({"node_pools": pools} if pools else {})}
     return SubmitConfig.model_validate(
@@ -57,7 +58,7 @@ def _config(node_local=None, *, services=None, pools=None, policy=None, exports=
                 **({"policy_model": policy} if policy else {}),
             },
             "job": {"output_path": "/jobs", **({"export": {"evalrdl": {}}} if exports else {})},
-            "otel": {"enabled": False},
+            "otel": otel or {"enabled": False},
         }
     )
 
@@ -698,3 +699,36 @@ def test_an_archive_that_overruns_its_bound_is_dropped_whole(tmp_path):
     assert "archiving the node-local dir failed" in (tmp_path / "job.out").read_text()
     assert list((tmp_path / "run" / "b" / "node-local").iterdir()) == []
     assert not (tmp_path / "host" / "gym-node-local-11").exists()
+
+
+# --- the OTel collector's node directory -------------------------------------------------------------------------
+
+
+def _pkill_regex(script: str, job_id: str) -> str:
+    """The regular expression the collector's stop gives pkill once the batch shell has expanded it."""
+    line = next(line for line in script.splitlines() if "pkill -TERM" in line)
+    words = line[line.index(" -- ") + len(" -- ") : line.index(" || true")]
+    printed = subprocess.run(
+        ["bash", "-c", f"printf %s {words}"], env={"SLURM_JOB_ID": job_id}, capture_output=True, text=True
+    )
+    return printed.stdout
+
+
+def test_with_node_local_the_collector_keeps_its_files_under_base_dir():
+    otel = {"enabled": True, "gym_telemetry": False, "remote_export": False}
+    script = _script(_config({"base_dir": "/raid/scratch"}, otel=otel))
+    assert 'mktemp -d "/raid/scratch/gym-otel-$SLURM_JOB_ID.XXXXXX"' in script
+    regex = _pkill_regex(script, "4242")
+    config = "--config /jobs/20261116_run/b/otel/collector.yaml"
+    assert re.search(regex, f"/raid/scratch/gym-otel-4242.Xy12Ab/otelcol-contrib {config}")
+    assert not re.search(regex, f"/tmp/gym-otel-4242.Xy12Ab/otelcol-contrib {config}")
+
+
+def test_a_collector_container_gets_base_dir_mounted():
+    otel = {"enabled": True, "gym_telemetry": False, "remote_export": False, "container": "otel.sqsh"}
+    line = next(
+        line
+        for line in _script(_config({"base_dir": "/raid/scratch"}, otel=otel)).splitlines()
+        if "logs/otel_collector-" in line
+    )
+    assert "--container-mounts=/jobs/20261116_run/b:/jobs/20261116_run/b,/raid/scratch:/raid/scratch " in line
