@@ -798,6 +798,18 @@ class TestSaveDir:
         assert not any((tmp_path / "results" / "swebench" / "verification" / "no-rollout").iterdir())
         assert caplog.text.count("Could not keep") == 1
 
+    async def test_a_failed_copy_never_removes_a_folder_it_did_not_create(
+        self, set_global_config, tmp_path: Path, monkeypatch
+    ) -> None:
+        set_global_config({"results_dir": str(tmp_path / "results")})
+        existing = tmp_path / "results" / "swebench" / "verification" / "no-rollout" / "taken"
+        existing.mkdir(parents=True)
+        (existing / "earlier.log").write_text("x")
+        monkeypatch.setattr(runtime_files, "_kept_dir", lambda *args: existing)
+
+        assert await save_dir(self._logs(tmp_path), server_name="swebench", name="verification") is None
+        assert (existing / "earlier.log").exists()
+
     async def test_a_copy_that_fails_after_its_request_is_cancelled_is_logged(
         self, set_global_config, tmp_path: Path, monkeypatch, caplog
     ) -> None:

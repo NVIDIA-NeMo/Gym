@@ -488,9 +488,11 @@ def _copy_dir(src: Path, dest: Path) -> Path:
     write fails the copy, which removes what it copied.
     """
     unread: list[str] = []
+    created = False
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.mkdir()
+        created = True
         for root, dirs, files in os.walk(src, onerror=lambda error: unread.append(str(error.filename))):
             target = dest / os.path.relpath(root, src)
             for entry in [*dirs, *files]:
@@ -515,7 +517,9 @@ def _copy_dir(src: Path, dest: Path) -> Path:
     except BaseException:
         # Logged here, since a cancelled caller no longer receives the error.
         logger.warning("Could not keep %s at %s", src, dest, exc_info=True)
-        _remove_tree(dest)
+        # Only a folder this copy created: dest.mkdir() fails on one that was already there.
+        if created:
+            _remove_tree(dest)
         raise
     if unread:
         logger.warning("Kept %s without %d entries it could not read, such as %s", src, len(unread), unread[0])
