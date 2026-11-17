@@ -1,0 +1,34 @@
+{
+  "skill_name": "nemo-gym-running-evals",
+  "should_trigger": [
+    "run an eval of my model on GPQA with NeMo Gym",
+    "evaluate Qwen3 on IFBench using Gym",
+    "I have an OpenAI-compatible endpoint, how do I benchmark it with Gym",
+    "try my vLLM server on a Gym benchmark, just a quick smoke",
+    "run the Gym eval on our Slurm cluster with a self-hosted vLLM checkpoint",
+    "my Gym eval job hit the walltime, how do I resume it",
+    "the evaluation chain stopped, what do I do next",
+    "is my Gym run done and can I trust the score",
+    "serve this checkpoint for a Gym evaluation and turn thinking off",
+    "what command lists the benchmarks I can run in Gym",
+    "run SWE-bench with Gym against my model endpoint",
+    "how do I smoke a benchmark with 5 tasks before the full run",
+    "compare BF16 and the NVFP4 export fairly in a Gym eval",
+    "evaluate my model on Terminal-Bench with Gym",
+    "gym eval submit says the config is invalid, help me write the model config",
+    "how many repeats should a benchmark run use before I report the score"
+  ],
+  "should_not_trigger": [
+    "add a new benchmark to Gym",
+    "why is my score different from the paper",
+    "compare these two finished runs and tell me if the gain is real",
+    "my rollouts file is empty and the servers crashed",
+    "write a new agent harness",
+    "how do I train a model with NeMo RL",
+    "explain what a resources server is",
+    "bump the Gym release version",
+    "review this PR to Gym",
+    "analyze which tasks fail in my results"
+  ],
+  "note": "DRAFT 11-18: 16 positive, 10 negative; not yet run against Claude Code or Codex"
+}

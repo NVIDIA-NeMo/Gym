@@ -1,0 +1,47 @@
+{
+  "skill_name": "nemo-gym-analyzing-results",
+  "status": "DRAFT: prompts and assertions only; needs golden-run fixtures (runs with known values) so findings can be checked against actual numbers; with-vs-without runs on Claude Code and Codex not done; schema to be checked against the NVIDIA skills guide",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "My Gym GPQA score is 5 points below the model card. Both run directories are attached. Is it a real regression?",
+      "expected_output": "Quantifies noise first (repeat counts, standard error, interval), then checks code, data, method, failure accounting and health; ends with within noise, explained or not yet explained and one evidence-backed finding.",
+      "assertions": [
+        "computes or reads the standard error before calling the gap real",
+        "diffs the two resolved configs",
+        "checks failure accounting (scored vs materialized inputs)",
+        "ends with one of: within noise, explained, not yet explained"
+      ],
+      "files": [
+        "FIXTURE_NEEDED: two small run directories with known aggregate metrics"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Compare results/baseline and results/candidate (8 repeats each, same agent) and tell me whether the candidate is better.",
+      "expected_output": "Runs gym eval compare with --baseline, --candidates, --output-dir, reads the interval and the flipped tasks, reports the delta with its interval.",
+      "assertions": [
+        "uses gym eval compare, not a hand-computed difference",
+        "reports the delta together with its confidence interval",
+        "lists tasks that flipped between pass and fail"
+      ],
+      "files": [
+        "FIXTURE_NEEDED"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Which tasks does the model fail in results/run1, and why? Give me a short report.",
+      "expected_output": "Counts tasks, rollouts and missing rows; computes pass@1 and pass@k; buckets always, sometimes, never pass and missing; labels failures with one primary cause each; recommends one action per cause; cites row counts and task ids.",
+      "assertions": [
+        "buckets tasks into always-pass, sometimes-pass, never-pass and missing",
+        "cites task ids or row counts for each claim",
+        "uses one primary cause label per failure",
+        "does not invent evidence for missing artifacts"
+      ],
+      "files": [
+        "FIXTURE_NEEDED: run with a known failure mix"
+      ]
+    }
+  ]
+}

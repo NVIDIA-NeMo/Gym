@@ -1,0 +1,28 @@
+{
+  "skill_name": "nemo-gym-analyzing-results",
+  "should_trigger": [
+    "why is my GPQA score lower than the model card",
+    "my Gym number does not match the tech report",
+    "is the difference between BF16 and the quantized checkpoint real",
+    "compare baseline and candidate runs with confidence intervals",
+    "which tasks does the model fail and why",
+    "the same output got different rewards, why",
+    "repeat-to-repeat variance looks too high on this benchmark",
+    "write up the results of this benchmark run",
+    "two harnesses give different scores on the same benchmark, which is right",
+    "what should we fix next after this evaluation",
+    "are these two runs even comparable",
+    "how many repeats do I need to see a 1 point change"
+  ],
+  "should_not_trigger": [
+    "run an eval of my model on IFBench",
+    "the job timed out, resume it",
+    "my run crashed and produced no rollouts",
+    "add a benchmark to Gym",
+    "what does mean/reward mean in the profiling file",
+    "serve a checkpoint with vLLM",
+    "open a PR for this change",
+    "debug a sandbox that will not start"
+  ],
+  "note": "DRAFT 11-18: 12 positive, 8 negative; not yet run against Claude Code or Codex"
+}
