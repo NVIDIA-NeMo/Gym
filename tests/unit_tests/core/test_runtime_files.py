@@ -470,7 +470,17 @@ class TestSessionTempDir:
         other.mkdir(parents=True)
 
         with caplog.at_level("WARNING"):
-            for path in (elsewhere, Path(""), session.parent, process, other, Path("session-abc")):
+            for path in (
+                elsewhere,
+                Path(""),
+                session.parent,
+                process,
+                other,
+                Path("session-abc"),
+                # pathlib keeps "..", so this names temp_dir itself while its parent looks like a process folder.
+                session.parent / "..",
+                session.parent / "." / ".." / session.parent.name,
+            ):
                 assert remove_temp_dir(path) is False
 
         assert elsewhere.exists() and session.exists() and process.exists() and other.exists()

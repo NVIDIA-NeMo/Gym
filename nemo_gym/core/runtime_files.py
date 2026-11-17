@@ -405,7 +405,8 @@ def remove_temp_dir(path: Path) -> bool:
     path never deletes something else. A failure is logged, never raised, so a caller can try again later. A folder
     that is already gone counts as removed.
     """
-    path = Path(path)
+    # Normalized first: pathlib keeps "..", so "<process folder>/.." would otherwise pass as a folder in it.
+    path = Path(os.path.normpath(path))
     if not path.is_absolute() or path.parent not in _process_dirs.values() or path.name.startswith("process."):
         _warn_once(f"refuse:{path}", "Not removing %s: it is not a temporary folder this process created.", path)
         return False
