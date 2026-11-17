@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-from responses_api_agents.codex_agent.tool_namespace_check import run_check
+from responses_api_agents.codex_agent.tests.tool_namespace_check import run_check
 
 
 BWRAP = os.environ.get("NEMO_GYM_TEST_BWRAP") or shutil.which("bwrap")
@@ -72,6 +72,7 @@ async def test_without_the_namespace_the_same_commands_kill_the_harness(tmp_path
     # Shows the check is sensitive: kill -9 -1 from the harness's own namespace ends the episode.
     report = await run_check(BWRAP, base_dir=str(tmp_path), control=True)
     _assert_ok(report)
+    assert "execute_error" not in report and "kill -9 -1" in report["kill_report"]
     assert report["turn_completed"] is False
 
 

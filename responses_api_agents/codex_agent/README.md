@@ -228,7 +228,7 @@ If a harness process dies anyway and nobody stopped it, the error and gaps say
 receipt, or the runner exited with 128+N (it or Codex ended by signal N). With
 `failure_artifacts_dir` set, `failure.json` records the evidence beside the session's logs.
 
-`responses_api_agents.codex_agent.tool_namespace_check` checks all of this end to end against a
+`responses_api_agents/codex_agent/tests/tool_namespace_check.py` checks all of this end to end against a
 real bwrap. Its optional mode runs the real Codex CLI. See
 `responses_api_agents/codex_agent/tests/test_bwrap_tool_namespace.py`.
 

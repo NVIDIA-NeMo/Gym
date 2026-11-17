@@ -17,7 +17,7 @@ and the harness must survive: the supervisor writes a normal receipt and Codex c
   Codex CLI against a scripted Responses endpoint served from this process (the sandbox
   shares the host network), so real ``exec_command`` calls go through the real exec-server.
 
-    python -m responses_api_agents.codex_agent.tool_namespace_check --bwrap /path/to/bwrap \\
+    python -m responses_api_agents.codex_agent.tests.tool_namespace_check --bwrap /path/to/bwrap \\
         [--codex-runtime DIR] [--control] [--base-dir DIR]
 
 Prints a JSON report and exits 0 when every expectation holds.
@@ -36,7 +36,14 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from nemo_gym.agents import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, AgentSeedSessionRequest, SandboxSession
+from nemo_gym.agents import (
+    HARNESS_RUNNER_FILE,
+    HARNESS_RUNNER_SCRIPT,
+    AgentSeedSessionRequest,
+    SandboxCommand,
+    SandboxSession,
+    shell_assignments,
+)
 from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.sandbox.providers.bwrap import BwrapProvider
@@ -211,17 +218,19 @@ async def run_check(
         "bwrap": bwrap,
     }
     server = None
+    scratch_dir = tempfile.TemporaryDirectory(prefix="nemo-gym-tool-namespace-check-")
+    scratch = scratch_dir.name
     try:
         runtime = RUNTIME_MOUNT if codex_runtime else FAKE_RUNTIME
         report["sandbox_uid"] = (await _exec(sandbox, "id -u")).strip()
         await _exec(sandbox, f"mkdir -p {SESSION_DIR}/home/.codex")
         for name, text in (("kill.sh", KILL_SCRIPT), ("view.sh", VIEW_SCRIPT)):
-            await sandbox.upload(_scratch(text), f"{WORKDIR}/{name}")
+            await sandbox.upload(_scratch(scratch, text), f"{WORKDIR}/{name}")
         if not codex_runtime:
             fake = (
                 f"{FAKE_RUNTIME}/codex/node_modules/@openai/codex-linux-fake/vendor/fake-unknown-linux-musl/bin/codex"
             )
-            await sandbox.upload(_scratch(FAKE_CODEX, mode=0o755), fake)
+            await sandbox.upload(_scratch(scratch, FAKE_CODEX, mode=0o755), fake)
         await sandbox.upload(Path(bwrap), tool_host_paths(SESSION_DIR)[0])
         setup = await sandbox.exec(tool_host_setup_command(SESSION_DIR, runtime), timeout_s=60)
         report["setup"] = {"exit": setup.return_code, "output": f"{setup.stderr or ''}{setup.stdout or ''}".strip()}
@@ -254,12 +263,32 @@ async def run_check(
             ]
         else:
             tool = tool_host_argv(SESSION_DIR) if not control else ["sh", f"{WORKDIR}/kill.sh"]
-            await sandbox.upload(_scratch(FAKE_NODE), f"{SESSION_DIR}/fake_node.py")
+            await sandbox.upload(_scratch(scratch, FAKE_NODE), f"{SESSION_DIR}/fake_node.py")
             # A Codex stand-in whose command line says node, as the real one's does.
             await _exec(sandbox, f'ln -sfn "$(command -v python3)" {SESSION_DIR}/bin/node')
             command = [f"{SESSION_DIR}/bin/node", f"{SESSION_DIR}/fake_node.py", json.dumps(tool)]
+        # The runner starts this command under the real supervisor, as CodexSandboxSession.stage_activation does
+        # for the Codex launcher.
+        params = {
+            "cwd": WORKDIR,
+            "command": command,
+            "env": [f"{name}={value}" for name, value in env.items()],
+            "stdin": f"{SESSION_DIR}/prompt.txt",
+            "stdout": f"{SESSION_DIR}/stdout.log",
+            "stderr": f"{SESSION_DIR}/stderr.log",
+            "events": f"{SESSION_DIR}/events.jsonl",
+        }
+
+        async def stage_activation() -> SandboxCommand:
+            await session.upload_text("prompt.txt", "check")
+            await session.upload_text("params.sh", shell_assignments(params))
+            return SandboxCommand(argv=["bash", f"{SESSION_DIR}/{HARNESS_RUNNER_FILE}", f"{SESSION_DIR}/params.sh"])
+
+        session.capture_budget_s = 30
         try:
-            raw = await session.execute(command=command, env=env, prompt="check", timeout=180, close_timeout=30)
+            raw = await session.session.execute(
+                stage_activation=stage_activation, collect=session.collect_artifacts, timeout=180, close_timeout=30
+            )
         except Exception as error:  # noqa: BLE001 - the report carries it
             raw = session.session.artifacts or ""
             report["execute_error"] = f"{type(error).__name__}: {error}"
@@ -278,13 +307,25 @@ async def run_check(
             report["harness_alive_after_tool"] = json.loads(messages[-1]) if messages else None
         report["checks"] = _checks(report, codex=bool(codex_runtime))
         expected = all(report["checks"].values())
-        # The control run passes when the same tool command did kill the unprotected harness.
-        report["ok"] = expected if not control else not report["turn_completed"]
+        if control:
+            # The control run passes only when the check itself ran, the kill commands ran, and the unprotected
+            # harness then died: no completed turn, plus a lost receipt or a supervisor that reported a failure.
+            # A crash before the turn is not that.
+            cleanup = report["cleanup"] or {}
+            report["ok"] = (
+                "execute_error" not in report
+                and "kill -9 -1" in (report["kill_report"] or "")
+                and not report["turn_completed"]
+                and (bool(report["cleanup_receipt_missing"]) or cleanup.get("return_code") not in (0, None))
+            )
+        else:
+            report["ok"] = expected and "execute_error" not in report
         return report
     finally:
         if server is not None:
             server.server.shutdown()
         await sandbox.stop()
+        scratch_dir.cleanup()
 
 
 def _checks(report: dict[str, Any], *, codex: bool) -> dict[str, bool]:
@@ -330,11 +371,8 @@ def _codex_config(base_url: str) -> dict[str, Any]:
     }
 
 
-_SCRATCH = tempfile.TemporaryDirectory(prefix="nemo-gym-tool-namespace-check-")
-
-
-def _scratch(text: str, mode: int = 0o644) -> Path:
-    path = Path(_SCRATCH.name) / f"{len(os.listdir(_SCRATCH.name))}"
+def _scratch(directory: str, text: str, mode: int = 0o644) -> Path:
+    path = Path(directory) / f"{len(os.listdir(directory))}"
     path.write_text(text)
     path.chmod(mode)
     return path
