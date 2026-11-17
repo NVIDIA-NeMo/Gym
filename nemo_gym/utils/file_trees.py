@@ -74,8 +74,8 @@ def copy_tree(src: Path, dest: Path) -> Path:
 
     Folders are created afresh, so they take the user's usual permissions rather than the source's, and files are
     copied by content: no permission, time or extended-attribute copies, each a metadata operation on shared
-    storage. Symlinks are copied as symlinks, and sockets, pipes and other special files are skipped. An entry that cannot be read is skipped, so the rest is kept; a failure to
-    write fails the copy, which removes what it copied.
+    storage. Symlinks are copied as symlinks, and sockets, pipes and other special files are skipped. An entry that
+    cannot be read is skipped, so the rest is kept; a failure to write fails the copy, which removes what it copied.
     """
     unread: list[str] = []
     created = False

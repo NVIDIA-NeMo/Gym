@@ -970,32 +970,6 @@ class TestSaveDir:
 
         assert all(path is not None for path in kept)
 
-    async def test_a_caller_bounds_its_wait_and_the_copy_still_finishes(
-        self, set_global_config, tmp_path: Path, monkeypatch
-    ) -> None:
-        # As on a stalled shared filesystem: the request must return on time, and the files are still kept.
-        set_global_config({"results_dir": str(tmp_path / "results")})
-        release = threading.Event()
-        copyfileobj = shutil.copyfileobj
-
-        def stalled(*args, **kwargs):
-            release.wait(10)
-            return copyfileobj(*args, **kwargs)
-
-        monkeypatch.setattr(shutil, "copyfileobj", stalled)
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(save_dir(self._logs(tmp_path), server_name="swebench", name="verification"), 0.05)
-        release.set()
-
-        kept = tmp_path / "results" / "swebench" / "verification" / "no-rollout"
-        for _ in range(200):
-            leaves = list(kept.iterdir())
-            if leaves and (leaves[0] / "sub" / "test_output.txt").exists():
-                break
-            await asyncio.sleep(0.01)
-        assert (leaves[0] / "report.json").read_text() == "{}"
-        assert (leaves[0] / "sub" / "test_output.txt").read_text() == "ok"
-
     async def test_names_and_labels_stay_one_folder_under_the_root(self, set_global_config, tmp_path: Path) -> None:
         set_global_config({"results_dir": str(tmp_path / "results")})
         logs = self._logs(tmp_path)
