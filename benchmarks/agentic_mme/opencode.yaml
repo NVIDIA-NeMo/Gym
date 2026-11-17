@@ -1,0 +1,145 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Agentic-MME with OpenCode in place of the Agentic-MME agent. The resources server starts one sandbox per episode
+# that holds the task images under images/, and lends it to OpenCode. OpenCode sees the images in its prompt and works
+# on the files with its own shell, Python and read tools instead of the 14 fixed image tools, so its scores are a
+# separate track from config.yaml. Web search is off.
+#
+# Needs a sandbox image built from resources_servers/agentic_mme/sandbox_image/Dockerfile (AGENTIC_MME_SANDBOX_IMAGE)
+# and the OpenSandbox provider block below (OPENSANDBOX_DOMAIN, OPENSANDBOX_API_KEY). prepare.py writes the images
+# under benchmarks/agentic_mme/data/images; for the example rows set
+# AGENTIC_MME_IMAGE_ROOT=resources_servers/agentic_mme/data/example_images.
+config_paths:
+  - benchmarks/agentic_mme/config.yaml
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+# The lent sandbox's egress rule opens every port of the policy model's host. So every other server sets host
+# 127.0.0.1, which a launcher's default_host (NeMo RL sets one) cannot change: the head server (it returns the whole
+# config, keys included, to any caller), the judge (it spends the judge's API key for any caller), the agent (a request
+# without a session runs OpenCode on this host), and the resources and Environment Servers (they start sandboxes and
+# episodes). All their callers run on this host. opencode_server_tools.yaml gives the resources server its reachable
+# address back, because OpenCode calls its /mcp route from the sandbox. NeMo RL sets the head server's address itself,
+# and that wins over this file.
+head_server:
+  host: 127.0.0.1
+
+agentic_mme_judge_model:
+  responses_api_models:
+    openai_model:
+      host: 127.0.0.1
+
+agentic_mme:
+  resources_servers:
+    agentic_mme:
+      host: 127.0.0.1
+      allowed_agents: [opencode_agent]
+      # Names the top-level provider block from opensandbox.yaml.
+      sandbox_provider: sandbox
+      # The lent sandbox reaches the policy model and nothing else, so the harness cannot install tools or look answers
+      # up on the internet. The model server must have an address the sandbox can reach (++use_absolute_ip=true).
+      # A provider that does not enforce network policies, such as Docker, needs sandbox_network_access: inherit.
+      sandbox_network_access: model_only
+      sandbox_model_server:
+        type: responses_api_models
+        name: policy_model
+      image_root: ${oc.env:AGENTIC_MME_IMAGE_ROOT,benchmarks/agentic_mme/data/images}
+      sandbox_config:
+        image: ${oc.env:AGENTIC_MME_SANDBOX_IMAGE,null}
+        # Without a TTL the OpenSandbox SDK expires a sandbox 10 minutes after creation. The resources session
+        # expires with the sandbox, so the TTL outlives the episode deadline below plus close and cleanup.
+        ttl_s: 7200
+        env:
+          # execd otherwise waits 1 s after every command.
+          EXECD_API_GRACE_SHUTDOWN: 50ms
+        resources: {cpu: 4, memory_mib: 16384}
+
+# Drop the Agentic-MME agent; the environment server below runs OpenCode instead.
+agentic_mme_agent: null
+
+agentic_mme_opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      entrypoint: app.py
+      host: 127.0.0.1
+      description: Agentic-MME with OpenCode in a sandbox that holds the task images
+      # The resources server whose task schema checks the dataset rows below. The environment server runs the episodes.
+      resources_server:
+        type: resources_servers
+        name: agentic_mme
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      opencode_version: 1.17.11
+      # A sandbox without internet access cannot download OpenCode, so it runs the copy that
+      # resources_servers/agentic_mme/sandbox_image/Dockerfile installs: OpenCode 1.17.11 for glibc x86_64.
+      sandbox_executable_path: /opt/opencode/bin/opencode
+      sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded  # pragma: allowlist secret
+      # OpenCode's plugin dependencies, from the same image. Without them, OpenCode tries to install them from npm at
+      # each start, and an offline start waits about 70 s before its first model call.
+      sandbox_plugin_dependencies_path: /opt/opencode/opencode-1.17.11-plugin-dependencies.tar.gz
+      sandbox_plugin_dependencies_sha256: 77b03eba45c8d7fe3d0a58bfc215f6fb99a1db4dd18a7e3d91fd29981fddafb1  # pragma: allowlist secret
+      concurrency: 32
+      # The served context length minus max_output_tokens.
+      context_window: ${oc.select:agentic_mme_opencode_context_window,114688}
+      max_output_tokens: ${oc.select:agentic_mme_opencode_max_output_tokens,16384}
+      # The OpenCode process, inside the environment server's episode deadline.
+      timeout: 3600
+      session_close_timeout_seconds: 90
+      # The model looks at images that tools return: crops it reads with OpenCode's read tool here, or the MCP image
+      # tools' results in opencode_server_tools.yaml. The prompt holds the task images, which declares image input
+      # anyway; this keeps it declared for any row, so OpenCode never swaps a tool image for an error text.
+      image_input: true
+      opencode_config:
+        tools:
+          webfetch: false
+          websearch: false
+          task: false
+        permission:
+          # OpenCode asks before it reads or writes outside the working directory, as when the model saves a crop
+          # under /tmp. `opencode run` rejects every request that would ask, and a rejection ends the run with no
+          # answer. The lent sandbox holds only the task images, so allow every path.
+          external_directory: allow
+          # OpenCode also asks when the model repeats an identical tool call (doom loop), and the rejection makes
+          # `opencode run` exit with code 1, so the rollout fails unscored. Allow it; a step budget,
+          # not a crash, should end a loop.
+          doom_loop: allow
+        compaction:
+          # Automatic compaction summarizes the session and continues from the summary, in model calls that training
+          # cannot join to the scored call. With it off, a run that fills the context ends with a context-limit error.
+          auto: false
+        # A step limit (agent.build.steps) is off here. With one, OpenCode asks for a final answer from that call on
+        # but still offers the tools. The agentic_mme server scores an answer at or after the limit 0 by default
+        # (score_step_limit_answer: false), like the Agentic-MME agent's 0 for an episode that runs out of rounds;
+        # a policy trained with that answer scored learned to use every step. agent.build.steps: 17 matches the
+        # Agentic-MME agent's 15 tool rounds plus one answer call. Token capture keeps the calls after OpenCode's
+        # step-limit note chained to the rollout's earlier calls.
+      datasets:
+        - name: agentic_mme_opencode
+          type: benchmark
+          jsonl_fpath: benchmarks/agentic_mme/data/agentic_mme_opencode_benchmark.jsonl
+          prepare_script: benchmarks/agentic_mme/prepare_opencode.py
+          prepare_project: resources_servers/agentic_mme
+          num_repeats: 1
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/agentic_mme/data/example_opencode.jsonl
+          num_repeats: 1
+
+agentic_mme_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      host: 127.0.0.1
+      # The episode's wall-clock bound: the lent sandbox's start, OpenCode's timeout (3600 s), the session close and
+      # the judge fit inside it, and it ends well before the sandbox's ttl_s (7200 s). The default (21600 s) would
+      # outlive the sandbox, and a verify after the sandbox expires is masked as a lost session.
+      default_episode_timeout_seconds: 5400
+      # Admit episodes at the agent's rate (its concurrency, 32). Each seed lends a sandbox, so an episode admitted
+      # beyond it would wait for OpenCode with its sandbox started and its deadline running. Admission comes before
+      # the deadline starts.
+      max_concurrent_episodes: 32
+      queue_timeout_seconds: 86400
+      # resources_server comes from resources_servers/agentic_mme/configs/agentic_mme.yaml.
+      agent_server:
+        type: responses_api_agents
+        name: agentic_mme_opencode_agent
