@@ -91,8 +91,8 @@ Rows, results and verifier logs are labelled by the entry's name (`skillsbench` 
 Skills stay plain files: in the with-skill condition the environment server places each task's skills at
 `/skills` (the location Harbor's own skills example uses, outside every task's working directory) and writes
 the path to `/tmp/.nemo-gym/task.json` in the sandbox. A harness that declares `supports_task_tool_context` reads it
-there and points its model at the folder, so loading and the tools the model uses do not depend on the harness. One
-that declares `supports_task_skills` copies the folder into where its CLI discovers skills at seed (Claude Code and
+there and points its model at the folder, so loading and the tools the model uses are the same on every such harness.
+One that declares `supports_task_skills` copies the folder into where its CLI discovers skills at seed (Claude Code and
 Codex), so its model finds the skills through the CLI's own mechanism. A task with `skills_dir` is refused to a
 harness that declares neither, rather than run without its skills; at this revision `miniswe_sandboxed_agent` tells
 the model where the skills are. The no-skill condition declares no `skills_dir` and runs on any sandboxed harness.
@@ -101,7 +101,8 @@ With Claude Code the two conditions differ in more than the skills. The with-ski
 so the harness drops `--bare` (Claude Code finds its skills only then) and also lets Claude Code read hooks, plugins,
 memory and `CLAUDE.md` or project settings from the working directory. The no-skill condition declares none and keeps
 `--bare`. Set `bare: false` on `claude_code_agent` for both conditions to run them alike; otherwise do not read the
-with-skill minus no-skill difference as the effect of the skills alone. Codex has no such switch.
+with-skill minus no-skill difference as the effect of the skills alone. Codex needs no such setting: it discovers
+skills natively and runs the same way with or without them.
 
 Three tasks' skills (`3d-scan-calc`, `lean4-proof`, `video-silence-remover`) name their own scripts under
 `/root/.claude/skills/`. No harness here puts the skills there: they reach the model under `/skills/` for a harness
