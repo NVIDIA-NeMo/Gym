@@ -149,14 +149,16 @@ processing, then GRPO repetition. Indexing never renders or calls a processed
 dataset item. The sampler has no PyTorch dependency; it implements the iterator
 and checkpoint methods accepted by `StatefulDataLoader`.
 
-Each prompt batch has equal source quotas. Within a source, a draw mixes uniform
+Each prompt independently samples a source uniformly, so source counts can vary
+within a batch. Within a source, a draw mixes uniform
 rows with operation buckets weighted by `log(1 + bucket_size / tau)`. Duplicate
 operation names count once. Sources in `uniform_sources` use uniform rows. Draws
-use replacement. Batch size must be divisible by the source count, and epoch
-size must be a positive multiple of batch size. Do not combine this policy with
+use replacement. Epoch size must be a positive multiple of the positive batch
+size. Do not combine this policy with
 shuffling, static source balancing, or multiple dataloaders. A seed, batch index,
 and epoch determine each batch; checkpoint fingerprints reject changed metadata
-or settings and preserve resume across prefetching.
+or settings and preserve resume across prefetching. Checkpoints from the previous
+quota-based sampler require a fresh dataloader state.
 
 `dataset/lazy_inputs.py` supports metadata-only `deepcad_lazy` manifests. Only
 sampled rows invoke bounded renderer subprocesses. Per-key locks and atomic cache

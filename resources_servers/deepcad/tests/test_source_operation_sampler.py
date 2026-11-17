@@ -39,17 +39,16 @@ def cfg(**kwargs):
     return SourceOperationSamplingConfig(sources=["a", "b", "histcad"], samples_per_epoch=600, **kwargs)
 
 
-def test_quota_determinism_epochs_and_resume():
+def test_sampling_determinism_epochs_and_resume():
     config = cfg()
     sampler = SourceOperationSampler(rows(), config, 12)
     expected = list(sampler)
     assert expected == list(SourceOperationSampler(rows(), config, 12))
-    for start in range(0, len(expected), 12):
-        assert Counter(["a" if i < 3 else "b" if i < 5 else "histcad" for i in expected[start : start + 12]]) == {
-            "a": 4,
-            "b": 4,
-            "histcad": 4,
-        }
+    assert any(
+        Counter("a" if i < 3 else "b" if i < 5 else "histcad" for i in expected[start : start + 12])
+        != {"a": 4, "b": 4, "histcad": 4}
+        for start in range(0, len(expected), 12)
+    )
     assert list(sampler) != expected
     sampler = SourceOperationSampler(rows(), config, 12)
     iterator = iter(sampler)
@@ -61,6 +60,16 @@ def test_quota_determinism_epochs_and_resume():
     baseline = SourceOperationSampler(rows(), config, 12)
     list(baseline)
     assert list(restored) == list(baseline)
+
+
+@pytest.mark.parametrize("batch_size", [1, 2, 4, 64])
+def test_uniform_sources_without_batch_quotas(batch_size):
+    config = cfg().model_copy(update={"samples_per_epoch": batch_size * 3000})
+    sampler = SourceOperationSampler(rows(), config, batch_size)
+    selected = list(sampler)
+    counts = Counter("a" if i < 3 else "b" if i < 5 else "histcad" for i in selected)
+    assert len(selected) == len(sampler)
+    np.testing.assert_allclose([counts[s] / len(selected) for s in config.sources], 1 / 3, atol=0.03)
 
 
 @pytest.mark.parametrize("workers", [0, 2])
@@ -135,7 +144,7 @@ def test_bad_config(kwargs):
 
 def test_bad_metadata_and_state():
     with pytest.raises(ValueError):
-        SourceOperationSampler(rows(), cfg(), 4)
+        SourceOperationSampler(rows(), cfg(), 0)
     with pytest.raises(ValueError):
         SourceOperationSampler(rows()[:-1], cfg(), 12)
     bad = rows()
@@ -147,6 +156,8 @@ def test_bad_metadata_and_state():
     with pytest.raises(ValueError):
         SourceOperationSampler(bad, cfg(), 12)
     first = SourceOperationSampler(rows(), cfg(), 12)
+    with pytest.raises(ValueError):
+        first.load_state_dict(dict(first.state_dict(), version=1))
     for changed_rows, config in [
         (rows()[::-1], cfg()),
         (rows(), cfg(tau=10)),

@@ -60,7 +60,7 @@ def validate_source_operation_sampling(data_config: dict[str, Any]) -> SourceOpe
 
 
 class SourceOperationSampler:
-    """Equal source quotas per batch; on-demand draws with replacement.
+    """Uniform source draws per prompt, with replacement and no batch quotas.
 
     Batch-specific RNG seeds make resume independent of prefetching. State is
     just the epoch/cursor and a fingerprint of metadata and sampling settings.
@@ -75,8 +75,8 @@ class SourceOperationSampler:
     ) -> None:
         self.config = SourceOperationSamplingConfig.model_validate(config)
         self.batch_size = batch_size
-        if batch_size <= 0 or batch_size % len(config.sources):
-            raise ValueError("Prompt batch size must be divisible by the number of sources")
+        if batch_size <= 0:
+            raise ValueError("Prompt batch size must be positive")
         members = {s: array("q") for s in config.sources}
         buckets = {s: {} for s in config.sources}
         digest = hashlib.sha256()
@@ -135,29 +135,27 @@ class SourceOperationSampler:
             batch_index, offset = divmod(self.position, self.batch_size)
             rng = np.random.default_rng(np.random.SeedSequence([self.config.seed, self.epoch, batch_index]))
             batch = []
-            per_source = self.batch_size // len(self.members)
-            for members, groups, probabilities in zip(self.members, self.buckets, self.operation_probabilities):
-                for _ in range(per_source):
-                    if groups and rng.random() < self.config.operation_fraction:
-                        group = groups[int(rng.choice(len(groups), p=probabilities))]
-                    else:
-                        group = members
-                    batch.append(int(group[rng.integers(len(group))]))
-            rng.shuffle(batch)
+            for source in rng.integers(len(self.members), size=self.batch_size):
+                groups = self.buckets[source]
+                if groups and rng.random() < self.config.operation_fraction:
+                    group = groups[int(rng.choice(len(groups), p=self.operation_probabilities[source]))]
+                else:
+                    group = self.members[source]
+                batch.append(int(group[rng.integers(len(group))]))
             for index in batch[offset:]:
                 self.position += 1
                 yield index
 
     def state_dict(self) -> dict[str, int | str]:
         return {
-            "version": 1,
+            "version": 2,
             "fingerprint": self.fingerprint,
             "epoch": self.epoch,
             "position": self.position,
         }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
-        if state.get("version") != 1 or state.get("fingerprint") != self.fingerprint:
+        if state.get("version") != 2 or state.get("fingerprint") != self.fingerprint:
             raise ValueError("Sampler manifest/config changed; use a fresh dataloader state")
         epoch, position = state["epoch"], state["position"]
         if (
