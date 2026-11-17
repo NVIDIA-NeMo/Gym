@@ -1,0 +1,230 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# EvalBench's capability taxonomy and domain list: the values a manifest's `capabilities` and `domains` may name.
+# Only the value lists are copied. To move to a newer EvalBench version, replace this whole file and its two
+# version keys. EvalBench's `unknown` domain is left out: a manifest that does not know writes `domains: unknown`.
+capability_taxonomy_version: capability_taxonomy_v0_1
+domain_list_version: enrichment_tags_v0_1
+
+# A manifest names a capability as `<capability>` or `<capability>/<specialization>`.
+capabilities:
+  coding:
+    description: Understanding, generating, modifying, debugging, and validating code.
+    specializations:
+      code_understanding: Reading, explaining, or summarizing code without modifying it; includes tracing execution, explaining APIs, and answering questions about code behavior.
+      code_generation: Producing new code, functions, scripts, modules, or implementations from natural-language requirements or examples.
+      code_editing: Modifying, refactoring, completing, porting, or repairing existing code snippets or scripts.
+      debugging_and_testing: Finding bugs, interpreting failures, predicting program behavior, writing tests, using test feedback, and validating correctness.
+      repository_coding: Working across one or multiple repositories with files, dependencies, tests, build systems, source control, and environment feedback.
+      code_review: Reviewing code, proposed implementations, or pull requests to identify correctness, quality, security, performance, or test-coverage issues and provide actionable feedback.
+      systems_coding: Systems, concurrency, memory, OS/runtime behavior, compilers, low-level interfaces, and performance-sensitive code.
+      gpu_kernel_coding: Writing, debugging, or optimizing GPU kernels and accelerator-targeted code, including numerical correctness, parallelism, memory hierarchy, compilation, profiling, and performance.
+      hardware_description_coding: Writing, editing, debugging, or verifying hardware-description and RTL code such as Verilog or VHDL, including spec-to-RTL generation.
+      data_query_coding: Writing database queries or data-access code, including SQL and structured query workflows.
+      ml_engineering: Building, training, evaluating, debugging, or improving ML systems, including data prep, model pipelines, SFT/RL/reward workflows, and experiment iteration.
+      scientific_coding: Implementing, validating, or debugging code for scientific and technical workflows.
+  planning_and_autonomy:
+    description: Managing the task-level plan across many steps, distinct from the mechanics of making individual tool calls.
+    specializations:
+      task_planning: Decomposing ambiguous or complex goals into end-to-end executable steps, sequencing work, and revising the plan when observations or errors invalidate it.
+      strategy_and_search: Choosing an approach and exploring alternatives, branches, cases, constructions, or solution paths.
+      optimization: Selecting actions under objectives, tradeoffs, constraints, uncertainty, or competing priorities.
+      long_horizon_execution: Sustaining coherent progress, task state and adherence to a plan over many steps, turns, or tool calls until completion, while avoiding unnecessary drift.
+      error_recovery: Recovering from an observable failure or invalid state by adapting the strategy or action and restoring verified task progress.
+      self_verification: Checking whether the current or final state satisfies the original goal, requirements, constraints, and success criteria before declaring the task completed.
+  tool_and_computer_use:
+    description: Selecting, calling, sequencing, and interpreting external tools, APIs, browsers, terminals, filesystems, GUIs, services, or stateful environments.
+    specializations:
+      tool_calling: Selecting the right tool and producing valid tool names, schemas, and arguments, then interpreting the returned result.
+      browser_and_web_tasks: Completing tasks by operating a browser UI — navigating pages, clicking elements, filling forms, managing accounts, and interacting with online services through their graphical interface.
+      web_search: Querying external information sources via a search or fetch tool/API (e.g. web_search, web_fetch, search APIs). Covers both keyword search and direct URL retrieval when the model issues the call programmatically rather than through a browser UI.
+      terminal_and_cli_use: Operating a shell or command-line environment to run commands, manage files and processes, configure systems, and complete tasks using terminal feedback.
+      gui_tasks: Operating graphical interfaces, local files, applications, settings, and operating-system workflows.
+      env_feedback_interpretation: Interpreting tool results, errors, observations, logs, screenshots, or environment state to determine next actions.
+      file_operations: Reading, creating, writing, and targeted editing of files while preserving unrelated content.
+      mcp_tool_use: Discovering, selecting, and using MCP servers and tools while handling transport, schema, latency, and runtime differences.
+      parallel_tool_calling: Batching independent tool calls while preserving correct sequencing when one call depends on another.
+      multi_step_tool_use: Sequencing dependent tool and API calls over multiple steps, using prior observations and evolving state to choose the next action.
+  multi_agent_orchestration:
+    description: Decomposing, delegating, coordinating, and aggregating work across multiple agents or models while preserving state and containing failures.
+    specializations:
+      subagent_delegation: Decomposing work into bounded tasks, selecting appropriate workers, and dispatching the right scope and context.
+      handoff_and_state_passing: Passing sufficient task state, constraints, files, and decisions across agent boundaries without leakage or bloat.
+      result_aggregation: Reconciling and integrating worker outputs into a coherent, correct end result.
+      failure_containment: Detecting bad, conflicting, or timed-out worker output and repairing, redispatching, or escalating without propagating the failure.
+  retrieval_and_grounding:
+    description: Finding, selecting, using, and citing relevant information from provided context, documents, databases, tools, or the open web.
+    specializations:
+      long_context_learning: Reusing relevant information from supplied long context, uploaded files, conversation history, or long documents.
+      open_retrieval: Searching or browsing open-ended external sources such as the web, databases, APIs, or knowledge systems.
+      multi_source_synthesis: Combining information across multiple documents, passages, sources, search results, or evidence fragments and resolving or interpreting conflicts across sources.
+      evidence_synthesis: Selecting, combining, and faithfully using retrieved information from one or more sources to produce an answer, summary, report, recommendation, table, or other artifact; includes preserving provenance, deduplicating overlapping evidence, and reconciling source differences when required.
+      source_assessment: Assessing source reliability, recency, contradiction, authority, and relevance when grounding answers or deciding what evidence to trust.
+  context_management:
+    description: Selecting, isolating, preserving, and resuming the right conversational, task, file, user, or project context across turns and task switches.
+    specializations:
+      context_switching: Detecting when the user changes tasks, starts a new topic, branches, abandons a task, or resumes an earlier task.
+      context_isolation: Preventing irrelevant prior context, files, constraints, or assumptions from contaminating the current task.
+      context_resumption: Resuming an earlier active task within the same ongoing conversation, preserving its relevant state, constraints, decisions, and references even after many intervening turns or topic changes.
+      reference_resolution: Resolving references such as "this", "that one", "the previous version", "back to the first task", or "same format as before".
+      constraint_preservation: Preserving task-relevant user constraints, preferences, and prior decisions across turns.
+      context_compaction_continuation: Preserving the goal, plan, constraints, decisions, and completed work across context compression without unnecessary redo and without losing important information for task continuation.
+      checkpoint_and_resume: Resuming a multi-phase task correctly from a durable state after interruption, restart, or handoff.
+  memory_and_state:
+    description: Acquiring, consolidating, updating, retrieving, and applying persistent user, task, episodic, semantic, or procedural state across interactions, sessions, runs, agents, or external memory stores.
+    specializations:
+      memory_acquisition: Deciding what information should be written to memory, profile, notes, or durable task state.
+      memory_consolidation: Summarizing, deduplicating, linking, abstracting, organizing, or evolving memories without losing load-bearing facts.
+      memory_retrieval: Finding relevant stored memories when needed, including semantic, lexical, entity, graph, file, or tool-mediated retrieval.
+      memory_update_and_forgetting: Handling changed facts, stale memories, contradictions, noisy feedback, obsolete state, and forgetting behavior.
+      memory_application: Correctly using retrieved or always-loaded memory to guide answers, plans, actions, constraints, or personalization.
+      procedural_memory: Learning and reusing procedures, conventions, skills, or latent task structure across instances.
+      skill_creation: Authoring reusable, executable skills and validating them on held-out tasks. Co-tag with procedural_memory.
+      skill_use: Applying a provided reusable skill when relevant and following its procedure faithfully. Co-tag with procedural_memory.
+      shared_agent_memory: Managing a persistent knowledge layer shared across agents, including writing, retrieving, updating, and consolidating accumulated learnings, hypotheses, failures, decisions and intermediate results while preserving provenance and avoiding erroneous memory propagation.
+  reasoning:
+    description: Applying general, expert, mathematical, causal, or formal reasoning beyond surface-level response generation.
+    specializations:
+      deductive_reasoning: Applying rules, implications, logic, consistency checks, constraints, and valid inference.
+      inductive_reasoning: Inferring patterns, analogies, generalizations, or latent structure from examples or partial evidence.
+      quantitative_reasoning: Arithmetic, algebraic, symbolic, numerical, unit-aware, equation-based, and formal manipulation reasoning.
+      probabilistic_reasoning: Reasoning with uncertainty, probability, distributions, statistics, risk, evidence strength, and likelihoods.
+      causal_reasoning: Inferring causes, effects, mechanisms, interventions, dependencies, and counterfactual outcomes.
+      spatial_temporal_reasoning: Reasoning about space, geometry, order, time, sequences, motion, relational structure, and temporal constraints.
+      social_reasoning: Reasoning about beliefs, intentions, emotions, relationships, perspectives, social norms, reputation, deception, and likely interpersonal behavior.
+  knowledge:
+    description: Recalling, recognizing, and applying facts, concepts, rules, procedures, terminology, conventions, and expert knowledge.
+    specializations:
+      factual_knowledge: Facts about entities, events, places, works, dates, attributes, relationships, and everyday commonsense and world knowledge.
+      procedural_knowledge: Knowing procedures, algorithms, rules, formulas, theorems, protocols, conventions, and when they apply.
+      expert_knowledge: Specialized knowledge in fields such as science, medicine, law, finance, engineering, humanities, or other expert domains.
+      knowledge_uncertainty: Recognizing the limits, uncertainty and reliability of one's own knowledge. Includes knowing when not to answer confidently, when to abstain and when additional verification is needed.
+      cultural_knowledge: Applying behavior, examples, assumptions, norms, references, politeness strategies, idioms, localization choices, and language use to the user's cultural, regional, or linguistic context.
+  writing_and_editing:
+    description: Producing helpful conversational responses, explanations, summaries, rewrites, and creative or user-facing prose.
+    specializations:
+      general_qa: Answering general-knowledge, advice, or explanatory questions.
+      summarization: Condensing text, documents, conversations, or findings while preserving key information.
+      text_revision: Improving, transforming, or adapting provided text for tone, length, audience, register, clarity, or style.
+      creative_writing: Producing stories, scripts, marketing copy, or other open-ended creative prose.
+      informational_writing: Composing clear, coherent, factual, user-facing prose such as articles, explainers, briefs, reports, memos, or public-facing summaries, where organization, framing, tone, audience fit, and readability are central to success.
+      persuasive_and_argumentative_writing: Developing clear positions, supporting them with sound evidence and reasoning, addressing counterarguments, and motivating action without deception or manipulation.
+  instruction_and_format_following:
+    description: Following explicit instructions, constraints, scope limits, instruction hierarchy, and requested output formats.
+    specializations:
+      instruction_following: Satisfying non-format task instructions, constraints, exclusions, scope limits and priorities across single-turn or multi-turn interactions. Includes preserving active requirements, updating them when the user refines, edits, corrects or redirects the task, and avoiding dropping still-applicable constraints. Covers style constraints (tone, register, persona), length constraints (word/sentence limits), content constraints (keyword inclusion or exclusion, topic restrictions), and ordering constraints (sequence of sections or points).
+      structured_output: Producing outputs that conform to an explicitly required format or structure. Includes machine-readable formats (JSON, YAML, XML, tables, schemas, forms), and document layout requirements (number of columns, placement of headers, titles, dates, section ordering), or other structural constraints on the output). Assign this when correctness depends on the shape or structure of the output, not merely on content.
+      prompt_and_format_robustness: Reliably following instructions and preserving task performance despite prompt noise, typos, unusual formatting, ordering changes, verbosity or buried requirements.
+      hierarchy_following: Resolving conflicting instructions across system, developer, user, tool, and environment levels.
+  human_ai_interaction:
+    description: Managing interactive, collaborative, and socially appropriate dialogue with users across turns.
+    specializations:
+      roleplay_and_persona: Adopting and sustaining a requested character, persona, social role, interaction style or fictional scenario across turns.
+      ideation_and_brainstorming: Generating, expanding, organizing, combining or refining diverse ideas, hypotheses or creative directions under user-provided goals and constraints.
+      human_in_the_loop_communication: Collaborating with the user during task execution, including surfacing important choices, giving progress updates, incorporating user feedback, handling interruptions and keeping the user informed without derailing the task.
+      empathic_and_supportive_dialogue: Responding with empathy, tact, encouragement, validation and social awareness in emotional or sensitive conversations.
+      clarification_and_assumption_management: Identifying ambiguous, incomplete, conflicting, implicit or underspecified user's requests. Asking clarifying questions when needed, making reasonable assumptions when appropriate and stating limitations before proceeding.
+      other_dialogues: Producing open-ended and context-aware, natural, tactful dialogue that responds appropriately to user intent, emotion, prior turns, and conversational norms.
+  multilingual_and_multicultural:
+    description: Understanding and producing language across languages and locales while preserving meaning, following language requests, maintaining language consistency, and culturally appropriate adaptation.
+    specializations:
+      translation: Converting meaning across languages, including mixed-language or cross-lingual transfer when the language transformation is central.
+      language_consistency: Maintaining the selected language throughout the response or interaction unless instructed otherwise.
+      requested_language_response: Producing the response in an explicitly requested language, without translating source content.
+      cultural_adaptation: Adapting behavior, examples, assumptions, norms, references, politeness strategies, idioms, localization choices, and language use to the user's cultural, regional, or linguistic context.
+  data_analysis:
+    description: Inspecting, transforming, analyzing, visualizing, or explaining structured and semi-structured data.
+    specializations:
+      tabular_data_analysis: Working with tables, CSVs, spreadsheets, logs, and dataframe-like data, including cleaning, joining, filtering, and performing data quality checks.
+      data_transformation: Reshaping, aggregating, deriving variables, constructing features, and building data transformations or query-like operations.
+      exploratory_analysis: Discovering patterns, anomalies, distributions, relationships, and descriptive summaries in data.
+      statistical_analysis: Applying statistical methods and interpreting quantitative results.
+      data_visualization: Creating or interpreting charts, plots, dashboards, and visual summaries.
+      experiment_analysis: Analyzing experimental results, benchmark metrics, A/B tests, model evals, and performance comparisons.
+      data_quality_and_validation: Assessing schemas, completeness, accuracy, duplicates, missingness, leakage, bias, anomalies, and integrity before drawing conclusions from data.
+      time_series_and_forecasting: Analyzing temporal data for trends, seasonality, change points, dependencies, and forecasts with appropriate uncertainty.
+  evaluation_and_judging:
+    description: Assessing, comparing, grading, or critiquing outputs, trajectories, data, or model behavior against criteria.
+    specializations:
+      rubric_judging: Scoring or grading outputs against explicit criteria, rubrics, checklists, standards, or policies.
+      preference_judging: Comparing candidates and selecting the better one, pairwise or by ranking.
+      error_analysis: Identifying errors, missing requirements, failure modes, or root causes in outputs, trajectories, code, or data.
+      critique_and_feedback: Producing actionable critique, review comments, revision suggestions, or improvement plans.
+      consistency_checking: Checking whether an output satisfies requirements, is internally consistent, follows constraints, or meets quality bars.
+      safety_and_robustness_evaluation: Assessing harmful behavior, bias, privacy or security risks, adversarial susceptibility, and reliability under unusual or changing conditions.
+  multimodal_input_understanding:
+    description: Interpreting the content, structure, meaning, intent, and relevant signals in provided inputs before reasoning, retrieval, generation, tool use, or action.
+    specializations:
+      messy_text_understanding: Understanding noisy, partial, copied, malformed, or poorly structured text inputs.
+      scene_understanding: Includes object detection, recognition, image captioning, and question answering about a multimodal artifact such as an image or video.
+      structured_visual_artifact_understanding: Understanding structured visual artifacts such as charts, plots, tables, diagrams, graphs, maps, schematics, flowcharts, equations-as-layout, and other visual representations of relationships or data.
+      speech_and_audio_understanding: Understanding spoken language, speaker turns, prosody, music, sound events, and acoustic scenes from audio input.
+      cross_modal_understanding: Linking, aligning, or reconciling corresponding information across modalities such as text, image, audio, video, tables, diagrams, screenshots, or documents.
+      temporal_media_understanding: Understanding events, actions, state changes, motion, temporal order, and continuity across video, animation, screen recordings, or other time-based media.
+  multimodal_generation_and_editing:
+    description: Generating, editing, transforming, or composing non-text media such as images, video, animation, audio, speech, music, layouts, or multimodal assets.
+    specializations:
+      image_generation_and_editing: Creating or editing images, illustrations, diagrams, photos, icons, or visual assets.
+      video_generation_and_editing: Creating or editing video, animation, motion sequences, or temporal visual media.
+      audio_generation_and_editing: Creating or editing speech, sound effects, music, voice, or other audio content.
+      artifact_composition: Assembling multiple output components, such as text, tables, charts, images, captions, sections, attachments, layouts, slides, storyboards, UI mockups, files, and related pieces into a coherent final artifact or deliverable.
+      design_and_3d_generation_and_editing: Creating or editing CAD models, 3D scenes, architectural drawings, engineering diagrams, and design files such as DWG, STL, SVG, or Figma exports. Excludes websites, spreadsheets, and databases, which belong under coding or data_analysis.
+  safety:
+    description: Handling harmful, risky, private, biased, adversarial, or policy-sensitive requests appropriately.
+    specializations:
+      content_safety: Harmful-request refusal, safe redirection, and over-refusal avoidance.
+      privacy_and_data_safety: Protecting sensitive, personal, proprietary, or confidential information.
+      bias_and_fairness: Bias and sensitive-attribute handling, stereotype avoidance, and fairness-sensitive content.
+      security_safety: Cyber, product-security, prompt-injection, and tool-abuse safety.
+      high_risk_domain_safety: CBRNE, medical, legal, financial, or other high-risk safety behavior.
+      epistemic_and_autonomy_safety: Avoiding unsupported claims, misleading certainty, manipulation, misinformation, deceptive or manipulative framing, delusion reinforcement, unhealthy dependency, deceptive personification, coercion, and other responses that undermine the user's ability to form accurate beliefs or make informed, autonomous choices.
+      agentic_action_safety: Ensuring tool use and real-world actions remain authorized, scoped, reversible where possible, monitored, and subject to confirmation or escalation when consequences are significant.
+
+# The fields of expertise a task needs. A manifest lists its main domain first.
+domains:
+  - computer_science
+  - mathematics
+  - physics
+  - chemistry
+  - biology
+  - medicine
+  - law
+  - artificial_intelligence
+  - earth_environmental_science
+  - astronomy_space
+  - data_science
+  - cybersecurity
+  - engineering
+  - hardware_semiconductors
+  - networking_telecommunications
+  - social_science
+  - psychology
+  - humanities
+  - history
+  - philosophy
+  - geography
+  - statistics
+  - language_linguistics
+  - education
+  - accounting_audit
+  - economics
+  - finance
+  - politics_government
+  - public_policy
+  - business_management
+  - marketing_advertising
+  - insurance
+  - real_estate
+  - retail_ecommerce
+  - manufacturing
+  - energy_utilities
+  - agriculture_food
+  - transportation_logistics
+  - travel_hospitality
+  - media_entertainment
+  - sports_recreation
+  - defense_security
+  - arts_design
+  - general
+  - other  # A known field outside the values above.

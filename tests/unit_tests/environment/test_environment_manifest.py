@@ -523,6 +523,8 @@ CATALOG_FIELDS = (
     "protocol_of",
     "maintainers",
     "intended_use",
+    "capabilities",
+    "domains",
     "overlaps_with",
     "primary_metric",
     "requirements",
@@ -544,6 +546,8 @@ def test_catalog_fields_round_trip() -> None:
         setup_of="my_eval",
         maintainers=["alice-nv"],
         intended_use=["evaluation", "training"],
+        capabilities=["coding/code_generation", "reasoning"],
+        domains=["finance", "law"],
         overlaps_with=["gpqa"],
         primary_metric="pass@1",
         requirements={"gpu": False, "network": "allowlist"},
@@ -551,6 +555,9 @@ def test_catalog_fields_round_trip() -> None:
     manifest = EnvironmentManifest.model_validate(raw)
 
     assert manifest.intended_use == [IntendedUse.EVALUATION, IntendedUse.TRAINING]
+    assert manifest.capabilities == ["coding/code_generation", "reasoning"]
+    # The main domain stays first.
+    assert manifest.domains == ["finance", "law"]
     assert manifest.requirements is not None and manifest.requirements.network == "allowlist"
     assert EnvironmentManifest.model_validate(yaml.safe_load(dump_manifest(manifest))) == manifest
     assert not list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))
@@ -621,6 +628,12 @@ def test_manifest_cannot_link_to_itself(field: str) -> None:
         ("maintainers", []),
         ("intended_use", ["serving"]),
         ("intended_use", ["training", "training"]),
+        ("capabilities", ["reasoning", "reasoning"]),
+        # One value is still a list; only `unknown` stands alone.
+        ("capabilities", "reasoning"),
+        ("domains", ["finance", "finance"]),
+        ("domains", "finance"),
+        ("domains", "Unknown"),
         ("overlaps_with", ["gpqa", "gpqa"]),
         ("requirements", {"gpu": True, "vram_gb": 80}),
         ("requirements", {"network": "sometimes"}),
@@ -634,3 +647,110 @@ def test_catalog_fields_reject_invalid_values(field: str, value: object) -> None
 
     with pytest.raises(ValidationError):
         EnvironmentManifest.model_validate(raw)
+
+
+def _schema_errors(raw: dict) -> list[str]:
+    return [error.message for error in Draft202012Validator(manifest_json_schema()).iter_errors(raw)]
+
+
+@pytest.mark.parametrize(
+    "capabilities",
+    [
+        ["reasoning"],
+        ["coding/code_generation"],
+        ["tool_and_computer_use/mcp_tool_use", "coding"],
+        # None applies, for example a speed benchmark that tests no model skill.
+        [],
+        "unknown",
+    ],
+)
+def test_capabilities_are_a_list_of_capabilities_or_specializations_or_unknown(capabilities: object) -> None:
+    raw = _manifest() | {"capabilities": capabilities}
+
+    manifest = EnvironmentManifest.model_validate(raw)
+
+    assert manifest.capabilities == capabilities
+    assert EnvironmentManifest.model_validate(yaml.safe_load(dump_manifest(manifest))) == manifest
+    assert not _schema_errors(raw)
+
+
+@pytest.mark.parametrize(
+    ("capability", "message"),
+    [
+        ("codng", "'codng' is not in EvalBench's capability taxonomy .* Did you mean `coding`\\?"),
+        ("codng/code_generation", "Did you mean `coding/code_generation`\\?"),
+        # A specialization is only valid under its own capability.
+        ("reasoning/code_generation", "'code_generation' is not a specialization of 'reasoning'.* causal_reasoning"),
+        ("coding/code_gen", "Its specializations are: code_understanding, code_generation, code_editing"),
+        ("coding/code_generation/python", "not a specialization of 'coding'"),
+    ],
+)
+def test_an_unknown_capability_is_rejected_with_the_values_it_could_be(capability: str, message: str) -> None:
+    raw = _manifest() | {"capabilities": ["reasoning", capability]}
+
+    with pytest.raises(ValidationError, match=message) as error:
+        EnvironmentManifest.model_validate(raw)
+    # One error for the field, not one per branch of `list | unknown`.
+    assert [issue["loc"] for issue in error.value.errors()] == [("capabilities",)]
+    assert _schema_errors(raw)
+
+
+@pytest.mark.parametrize("domains", [["finance"], ["medicine", "law"], ["general"], ["other"], [], "unknown"])
+def test_domains_are_a_list_of_evalbench_domains_or_unknown(domains: object) -> None:
+    raw = _manifest() | {"domains": domains}
+
+    manifest = EnvironmentManifest.model_validate(raw)
+
+    assert manifest.domains == domains
+    assert EnvironmentManifest.model_validate(yaml.safe_load(dump_manifest(manifest))) == manifest
+    assert not _schema_errors(raw)
+
+
+@pytest.mark.parametrize(
+    ("domain", "message"),
+    [
+        ("financ", "'financ' is not in EvalBench's domain list .* Did you mean `finance`\\?"),
+        # Gym's own `domain` categories are not EvalBench domains.
+        ("coding", "'coding' is not in EvalBench's domain list"),
+    ],
+)
+def test_an_unknown_domain_is_rejected_with_a_suggestion(domain: str, message: str) -> None:
+    raw = _manifest() | {"domains": ["finance", domain]}
+
+    with pytest.raises(ValidationError, match=message) as error:
+        EnvironmentManifest.model_validate(raw)
+    assert [issue["loc"] for issue in error.value.errors()] == [("domains",)]
+    assert "evalbench_taxonomy.yaml" in str(error.value)
+    assert _schema_errors(raw)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("capabilities", ["unknown"]),
+        ("capabilities", ["coding", "unknown"]),
+        ("domains", ["unknown"]),
+        ("domains", ["general", "unknown"]),
+    ],
+)
+def test_unknown_is_the_whole_value_never_a_list_item(field: str, value: list[str]) -> None:
+    raw = _manifest() | {field: value}
+
+    with pytest.raises(ValidationError, match=f"as in `{field}: unknown`, not an item in a list") as error:
+        EnvironmentManifest.model_validate(raw)
+    assert [issue["loc"] for issue in error.value.errors()] == [(field,)]
+    assert _schema_errors(raw)
+
+
+def test_the_schema_lists_exactly_the_values_validation_accepts() -> None:
+    properties = manifest_json_schema()["properties"]
+    capabilities = properties["capabilities"]["anyOf"][0]["items"]["enum"]
+    domains = properties["domains"]["anyOf"][0]["items"]["enum"]
+    raw = _manifest() | {"capabilities": capabilities, "domains": domains}
+
+    manifest = EnvironmentManifest.model_validate(raw)
+
+    assert manifest.capabilities == capabilities and manifest.domains == domains
+    assert {"coding", "coding/code_generation", "safety/agentic_action_safety"} <= set(capabilities)
+    # `domains: unknown` is how a manifest says it does not know, so EvalBench's own `unknown` domain is not listed.
+    assert {"general", "other"} <= set(domains) and "unknown" not in domains
