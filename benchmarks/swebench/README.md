@@ -11,16 +11,17 @@ Adds multiple SWE benchmarks to Gym. These are useable across agents/harnesses.
   for the verifier, so it needs internet access; rollouts and verification do not. See
   [SWE Bench Multimodal grading](../../resources_servers/swebench/README.md#swe-bench-multimodal-grading).
   The test split is not prepared, because the pinned SWE-bench harness (swebench 4.1.0) has no
-  environment specs for its repositories.
+  environment specs for its repositories. `multimodal/hermes.yaml` runs the same tasks with Hermes.
 
 ## Harnesses
 
-Use the `opencode.yaml` recipe of Verified, Multilingual or Pro. It runs `opencode_agent` through
-`single_agent_turn`, as `verified/hermes.yaml` runs Hermes: the Resources Server starts the task sandbox, lends it to
-the agent session, and grades the captured patch after the agent closes. Rows reach it through the recipe's taskset
-(`swebench:verified`, `swebench:multilingual` or `swebench:pro`).
+Use the `opencode.yaml` recipe of Verified, Multilingual, Pro or Multimodal. It runs `opencode_agent` through
+`single_agent_turn`, as `verified/hermes.yaml` and `multimodal/hermes.yaml` run Hermes: the Resources Server starts
+the task sandbox, lends it to the agent session, and grades the captured patch after the agent closes. Rows reach it
+through the recipe's taskset (`swebench:verified`, `swebench:multilingual`, `swebench:pro` or `swebench:multimodal`).
+Both harnesses receive the Multimodal issue images as prompt images.
 
-The `opencode_legacy_agent.yaml` recipes of Verified, Multilingual and Pro are deprecated. They run
+The `opencode_legacy_agent.yaml` recipes of Verified, Multilingual, Pro and Multimodal are deprecated. They run
 `opencode_sandboxed_agent` through the `legacy_agent` relay, and that agent
 [will be removed](../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx) after the Environment
 Server migration. They stay to reproduce existing results, such as the

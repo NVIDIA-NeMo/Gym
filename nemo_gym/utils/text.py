@@ -15,7 +15,6 @@
 """Text helpers for user-facing messages."""
 
 import difflib
-import json
 import re
 from typing import Any, Iterable
 
@@ -44,6 +43,21 @@ def hydra_quote(value: str) -> str:
     return f"'{escaped}'"
 
 
+def _same_with_types(parsed: Any, expected: Any) -> bool:
+    """Whether `parsed` equals `expected` with every mapping key, item and scalar of the same type."""
+    if isinstance(expected, dict):
+        return (
+            isinstance(parsed, dict)
+            and [(type(key), key) for key in parsed] == [(type(key), key) for key in expected]
+            and all(_same_with_types(parsed[key], expected[key]) for key in expected)
+        )
+    if isinstance(expected, (list, tuple)):
+        return (
+            isinstance(parsed, list) and len(parsed) == len(expected) and all(map(_same_with_types, parsed, expected))
+        )
+    return type(parsed) is type(expected) and (parsed == expected or parsed != parsed and expected != expected)
+
+
 def _hydra_parses_to(text: str, expected: Any) -> bool:
     """Whether Hydra's override grammar reads `text` back as exactly `expected`, type included."""
     from hydra.core.override_parser.overrides_parser import OverridesParser
@@ -53,7 +67,7 @@ def _hydra_parses_to(text: str, expected: Any) -> bool:
         parsed = OverridesParser.create().parse_overrides([f"+setting={text}"])[0].value()
     except HydraException:
         return False
-    return json.dumps(parsed, sort_keys=True, default=str) == json.dumps(expected, sort_keys=True, default=str)
+    return _same_with_types(parsed, expected)
 
 
 def hydra_literal(value: Any) -> str:
@@ -61,7 +75,7 @@ def hydra_literal(value: Any) -> str:
 
     A string is written as it is when Hydra reads it back unchanged, and as a quoted literal otherwise, so
     `"1"` stays a string and `nightly(run)` survives the grammar. The check is Hydra's own parser, not a guess
-    at its rules. Numbers, booleans, null and lists of those are written in their own syntax; anything else
+    at its rules. Numbers, booleans, null and lists and mappings of those are written in their own syntax; anything else
     raises `ValueError`.
     """
     if value is None:
@@ -72,11 +86,17 @@ def hydra_literal(value: Any) -> str:
         return repr(value)
     if isinstance(value, str):
         return value if _hydra_parses_to(value, value) else hydra_quote(value)
-    if isinstance(value, (list, tuple)):
+    if isinstance(value, (list, tuple, dict)):
         for quote_strings in (False, True):
-            items = (hydra_quote(v) if quote_strings and isinstance(v, str) else hydra_literal(v) for v in value)
-            text = "[" + ",".join(items) + "]"
-            if _hydra_parses_to(text, list(value)):
+
+            def item(v: Any) -> str:
+                return hydra_quote(v) if quote_strings and isinstance(v, str) else hydra_literal(v)
+
+            if isinstance(value, dict):
+                text = "{" + ",".join(f"{key}: {item(v)}" for key, v in value.items()) + "}"
+            else:
+                text = "[" + ",".join(item(v) for v in value) + "]"
+            if _hydra_parses_to(text, value):
                 return text
     raise ValueError(f"{value!r} cannot be written as a Hydra override value.")
 

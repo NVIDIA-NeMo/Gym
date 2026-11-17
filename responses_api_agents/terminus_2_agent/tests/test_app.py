@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.trajectory import transcript_to_atif
 from responses_api_agents.terminus_2_agent.app import (
     Terminus2Agent,
     Terminus2AgentConfig,
@@ -213,6 +214,37 @@ class TestTrajectoryOutput:
         assert output[0]["routed_experts"] == [[[3]]]
         assert output[1]["call_id"] == output[2]["call_id"] == "call_0_1"
 
+    def test_feedback_on_an_unparsed_reply_is_a_user_turn_the_atif_export_accepts(self) -> None:
+        trajectory = {
+            "steps": [
+                {
+                    "source": "agent",
+                    "message": '{"commands": [{"keystrokes": "ls\\n", "duration": 0.1}',
+                    "observation": {"results": [{"content": "Previous response had parsing errors: Invalid JSON"}]},
+                },
+                {
+                    "source": "agent",
+                    "message": '{"commands":[{"keystrokes":"ls\\n","duration":0.1}]}',
+                    "observation": {"results": [{"content": "file.txt"}]},
+                },
+            ]
+        }
+
+        output = trajectory_to_responses(trajectory)
+
+        assert [item["type"] for item in output] == [
+            "message",
+            "message",
+            "message",
+            "function_call",
+            "function_call_output",
+        ]
+        assert output[1]["role"] == "user" and output[1]["content"].startswith("Previous response had parsing errors")
+        assert output[3]["call_id"] == output[4]["call_id"] == "call_1_1"
+        trajectory = transcript_to_atif("task", output, session_id="s", agent_name="terminus-2", agent_version="1")
+        # The feedback is the observation of the step whose reply ran nothing.
+        assert "parsing errors" in trajectory.steps[1].observation.results[0].content
+
 
 class TestResponses:
     @pytest.mark.asyncio
@@ -281,6 +313,8 @@ class TestResponses:
         assert response.temperature == 0.7
         assert [item.type for item in response.output] == ["message", "function_call", "function_call_output"]
         assert response.usage.total_tokens == 14
+        # final_metrics reported no cache reads, so they stay unknown rather than zero.
+        assert response.usage.input_tokens_details.cached_tokens is None
         assert response.usage.output_tokens_details.reasoning_tokens is None
         assert '"finished_naturally": true' in response.metadata["terminus_2"]
         called_instruction = agent._run_terminus.await_args.args[1]
@@ -301,7 +335,10 @@ class TestResponses:
         self, accounting: dict, usage: int | None, cached: int | None
     ) -> None:
         agent = _make_agent()
-        trajectory = {"steps": [], "final_metrics": {"total_prompt_tokens": 10, "total_completion_tokens": 4}}
+        trajectory = {
+            "steps": [],
+            "final_metrics": {"total_prompt_tokens": 10, "total_completion_tokens": 4, "total_cached_tokens": 0},
+        }
         agent._run_terminus = AsyncMock(return_value=(trajectory, AgentContext(), {}, False, True, None, accounting))
         body = NeMoGymResponseCreateParamsNonStreaming(model="model", input="task")
 

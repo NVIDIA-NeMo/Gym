@@ -75,6 +75,9 @@ terminal_bench_4:
         sandbox_metadata:
           nemo.nvidia.com/resources: custom
           nemo.nvidia.com/oom-kill: process
+          # Leave out the cell's shared read-only S3 bucket (/mnt/s3-data, data unrelated to the benchmark):
+          # agents search it, and the 4.1 distributed-dedup verifier stops on its read errors.
+          nemo.nvidia.com/s3-hostpath: 'false'
         sandbox_ttl_s: 28800
         sandbox_ready_timeout_s: 1200
         default_exec_timeout_s: 64800

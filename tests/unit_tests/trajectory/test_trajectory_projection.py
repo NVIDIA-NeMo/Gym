@@ -381,6 +381,16 @@ def test_v1_projection_preserves_sparse_serialization(explicit_defaults):
     assert full["tool_calls"] == []
 
 
+def test_v1_projection_drops_the_agent_identity_of_a_model_call():
+    raw = {
+        "schema_version": "2.0",
+        "task_id": "task",
+        "capture_key": "capture",
+        "model_calls": [{"model_call_id": "model", "agent_instance": "judge.1", "agent_kind": "judge"}],
+    }
+    assert project_trajectory_v1(raw)["model_calls"] == [{"model_call_id": "model"}]
+
+
 def test_v1_projection_respects_explicit_field_exclusions():
     record = TrajectoryRecord(task_id="task", rollout_id="capture", schema_version="1.0", tool_calls=[])
     assert record.model_dump(include={"task_id", "rollout_id"}) == {"task_id": "task", "rollout_id": "capture"}

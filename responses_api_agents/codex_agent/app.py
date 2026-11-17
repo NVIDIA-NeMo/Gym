@@ -343,7 +343,6 @@ def parse_exec_jsonl(
     *,
     structured_reasoning: bool = False,
     include_partial: bool = False,
-    conservative_usage_details: bool = False,
 ) -> tuple[list[Any], dict]:
     """Convert ``codex exec --json`` JSONL stdout into (output_items, metadata).
 
@@ -353,15 +352,18 @@ def parse_exec_jsonl(
     successful retry. Tool-shaped items are mapped to a
     ``function_call`` + ``function_call_output`` pair so verifiers see one uniform trajectory
     shape across agent harnesses; reasoning is buffered and prepended to the next assistant
-    message inside ``<think>`` tags (mirroring the Claude Code agent). Sandbox session callers use
-    ``conservative_usage_details`` because the pinned CLI defaults absent backend cache/reasoning
-    counters to zero: only positive integers establish measured details in this artifact.
+    message inside ``<think>`` tags (mirroring the Claude Code agent). The pinned CLI defaults absent
+    backend cache/reasoning counters to zero, so only positive integers establish measured details;
+    otherwise ``cached_input_tokens`` and ``reasoning_tokens`` are None.
     """
     output_items: list[Any] = []
     buffered_think: Optional[str] = None
-    metadata: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0, "reasoning_tokens": 0}
-    if conservative_usage_details:
-        metadata.update(cached_input_tokens=None, reasoning_tokens=None)
+    metadata: dict[str, Any] = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_input_tokens": None,
+        "reasoning_tokens": None,
+    }
     usage_seen = False
     errors: list[str] = []
     unfinished: dict[str, dict[str, Any]] = {}
@@ -405,14 +407,11 @@ def parse_exec_jsonl(
                 ("reasoning_output_tokens", "reasoning_tokens"),
             ):
                 value = usage.get(source)
-                if conservative_usage_details:
-                    # Zero is ambiguous in Codex JSONL, not a known backend measurement.
-                    if type(value) is not int or value <= 0 or (usage_seen and metadata[target] is None):
-                        metadata[target] = None
-                    else:
-                        metadata[target] = (metadata[target] or 0) + value
+                # Zero is ambiguous in Codex JSONL, not a known backend measurement.
+                if type(value) is not int or value <= 0 or (usage_seen and metadata[target] is None):
+                    metadata[target] = None
                 else:
-                    metadata[target] += int(value or 0)
+                    metadata[target] = (metadata[target] or 0) + value
             usage_seen = True
             continue
 
@@ -779,12 +778,12 @@ class CodexAgent(SimpleResponsesAPIAgent):
     def _require_agent_session(self, agent_session_id: str) -> CodexSandboxSession:
         state = super()._require_agent_session(agent_session_id)
         if not isinstance(state, CodexSandboxSession):
-            raise HTTPException(409, "Invalid Codex session state")
+            raise AgentSessionConflictError("Invalid Codex session state")
         return state
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         if not isinstance(state, CodexSandboxSession):
-            raise HTTPException(409, "Invalid Codex session state")
+            raise AgentSessionConflictError("Invalid Codex session state")
         await state.close(self.config.session_close_timeout_seconds)
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
@@ -934,14 +933,18 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     cwd=workdir,
                     timeout_s=self.config.sandbox_install_timeout_seconds,
                 )
-                reported = (checked.stdout or "").strip()
+                # OpenSandbox may merge stderr warnings into stdout. Match the exact version
+                # record without treating those diagnostics as part of the version string.
+                reported = [
+                    line.strip() for line in (checked.stdout or "").splitlines() if line.startswith("codex-cli ")
+                ]
                 if checked.error_type:
                     # A transport failure or timeout may pass on another attempt.
                     raise RuntimeError(
                         f"Codex could not check the runtime in {runtime} (error_type={checked.error_type}); "
                         f"stdout={checked.stdout}; stderr={checked.stderr}"
                     )
-                if checked.return_code != 0 or reported != f"codex-cli {self.config.codex_version}":
+                if checked.return_code != 0 or reported != [f"codex-cli {self.config.codex_version}"]:
                     # A missing runtime or another version fails the same way every time.
                     raise AgentSeedRejectedError(
                         f"Codex runtime in {runtime} does not run codex_version {self.config.codex_version} "
@@ -1182,7 +1185,6 @@ class CodexAgent(SimpleResponsesAPIAgent):
             "\n".join(json.dumps(event) for event in parse_events),
             structured_reasoning=True,
             include_partial=True,
-            conservative_usage_details=True,
         )
         error = cleanup["error"] if cleanup else "Codex runner result unavailable"
         errors = usage.get("errors") or []
@@ -1225,6 +1227,11 @@ class CodexAgent(SimpleResponsesAPIAgent):
             input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=usage["cached_input_tokens"]),
             output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=usage["reasoning_tokens"]),
         )
+        if gradable_limit and not completed and (started or output or state.model_attempts):
+            # Codex (0.144.4 and 0.154.0) records no usage for an output-limited (incomplete) response and writes a
+            # call's token_count only after its tools finish. A run stopped at its output or wall-time budget can
+            # therefore have calls missing from both the CLI total and the session-file total, so its usage is unknown.
+            response_usage = None
         # A failed run that may be scored can have done model work after the CLI's last usage total.
         if (reported_model_error or gradable) and not completed:
             native_usage = parse_codex_usage(state.native_transcript)
@@ -1862,13 +1869,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
             usage=NeMoGymResponseUsage(
                 input_tokens=input_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(
-                    cached_tokens=usage.get("cached_input_tokens", 0)
-                ),
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=usage["cached_input_tokens"]),
                 output_tokens=output_tokens,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(
-                    reasoning_tokens=usage.get("reasoning_tokens", 0)
-                ),
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=usage["reasoning_tokens"]),
                 total_tokens=input_tokens + output_tokens,
             ),
             metadata={AGENT_TIMEOUT_METADATA_KEY: str(timeout)},
@@ -1890,9 +1893,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
             state = self._require_agent_session(session_id)
             rollout_id = request.path_params.get("rollout_id")
             if state.request.episode_id.capture_key != rollout_id:
-                raise HTTPException(409, "Codex activation does not match the seeded session and rollout route")
+                raise AgentSessionConflictError("Codex activation does not match the seeded session and rollout route")
             if state.session.closing:
-                raise HTTPException(409, "Codex session is closing")
+                raise AgentSessionConflictError("Codex session is closing")
             if state.task is None:
                 prompt, system, media = self._sandbox_input(body)
                 state.activation_request = body.model_copy(deep=True)
@@ -1900,14 +1903,14 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     self._sandbox_response(state, body, prompt=prompt, system=system, media=media)
                 )
             elif body != state.activation_request:
-                raise HTTPException(409, "Codex sessions support one activation; retry the same request")
+                raise AgentSessionConflictError("Codex sessions support one activation; retry the same request")
             # The invocation belongs to the session; a disconnected waiter cannot cancel it.
             return (await asyncio.shield(state.task)).model_copy(deep=True)
         return await self._create_response(body)
 
     async def run(self, request: Request, body: CodexAgentRunRequest) -> CodexAgentVerifyResponse:
         if self._session_marker(request) is not None:
-            raise HTTPException(409, "Use the agent session responses and close routes")
+            raise AgentSessionConflictError("Use the agent session responses and close routes")
         if self.config.resources_server is None:
             raise HTTPException(422, "Legacy /run requires resources_server")
         async with self.sem:
