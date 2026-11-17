@@ -508,11 +508,14 @@ class TestApp:
 
         assert response.reward == 0.0
 
-    async def test_verify_raises_on_malformed_ground_truth_expression(
+    async def test_verify_scores_zero_on_malformed_ground_truth_expression(
         self, config: MultiVerseMathHardResourcesServerConfig
     ) -> None:
-        """A malformed ground_truth_expression is a genuine data bug and must surface
-        loudly (raise), not silently score reward=0.
+        """[CUSTOM-MATHCALC-GT-ERRORHANDLING 2026-11-09] A malformed/disallowed
+        ground_truth_expression must no longer crash verify() -- a single bad row
+        previously took down an entire training run (job 63861875). It must be
+        logged and scored reward=0 instead, same as route_to_python_function's own
+        client-input-error handling.
         """
         resources_server = self.init_server(config)
 
@@ -521,5 +524,47 @@ class TestApp:
             ground_truth_expression="__import__('os').system('ls')",
         )
 
-        with raises(GroundTruthExpressionError):
-            await resources_server.verify(verify_request)
+        response = await resources_server.verify(verify_request)
+
+        assert response.reward == 0.0
+
+    async def test_verify_scores_zero_when_altered_power_goes_complex(
+        self, config: MultiVerseMathHardResourcesServerConfig
+    ) -> None:
+        """[CUSTOM-MATHCALC-GT-ERRORHANDLING 2026-11-09] Real bug class found in ~0.9% of
+        sampled rows: power(a, b) = a ** (b + 2) goes complex for a negative base with a
+        non-integer exponent, so float(result) raises TypeError. This must score reward=0,
+        not propagate the TypeError out of verify(). subtract(a=1.0, b=1.0) = 1-1-3 = -3.0
+        supplies the negative base -- a bare negative literal isn't expressible in the
+        restricted AST grammar (a unary minus parses as a disallowed UnaryOp node).
+        """
+        resources_server = self.init_server(config)
+
+        verify_request = _make_verify_request(
+            predicted_solutions=[1.0],
+            ground_truth_expression="power(a=subtract(a=1.0, b=1.0), b=0.5)",
+        )
+
+        response = await resources_server.verify(verify_request)
+
+        assert response.reward == 0.0
+
+    async def test_verify_scores_zero_when_altered_log_hits_domain_error(
+        self, config: MultiVerseMathHardResourcesServerConfig
+    ) -> None:
+        """[CUSTOM-MATHCALC-GT-ERRORHANDLING 2026-11-09] Real bug class found in ~0.9% of
+        sampled rows: log(a, base) = math.log(a, abs(base + 1.5)) raises ValueError ("math
+        domain error") for a <= 0. This must score reward=0, not propagate the ValueError
+        out of verify(). subtract(a=1.0, b=1.0) = 1-1-3 = -3.0 supplies the negative base --
+        see the matching comment on the power() test above for why a literal can't be used.
+        """
+        resources_server = self.init_server(config)
+
+        verify_request = _make_verify_request(
+            predicted_solutions=[1.0],
+            ground_truth_expression="log(a=subtract(a=1.0, b=1.0), base=4.0)",
+        )
+
+        response = await resources_server.verify(verify_request)
+
+        assert response.reward == 0.0

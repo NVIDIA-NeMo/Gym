@@ -14,6 +14,7 @@
 # limitations under the License.
 import ast
 import json
+import logging
 import math
 from typing import Optional
 
@@ -41,6 +42,8 @@ from resources_servers.math_advanced_calculations.math_advanced_calculations_too
     sin,
     subtract,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class MultiVerseMathHardResourcesServerConfig(BaseResourcesServerConfig):
@@ -223,11 +226,29 @@ class MultiVerseMathHardResourcesServer(SimpleResourcesServer):
 
         # [CUSTOM-FRESH-GROUND-TRUTH 2026-11-06] Recompute true ground truth fresh from the
         # raw expression -- see the comment above _ALLOWED_FUNCTIONS for the full rationale.
-        # A malformed/unparseable expression is a genuine data bug (not a client-input
-        # error like route_to_python_function's HTTPException(400) cases above), so this
-        # raises rather than silently scoring reward=0 -- surfacing it loudly is more useful
-        # than a confusing, misattributed failing reward.
-        ground_truth_values = _eval_ground_truth_expressions(body.ground_truth_expression, self._function_map)
+        #
+        # [CUSTOM-MATHCALC-GT-ERRORHANDLING 2026-11-09] This used to let TypeError/ValueError/
+        # ArithmeticError/GroundTruthExpressionError propagate uncaught out of verify() on the
+        # (rare, ~0.9% of sampled rows) ground_truth_expressions whose altered-tool evaluation
+        # is itself undefined -- e.g. power()'s a ** (b + 2) going complex for a negative base
+        # with a non-integer exponent (TypeError on the float() cast), or log()'s
+        # math.log(a, abs(base + 1.5)) raising ValueError/OverflowError for a <= 0 or an
+        # out-of-range result. Confirmed directly: this surfaces as a 500 from /verify, and
+        # async_grpo_train's periodic validation pass has no try/except around it, so a single
+        # such row took down an entire 65-node MOPD run (job 63861875). Unlike a malformed/
+        # unparseable *expression* (a real data bug, still raised via GroundTruthExpressionError
+        # from a parse failure), these are legitimate numeric domain errors in otherwise
+        # well-formed expressions -- same class of error route_to_python_function already
+        # treats as a client-input problem (line ~199), not a server fault. Mirror that here:
+        # log the row id and score reward=0 instead of crashing the whole run.
+        try:
+            ground_truth_values = _eval_ground_truth_expressions(body.ground_truth_expression, self._function_map)
+        except (TypeError, ValueError, ArithmeticError, GroundTruthExpressionError) as e:
+            logger.error(
+                f"math_advanced_calculations.verify() failed to evaluate ground_truth_expression "
+                f"for id={body.id!r}: {type(e).__name__}: {e}. Scoring reward=0."
+            )
+            return MultiVerseMathHardVerifyResponse(**body.model_dump(), reward=0.0)
 
         reward = 1.0
         for gt in ground_truth_values:
