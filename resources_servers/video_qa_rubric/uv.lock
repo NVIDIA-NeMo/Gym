@@ -809,7 +809,7 @@ wheels = [
 ]
 
 [[package]]
-name = "gym-resources-servers-openqa-rubric"
+name = "gym-resources-servers-video-qa-rubric"
 version = "0.0.0"
 source = { virtual = "." }
 dependencies = [

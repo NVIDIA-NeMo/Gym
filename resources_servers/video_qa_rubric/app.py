@@ -44,15 +44,15 @@ from nemo_gym.verification import (
     record_parsed_judge_verdict,
     record_rejected_judge_reply,
 )
-from resources_servers.openqa_rubric.rubric import (
+from resources_servers.video_mcqa.scoring import EXECUTION_FAILURE_METADATA_KEY, final_answer_text
+from resources_servers.video_mcqa.task import Setting
+from resources_servers.video_qa_rubric.rubric import (
     JUDGMENT_SCHEMA,
     JUDGMENT_SCHEMA_NAME,
     judge_messages,
     judgment_points,
 )
-from resources_servers.openqa_rubric.task_data import RubricDict, Text
-from resources_servers.video_mcqa.scoring import EXECUTION_FAILURE_METADATA_KEY, final_answer_text
-from resources_servers.video_mcqa.task import Setting
+from resources_servers.video_qa_rubric.task_data import RubricDict, Text
 
 
 logger = logging.getLogger(__name__)
@@ -79,7 +79,7 @@ VERIFICATION_FIELDS = frozenset(
 )
 
 
-class OpenQARubricResourcesServerConfig(BaseResourcesServerConfig):
+class VideoQARubricResourcesServerConfig(BaseResourcesServerConfig):
     """The judge and its retry budget; ``empty_answer_reward`` is a training option."""
 
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
@@ -103,7 +103,7 @@ class OpenQARubricResourcesServerConfig(BaseResourcesServerConfig):
     empty_answer_reward: float | None = Field(default=None, le=0, allow_inf_nan=False)
 
 
-class OpenQARubricMetadata(BaseModel):
+class VideoQARubricMetadata(BaseModel):
     """Verifier-only question data: the rubric never reaches the model."""
 
     model_config = ConfigDict(extra="allow")
@@ -111,14 +111,14 @@ class OpenQARubricMetadata(BaseModel):
     rubric: RubricDict
 
 
-class OpenQARubricVerifyRequest(BaseVerifyRequest):
+class VideoQARubricVerifyRequest(BaseVerifyRequest):
     model_config = ConfigDict(extra="allow")
     task_id: Text
     setting: Setting
-    verifier_metadata: OpenQARubricMetadata
+    verifier_metadata: VideoQARubricMetadata
 
 
-class OpenQARubricVerifyResponse(OpenQARubricVerifyRequest, BaseVerifyResponse):
+class VideoQARubricVerifyResponse(VideoQARubricVerifyRequest, BaseVerifyResponse):
     """Reward = the rubric score (0-1); 0, or ``empty_answer_reward``, for an attempt without an answer; a failed model
     call or agent infrastructure leaves the attempt unmeasured (masked)."""
 
@@ -149,10 +149,10 @@ def _is_retryable(failure: NgFailureEvent) -> bool:
     return status is None or status in RETRYABLE_JUDGE_STATUSES or status >= 500
 
 
-class OpenQARubricResourcesServer(SimpleResourcesServer):
+class VideoQARubricResourcesServer(SimpleResourcesServer):
     """Rubric grading of final answers; no tools or sessions."""
 
-    config: OpenQARubricResourcesServerConfig
+    config: VideoQARubricResourcesServerConfig
     checkpoint_verify: ClassVar[Literal["replay"]] = "replay"
     _judge_semaphore: asyncio.Semaphore = PrivateAttr()
     _judge_converter: ChatCompletionsConverter = PrivateAttr(
@@ -163,7 +163,7 @@ class OpenQARubricResourcesServer(SimpleResourcesServer):
         super().model_post_init(context)
         self._judge_semaphore = asyncio.Semaphore(self.config.judge_endpoint_max_concurrency)
 
-    async def verify(self, body: OpenQARubricVerifyRequest) -> OpenQARubricVerifyResponse:
+    async def verify(self, body: VideoQARubricVerifyRequest) -> VideoQARubricVerifyResponse:
         """Grade the final answer; an attempt without one scores 0 (or ``empty_answer_reward``) without a judge call.
 
         A judge that fails every attempt raises: Gym's judge failsafe masks the row and keeps it, answer included, for
@@ -175,7 +175,7 @@ class OpenQARubricResourcesServer(SimpleResourcesServer):
                 body,
                 outcome="infrastructure_failure",
                 rubric_score=None,
-                failure_kind="openqa_rubric:infrastructure_failure",
+                failure_kind="video_qa_rubric:infrastructure_failure",
                 failure_reason="The model endpoint or agent infrastructure failed; no answer was measured.",
             )
         failure_reason = None
@@ -188,7 +188,7 @@ class OpenQARubricResourcesServer(SimpleResourcesServer):
                 body,
                 outcome="execution_failure",
                 rubric_score=0.0,
-                failure_kind="openqa_rubric:execution_failure",
+                failure_kind="video_qa_rubric:execution_failure",
                 failure_reason=failure_reason,
             )
         penalty = self.config.empty_answer_reward
@@ -197,7 +197,7 @@ class OpenQARubricResourcesServer(SimpleResourcesServer):
             reward = 0.0 if penalty is None or not response.output else penalty
             return self._respond(body, outcome="empty_answer", rubric_score=0.0, reward=reward)
 
-        async def grade() -> OpenQARubricVerifyResponse:
+        async def grade() -> VideoQARubricVerifyResponse:
             judgment, points, usage, attempts = await self._judge(body.verifier_metadata, answer)
             return self._respond(
                 body,
@@ -213,16 +213,16 @@ class OpenQARubricResourcesServer(SimpleResourcesServer):
 
     def _respond(
         self,
-        body: OpenQARubricVerifyRequest,
+        body: VideoQARubricVerifyRequest,
         *,
         rubric_score: float | None,
         reward: float | None = None,
         **fields: Any,
-    ) -> OpenQARubricVerifyResponse:
+    ) -> VideoQARubricVerifyResponse:
         """The verify response; the reward is the rubric score unless given, and 0 for an unmeasured attempt."""
         if reward is None:
             reward = 0.0 if rubric_score is None else rubric_score
-        return OpenQARubricVerifyResponse(
+        return VideoQARubricVerifyResponse(
             **body.model_dump(exclude=VERIFICATION_FIELDS),
             reward=reward,
             mask_sample=rubric_score is None,
@@ -232,7 +232,7 @@ class OpenQARubricResourcesServer(SimpleResourcesServer):
         )
 
     async def _judge(
-        self, metadata: OpenQARubricMetadata, answer: str
+        self, metadata: VideoQARubricMetadata, answer: str
     ) -> tuple[dict[str, Any], float, dict[str, Any] | None, int]:
         """(judgment, points from 0 to 100, the judge's usage, attempts) of the first judgment the rubric accepts."""
         params = self.config.judge_chat_completion_create_params.model_copy(deep=True)
@@ -322,6 +322,6 @@ class OpenQARubricResourcesServer(SimpleResourcesServer):
 
 
 if __name__ == "__main__":
-    OpenQARubricResourcesServer.run_webserver()
+    VideoQARubricResourcesServer.run_webserver()
 elif is_nemo_gym_fastapi_entrypoint(__file__):
-    app = OpenQARubricResourcesServer.run_webserver()  # noqa: F401
+    app = VideoQARubricResourcesServer.run_webserver()  # noqa: F401

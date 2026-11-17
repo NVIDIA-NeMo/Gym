@@ -16,15 +16,15 @@ from pydantic import ValidationError
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServerConfig
 from nemo_gym.config_types import DatasetConfig
 from nemo_gym.data import TaskDataValidator, load_task_data_schema
-from resources_servers.openqa_rubric.app import (
-    OpenQARubricMetadata,
-    OpenQARubricResourcesServerConfig,
-    OpenQARubricVerifyRequest,
-)
-from resources_servers.openqa_rubric.task import PROMPT, prepare_single_turn
-from resources_servers.openqa_rubric.task_data import TaskData
-from resources_servers.openqa_rubric.tests.test_app import RUBRIC
 from resources_servers.video_mcqa.tests.helpers import response
+from resources_servers.video_qa_rubric.app import (
+    VideoQARubricMetadata,
+    VideoQARubricResourcesServerConfig,
+    VideoQARubricVerifyRequest,
+)
+from resources_servers.video_qa_rubric.task import PROMPT, prepare_single_turn
+from resources_servers.video_qa_rubric.task_data import TaskData
+from resources_servers.video_qa_rubric.tests.test_app import RUBRIC
 from responses_api_agents.simple_agent.app import SimpleAgentConfig
 
 
@@ -33,7 +33,7 @@ EXAMPLES = [json.loads(line) for line in (SERVER / "data" / "example.jsonl").rea
 
 
 def report(rows: list[dict]):
-    validator = TaskDataValidator("openqa_rubric", load_task_data_schema(SERVER), "rows.jsonl")
+    validator = TaskDataValidator("video_qa_rubric", load_task_data_schema(SERVER), "rows.jsonl")
     for index, row in enumerate(rows):
         validator.validate_row(index, row)
     return validator.report
@@ -41,8 +41,8 @@ def report(rows: list[dict]):
 
 def test_a_single_turn_row_shows_the_model_the_video_and_question_only() -> None:
     rubric = copy.deepcopy(RUBRIC)
-    row = prepare_single_turn("openqa_rubric:one", "Which way does it move?", rubric, video_url="file:///v.mp4")
-    assert (row["task_id"], row["setting"]) == ("openqa_rubric:one", "single_turn")
+    row = prepare_single_turn("video_qa_rubric:one", "Which way does it move?", rubric, video_url="file:///v.mp4")
+    assert (row["task_id"], row["setting"]) == ("video_qa_rubric:one", "single_turn")
     assert row["responses_create_params"] == {
         "tools": [],
         "tool_choice": "none",
@@ -77,20 +77,20 @@ def test_the_schema_declares_the_fields_the_verifier_reads() -> None:
         name for name, field in TaskData.model_fields.items() if (field.json_schema_extra or {}).get("legacy_location")
     }
     top_level = set(TaskData.model_fields) - nested
-    assert nested == set(OpenQARubricMetadata.model_fields) == {"question", "rubric"}
-    assert top_level == {"task_id", "setting"} <= set(OpenQARubricVerifyRequest.model_fields)
-    for model in (TaskData, OpenQARubricMetadata):
+    assert nested == set(VideoQARubricMetadata.model_fields) == {"question", "rubric"}
+    assert top_level == {"task_id", "setting"} <= set(VideoQARubricVerifyRequest.model_fields)
+    for model in (TaskData, VideoQARubricMetadata):
         assert all(field.is_required() for field in model.model_fields.values())
 
 
 def test_rows_the_verifier_refuses_are_invalid_task_data() -> None:
-    good = prepare_single_turn("openqa_rubric:one", "Q?", RUBRIC, video_url="file:///v.mp4")
+    good = prepare_single_turn("video_qa_rubric:one", "Q?", RUBRIC, video_url="file:///v.mp4")
     bad = copy.deepcopy(good)
     bad["verifier_metadata"]["rubric"]["criteria"][0]["weight_points"] = 10
     assert report([good]).clean and report([bad]).error_rows == 1
-    OpenQARubricVerifyRequest.model_validate(good | {"response": response("Right.")})
+    VideoQARubricVerifyRequest.model_validate(good | {"response": response("Right.")})
     with pytest.raises(ValidationError):
-        OpenQARubricVerifyRequest.model_validate(bad | {"response": response("Right.")})
+        VideoQARubricVerifyRequest.model_validate(bad | {"response": response("Right.")})
 
 
 def test_the_examples_are_valid_rows_on_the_synthetic_clips() -> None:
@@ -98,8 +98,8 @@ def test_the_examples_are_valid_rows_on_the_synthetic_clips() -> None:
     assert len(EXAMPLES) == result.rows == 5 and result.clean, result.summary()
     clips = SERVER.parent / "video_mcqa" / "data" / "example_videos"
     for number, row in enumerate(EXAMPLES, start=1):
-        assert row["task_id"] == f"openqa_rubric:example-{number}"
-        OpenQARubricVerifyRequest.model_validate(row | {"response": response("An answer.")})
+        assert row["task_id"] == f"video_qa_rubric:example-{number}"
+        VideoQARubricVerifyRequest.model_validate(row | {"response": response("An answer.")})
         video, text = row["responses_create_params"]["input"][0]["content"]
         assert text["text"] == PROMPT.format(question=row["verifier_metadata"]["question"])
         prefix, encoded = video["video_url"].split(",", 1)
@@ -110,33 +110,33 @@ def test_the_examples_are_valid_rows_on_the_synthetic_clips() -> None:
 
 def test_the_config_binds_one_model_call_and_the_judge_to_this_server() -> None:
     values = {"judge_base_url": "https://judge.invalid/v1", "judge_api_key": "invented", "judge_model_name": "judge"}
-    loaded = OmegaConf.merge(OmegaConf.load(SERVER / "configs" / "openqa_rubric.yaml"), OmegaConf.create(values))
+    loaded = OmegaConf.merge(OmegaConf.load(SERVER / "configs" / "video_qa_rubric.yaml"), OmegaConf.create(values))
     config = OmegaConf.to_container(loaded, resolve=True)
-    resource = OpenQARubricResourcesServerConfig(
-        name="openqa_rubric",
+    resource = VideoQARubricResourcesServerConfig(
+        name="video_qa_rubric",
         host="127.0.0.1",
         port=8001,
-        **config["openqa_rubric"]["resources_servers"]["openqa_rubric"],
+        **config["video_qa_rubric"]["resources_servers"]["video_qa_rubric"],
     )
-    assert resource.judge_model_server.name == "openqa_rubric_judge" and resource.empty_answer_reward is None
-    assert config["openqa_rubric_judge"]["responses_api_models"]["openai_model"]["openai_model"] == "judge"
-    agent_config = config["openqa_rubric_single_turn"]["responses_api_agents"]["simple_agent"]
-    agent = SimpleAgentConfig(name="openqa_rubric_single_turn", host="127.0.0.1", port=8002, **agent_config)
+    assert resource.judge_model_server.name == "video_qa_rubric_judge" and resource.empty_answer_reward is None
+    assert config["video_qa_rubric_judge"]["responses_api_models"]["openai_model"]["openai_model"] == "judge"
+    agent_config = config["video_qa_rubric_single_turn"]["responses_api_agents"]["simple_agent"]
+    agent = SimpleAgentConfig(name="video_qa_rubric_single_turn", host="127.0.0.1", port=8002, **agent_config)
     assert (agent.resources_server.name, agent.model_server.name, agent.max_steps) == (
-        "openqa_rubric",
+        "video_qa_rubric",
         "policy_model",
         1,
     )
     (example,) = [DatasetConfig.model_validate(item) for item in agent_config["datasets"]]
     assert (example.type, example.license) == ("example", "Apache 2.0")
-    assert example.jsonl_fpath == "resources_servers/openqa_rubric/data/example.jsonl"
+    assert example.jsonl_fpath == "resources_servers/video_qa_rubric/data/example.jsonl"
     environment = SingleAgentTurnLegacyEnvironmentServerConfig(
-        name="openqa_rubric_single_turn_environment",
+        name="video_qa_rubric_single_turn_environment",
         host="127.0.0.1",
         port=8003,
-        **config["openqa_rubric_single_turn_environment"]["environment_servers"]["single_agent_turn_legacy"],
+        **config["video_qa_rubric_single_turn_environment"]["environment_servers"]["single_agent_turn_legacy"],
     )
     assert (environment.agent_server.name, environment.resources_server.name) == (
-        "openqa_rubric_single_turn",
-        "openqa_rubric",
+        "video_qa_rubric_single_turn",
+        "video_qa_rubric",
     )

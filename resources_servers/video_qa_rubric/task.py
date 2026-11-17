@@ -5,8 +5,8 @@
 
 from typing import Any, TypedDict
 
-from resources_servers.openqa_rubric.task_data import validate_rubric
 from resources_servers.video_mcqa.task import ResponsesCreateParams, Setting
+from resources_servers.video_qa_rubric.task_data import validate_rubric
 
 
 PROMPT = "Watch the video and answer the question.\n\nQuestion: {question}"

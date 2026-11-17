@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Task-data schemas of open-ended question rows graded against a weighted-points rubric.
 
-Mirrors the wire: ``OpenQARubricVerifyRequest`` reads ``task_id`` and ``setting`` top-level and ``question`` and
+Mirrors the wire: ``VideoQARubricVerifyRequest`` reads ``task_id`` and ``setting`` top-level and ``question`` and
 ``rubric`` from ``verifier_metadata``. A rubric is checked against ``Rubric`` but kept as the row has it, because the
 judge sees it unchanged; criterion guidance, evidence and an ``answer_policy`` are free-form.
 """

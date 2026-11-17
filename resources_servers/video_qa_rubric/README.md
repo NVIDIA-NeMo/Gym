@@ -1,11 +1,11 @@
-# OpenQA rubric
+# Video QA rubric
 
 A training environment for open-ended questions about a video. The policy sees the video and the question and writes
 a free-text answer. A judge model grades the final answer against the question's own rubric, and the reward is the
 rubric score from 0 to 1. The judge sees the question, the rubric and the final answer; it never sees the video, the
 policy's reasoning or a reference answer.
 
-`configs/openqa_rubric.yaml` runs single-turn rows (`simple_agent`, one model call). The same resources server
+`configs/video_qa_rubric.yaml` runs single-turn rows (`simple_agent`, one model call). The same resources server
 grades agentic rows (`setting: agentic`) when an agent harness is bound to it.
 
 ## Rows
@@ -71,14 +71,14 @@ as coverage. Each verified row carries `rubric_points`, the `judgment`, `judge_u
 
 ## Judge
 
-`openqa_rubric_judge` in `configs/openqa_rubric.yaml` is an `openai_model` server: any OpenAI-compatible chat model
+`video_qa_rubric_judge` in `configs/video_qa_rubric.yaml` is an `openai_model` server: any OpenAI-compatible chat model
 with JSON-schema structured output, set with `judge_base_url`, `judge_api_key` and `judge_model_name`. A strong
 reasoning model is recommended. Its sampling and reasoning settings go in `judge_chat_completion_create_params`:
 
 ```yaml
-openqa_rubric:
+video_qa_rubric:
   resources_servers:
-    openqa_rubric:
+    video_qa_rubric:
       judge_chat_completion_create_params:
         messages: []
         reasoning_effort: high
@@ -100,13 +100,13 @@ env:
   nemo_gym:
     config_paths:
     - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
-    - resources_servers/openqa_rubric/configs/openqa_rubric.yaml
+    - resources_servers/video_qa_rubric/configs/video_qa_rubric.yaml
     judge_base_url: https://judge.example.com/v1
     judge_api_key: ${oc.env:JUDGE_API_KEY}
     judge_model_name: my-judge-model
-    openqa_rubric:
+    video_qa_rubric:
       resources_servers:
-        openqa_rubric:
+        video_qa_rubric:
           empty_answer_reward: -0.5
           judge_max_attempts: 12
           judge_endpoint_max_concurrency: 24
@@ -116,7 +116,7 @@ env:
             max_completion_tokens: 32768
 ```
 
-Each training row needs `agent_ref: {type: responses_api_agents, name: openqa_rubric_single_turn}`, which
+Each training row needs `agent_ref: {type: responses_api_agents, name: video_qa_rubric_single_turn}`, which
 `gym dataset collate` adds for datasets declared in the config. In a mix with other environments, every row's
 `agent_ref` routes it to its own environment. Keep the judge separate from the policy: a policy that grades its own
 answers can learn to please itself.
@@ -136,15 +136,15 @@ run should use a separate, stronger judge.
 vllm serve nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16 --max-model-len 131072 \
   --trust-remote-code --video-pruning-rate 0.5 --reasoning-parser nemotron_v3 \
   --media-io-kwargs '{"video": {"fps": 2, "num_frames": 256}}'
-gym env start "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml,resources_servers/openqa_rubric/configs/openqa_rubric.yaml]" \
+gym env start "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml,resources_servers/video_qa_rubric/configs/video_qa_rubric.yaml]" \
   +policy_base_url=http://127.0.0.1:8000/v1 +policy_api_key=EMPTY \
   +policy_model_name=nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16 \
   +judge_base_url=http://127.0.0.1:8000/v1 +judge_api_key=EMPTY \
   +judge_model_name=nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16 \
-  ++openqa_rubric.resources_servers.openqa_rubric.judge_chat_completion_create_params.max_completion_tokens=16384
-gym eval run --no-serve --agent openqa_rubric_single_turn \
-    --input resources_servers/openqa_rubric/data/example.jsonl \
-    --output resources_servers/openqa_rubric/data/example_rollouts.jsonl --limit 5
+  ++video_qa_rubric.resources_servers.video_qa_rubric.judge_chat_completion_create_params.max_completion_tokens=16384
+gym eval run --no-serve --agent video_qa_rubric_single_turn \
+    --input resources_servers/video_qa_rubric/data/example.jsonl \
+    --output resources_servers/video_qa_rubric/data/example_rollouts.jsonl --limit 5
 ```
 
 Three answers earn full points (the blue background and the yellow diamond, one red dot, the bar moving down; the
@@ -156,8 +156,8 @@ counter the model runs out of its 16,384 output tokens without an answer (`empty
 ## Tests
 
 ```bash
-pytest resources_servers/openqa_rubric/tests
-gym env test --resources-server openqa_rubric
+pytest resources_servers/video_qa_rubric/tests
+gym env test --resources-server video_qa_rubric
 ```
 
 The tests use invented questions and rubrics and a scripted judge; no API key or network is needed.

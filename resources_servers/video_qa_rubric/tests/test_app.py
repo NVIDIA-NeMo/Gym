@@ -19,15 +19,15 @@ from nemo_gym.core import NgFailureEvent
 from nemo_gym.server_runtime import verifier_observability
 from nemo_gym.trajectory import VerifierInvocation, grading_result_binding
 from nemo_gym.verification import JudgeError
-from resources_servers.openqa_rubric.app import (
-    OpenQARubricResourcesServer,
-    OpenQARubricResourcesServerConfig,
-    OpenQARubricVerifyRequest,
-)
-from resources_servers.openqa_rubric.rubric import JUDGE_SYSTEM_PROMPT, JUDGMENT_SCHEMA, JUDGMENT_SCHEMA_NAME
-from resources_servers.openqa_rubric.task import prepare_single_turn
 from resources_servers.video_mcqa.scoring import EXECUTION_FAILURE_METADATA_KEY
 from resources_servers.video_mcqa.tests.helpers import grade_failed_run_and_replay, response
+from resources_servers.video_qa_rubric.app import (
+    VideoQARubricResourcesServer,
+    VideoQARubricResourcesServerConfig,
+    VideoQARubricVerifyRequest,
+)
+from resources_servers.video_qa_rubric.rubric import JUDGE_SYSTEM_PROMPT, JUDGMENT_SCHEMA, JUDGMENT_SCHEMA_NAME
+from resources_servers.video_qa_rubric.task import prepare_single_turn
 
 
 JUDGE = ModelServerRef(type="responses_api_models", name="rubric_judge")
@@ -41,7 +41,7 @@ RUBRIC = {
     ],
 }
 ROW = prepare_single_turn(
-    "openqa_rubric:invented-1",
+    "video_qa_rubric:invented-1",
     "What moves in the video, and in which direction?",
     RUBRIC,
     video_url="https://example.invalid/square.mp4",
@@ -107,10 +107,10 @@ def scripted_judge(*replies: str | bytes | Exception) -> tuple[MagicMock, list[d
     return client, calls
 
 
-def make_server(*replies: str | bytes | Exception, **options: object) -> tuple[OpenQARubricResourcesServer, list]:
+def make_server(*replies: str | bytes | Exception, **options: object) -> tuple[VideoQARubricResourcesServer, list]:
     client, calls = scripted_judge(*replies)
-    config = OpenQARubricResourcesServerConfig(
-        name="openqa_rubric",
+    config = VideoQARubricResourcesServerConfig(
+        name="video_qa_rubric",
         host="127.0.0.1",
         port=8000,
         entrypoint="app.py",
@@ -119,15 +119,15 @@ def make_server(*replies: str | bytes | Exception, **options: object) -> tuple[O
         judge_retry_base_delay_seconds=0,
         **options,
     )
-    return OpenQARubricResourcesServer(config=config, server_client=client), calls
+    return VideoQARubricResourcesServer(config=config, server_client=client), calls
 
 
 def request(text: str | None = "An orange square moves to the right.", *, setting: str = "single_turn", **updates):
     row = copy.deepcopy(ROW) | {"setting": setting}
-    return OpenQARubricVerifyRequest.model_validate(row | {"response": response(text, **updates)})
+    return VideoQARubricVerifyRequest.model_validate(row | {"response": response(text, **updates)})
 
 
-def request_with(*items: dict, setting: str = "agentic") -> OpenQARubricVerifyRequest:
+def request_with(*items: dict, setting: str = "agentic") -> VideoQARubricVerifyRequest:
     return request(None, setting=setting, output=list(items))
 
 
@@ -187,7 +187,7 @@ async def test_a_rejected_judgment_is_asked_for_again(caplog) -> None:
         judgment(60, 40),
         judge_max_attempts=5,
     )
-    with caplog.at_level("WARNING", logger="resources_servers.openqa_rubric.app"):
+    with caplog.at_level("WARNING", logger="resources_servers.video_qa_rubric.app"):
         result = await server.verify(request())
     assert (result.reward, result.judge_attempts, len(calls)) == (1.0, 5, 5)
     # Each failed attempt is logged with its reason, never with the answer.
@@ -223,7 +223,7 @@ def test_judge_failures_are_masked_rows_for_rejudging_not_wrong_answers(reply) -
     assert row["response"]["output"][0]["content"][0]["text"] == "An orange square moves to the right."
 
 
-async def observed_verify(server: OpenQARubricResourcesServer, body: OpenQARubricVerifyRequest):
+async def observed_verify(server: VideoQARubricResourcesServer, body: VideoQARubricVerifyRequest):
     invocation = VerifierInvocation(invocation_id="verify-1")
     token = verifier_observability._active_verifier.set(invocation)
     try:
@@ -262,7 +262,7 @@ async def test_no_judge_call_without_an_answer() -> None:
         True,
         False,
     )
-    assert failed.rubric_score is None and failed.failure_kind == "openqa_rubric:infrastructure_failure"
+    assert failed.rubric_score is None and failed.failure_kind == "video_qa_rubric:infrastructure_failure"
     assert calls == []
 
 
@@ -288,14 +288,14 @@ async def test_a_failed_agent_run_scores_zero_when_its_saved_answer_is_replayed(
     server, calls = make_server(empty_answer_reward=penalty)
     agentic = copy.deepcopy(ROW) | {"setting": "agentic"}
     failed = response("An orange square moves to the right.", metadata={EXECUTION_FAILURE_METADATA_KEY: "true"})
-    saved, replayed = await grade_failed_run_and_replay(server, OpenQARubricVerifyRequest, agentic, failed)
+    saved, replayed = await grade_failed_run_and_replay(server, VideoQARubricVerifyRequest, agentic, failed)
     for result in (saved, replayed.model_dump()):
         assert (result["outcome"], result["reward"], result["mask_sample"]) == ("execution_failure", 0, False)
     assert calls == []
     # An agent without the failure marker gets the same zero for the empty response it verifies (a replay of its
     # saved row then grades the saved answer, as video_mcqa does).
     server, calls = make_server(judgment(60, 0), empty_answer_reward=penalty)
-    saved, replayed = await grade_failed_run_and_replay(server, OpenQARubricVerifyRequest, agentic, response("Red."))
+    saved, replayed = await grade_failed_run_and_replay(server, VideoQARubricVerifyRequest, agentic, response("Red."))
     assert (saved["outcome"], saved["reward"], saved["mask_sample"]) == ("empty_answer", 0, False)
     assert (replayed.outcome, replayed.reward, len(calls)) == ("graded", 0.6, 1)
 
@@ -333,7 +333,7 @@ async def test_without_empty_answer_reward_the_last_assistant_message_is_graded(
 async def test_a_replayed_row_is_graded_again_from_its_saved_answer() -> None:
     server, calls = make_server(judgment(60, 40), judgment(30, 40))
     first = await server.verify(request())
-    replayed = await server.verify(OpenQARubricVerifyRequest.model_validate(first.model_dump()))
+    replayed = await server.verify(VideoQARubricVerifyRequest.model_validate(first.model_dump()))
     assert (first.reward, replayed.reward, len(calls)) == (1.0, 0.7, 2)
 
 
@@ -341,7 +341,7 @@ def test_rows_with_a_malformed_rubric_are_refused() -> None:
     row = request().model_dump()
     row["verifier_metadata"]["rubric"]["criteria"][1]["weight_points"] = 30
     with pytest.raises(ValidationError, match="add up to 100"):
-        OpenQARubricVerifyRequest.model_validate(row)
+        VideoQARubricVerifyRequest.model_validate(row)
     server, _ = make_server()
     assert TestClient(server.setup_webserver()).post("/verify", json=row).status_code == 422
 

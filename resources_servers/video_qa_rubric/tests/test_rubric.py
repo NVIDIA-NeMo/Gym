@@ -9,14 +9,14 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from resources_servers.openqa_rubric.rubric import (
+from resources_servers.video_qa_rubric.rubric import (
     GRADING_INSTRUCTIONS,
     JUDGE_SYSTEM_PROMPT,
     JUDGMENT_SCHEMA,
     judge_messages,
     judgment_points,
 )
-from resources_servers.openqa_rubric.task_data import validate_rubric
+from resources_servers.video_qa_rubric.task_data import validate_rubric
 
 
 RUBRIC = {

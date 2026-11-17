@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [project]
-name = "gym-resources-servers-openqa-rubric"
+name = "gym-resources-servers-video-qa-rubric"
 version = "0.0.0"
 requires-python = ">=3.13.14"
 dependencies = [
