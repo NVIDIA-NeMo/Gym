@@ -173,6 +173,45 @@ BINDING = "class Thing:\n    @classmethod\n    def make(cls) -> int:\n        re
 GENERIC_CLASS = "class Thing[T: int]:\n    def run(self, x: T) -> T:\n        return x\n"
 GENERIC_FUNCTION = "def helper[T: int](a: T) -> T:\n    return a\n"
 IMPORTED = "from external import helper, Other\n"
+CALLABLE = "class Thing:\n    async def __call__(self, value: int) -> int:\n        return value\n"
+CONTEXT = "class Thing:\n    async def __aenter__(self) -> int:\n        return 1\n"
+INIT = "class Thing:\n    def __init__(self, x: int) -> None:\n        self.x = x\n"
+MANGLED = "class Thing:\n    def __helper(self, x: int) -> int:\n        return x\n"
+FIRST = "    def first(self, x: int) -> int:\n        return x\n"
+SECOND = "    def second(self, x: int) -> int:\n        return x\n"
+METHODS = f"class Thing:\n{FIRST}\n{SECOND}"
+FIELDS = "class Thing:\n    a: int\n    b: str\n"
+GETTER = "    @property\n    def value(self) -> int:\n        return 1\n"
+SETTER = "    @value.setter\n    def value(self, v: int) -> None:\n        pass\n"
+ACCESSORS = f"class Thing:\n{GETTER}\n{SETTER}"
+PLAIN = "    def value(self) -> int:\n        return 1\n"
+REPLACED = "    def value(self) -> str:\n        return ''\n"
+REDEFINED = f"class Thing:\n{PLAIN}\n{REPLACED}"
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        pytest.param(CALLABLE, CALLABLE.replace("value: int)", "value: int, *, extra: int)"), id="call"),
+        pytest.param(CONTEXT, CONTEXT.replace("-> int", "-> str"), id="aenter"),
+        pytest.param(INIT, INIT.replace("x: int", "x: str"), id="init"),
+        pytest.param(METHODS, METHODS.replace("second(self, x: int)", "second(self, x: str)"), id="method"),
+        pytest.param(FIELDS, "class Thing:\n    b: str\n    a: int\n", id="field-order"),
+        pytest.param(ACCESSORS, ACCESSORS.replace("v: int", "v: str"), id="setter"),
+        pytest.param(REDEFINED, REDEFINED.replace("-> str", "-> bytes"), id="replacing-definition"),
+    ],
+)
+def test_special_methods_fields_and_accessor_chains_are_fingerprinted(tmp_path: Path, before: str, after: str) -> None:
+    tier, evidence = grade(tmp_path, {"nemo_gym/core/things.py": before}, {"nemo_gym/core/things.py": after})
+    assert tier == "high"
+    assert "export changed: nemo_gym.core.Thing" in evidence
+
+
+def test_reordering_definitions_of_one_name_changes_the_surface(tmp_path: Path) -> None:
+    swapped = f"class Thing:\n{REPLACED}\n{PLAIN}"
+    tier, evidence = grade(tmp_path, {"nemo_gym/core/things.py": REDEFINED}, {"nemo_gym/core/things.py": swapped})
+    assert tier == "high"
+    assert "export changed: nemo_gym.core.Thing" in evidence
 
 
 @pytest.mark.parametrize(
@@ -202,6 +241,9 @@ def test_decorator_generic_and_import_source_changes_are_high(
         pytest.param("things.py", GENERIC_CLASS, GENERIC_CLASS.replace("return x", "return (x)"), id="class-body"),
         pytest.param("helpers.py", GENERIC_FUNCTION, GENERIC_FUNCTION.replace("return a", "return (a)"), id="body"),
         pytest.param("reexports.py", IMPORTED, IMPORTED.replace("Other", "Different"), id="unrelated-import"),
+        pytest.param("things.py", METHODS, f"class Thing:\n{SECOND}\n{FIRST}", id="method-order"),
+        pytest.param("things.py", MANGLED, MANGLED.replace("x: int", "x: str"), id="name-mangled"),
+        pytest.param("things.py", CALLABLE, CALLABLE.replace("return value", "return (value)"), id="special-body"),
     ],
 )
 def test_bodies_private_members_and_unrelated_imports_keep_the_public_surface(

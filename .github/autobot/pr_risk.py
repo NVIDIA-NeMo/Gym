@@ -169,13 +169,38 @@ def module_path(tree: Path, module: str) -> Path:
 
 
 def is_public_member(node: ast.stmt) -> bool:
-    """Return whether a class-body statement is part of the class's public surface."""
+    """Return whether a class-body statement is part of the class's public surface, including special methods."""
     if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-        return not node.name.startswith("_") or node.name == "__init__"
+        special = node.name.startswith("__") and node.name.endswith("__")
+        return not node.name.startswith("_") or special
     targets = node.targets if isinstance(node, ast.Assign) else [getattr(node, "target", None)]
     return isinstance(node, ast.Assign | ast.AnnAssign) and not any(
         isinstance(target, ast.Name) and target.id.startswith("_") for target in targets
     )
+
+
+def bound_names(node: ast.stmt) -> list[str]:
+    """Return the plain names a public class-body statement binds."""
+    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+        return [node.name]
+    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+    return [target.id for target in targets if isinstance(target, ast.Name)]
+
+
+def class_members(node: ast.ClassDef) -> list[str]:
+    """Fingerprint a class's public members so that moving an independent method changes nothing.
+
+    Fields keep their declaration order, which can define a positional constructor. Every member is also grouped by the
+    name it binds and the groups are sorted, while each group keeps its order, so a property's getter and setter, or a
+    later definition that replaces an earlier one, stay ordered.
+    """
+    members = [item for item in node.body if is_public_member(item)]
+    fields = [signature(item) for item in members if isinstance(item, ast.Assign | ast.AnnAssign)]
+    groups: dict[str, list[str]] = {}
+    for item in members:
+        for name in bound_names(item):
+            groups.setdefault(name, []).append(signature(item))
+    return [*fields, *(fingerprint for name in sorted(groups) for fingerprint in groups[name])]
 
 
 def signature(node: ast.stmt) -> str:
@@ -187,8 +212,7 @@ def signature(node: ast.stmt) -> str:
     if isinstance(node, ast.ClassDef):
         parts = (*node.type_params, *node.decorator_list, *node.bases, *node.keywords)
         header = [ast.dump(part) for part in parts]
-        members = [signature(item) for item in node.body if is_public_member(item)]
-        return "\n".join([f"class {node.name}", *header, *members])
+        return "\n".join([f"class {node.name}", *header, *class_members(node)])
     return ast.dump(node)
 
 
