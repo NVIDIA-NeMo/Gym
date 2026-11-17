@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Start the catalog's Postgres and wait until it takes connections. The Auto Ontology agent runs this at each
+# episode's seed, since the sandbox keeps its own entrypoint.
+set -euo pipefail
+su postgres -c "pg_ctl -D '$PGDATA' -l '$PGDATA/server.log' -w -t 120 \
+  -o '-p $POSTGRES_PORT -c listen_addresses=localhost' start" >/dev/null
+pg_isready -h localhost -p "$POSTGRES_PORT" -t 60
