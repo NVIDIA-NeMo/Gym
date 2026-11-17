@@ -156,12 +156,14 @@ metadata.
   `create.idle_timeout_s` is paused and resumed before the next request, with its original
   lifetime. Requests in flight are never cut off. A failed resume makes `exec` return code 125
   with `error_type="sandbox"`, and the next request retries. An `endpoint()` or `serialize()`
-  keeps the sandbox running from then on, because that traffic bypasses the provider.
+  keeps the sandbox running from then on, because that traffic bypasses the provider. Closing the
+  provider kills sandboxes it left paused, because a paused sandbox never reaches its timeout.
 - With `create.idle_policy: suspend`, an idle sandbox is snapshotted and killed instead, and the
   next request creates a sandbox from the snapshot wherever the backend places it, then deletes the
   snapshot. The Gym handle keeps its ID while the E2B sandbox behind it changes. A failed restore
   keeps the snapshot for the next request. Closing the sandbox or the provider deletes leftover
-  snapshots; a process that dies while sandboxes are suspended leaves theirs behind.
+  snapshots; a failed delete is retried, and `close()` raises until it succeeds so it can be
+  retried. A process that dies while sandboxes are suspended leaves theirs behind.
 
 ## Security and Isolation
 

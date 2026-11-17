@@ -333,6 +333,9 @@ class _E2BSandboxState:
     # Lifetime sent at create; reapplied on every resume, because E2B's
     # connect otherwise resets it to the SDK default.
     ttl_s: int | None
+    # The handle create() returned. aclose() reaches the sandbox through it,
+    # because a restore changes the E2B sandbox behind it.
+    handle: SandboxHandle
     # Held across a pause, a resume or a kill, never across a command, so a
     # request waits out a transition already sent instead of hitting a sandbox
     # that the backend reports as mid-transition.
@@ -355,6 +358,8 @@ class _E2BSandboxState:
     # endpoint, or a handle serialized to another process). The provider can
     # then no longer tell when the sandbox is idle, so it stops parking it.
     pinned: bool = False
+    # When the last park was confirmed; None while running or after a park
+    # whose outcome is unknown.
     parked_at: float | None = None
     pauses: int = 0
     pause_s: float = 0.0
@@ -366,8 +371,12 @@ class _E2BSandboxState:
     # Implies ``parked``.
     snapshot_id: str | None = None
     # Snapshotted sandboxes whose kill failed; killed again after the next
-    # restore and at close.
+    # restore and at close. One that stays alive still counts down its TTL.
     orphans: list[Any] = field(default_factory=list)
+    # Snapshots no sandbox needs any more (restored from, or of a closed
+    # sandbox) whose delete has not succeeded yet. Snapshots never expire, so
+    # these are retried after every restore, at close and at aclose.
+    stale_snapshots: list[str] = field(default_factory=list)
     suspends: int = 0
     suspend_s: float = 0.0
     restores: int = 0
@@ -596,6 +605,7 @@ class E2BProvider:
         if self._create.idle_policy != "never":
             self._states[handle.sandbox_id] = _E2BSandboxState(
                 ttl_s=kwargs["timeout"],
+                handle=handle,
                 create_args={key: kwargs[key] for key in _RESTORE_ARGS if key in kwargs},
             )
             # The first command comes after the agent's first model call; until
@@ -821,10 +831,9 @@ class E2BProvider:
         )
 
     async def close(self, handle: SandboxHandle) -> None:
-        if handle.raw is None:
-            return
         state = self._states.get(handle.sandbox_id)
         if state is None:
+            # A no-op for a handle already closed.
             await self._kill(handle)
             return
         state.closed = True
@@ -837,10 +846,16 @@ class E2BProvider:
                     await self._kill(handle)
                 else:
                     # Suspended: nothing runs; the snapshot is all that is left.
-                    await self._delete_snapshot(state.snapshot_id)
+                    state.stale_snapshots.append(state.snapshot_id)
                     state.snapshot_id = None
                     handle.raw = None
                 await self._kill_orphans(state)
+                if not await self._delete_stale_snapshots(state):
+                    # Snapshots never expire: keep the state, so close() or aclose() tries again.
+                    raise RuntimeError(
+                        f"e2b: could not delete snapshots {', '.join(state.stale_snapshots)} of sandbox "
+                        f"{handle.sandbox_id}; close() can be retried"
+                    )
         except BaseException:
             state.closed = False
             raise
@@ -888,16 +903,34 @@ class E2BProvider:
                 LOGGER.debug("e2b sandbox %s already gone on close", sandbox.sandbox_id)
 
     async def aclose(self) -> None:
-        """Wait out idle parks already sent; sandboxes own their connections."""
+        """Wait out idle parks already sent, then clean up after sandboxes nobody closed.
+
+        Sandboxes own their connections. Running sandboxes are left to their
+        TTL, as without an idle policy.
+        """
         for state in self._states.values():
             self._cancel_pending_park(state)
         loop = asyncio.get_running_loop()
         pending = [task for task in self._park_tasks if task.get_loop() is loop]
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
+        suspended = [state for state in self._states.values() if state.snapshot_id is not None]
+        # A paused sandbox does not count down its TTL, so nothing else would reclaim it.
+        paused = [
+            state
+            for state in self._states.values()
+            if state.parked and state.snapshot_id is None and not state.closed and state.handle.raw is not None
+        ]
+        if paused:
+            LOGGER.warning("e2b: provider closed with %d sandboxes paused; killing them", len(paused))
+            for state in paused:
+                async with state.lock:
+                    try:
+                        await self._kill(state.handle)
+                    except Exception as exc:  # noqa: BLE001 - shutdown goes on to the other sandboxes
+                        LOGGER.warning("e2b: could not kill paused sandbox %s: %s", state.handle.sandbox_id, exc)
         # Only this provider knows which snapshot holds which suspended
         # sandbox, and snapshots do not expire, so delete those nobody closed.
-        suspended = [state for state in self._states.values() if state.snapshot_id is not None]
         if suspended:
             LOGGER.warning(
                 "e2b: provider closed with %d sandboxes suspended; deleting their snapshots", len(suspended)
@@ -906,6 +939,7 @@ class E2BProvider:
                 if await self._delete_snapshot(state.snapshot_id):
                     state.snapshot_id = None
         for state in self._states.values():
+            await self._delete_stale_snapshots(state)
             if state.orphans:
                 await self._kill_orphans(state)
 
@@ -1013,6 +1047,10 @@ class E2BProvider:
         """
         if self._create.idle_policy == "suspend":
             return await self._suspend_locked(handle, state, reason=reason)
+        if state.parked and state.parked_at is not None:
+            # Already paused by an idle park; a second pause would only get a 409. A pause whose outcome is
+            # unknown sets no ``parked_at``, so it is sent again.
+            return True
         loop = asyncio.get_running_loop()
         started = loop.time()
         sandbox = self._sandbox(handle)
@@ -1141,7 +1179,9 @@ class E2BProvider:
             parked_for,
         )
         # Only now: until the new sandbox existed the snapshot was the only copy.
-        await self._delete_snapshot(snapshot_id)
+        # A delete that fails is retried after the next restore and at close.
+        state.stale_snapshots.append(snapshot_id)
+        await self._delete_stale_snapshots(state)
         await self._kill_orphans(state)
 
     async def _create_detached(self, kwargs: dict[str, Any]) -> Any:
@@ -1176,9 +1216,16 @@ class E2BProvider:
                 operation="delete_snapshot",
             )
         except Exception as exc:  # noqa: BLE001 - cleanup must not fail the request
-            LOGGER.warning("e2b: could not delete snapshot %s: %s; it stays in storage", snapshot_id, exc)
+            LOGGER.warning("e2b: could not delete snapshot %s: %s", snapshot_id, exc)
             return False
         return True
+
+    async def _delete_stale_snapshots(self, state: _E2BSandboxState) -> bool:
+        """Delete the snapshots no sandbox needs any more; returns whether none is left."""
+        for snapshot_id in list(state.stale_snapshots):
+            if await self._delete_snapshot(snapshot_id):
+                state.stale_snapshots.remove(snapshot_id)
+        return not state.stale_snapshots
 
     async def _kill_orphans(self, state: _E2BSandboxState) -> None:
         for sandbox in list(state.orphans):

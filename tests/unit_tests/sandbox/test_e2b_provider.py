@@ -1743,6 +1743,7 @@ class RemoteFakeSandbox:
     create_delay = 0.0
     snapshot_outcomes: list[object] = []
     snapshot_delay = 0.0
+    delete_outcomes: list[object] = []
     kill_outcomes: list[object] = []
 
     def __init__(self, remote: FakeRemote) -> None:
@@ -1789,6 +1790,10 @@ class RemoteFakeSandbox:
 
     @classmethod
     async def delete_snapshot(cls, snapshot_id, **kwargs) -> bool:
+        if cls.delete_outcomes:
+            outcome = cls.delete_outcomes.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
         cls.deleted_snapshots.append(snapshot_id)
         return cls.snapshots.pop(snapshot_id, None) is not None
 
@@ -1854,6 +1859,7 @@ def gateway(monkeypatch: pytest.MonkeyPatch) -> dict[str, FakeRemote]:
     RemoteFakeSandbox.create_delay = 0.0
     RemoteFakeSandbox.snapshot_outcomes = []
     RemoteFakeSandbox.snapshot_delay = 0.0
+    RemoteFakeSandbox.delete_outcomes = []
     RemoteFakeSandbox.kill_outcomes = []
     sdk = _fake_sdk()
     sdk.AsyncSandbox = RemoteFakeSandbox
@@ -2014,6 +2020,31 @@ class TestIdlePause:
         assert ("connect", 3600) not in remote.events[remote.events.index(("exec", "two")) :]
         get_info.assert_not_awaited()
 
+    async def test_explicit_pause_after_an_idle_pause_succeeds(self, gateway: dict[str, FakeRemote]) -> None:
+        provider = _idle_provider()
+        handle = await provider.create(_spec())
+        remote = gateway[handle.sandbox_id]
+        assert remote.state == "paused"
+        # The idle timer already paused it: a second pause would get a 409, so none is sent.
+        await provider.pause(handle)
+        assert _kinds(remote).count("pause") == 1
+        assert await provider.status(handle) is SandboxStatus.PAUSED
+        assert (await provider.exec(handle, "true")).return_code == 0
+        await provider.close(handle)
+
+    async def test_explicit_pause_after_a_failed_idle_pause_pauses_again(self, gateway: dict[str, FakeRemote]) -> None:
+        provider = _idle_provider()
+        handle = await provider.create(_spec())
+        remote = gateway[handle.sandbox_id]
+        remote.pause_outcomes = [ConnectionError("lost")]
+        await provider.exec(handle, "one")
+        await asyncio.sleep(0.01)
+        assert remote.state == "running"  # the idle pause never reached the server
+        await provider.pause(handle)
+        assert remote.state == "paused"
+        assert _kinds(remote).count("pause") == 3
+        await provider.close(handle)
+
     async def test_explicit_pause_raises_when_refused(self, gateway: dict[str, FakeRemote]) -> None:
         provider = _idle_provider(idle_s=60.0)
         handle = await provider.create(_spec())
@@ -2144,7 +2175,28 @@ class TestIdlePause:
         remote.pause_delay = 0.05
         await asyncio.sleep(0.03)
         await provider.aclose()
-        assert remote.events[-1] == ("paused",)
+        # The pause finishes first; the sandbox is then killed, since a paused one never reaches its TTL.
+        assert remote.events[-2:] == [("paused",), ("kill",)]
+
+    async def test_aclose_kills_sandboxes_left_paused_and_leaves_running_ones(
+        self, gateway: dict[str, FakeRemote]
+    ) -> None:
+        provider = _idle_provider()
+        paused = await provider.create(_spec())
+        pinned = await provider.create(_spec())
+        await provider.serialize_handle(pinned)
+        assert (gateway[paused.sandbox_id].state, gateway[pinned.sandbox_id].state) == ("paused", "running")
+        await provider.aclose()
+        assert gateway[paused.sandbox_id].state == "killed"
+        assert gateway[pinned.sandbox_id].state == "running"  # still reclaimed at its TTL
+
+    async def test_aclose_leaves_a_sandbox_inside_its_idle_timeout_running(
+        self, gateway: dict[str, FakeRemote]
+    ) -> None:
+        provider = _idle_provider(idle_s=60.0)
+        handle = await provider.create(_spec())
+        await provider.aclose()
+        assert gateway[handle.sandbox_id].state == "running"
 
 
 def test_sync_sandbox_idle_pause_round_trip(gateway: dict[str, FakeRemote]) -> None:
@@ -2361,6 +2413,58 @@ class TestSuspend:
         provider = _suspend_provider()
         await provider.create(_spec())
         await provider.aclose()
+        assert RemoteFakeSandbox.snapshots == {}
+
+    async def test_close_keeps_a_snapshot_it_could_not_delete_for_the_next_close(
+        self, gateway: dict[str, FakeRemote]
+    ) -> None:
+        provider = _suspend_provider(operations={"retries": 0})
+        handle = await provider.create(_spec())
+        RemoteFakeSandbox.delete_outcomes = [ConnectionError("store down")]
+        with pytest.raises(RuntimeError, match=r"snap-1 .*close\(\) can be retried"):
+            await provider.close(handle)
+        assert list(RemoteFakeSandbox.snapshots) == ["snap-1"]
+        assert handle.sandbox_id in provider._states
+        await provider.close(handle)
+        assert RemoteFakeSandbox.snapshots == {} and provider._states == {}
+
+    async def test_aclose_deletes_a_snapshot_a_failed_close_left(self, gateway: dict[str, FakeRemote]) -> None:
+        provider = _suspend_provider(operations={"retries": 0})
+        handle = await provider.create(_spec())
+        RemoteFakeSandbox.delete_outcomes = [ConnectionError("store down")]
+        with pytest.raises(RuntimeError, match="can be retried"):
+            await provider.close(handle)
+        await provider.aclose()
+        assert RemoteFakeSandbox.snapshots == {}
+
+    async def test_restore_retries_a_snapshot_delete_that_failed(self, gateway: dict[str, FakeRemote]) -> None:
+        provider = _suspend_provider(operations={"retries": 0})
+        handle = await provider.create(_spec())
+        state = provider._states[handle.sandbox_id]
+        RemoteFakeSandbox.delete_outcomes = [ConnectionError("store down")]
+        # The request itself succeeds; only the cleanup of the snapshot it restored from failed.
+        assert (await provider.exec(handle, "one")).return_code == 0
+        await asyncio.sleep(0.01)
+        assert state.stale_snapshots == ["snap-1"]
+        assert sorted(RemoteFakeSandbox.snapshots) == ["snap-1", "snap-2"]
+        assert (await provider.exec(handle, "two")).return_code == 0
+        await asyncio.sleep(0.01)
+        assert state.stale_snapshots == []
+        assert sorted(RemoteFakeSandbox.snapshots) == ["snap-3"]
+        await provider.close(handle)
+        assert RemoteFakeSandbox.snapshots == {}
+
+    @pytest.mark.parametrize("cleanup", ["close", "aclose"])
+    async def test_close_and_aclose_delete_snapshots_a_restore_could_not(
+        self, gateway: dict[str, FakeRemote], cleanup: str
+    ) -> None:
+        provider = _suspend_provider(operations={"retries": 0})
+        handle = await provider.create(_spec())
+        RemoteFakeSandbox.delete_outcomes = [ConnectionError("store down")]
+        await provider.exec(handle, "one")
+        await asyncio.sleep(0.01)
+        assert sorted(RemoteFakeSandbox.snapshots) == ["snap-1", "snap-2"]
+        await (provider.close(handle) if cleanup == "close" else provider.aclose())
         assert RemoteFakeSandbox.snapshots == {}
 
     async def test_serialize_restores_the_sandbox_and_names_the_one_now_running(
