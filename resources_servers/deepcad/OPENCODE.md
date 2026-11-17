@@ -95,7 +95,48 @@ python -m pytest resources_servers/deepcad/tests/test_opencode_sessions.py \
 ```
 
 Automated tests cover resource sessions, final-file authority, retained source,
-cleanup/retries, prompt/image preservation, and stock-harness input/config
-compatibility. They do not establish Docker or real-model rollout success.
-A fresh Linux image build, render/edit model smoke, and distributed token/media
-capture validation are required before marking this implementation production-ready.
+cleanup/retries, prompt/image preservation, and stock-harness input/config compatibility.
+
+A Linux ARM64 smoke on 2026-11-16 used stock OpenCode 1.17.11, the Mixed76 step-76
+vision checkpoint, a 131,072-token context setting, Apptainer workspaces, and Enroot
+grading. All five synthetic tasks ran twice, with explicit instructions to render
+a wrong draft, inspect the preview, edit, and render again; the smoke allowed 20 steps.
+
+- All ten episodes collected `model.py` and graded without masking or failure.
+  Mean B-rep IoU was 1.0 to floating-point tolerance.
+- All ten saved rollouts retained their prompts and three decodable target PNGs.
+  Each episode rendered twice and read at least one preview (14 preview reads total).
+  Recorded model requests contained the actual additional preview PNGs, not only
+  text acknowledging a read. These are controlled smoke results, not evidence of
+  spontaneous feedback use or benchmark quality.
+- Raw OpenCode `/run` responses did not carry token arrays. Gym's normal observation
+  enrichment and token finalizer produced 72 token-bearing model calls across all
+  ten episodes, with no token masks, unresolved parents, or dropped generated tokens.
+  All 62 captured parent/child prefixes matched exactly, and token/log-probability
+  arrays had equal lengths and finite log probabilities.
+- Cleanup left no harness processes, listening service ports, Apptainer instances,
+  or verifier sandboxes. Single-turn and reference/known-bad baseline results are
+  recorded in the [component README](README.md#inputs-and-tests).
+
+The initial standalone configuration masked six of ten token reconstructions and
+scored the sphere at 0.666667. Preserving prior reasoning in the chat template fixed
+all ten reconstructions in the repeat. The diagnostic configuration used:
+
+```yaml
+observability_enabled: true
+model_call_capture_dir: /tmp/cad-model-calls
+token_id_capture: {enabled: true, all_agents: true, dir: /tmp/cad-tokens}
+policy_model:
+  responses_api_models:
+    vllm_model:
+      return_token_id_information: true
+      request_prompt_and_generation_token_ids: true
+      supply_prefix_token_ids: false  # Standalone diagnostic only; native training keeps prefix supply.
+      extra_body:
+        chat_template_kwargs: {enable_thinking: true, truncate_history_thinking: false}
+```
+
+The standalone backend lacks `required_prefix_token_ids`, so this smoke disabled
+prefix supply and checked the actual generation-time prefixes instead. Native
+training retains exact-prefix supply. This does not validate distributed tensor/media
+handoff, a full 128k-window workload, or the default Docker image and its isolation.

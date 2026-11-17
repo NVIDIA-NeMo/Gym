@@ -99,9 +99,16 @@ gym eval run --no-serve --agent deepcad_simple_agent \
   --output resources_servers/deepcad/data/example_rollouts.jsonl --limit 5
 ```
 
-The committed records use the Mixed76 checkpoint through the single-turn
-Environment Server on HSG, with Enroot and CadQuery 2.8.0. The Enroot deployment
-sets `bypass_entrypoint: false`. Docker and OpenCode require separate live checks.
+The committed records are real single-turn responses from the Mixed76 step-76
+checkpoint, with prompt/generation token IDs and log probabilities. A Linux ARM64
+smoke ran all five tasks twice through the Environment Server with Enroot and
+CadQuery 2.8.0 (`bypass_entrypoint: false`): mean B-rep IoU 0.933333, no masks or
+failures. The sphere scored 0.666667 on both runs; the other tasks scored 1.0.
+All ten records retained their prompts and three decodable target PNGs.
+Reference-as-answer baselines scored 1.0 on every task; a valid, severely
+mismatched thin plate scored between 0 and 1.91e-9.
+See [OpenCode validation](OPENCODE.md#validation) for multi-turn results and the
+remaining token-continuity and Docker validation gaps.
 
 `dataset/prepare_gym.py` prepares images and task rows from DeepCAD construction
 histories. `dataset/augment_inputs.py` supplies deterministic axis/diagonal view
