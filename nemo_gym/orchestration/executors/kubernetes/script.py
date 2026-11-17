@@ -233,7 +233,10 @@ def _driver_command(
         # A task target goes first (`gym eval run` reads its first bare token as TARGET), and its rows live in the
         # run directory, not in the fresh checkout this job works in.
         target_args = render_target_args(
-            benchmark.target, benchmark.agent, benchmark.sandbox, f"{run_dir}/{ARTIFACTS_DIRNAME}/harbor"
+            benchmark.target,
+            agent=benchmark.agent,
+            sandbox=benchmark.sandbox,
+            output_root=f"{run_dir}/{ARTIFACTS_DIRNAME}/harbor",
         )
         gym_cmd = render_gym_cmd(
             "eval run", "GYM_CMD", target_args + [output_path] + extra_flags + flatten_run_args(benchmark.run)

@@ -44,7 +44,7 @@ def flatten_run_args(run: dict[str, Any], prefix: str = "") -> list[str]:
     return args
 
 
-def render_target_args(target: str | None, agent: str | None, sandbox: str | None, output_root: str) -> list[str]:
+def render_target_args(target: str | None, *, agent: str | None, sandbox: str | None, output_root: str) -> list[str]:
     """The shell-quoted TARGET, ``--agent``, ``--sandbox`` and output root of a task run, which go ahead of its
     Hydra overrides.
 

@@ -3533,13 +3533,13 @@ def test_a_task_target_with_an_empty_prepare_runs_no_separate_preparation(tmp_pa
 def test_a_task_target_is_shell_quoted():
     from nemo_gym.orchestration.executors.utils import render_target_args
 
-    assert render_target_args("/data/my tasks", "opencode_agent", None, "/jobs/a b") == [
+    assert render_target_args("/data/my tasks", agent="opencode_agent", sandbox=None, output_root="/jobs/a b") == [
         "'/data/my tasks'",
         "--agent",
         "opencode_agent",
         "'+harbor_output_root=/jobs/a b'",
     ]
-    assert render_target_args(None, None, None, "/jobs") == []
+    assert render_target_args(None, agent=None, sandbox=None, output_root="/jobs") == []
 
 
 @pytest.mark.parametrize(
@@ -3549,7 +3549,9 @@ def test_a_rendered_output_root_is_the_same_path_after_the_shell_and_hydra(root)
     from nemo_gym.data.tasks.harbor.prepare import output_root_from_overrides
     from nemo_gym.orchestration.executors.utils import render_target_args
 
-    words = shlex.split(" ".join(render_target_args("/data/t", "opencode_agent", None, root)))
+    words = shlex.split(
+        " ".join(render_target_args("/data/t", agent="opencode_agent", sandbox=None, output_root=root))
+    )
     token = next(word for word in words if word.startswith("+harbor_output_root="))
 
     assert str(output_root_from_overrides([token])) == root
@@ -3571,6 +3573,13 @@ def test_a_benchmark_without_a_target_renders_no_target_arguments(tmp_path):
         (
             {"target": "/data/bmb", "agent": "opencode_agent", "command": "harness", "run": {}},
             "both `command` and `target`",
+        ),
+        ({"target": "", "agent": "opencode_agent"}, "at least 1 character"),
+        ({"target": "/data/bmb", "agent": ""}, "at least 1 character"),
+        ({"target": "/data/bmb", "agent": "opencode_agent", "run": {"exclude_tasks": "bad-*"}}, "`exclude_tasks`"),
+        (
+            {"target": "/data/bmb", "agent": "opencode_agent", "run": {"only_tasks": "a", "skip_unloadable": True}},
+            "`only_tasks`, `skip_unloadable`",
         ),
     ],
 )

@@ -4894,3 +4894,28 @@ class TestHarborOutputRoot:
         monkeypatch.chdir(tmp_path)
         with pytest.raises(SystemExit, match="path string"):
             self._prepare(self._target_args(tmp_path), ["+harbor_output_root=3"])
+
+    @pytest.mark.parametrize("overrides", [[], ["+harbor_output_root={root}"]])
+    def test_the_oracle_run_prepares_under_the_output_root(self, tmp_path, monkeypatch, overrides):
+        """`gym eval run TARGET --agent harbor_oracle_agent` goes through the validation path; with the output root set
+        it prepares and renders there too, keeping its own validation/ folder, so a submitted oracle run does not
+        write into the checkout."""
+        root = tmp_path / "job" / "artifacts" / "harbor"
+        overrides = [token.format(root=root) for token in overrides]
+        seen = {}
+
+        class Stop(Exception):
+            pass
+
+        def capture(target, **kwargs):
+            seen.update(kwargs)
+            raise Stop
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(cli_eval, "prepare_target", capture)
+        args = self._target_args(tmp_path)
+        with pytest.raises(Stop):
+            cli_eval.validate_target(args, overrides, agent=resolve_agent("harbor_oracle_agent"))
+        expected = root if overrides else Path("results/harbor")
+        assert seen["output_root"] == expected / "validation"
+        assert seen["render_root"] == expected

@@ -275,7 +275,7 @@ Schema validation runs when the config is composed, before anything is rendered 
 - **Multi-node data parallelism** requires `number_of_instances` to be evenly divisible by the number of nodes, unless the Ray Serve gateway is in use.
 - **Policy wiring** conflicts, as described above.
 - **Benchmark `command`** combined with `run` or `resumable` is rejected.
-- **Benchmark `target`** without an `agent`, `agent` or `sandbox` without a `target`, or `target` combined with `command` is rejected.
+- **Benchmark `target`** without an `agent`, `agent` or `sandbox` without a `target`, an empty `target` or `agent`, `target` combined with `command`, or `target` with `only_tasks`, `exclude_tasks` or `skip_unloadable` under `run` (`gym eval run` takes those only as command-line flags) is rejected.
 - **Pool agreement** (checked at render time, not by `--resolve-only`). Pools used together by one job must agree on `partition`, tasks, GPUs, and extra directives. A mismatch fails `--dry-run` and the real submit.
 
 Mount source existence, SSH reachability, and OTel destination checks happen later, at submit time.

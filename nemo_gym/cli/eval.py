@@ -87,7 +87,6 @@ from nemo_gym.data.tasks.harbor.materialize import (
     write_rows,
 )
 from nemo_gym.data.tasks.harbor.prepare import (
-    DEFAULT_OUTPUT_ROOT,
     HARBOR_TARGET_KEY,
     ORACLE_AGENT,
     AgentSelection,
@@ -2015,12 +2014,14 @@ def validate_target(
         if sandbox is not None:
             resolve_sandbox_config(sandbox)
         preparation = preparation_overrides if preparation_overrides is not None else overrides
+        # `+harbor_output_root` (a submitted run's job directory) moves both, as it does for a model's run.
+        output_root = output_root_from_overrides(preparation)
         prepared = prepare_target(
             args.target,
-            output_root=DEFAULT_OUTPUT_ROOT / "validation",
+            output_root=output_root / "validation",
             # A template renders where `gym eval run` renders it: one rendered dataset, one set of records (an image
             # built for it once), while the oracle's rows and results stay under validation/.
-            render_root=DEFAULT_OUTPUT_ROOT,
+            render_root=output_root,
             exclude=_patterns(args, "exclude_tasks"),
             only=_patterns(args, "only_tasks"),
             build=build_options_from_overrides(preparation),

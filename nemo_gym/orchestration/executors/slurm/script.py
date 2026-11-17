@@ -1209,7 +1209,10 @@ def build_sbatch_script(
         # A task target goes first (`gym eval run` reads its first bare token as TARGET), and its rows live in the
         # job directory, not in the fresh checkout this allocation works in.
         target_args = render_target_args(
-            benchmark.target, benchmark.agent, benchmark.sandbox, f"{remote_bench_dir}/{ARTIFACTS_DIRNAME}/harbor"
+            benchmark.target,
+            agent=benchmark.agent,
+            sandbox=benchmark.sandbox,
+            output_root=f"{remote_bench_dir}/{ARTIFACTS_DIRNAME}/harbor",
         )
         gym_cmd = render_gym_cmd(
             "eval run", "GYM_CMD", target_args + [output_path] + extra_flags + flatten_run_args(run_args)
