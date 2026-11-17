@@ -903,7 +903,7 @@ class ChatCompletionsConverter(BaseModel):
         for background on reasoning in the Responses API.
         """
         blocks = self.decode_thinking_blocks(m.get("encrypted_content")) if self.preserve_thinking_blocks else None
-        if blocks is not None:
+        if blocks is not None and not m.get("content"):
             # The signed blocks carry the thinking; the summary is their readable copy and is not replayed.
             state.assistant_item_buffered = True
             state.thinking_blocks_buffer.extend(blocks)

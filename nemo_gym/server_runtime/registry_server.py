@@ -121,7 +121,7 @@ def served_global_config_dict(global_config_dict: DictConfig) -> DictConfig:
     `head_server_serve_credentials` is set. The route has no authentication and the head server shares its host's
     loopback with whatever runs there (agent sandboxes with host networking), while servers Gym launches read the
     unmasked config from NEMO_GYM_CONFIG_DICT; HTTP clients use this copy for routing, not for credentials."""
-    if global_config_dict.get(HEAD_SERVER_SERVE_CREDENTIALS_KEY_NAME):
+    if global_config_dict.get(HEAD_SERVER_SERVE_CREDENTIALS_KEY_NAME) is True:
         return global_config_dict
     container = OmegaConf.to_container(global_config_dict, resolve=False, throw_on_missing=False)
     return OmegaConf.create(mask_credentials(container))

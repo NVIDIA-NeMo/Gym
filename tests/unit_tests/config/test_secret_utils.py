@@ -245,3 +245,181 @@ def test_mask_credentials_masks_only_credential_values() -> None:
     }
     # A copy: the input is untouched.
     assert config["policy_api_key"] == "sk-live"
+
+
+@pytest.mark.parametrize("header_first", [False, True])
+def test_mask_credentials_follows_shared_header_and_scalar_sources(header_first: bool) -> None:
+    config = {
+        "shared": {"x-litellm-key": "sentinel-header", "x-trace-id": "trace-kept"},
+        "alias": "${shared}",
+        "second_alias": "${alias}",
+        "openai_default_headers": "${second_alias}",
+        "values": ["not-secret", "sentinel-scalar"],
+        "policy_api_key": "${values[1]}",
+        "api_key_via_container": "${alias[x-litellm-key]}",
+        "cache_key": "cache-kept",
+        "max_tokens": 4096,
+        "unrelated": "${oc.env:MASK_TEST_UNSET}",
+    }
+    if header_first:
+        config = dict(reversed(list(config.items())))
+    masked = mask_credentials(config)
+    assert "sentinel" not in repr(masked)
+    assert masked["shared"] == {"x-litellm-key": "****", "x-trace-id": "trace-kept"}
+    assert masked["values"] == ["not-secret", "****"]
+    assert masked["openai_default_headers"] == "${second_alias}"
+    assert OmegaConf.create(masked).openai_default_headers["x-trace-id"] == "trace-kept"
+    assert OmegaConf.create(masked).openai_default_headers["x-litellm-key"] == "****"
+    assert masked["cache_key"] == "cache-kept" and masked["max_tokens"] == 4096
+    assert masked["unrelated"] == "${oc.env:MASK_TEST_UNSET}"
+    assert config["shared"]["x-litellm-key"] == "sentinel-header"
+    assert config["values"][1] == "sentinel-scalar"
+
+
+def test_mask_credentials_follows_relative_and_embedded_references() -> None:
+    config = {
+        "sources": ["sentinel-root"],
+        "nested": {
+            "values": [{"value": "sentinel-nested", "ordinary": "kept"}],
+            "api_key": "${.values[0].value}",
+            "headers": {"Authorization": "Bearer ${...sources[0]}"},
+        },
+    }
+    masked = mask_credentials(config)
+    assert "sentinel" not in repr(masked)
+    assert masked["sources"] == ["****"]
+    assert masked["nested"]["values"] == [{"value": "****", "ordinary": "kept"}]
+    assert masked["nested"]["api_key"] == "****"
+    assert masked["nested"]["headers"]["Authorization"] == "****"
+    assert config["sources"] == ["sentinel-root"]
+
+
+def test_mask_credentials_masks_url_password_and_its_source() -> None:
+    config = {
+        "shared": "sentinel-password",
+        "mlflow_tracking_uri": "https://user:prefix${shared}suffix@host/path",
+        "unrelated": "${oc.env:MASK_TEST_UNSET}",
+    }
+    masked = mask_credentials(config)
+    assert masked["mlflow_tracking_uri"] == "https://user:****@host/path"
+    assert masked["shared"] == "****"
+    assert "sentinel" not in repr(masked)
+    assert config["shared"] == "sentinel-password"
+    # Other uses of the existing URL helper keep interpolations unchanged.
+    assert mask_url_passwords(config["mlflow_tracking_uri"]) == config["mlflow_tracking_uri"]
+
+
+def test_mask_credentials_never_evaluates_environment_or_custom_resolvers(monkeypatch) -> None:
+    monkeypatch.delenv("MASK_TEST_UNSET", raising=False)
+    called = []
+    OmegaConf.register_new_resolver("mask_test_resolver", lambda: called.append(True), replace=True)
+    try:
+        config = {
+            "env_name": "MASK_TEST_UNSET",
+            "default_value": "sentinel-default",
+            "api_key": "${oc.env:${env_name},${default_value}}",
+            "unrelated": "${mask_test_resolver:}",
+            "unrelated_env": "${oc.env:MASK_TEST_UNSET}",
+        }
+        masked = mask_credentials(config)
+        assert masked["api_key"] == masked["default_value"] == "****"
+        assert masked["env_name"] == "MASK_TEST_UNSET"
+        assert masked["unrelated"] == "${mask_test_resolver:}"
+        assert masked["unrelated_env"] == "${oc.env:MASK_TEST_UNSET}"
+        with pytest.raises(ValueError, match="Cannot safely mask"):
+            mask_credentials({"api_key": "${mask_test_resolver:}"})
+        assert not called
+    finally:
+        OmegaConf.clear_resolver("mask_test_resolver")
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"which": "value", "values": {"value": "sentinel"}, "api_key": "${values.${which}}"},
+        {"api_key": "${custom:sentinel}"},
+        {"extra_headers": "${oc.env:MASK_TEST_UNSET}"},
+        {"first": "${second}", "second": "${first}", "api_key": "${first.value}"},
+    ],
+)
+def test_mask_credentials_refuses_unanalyzable_sensitive_references(config) -> None:
+    with pytest.raises(ValueError, match="Cannot safely mask") as error:
+        mask_credentials(config)
+    assert "sentinel" not in str(error.value)
+
+
+def test_mask_credentials_handles_cycles_and_escaped_interpolation_literals() -> None:
+    config = {
+        "first": "${second}",
+        "second": "${first}",
+        "api_key": "${first}",
+        "ordinary": r"\${not_a_reference}",
+        "extra_headers": {"x-trace-id": r"\${not_a_reference}"},
+    }
+    masked = mask_credentials(config)
+    assert masked["first"] == masked["second"] == masked["api_key"] == "****"
+    assert masked["ordinary"] == config["ordinary"]
+    assert masked["extra_headers"] == config["extra_headers"]
+
+
+@pytest.mark.parametrize("present", [False, True])
+def test_mask_credentials_supports_static_select_and_unresolved_fallbacks(present: bool, monkeypatch) -> None:
+    monkeypatch.delenv("MASK_TEST_UNSET", raising=False)
+    config = {
+        "default_value": "sentinel-default",
+        "nested": {
+            "value": "sentinel-relative",
+            "api_key": "${oc.select:.value,unused}",
+            "openai_api_key": "${oc.select:shared,${oc.env:MASK_TEST_UNSET,${default_value}}}",
+            "password": "${oc.select:missing.path,null}",
+        },
+        "unrelated": "${oc.env:MASK_TEST_UNSET}",
+    }
+    if present:
+        config["shared"] = "sentinel-selected"
+    masked = mask_credentials(config)
+    assert "sentinel" not in repr(masked)
+    assert masked["default_value"] == "****"
+    assert masked["nested"] == {"value": "****", "api_key": "****", "openai_api_key": "****", "password": "****"}
+    assert masked["unrelated"] == config["unrelated"]
+    assert config["default_value"] == "sentinel-default"
+
+
+@pytest.mark.parametrize("present", [False, True])
+def test_mask_credentials_supports_repository_decode_select_wrapper(present: bool) -> None:
+    # The critpt recipe decodes the selected credential or null. Its dependency can be found without decoding it.
+    config = {"api_key": "${oc.decode:${oc.select:shared,null}}"}
+    if present:
+        config["shared"] = "sentinel-selected"
+    masked = mask_credentials(config)
+    assert masked["api_key"] == "****"
+    assert "sentinel" not in repr(masked)
+    if present:
+        assert masked["shared"] == "****"
+        assert config["shared"] == "sentinel-selected"
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"which": "value", "api_key": "${oc.select:${which},unused}"},
+        {"extra_headers": "${oc.select:shared,{x-litellm-key:sentinel}}"},
+        {"api_key": "${oc.decode:${oc.env:MASK_TEST_UNSET}}"},
+        {"shared": r"\${unclassified}", "unclassified": "sentinel", "api_key": "${oc.decode:${shared}}"},
+        {"shared": "{unclassified}", "unclassified": "sentinel", "api_key": "${oc.decode:$${shared}}"},
+        {"unclassified": "sentinel", "api_key": r"${oc.decode:${oc.select:missing,'\${unclassified}'}}"},
+        {
+            "unclassified": "sentinel",
+            "api_key": r"${oc.decode:${oc.select:missing,${oc.select:also_missing,'\${unclassified}'}}}",
+        },
+        {
+            "piece": "{unclassified}",
+            "unclassified": "sentinel",
+            "api_key": "${oc.decode:${oc.select:missing,$${piece}}}",
+        },
+    ],
+)
+def test_mask_credentials_refuses_dynamic_select_or_decode(config) -> None:
+    with pytest.raises(ValueError, match="Cannot safely mask") as error:
+        mask_credentials(config)
+    assert "sentinel" not in str(error.value)

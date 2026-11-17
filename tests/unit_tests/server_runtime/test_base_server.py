@@ -197,6 +197,66 @@ class TestServerUtils:
         # The supervisor's own config (and so NEMO_GYM_CONFIG_DICT for the servers it launches) is untouched.
         assert global_config_dict.policy_api_key == "sk-live-sentinel"
 
+    @mark.parametrize("opt_out", [None, False, "false", "true", 0, 1, "${oc.env:TEST_SERVE_CREDENTIALS}", True])
+    def test_HeadServer_serves_credentials_only_for_boolean_true(self, monkeypatch: MonkeyPatch, opt_out) -> None:
+        from fastapi.testclient import TestClient
+
+        monkeypatch.setenv("TEST_SERVE_CREDENTIALS", "false")
+        global_config_dict = DictConfig({"policy_api_key": "sk-live-sentinel"})
+        if opt_out is not None:
+            global_config_dict.head_server_serve_credentials = opt_out
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.registry_server,
+            "get_global_config_dict",
+            MagicMock(return_value=global_config_dict),
+        )
+        head_server = HeadServer(config=BaseServerConfig(host="", port=0))
+        with TestClient(head_server.setup_webserver()) as client:
+            response = client.get("/global_config_dict_yaml")
+        assert response.status_code == 200
+        served = OmegaConf.create(response.json())
+        assert served.policy_api_key == ("sk-live-sentinel" if opt_out is True else "****")
+        assert global_config_dict.policy_api_key == "sk-live-sentinel"
+
+    def test_HeadServer_masks_referenced_header_credentials(self, monkeypatch: MonkeyPatch) -> None:
+        from fastapi.testclient import TestClient
+
+        global_config_dict = DictConfig(
+            {
+                "shared": {"x-litellm-key": "sk-shared-sentinel", "x-trace-id": "trace-id"},
+                "header_alias": "${shared}",
+                "policy_model": {
+                    "openai_default_headers": "${header_alias}",
+                    "port": 1234,
+                },
+                "opaque_value": "sk-scalar-sentinel",
+                "api_key": "${opaque_value}",
+                "cache_key": "cache-id",
+                "max_tokens": 4096,
+                "unrelated": "${oc.env:UNSET_UNRELATED_VARIABLE}",
+            }
+        )
+        monkeypatch.delenv("UNSET_UNRELATED_VARIABLE", raising=False)
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.registry_server,
+            "get_global_config_dict",
+            MagicMock(return_value=global_config_dict),
+        )
+        head_server = HeadServer(config=BaseServerConfig(host="", port=0))
+        with TestClient(head_server.setup_webserver()) as client:
+            response = client.get("/global_config_dict_yaml")
+        assert response.status_code == 200 and "sentinel" not in response.text
+        served = OmegaConf.create(response.json())
+        assert served.policy_model.openai_default_headers["x-litellm-key"] == "****"
+        assert served.policy_model.openai_default_headers["x-trace-id"] == "trace-id"
+        assert served.shared["x-litellm-key"] == "****"
+        assert served.opaque_value == served.api_key == "****"
+        assert served.cache_key == "cache-id" and served.max_tokens == 4096
+        assert served.policy_model.port == 1234
+        assert OmegaConf.to_container(served, resolve=False)["unrelated"] == "${oc.env:UNSET_UNRELATED_VARIABLE}"
+        assert global_config_dict.shared["x-litellm-key"] == "sk-shared-sentinel"
+        assert global_config_dict.opaque_value == "sk-scalar-sentinel"
+
     async def test_HeadServer_global_config_dict_yaml_serves_credentials_when_asked(
         self, monkeypatch: MonkeyPatch
     ) -> None:

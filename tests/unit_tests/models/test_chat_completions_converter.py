@@ -2605,10 +2605,12 @@ def _assistant_with_thinking() -> dict:
     }
 
 
-def test_preserve_thinking_blocks_round_trip() -> None:
+@pytest.mark.parametrize("content", [None, []])
+def test_preserve_thinking_blocks_round_trip(content) -> None:
     converter = ChatCompletionsConverter(return_token_id_information=False, preserve_thinking_blocks=True)
     output = converter.postprocess_assistant_message_dict(_assistant_with_thinking())
     reasoning = [o for o in output if o.type == "reasoning"]
+    reasoning[0].content = content
     assert len(reasoning) == 1
     assert reasoning[0].summary[0].text == "Use ls -a."
     assert ChatCompletionsConverter.decode_thinking_blocks(reasoning[0].encrypted_content) == SIGNED_BLOCKS
@@ -2633,6 +2635,23 @@ def test_preserve_thinking_blocks_round_trip() -> None:
     # Validation keeps the field on the outbound body.
     dumped = params.model_dump(exclude_none=True)
     assert next(m for m in dumped["messages"] if m["role"] == "assistant")["thinking_blocks"] == SIGNED_BLOCKS
+
+
+def test_preserve_thinking_blocks_does_not_discard_separate_reasoning_content() -> None:
+    converter = ChatCompletionsConverter(return_token_id_information=False, preserve_thinking_blocks=True)
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {
+                "type": "reasoning",
+                "id": "rs_1",
+                "summary": [{"type": "summary_text", "text": "A readable summary"}],
+                "encrypted_content": converter.encode_thinking_blocks(SIGNED_BLOCKS),
+                "content": [{"type": "reasoning_text", "text": "Keep this separate reasoning"}],
+            }
+        ]
+    )
+    with pytest.raises(NotImplementedError, match="reasoning content/encrypted_content cannot be preserved"):
+        converter.responses_to_chat_completion_create_params(params)
 
 
 def test_thinking_blocks_ignored_unless_enabled() -> None:

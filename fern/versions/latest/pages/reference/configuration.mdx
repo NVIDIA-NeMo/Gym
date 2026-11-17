@@ -452,7 +452,9 @@ wandb_api_key: your-wandb-key
 - **Default:** `false` — every non-empty string under a credential-shaped key (`*api_key*`, `*secret*`, `*password*`, `*credential*`, `*authorization*`, `*cookie*`, `token`, `*_token`, and a `*-key` / `*_key` header inside a `*headers` mapping, such as `x-litellm-key`) is served as `****`, interpolations included, and the password in any URL's user info is masked. Empty and unset (`???`) values stay visible, and so does every other setting, so clients can still route and read flags.
 - **Why:** anything that can reach the head server can read this route, including an agent sandbox that shares its network namespace.
 - **Effect on servers:** none. Gym-launched servers read their unmasked configuration from their environment, not from this route.
-- **When to set `true`:** only for a client that fetches credentials from the route itself.
+- **When to set `true`:** only for a client that fetches credentials from the route itself. This requires the boolean `true`; quoted strings such as `"false"` or `"true"` do not enable it.
+
+Masking follows static config references to their source values, including shared header mappings and URL passwords, while keeping ordinary headers and unrelated unresolved expressions intact. It inspects supported `oc.env`, `oc.select` and static-input `oc.decode` expressions without evaluating resolvers. Dynamic references, custom resolvers and runtime-backed decoding such as `oc.decode` of an environment value cannot be inspected safely, so the route refuses to serve those credential configs. Use static references or the supported expressions for credential values, and static references for header mappings.
 
 ### Multi-Node Configuration
 
