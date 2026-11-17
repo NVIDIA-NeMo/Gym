@@ -14,12 +14,17 @@ from resources_servers.swe_next.verification import VerificationResult
 from resources_servers.swebench.patch_capture import PatchCapture
 
 
+@pytest.fixture(autouse=True)
+def isolated_global_config(monkeypatch):
+    monkeypatch.setattr(app, "get_global_config_dict", lambda: {})
+
+
 @pytest.mark.parametrize("typed", [False, True])
 @pytest.mark.parametrize("completed", [False, True])
 def test_routes_capture_before_cleanup_and_mask_infrastructure(monkeypatch, tmp_path, typed, completed):
     sandboxes = []
 
-    async def create(self, body, files=None, *, session_id=None, verifier_session_id=None):
+    async def create(self, body, files=None, *, session_id=None, verifier_session_id=None, for_agent=False):
         sandbox = MagicMock()
         sandbox.sandbox_id = f"sb-{len(sandboxes)}"
         sandbox.exec = AsyncMock(return_value=SandboxExecResult(return_code=0, stdout="seed-base\n", stderr=""))
@@ -121,7 +126,7 @@ def test_routes_execute_capture_and_grading(monkeypatch, tmp_path, typed, outcom
     grading_calls = []
     capture_calls = []
 
-    async def create(self, body, files=None, *, session_id=None, verifier_session_id=None):
+    async def create(self, body, files=None, *, session_id=None, verifier_session_id=None, for_agent=False):
         sandbox = MagicMock()
         sandbox.sandbox_id = f"sb-{len(sandboxes)}"
         sandbox.stop = AsyncMock()
