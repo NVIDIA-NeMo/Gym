@@ -604,15 +604,28 @@ class HarborAgent(SimpleResponsesAPIAgent):
             result.exception_info is not None and result.exception_info.exception_type == "AgentTimeoutError"
             for result in [trial, *(trial.step_results or [])]
         )
+        agent = trial.config.agent
+        # Built-in controls produce a verifier grade without an LLM trajectory. Keep missing ATIF an error
+        # for custom agents, unverified controls, and failed trials; their result must not become a valid grade.
+        control_without_trajectory = (
+            agent.name in {"oracle", "nop"}
+            and agent.import_path is None
+            and bool(step_rewards[-1])
+            and all(result.exception_info is None for result in [trial, *(trial.step_results or [])])
+        )
         # An agent ended at its deadline may not have written its trajectory; its outcome is still the graded zero.
         trajectories = [
             Trajectory.model_validate_json(trajectory_path.read_text())
             for _, trajectory_path in path_entries
-            if not timed_out or trajectory_path.is_file()
+            if not (timed_out or control_without_trajectory) or trajectory_path.is_file()
         ]
         conversion_warnings: list[str] = []
         if len(trajectories) < len(path_entries):
-            conversion_warnings.append("the agent timed out before it wrote its trajectory")
+            conversion_warnings.append(
+                f"the {agent.name} control agent does not emit an ATIF trajectory"
+                if control_without_trajectory
+                else "the agent timed out before it wrote its trajectory"
+            )
         output = [self.convert_atif_to_gym_responses(trajectory, conversion_warnings) for trajectory in trajectories]
         output = output or [[]]
 

@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -351,7 +352,10 @@ def test_an_agent_timeout_without_a_test_result_is_a_terminal_graded_zero(tmp_pa
     trial = SimpleNamespace(
         id="trial-1",
         task_name="task",
-        config=SimpleNamespace(task=SimpleNamespace(get_local_path=lambda: task_dir)),
+        config=SimpleNamespace(
+            task=SimpleNamespace(get_local_path=lambda: task_dir),
+            agent=agent.config.job.agents[0],
+        ),
         exception_info=timeout,
         verifier_result=None,
         step_results=[],
@@ -378,6 +382,149 @@ def test_an_agent_timeout_without_a_test_result_is_a_terminal_graded_zero(tmp_pa
     assert row["response"]["output"] == []
     assert row["atif_conversion"]["warnings"] == ["the agent timed out before it wrote its trajectory"]
     assert "_ng_failure_class" not in row
+
+
+_CompletedTrial = Callable[..., tuple[HarborAgent, app.HarborRunRequest, Path]]
+
+
+@pytest.fixture
+def completed_trial(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _CompletedTrial:
+    """A real Harbor result schema; its saved agent identity differs from the server's OpenCode default."""
+    monkeypatch.setattr(app, "get_global_config_dict", lambda: {})
+    task_dir = tmp_path / "tasks" / "task"
+    task_dir.mkdir(parents=True)
+    app.TaskPaths(task_dir).instruction_path.write_text("Do the task.")
+    trial_dir = tmp_path / "jobs" / "job" / "trial"
+    trial_dir.mkdir(parents=True)
+    agent = HarborAgent.model_construct()
+    agent.config = app.HarborAgentConfig.model_validate(
+        {
+            "name": "harbor_agent_general",
+            "host": "0.0.0.0",
+            "port": 8080,
+            "entrypoint": "app.py",
+            "job": {
+                "jobs_dir": tmp_path / "jobs",
+                "datasets": [{"path": tmp_path / "tasks"}],
+                "agents": [{"name": "opencode", "model_name": "native-model"}],
+            },
+        }
+    )
+    body = app.HarborRunRequest.model_validate(
+        {
+            "task_name": "task",
+            app.TASK_INDEX_KEY_NAME: 0,
+            app.ROLLOUT_INDEX_KEY_NAME: 0,
+            "responses_create_params": {"input": []},
+        }
+    )
+
+    def write(
+        agent_name: str = "oracle",
+        *,
+        reward: float | dict[str, float] | None = 1.0,
+        import_path: str | None = None,
+        exception_info: dict[str, str] | None = None,
+    ) -> tuple[HarborAgent, app.HarborRunRequest, Path]:
+        trial = app.TrialResult.model_validate(
+            {
+                "task_name": "task",
+                "trial_name": "trial",
+                "trial_uri": trial_dir.as_uri(),
+                "task_id": {"path": str(task_dir)},
+                "task_checksum": "unit-test-task",
+                "config": {
+                    "task": {"path": str(task_dir)},
+                    "agent": {"name": agent_name, "import_path": import_path},
+                },
+                "agent_info": {"name": agent_name, "version": "1.0"},
+                "verifier_result": None
+                if reward is None
+                else {"rewards": reward if isinstance(reward, dict) else {"reward": reward}},
+                "exception_info": exception_info,
+            }
+        )
+        app.TrialPaths(trial_dir).result_path.write_text(trial.model_dump_json())
+        return agent, body, trial_dir
+
+    return write
+
+
+@pytest.mark.parametrize("agent_name,reward", [("oracle", 1.0), ("oracle", 0.0), ("nop", 0.0)])
+def test_control_without_a_trajectory_preserves_verifier_grade(
+    completed_trial: _CompletedTrial, agent_name: str, reward: float
+) -> None:
+    agent, body, trial_dir = completed_trial(agent_name, reward=reward)
+
+    row = agent.success_response(body, trial_dir).model_dump()
+
+    assert row["reward"] == reward
+    assert row["response"]["status"] == "completed"
+    assert row["response"]["output"] == []
+    assert row["response"]["usage"]["total_tokens"] == 0
+    assert row["mask_sample"] is False
+    assert row["failure_kind"] is None
+    assert "_ng_failure_class" not in row
+    assert row["atif_conversion"]["trajectories"] == []
+    assert row["atif_conversion"]["warnings"] == [f"the {agent_name} control agent does not emit an ATIF trajectory"]
+    assert not (app.TrialPaths(trial_dir).agent_dir / app.TaskPaths.TRAJECTORY_FILENAME).exists()
+
+
+@pytest.mark.parametrize(
+    "agent_name,import_path",
+    [("opencode", None), ("pi", None), ("oracle", "custom.agents:ModelAgent"), ("nop", "custom.agents:ModelAgent")],
+)
+def test_model_or_custom_agent_still_requires_a_trajectory(
+    completed_trial: _CompletedTrial, agent_name: str, import_path: str | None
+) -> None:
+    agent, body, trial_dir = completed_trial(agent_name, import_path=import_path)
+
+    with pytest.raises(FileNotFoundError, match="trajectory.json"):
+        agent.success_response(body, trial_dir)
+
+
+@pytest.mark.parametrize("reward", [None, {}], ids=["no-verification", "empty-rewards"])
+def test_control_without_verification_still_requires_a_trajectory(
+    completed_trial: _CompletedTrial, reward: dict[str, float] | None
+) -> None:
+    agent, body, trial_dir = completed_trial(reward=reward)
+
+    with pytest.raises(FileNotFoundError, match="trajectory.json"):
+        agent.success_response(body, trial_dir)
+
+
+def test_control_without_a_trajectory_preserves_alternative_reward_key(completed_trial: _CompletedTrial) -> None:
+    agent, body, trial_dir = completed_trial(reward={"score": 0.25})
+
+    row = agent.success_response(body, trial_dir).model_dump()
+
+    assert row["reward"] == 0.25
+    assert row["failure_kind"] is None
+    assert row["response"]["output"] == []
+
+
+def test_failed_control_does_not_get_the_missing_trajectory_exception(completed_trial: _CompletedTrial) -> None:
+    agent, body, trial_dir = completed_trial(
+        exception_info={
+            "exception_type": "RuntimeError",
+            "exception_message": "solution failed",
+            "exception_traceback": "",
+            "occurred_at": "2026-11-16T00:00:00Z",
+        }
+    )
+
+    with pytest.raises(FileNotFoundError, match="trajectory.json"):
+        agent.success_response(body, trial_dir)
+
+
+def test_malformed_control_trajectory_is_not_ignored(completed_trial: _CompletedTrial) -> None:
+    agent, body, trial_dir = completed_trial()
+    path = app.TrialPaths(trial_dir).agent_dir / app.TaskPaths.TRAJECTORY_FILENAME
+    path.parent.mkdir(parents=True)
+    path.write_text("not a trajectory")
+
+    with pytest.raises(app.ValidationError):
+        agent.success_response(body, trial_dir)
 
 
 @pytest.mark.asyncio

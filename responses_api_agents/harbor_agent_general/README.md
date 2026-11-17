@@ -91,6 +91,11 @@ The execution constraints above apply to both forms. Previously ignored conflict
 > also has no generic image-capability flag, so local-image support must be
 > validated per agent and model provider.
 
+The built-in `oracle` and `nop` controls are exceptions: a completed verifier result with nonempty rewards is returned with empty model
+output and zero token usage when they produce no trajectory. The `atif_conversion` warning records this absence.
+Custom agents, failed controls, and controls without verification do not receive this exception. Existing malformed
+trajectories still fail conversion.
+
 To inspect the exact agents and ATIF capabilities in the installed Harbor
 version:
 
