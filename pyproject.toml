@@ -283,10 +283,10 @@ ray = [
 mlflow = [
     # mlflow-skinny: used for interacting with the Gitlab model registry. We use the "skinny" version that does not have unnecessary dependencies.
     # mlflow dependency is necessary for importing. However, all of mlflow's dependencies that don't overlap with mlflow-skinny are excluded below.
-    # Updated Mon Sep 28, 2026 with mlflow>=3.16.1 (security bump)
+    # Updated Mon Nov 16, 2026 with mlflow>=3.18.0 (security bump)
     # License: Apache 2.0 https://github.com/mlflow/mlflow/blob/c6ce84e817897e1a0461632f8a06d4e5e4ac3726/LICENSE.txt
-    "mlflow-skinny>=3.16.1",
-    "mlflow>=3.16.1",
+    "mlflow-skinny>=3.18.0",
+    "mlflow>=3.18.0",
 
     # sqlparse: SQL parsing library (transitive dependency of mlflow-skinny, pinned for security)
     # mlflow-skinny only requires sqlparse<1,>=0.4.0, so it won't pull the fixed version on its own.
@@ -308,9 +308,9 @@ wandb = [
     "wandb>=0.30.0",
 
     # GitPython: Git interaction library (transitive dependency of wandb, pinned for security)
-    # Updated: Fri Sep 04, 2026 with GitPython>=3.1.61
+    # Updated: Mon Nov 16, 2026 with GitPython>=3.2.1 (security bump)
     # License: BSD 3-Clause https://github.com/gitpython-developers/GitPython/blob/main/LICENSE
-    "GitPython>=3.1.61",
+    "GitPython>=3.2.1",
 ]
 
 vllm = [
