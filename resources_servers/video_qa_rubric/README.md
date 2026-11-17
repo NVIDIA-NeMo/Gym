@@ -57,8 +57,12 @@ policy.
 | --- | --- | --- | --- |
 | `graded` | The judge's checked score | score / 100 | no |
 | `empty_answer` | No final answer (reasoning only, an unfinished reasoning block, an empty message) | 0, or `empty_answer_reward` | no |
-| `execution_failure` | A tool call in a single-turn row, or an agent run marked as failed | 0 | no |
-| `infrastructure_failure` | The model call or the agent's infrastructure failed | 0 | yes |
+| `execution_failure` | A tool call in a single-turn row, or an agent run whose response is `failed` or `incomplete` | 0 | no |
+| `infrastructure_failure` | The model call of a single-turn row failed | 0 | yes |
+
+Both failures are read from the response's own status with video_mcqa's `response_failure`, so a replayed row scores
+the same. In the agentic setting the Environment Server sends verify only the failed runs that its outcome policy
+scores, so a failed agent run is not masked.
 
 `empty_answer_reward` is a training option (for example `-0.5`). With it set, the answer must also be the last thing
 the model produced: an attempt that ended on a tool call, a tool result or reasoning gets `empty_answer_reward`
