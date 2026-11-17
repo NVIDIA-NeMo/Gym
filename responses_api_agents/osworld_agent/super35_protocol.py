@@ -23,7 +23,7 @@ from typing import Any
 from responses_api_agents.osworld_agent.model_protocol import OSWorldModelProtocol, ProtocolMessageContext
 
 
-SUPER35_PROTOCOL_ID = "nemotron-super35-tool-xml-v2"
+SUPER35_PROTOCOL_ID = "nemotron-super35-tool-xml-v3"
 SUPER35_TOOLS = (
     {
         "type": "function",
@@ -285,7 +285,10 @@ SUPER35_PROTOCOL = OSWorldModelProtocol(
     assistant_history_template_non_thinking="{action}\n{tool_call_xml}",
     parser=parse_super35_response,
     tools=SUPER35_TOOLS,
-    tool_choice="auto",
+    # Render the API tool definitions, but parse the original XML in Gym.
+    # The serving endpoint must disable automatic tool extraction.
+    tool_choice="none",
+    skip_special_tokens=False,
     coordinate_types=frozenset({"relative"}),
     preserve_response=True,
     python_execution="exec",

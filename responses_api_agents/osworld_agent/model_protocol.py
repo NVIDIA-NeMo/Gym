@@ -55,7 +55,8 @@ class OSWorldModelProtocol:
     chat_template_kwargs_non_thinking: Mapping[str, Any] | None = None
     parse_retry_template: str | None = None
     tools: Sequence[Mapping[str, Any]] | None = None
-    tool_choice: Literal["auto"] | None = None
+    tool_choice: Literal["auto", "none"] | None = None
+    skip_special_tokens: bool | None = None
     coordinate_types: frozenset[str] | None = None
     preserve_response: bool = False
     python_execution: Literal["direct", "exec"] = "direct"
@@ -111,6 +112,8 @@ class OSWorldModelProtocol:
             extensions["parse_retry_template"] = self.parse_retry_template
         if self.tools is not None:
             extensions.update(tools=self.request_tools(), tool_choice=self.tool_choice)
+        if self.skip_special_tokens is not None:
+            extensions["skip_special_tokens"] = self.skip_special_tokens
         if self.coordinate_types is not None:
             extensions["coordinate_types"] = sorted(self.coordinate_types)
         if self.preserve_response:

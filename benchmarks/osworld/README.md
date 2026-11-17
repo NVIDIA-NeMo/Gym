@@ -391,7 +391,7 @@ python3 prepare.py \
 ```
 
 Start control and evaluation with the normal wrappers. The profile selects
-`nemotron_super35_agent` and `nemotron-super35-tool-xml-v2`, initial-plus-recent
+`nemotron_super35_agent` and `nemotron-super35-tool-xml-v3`, initial-plus-recent
 four-image history, 100 steps, 4096 output tokens, temperature 0.6, and top_p
 0.95. It preserves historical thinking and full assistant tool calls. See the
 [protocol and model extension guide](../../responses_api_agents/osworld_agent/README.md#super-35-vl-tool-xml)

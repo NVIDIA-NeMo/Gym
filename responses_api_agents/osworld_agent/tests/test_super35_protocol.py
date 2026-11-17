@@ -114,8 +114,8 @@ def test_invalid_samples_are_rejected_without_inventing_a_terminal_action(respon
         parse(response)
 
 
-def test_native_call_with_empty_content_uses_the_same_parser_and_history() -> None:
-    instance = agent()
+def test_super35_rejects_server_extracted_calls_instead_of_trusting_repaired_xml() -> None:
+    instance = agent(parse_retries=1)
     instance.call_llm = lambda *_: {
         "content": None,
         "reasoning_content": "Click the target.",
@@ -131,10 +131,30 @@ def test_native_call_with_empty_content_uses_the_same_parser_and_history() -> No
         ],
     }
     _, actions, info = instance.predict("Click the target.", {"screenshot": b"screen"})
-    assert actions == ["pyautogui.click(960, 270)"]
-    assert not info.get("stop_rollout")
-    assert "<think>\nClick the target.\n</think>" in instance._assistant_history(instance.cots[0])
-    assert "<function=exec_py>" in instance._assistant_history(instance.cots[0])
+    assert actions == []
+    assert info["agent_outcome"] == "model_response_unparseable"
+    assert info["stop_rollout"] and info["model_call_completed"]
+
+
+def test_missing_opening_tool_tag_is_rejected_then_retried_without_repair() -> None:
+    # Shape observed in a real rollout: the server had extracted a valid click
+    # despite the original generation omitting its opening <tool_call> tag.
+    malformed = (
+        "<function=exec_py>\n<parameter=code_block>\npyautogui.click(0.119, 0.069)\n"
+        "</parameter>\n</function>\n</tool_call>"
+    )
+    replies = [
+        {"content": malformed, "finish_reason": "stop"},
+        {"content": xml("computer.wait", {}), "finish_reason": "stop"},
+    ]
+    instance = agent(parse_retries=2, parse_error_feedback=True)
+    instance.call_llm = lambda *_: replies.pop(0)
+    _, actions, info = instance.predict("Task", {"screenshot": b"screen"})
+    assert actions == ["WAIT"]
+    assert info["model_calls"][0]["response"]["content"] == malformed
+    assert info["model_calls"][0]["accepted"] is False
+    assert info["model_calls"][0]["parsed_actions"] == []
+    assert info["model_calls"][1]["accepted"] is True
 
 
 def test_history_retains_initial_and_recent_images_and_all_assistant_tool_turns() -> None:
@@ -168,7 +188,8 @@ def test_history_retains_initial_and_recent_images_and_all_assistant_tool_turns(
         assert "<function=exec_py>" in content
     assert not any(message["role"] == "tool" for message in messages)
     assert payloads[-1]["tools"] == list(SUPER35_TOOLS)
-    assert payloads[-1]["tool_choice"] == "auto"
+    assert payloads[-1]["tool_choice"] == "none"
+    assert payloads[-1]["skip_special_tokens"] is False
     assert payloads[-1]["_nemo_gym_preserve_response"] is True
     assert "<tools>" not in messages[0]["content"]
     assert payloads[-1]["chat_template_kwargs"] == {"enable_thinking": True, "truncate_history_thinking": False}
@@ -267,6 +288,8 @@ def test_renderer_and_request_changes_have_distinct_wire_contracts() -> None:
         replace(SUPER35_PROTOCOL, message_renderer_id="another-renderer-v1"),
         replace(SUPER35_PROTOCOL, chat_template_kwargs_thinking={"enable_thinking": False}),
         replace(SUPER35_PROTOCOL, tools=(), tool_choice="auto"),
+        replace(SUPER35_PROTOCOL, tool_choice="auto"),
+        replace(SUPER35_PROTOCOL, skip_special_tokens=True),
         replace(SUPER35_PROTOCOL, python_execution="direct"),
         replace(SUPER35_PROTOCOL, preserve_response=False),
     ]:
@@ -347,6 +370,44 @@ def test_transport_does_not_repair_truncated_native_arguments_or_content() -> No
         parse(response)
 
 
+@pytest.mark.parametrize("log_model_io", [False, True])
+def test_transport_keeps_raw_xml_and_special_tokens(monkeypatch, tmp_path, log_model_io) -> None:
+    from responses_api_agents.osworld_agent import app
+
+    raw = "\n<function=exec_py><parameter=code_block>pass</parameter></function></tool_call>\n"
+    message = SimpleNamespace(content=raw, tool_calls=[], reasoning="\nOriginal reasoning.\n", model_extra={})
+    client = MagicMock()
+    client.chat.completions.create.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(message=message, finish_reason="stop")]
+    )
+    monkeypatch.setattr(app, "_build_policy_openai_client", lambda **_: client)
+    if log_model_io:
+        monkeypatch.setenv("OSWORLD_MODEL_IO_LOG", str(tmp_path / "model-io.jsonl"))
+    caller = app._build_messages_model_fn(
+        base_url="http://policy/v1", model_name="policy", api_key="test-key"
+    )  # pragma: allowlist secret
+    response = caller(
+        [{"role": "user", "content": "Task"}],
+        {
+            "_nemo_gym_return_message": True,
+            "_nemo_gym_preserve_response": True,
+            "tools": list(SUPER35_TOOLS),
+            "tool_choice": "none",
+            "skip_special_tokens": False,
+            "chat_template_kwargs": {"enable_thinking": True, "truncate_history_thinking": False},
+        },
+    )
+    sent = client.chat.completions.create.call_args.kwargs
+    assert sent["tool_choice"] == "none" and sent["tools"] == list(SUPER35_TOOLS)
+    assert sent["extra_body"] == {
+        "skip_special_tokens": False,
+        "chat_template_kwargs": {"enable_thinking": True, "truncate_history_thinking": False},
+    }
+    assert response["content"] == raw and response["reasoning"] == message.reasoning
+    with pytest.raises(ValueError, match="one complete"):
+        parse(response)
+
+
 @pytest.mark.parametrize("coordinate_type", ["absolute", "qwen25"])
 def test_unsupported_coordinates_fail_at_both_configuration_entrypoints(coordinate_type: str) -> None:
     with pytest.raises(ValueError, match="does not support coordinate_type"):
@@ -370,6 +431,7 @@ def test_super35_profile_wires_model_agent_history_and_request_forwarding() -> N
     model = config["policy_model"]["responses_api_models"]["vllm_model"]
     assert model["forward_request_chat_template_kwargs"] is True
     assert model["chat_template_kwargs"]["truncate_history_thinking"] is False
+    assert model["extra_body"] == {"skip_special_tokens": False}
     settings = config["osworld_super35_agent"]["responses_api_agents"]["osworld_agent"]
     assert settings["runner_name"] == "nemotron_super35_agent"
     assert settings["model_protocol_id"] == SUPER35_PROTOCOL_ID

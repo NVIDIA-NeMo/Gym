@@ -962,6 +962,8 @@ class OSWorldProtocolAgent:
             if tools is not None:
                 payload["tools"] = tools
                 payload["tool_choice"] = self.model_protocol.tool_choice
+            if self.model_protocol.skip_special_tokens is not None:
+                payload["skip_special_tokens"] = self.model_protocol.skip_special_tokens
             if self.model_protocol.preserve_response:
                 payload["_nemo_gym_preserve_response"] = True
             model_call_record: Dict[str, Any] = {
@@ -988,6 +990,8 @@ class OSWorldProtocolAgent:
                     if isinstance(response, Mapping)
                     else getattr(response, "tool_calls", None)
                 )
+                if self.model_protocol.tool_choice == "none" and tool_calls:
+                    raise ValueError("The endpoint returned parsed tool_calls when raw response content was requested")
                 if not content and not tool_calls:
                     raise ValueError("model response has no content")
                 low_level, actions, response_info = self.model_protocol.parser(

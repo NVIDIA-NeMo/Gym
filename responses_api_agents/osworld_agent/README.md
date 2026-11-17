@@ -295,9 +295,8 @@ recovering executable code from arbitrary prose.
 
 Select `benchmarks/osworld/configs/osworld_agent_super35.yaml`, or prepare the
 benchmark with `--profile super35`. This uses the Gym-owned
-`nemotron-super35-tool-xml-v2` protocol. It accepts both raw
-`<tool_call><function=...><parameter=...>` responses and native OpenAI
-`tool_calls`. Supported tools are `exec_py(code_block)`, argument-free
+`nemotron-super35-tool-xml-v3` protocol. It requests raw
+`<tool_call><function=...><parameter=...>` response content. Supported tools are `exec_py(code_block)`, argument-free
 `computer.wait`, and `computer.terminate(status, answer?)`. Mouse positions
 must be literal normalized coordinates in `[0, 1]`; Gym projects them to the
 screen dimensions before execution.
@@ -308,26 +307,30 @@ thinking in chronological history. Observations are user turns. It passes
 `enable_thinking` and `truncate_history_thinking: false` through the policy
 transport. The profile enables `forward_request_chat_template_kwargs` on
 Gym's vLLM model adapter so those per-request options reach the backend.
-The protocol sends JSON-schema `tools` and `tool_choice: auto` on every
+The protocol sends JSON-schema `tools` and `tool_choice: none` on every
 request, including retries. The model's chat template renders these definitions;
-the system message does not duplicate a handcrafted `<tools>` block. The
+the system message does not duplicate a handcrafted `<tools>` block. For this
+model's pinned template, `none` leaves the rendered prompt unchanged and requests
+text output so Gym can apply its strict XML parser. `skip_special_tokens: false`
+preserves the XML delimiter tokens. The
 endpoint must accept the exact dotted tool names `computer.wait` and
 `computer.terminate`. A gateway that rejects those names is incompatible with
 this profile; its HTTP error is an infrastructure failure, not a model score.
 
-Use a compatible Super 3.5 VL model service, for example the public model's
-recommended vLLM version and `qwen3_coder` / `nemotron_v3` parsers. The model
-service must allow at least four images. For example, add these arguments to
-the model's version-pinned serving command:
+Use a compatible Super 3.5 VL model service with reasoning separation and
+automatic tool extraction disabled. The model service must allow at least four
+images. For example, add these arguments to the model's version-pinned serving command:
 
 ```bash
---enable-auto-tool-choice --tool-call-parser qwen3_coder \
 --reasoning-parser nemotron_v3 --limit-mm-per-prompt '{"image": 4, "video": 1}'
 ```
 
-Sending only prompt-embedded tool definitions to an auto-tool parser can lose
-the XML action when `tool_choice` defaults to `none`. Do not reuse that v1
-request shape with this serving configuration.
+Omit `--enable-auto-tool-choice` and `--tool-call-parser`. In vLLM 0.32.0,
+`qwen3_coder` can extract calls whose original XML is missing a delimiter.
+It can also discard tool XML with `tool_choice: none`, so that request option
+alone is insufficient while the serving tool parser remains enabled. The agent
+rejects returned native `tool_calls` on this raw-content contract. Gate a new
+serving version against its original completion or token IDs before scoring.
 
 `computer.wait` uses the runner's
 configured post-action delay. Gym still owns the horizon; malformed replies
@@ -335,14 +338,15 @@ are bounded parser retries, not synthetic model-authored `FAIL` actions.
 Unsupported coordinate modes fail during configuration resolution and direct
 agent construction. Only `relative` is supported by this protocol.
 
-The strict local XML/JSON parser is unchanged. The v2 transport preserves
-served content, reasoning, and native tool argument strings without fenced-code
-recovery or conversion into synthetic XML. Native `tool_calls` have already
-passed through the serving parser: their acceptance grammar can differ from
-the strict XML path (for example, a server may accept an unclosed XML call).
-Freeze and record the serving parser too; retain the pre-parser completion or
-token IDs when claiming raw-generation integrity. An API envelope alone cannot
-prove what a serving parser consumed.
+The strict local XML/JSON parser and coordinate conversion are unchanged. The v3
+transport preserves raw response content and reasoning without fenced-code
+recovery or delimiter repair. The parser function retains its existing native-call
+support for other explicit callers, but this profile requires raw XML so the
+server cannot silently expand its acceptance grammar. Freeze and record the
+serving reasoning parser too; retain the pre-parser completion or token IDs
+when claiming raw-generation integrity. An API envelope alone cannot prove
+what a serving parser consumed. Earlier v1/v2 scores describe different wire
+contracts and must retain their original configuration and provenance.
 
 After coordinate projection, the executor passes Python actions as the exact
 string argument to `exec(...)`. This host-owned wrapper lets compound statements

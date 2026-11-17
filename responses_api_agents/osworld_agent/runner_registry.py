@@ -152,7 +152,7 @@ RUNNER_REGISTRY: Dict[str, RunnerSpec] = {
         observation_type="screenshot",
         agent_class_path="responses_api_agents.osworld_agent.adapter_agents.OSWorldProtocolAgent",
         agent_kwargs={"coordinate_type": "relative", "thinking": True},
-        model_protocol_id="nemotron-super35-tool-xml-v2",
+        model_protocol_id="nemotron-super35-tool-xml-v3",
     ),
     # Upstream OSWorld contains Qwen3VLAgent. Gym owns its transport/retry
     # compatibility for Qwen3-Omni instead of carrying direct model HTTP calls
