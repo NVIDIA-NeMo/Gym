@@ -476,3 +476,79 @@ async def test_stop_and_removal_do_not_need_a_workdir_the_task_moved(session, tm
 def test_a_relative_session_directory_still_resolves_against_the_workdir():
     assert control_cwd(session_dir="/tmp/session", workdir="/app") == "/"
     assert control_cwd(session_dir=".gym/session", workdir="/app") == "/app"
+
+
+def test_receipt_keeps_counted_foreign_signals():
+    receipt = {"cleanup_confirmed": True, "return_code": 0, "error": None, "timed_out": False, "foreign_signals": 3}
+    assert parse_cleanup_receipt(receipt) == receipt
+    # A malformed receipt keeps a valid count; an invalid one is dropped.
+    assert parse_cleanup_receipt(receipt | {"error": 1})["foreign_signals"] == 3
+    assert "foreign_signals" not in parse_cleanup_receipt(receipt | {"error": 1, "foreign_signals": "3"})
+
+
+# Seen in a real run: the launch exec returned normally but its supervisor left no
+# cleanup.json.
+
+
+@pytest.mark.parametrize("terminated", [True, False])
+async def test_missing_receipt_after_launch_returned_needs_provider_proof(session, terminated):
+    sandbox, session_dir = session
+    (session_dir / LAUNCH_CLAIM_FILE).symlink_to("launch")
+    (session_dir / SUPERVISOR_PID_FILE).write_text("2147483647")
+    sandbox.exec_processes_terminated = AsyncMock(return_value=terminated)
+    exec_spy = AsyncMock(wraps=sandbox.exec)
+    sandbox.exec = exec_spy
+    diagnostics = {}
+    if terminated:
+        receipt = await stop_and_confirm_cleanup(
+            sandbox,
+            session_dir=str(session_dir),
+            workdir=str(session_dir.parent),
+            timeout=1,
+            harness="test",
+            launch_finished=True,
+            diagnostics=diagnostics,
+        )
+        assert receipt == {"cleanup_confirmed": True, "error": None, "return_code": None, "timed_out": False}
+        assert diagnostics == {"receipt_missing": True}
+        exec_spy.assert_not_awaited()  # nothing to stop, and no stale pid to signal
+    else:
+        with pytest.raises(RuntimeError, match="test launch outcome is unknown"):
+            await stop_and_confirm_cleanup(
+                sandbox,
+                session_dir=str(session_dir),
+                workdir=str(session_dir.parent),
+                timeout=1,
+                harness="test",
+                launch_finished=True,
+                diagnostics=diagnostics,
+            )
+        assert diagnostics == {}
+    assert not (session_dir / CLEANUP_RECEIPT_FILE).exists()
+
+
+async def test_provider_proof_is_consulted_only_after_the_launch_returned(session):
+    sandbox, session_dir = session
+    (session_dir / LAUNCH_CLAIM_FILE).symlink_to("launch")
+    sandbox.exec_processes_terminated = AsyncMock(return_value=True)
+    with pytest.raises(RuntimeError, match="test launch outcome is unknown"):
+        await stop_and_confirm_cleanup(
+            sandbox, session_dir=str(session_dir), workdir=str(session_dir.parent), timeout=1, harness="test"
+        )
+    sandbox.exec_processes_terminated.assert_not_awaited()
+
+
+async def test_unprovable_finished_launch_still_fences_an_unclaimed_launch(session):
+    # A launch shell that exited before claiming (e.g. failed bootstrap) is still fenced by the stop.
+    sandbox, session_dir = session
+    sandbox.exec_processes_terminated = AsyncMock(return_value=False)
+    receipt = await stop_and_confirm_cleanup(
+        sandbox,
+        session_dir=str(session_dir),
+        workdir=str(session_dir.parent),
+        timeout=1,
+        harness="test",
+        launch_finished=True,
+    )
+    assert receipt["cleanup_confirmed"] is True and receipt["return_code"] is None
+    assert (session_dir / LAUNCH_CLAIM_FILE).readlink() == Path("stop")

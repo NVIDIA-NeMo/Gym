@@ -99,8 +99,15 @@ from responses_api_agents.codex_agent.observability import (
     parse_codex_usage,
     read_codex_observations,
 )
-from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE, CodexSandboxSession
+from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE, CodexSandboxSession, harness_kill_evidence
 from responses_api_agents.codex_agent.setup_codex import ensure_codex
+from responses_api_agents.codex_agent.tool_host import (
+    codex_config_overrides,
+    environments_toml,
+    setup_failure_hint,
+    tool_host_paths,
+    tool_host_setup_command,
+)
 from responses_api_agents.codex_agent.transport import rate_limit_proxy
 
 
@@ -692,6 +699,16 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
         ),
     )
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
+    # Agent-host directory where a failed sandboxed activation keeps the session's supervisor and
+    # Codex logs (output.log, stderr.log, events.jsonl, ...) before the sandbox is released. None: off.
+    failure_artifacts_dir: Optional[str] = None
+    # Native sandbox only: run Codex's tool commands in a nested pid namespace (bwrap) so they
+    # cannot see or signal the supervisor, the runner or the Codex CLI (see tool_host.py). The
+    # session fails at seed if the namespace cannot be created.
+    tool_pid_namespace: bool = False
+    # Agent-host path of the bwrap binary uploaded for that namespace. None: the bwrap sandbox
+    # provider's own bwrap_path.
+    tool_pid_namespace_bwrap_path: Optional[str] = None
 
     @field_validator("sandbox_logs_dir")
     @classmethod
@@ -865,7 +882,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
         if self.config.sandbox_mode != "danger-full-access":
             raise HTTPException(422, "Codex in the task sandbox requires danger-full-access inside the task sandbox")
 
-        provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
+        provider_config = resolve_provider_config(provider_ref, get_global_config_dict())
+        tool_bwrap = self._tool_namespace_bwrap(provider_config) if self.config.tool_pid_namespace else None
+        provider = create_provider(provider_config)
         if owns_sandbox:
             try:
                 spec = restrict_sandbox_network(
@@ -971,6 +990,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     )
             await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
             await sandbox.upload(Path(__file__).with_name(LAUNCHER_FILE), f"{directory}/{LAUNCHER_FILE}")
+            if tool_bwrap is not None:
+                await self._prepare_tool_host(sandbox, directory=directory, runtime=runtime, bwrap=tool_bwrap)
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
@@ -978,6 +999,30 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 raise AgentSessionSetupError(state, error=error) from error
             raise
         return state
+
+    def _tool_namespace_bwrap(self, provider_config: Any) -> Path:
+        """The agent-host bwrap binary to upload for the tool pid namespace."""
+        path = self.config.tool_pid_namespace_bwrap_path
+        if path is None and isinstance(provider_config, Mapping) and isinstance(provider_config.get("bwrap"), Mapping):
+            path = provider_config["bwrap"].get("bwrap_path")
+        if not isinstance(path, str) or not os.path.isabs(path):
+            raise HTTPException(
+                422, "tool_pid_namespace needs tool_pid_namespace_bwrap_path or a bwrap sandbox provider"
+            )
+        return Path(path)
+
+    async def _prepare_tool_host(self, sandbox: AsyncSandbox, *, directory: str, runtime: str, bwrap: Path) -> None:
+        """Upload bwrap and prove that it can create the tool namespace before the episode starts."""
+        uploaded, _ = tool_host_paths(directory)
+        await sandbox.upload(bwrap, uploaded)
+        command = tool_host_setup_command(directory, runtime)
+        result = await sandbox.exec(command, timeout_s=60)
+        if result.return_code != 0 or result.error_type:
+            detail = f"{result.stderr or ''}{result.stdout or ''}".strip()
+            raise RuntimeError(
+                f"Cannot create the Codex tool pid namespace (tool_pid_namespace): exit={result.return_code}, "
+                f"error_type={result.error_type}; {detail}.{setup_failure_hint(detail)}"
+            )
 
     def _sandbox_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str, list[MediaFile]]:
         """Validate and normalize input before consuming the session's activation."""
@@ -1085,6 +1130,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
         config = self._build_config(base_url, developer_instructions=system, mcp_servers=mcp_servers or None)
         config["model_providers"]["gym"]["http_headers"] = {"x-session-id": invocation_id}
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
+        if self.config.tool_pid_namespace:
+            config = _deep_merge(config, codex_config_overrides())
         # Codex's forced stdin prompt rejects empty text; an explicit empty argument accepts image-only input.
         command = self._build_command("" if media and not prompt.strip() else "-", state.session.workdir)
         image_args = [arg for file in media for arg in ("--image", media_path(file))]
@@ -1120,7 +1167,14 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     payload,
                     timeout=timeout,
                     close_timeout=self.config.session_close_timeout_seconds,
-                    files={"home/.codex/config.toml": toml_dumps(config)},
+                    files={
+                        "home/.codex/config.toml": toml_dumps(config),
+                        **(
+                            {"home/.codex/environments.toml": environments_toml(state.session.session_dir)}
+                            if self.config.tool_pid_namespace
+                            else {}
+                        ),
+                    },
                     media=media,
                     deadline=monotonic() + timeout,
                 )
@@ -1214,6 +1268,21 @@ class CodexAgent(SimpleResponsesAPIAgent):
         completed = any(event.get("type") == "turn.completed" for _, event in events)
         if cleanup and not completed and not cleanup["timed_out"] and not output_limited:
             error = error or "Codex ended without turn.completed"
+        # Nobody stopped the harness, yet a harness process died: in practice a tool command
+        # signalled it (pkill -f python, kill -9 -1, ...). Label it so summaries can count it apart.
+        harness_kill = None
+        harness_kill_code = "harness_killed" if self.config.tool_pid_namespace else "agent_killed_harness"
+        if failure is None and error:
+            harness_kill = harness_kill_evidence(
+                cleanup=cleanup,
+                cleanup_receipt_missing=state.session.cleanup_receipt_missing,
+                launch_return_code=state.session.launch_return_code,
+            )
+            if harness_kill:
+                error = f"{harness_kill_code}: {harness_kill}; {error}"
+        foreign_signals = {
+            name: count for name, count in (("supervisor", (cleanup or {}).get("foreign_signals", 0)),) if count
+        }
         status = "failed" if error else "incomplete" if cleanup["timed_out"] or output_limited else "completed"
         # A reported provider failure keeps its classified outcome, so the Environment Server decides it. A run
         # that never started a turn did no work to grade, and its stderr explains the failure (see below).
@@ -1286,8 +1355,28 @@ class CodexAgent(SimpleResponsesAPIAgent):
             gaps.append(ObservationGap(code="runtime_info_unavailable"))
         if cleanup is not None and cleanup["return_code"] is None:
             gaps.append(ObservationGap(code="worker_exit_code_unavailable"))
+        if state.session.cleanup_receipt_missing:
+            gaps.append(
+                ObservationGap(
+                    code="cleanup_receipt_missing",
+                    detail=(
+                        f"supervisor exited ({state.session.launch_return_code}) without a cleanup receipt; "
+                        "the sandbox provider confirmed that no sandboxed process remains"
+                    ),
+                )
+            )
         if failure is not None:
             gaps.append(ObservationGap(code="agent_activation_interrupted", detail=type(failure).__name__))
+        if harness_kill:
+            gaps.append(ObservationGap(code=harness_kill_code, detail=harness_kill))
+        if foreign_signals:
+            gaps.append(
+                ObservationGap(
+                    code="harness_signals_ignored",
+                    detail="stop signals from inside the sandbox, ignored: "
+                    + ", ".join(f"{name} {count}" for name, count in foreign_signals.items()),
+                )
+            )
         if not events:
             gaps.append(ObservationGap(code="agent_transcript_unavailable"))
         invocation_status = "incomplete" if failure else status
@@ -1406,6 +1495,26 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 for record in state.observations.records:
                     if isinstance(record, AgentInvocation) and record.invocation_id == invocation_id:
                         record.status = status
+        if (
+            failure is not None or error or state.session.cleanup_receipt_missing
+        ) and self.config.failure_artifacts_dir:
+            # Before raising: close releases the sandbox and deletes these files.
+            await state.preserve_failure_artifacts(
+                self.config.failure_artifacts_dir,
+                {
+                    "failure": repr(failure) if failure is not None else None,
+                    "error": error or None,
+                    "cleanup": dict(cleanup) if cleanup is not None else None,
+                    "cleanup_receipt_missing": state.session.cleanup_receipt_missing,
+                    "launch_return_code": state.session.launch_return_code,
+                    "capture_error": repr(state.session.capture_error) if state.session.capture_error else None,
+                    "events": len(events),
+                    "terminal_events": terminal_events,
+                    "classification": harness_kill_code if harness_kill else None,
+                    "harness_kill": harness_kill,
+                    "foreign_signals": foreign_signals,
+                },
+            )
         if failure is not None:
             raise failure
         if error and not reported_model_error:

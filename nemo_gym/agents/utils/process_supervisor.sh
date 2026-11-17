@@ -18,6 +18,10 @@
 # scans after dropping the marker from its environment. The receipt confirms that no reached
 # process can still run; it is not a sandbox-empty check.
 #
+# Stop signals (TERM, INT, HUP) count only once the stop file exists. Others are counted in the
+# receipt's foreign_signals and ignored: a tool command in the same sandbox that signals every process
+# matching a pattern (`pkill -f ...`, `killall bash`) must not end the episode this way.
+#
 # The expire file, when given, moves the deadline to now: once it appears, the harness ends exactly
 # as at its time limit and the receipt records timed_out. If it appears before launch, the harness
 # never starts. The supervisor never deletes it.
@@ -184,9 +188,20 @@ stopped() { ((stopping)) || [[ -e $stop_file ]]; }
 
 expired() { [[ -n $expire_file && -e $expire_file ]]; }
 
+# A stop signal stops the harness only once the stop file exists; any other is counted and ignored.
+stop_signal() {
+    if [[ -e $stop_file ]]; then
+        stopping=1
+    else
+        ((foreign_signals += 1))
+    fi
+}
+
 write_receipt() {
-    printf '{"cleanup_confirmed": %s, "return_code": %s, "error": %s, "timed_out": %s}' \
-        "$1" "$return_code" "$2" "$timed_out" >"$receipt.tmp" && mv -f "$receipt.tmp" "$receipt"
+    local foreign=
+    ((${foreign_signals:-0} > 0)) && foreign=", \"foreign_signals\": $foreign_signals"
+    printf '{"cleanup_confirmed": %s, "return_code": %s, "error": %s, "timed_out": %s%s}' \
+        "$1" "$return_code" "$2" "$timed_out" "$foreign" >"$receipt.tmp" && mv -f "$receipt.tmp" "$receipt"
 }
 
 # Tests source the functions above without running the supervisor.
@@ -216,7 +231,8 @@ if [[ ${NEMO_GYM_SUPERVISOR-} != detached ]] && stat_fields $$ && [[ ${fields[2]
     NEMO_GYM_SUPERVISOR=detached "$BASH" "$0" "${arguments[@]}" &
     supervisor=$!
     set +m
-    trap 'kill -TERM "$supervisor" 2>/dev/null' TERM
+    # The supervisor decides whether a stop signal counts (stop_signal); INT and HUP must not end this shell.
+    trap 'kill -TERM "$supervisor" 2>/dev/null' TERM INT HUP
     while kill -0 "$supervisor" 2>/dev/null; do
         wait "$supervisor"
     done
@@ -224,9 +240,9 @@ if [[ ${NEMO_GYM_SUPERVISOR-} != detached ]] && stat_fields $$ && [[ ${fields[2]
     exit
 fi
 
-return_code=null timed_out=false stopping=0 preserving=0 forced=0
+return_code=null timed_out=false stopping=0 preserving=0 forced=0 foreign_signals=0
 tracked=() groups=() preserved=()
-trap 'stopping=1' TERM
+trap stop_signal TERM INT HUP
 if stopped; then
     write_receipt true null # Nothing was launched.
     exit 0
@@ -272,7 +288,7 @@ if kill -0 "$harness" 2>/dev/null; then
         ((NOW < grace)) || break
     done
 fi
-trap '' TERM
+trap '' TERM INT HUP
 
 kill_reached
 # A process in uninterruptible sleep outlives KILL; report it rather than wait without bound.

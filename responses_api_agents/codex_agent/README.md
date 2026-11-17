@@ -200,6 +200,38 @@ The supervisor and the shared `harness_runner.sh` are bash scripts, and `sandbox
 the runtime's private Node, so a task agent's `pkill -f python3`, `pkill python3` or `killall python3`
 does not end Codex, as it would not under Harbor.
 
+### Tool commands versus the harness
+
+The model's tool commands run as the same user as the harness. By default they also share its
+pid namespace, so `pkill -f python`, `pkill -f node` or `kill -9 -1` can end the episode.
+Three layers keep that apart:
+
+- **`tool_pid_namespace: true`** (off by default) runs every tool command (`exec_command` and
+  `write_stdin` sessions, the shell tool, `apply_patch`, file reads) in a nested pid namespace.
+  Codex 0.144 reaches it through `$CODEX_HOME/environments.toml`: one stdio exec-server
+  environment and no local one. The exec-server is the native Codex binary, linked as
+  `nemo-gym-tool-host` and started as pid 1 by an uploaded bwrap (`tool_pid_namespace_bwrap_path`,
+  default the bwrap provider's `bwrap_path`). The namespace has the same filesystem, `/dev` and
+  network as the sandbox and a fresh `/proc`: tools see only each other. As pid 1, the tool host
+  ignores SIGKILL from inside, and `kill -1` skips it. Tools also keep managing their own
+  processes, because they share one namespace. Seed fails if the namespace cannot be created.
+  A sandboxed root needs the bwrap provider's `allow_nested_userns: true`. The generated
+  config disables the orchestrator `skills` tools, so the model sees the same tools as before.
+- **Process names.** The supervisor and runner are bash scripts, so their command lines
+  contain neither `python` nor `python3 -`.
+- **Stop signals.** The supervisor counts a SIGTERM/SIGINT/SIGHUP as a stop only once
+  `stop.request` exists; controllers stop it through that file. Others are ignored and
+  reported in the `harness_signals_ignored` gap.
+
+If a harness process dies anyway and nobody stopped it, the error and gaps say
+`agent_killed_harness` (`harness_killed` with `tool_pid_namespace`): the supervisor left no
+receipt, or the runner exited with 128+N (it or Codex ended by signal N). With
+`failure_artifacts_dir` set, `failure.json` records the evidence beside the session's logs.
+
+`responses_api_agents.codex_agent.tool_namespace_check` checks all of this end to end against a
+real bwrap. Its optional mode runs the real Codex CLI. See
+`responses_api_agents/codex_agent/tests/test_bwrap_tool_namespace.py`.
+
 Responses and close observations preserve text, reasoning, tool events, partial output,
 CLI aggregate usage, and sandbox hostname/PID/version. Wall-time and the pinned CLI's explicit
 model-output-limit event yield incomplete, potentially gradable work. Reported provider failures retain partial output and classified cause; the Environment Server decides grading and episode retries. Worker and cleanup failures remain execution errors. Only Resources determines reward.

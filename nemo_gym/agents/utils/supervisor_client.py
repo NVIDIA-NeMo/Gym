@@ -35,7 +35,7 @@ import json
 import logging
 from pathlib import Path
 from shlex import join, quote
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 from uuid import uuid4
 
 from pydantic import TypeAdapter, ValidationError
@@ -78,6 +78,8 @@ class CleanupReceipt(TypedDict):
     return_code: int | None
     error: str | None
     timed_out: bool
+    # Stop signals the supervisor ignored because no stop file existed; present only when nonzero.
+    foreign_signals: NotRequired[int]
 
 
 def exec_timeout(*, timeout: float, cleanup_timeout: float = DEFAULT_CLEANUP_TIMEOUT) -> float:
@@ -137,12 +139,16 @@ def parse_cleanup_receipt(payload: object) -> CleanupReceipt:
         return _CLEANUP_RECEIPT.validate_python(payload, strict=True, extra="forbid")
     except ValidationError:
         LOG.warning("Harness termination was confirmed, but its diagnostic fields did not match the receipt schema")
-    return {
+    receipt: CleanupReceipt = {
         "cleanup_confirmed": True,
         "return_code": payload.get("return_code") if type(payload.get("return_code")) is int else None,
         "timed_out": payload.get("timed_out") is True,
         "error": payload.get("error") if isinstance(payload.get("error"), str) else None,
     }
+    foreign_signals = payload.get("foreign_signals")
+    if type(foreign_signals) is int and foreign_signals > 0:
+        receipt["foreign_signals"] = foreign_signals
+    return receipt
 
 
 def supervision_timeouts(*, timeout: float, close_timeout: float) -> tuple[float, float]:
@@ -204,18 +210,46 @@ def control_cwd(*, session_dir: str, workdir: str | None) -> str | None:
 
 
 async def stop_and_confirm_cleanup(
-    sandbox: AsyncSandbox, *, session_dir: str, workdir: str | None, timeout: float, harness: str
+    sandbox: AsyncSandbox,
+    *,
+    session_dir: str,
+    workdir: str | None,
+    timeout: float,
+    harness: str,
+    launch_finished: bool = False,
+    diagnostics: dict[str, object] | None = None,
 ) -> CleanupReceipt:
     """Fence a pending launch or require explicit supervisor acknowledgement before teardown.
 
     A stop that wins the launch claim writes the same receipt shape as the
     supervisor, with no return code because no harness process ran.
+
+    ``launch_finished`` means the provider exec of the launch command returned
+    normally: no launch is pending and the supervisor process has exited. If it
+    exited without a receipt (killed, e.g. by a harness tool or the OOM killer),
+    nothing can write one any more, and cleanup is confirmed when the provider
+    proves that no sandboxed process can still run
+    (``AsyncSandbox.exec_processes_terminated``). Otherwise the stop below runs as
+    usual: it still fences a launch that exited before claiming. A caller-supplied
+    ``diagnostics`` dict gets ``receipt_missing=True`` on that provider-confirmed path.
     """
     receipt_path = f"{session_dir}/{CLEANUP_RECEIPT_FILE}"
+    receipt_missing = False
     try:
         receipt = json.loads(await read_text(sandbox, path=receipt_path))
     except Exception:
-        receipt = {}
+        receipt, receipt_missing = {}, True
+    if receipt_missing and launch_finished:
+        provable = getattr(sandbox, "exec_processes_terminated", None)  # AsyncSandbox; absent on test doubles
+        if provable is not None and (await provable()) is True:
+            LOG.warning(
+                "%s supervisor exited without a cleanup receipt; the sandbox provider confirms "
+                "that no sandboxed process remains",
+                harness,
+            )
+            if diagnostics is not None:
+                diagnostics["receipt_missing"] = True
+            return {"cleanup_confirmed": True, "return_code": None, "error": None, "timed_out": False}
     _raise_terminal_failure(receipt, harness=harness)
     if not isinstance(receipt, dict) or receipt.get("cleanup_confirmed") is not True:
         stop_path = quote(f"{session_dir}/{STOP_REQUEST_FILE}")

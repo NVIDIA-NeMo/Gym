@@ -698,6 +698,71 @@ def test_unreadable_startup_stderr_does_not_hold_the_activation(setup):
     assert elapsed < 5
 
 
+def _supervisor_left_no_receipt(sandbox):
+    """Seen in a real run: Codex ran, the launch exec returned, no cleanup.json."""
+
+    def publish():
+        sandbox.files[f"{sandbox.directory}/runtime.json"] = json.dumps({"hostname": "task-container", "pid": 2})
+        sandbox.files[f"{sandbox.directory}/events.jsonl"] = sandbox.events
+        sandbox.files[f"{sandbox.directory}/output.log"] = "supervisor diagnostics"
+
+    sandbox.publish = publish
+
+
+def test_missing_receipt_confirmed_by_provider_completes_and_keeps_diagnostics(setup, tmp_path):
+    agent, sandbox = setup
+    agent.config.failure_artifacts_dir = str(tmp_path / "failures")
+    _supervisor_left_no_receipt(sandbox)
+    sandbox.exec_processes_terminated = AsyncMock(return_value=True)
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        assert result.json()["status"] == "completed"
+        state = agent._session_records[session_id].state
+        assert state.session.cleanup_receipt_missing
+        assert "cleanup_receipt_missing" in {gap.code for gap in state.observations.gaps}
+        commands = [
+            str(call.args[0] if call.args else call.kwargs.get("command")) for call in sandbox.exec.await_args_list
+        ]
+        assert not any("stop.request" in command and "touch " in command for command in commands)
+        sandbox.launch.assert_awaited_once()
+        (saved,) = (tmp_path / "failures").iterdir()
+        assert (saved / "output.log").read_text() == "supervisor diagnostics"
+        summary = json.loads((saved / "failure.json").read_text())
+        assert summary["cleanup_receipt_missing"] is True and summary["failure"] is None
+        assert "cleanup.json" in summary["unavailable"] and "events.jsonl" in summary["copied"]
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
+        assert closed.status_code == 200, closed.text
+    sandbox.disconnect.assert_awaited_once()
+
+
+def test_unprovable_missing_receipt_fails_closed_and_preserves_logs(setup, tmp_path):
+    agent, sandbox = setup
+    agent.config.failure_artifacts_dir = str(tmp_path / "failures")
+    _supervisor_left_no_receipt(sandbox)  # this provider cannot prove termination
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code >= 500
+        (saved,) = (tmp_path / "failures").iterdir()
+        assert (saved / "output.log").read_text() == "supervisor diagnostics"
+        summary = json.loads((saved / "failure.json").read_text())
+        assert "launch outcome is unknown" in summary["failure"]
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code >= 500
+    sandbox.disconnect.assert_not_awaited()
+
+
+def test_failure_artifacts_are_off_by_default(setup, tmp_path, monkeypatch):
+    agent, sandbox = setup
+    monkeypatch.chdir(tmp_path)
+    _supervisor_left_no_receipt(sandbox)
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"}).status_code >= 500
+    assert not list(tmp_path.iterdir())
+
+
 def test_several_workers_seed_sessions(setup):
     """Session routing sends a session's later requests to the worker that seeded it."""
     agent, sandbox = setup
