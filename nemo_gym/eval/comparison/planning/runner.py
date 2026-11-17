@@ -17,7 +17,6 @@
 import shlex
 import sys
 from datetime import datetime, timezone
-from math import sqrt
 from pathlib import Path
 
 import yaml
@@ -99,7 +98,7 @@ def build_repeat_planning_result(config: RepeatPlanningCLIConfig, command: str) 
         raise ConfigError(f"Cannot plan repeats for '{path}': {error}") from error
 
     results = []
-    for index, cell in enumerate(cells):
+    for index, cell in enumerate(manifest.cells):
         baseline = allocation.baseline_counts[index]
         candidate = allocation.candidate_counts[index]
         new_baseline = allocation.additional_baseline_counts[index]
@@ -108,8 +107,10 @@ def build_repeat_planning_result(config: RepeatPlanningCLIConfig, command: str) 
                 model=cell.model,
                 benchmark=cell.benchmark,
                 weight=1 / len(cells),
-                baseline_std_points=sqrt(cell.baseline_variance),
-                candidate_std_points=sqrt(cell.candidate_variance),
+                baseline_std_points=cell.baseline_std_points,
+                candidate_std_points=(
+                    cell.baseline_std_points if cell.candidate_std_points is None else cell.candidate_std_points
+                ),
                 repeat_step=cell.repeat_step,
                 repeat_cost=cell.repeat_cost,
                 existing_baseline_repeats=cell.existing_baseline_repeats or 0,

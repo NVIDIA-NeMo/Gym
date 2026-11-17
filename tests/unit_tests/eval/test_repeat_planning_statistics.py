@@ -73,7 +73,7 @@ def test_joint_allocation_matches_independent_exhaustive_cost_oracle(
     cell = PlanningCell("m", "b", variance, variance * 1.5, repeat_step=step, repeat_cost=2.5)
     result = plan_repeats([cell], parameters=parameters)
     # This independent SciPy oracle enumerates the whole bounded rectangle,
-    # whereas production prunes using a feasible incumbent and batches by arm.
+    # whereas production bounds cost with a feasible incumbent and batches by arm.
     legal = np.arange(max(step, int(np.ceil(2 / step)) * step), 65, step)
     baseline, candidate = np.meshgrid(legal, legal, indexing="ij")
     a, b = variance / baseline, variance * 1.5 / candidate
@@ -107,47 +107,7 @@ def test_joint_search_checks_unbalanced_designs_when_no_balanced_seed_is_feasibl
     assert result.statistics.power >= parameters.target_power
 
 
-@pytest.mark.parametrize("mode", ["optimize", "existing"])
-def test_infeasible_scalar_bound_avoids_exhaustive_noncentral_t_work(monkeypatch, mode: str) -> None:
-    cell = PlanningCell("m", "b", 25.0, 25.0, existing_baseline_repeats=20_000 if mode == "existing" else None)
-    parameters = PlanningParameters(baseline_mode=mode, margin_points=0.1)
-    real_survival = nct.sf
-    evaluations = 0
-
-    def counted_survival(*args, **kwargs):
-        nonlocal evaluations
-        evaluations += np.broadcast(*args[:3]).size
-        # Fail promptly if pruning regresses, instead of running the 400-million-pair search.
-        assert evaluations < 1_000
-        return real_survival(*args, **kwargs)
-
-    monkeypatch.setattr(nct, "sf", counted_survival)
-    with pytest.raises(ValueError, match="max_repeats=20000.*known-variance power upper bound"):
-        plan_repeats([cell], parameters=parameters)
-    assert evaluations == 0
-
-
-def test_scalar_bound_preserves_exhaustive_checks_near_roundoff_boundary(monkeypatch) -> None:
-    target = 0.8
-    distance = float(norm.isf(0.05) + norm.ppf(target) - 2e-12)
-    cell = PlanningCell("m", "b", 1.0, 1.0)
-    parameters = PlanningParameters(margin_points=distance, max_repeats=2)
-    real_survival = nct.sf
-    evaluations = 0
-
-    def counted_survival(*args, **kwargs):
-        nonlocal evaluations
-        evaluations += np.broadcast(*args[:3]).size
-        return real_survival(*args, **kwargs)
-
-    monkeypatch.setattr(nct, "sf", counted_survival)
-    with pytest.raises(ValueError, match=r"No feasible allocation found within max_repeats=2\.$"):
-        plan_repeats([cell], parameters=parameters)
-    # The normal bound is just below target; the buffer must leave the real NCT test in charge.
-    assert evaluations > 0
-
-
-def test_existing_baseline_filter_preserves_the_first_feasible_candidate_count(monkeypatch) -> None:
+def test_existing_baseline_search_returns_the_first_feasible_candidate_count() -> None:
     cell = PlanningCell("m", "b", 1.0, 1.5, existing_baseline_repeats=50)
     parameters = PlanningParameters(baseline_mode="existing", max_repeats=64)
     candidates = np.arange(2, 65)
@@ -156,24 +116,10 @@ def test_existing_baseline_filter_preserves_the_first_feasible_candidate_count(m
     degrees = total_variance**2 / (baseline_variance**2 / 49 + candidate_variance**2 / (candidates - 1))
     independent_power = nct.sf(t.isf(0.05, degrees), degrees, 1 / np.sqrt(total_variance))
     expected = candidates[np.flatnonzero(independent_power >= parameters.target_power)[0]]
-    normal_upper = norm.sf(norm.isf(0.05) - 1 / np.sqrt(total_variance))
-    assert normal_upper[0] < parameters.target_power - 1e-12
-
-    real_survival = nct.sf
-    evaluations = 0
-
-    def counted_survival(*args, **kwargs):
-        nonlocal evaluations
-        evaluations += np.broadcast(*args[:3]).size
-        return real_survival(*args, **kwargs)
-
-    monkeypatch.setattr(nct, "sf", counted_survival)
     result = plan_repeats([cell], parameters=parameters)
     assert result.baseline_counts == (50,)
     assert result.candidate_counts == (expected,)
     assert result.statistics.power >= parameters.target_power
-    # Initial rows really were filtered; all retained probabilities use the real SciPy calculation.
-    assert 0 < evaluations < len(candidates)
 
 
 def test_existing_baseline_search_handles_nonmonotone_power() -> None:
@@ -210,6 +156,19 @@ def test_count_limit_and_infeasible_search_fail_with_actionable_context() -> Non
         )
     with pytest.raises(ValueError, match="No legal new count"):
         plan_repeats([PlanningCell("m", "b", 1.0, 1.0, repeat_step=8)], parameters=PlanningParameters(max_repeats=4))
+
+
+@pytest.mark.parametrize("mode", ["optimize", "existing"])
+@pytest.mark.parametrize("experiments", [2, 10**400])
+def test_repeat_cost_overflow_is_rejected_before_infeasible_power(mode: str, experiments: int) -> None:
+    cell = PlanningCell(
+        "m", "b", 25.0, 25.0, repeat_cost=1e308, existing_baseline_repeats=20_000 if mode == "existing" else None
+    )
+    parameters = PlanningParameters(
+        baseline_mode=mode, candidate_experiments=experiments, margin_points=0.1, max_repeats=4
+    )
+    with pytest.raises(ValueError, match="Repeat costs overflowed after multiplying by candidate_experiments"):
+        plan_repeats([cell], parameters=parameters)
 
 
 def test_suite_buys_more_cheap_passes_and_explicitly_reports_local_solution() -> None:

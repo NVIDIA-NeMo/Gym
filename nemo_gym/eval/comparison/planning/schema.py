@@ -93,8 +93,8 @@ class RepeatPlanningManifest(_PlanningModel):
 
     @model_validator(mode="after")
     def validate_cells(self) -> "RepeatPlanningManifest":
-        identities = [(cell.model, cell.benchmark) for cell in self.cells]
-        if len(identities) != len(set(identities)):
+        identities = {(cell.model, cell.benchmark) for cell in self.cells}
+        if len(identities) != len(self.cells):
             raise ValueError("Each model/benchmark cell must be unique.")
         if self.aggregation_level == "benchmark" and len(self.cells) != 1:
             raise ValueError("aggregation_level benchmark requires exactly one model/benchmark cell.")

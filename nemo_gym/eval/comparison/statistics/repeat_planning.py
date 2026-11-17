@@ -152,8 +152,8 @@ class SimulationResult:
 def _inputs(cells: Sequence[PlanningCell], weights: Sequence[float] | None) -> tuple[float, ...]:
     if not cells or any(not isinstance(cell, PlanningCell) for cell in cells):
         raise ValueError("At least one PlanningCell is required.")
-    identities = [(cell.model, cell.benchmark) for cell in cells]
-    if len(set(identities)) != len(identities):
+    identities = {(cell.model, cell.benchmark) for cell in cells}
+    if len(identities) != len(cells):
         raise ValueError("Model/benchmark cells must be unique.")
     resolved = (1.0 / len(cells),) * len(cells) if weights is None else tuple(weights)
     if len(resolved) != len(cells):
@@ -241,18 +241,19 @@ def power_for_counts(
     )
 
 
-def _powers(
+def _power(
     cells: Sequence[PlanningCell],
     designs: NDArray[np.float64],
     weights: tuple[float, ...],
     parameters: PlanningParameters,
 ) -> NDArray[np.float64]:
-    """Batch the Welch equations for search; returned designs are checked by Gym."""
+    """Evaluate one design or a batch; returned allocations are checked by Gym."""
     variances = np.array([(cell.baseline_variance, cell.candidate_variance) for cell in cells])
-    contribution = np.square(weights)[None, :, None] * variances[None, :, :] / designs.reshape(-1, len(cells), 2)
-    total = contribution.sum(axis=(1, 2))
-    fractions = contribution / total[:, None, None]
-    denominator = (fractions**2 / (designs.reshape(-1, len(cells), 2) - 1)).sum(axis=(1, 2))
+    counts = designs.reshape(*designs.shape[:-1], len(cells), 2)
+    contribution = np.square(weights)[:, None] * variances / counts
+    total = contribution.sum(axis=(-2, -1))
+    fractions = contribution / total[..., None, None]
+    denominator = (fractions**2 / (counts - 1)).sum(axis=(-2, -1))
     degrees = 1 / denominator
     critical = t.isf(parameters.alpha, degrees)
     distance = parameters.expected_delta_points + parameters.margin_points
@@ -262,77 +263,34 @@ def _powers(
     return powers
 
 
-def _limits(
-    cells: Sequence[PlanningCell], parameters: PlanningParameters
-) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
-    steps = np.repeat([cell.repeat_step for cell in cells], 2).astype(float)
-    lower = np.ceil(2 / steps) * steps
-    upper = np.floor(parameters.max_repeats / steps) * steps
-    try:
-        prices = np.array([(cell.repeat_cost, cell.repeat_cost * parameters.candidate_experiments) for cell in cells])
-    except OverflowError as error:
-        raise ValueError("Repeat costs overflowed after multiplying by candidate_experiments.") from error
-    if not np.isfinite(prices).all():
-        raise ValueError("Repeat costs overflowed after multiplying by candidate_experiments.")
-    if parameters.baseline_mode == "existing":
-        for index, cell in enumerate(cells):
-            if cell.existing_baseline_repeats is None:
-                raise ValueError("existing baseline mode requires existing_baseline_repeats for every cell.")
-            lower[2 * index] = upper[2 * index] = cell.existing_baseline_repeats
-        prices[:, 0] = 0.0
-    if np.any(upper < lower):
+def _limits(cell: PlanningCell, parameters: PlanningParameters) -> tuple[int, int]:
+    """Return scalar bounds for newly collected complete-repeat counts."""
+    minimum = max(2, cell.repeat_step)
+    maximum = parameters.max_repeats // cell.repeat_step * cell.repeat_step
+    if maximum < minimum:
         raise ValueError("No legal new count fits repeat_step and max_repeats.")
-    return lower, upper, steps, prices.ravel()
-
-
-def _could_reach_target(
-    cell: PlanningCell,
-    designs: NDArray[np.float64],
-    weight: float,
-    parameters: PlanningParameters,
-) -> NDArray[np.bool_]:
-    """Retain scalar designs whose known-variance power bound permits the target.
-
-    For T=(Z+lambda)/sqrt(U/df), the Student-t rejection rule has null size
-    alpha. The Neyman-Pearson lemma makes the Z test most powerful when the
-    variance is known, so NCT power cannot exceed Phi(lambda-z_(1-alpha)),
-    whatever the degrees of freedom. This bounds the analytic planning model,
-    not the actual Welch simulation's rejection rate. No monotonicity of
-    Welch power in either arm count or degrees of freedom is assumed.
-
-    References: https://stat210a.berkeley.edu/fall-2025/reader/hypothesis-testing.html
-    and https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.nct.html
-    """
-    variance = weight**2 * (cell.baseline_variance / designs[:, 0] + cell.candidate_variance / designs[:, 1])
-    distance = parameters.expected_delta_points + parameters.margin_points
-    with np.errstate(divide="ignore", over="ignore"):
-        normal_power = norm.sf(norm.isf(parameters.alpha) - distance / np.sqrt(variance))
-    # A conservative buffer preserves exhaustive checks near the floating-point boundary.
-    return np.asarray(normal_power >= parameters.target_power - 1e-12)
+    return minimum, maximum
 
 
 def _scalar_counts(
     cells: Sequence[PlanningCell], parameters: PlanningParameters, weights: tuple[float, ...]
 ) -> tuple[NDArray[np.float64], str]:
-    lower, upper, steps, _ = _limits(cells, parameters)
-    step = int(steps[1])
-    if not _could_reach_target(cells[0], upper[None, :], weights[0], parameters)[0]:
-        subject = "candidate count" if parameters.baseline_mode == "existing" else "allocation"
-        raise ValueError(
-            f"No feasible {subject} found within max_repeats={parameters.max_repeats}: "
-            "even the known-variance power upper bound is below the target."
-        )
+    cell = cells[0]
+    step = cell.repeat_step
+    minimum, maximum = _limits(cell, parameters)
     if parameters.baseline_mode == "existing":
-        candidates = np.arange(lower[1], upper[1] + 1, step)
-        designs = np.column_stack((np.full(len(candidates), lower[0]), candidates))
-        designs = designs[_could_reach_target(cells[0], designs, weights[0], parameters)]
-        feasible = np.flatnonzero(_powers(cells, designs, weights, parameters) >= parameters.target_power)
-        if not len(feasible):
+        if cell.existing_baseline_repeats is None:
+            raise ValueError("existing baseline mode requires existing_baseline_repeats for every cell.")
+        candidates = np.arange(minimum, maximum + 1, step, dtype=float)
+        designs = np.column_stack((np.full(len(candidates), cell.existing_baseline_repeats), candidates))
+        feasible = _power(cells, designs, weights, parameters) >= parameters.target_power
+        if not feasible.any():
             raise ValueError(f"No feasible candidate count found within max_repeats={parameters.max_repeats}.")
-        return designs[feasible[0]], "minimum candidate count within the configured bound"
-    incumbent = lower.copy()
+        return designs[feasible.argmax()], "minimum candidate count within the configured bound"
+    upper = np.full(2, maximum, dtype=float)
+    incumbent = np.full(2, minimum, dtype=float)
     found = True
-    while _powers(cells, incumbent[None, :], weights, parameters)[0] < parameters.target_power:
+    while _power(cells, incumbent, weights, parameters) < parameters.target_power:
         enlarged = np.minimum(upper, incumbent * 2)
         if np.array_equal(enlarged, incumbent):
             found = False
@@ -343,20 +301,16 @@ def _scalar_counts(
     if not found:
         # This bound includes the whole legal rectangle until a feasible pair is found.
         best_total += 1
-    # Every cheaper legal pair is evaluated or excluded by the known-variance
-    # upper bound, including low-count nonmonotone power.
-    for nc in range(int(lower[1]), min(int(upper[1]), (best_total - int(lower[0]) - 1) // experiments) + 1, step):
-        maximum = min(int(upper[0]), best_total - experiments * nc - 1)
-        baselines = np.arange(lower[0], maximum + 1, steps[0])
+    # Evaluate every cheaper legal pair, including low-count nonmonotone power.
+    for nc in range(minimum, min(maximum, (best_total - minimum - 1) // experiments) + 1, step):
+        maximum_baseline = min(maximum, best_total - experiments * nc - 1)
+        baselines = np.arange(minimum, maximum_baseline + 1, step, dtype=float)
         if not len(baselines):
             continue
         designs = np.column_stack((baselines, np.full(len(baselines), nc)))
-        designs = designs[_could_reach_target(cells[0], designs, weights[0], parameters)]
-        if not len(designs):
-            continue
-        feasible = np.flatnonzero(_powers(cells, designs, weights, parameters) >= parameters.target_power)
-        if len(feasible):
-            incumbent = designs[feasible[0]]
+        feasible = _power(cells, designs, weights, parameters) >= parameters.target_power
+        if feasible.any():
+            incumbent = designs[feasible.argmax()]
             best_total = int(incumbent[0] + experiments * nc)
             found = True
     if not found:
@@ -365,15 +319,13 @@ def _scalar_counts(
 
 
 def _normal_start(
-    cells: Sequence[PlanningCell],
     parameters: PlanningParameters,
-    weights: tuple[float, ...],
+    coefficient: NDArray[np.float64],
     lower: NDArray[np.float64],
     upper: NDArray[np.float64],
     steps: NDArray[np.float64],
     prices: NDArray[np.float64],
 ) -> NDArray[np.float64]:
-    coefficient = (np.square(weights)[:, None] * [(c.baseline_variance, c.candidate_variance) for c in cells]).ravel()
     distance = parameters.expected_delta_points + parameters.margin_points
     variance_limit = (distance / (norm.isf(parameters.alpha) + norm.ppf(parameters.target_power))) ** 2
     mutable = (prices > 0) & (coefficient > 0)
@@ -408,17 +360,28 @@ def _normal_start(
 def _suite_counts(
     cells: Sequence[PlanningCell], parameters: PlanningParameters, weights: tuple[float, ...]
 ) -> tuple[NDArray[np.float64], str]:
-    lower, upper, steps, prices = _limits(cells, parameters)
+    limits = np.array([_limits(cell, parameters) for cell in cells], dtype=float)
+    lower = np.repeat(limits[:, 0], 2)
+    upper = np.repeat(limits[:, 1], 2)
+    steps = np.repeat([cell.repeat_step for cell in cells], 2).astype(float)
+    prices = np.array([(cell.repeat_cost, cell.repeat_cost * parameters.candidate_experiments) for cell in cells])
+    if parameters.baseline_mode == "existing":
+        for index, cell in enumerate(cells):
+            if cell.existing_baseline_repeats is None:
+                raise ValueError("existing baseline mode requires existing_baseline_repeats for every cell.")
+            lower[2 * index] = upper[2 * index] = cell.existing_baseline_repeats
+        prices[:, 0] = 0.0
+    prices = prices.ravel()
     counts = lower.copy()
     coefficient = (np.square(weights)[:, None] * [(c.baseline_variance, c.candidate_variance) for c in cells]).ravel()
-    if _powers(cells, counts[None, :], weights, parameters)[0] < parameters.target_power:
+    if _power(cells, counts, weights, parameters) < parameters.target_power:
         if not np.any((prices > 0) & (coefficient > 0)):
             raise ValueError(
                 "No feasible suite allocation: new repeats cannot reduce the existing baseline uncertainty."
             )
-        counts = _normal_start(cells, parameters, weights, lower, upper, steps, prices)
+        counts = _normal_start(parameters, coefficient, lower, upper, steps, prices)
     for _ in range(20_000):
-        current_power = _powers(cells, counts[None, :], weights, parameters)[0]
+        current_power = _power(cells, counts, weights, parameters)
         if current_power >= parameters.target_power:
             break
         indices = np.flatnonzero((counts + steps <= upper) & (coefficient > 0))
@@ -426,7 +389,7 @@ def _suite_counts(
             raise ValueError(f"No feasible suite allocation found within max_repeats={parameters.max_repeats}.")
         proposals = np.repeat(counts[None, :], len(indices), axis=0)
         proposals[np.arange(len(indices)), indices] += steps[indices]
-        gain = (_powers(cells, proposals, weights, parameters) - current_power) / (prices[indices] * steps[indices])
+        gain = (_power(cells, proposals, weights, parameters) - current_power) / (prices[indices] * steps[indices])
         counts = proposals[int(np.argmax(gain))]
     else:
         raise ValueError("Suite allocation exceeded its finite repair search.")
@@ -453,7 +416,7 @@ def _suite_counts(
                     if np.dot(prices, proposal) < best_cost:
                         proposals.append(proposal)
             designs = np.stack(proposals)
-            powers = _powers(cells, designs, weights, parameters)
+            powers = _power(cells, designs, weights, parameters)
             costs = designs @ prices
             feasible = np.flatnonzero((powers >= parameters.target_power) & (costs < best_cost))
             if len(feasible):
@@ -480,6 +443,12 @@ def plan_repeats(
     resolved = _inputs(cells, weights)
     if not isinstance(parameters, PlanningParameters):
         raise ValueError("parameters must be PlanningParameters.")
+    try:
+        finite_costs = all(isfinite(cell.repeat_cost * parameters.candidate_experiments) for cell in cells)
+    except OverflowError as error:
+        raise ValueError("Repeat costs overflowed after multiplying by candidate_experiments.") from error
+    if not finite_costs:
+        raise ValueError("Repeat costs overflowed after multiplying by candidate_experiments.")
     counts, method = (
         _scalar_counts(cells, parameters, resolved) if len(cells) == 1 else _suite_counts(cells, parameters, resolved)
     )

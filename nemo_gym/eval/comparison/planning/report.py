@@ -23,8 +23,8 @@ from nemo_gym.eval.comparison.planning.schema import RepeatPlanningResult
 from nemo_gym.eval.comparison.schema import ReportFormat
 
 
-def _number(value: float | None) -> str:
-    return "unavailable" if value is None else f"{value:#.4g}"
+def _number(value: float) -> str:
+    return f"{value:#.4g}"
 
 
 def _text(value: object) -> str:
@@ -183,23 +183,18 @@ def write_repeat_planning_reports(
     result: RepeatPlanningResult, output_dir: Path, report_format: ReportFormat
 ) -> list[Path]:
     """Write separate planning artifacts, preserving the input plan even through aliases."""
-    names = [
-        name
-        for extension, name in (("md", "repeat_planning_report.md"), ("json", "repeat_planning_report.json"))
+    paths = [
+        output_dir / f"repeat_planning_report.{extension}"
+        for extension in ("md", "json")
         if report_format in (extension, "both")
     ]
-    for name in names:
-        target = output_dir / name
-        if target.resolve() == result.plan_fpath.resolve() or (target.exists() and target.samefile(result.plan_fpath)):
-            raise ConfigError(f"Planning report '{target}' would overwrite the input plan; choose --output-dir.")
+    for path in paths:
+        if path.resolve() == result.plan_fpath.resolve() or (path.exists() and path.samefile(result.plan_fpath)):
+            raise ConfigError(f"Planning report '{path}' would overwrite the input plan; choose --output-dir.")
     output_dir.mkdir(parents=True, exist_ok=True)
-    written = []
-    if report_format in ("md", "both"):
-        path = output_dir / "repeat_planning_report.md"
-        path.write_text(render_repeat_planning_markdown(result), encoding="utf-8")
-        written.append(path)
-    if report_format in ("json", "both"):
-        path = output_dir / "repeat_planning_report.json"
-        path.write_bytes(orjson.dumps(result.model_dump(mode="json"), option=orjson.OPT_INDENT_2) + b"\n")
-        written.append(path)
-    return written
+    for path in paths:
+        if path.suffix == ".md":
+            path.write_text(render_repeat_planning_markdown(result), encoding="utf-8")
+        else:
+            path.write_bytes(orjson.dumps(result.model_dump(mode="json"), option=orjson.OPT_INDENT_2) + b"\n")
+    return paths
