@@ -409,7 +409,7 @@ SCHEDULER_DOWN = "#!/bin/bash\necho 'squeue: error: Unable to contact the contro
 def _store_run_with_unknown_accounting(tmp_path, outcomes):
     """The walltime test run as a Store run (one scored rollout, then one per entry of ``outcomes``) whose infra-retry
     count is unreadable."""
-    from tests.unit_tests.orchestration.test_masked_infrastructure_recovery import _run
+    from tests.unit_tests.eval.recovery.test_masked_infrastructure_recovery import _run
 
     job_dir = _timed_run(tmp_path)
     for name in ("rollouts.jsonl", "rollouts_materialized_inputs.jsonl"):
@@ -446,7 +446,7 @@ def test_mixed_masks_name_the_partial_rerun_with_its_budget_and_never_a_budget_a
 
 def test_a_protocol_violation_keeps_its_producer_fix_over_a_masked_rerun(tmp_path, slurm_bin):
     from nemo_gym.orchestration.submit import inspect_recovery
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import PROTOCOL_VIOLATION
+    from tests.unit_tests.eval.recovery.test_recovery_decision import PROTOCOL_VIOLATION
     from tests.unit_tests.orchestration.test_rerun_masked_without_artifact import _kept
 
     violation = PROTOCOL_VIOLATION | {
@@ -471,7 +471,7 @@ def test_a_protocol_violation_keeps_its_producer_fix_over_a_masked_rerun(tmp_pat
 def test_an_admitted_rejudgment_waits_for_the_scheduler_before_any_budget(tmp_path, slurm_bin):
     from nemo_gym.orchestration.submit import recover
     from nemo_gym.rollouts.rollout_store import RolloutStore
-    from tests.unit_tests.orchestration.test_masked_infrastructure_recovery import _ANSWER
+    from tests.unit_tests.eval.recovery.test_masked_infrastructure_recovery import _ANSWER
 
     judge_failure = _ANSWER | {
         "_ng_failure_class": "judge_failed",
@@ -559,8 +559,8 @@ def test_the_verdict_of_an_inspection_repeats_the_options_it_was_asked_with(tmp_
 
 def test_a_terminal_protocol_row_beside_missing_rows_is_recovered_not_resubmitted_fresh(tmp_path, slurm_bin):
     from nemo_gym.orchestration.submit import inspect_recovery, recover
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import PROTOCOL_VIOLATION
-    from tests.unit_tests.orchestration.test_masked_infrastructure_recovery import _run
+    from tests.unit_tests.eval.recovery.test_masked_infrastructure_recovery import _run
+    from tests.unit_tests.eval.recovery.test_recovery_decision import PROTOCOL_VIOLATION
 
     violation = PROTOCOL_VIOLATION | {
         "_ng_failure_class": "environment_protocol_violation",
@@ -594,8 +594,8 @@ def test_a_terminal_protocol_row_beside_missing_rows_is_recovered_not_resubmitte
 
 def test_a_protocol_row_beside_a_spent_retry_budget_is_extended_not_resubmitted_fresh(tmp_path, slurm_bin):
     from nemo_gym.orchestration.submit import inspect_recovery, recover
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import PROTOCOL_VIOLATION
-    from tests.unit_tests.orchestration.test_masked_infrastructure_recovery import _run
+    from tests.unit_tests.eval.recovery.test_masked_infrastructure_recovery import _run
+    from tests.unit_tests.eval.recovery.test_recovery_decision import PROTOCOL_VIOLATION
 
     violation = PROTOCOL_VIOLATION | {
         "_ng_failure_class": "environment_protocol_violation",

@@ -14,6 +14,7 @@
 # limitations under the License.
 """Evidence builders the recovery and orchestration tests share."""
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -21,6 +22,7 @@ from pathlib import Path
 
 from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.eval.recovery.evidence import COLLECT_SCRIPT, CollectedEvidence
+from nemo_gym.eval.recovery.policy import RecoveryOutcomePolicyConfig
 
 
 # Use the response serialized by the actual typed producer/verifier contract, not an output-only placeholder.
@@ -147,3 +149,65 @@ def final_model_zero(task: int, rollout: int) -> dict:
 
 def _judge_failure(task: int, **extra) -> dict:
     return ident(task, _ng_failure_class="judge_failed", failure_kind="judge_failed", **extra)
+
+
+class _StartsWith:
+    def __init__(self, prefix: str) -> None:
+        self.prefix = prefix
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, str) and other.startswith(self.prefix)
+
+    def __repr__(self) -> str:
+        return f"startswith({self.prefix!r})"
+
+
+# A report without run.stats.responses leaves the response gate unknown, and the trial count is a lower bound.
+HEALTH_UNKNOWN = _StartsWith("response/trial health unknown: ['")
+
+
+def complete_job(tmp_path: Path) -> Path:
+    job = write_job_dir(tmp_path / "job", n=4, results=[ident(t, reward=1.0) for t in range(4)], failures=[])
+    (job / "artifacts" / "rollouts_aggregate_metrics.json").write_text(json.dumps({"agent": {"mean/reward": 0.75}}))
+    write_postrun_receipt(job)
+    return job
+
+
+RECEIPT_FILES = {
+    "rollouts_jsonl_fpath": "rollouts.jsonl",
+    "resolved_config_yaml_fpath": "rollouts_resolved_config.yaml",
+    "aggregate_metrics_json_fpath": "rollouts_aggregate_metrics.json",
+    "failures_jsonl_fpath": "rollouts_failures.jsonl",
+    "materialized_inputs_jsonl_fpath": "rollouts_materialized_inputs.jsonl",
+}
+
+
+def artifact_digests(job: Path) -> dict:
+    files = {key: job / "artifacts" / name for key, name in RECEIPT_FILES.items()}
+    return {key: hashlib.sha256(f.read_bytes()).hexdigest() if f.exists() else None for key, f in files.items()}
+
+
+def write_postrun_receipt(job: Path, run_id: str = "postrun-run") -> None:
+    """The version-1 receipt a content-bound post-run export writes: its backend run id and the artifact digests."""
+    receipt = {
+        "version": 1,
+        "run_id": run_id,
+        "artifacts": artifact_digests(job),
+        "uploaded_rollouts": True,
+        "rollout_projection_version": 1,
+    }
+    (job / "artifacts" / "rollouts_mlflow_export_done").write_text(json.dumps(receipt))
+
+
+STOP_PROVIDER = RecoveryOutcomePolicyConfig(by_failure_kind={"provider_unavailable": "fail"})
+
+
+_SKIP_REASON = "CritPt smoke mode (fire_after): the batch was not sent to the grading API"
+
+
+def _skipped_job(tmp_path, kind: str = "judge_skipped", n: int = 5):
+    rows = [
+        ident(t, mask_sample=True, reward=0.0, failure_kind=kind, failure_reason=_SKIP_REASON, response=SAVED_ANSWER)
+        for t in range(n)
+    ]
+    return write_job_dir(tmp_path / "job", n=n, results=rows, failures=[])

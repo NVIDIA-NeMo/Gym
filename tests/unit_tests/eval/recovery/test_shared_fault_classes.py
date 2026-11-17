@@ -29,11 +29,6 @@ from nemo_gym.eval.recovery.trials import (
     fault_report,
 )
 from tests.helpers.recovery_health import _gate, _run
-from tests.unit_tests.orchestration.test_eval_resubmit_decision import (  # noqa: F401
-    complete_job,
-    fake_executor,
-    run_cli,
-)
 
 
 def test_the_gate_uses_the_shared_classifier():
@@ -120,15 +115,6 @@ def test_a_queued_policy_timeout_is_a_server_fault():
 def test_the_setting_is_a_strict_boolean():
     with pytest.raises(ValueError):
         GateCriteria(policy_timeout_counts_as_model="no")
-
-
-@pytest.mark.parametrize("value,expected", [("false", False), ("true", True)])
-def test_the_recover_command_sets_it_on_the_gate(tmp_path, fake_executor, capsys, value, expected):
-    fake_executor.job_dir = complete_job(tmp_path)
-    _, out = run_cli(
-        ["eval", "resubmit", "gym-job-k", "bench", "--recover", "--policy-timeout-counts-as-model", value], capsys
-    )
-    assert out["gate_task"]["criteria"]["evaluation"]["policy_timeout_counts_as_model"] is expected
 
 
 def test_ungraded_harness_failure_is_evaluation_side_not_model_invalid_output():
@@ -344,7 +330,7 @@ def test_bad_judge_verdict_preserves_other_trials_saved_attribution():
 
 @pytest.mark.parametrize("kind", ["provider_oom_killed", "verifier_error", "session_lost"])
 def test_saved_fail_stops_masked_recovery_even_when_its_default_policy_would_retry(tmp_path, kind):
-    from tests.unit_tests.orchestration.test_masked_infrastructure_recovery import _decide, _masked, _run
+    from tests.unit_tests.eval.recovery.test_masked_infrastructure_recovery import _decide, _masked, _run
 
     output, _ = _run(
         tmp_path, [[_masked(kind) | {"failure_outcome_action": "fail", "failure_outcome_attribution": "evaluation"}]]
@@ -497,7 +483,7 @@ def test_collector_preserves_final_failure_stage_for_shared_health_classificatio
 def test_recovery_uses_configured_class_after_policy_save_reload(tmp_path):
     from nemo_gym.eval.recovery.policy import RecoveryOutcomePolicyConfig
     from tests.helpers.recovery_evidence import INFRA, ident, write_job_dir
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import _decide
+    from tests.unit_tests.eval.recovery.test_recovery_decision import _decide
 
     row = ident(0, **INFRA)
     row.update(

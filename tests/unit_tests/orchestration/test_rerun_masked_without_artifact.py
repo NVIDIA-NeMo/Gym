@@ -32,11 +32,11 @@ from nemo_gym.eval.recovery.planner import (
     decide_from_collected,
 )
 from nemo_gym.rollouts.rollout_store import RolloutStore
+from tests.unit_tests.eval.recovery.test_masked_infrastructure_recovery import _ANSWER, _masked, _run
 from tests.unit_tests.orchestration.test_eval_resubmit import _handle, _resumable_run
 from tests.unit_tests.orchestration.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.orchestration.test_eval_resubmit import slurm_bin as slurm_bin
 from tests.unit_tests.orchestration.test_managed_recovery_selection import collect
-from tests.unit_tests.orchestration.test_masked_infrastructure_recovery import _ANSWER, _masked, _run
 
 
 FLAG = "--rerun-masked-without-artifact --rerun-reason"

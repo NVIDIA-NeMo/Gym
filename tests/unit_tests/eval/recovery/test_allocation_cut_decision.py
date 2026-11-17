@@ -33,8 +33,6 @@ from nemo_gym.eval.recovery.evidence import (
 )
 from nemo_gym.eval.recovery.planner import decide_from_collected
 from tests.helpers.recovery_cut_runs import _cut_run, _decide, _digests
-from tests.unit_tests.orchestration.test_eval_resubmit import _local_index as _local_index
-from tests.unit_tests.orchestration.test_eval_resubmit import slurm_bin as slurm_bin
 
 
 def test_the_in_job_admission_verifies_and_reads_the_store_once(tmp_path, monkeypatch, capsys):
