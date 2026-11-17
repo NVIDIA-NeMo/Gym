@@ -87,28 +87,18 @@ def _source_stat(source: Path) -> tuple[int, ...]:
     return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
 
 
-def workspace_file(path: str, *, workspace_root: Path, scratch_roots: tuple[Path, ...] = ()) -> Path:
-    """A regular file under the workspace or a scratch directory; a symlink that leads out of them is refused.
-
-    A relative path starts at the workspace.
-    """
+def workspace_file(path: str, *, workspace_root: Path) -> Path:
+    """A regular file under the workspace; a symlink that leads out of it is refused."""
     root = workspace_root.resolve(strict=True)
     requested = Path(path)
     source = (requested if requested.is_absolute() else root / requested).resolve(strict=True)
-    allowed = (root, *(scratch.resolve() for scratch in scratch_roots))
-    if not any(source.is_relative_to(directory) for directory in allowed) or not source.is_file():
+    if not source.is_relative_to(root) or not source.is_file():
         raise MediaContractError(
             "invalid_media_path",
-            "media must be a regular file within the configured workspace or scratch directories",
-            details={"path": path, "allowed_directories": [str(directory) for directory in allowed]},
+            "media must be a regular file within the configured workspace",
+            details={"path": path},
         )
     return source
-
-
-def shown_path(source: Path, *, workspace_root: Path) -> str:
-    """The path the text names: workspace-relative, or absolute for a file in a scratch directory."""
-    root = workspace_root.resolve()
-    return source.relative_to(root).as_posix() if source.is_relative_to(root) else source.as_posix()
 
 
 def _run_process(
@@ -681,17 +671,12 @@ def frame_jpeg(frame: np.ndarray) -> bytes:
 
 
 def watch_video(
-    requested: VideoSpec,
-    *,
-    workspace_root: Path,
-    cache_dir: Path,
-    profile: FrameProfile,
-    scratch_roots: tuple[Path, ...] = (),
+    requested: VideoSpec, *, workspace_root: Path, cache_dir: Path, profile: FrameProfile
 ) -> dict[str, object]:
     """The requested frames as JPEG data URLs, in order, with the text that labels them."""
-    source = workspace_file(requested.video_path, workspace_root=workspace_root, scratch_roots=scratch_roots)
+    source = workspace_file(requested.video_path, workspace_root=workspace_root)
     # The text names the workspace-relative path, never a machine-specific absolute one.
-    requested = requested.model_copy(update={"video_path": shown_path(source, workspace_root=workspace_root)})
+    requested = requested.model_copy(update={"video_path": source.relative_to(workspace_root.resolve()).as_posix()})
     index_started = time.monotonic()
     index, index_cache_hit = _get_source_index(source, cache_dir=cache_dir, profile=profile)
     index_seconds = time.monotonic() - index_started
@@ -734,9 +719,9 @@ def watch_video(
     }
 
 
-def view_image(path: str, *, workspace_root: Path, scratch_roots: tuple[Path, ...] = ()) -> dict[str, object]:
+def view_image(path: str, *, workspace_root: Path) -> dict[str, object]:
     """An image file's own bytes, after the byte and area checks; the image is not resized."""
-    source = workspace_file(path, workspace_root=workspace_root, scratch_roots=scratch_roots)
+    source = workspace_file(path, workspace_root=workspace_root)
     if source.stat().st_size > MAX_IMAGE_BYTES:
         raise MediaContractError(
             "image_too_large", "image exceeds its byte limit", details={"maximum_bytes": MAX_IMAGE_BYTES}
@@ -762,7 +747,7 @@ def view_image(path: str, *, workspace_root: Path, scratch_roots: tuple[Path, ..
         mime = Image.MIME[image_format]
     data = source.read_bytes()
     return {
-        "output": f"Image: {shown_path(source, workspace_root=workspace_root)}",
+        "output": f"Image: {source.relative_to(workspace_root.resolve()).as_posix()}",
         "attachments": [{"mime": mime, "url": f"data:{mime};base64," + base64.b64encode(data).decode()}],
         "metadata": {"source_sha256": hashlib.sha256(data).hexdigest(), "width": width, "height": height},
     }

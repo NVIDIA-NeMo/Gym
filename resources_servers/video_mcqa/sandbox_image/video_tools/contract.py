@@ -91,13 +91,6 @@ class FrameProfile(BaseModel):
         return self.patch_size * self.spatial_merge_size
 
 
-def _absolute_directory(value: str) -> str:
-    path = PurePosixPath(value)
-    if not path.is_absolute() or path == PurePosixPath("/") or ".." in path.parts:
-        raise ValueError("must be an absolute sandbox directory other than /")
-    return value
-
-
 class ToolSettings(BaseModel):
     """The frame profile and the plugin's limits, as a resources server config sets them."""
 
@@ -114,14 +107,6 @@ class ToolSettings(BaseModel):
     # Base64 bytes of tool images one episode sends to the model. From the tool result that would pass it on, the
     # plugin sends a notice in place of each result's images, the same in every later request.
     max_tool_media_bytes: PositiveInt = 400 << 20
-    # Absolute sandbox directories outside the workspace whose files the tools also read: OpenCode's temporary
-    # directory, where its bash tool keeps scratch files such as frames the model cut.
-    scratch_roots: tuple[str, ...] = ("/tmp/opencode",)
-
-    @field_validator("scratch_roots")
-    @classmethod
-    def absolute_scratch_roots(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        return tuple(_absolute_directory(root) for root in value)
 
 
 class ToolConfig(ToolSettings):
@@ -135,14 +120,15 @@ class ToolConfig(ToolSettings):
     @field_validator("workspace_root", "cache_dir")
     @classmethod
     def absolute_directory(cls, value: str) -> str:
-        return _absolute_directory(value)
+        path = PurePosixPath(value)
+        if not path.is_absolute() or path == PurePosixPath("/") or ".." in path.parts:
+            raise ValueError("must be an absolute sandbox directory other than /")
+        return value
 
     @model_validator(mode="after")
     def cache_outside_workspace(self) -> "ToolConfig":
-        if any(
-            PurePosixPath(self.cache_dir).is_relative_to(root) for root in (self.workspace_root, *self.scratch_roots)
-        ):
-            raise ValueError("cache_dir must be outside workspace_root and scratch_roots")
+        if PurePosixPath(self.cache_dir).is_relative_to(self.workspace_root):
+            raise ValueError("cache_dir must be outside workspace_root")
         return self
 
 

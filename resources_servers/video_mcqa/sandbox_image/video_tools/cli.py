@@ -42,19 +42,13 @@ class ImageRequest(BaseModel):
 def execute_tool(request: ToolRequest, config: ToolConfig) -> dict[str, object]:
     """Run one tool; it never resizes, drops or adds frames on its own."""
     workspace_root = Path(config.workspace_root)
-    scratch_roots = tuple(Path(root) for root in config.scratch_roots)
     if request.tool == "view_image":
-        return view_image(
-            ImageRequest.model_validate(request.arguments).path,
-            workspace_root=workspace_root,
-            scratch_roots=scratch_roots,
-        )
+        return view_image(ImageRequest.model_validate(request.arguments).path, workspace_root=workspace_root)
     return watch_video(
         VideoSpec.model_validate(request.arguments),
         workspace_root=workspace_root,
         cache_dir=Path(config.cache_dir),
         profile=config.profile,
-        scratch_roots=scratch_roots,
     )
 
 

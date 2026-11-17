@@ -108,11 +108,9 @@ terms below still apply.
 
 `sandbox_image/Dockerfile` builds the image: OpenCode 1.17.11 and its plugin
 dependencies (the pins of `visual_coding_opencode`), the static FFmpeg 7.0.2
-build of mwader/static-ffmpeg, Python 3.13 with NumPy 2.4.6, Pillow 12.3.0 and
-Pydantic 2.13.5, and the video tools in `/opt/video-mcqa`. For the model's own
-commands it also has ripgrep (OpenCode's grep and glob tools), fonts for FFmpeg's
-`drawtext` filter, and ImageMagick with the fonts its labels default to. Each pin
-is checked during the build, and so are `drawtext`, ripgrep and `montage`.
+build of johnvansickle.com, Python 3.13 with NumPy 2.4.6, Pillow 12.3.0 and
+Pydantic 2.13.5, and the video tools in `/opt/video-mcqa`. Each pin is checked
+during the build.
 
 ```bash
 docker build --platform linux/amd64 -t <registry>/video-mcqa-sandbox:<tag> \
@@ -143,13 +141,7 @@ the seed writes from the server's `video_tools` settings.
   tokens, then `This is a video:` and one `Frame i sampled at t seconds:` line
   per frame, in the order of the images. These are the frame rules of Nemotron
   4's agentic video training.
-- `view_image(path)` returns an image file unchanged.
-
-Both tools read regular files under the media root and under
-`video_tools.scratch_roots`, by default `/tmp/opencode`: OpenCode's bash tool
-keeps temporary files there, such as frames or contact sheets the model made.
-A relative path starts at the media root, and a symlink that leads out of these
-directories is refused. The tool descriptions name only the workspace.
+- `view_image(path)` returns an image file under the media root unchanged.
 
 A request outside the limits is a tool error; frames and sizes are never
 reduced silently. One frame is at most 2048×2048 pixels, the frames of one call

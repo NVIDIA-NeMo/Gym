@@ -192,14 +192,6 @@ def test_profile_and_tool_configuration_are_checked() -> None:
         ToolConfig(workspace_root="/testbed", cache_dir="/testbed/index")
     with pytest.raises(ValidationError, match="absolute"):
         ToolConfig(workspace_root="testbed", cache_dir="/tmp/index")
-    # OpenCode's temporary directory is readable by default; the index cache stays out of every readable directory.
-    assert config.scratch_roots == ("/tmp/opencode",)
-    with pytest.raises(ValidationError, match="scratch_roots"):
-        ToolConfig(workspace_root="/testbed", cache_dir="/tmp/opencode/index")
-    with pytest.raises(ValidationError, match="absolute"):
-        ToolConfig(workspace_root="/testbed", cache_dir="/tmp/index", scratch_roots=("tmp/opencode",))
-    with pytest.raises(ValidationError, match="other than /"):
-        ToolConfig(workspace_root="/testbed", cache_dir="/tmp/index", scratch_roots=("/",))
 
 
 @pytest.fixture
@@ -276,56 +268,6 @@ def test_paths_outside_the_workspace_are_refused(media, workspace, tmp_path) -> 
         with pytest.raises(MediaContractError) as error:
             media.workspace_file(path, workspace_root=workspace)
         assert error.value.code == "invalid_media_path"
-
-
-def test_files_in_a_scratch_directory_are_read_and_named_by_absolute_path(media, workspace, tmp_path) -> None:
-    from PIL import Image
-
-    scratch = tmp_path / "opencode"
-    scratch.mkdir()
-    buffer = io.BytesIO()
-    Image.new("RGB", (30, 20), (10, 200, 10)).save(buffer, format="PNG")
-    (scratch / "sheet.png").write_bytes(buffer.getvalue())
-    result = media.view_image(str(scratch / "sheet.png"), workspace_root=workspace, scratch_roots=(scratch,))
-    assert result["output"] == f"Image: {(scratch / 'sheet.png').resolve()}"
-    (attachment,) = result["attachments"]
-    assert base64.b64decode(attachment["url"].removeprefix("data:image/png;base64,")) == buffer.getvalue()
-    # Relative paths still start at the workspace; a scratch link that leads elsewhere is refused.
-    with pytest.raises(FileNotFoundError):
-        media.workspace_file("sheet.png", workspace_root=workspace, scratch_roots=(scratch,))
-    outside = tmp_path / "secret.png"
-    outside.write_bytes(buffer.getvalue())
-    (scratch / "link.png").symlink_to(outside)
-    with pytest.raises(MediaContractError) as error:
-        media.workspace_file(str(scratch / "link.png"), workspace_root=workspace, scratch_roots=(scratch,))
-    assert error.value.code == "invalid_media_path"
-    assert error.value.details["allowed_directories"] == [str(workspace.resolve()), str(scratch.resolve())]
-    # Without the scratch directory, the same file is outside the tools' reach.
-    with pytest.raises(MediaContractError):
-        media.view_image(str(scratch / "sheet.png"), workspace_root=workspace)
-
-
-@needs_ffmpeg
-def test_watch_video_reads_a_clip_in_a_scratch_directory(media, workspace, tmp_path) -> None:
-    scratch = tmp_path / "opencode"
-    scratch.mkdir()
-    shutil.copy(CLIPS / "synthetic-5.mp4", scratch / "cut.mp4")
-    request = VideoSpec(video_path=str(scratch / "cut.mp4"), start=0.5, end=2.5, num_frames=3, resize_long_edge=100)
-    result = media.watch_video(
-        request,
-        workspace_root=workspace,
-        cache_dir=tmp_path / "index",
-        profile=FrameProfile(),
-        scratch_roots=(scratch,),
-    )
-    assert result["output"].startswith(f"Video: {(scratch / 'cut.mp4').resolve()}\nSource range: [0.50s, 2.50s)\n")
-    in_workspace = media.watch_video(
-        request.model_copy(update={"video_path": "videos/clip.mp4"}),
-        workspace_root=workspace,
-        cache_dir=tmp_path / "index",
-        profile=FrameProfile(),
-    )
-    assert result["metadata"]["frame_sha256"] == in_workspace["metadata"]["frame_sha256"]
 
 
 def test_view_image_returns_the_file_unchanged(media, workspace) -> None:
