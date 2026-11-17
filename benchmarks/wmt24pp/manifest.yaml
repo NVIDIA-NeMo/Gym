@@ -12,6 +12,13 @@ authors:
 - gwarmstrong
 maintainers:
 - gwarmstrong
+capabilities:
+- multilingual_and_multicultural
+- multilingual_and_multicultural/translation
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+domains:
+- language_linguistics
 primary_metric: unknown
 requirements:
   gpu: true

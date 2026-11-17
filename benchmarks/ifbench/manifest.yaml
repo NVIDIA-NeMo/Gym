@@ -12,6 +12,25 @@ authors:
 - fsiino-nvidia
 maintainers:
 - fsiino-nvidia
+capabilities:
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+- instruction_and_format_following/structured_output
+- writing_and_editing
+- writing_and_editing/creative_writing
+- writing_and_editing/informational_writing
+- writing_and_editing/general_qa
+- knowledge
+- knowledge/expert_knowledge
+- reasoning
+- reasoning/quantitative_reasoning
+- planning_and_autonomy
+- planning_and_autonomy/self_verification
+domains:
+- media_entertainment
+- language_linguistics
+- artificial_intelligence
+- mathematics
 primary_metric: unknown
 requirements:
   gpu: false

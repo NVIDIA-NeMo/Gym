@@ -12,6 +12,8 @@ authors:
 - Guo Chen
 maintainers:
 - cg1177
+capabilities: unknown
+domains: unknown
 primary_metric: mean/Video_MME_agentic
 requirements:
   gpu: false

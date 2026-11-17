@@ -10,6 +10,8 @@ licensing: Apache-2.0
 authors: [Jarno Seppänen]
 maintainers:
 - jseppanen
+capabilities: unknown
+domains: unknown
 requirements:
   gpu: false
   network: allowlist

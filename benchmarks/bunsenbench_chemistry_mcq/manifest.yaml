@@ -11,6 +11,15 @@ authors:
 - eric-tramel
 maintainers:
 - eric-tramel
+capabilities:
+- knowledge
+- knowledge/expert_knowledge
+- knowledge/procedural_knowledge
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+domains:
+- chemistry
 primary_metric: pass@1[avg-of-8]/accuracy
 requirements:
   gpu: false

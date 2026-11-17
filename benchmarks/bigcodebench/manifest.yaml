@@ -12,6 +12,13 @@ authors:
 - George Armstrong
 maintainers:
 - gwarmstrong
+capabilities:
+- coding
+- coding/code_generation
+- knowledge
+- knowledge/procedural_knowledge
+domains:
+- computer_science
 primary_metric: pass@1[avg-of-1]/accuracy
 requirements:
   gpu: false

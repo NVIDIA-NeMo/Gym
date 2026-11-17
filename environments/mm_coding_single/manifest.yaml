@@ -11,6 +11,8 @@ authors:
 - Fuxiao Liu
 maintainers:
 - yfw
+capabilities: unknown
+domains: unknown
 requirements:
   gpu: false
   network: allowlist

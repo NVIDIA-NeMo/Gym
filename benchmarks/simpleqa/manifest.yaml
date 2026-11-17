@@ -12,6 +12,14 @@ authors:
 - gwarmstrong
 maintainers:
 - gwarmstrong
+capabilities:
+- knowledge
+- knowledge/factual_knowledge
+- knowledge/knowledge_uncertainty
+- writing_and_editing
+- writing_and_editing/general_qa
+domains:
+- general
 primary_metric: pass@1[avg-of-1]/f1
 requirements:
   gpu: false

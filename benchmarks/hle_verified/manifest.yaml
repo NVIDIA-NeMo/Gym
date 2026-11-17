@@ -11,6 +11,18 @@ authors:
 - fsiino-nvidia
 maintainers:
 - gnalbandyan
+capabilities:
+- knowledge
+- knowledge/expert_knowledge
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+- writing_and_editing
+- writing_and_editing/general_qa
+domains:
+- mathematics
+- physics
+- humanities
 primary_metric: mean/reward
 requirements:
   gpu: false

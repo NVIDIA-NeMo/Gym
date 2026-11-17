@@ -11,6 +11,19 @@ authors:
 - stephencge
 maintainers:
 - stephencge
+capabilities:
+- reasoning
+- reasoning/deductive_reasoning
+- reasoning/quantitative_reasoning
+- coding
+- coding/code_generation
+- knowledge
+- knowledge/procedural_knowledge
+- planning_and_autonomy
+- planning_and_autonomy/strategy_and_search
+domains:
+- mathematics
+- computer_science
 primary_metric: mean/reward
 requirements:
   gpu: false

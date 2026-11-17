@@ -11,6 +11,22 @@ authors:
 - rystewart-nvidia
 maintainers:
 - rystewart-nvidia
+capabilities:
+- knowledge
+- knowledge/expert_knowledge
+- retrieval_and_grounding
+- retrieval_and_grounding/long_context_learning
+- retrieval_and_grounding/evidence_synthesis
+- tool_and_computer_use
+- tool_and_computer_use/file_operations
+- tool_and_computer_use/multi_step_tool_use
+- memory_and_state
+- memory_and_state/skill_use
+- memory_and_state/procedural_memory
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+domains:
+- law
 primary_metric: mean/reward
 requirements:
   gpu: false

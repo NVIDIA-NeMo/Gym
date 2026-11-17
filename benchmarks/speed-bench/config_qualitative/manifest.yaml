@@ -14,6 +14,9 @@ authors:
 maintainers:
 - gwarmstrong
 - YoavMiron
+capabilities: []
+domains:
+- other
 primary_metric: unknown
 requirements:
   gpu: false

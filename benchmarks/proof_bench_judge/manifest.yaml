@@ -12,6 +12,19 @@ authors:
 - gwarmstrong
 maintainers:
 - gwarmstrong
+capabilities:
+- evaluation_and_judging
+- evaluation_and_judging/error_analysis
+- evaluation_and_judging/consistency_checking
+- reasoning
+- reasoning/deductive_reasoning
+- reasoning/quantitative_reasoning
+- knowledge
+- knowledge/expert_knowledge
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+domains:
+- mathematics
 primary_metric: unknown
 requirements:
   gpu: false

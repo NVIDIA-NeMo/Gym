@@ -12,6 +12,17 @@ authors:
 - Eric Yang
 maintainers:
 - ericyang0
+capabilities:
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+- context_management
+- context_management/constraint_preservation
+- retrieval_and_grounding
+- retrieval_and_grounding/long_context_learning
+- tool_and_computer_use
+- tool_and_computer_use/tool_calling
+domains:
+- general
 primary_metric: composite/complete_accuracy
 requirements:
   gpu: false

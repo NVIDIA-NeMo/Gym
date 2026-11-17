@@ -11,6 +11,17 @@ authors:
 - i-vainn
 maintainers:
 - i-vainn
+capabilities:
+- reasoning
+- reasoning/deductive_reasoning
+- reasoning/quantitative_reasoning
+- planning_and_autonomy
+- planning_and_autonomy/strategy_and_search
+- knowledge
+- knowledge/procedural_knowledge
+- planning_and_autonomy/self_verification
+domains:
+- mathematics
 primary_metric: pass@1[avg-of-4]/score
 requirements:
   gpu: false

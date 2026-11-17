@@ -12,6 +12,27 @@ authors:
 - DanialTaheri
 maintainers:
 - DanialTaheri
+capabilities:
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+- instruction_and_format_following/instruction_following
+- multimodal_input_understanding
+- multimodal_input_understanding/scene_understanding
+- multimodal_input_understanding/structured_visual_artifact_understanding
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/spatial_temporal_reasoning
+- tool_and_computer_use
+- tool_and_computer_use/web_search
+- tool_and_computer_use/tool_calling
+- retrieval_and_grounding
+- retrieval_and_grounding/open_retrieval
+- retrieval_and_grounding/evidence_synthesis
+- knowledge
+domains:
+- general
+- data_science
+- sports_recreation
 primary_metric: mean/reward
 requirements:
   gpu: false

@@ -11,6 +11,19 @@ authors:
 - Maria Bagdasarova
 maintainers:
 - pachmu
+capabilities:
+- retrieval_and_grounding
+- retrieval_and_grounding/long_context_learning
+- memory_and_state
+- memory_and_state/memory_retrieval
+- memory_and_state/memory_update_and_forgetting
+- memory_and_state/memory_application
+- reasoning
+- reasoning/spatial_temporal_reasoning
+- knowledge
+- knowledge/knowledge_uncertainty
+domains:
+- general
 primary_metric: accuracy
 requirements:
   gpu: false

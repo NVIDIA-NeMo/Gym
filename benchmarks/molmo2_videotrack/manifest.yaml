@@ -12,6 +12,8 @@ authors:
 - Pulkit Khandelwal
 maintainers:
 - pulkitkumar95
+capabilities: unknown
+domains: unknown
 primary_metric: f1
 requirements:
   gpu: false

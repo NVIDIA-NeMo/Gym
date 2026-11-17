@@ -12,6 +12,17 @@ authors:
 - gwarmstrong
 maintainers:
 - gwarmstrong
+capabilities:
+- knowledge
+- knowledge/factual_knowledge
+- reasoning
+- reasoning/deductive_reasoning
+- writing_and_editing
+- writing_and_editing/general_qa
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+domains:
+- general
 primary_metric: pass@1[avg-of-1]/is_correct_strict
 requirements:
   gpu: false

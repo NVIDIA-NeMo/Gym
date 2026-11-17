@@ -11,6 +11,18 @@ authors:
 - wedu-nvidia
 maintainers:
 - wedu-nvidia
+capabilities:
+- knowledge
+- knowledge/expert_knowledge
+- reasoning
+- reasoning/deductive_reasoning
+- reasoning/quantitative_reasoning
+- multilingual_and_multicultural
+- multilingual_and_multicultural/language_consistency
+domains:
+- physics
+- chemistry
+- biology
 primary_metric: pass@1[avg-of-8]/accuracy
 requirements:
   gpu: false

@@ -12,6 +12,18 @@ authors:
 - Rima Shahbazyan
 maintainers:
 - rimashahbazyan
+capabilities:
+- coding
+- coding/code_generation
+- coding/scientific_coding
+- knowledge
+- knowledge/expert_knowledge
+- instruction_and_format_following
+- instruction_and_format_following/prompt_and_format_robustness
+domains:
+- computer_science
+- physics
+- mathematics
 primary_metric: pass@1[avg-of-1]/accuracy
 requirements:
   gpu: false

@@ -12,6 +12,17 @@ authors:
 - NVIDIA NeMo Gym contributors
 maintainers:
 - ryan-lempka
+capabilities:
+- coding
+- coding/data_query_coding
+- coding/code_generation
+- data_analysis
+- data_analysis/data_transformation
+- reasoning
+- reasoning/deductive_reasoning
+domains:
+- data_science
+- computer_science
 primary_metric: mean/reward
 requirements:
   gpu: false

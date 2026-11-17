@@ -13,6 +13,8 @@ authors:
   - slikhite-1
 maintainers:
 - slikhite-1
+capabilities: unknown
+domains: unknown
 requirements:
   gpu: false
   network: allowlist

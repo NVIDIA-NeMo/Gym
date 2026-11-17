@@ -11,6 +11,17 @@ authors:
 - gwarmstrong
 maintainers:
 - gwarmstrong
+capabilities:
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+- knowledge
+- knowledge/expert_knowledge
+- knowledge/procedural_knowledge
+domains:
+- physics
+- chemistry
+- biology
 primary_metric: pass@1[avg-of-1]/accuracy
 requirements:
   gpu: false

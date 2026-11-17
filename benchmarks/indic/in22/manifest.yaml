@@ -12,6 +12,14 @@ licensing: CC-BY-4.0
 authors: [NVIDIA NeMo Gym contributors]
 maintainers:
 - anushaknvidia
+capabilities:
+- multilingual_and_multicultural
+- multilingual_and_multicultural/translation
+- multilingual_and_multicultural/requested_language_response
+- knowledge
+- knowledge/cultural_knowledge
+domains:
+- language_linguistics
 primary_metric: unknown
 requirements:
   gpu: false

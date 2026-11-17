@@ -12,6 +12,15 @@ authors:
 - jeffwillette
 maintainers:
 - jeffwillette
+capabilities:
+- multilingual_and_multicultural
+- multilingual_and_multicultural/translation
+- multilingual_and_multicultural/requested_language_response
+- multilingual_and_multicultural/language_consistency
+- retrieval_and_grounding
+- retrieval_and_grounding/long_context_learning
+domains:
+- language_linguistics
 primary_metric: unknown
 requirements:
   gpu: true

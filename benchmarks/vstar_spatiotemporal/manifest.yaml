@@ -13,6 +13,8 @@ authors:
 - Pulkit Khandelwal
 maintainers:
 - pulkitkumar95
+capabilities: unknown
+domains: unknown
 primary_metric: mAM
 requirements:
   gpu: false

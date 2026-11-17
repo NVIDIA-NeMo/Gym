@@ -12,6 +12,21 @@ authors:
 - arti4nvj
 maintainers:
 - gwarmstrong
+capabilities:
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+- instruction_and_format_following/structured_output
+- writing_and_editing
+- writing_and_editing/creative_writing
+- writing_and_editing/informational_writing
+- knowledge
+- knowledge/factual_knowledge
+- multilingual_and_multicultural
+- multilingual_and_multicultural/requested_language_response
+domains:
+- general
+- media_entertainment
+- marketing_advertising
 primary_metric: mean/reward
 requirements:
   gpu: false

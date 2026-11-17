@@ -17,6 +17,9 @@ authors:
 maintainers:
 - gwarmstrong
 - YoavMiron
+capabilities: []
+domains:
+- artificial_intelligence
 primary_metric: unknown
 requirements:
   gpu: false

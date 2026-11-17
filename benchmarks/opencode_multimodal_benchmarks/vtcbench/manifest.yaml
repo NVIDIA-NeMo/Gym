@@ -13,6 +13,8 @@ authors:
 - NVIDIA NeMo Gym contributors
 maintainers:
 - katerynaCh
+capabilities: unknown
+domains: unknown
 primary_metric: accuracy
 requirements:
   gpu: false

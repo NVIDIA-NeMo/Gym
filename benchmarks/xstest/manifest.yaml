@@ -12,6 +12,11 @@ authors:
 - bxyu-nvidia
 maintainers:
 - dcfarris
+capabilities:
+- safety
+- safety/content_safety
+domains:
+- general
 primary_metric: mean/reward
 requirements:
   gpu: true

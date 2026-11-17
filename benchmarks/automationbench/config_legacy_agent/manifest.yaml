@@ -13,6 +13,8 @@ authors:
 maintainers:
 - cmunley1
 - d-molinari
+capabilities: unknown
+domains: unknown
 primary_metric: mean/reward
 requirements:
   gpu: false

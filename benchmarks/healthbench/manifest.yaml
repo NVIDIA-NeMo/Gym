@@ -13,6 +13,8 @@ authors:
 - cparisien
 maintainers:
 - jin-nvidia
+capabilities: unknown
+domains: unknown
 primary_metric: overall_score
 requirements:
   gpu: false

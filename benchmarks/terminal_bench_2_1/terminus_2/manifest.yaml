@@ -14,6 +14,36 @@ maintainers:
 - bxyu-nvidia
 - iguehring-nvidia
 - yaoyu-33
+capabilities:
+- tool_and_computer_use
+- tool_and_computer_use/terminal_and_cli_use
+- tool_and_computer_use/file_operations
+- tool_and_computer_use/env_feedback_interpretation
+- tool_and_computer_use/multi_step_tool_use
+- coding
+- coding/code_generation
+- coding/debugging_and_testing
+- coding/repository_coding
+- coding/systems_coding
+- coding/code_understanding
+- coding/ml_engineering
+- coding/scientific_coding
+- planning_and_autonomy
+- planning_and_autonomy/error_recovery
+- planning_and_autonomy/self_verification
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+- instruction_and_format_following/instruction_following
+- reasoning
+- reasoning/quantitative_reasoning
+- knowledge
+- knowledge/expert_knowledge
+- data_analysis
+domains:
+- computer_science
+- artificial_intelligence
+- cybersecurity
+- data_science
 primary_metric: mean/reward
 requirements:
   gpu: false

@@ -11,6 +11,22 @@ licensing: Apache-2.0
 authors: [Jarno Seppänen]
 maintainers:
 - jseppanen
+capabilities:
+- retrieval_and_grounding
+- retrieval_and_grounding/long_context_learning
+- retrieval_and_grounding/multi_source_synthesis
+- retrieval_and_grounding/evidence_synthesis
+- reasoning
+- reasoning/quantitative_reasoning
+- multimodal_input_understanding
+- multimodal_input_understanding/structured_visual_artifact_understanding
+- tool_and_computer_use
+- tool_and_computer_use/multi_step_tool_use
+- tool_and_computer_use/terminal_and_cli_use
+domains:
+- finance
+- economics
+- politics_government
 primary_metric: pass@1[avg-of-5]/accuracy_no_net
 requirements:
   gpu: false

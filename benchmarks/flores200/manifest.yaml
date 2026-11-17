@@ -12,6 +12,12 @@ authors:
 - gwarmstrong
 maintainers:
 - gwarmstrong
+capabilities:
+- multilingual_and_multicultural
+- multilingual_and_multicultural/translation
+- multilingual_and_multicultural/language_consistency
+domains:
+- language_linguistics
 primary_metric: unknown
 requirements:
   gpu: true

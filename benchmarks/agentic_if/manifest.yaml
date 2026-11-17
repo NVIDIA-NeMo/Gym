@@ -13,6 +13,38 @@ authors:
 - NVIDIA NeMo Gym contributors
 maintainers:
 - katherineh123
+capabilities:
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+- instruction_and_format_following/instruction_following
+- writing_and_editing
+- writing_and_editing/informational_writing
+- writing_and_editing/summarization
+- tool_and_computer_use
+- tool_and_computer_use/tool_calling
+- tool_and_computer_use/multi_step_tool_use
+- tool_and_computer_use/web_search
+- retrieval_and_grounding
+- retrieval_and_grounding/open_retrieval
+- retrieval_and_grounding/evidence_synthesis
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+- knowledge
+- knowledge/expert_knowledge
+- coding
+- coding/code_generation
+- planning_and_autonomy
+- planning_and_autonomy/task_planning
+- human_ai_interaction
+- human_ai_interaction/empathic_and_supportive_dialogue
+domains:
+- general
+- computer_science
+- psychology
+- finance
+- media_entertainment
+- business_management
 primary_metric: unknown
 requirements:
   gpu: false

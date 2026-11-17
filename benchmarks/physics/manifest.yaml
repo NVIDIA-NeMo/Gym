@@ -12,6 +12,17 @@ authors:
 - gwarmstrong
 maintainers:
 - gwarmstrong
+capabilities:
+- reasoning
+- reasoning/quantitative_reasoning
+- knowledge
+- knowledge/expert_knowledge
+- knowledge/procedural_knowledge
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+domains:
+- physics
+- mathematics
 primary_metric: unknown
 requirements:
   gpu: false

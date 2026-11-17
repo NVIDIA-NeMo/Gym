@@ -11,6 +11,15 @@ authors:
 - gwarmstrong
 maintainers:
 - gwarmstrong
+capabilities:
+- multimodal_input_understanding
+- multimodal_input_understanding/speech_and_audio_understanding
+- knowledge
+- knowledge/knowledge_uncertainty
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+domains:
+- language_linguistics
 primary_metric: pass@1[avg-of-1]/hallucination_rate
 requirements:
   gpu: false

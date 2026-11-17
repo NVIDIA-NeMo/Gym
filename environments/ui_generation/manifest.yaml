@@ -13,6 +13,8 @@ authors:
 - titu1994
 maintainers:
 - titu1994
+capabilities: unknown
+domains: unknown
 requirements:
   gpu: false
   network: allowlist

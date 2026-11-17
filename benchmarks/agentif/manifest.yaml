@@ -12,6 +12,15 @@ authors:
 - Maria Bagdasarova
 maintainers:
 - pachmu
+capabilities:
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+- instruction_and_format_following/structured_output
+- instruction_and_format_following/prompt_and_format_robustness
+- retrieval_and_grounding
+- retrieval_and_grounding/long_context_learning
+domains:
+- artificial_intelligence
 primary_metric: unknown
 requirements:
   gpu: false

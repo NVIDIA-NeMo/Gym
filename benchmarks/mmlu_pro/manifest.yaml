@@ -11,6 +11,23 @@ authors:
 - gwarmstrong
 maintainers:
 - fsiino-nvidia
+capabilities:
+- reasoning
+- reasoning/deductive_reasoning
+- reasoning/quantitative_reasoning
+- knowledge
+- knowledge/expert_knowledge
+- knowledge/procedural_knowledge
+domains:
+- physics
+- mathematics
+- law
+- biology
+- chemistry
+- psychology
+- economics
+- engineering
+- medicine
 primary_metric: pass@1[avg-of-1]/accuracy
 requirements:
   gpu: false

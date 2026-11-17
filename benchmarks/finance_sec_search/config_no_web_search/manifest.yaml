@@ -12,6 +12,20 @@ authors:
 - ushnish-de
 maintainers:
 - ushnish-de
+capabilities:
+- retrieval_and_grounding
+- retrieval_and_grounding/open_retrieval
+- retrieval_and_grounding/evidence_synthesis
+- retrieval_and_grounding/multi_source_synthesis
+- tool_and_computer_use
+- tool_and_computer_use/multi_step_tool_use
+- knowledge
+- knowledge/expert_knowledge
+- reasoning
+- reasoning/quantitative_reasoning
+domains:
+- finance
+- accounting_audit
 primary_metric: mean/reward
 requirements:
   gpu: false

@@ -12,6 +12,8 @@ authors:
 - NVIDIA NeMo Gym contributors
 maintainers:
 - lafrancef
+capabilities: unknown
+domains: unknown
 primary_metric: mean/reward
 requirements:
   gpu: true

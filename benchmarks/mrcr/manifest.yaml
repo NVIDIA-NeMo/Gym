@@ -12,6 +12,15 @@ authors:
 - Marta Stepniewska-Dziubinska
 maintainers:
 - gwarmstrong
+capabilities:
+- retrieval_and_grounding
+- retrieval_and_grounding/long_context_learning
+- context_management
+- context_management/reference_resolution
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+domains:
+- general
 primary_metric: pass@1[avg-of-4]/accuracy
 requirements:
   gpu: false

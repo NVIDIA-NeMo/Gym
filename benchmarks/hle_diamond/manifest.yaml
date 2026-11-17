@@ -13,6 +13,20 @@ authors:
 - rshahbazyan
 maintainers:
 - rimashahbazyan
+capabilities:
+- knowledge
+- knowledge/expert_knowledge
+- knowledge/knowledge_uncertainty
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+- multimodal_input_understanding
+- multimodal_input_understanding/structured_visual_artifact_understanding
+- multimodal_input_understanding/cross_modal_understanding
+domains:
+- mathematics
+- physics
+- humanities
 primary_metric: mean/reward
 requirements:
   gpu: false

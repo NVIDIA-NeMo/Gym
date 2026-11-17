@@ -12,6 +12,18 @@ authors:
 - Maria Bagdasarova
 maintainers:
 - pachmu
+capabilities:
+- evaluation_and_judging
+- evaluation_and_judging/consistency_checking
+- evaluation_and_judging/error_analysis
+- retrieval_and_grounding
+- retrieval_and_grounding/source_assessment
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+- safety
+- safety/epistemic_and_autonomy_safety
+domains:
+- general
 primary_metric: mean_reward
 requirements:
   gpu: false

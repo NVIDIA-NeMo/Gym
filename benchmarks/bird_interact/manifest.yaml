@@ -12,6 +12,8 @@ authors:
 - Felipe Vieira Frujeri
 maintainers:
 - ffrujeri
+capabilities: unknown
+domains: unknown
 primary_metric: mean/reward
 requirements:
   gpu: false

@@ -12,6 +12,19 @@ authors:
 - Danial MohseniTaheri
 maintainers:
 - yfw
+capabilities:
+- multimodal_input_understanding
+- multimodal_input_understanding/scene_understanding
+- multimodal_input_understanding/structured_visual_artifact_understanding
+- reasoning
+- reasoning/spatial_temporal_reasoning
+- reasoning/inductive_reasoning
+- coding
+- coding/code_generation
+- tool_and_computer_use
+- tool_and_computer_use/multi_step_tool_use
+domains:
+- general
 primary_metric: mean/reward
 requirements:
   gpu: false

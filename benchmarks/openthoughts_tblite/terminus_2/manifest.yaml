@@ -12,6 +12,18 @@ authors:
 - NVIDIA NeMo Gym contributors
 maintainers:
 - ekellbuch
+capabilities:
+- tool_and_computer_use
+- tool_and_computer_use/terminal_and_cli_use
+- tool_and_computer_use/multi_step_tool_use
+- tool_and_computer_use/env_feedback_interpretation
+- coding
+- coding/code_generation
+- coding/debugging_and_testing
+- planning_and_autonomy
+- planning_and_autonomy/long_horizon_execution
+domains:
+- computer_science
 primary_metric: mean/reward
 requirements:
   gpu: false

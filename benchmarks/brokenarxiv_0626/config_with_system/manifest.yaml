@@ -12,6 +12,18 @@ authors:
 - Kipok
 maintainers:
 - Kipok
+capabilities:
+- reasoning
+- reasoning/deductive_reasoning
+- knowledge
+- knowledge/expert_knowledge
+- knowledge/knowledge_uncertainty
+- safety
+- safety/epistemic_and_autonomy_safety
+- evaluation_and_judging
+- evaluation_and_judging/error_analysis
+domains:
+- mathematics
 primary_metric: pass@1[avg-of-1]/score
 requirements:
   gpu: false

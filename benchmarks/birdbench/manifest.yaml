@@ -13,6 +13,17 @@ authors:
 maintainers:
 - gwarmstrong
 - dkmisra
+capabilities:
+- coding
+- coding/data_query_coding
+- reasoning
+- reasoning/quantitative_reasoning
+- data_analysis
+- data_analysis/tabular_data_analysis
+domains:
+- computer_science
+- data_science
+- general
 primary_metric: pass@1[avg-of-1]/accuracy
 requirements:
   gpu: false

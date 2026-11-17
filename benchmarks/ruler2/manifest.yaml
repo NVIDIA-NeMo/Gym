@@ -12,6 +12,16 @@ authors:
 - gwarmstrong
 maintainers:
 - gwarmstrong
+capabilities:
+- retrieval_and_grounding
+- retrieval_and_grounding/long_context_learning
+- retrieval_and_grounding/multi_source_synthesis
+- reasoning
+- reasoning/deductive_reasoning
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+domains:
+- general
 primary_metric: ruler2_suite_avg/pass@1[avg-of-1]/accuracy
 requirements:
   gpu: false

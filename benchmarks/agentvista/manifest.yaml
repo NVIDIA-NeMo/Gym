@@ -13,6 +13,8 @@ authors:
 - NVIDIA
 maintainers:
 - bpritam14
+capabilities: unknown
+domains: unknown
 primary_metric: agentvista/mean_score
 requirements:
   gpu: false

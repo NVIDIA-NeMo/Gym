@@ -11,6 +11,13 @@ authors:
 - muskank7
 maintainers:
 - muskank7
+capabilities:
+- safety
+- safety/content_safety
+- safety/security_safety
+- safety/high_risk_domain_safety
+domains:
+- general
 primary_metric: aegis/response_unsafe_rate_resolved
 requirements:
   gpu: false

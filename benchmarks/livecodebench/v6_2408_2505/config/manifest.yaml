@@ -12,6 +12,17 @@ authors:
 - George Armstrong
 maintainers:
 - bxyu-nvidia
+capabilities:
+- coding
+- coding/code_generation
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+- reasoning/spatial_temporal_reasoning
+- knowledge
+- knowledge/procedural_knowledge
+domains:
+- computer_science
 primary_metric: pass@1[avg-of-3]/accuracy
 requirements:
   gpu: false

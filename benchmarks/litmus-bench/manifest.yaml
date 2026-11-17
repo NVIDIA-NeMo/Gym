@@ -12,6 +12,18 @@ authors:
 - Dane
 maintainers:
 - OliviaViessmann
+capabilities:
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+- instruction_and_format_following/instruction_following
+- knowledge
+- knowledge/expert_knowledge
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+- reasoning/spatial_temporal_reasoning
+domains:
+- chemistry
 primary_metric: pass@1[avg-of-5]/accuracy
 requirements:
   gpu: false

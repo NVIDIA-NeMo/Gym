@@ -13,6 +13,8 @@ authors:
 - gnalbandyan
 maintainers:
 - gnalbandyan
+capabilities: unknown
+domains: unknown
 primary_metric: mean/reward
 requirements:
   gpu: false

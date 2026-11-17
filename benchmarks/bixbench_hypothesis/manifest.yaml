@@ -11,6 +11,21 @@ authors:
 - Sanyam Kapoor
 maintainers:
 - activatedgeek
+capabilities:
+- coding
+- coding/scientific_coding
+- data_analysis
+- data_analysis/statistical_analysis
+- data_analysis/tabular_data_analysis
+- knowledge
+- knowledge/expert_knowledge
+- tool_and_computer_use
+- tool_and_computer_use/multi_step_tool_use
+- planning_and_autonomy
+- planning_and_autonomy/long_horizon_execution
+domains:
+- biology
+- statistics
 primary_metric: mean/reward
 requirements:
   gpu: false

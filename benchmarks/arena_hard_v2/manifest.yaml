@@ -12,6 +12,20 @@ authors:
 - gwarmstrong
 maintainers:
 - gwarmstrong
+capabilities:
+- writing_and_editing
+- writing_and_editing/creative_writing
+- writing_and_editing/general_qa
+- writing_and_editing/informational_writing
+- reasoning
+- reasoning/deductive_reasoning
+- coding
+- coding/code_generation
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+domains:
+- general
+- computer_science
 primary_metric: arena_elo/score
 requirements:
   gpu: false

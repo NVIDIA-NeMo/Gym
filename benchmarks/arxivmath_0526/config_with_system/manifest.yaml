@@ -12,6 +12,15 @@ authors:
 - wedu-nvidia
 maintainers:
 - wedu-nvidia
+capabilities:
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+- knowledge
+- knowledge/expert_knowledge
+- knowledge/procedural_knowledge
+domains:
+- mathematics
 primary_metric: unknown
 requirements:
   gpu: false

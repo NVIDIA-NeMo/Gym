@@ -14,6 +14,17 @@ authors:
 - gnalbandyan
 maintainers:
 - gnalbandyan
+capabilities:
+- knowledge
+- knowledge/expert_knowledge
+- knowledge/procedural_knowledge
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+domains:
+- chemistry
 primary_metric: unknown
 requirements:
   gpu: false

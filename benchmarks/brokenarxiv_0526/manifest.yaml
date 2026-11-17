@@ -12,6 +12,19 @@ authors:
 - wedu-nvidia
 maintainers:
 - wedu-nvidia
+capabilities:
+- safety
+- safety/epistemic_and_autonomy_safety
+- reasoning
+- reasoning/deductive_reasoning
+- reasoning/quantitative_reasoning
+- knowledge
+- knowledge/expert_knowledge
+- knowledge/knowledge_uncertainty
+- planning_and_autonomy
+- planning_and_autonomy/self_verification
+domains:
+- mathematics
 primary_metric: pass@1[avg-of-1]/score
 requirements:
   gpu: false

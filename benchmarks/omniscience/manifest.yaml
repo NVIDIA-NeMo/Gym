@@ -11,6 +11,23 @@ authors:
 - gwarmstrong
 maintainers:
 - gwarmstrong
+capabilities:
+- knowledge
+- knowledge/expert_knowledge
+- knowledge/knowledge_uncertainty
+- knowledge/factual_knowledge
+- reasoning
+- reasoning/quantitative_reasoning
+- retrieval_and_grounding
+- retrieval_and_grounding/open_retrieval
+domains:
+- law
+- computer_science
+- medicine
+- finance
+- history
+- engineering
+- humanities
 primary_metric: unknown
 requirements:
   gpu: false

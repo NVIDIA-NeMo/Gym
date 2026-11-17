@@ -11,6 +11,12 @@ authors:
 - gwarmstrong
 maintainers:
 - gwarmstrong
+capabilities:
+- multimodal_input_understanding
+- multimodal_input_understanding/speech_and_audio_understanding
+- multimodal_input_understanding/cross_modal_understanding
+domains:
+- language_linguistics
 primary_metric: wer
 requirements:
   gpu: false

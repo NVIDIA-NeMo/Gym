@@ -11,6 +11,25 @@ authors:
 - fsiino-nvidia
 maintainers:
 - fsiino-nvidia
+capabilities:
+- knowledge
+- knowledge/expert_knowledge
+- knowledge/procedural_knowledge
+- reasoning
+- reasoning/deductive_reasoning
+- reasoning/quantitative_reasoning
+domains:
+- biology
+- mathematics
+- history
+- chemistry
+- law
+- philosophy
+- economics
+- physics
+- engineering
+- psychology
+- medicine
 primary_metric: pass@1[avg-of-1]/accuracy
 requirements:
   gpu: false

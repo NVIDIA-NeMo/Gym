@@ -12,6 +12,27 @@ authors:
 - Christian Munley
 maintainers:
 - cmunley1
+capabilities:
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+- instruction_and_format_following/instruction_following
+- retrieval_and_grounding
+- retrieval_and_grounding/open_retrieval
+- retrieval_and_grounding/multi_source_synthesis
+- retrieval_and_grounding/evidence_synthesis
+- retrieval_and_grounding/source_assessment
+- tool_and_computer_use
+- tool_and_computer_use/web_search
+- multilingual_and_multicultural
+- multilingual_and_multicultural/requested_language_response
+- data_analysis
+- data_analysis/tabular_data_analysis
+domains:
+- media_entertainment
+- education
+- sports_recreation
+- politics_government
+- travel_hospitality
 primary_metric: mean/reward
 requirements:
   gpu: false

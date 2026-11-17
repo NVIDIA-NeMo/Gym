@@ -12,6 +12,18 @@ authors:
 - Sergey Kolchenko
 maintainers:
 - azkalot1
+capabilities:
+- multimodal_input_understanding
+- multimodal_input_understanding/structured_visual_artifact_understanding
+- multimodal_input_understanding/cross_modal_understanding
+- knowledge
+- knowledge/expert_knowledge
+- knowledge/procedural_knowledge
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/causal_reasoning
+domains:
+- biology
 primary_metric: pass@1[avg-of-3]/accuracy
 requirements:
   gpu: false

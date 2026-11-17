@@ -12,6 +12,13 @@ authors:
 - gwarmstrong
 maintainers:
 - gwarmstrong
+capabilities:
+- coding
+- coding/code_editing
+- coding/code_understanding
+- coding/code_generation
+domains:
+- computer_science
 primary_metric: pass@1[avg-of-1]/accuracy
 requirements:
   gpu: false

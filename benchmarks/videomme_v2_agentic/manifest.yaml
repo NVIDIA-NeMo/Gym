@@ -12,6 +12,8 @@ authors:
 - Guo Chen
 maintainers:
 - cg1177
+capabilities: unknown
+domains: unknown
 primary_metric: Video_MME_v2_agentic/nonlinear_score
 requirements:
   gpu: false

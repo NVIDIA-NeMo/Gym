@@ -13,6 +13,8 @@ authors:
 - Guo Chen
 maintainers:
 - cg1177
+capabilities: unknown
+domains: unknown
 primary_metric: mean/rubric_score
 requirements:
   gpu: false

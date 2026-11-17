@@ -12,6 +12,16 @@ authors:
 - Cheng-Ping Hsieh
 maintainers:
 - bxyu-nvidia
+capabilities:
+- retrieval_and_grounding
+- retrieval_and_grounding/long_context_learning
+- retrieval_and_grounding/multi_source_synthesis
+- reasoning
+- reasoning/inductive_reasoning
+- data_analysis
+- data_analysis/exploratory_analysis
+domains:
+- general
 primary_metric: mean/reward
 requirements:
   gpu: false

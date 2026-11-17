@@ -11,6 +11,17 @@ authors:
 - wedu-nvidia
 maintainers:
 - wedu-nvidia
+capabilities:
+- knowledge
+- knowledge/factual_knowledge
+- knowledge/cultural_knowledge
+- reasoning
+- reasoning/causal_reasoning
+- multilingual_and_multicultural
+- multilingual_and_multicultural/cultural_adaptation
+domains:
+- general
+- language_linguistics
 primary_metric: pass@1[avg-of-1]/accuracy
 requirements:
   gpu: false

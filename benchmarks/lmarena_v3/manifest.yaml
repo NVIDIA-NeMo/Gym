@@ -12,6 +12,19 @@ authors:
 - Julien Veron Vialard
 maintainers:
 - jveronvialard
+capabilities:
+- writing_and_editing
+- writing_and_editing/general_qa
+- writing_and_editing/informational_writing
+- writing_and_editing/creative_writing
+- human_ai_interaction
+- human_ai_interaction/other_dialogues
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+- context_management
+- context_management/constraint_preservation
+domains:
+- general
 primary_metric: win_rate
 requirements:
   gpu: false

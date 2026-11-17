@@ -12,6 +12,21 @@ authors:
 - NVIDIA NeMo Gym contributors
 maintainers:
 - gwarmstrong
+capabilities:
+- coding
+- coding/scientific_coding
+- tool_and_computer_use
+- tool_and_computer_use/terminal_and_cli_use
+- tool_and_computer_use/env_feedback_interpretation
+- planning_and_autonomy
+- planning_and_autonomy/long_horizon_execution
+- knowledge
+- knowledge/expert_knowledge
+- coding/debugging_and_testing
+domains:
+- computer_science
+- physics
+- biology
 primary_metric: mean/reward
 requirements:
   gpu: false

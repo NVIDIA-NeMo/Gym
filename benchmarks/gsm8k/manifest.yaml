@@ -11,6 +11,12 @@ authors:
 - gwarmstrong
 maintainers:
 - gwarmstrong
+capabilities:
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+domains:
+- mathematics
 primary_metric: pass@1[avg-of-1]/symbolic_accuracy
 requirements:
   gpu: false
