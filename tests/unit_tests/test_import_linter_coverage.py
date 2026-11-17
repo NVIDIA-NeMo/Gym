@@ -91,19 +91,20 @@ def test_every_module_is_in_a_layer() -> None:
     )
 
 
-def test_every_package_is_a_source_of_the_orchestration_contract() -> None:
-    """`forbidden_modules` cannot also be a source, so the contract lists each top-level module except orchestration."""
+def test_the_orchestration_contract_checks_every_module_and_excepts_only_the_cli_entrypoint() -> None:
+    """The contract's source is every module under nemo_gym and its exceptions are its whole list.
+
+    A new package is checked without being listed. Narrowing the source to a list would leave a new package
+    unchecked, and a longer exception list would let an import of orchestration through.
+    """
     contracts = tomllib.loads((REPO / "pyproject.toml").read_text())["tool"]["importlinter"]["contracts"]
     [contract] = [c for c in contracts if c["name"] == "only the CLI entrypoint imports orchestration"]
-    sources = {module.removeprefix("nemo_gym.") for module in contract["source_modules"]}
-    unchecked = sorted(_top_level_names() - sources - {"__init__", "orchestration"})
-    assert not unchecked, (
-        f"{unchecked} are not sources of the import-linter contract 'only the CLI entrypoint imports orchestration' "
-        "in pyproject.toml, so nothing stops them importing nemo_gym.orchestration. Add each to its source_modules."
-    )
-    assert not sources - _top_level_names(), (
-        "a source_modules entry of that contract names a module that does not exist"
-    )
+    assert contract["source_modules"] == ["nemo_gym.*"]
+    assert contract["forbidden_modules"] == ["nemo_gym.orchestration"]
+    assert set(contract["ignore_imports"]) == {
+        "nemo_gym.cli.main -> nemo_gym.orchestration.**",
+        "nemo_gym.orchestration.** -> nemo_gym.orchestration.**",
+    }
 
 
 def test_every_module_kept_outside_the_layers_exists() -> None:
