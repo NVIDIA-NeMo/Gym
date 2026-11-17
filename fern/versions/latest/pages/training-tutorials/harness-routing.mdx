@@ -1,0 +1,126 @@
+---
+title: "Single- and Multi-Harness Training"
+description: "Run an existing NeMo RL recipe through SingleAgentTurn or Harbor with one or several agent harnesses."
+position: 5
+---
+# Single- and Multi-Harness Training
+
+## Background
+
+Single-harness training uses one agent harness for every task. Multi-harness training uses several harnesses to train a shared policy in the same run. For example, OpenCode can handle some tasks and Pi can handle the rest.
+
+The Environment Server controls the episode. `single_agent_turn` (SAT) asks a Resources Server to seed and verify the task. `harbor` reads the task's sandbox and verifier from a Harbor task folder. Both call an Agent Server and return rewards to the same training loop.
+
+These are separate choices:
+
+| Episode path | Single harness | Multiple harnesses |
+| --- | --- | --- |
+| SAT | One taskset routes to SAT with OpenCode | Separate tasksets route to SAT with OpenCode or Pi |
+| Harbor | One taskset routes to Harbor with OpenCode | Separate tasksets route to Harbor with OpenCode or Pi |
+
+Start with your maintained researcher recipe. Keep its model, optimizer, sampling, parallelism, data mix and launch command. Change the Gym configuration and the equivalent task-row format. A generalist run can retain SWE, Terminal-Bench and document tasks while changing the harness assignment of one component. A second harness does not require a second policy.
+
+## Setup
+
+Use a NeMo RL checkout with materialized task routing from [NVIDIA-NeMo/RL#4429](https://github.com/NVIDIA-NeMo/RL/pull/4429). Its route lookup reads `task_id.taskset` and selects `env.nemo_gym.environment_server_routes[taskset]`. Keep the Gym checkout under `3rdparty/Gym-workspace/Gym` current enough to provide the selected environment and harness sessions.
+
+Follow [NeMo RL setup](/main/tutorials/training-tutorials/nemo-rl-grpo/setup) for the runtime, model access and tracking credentials. Configure an existing [sandbox provider](/main/infrastructure/sandbox) that the GPU workers and harnesses can reach. OpenCode and Pi install their runtimes in the task sandbox. Their model calls must use NeMo Gym's policy endpoint; enable the maintained NeMo RL token-capture path for external harnesses. See [external harness capture](/main/tutorials/training-tutorials/external-agent-harnesses).
+
+The runnable example uses the existing Terminal-Bench 2.1 Resources Server for SAT and the Harbor Environment Server for Harbor. Both use the selected tasks' original instructions and verifier files. It does not require SWE-Next or a judge model. Other environments can have different tools, judges, images and harness restrictions; retain those requirements when extending the mix.
+
+### Prepare the source tasks
+
+Run these commands from the NeMo Gym checkout:
+
+```bash
+python benchmarks/terminal_bench_2_1/prepare.py
+```
+
+This writes `benchmarks/terminal_bench_2_1/data/benchmark.jsonl` and downloads the task repository when absent. Pin the downloaded task revision for your run. Use your existing train/validation split; the benchmark's full source file is not a new training split or a held-out score claim.
+
+Set the existing NeMo RL recipe and your selected source rows:
+
+```bash
+RL_ROOT=/path/to/RL
+BASE_RECIPE="$RL_ROOT/path/to/your-maintained-recipe.yaml"
+SOURCE=/path/to/your-terminal-bench-train.jsonl
+VALIDATION_SOURCE=/path/to/your-terminal-bench-validation.jsonl
+TASKS="$PWD/benchmarks/terminal_bench_2_1/terminal-bench-2-1/tasks"
+```
+
+The source rows need `task_id`, `task_name`, `docker_image`, `task_folder` and `responses_create_params`, as written by the maintained preparation script. Relative `task_folder` paths are resolved from the Gym checkout. Keep the task folders available to the Gym servers throughout training.
+
+### Choose the episode path and harnesses
+
+The [preparation script](https://github.com/NVIDIA-NeMo/Gym/blob/main/examples/training/prepare_harness_routes.py) writes materialized rows, a Gym configuration and a NeMo RL configuration that inherits your base recipe.
+
+```bash
+# SAT, one harness
+python examples/training/prepare_harness_routes.py \
+  --source "$SOURCE" --validation-source "$VALIDATION_SOURCE" \
+  --tasks "$TASKS" --base "$BASE_RECIPE" \
+  --route sat --harnesses opencode_agent --output "$RL_ROOT/runs/sat-single"
+
+# SAT, two harnesses
+python examples/training/prepare_harness_routes.py \
+  --source "$SOURCE" --validation-source "$VALIDATION_SOURCE" \
+  --tasks "$TASKS" --base "$BASE_RECIPE" \
+  --route sat --harnesses opencode_agent pi_agent --output "$RL_ROOT/runs/sat-multi"
+
+# Harbor, one harness
+python examples/training/prepare_harness_routes.py \
+  --source "$SOURCE" --validation-source "$VALIDATION_SOURCE" \
+  --tasks "$TASKS" --base "$BASE_RECIPE" \
+  --route harbor --harnesses opencode_agent --sandbox opensandbox \
+  --output "$RL_ROOT/runs/harbor-single"
+
+# Harbor, two harnesses
+python examples/training/prepare_harness_routes.py \
+  --source "$SOURCE" --validation-source "$VALIDATION_SOURCE" \
+  --tasks "$TASKS" --base "$BASE_RECIPE" \
+  --route harbor --harnesses opencode_agent pi_agent --sandbox opensandbox \
+  --output "$RL_ROOT/runs/harbor-multi"
+```
+
+Harbor preparation records the selected task metadata and refuses missing tasks or a different prompt/image. Image builds are disabled. Supply already available task images; changing a Python recipe does not require rebuilding the runtime image. The preparation receipt records source identity and task-to-harness assignments.
+
+The example replaces the training and validation data paths and the Gym config paths. It preserves each supplied split and converts both to compatible episode routes. For a mixed dataset, apply the same assignment and routing pattern to its Terminal-Bench component and keep the other rows and services. Do not replace a researcher's full data mix with this component when comparing runs.
+
+### Keep each GRPO group on one harness
+
+For two harnesses, the script assigns each source task to OpenCode or Pi in input order. It writes one row per task. NeMo RL then generates the configured number of siblings for that row, so the siblings share the task and harness.
+
+```json
+{"task_id":{"taskset":"terminal-bench:opencode_agent","task_id":"task-a"},"task_input":{"responses_create_params":{"input":[]},"task_data":{}}}
+{"task_id":{"taskset":"terminal-bench:pi_agent","task_id":"task-b"},"task_input":{"responses_create_params":{"input":[]},"task_data":{}}}
+```
+
+The abbreviated `task_input` above shows the envelope; the generated file contains the complete task payload. Its route map selects the corresponding Environment Server:
+
+```yaml
+environment_server_routes:
+  terminal-bench:opencode_agent: terminal_bench_opencode_agent_sat
+  terminal-bench:pi_agent: terminal_bench_pi_agent_sat
+```
+
+The route fixes the harness before sibling sampling. Do not randomly choose a harness for each sibling and call the resulting group a matched comparison. A group can use one harness while another group in the same policy batch uses the other. This fixed-group routing does not require changing GRPO's grouping algorithm.
+
+### Run training
+
+Run the generated file with the same maintained entrypoint and allocation used by your base recipe. For a single-controller recipe, run from NeMo RL:
+
+```bash
+cd "$RL_ROOT"
+uv run python examples/run_grpo_single_controller.py \
+  --config "$RL_ROOT/runs/sat-multi/train.yaml"
+```
+
+Select any of the four generated files in the same way. Keep the base recipe's W&B project and credentials; each run should use a distinct run name and output/checkpoint directory. Apply those output overrides through the maintained launcher. The example does not allocate GPUs or start an extra inference service.
+
+## Results
+
+Check actual generation, verifier results, capture validity, nonempty trainable samples, loss/gradient values, optimizer updates and policy refits. Inspect per-harness counts as well as aggregate reward. A server starting or a configuration parsing does not establish training success.
+
+Compare SAT and Harbor with the same starting checkpoint, task identities, prompts, verifier behavior, harness settings, sampling, batching and training budget. Align episode timeouts and failure policies explicitly. Record any task-format or dependency adaptation; shared routing does not establish equal scores by itself.
+
+The example's real training validation is tracked in its pull request. Preparation and configuration checks are reported separately from model and optimizer evidence.
