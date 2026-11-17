@@ -1,0 +1,54 @@
+# Single-turn open-ended video questions graded against each question's weighted-points rubric by a judge model.
+# The same resources server grades agentic rows (setting: agentic) bound to an agent harness.
+openqa_rubric:
+  resources_servers:
+    openqa_rubric:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      description: Open-ended video QA graded against each question's weighted-points rubric by a judge model.
+      value: Improve open-ended answers about videos
+      judge_model_server:
+        type: responses_api_models
+        name: openqa_rubric_judge
+      # Sampling and reasoning settings of the judge's chat request; the server sets messages and response_format.
+      judge_chat_completion_create_params:
+        messages: []
+
+# The judge: any OpenAI-compatible chat model with JSON-schema structured output (judge_base_url, judge_api_key,
+# judge_model_name).
+openqa_rubric_judge:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${judge_base_url}
+      openai_api_key: ${judge_api_key}
+      openai_model: ${judge_model_name}
+
+openqa_rubric_single_turn:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 1
+      resources_server:
+        type: resources_servers
+        name: openqa_rubric
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/openqa_rubric/data/example.jsonl
+        license: Apache 2.0
+
+openqa_rubric_single_turn_environment:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: openqa_rubric
+      agent_server:
+        type: responses_api_agents
+        name: openqa_rubric_single_turn

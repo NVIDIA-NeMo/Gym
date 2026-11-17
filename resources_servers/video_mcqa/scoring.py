@@ -100,7 +100,8 @@ class AccuracySummary:
     outcome_counts: dict[str, int]
 
 
-def _final_text(text: str | None) -> str:
+def final_answer_text(text: str | None) -> str:
+    """The answer after any reasoning block; empty while a reasoning block is unfinished."""
     if text is None:
         return ""
     if not isinstance(text, str):
@@ -134,7 +135,7 @@ def grade_answer(
     if failure is not None:
         outcome = failure
     else:
-        text = _final_text(final_text)
+        text = final_answer_text(final_text)
         counted = set(LABELS[: max(_EIGHT_OPTIONS, metadata.option_count)])
         letters = {plain or wrapped for plain, wrapped in _BOXED.findall(text)} & counted
         if not text:
