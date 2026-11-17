@@ -1808,6 +1808,9 @@ class CollectedEvidence(BaseModel):
     infra_retries_configured: int | None = None
     # The marker line of a continuation that ended before it queued its follow-up, None when there is none.
     chain_continuation_note: str | None = None
+    # True when the marker is the line a job writes when it ends its own chain with nothing eligible for another
+    # attempt (NO_ELIGIBLE_RETRY_REASON): the chain stopped there with its accounting written.
+    chain_ended_itself: bool = False
     # The judge-only jobs queued for the run's saved answers (JUDGE_JOB_JOURNAL_NAME), oldest first: id, partition,
     # profile kind and the services it starts, walltime, rows, receipt path and ``state`` ("queued" without a receipt,
     # else the receipt's "completed" or "failed" with its counts); the executor adds the scheduler's state of a job
