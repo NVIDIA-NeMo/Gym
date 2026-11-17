@@ -1413,6 +1413,24 @@ class TestRolloutCollection:
             "response_status": "completed",
         }
 
+    def test_trajectory_model_call_carries_the_captured_agent_instance_and_kind(self) -> None:
+        row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        result = {
+            "ng_model_call_capture": {
+                "calls": [
+                    {"model_call_id": "named", "agent_instance": "judge.1", "agent_kind": "judge"},
+                    {"model_call_id": "unnamed"},
+                ]
+            }
+        }
+
+        trajectory = _build_trajectory_record(row, result)
+
+        assert [(call.model_call_id, call.agent_instance, call.agent_kind) for call in trajectory.model_calls] == [
+            ("named", "judge.1", "judge"),
+            ("unnamed", None, None),
+        ]
+
     def test_trajectory_keeps_each_captured_calls_total_duration(self) -> None:
         # A saved row keeps every captured call's start, end and total duration, a failed call's too, so a reader can
         # tell how long the model server took inside the agent's window.
