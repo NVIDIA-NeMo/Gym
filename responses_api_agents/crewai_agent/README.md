@@ -10,8 +10,9 @@ task's working directory and the tools of the episode's MCP grants, and its mode
 - Harness: `crewai==1.15.34`, pinned in [`pyproject.toml`](pyproject.toml) and locked in [`uv.lock`](uv.lock). The
   sandbox runtime installs the same version, with its dependencies at this server's versions.
 - Execution: a sandboxed harness under an Environment Server such as `single_agent_turn`, as
-  [Hermes](../hermes_agent/README.md) is. There is no `/run` route and no host path: `/v1/responses` without a seeded
-  agent session answers 409, and a seed with no sandbox to run in answers 422.
+  [Hermes](../hermes_agent/README.md) is. There is no legacy episode execution or host path: `/run` uses Gym's standard
+  terminal 422 refusal; `/v1/responses` without a seeded agent session answers 409,
+  and a seed with no sandbox to run in answers 422.
 - Capability level: Observability, plus Environment tools and task sandboxes. The close bundle carries an invocation
   record with every model-call reference, tool-call records with executor timing, and the agent's sandbox record. The
   [harness conformance probes](../../scripts/harness_conformance/README.md) for `crewai` meet P0 in all eight
@@ -264,7 +265,7 @@ every call that carried the session header to the invocation, including failed a
 
 ## Limitations
 
-- No host path or `/run` route, and no session without a sandbox.
+- No host execution or legacy `/run` execution; `/run` uses the framework's terminal 422 refusal. No session without a sandbox.
 - `SandboxAccess.user` is refused: the runtime and the session's files are written as the sandbox's default user.
 - Direct HTTP tool grants are not consumed; a required one is refused and an optional one is skipped.
 - The runner and the model's shell commands run as the same user in the same sandbox. A command such as

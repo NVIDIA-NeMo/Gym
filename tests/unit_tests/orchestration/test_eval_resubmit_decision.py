@@ -3215,3 +3215,25 @@ def test_a_masked_result_of_any_other_kind_still_stops_the_run(tmp_path) -> None
     assert not decision.unverified and not decision.complete
     task = gate_summary_from_collected(decision, collected, max_unhealthy_fraction=0.02)
     assert task["status"] != "UNVERIFIED"
+
+
+@pytest.mark.parametrize(
+    "marker, ended_itself",
+    [
+        (None, False),
+        # What a job writes when it ends its own chain with nothing eligible for another attempt.
+        ("no_eligible_retry", True),
+        ("Continuation 10 started; follow-up not yet queued", False),
+        ("GYM_ACCOUNTING_UNKNOWN: rejudge acknowledgement unknown", False),
+    ],
+)
+def test_the_collector_names_a_chain_that_ended_itself(tmp_path, marker, ended_itself) -> None:
+    from nemo_gym.orchestration.executors.resume_script import NO_ELIGIBLE_RETRY_REASON
+
+    job = write_job_dir(tmp_path, n=1, results=[], failures=[], chain=["10"])
+    if marker is not None:
+        text = NO_ELIGIBLE_RETRY_REASON if marker == "no_eligible_retry" else marker
+        (job / ".gym_chain_incomplete").write_text(text + "\n")
+    collected = collect(job)
+    assert collected.chain_incomplete is (marker is not None)
+    assert collected.chain_ended_itself is ended_itself
