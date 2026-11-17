@@ -85,6 +85,36 @@ def _response_data() -> dict:
 
 
 class TestApp:
+    @pytest.mark.parametrize("drop", [True, False])
+    async def test_drop_max_tokens_leaves_the_output_limit_to_the_provider(self, drop: bool) -> None:
+        server = self._setup_server(drop_max_tokens=drop)
+        client = TestClient(server.setup_webserver())
+        reply = {
+            "id": "chatcmpl-1",
+            "created": 1,
+            "model": "dummy_model",
+            "object": "chat.completion",
+            "choices": [{"finish_reason": "stop", "index": 0, "message": {"role": "assistant", "content": "ok"}}],
+        }
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_chat_completion = AsyncMock(return_value=reply)
+
+        res = client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [{"role": "user", "content": "q"}],
+                "max_tokens": 262144,
+                "max_completion_tokens": 262144,
+                "temperature": 1.0,
+            },
+        )
+
+        assert res.status_code == 200
+        sent = server._client.create_chat_completion.call_args.kwargs
+        assert sent["temperature"] == 1.0
+        assert ("max_tokens" in sent) is not drop
+        assert ("max_completion_tokens" in sent) is not drop
+
     def _setup_server(self, max_concurrent_requests=None, drop_input_reasoning_items=False, **kwargs):
         config = SimpleModelServerConfig(
             host="0.0.0.0",
