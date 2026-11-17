@@ -1,0 +1,41 @@
+# The Auto Ontology Agent Server: Auto Ontology's ReAct text-to-SQL agent. benchmarks/birdbench/auto_ontology.yaml
+# pairs it with BIRD dev. Auto Ontology needs its catalog, filled for each database, and the source databases: see
+# README.md.
+#
+# env.yaml supplies the settings below that name it: the embedding endpoint, the catalog's password and the source
+# databases' connection string.
+
+# Auto Ontology's embedding endpoint, which it calls directly, its catalog's password, and the source databases.
+auto_ontology_embedding_base_url: ???
+auto_ontology_embedding_api_key: ???
+auto_ontology_embedding_model: ???
+auto_ontology_catalog_password: ???
+auto_ontology_source_database_url: ???
+
+auto_ontology_agent:
+  responses_api_agents:
+    auto_ontology_agent:
+      entrypoint: app.py
+      # The ReAct episode runs on the evaluated policy.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # The name Auto Ontology sends. It needs an openai/, azure/ or aws/ prefix, which selects Auto Ontology's
+      # OpenAI-compatible client, the one whose calls go through Gym. The Model Server sends its own model name.
+      model: openai/${policy_model_name}
+      embedding_base_url: ${auto_ontology_embedding_base_url}
+      embedding_api_key: ${auto_ontology_embedding_api_key}
+      embedding_model: ${auto_ontology_embedding_model}
+      catalog:
+        host: localhost
+        port: 5432
+        user: postgres
+        password: ${auto_ontology_catalog_password}
+        database: auto_ontology
+      # For example sqlite:////data/bird/dev_databases/{database}/{database}.sqlite.
+      source_database_url: ${auto_ontology_source_database_url}
+      # The ReAct agent's settings, which Auto Ontology reads at import. Its defaults: 24 tool calls, at most 10
+      # run_sql calls, a submit tool, and no grep. The doc's tool variants set TEXT_TO_SQL_REACT_SUBMIT_TOOL and
+      # TEXT_TO_SQL_REACT_GREP.
+      feature_flags: {}
+      max_concurrent_episodes: 8

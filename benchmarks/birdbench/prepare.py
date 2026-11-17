@@ -57,9 +57,10 @@ VERIFIED_TRAIN_URL = "https://raw.githubusercontent.com/uiuc-kang-lab/ReViSQL/ma
 TRAIN_CORPUS_LIMIT_PER_COLUMN = 2000
 
 
-def output_fpath_for(dialect: str, split: str = "dev") -> Path:
-    """``data/birdbench_<dialect>_<split>.jsonl``."""
-    return DATA_DIR / f"birdbench_{dialect}_{split}.jsonl"
+def output_fpath_for(dialect: str, split: str = "dev", *, agent_context: bool = False) -> Path:
+    """``data/birdbench_<dialect>_<split>.jsonl``, or ``..._agent_context.jsonl`` for rows with an agent context."""
+    suffix = "_agent_context" if agent_context else ""
+    return DATA_DIR / f"birdbench_{dialect}_{split}{suffix}.jsonl"
 
 
 def build_uberset(train_entries: List[Dict[str, Any]], verified_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -144,6 +145,7 @@ def prepare(
     dialect: str = "sqlite",
     split: str = "dev",
     train_dir: Optional[str] = None,
+    agent_context: bool = False,
 ) -> Path:
     """Download BIRD dev (or read local train), produce the prepared jsonl for ``split``/``dialect``. Returns its path.
 
@@ -164,12 +166,16 @@ def prepare(
         split: ``dev`` (default; the 1534-task benchmark) or ``train`` (the uberset, see module docstring).
         train_dir: ``split="train"`` only: extracted BIRD ``train/`` directory holding ``train.json`` and
             ``train_databases/``. Default: downloaded by ``ensure_bird_train()``.
+        agent_context: Also give each row the task as an agent harness reads it, in its ``agent_context``: the
+            question as BIRD asks it, its evidence apart, and the database. For an agent that writes its own prompts,
+            such as ``auto_ontology_agent``. These rows go to their own file, because an agent that takes no agent
+            context refuses a seed that carries one.
     """
     if dialect not in DIALECTS:
         raise ValueError(f"Unsupported dialect {dialect!r}; expected one of {DIALECTS}")
     if split not in SPLITS:
         raise ValueError(f"Unsupported split {split!r}; expected one of {SPLITS}")
-    output_fpath = output_fpath_for(dialect, split)
+    output_fpath = output_fpath_for(dialect, split, agent_context=agent_context)
     output_fpath.parent.mkdir(parents=True, exist_ok=True)
 
     databases_dir = databases_dir_for(split, train_dir)
@@ -214,6 +220,10 @@ def prepare(
                 "db_id": db_id,
                 "id": i,
             }
+            if agent_context:
+                row["agent_context"] = {
+                    "agent": {"values": {"question": entry["question"], "evidence": evidence or "", "database": db_id}}
+                }
             f_out.write(json.dumps(row) + "\n")
             count += 1
 
