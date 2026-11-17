@@ -11,14 +11,29 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming
+from nemo_gym.core import (
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+    StageOutcomePolicyConfig,
+    environment_fault_policy,
+    require_retry_or_fail,
+)
+from nemo_gym.core.outcome_policy import declare_action_kind
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from resources_servers.agentic_turn_simulation.harnesses.base import ToolCallProtocol
 from resources_servers.agentic_turn_simulation.obstacles import ObstacleInjectionConfig
 
+
+FAILURE_KIND_PREFIX = "agentic_turn_simulation"  # the namespace of this server's failure kinds
+# Faults of the episode itself (the simulator is part of it, and the wall-clock cap is its serving speed): the shared
+# outcome policy decides what recovery does with a row that holds one. Other masked outcomes carry no decision.
+TIME_CAP_KIND = f"{FAILURE_KIND_PREFIX}:time_cap"
+SIMULATOR_FAILED_KIND = f"{FAILURE_KIND_PREFIX}:simulator_failed"
+# The outcome policy's action rules may select these kinds by name.
+declare_action_kind(TIME_CAP_KIND)
+declare_action_kind(SIMULATOR_FAILED_KIND)
 
 # How a tool call was answered: in code, by the simulator LLM, not at all (the simulator failed), or with an injected
 # obstacle.
@@ -59,6 +74,26 @@ class AgenticTurnSimulationSettings(BaseModel):
     # Agent stop reasons that mask the rollout. The default masks the wall-clock cap, which tracks serving speed. A
     # context overflow before the first step (the row does not fit the policy's context) is masked whatever this lists.
     masked_stop_reasons: list[str] = Field(default_factory=lambda: ["time_cap"])
+    # The decision saved with a row masked for a time_cap or a failed simulator. By default both kinds are classified as
+    # the evaluation's and that class is retried; a deployment can reclassify a kind or select fail for a class.
+    outcome_policy: StageOutcomePolicyConfig = Field(
+        default_factory=lambda: environment_fault_policy("agent", (TIME_CAP_KIND, SIMULATOR_FAILED_KIND))
+    )
+
+    @field_validator("outcome_policy", mode="before")
+    @classmethod
+    def keep_untouched_default_rules(cls, value: object) -> object:
+        """A partial override changes only the rules it names; the others keep this server's defaults."""
+        return StageOutcomePolicyConfig.overlay(
+            environment_fault_policy("agent", (TIME_CAP_KIND, SIMULATOR_FAILED_KIND)), value
+        )
+
+    @field_validator("outcome_policy")
+    @classmethod
+    def require_retry_or_fail_decisions(cls, policy: StageOutcomePolicyConfig) -> StageOutcomePolicyConfig:
+        """This boundary can retry a masked row or leave it ungraded; it cannot count it as zero."""
+        return require_retry_or_fail(policy, "agent", (TIME_CAP_KIND, SIMULATOR_FAILED_KIND))
+
     # Agent stop reasons that leave the turn unfinished by the policy's own doing: scored 0 as code_gate
     # "unfinished_turn", without a judge, which passes many cut-off turns (it credits the progress made before the cut).
     # empty_output (a final reply with neither a message nor a call) counts only when the reply is the policy's: one

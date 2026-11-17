@@ -259,6 +259,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "stirrup_agent",
         "terminus_2_agent",
         "terminus_2_sandboxed_agent",
+        "wildclawbench_agent",
     }
 )
 # Session agents whose swap-source template (`resources_server.name: ???`) runs on the host through /run.

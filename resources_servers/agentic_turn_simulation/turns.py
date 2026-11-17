@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from nemo_gym.client import ServerClient, get_response_json
-from nemo_gym.core import NeMoGymChatCompletion, NgFailureEvent, failure_kinds
+from nemo_gym.core import NeMoGymChatCompletion, NgFailureEvent, applied_outcome_fields, failure_kinds
 from nemo_gym.metrics import MASK_SAMPLE_FIELD
 from nemo_gym.server_runtime import observe_llm_judge_grading
 from nemo_gym.verification import call_judge, is_judge_failure, record_parsed_judge_verdict
@@ -53,6 +53,9 @@ from resources_servers.agentic_turn_simulation.render import (
     render_system_prompt,
 )
 from resources_servers.agentic_turn_simulation.schemas import (
+    FAILURE_KIND_PREFIX,
+    SIMULATOR_FAILED_KIND,
+    TIME_CAP_KIND,
     AgenticTurnSimulationRunRequest,
     AgenticTurnSimulationSettings,
     AgenticTurnSimulationVerifyRequest,
@@ -74,7 +77,6 @@ from resources_servers.agentic_turn_simulation.workspace import Workspace
 
 LOG = logging.getLogger(__name__)
 
-FAILURE_KIND_PREFIX = "agentic_turn_simulation"  # the namespace of this server's failure kinds
 # The output items of a policy turn that are scored: its reasoning is never shown to the judge.
 SCORED_ITEM_TYPES = ("message", "function_call", "function_call_output")
 # A reply cut off by its output budget is retried with the budget doubled, starting from the params' max_tokens
@@ -484,6 +486,10 @@ class TurnSimulation:
             turn = _policy_output(body)
         return harness.scored_turn(turn)
 
+    def _decision(self, failure_kind: str) -> dict[str, Any]:
+        """The saved outcome decision of an episode fault: the originating stage is the agent's, whatever the action."""
+        return applied_outcome_fields(failure_kind=failure_kind, stage="agent", config=self.config.outcome_policy)
+
     def _mask_reason(
         self,
         body: AgenticTurnSimulationVerifyRequest,
@@ -505,7 +511,9 @@ class TurnSimulation:
                 "the conversation history does not fit the policy's context (overflow before the first step)",
             )
         if stop_reason in self.config.masked_stop_reasons:
-            return _masked(f"{FAILURE_KIND_PREFIX}:{stop_reason}", f"the turn was cut off ({stop_reason})")
+            masked = _masked(f"{FAILURE_KIND_PREFIX}:{stop_reason}", f"the turn was cut off ({stop_reason})")
+            # The wall-clock cap tracks serving speed: the policy decides what recovery does with it.
+            return masked | self._decision(TIME_CAP_KIND) if masked["failure_kind"] == TIME_CAP_KIND else masked
         for item in items:
             if item.get("type") == "function_call_output":
                 text = str(item.get("output") or "")
@@ -515,7 +523,7 @@ class TurnSimulation:
             else:
                 continue
             if holds_simulator_failure(text):
-                return _masked(f"{FAILURE_KIND_PREFIX}:simulator_failed", text[:300])
+                return _masked(SIMULATOR_FAILED_KIND, text[:300]) | self._decision(SIMULATOR_FAILED_KIND)
         return None
 
     def _response_fields(

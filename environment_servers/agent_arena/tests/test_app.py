@@ -312,6 +312,14 @@ class TestEpisode:
         assert server._turns.config.masked_stop_reasons == ["time_cap", "max_steps"]
         assert server._turns.config.judges[0].model_server.name == "judge_0"
 
+    async def test_an_outcome_policy_override_is_the_resources_servers(self) -> None:
+        policy = {"by_stage": {"agent": {"by_failure_kind": {"agentic_turn_simulation:time_cap": "fail"}}}}
+        server = _server(outcome_policy=policy)
+        reply = _agent_reply({"p1": "x", "p2": "y"}, metadata={"stop_reason": "time_cap"})
+        _world(server, reply=reply)
+        episode = (await server.run_request(_request())).result.model_dump(mode="json")
+        assert (episode["failure_outcome_action"], episode["failure_outcome_attribution"]) == ("fail", "evaluation")
+
     async def test_a_failed_agent_reply_is_the_episodes_failure_by_the_outcome_policy(self) -> None:
         server = _server()
         outcome = json.dumps({"failure_kind": MODEL_TRANSPORT_ERROR})
@@ -471,6 +479,9 @@ class TestScoringParity:
         )
         assert episode["mask_sample"] is True and episode["failure_kind"] == verified.failure_kind
         assert episode["failure_kind"] == "agentic_turn_simulation:time_cap"
+        # The outcome policy's decision is saved with the row, as the resources server saves it.
+        assert (episode["failure_outcome_action"], episode["failure_outcome_attribution"]) == ("retry", "evaluation")
+        assert episode["_ng_failure_stage"] == verified.model_extra["_ng_failure_stage"] == "agent"
 
     async def test_the_metrics_are_the_resources_servers(self) -> None:
         rows = [
