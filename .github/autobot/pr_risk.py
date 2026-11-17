@@ -40,6 +40,7 @@ import ast
 import difflib
 import filecmp
 import os
+import re
 import sys
 from collections.abc import Iterator
 from fnmatch import fnmatch
@@ -55,6 +56,13 @@ UNCOUNTED_PATTERNS = ("*.lock", "*.jsonl")
 SCORING_PREFIXES = ("resources_servers/", "nemo_gym/verification/", "nemo_gym/verifiers/", "nemo_gym/metrics/")
 NON_SCORING_DIRS = frozenset({"tests", "data"})
 PROTECTED_FILES = Path(__file__).with_name("protected_files.yaml")
+PROTECTED_ENTRY = re.compile(
+    r"- (?:'(?P<single>(?:[^']|'')*)'"
+    r'|"(?P<double>(?:[^"\\]|\\["\\])*)"'
+    r"|(?P<plain>(?:[A-Za-z_/]|\.(?!\d))[^:#\t]*?))"
+    r"(?: +#.*| *)"
+)
+YAML_NON_STRINGS = frozenset({"null", "true", "false", "yes", "no", "on", "off", ".inf", ".nan"})
 MAX_LISTED = 10
 
 
@@ -99,12 +107,22 @@ def read_lines(path: Path) -> list[str] | None:
     return data.decode("utf-8", errors="replace").splitlines()
 
 
+def tree_lines(tree: Path, path: str) -> list[str] | None:
+    """Return ``path``'s lines in ``tree`` like ``read_lines``, but ``[]`` beneath a symlinked directory.
+
+    ``walk`` lists a directory symlink as a leaf, so a path beneath one does not exist in that tree.
+    """
+    if any((tree / parent).is_symlink() for parent in Path(path).parents if parent != Path(".")):
+        return []
+    return read_lines(tree / path)
+
+
 def changed_line_count(base: Path, head: Path, path: str) -> int:
     """Count one file's added plus removed lines; a binary file counts as zero."""
-    before, after = read_lines(base / path), read_lines(head / path)
+    before, after = tree_lines(base, path), tree_lines(head, path)
     if before is None or after is None:
         return 0
-    opcodes = difflib.SequenceMatcher(None, before, after).get_opcodes()
+    opcodes = difflib.SequenceMatcher(None, before, after, autojunk=False).get_opcodes()
     return sum(i2 - i1 + j2 - j1 for tag, i1, i2, j1, j2 in opcodes if tag != "equal")
 
 
@@ -164,9 +182,11 @@ def signature(node: ast.stmt) -> str:
     """Fingerprint a definition's contract: a function's signature, a class's surface or a constant's value."""
     if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
         returns = ast.dump(node.returns) if node.returns else "None"
-        return f"{type(node).__name__} {node.name}({ast.dump(node.args)}) -> {returns}"
+        header = [ast.dump(part) for part in (*node.type_params, *node.decorator_list)]
+        return "\n".join([*header, f"{type(node).__name__} {node.name}({ast.dump(node.args)}) -> {returns}"])
     if isinstance(node, ast.ClassDef):
-        header = [ast.dump(part) for part in (*node.decorator_list, *node.bases, *node.keywords)]
+        parts = (*node.type_params, *node.decorator_list, *node.bases, *node.keywords)
+        header = [ast.dump(part) for part in parts]
         members = [signature(item) for item in node.body if is_public_member(item)]
         return "\n".join([f"class {node.name}", *header, *members])
     return ast.dump(node)
@@ -187,10 +207,12 @@ def export_signature(tree: Path, module: str, name: str, hops: int = 3) -> str:
     for node in parsed.body if parsed else []:
         if not binds(node, name):
             continue
-        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("nemo_gym.") and hops:
-            original = next(alias.name for alias in node.names if (alias.asname or alias.name) == name)
-            return export_signature(tree, node.module, original, hops - 1)
-        return signature(node)
+        if not isinstance(node, ast.ImportFrom):
+            return signature(node)
+        alias = next(alias for alias in node.names if (alias.asname or alias.name) == name)
+        if (node.module or "").startswith("nemo_gym.") and hops:
+            return export_signature(tree, node.module, alias.name, hops - 1)
+        return ast.dump(ast.ImportFrom(module=node.module, names=[alias], level=node.level))
     return f"undefined {module}.{name}"
 
 
@@ -209,24 +231,41 @@ def public_api_changes(base: Path, head: Path, changed: list[str]) -> list[str]:
     return reasons
 
 
+def protected_entry(line: str) -> str | None:
+    """Decode one ``- <glob>`` line of the protected file list to the string YAML reads, or ``None`` if unsupported.
+
+    A single-quoted glob may escape ``'`` as ``''`` and a double-quoted one may escape only ``"`` and ``\\``. A plain
+    glob must start with a letter, ``_``, ``/`` or a ``.`` not followed by a digit, must not contain ``:``, ``#`` or
+    a tab, and must not be a word YAML reads as a boolean, null or float. Only spaces may precede a ``#`` comment.
+    """
+    match = PROTECTED_ENTRY.fullmatch(line)
+    if not match:
+        return None
+    single, double, plain = match.group("single", "double", "plain")
+    if single is not None:
+        return single.replace("''", "'")
+    if double is not None:
+        return re.sub(r"\\(.)", r"\1", double)
+    return None if plain.lower() in YAML_NON_STRINGS else plain
+
+
 def protected_patterns(path: Path = PROTECTED_FILES) -> tuple[str, ...]:
     """Return the protected path globs from ``path``, or none when the file is absent.
 
-    The file is a flat YAML list of plain or quoted strings with ``#`` comments, parsed here so that no YAML
-    library is needed.
+    The file is a flat YAML list of ``protected_entry`` lines with ``#`` comments, parsed here so that no YAML library
+    is needed. Any other line raises rather than yield a glob that differs from what YAML reads.
     """
     if not path.is_file():
         return ()
     patterns = []
     for number, line in enumerate(path.read_text().splitlines(), start=1):
-        entry = "" if line.lstrip().startswith("#") else line.split(" #", 1)[0].strip()
-        if not entry:
+        if not line.strip() or line.lstrip().startswith("#"):
             continue
-        value = entry.removeprefix("- ").strip() if entry.startswith("- ") else ""
-        if len(value) > 1 and value[0] == value[-1] and value[0] in "'\"":
-            value = value[1:-1]
+        value = protected_entry(line)
         if not value:
-            raise ValueError(f"{path}:{number}: expected a YAML list entry '- <glob>'")
+            raise ValueError(
+                f"{path}:{number}: expected a YAML list entry '- <glob>'; quote a glob that YAML reads otherwise"
+            )
         patterns.append(value)
     return tuple(patterns)
 

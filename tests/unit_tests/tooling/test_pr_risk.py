@@ -85,6 +85,29 @@ def test_removed_and_modified_lines_both_count(tmp_path: Path) -> None:
     assert grade(tmp_path, before, after) == ("mid", ["150 changed lines in 2 non-doc files"])
 
 
+@pytest.mark.parametrize("inserted", [True, False])
+def test_repeated_unchanged_lines_are_not_counted(tmp_path: Path, inserted: bool) -> None:
+    short, long = {"scripts/t.txt": "x\n" * 500}, {"scripts/t.txt": "marker\n" + "x\n" * 500}
+    before, after = (short, long) if inserted else (long, short)
+    assert grade(tmp_path, before, after) == ("low", ["1 changed lines in 1 non-doc files"])
+
+
+@pytest.mark.parametrize("linked_in_head", [True, False])
+def test_files_beneath_a_directory_symlink_do_not_exist(tmp_path: Path, linked_in_head: bool) -> None:
+    real = make_tree(tmp_path / "real", {**API, "shared/x.py": lines(401), "scripts/x.py": lines(401)})
+    linked = make_tree(tmp_path / "linked", {**API, "shared/x.py": lines(401)})
+    (linked / "scripts").symlink_to("shared")
+    base, head = (real, linked) if linked_in_head else (linked, real)
+    assert pr_risk.grade(base, head) == ("high", ["402 changed lines in 2 non-doc files"])
+
+
+def test_a_symlink_counts_its_target(tmp_path: Path) -> None:
+    base, head = make_tree(tmp_path / "base", API), make_tree(tmp_path / "head", API)
+    (base / "link").symlink_to("a")
+    (head / "link").symlink_to("b")
+    assert pr_risk.grade(base, head) == ("low", ["2 changed lines in 1 non-doc files"])
+
+
 @pytest.mark.parametrize(
     "path",
     [
@@ -144,6 +167,51 @@ def test_public_surface_change_is_high_at_any_size(tmp_path: Path, after: dict[s
     assert reason in evidence
 
 
+PROPERTY = "class Thing:\n    @property\n    def value(self) -> int:\n        return 1\n"
+PRIVATE = PROPERTY.replace("value", "_value")
+BINDING = "class Thing:\n    @classmethod\n    def make(cls) -> int:\n        return 1\n"
+GENERIC_CLASS = "class Thing[T: int]:\n    def run(self, x: T) -> T:\n        return x\n"
+GENERIC_FUNCTION = "def helper[T: int](a: T) -> T:\n    return a\n"
+IMPORTED = "from external import helper, Other\n"
+
+
+@pytest.mark.parametrize(
+    ("path", "before", "after", "export"),
+    [
+        pytest.param("things.py", PROPERTY, PROPERTY.replace("    @property\n", ""), "Thing", id="property"),
+        pytest.param("things.py", BINDING, BINDING.replace("@classmethod", "@staticmethod"), "Thing", id="binding"),
+        pytest.param("things.py", GENERIC_CLASS, GENERIC_CLASS.replace("int", "str"), "Thing", id="class-bound"),
+        pytest.param("helpers.py", GENERIC_FUNCTION, GENERIC_FUNCTION.replace("int", "str"), "helper", id="bound"),
+        pytest.param("reexports.py", IMPORTED, IMPORTED.replace("external", "other"), "helper", id="module"),
+        pytest.param("reexports.py", IMPORTED, IMPORTED.replace("helper", "other as helper"), "helper", id="alias"),
+    ],
+)
+def test_decorator_generic_and_import_source_changes_are_high(
+    tmp_path: Path, path: str, before: str, after: str, export: str
+) -> None:
+    tier, evidence = grade(tmp_path, {f"nemo_gym/core/{path}": before}, {f"nemo_gym/core/{path}": after})
+    assert tier == "high"
+    assert f"export changed: nemo_gym.core.{export}" in evidence
+
+
+@pytest.mark.parametrize(
+    ("path", "before", "after"),
+    [
+        pytest.param("things.py", PROPERTY, PROPERTY.replace("return 1", "return 2"), id="property-body"),
+        pytest.param("things.py", PRIVATE, PRIVATE.replace("    @property\n", ""), id="private-decorator"),
+        pytest.param("things.py", GENERIC_CLASS, GENERIC_CLASS.replace("return x", "return (x)"), id="class-body"),
+        pytest.param("helpers.py", GENERIC_FUNCTION, GENERIC_FUNCTION.replace("return a", "return (a)"), id="body"),
+        pytest.param("reexports.py", IMPORTED, IMPORTED.replace("Other", "Different"), id="unrelated-import"),
+    ],
+)
+def test_bodies_private_members_and_unrelated_imports_keep_the_public_surface(
+    tmp_path: Path, path: str, before: str, after: str
+) -> None:
+    tier, evidence = grade(tmp_path, {f"nemo_gym/core/{path}": before}, {f"nemo_gym/core/{path}": after})
+    assert tier == "low"
+    assert not [reason for reason in evidence if reason.startswith("export")]
+
+
 def test_private_and_body_changes_keep_the_public_surface(tmp_path: Path) -> None:
     after = {
         "nemo_gym/core/things.py": (
@@ -186,13 +254,29 @@ def test_protected_globs_match_the_whole_path(tmp_path: Path) -> None:
 def test_protected_patterns_load_from_the_companion_file(tmp_path: Path) -> None:
     assert pr_risk.protected_patterns(tmp_path / "missing.yaml") == ()
     companion = tmp_path / "protected_files.yaml"
-    companion.write_text("# header\n- a.toml  # inline\n\n- 'b/*'\n- \"*.lock\"\n")
-    assert pr_risk.protected_patterns(companion) == ("a.toml", "b/*", "*.lock")
+    companion.write_text(
+        "# header\n- a.toml  # inline\n\n- 'b/*'\n- \"*.lock\"\n  # indented comment\n- .github/workflows/*\n"
+        "- 'scripts/release #*.py'  # quoted hash\n- 'it''s'\n- \"say \\\"hi\\\" \\\\ #x\"\n"
+    )
+    expected = ("a.toml", "b/*", "*.lock", ".github/workflows/*", "scripts/release #*.py", "it's", 'say "hi" \\ #x')
+    assert pr_risk.protected_patterns(companion) == expected
     assert yaml.safe_load(companion.read_text()) == list(pr_risk.protected_patterns(companion))
-    for invalid in ("files:\n  - a\n", "-a\n", "- ''\n"):
+    unsupported = ("- *.lock\n", "- true\n", "- 1.0\n", "- a: b\n", "- a#b\n", "- a\tb\n", "- a\n  - b\n", '- "\\t"\n')
+    malformed = ("files:\n  - a\n", "-a\n", "- ''\n", "- 'open\n", "- 'a' b\n", "- 'a'# c\n")
+    for invalid in unsupported + malformed:
         companion.write_text(invalid)
         with pytest.raises(ValueError, match="expected a YAML list entry"):
             pr_risk.protected_patterns(companion)
+
+
+def test_quoted_protected_glob_keeps_its_hash(tmp_path: Path) -> None:
+    companion = tmp_path / "protected_files.yaml"
+    companion.write_text("- 'scripts/release #*.py'\n")
+    protected = pr_risk.protected_patterns(companion)
+    assert protected == ("scripts/release #*.py",)
+    tier, evidence = grade(tmp_path, {"scripts/release #1.py": "a\n"}, {"scripts/release #1.py": "b\n"}, protected)
+    assert tier == "high"
+    assert "protected: scripts/release #1.py" in evidence
 
 
 def test_repository_protects_packaging_files() -> None:
