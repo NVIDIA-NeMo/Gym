@@ -95,7 +95,9 @@ def test_agentic_dataset_uses_resources_schema_and_environment_route(monkeypatch
     local_input.write_text((ROOT / "data" / "agentic_example.jsonl").read_text())
     dataset.jsonl_fpath = str(local_input)
     dataset.prompt_config = ROOT / "prompts" / "agentic.yaml"
-    prepared = TrainDataProcessor()._collate_samples_single_type("benchmark", [owner], task_data_validation="error")
+    prepared = TrainDataProcessor()._collate_samples_single_type(
+        "benchmark", [owner], task_data_validation="error", output_dir=tmp_path / "prepared"
+    )
     rows = [json.loads(line) for line in prepared[0].read_text().splitlines()]
     assert len(rows) == 5
     for row in rows:
