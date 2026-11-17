@@ -25,7 +25,7 @@ from nemo_gym.agents.agent_outcome import OutcomeAction
 from nemo_gym.eval.recovery.policy import RecoveryOutcomePolicyConfig
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
-from tests.unit_tests.orchestration.test_allocation_cut_recovery import _decide
+from tests.helpers.recovery_cut_runs import _decide
 from tests.unit_tests.orchestration.test_eval_resubmit import slurm_bin as slurm_bin
 
 

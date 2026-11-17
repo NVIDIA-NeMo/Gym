@@ -32,7 +32,7 @@ from nemo_gym.orchestration.executors.slurm.resume_script import (
     RESUBMIT_LOCK_NAME,
     render_resume_prologue,
 )
-from tests.unit_tests.orchestration.test_allocation_cut_recovery import _cut_run, _digests
+from tests.helpers.recovery_cut_runs import _cut_run, _digests
 from tests.unit_tests.orchestration.test_resume_script import _run_prologue, _sbatch_calls
 
 

@@ -279,7 +279,7 @@ def test_the_in_job_continuation_applies_the_saved_policy(tmp_path) -> None:
 
 def test_the_continuation_admission_decides_with_the_saved_policy(tmp_path, monkeypatch) -> None:
     from nemo_gym.eval.recovery import continuation as recovery
-    from tests.unit_tests.orchestration.test_allocation_cut_recovery import _cut_run
+    from tests.helpers.recovery_cut_runs import _cut_run
 
     job = tmp_path / "job"
     _cut_run(job, scored=2, in_flight=0, not_started=2)

@@ -27,7 +27,7 @@ from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
 from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
 from nemo_gym.orchestration.executors.slurm import judge_job as slurm_judge_job
 from nemo_gym.orchestration.executors.slurm import reader as slurm_reader
-from tests.unit_tests.orchestration.test_allocation_cut_recovery import _cut_run
+from tests.helpers.recovery_cut_runs import _cut_run
 from tests.unit_tests.orchestration.test_eval_resubmit import _handle, _resumable_run
 from tests.unit_tests.orchestration.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.orchestration.test_eval_resubmit import slurm_bin as slurm_bin
