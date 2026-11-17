@@ -335,7 +335,7 @@ def _profile_schema_conditions() -> list[dict[str, Any]]:
             },
         },
         {
-            "if": {"properties": {"kind": {"const": "environment"}}, "required": ["kind"]},
+            "if": {"properties": {"kind": {"const": EnvironmentKind.ENVIRONMENT.value}}, "required": ["kind"]},
             "then": {"properties": {"protocol_of": {"type": "null"}}},
         },
     ]
