@@ -14,9 +14,10 @@
 # limitations under the License.
 """Grade a pull request's risk as ``low``, ``mid`` or ``high`` from its merge-base and head trees.
 
-The CI-Events ``pr-risk-label`` agent runs this file from the merge-base tree, never from the head:
+The CI-Events ``pr-risk-label`` agent always runs this file from the pull request's target branch tip, never from
+the merge base or the head, on the change from the merge base to the head:
 
-    python3 <merge-base>/.github/autobot/pr_risk.py --base <merge-base> --head <head>
+    python3 <target>/.github/autobot/pr_risk.py --base <merge-base> --head <head>
 
 It prints exactly one tier on stdout and its evidence on stderr. The agent may raise the tier after reading the code,
 never lower it. The tiers:
