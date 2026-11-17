@@ -154,7 +154,8 @@ A failed response's `error.message` is Droid's error message, or what ended the 
 as the failure reason.
 
 Droid's terminal stream-json `type: error` event carries only a message, so the classifier matches
-the message grammar Droid 1.1.0 wrote in runs against a scripted model server. Tool-result errors,
+the message grammar Droid 1.1.0 wrote in runs against a scripted model server and, for the
+repetition stop, in real model runs. Tool-result errors,
 assistant text and stderr are not model-failure evidence, even when their text matches this grammar:
 
 | Error event message | `ng_agent_outcome` |
@@ -162,10 +163,18 @@ assistant text and stderr are not model-failure evidence, even when their text m
 | the HTTP status, a space, then the error body's message (`429 rate limited`) | `model_request_error` with that status |
 | exactly `Connection error.` (a refused or reset connection) | `model_transport_error` |
 | exactly Droid's compaction-does-not-fit message (after a `context_length_exceeded` rejection) | `model_context_limit` |
+| exactly `LLM output entered an exact repetition cycle` | `agent_invalid_output` |
 | anything else | `unknown` |
 
 Another `droid_version` may word these differently, so its failures are reported as `unknown`. The
 Environment Server's outcome policy then decides whether to verify or retry.
+
+Droid 1.1.0 checks each model response's streamed text and thinking for an exact repeated cycle and
+resamples such a response once. Its repetition stop ends the run with `LLM output entered an exact
+repetition cycle` when the resample repeats too, or when the run has already resampled three times.
+With `temperature: 0` in `sampling_overrides`, the resample decodes greedily again and seldom
+escapes the cycle. The response stays `failed` with that message, and the default outcome policy
+verifies its partial work as the model's result.
 
 Session identity, the single activation, retries, close and its retry window follow the shared
 agent-session contract. `SandboxSession` runs Droid through the shared `harness_runner.sh` under the

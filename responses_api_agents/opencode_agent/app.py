@@ -544,6 +544,9 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # Either is a file already inside the sandbox and requires its SHA-256, which is checked there.
     sandbox_ripgrep_path: str | None = None
     sandbox_ripgrep_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
+    # Sandbox sessions only. Without a pinned rg or one on the task PATH, setup fails; true lets OpenCode download
+    # ripgrep on demand instead, which works only where the sandbox can reach GitHub.
+    sandbox_ripgrep_download: bool = False
     sandbox_plugin_dependencies_path: str | None = None
     sandbox_plugin_dependencies_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
     # Sandbox sessions only. Absolute sandbox directory, outside the task workdir, where each activation's capture
@@ -866,7 +869,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 db_path = translated
             invocation_id = rollout_id or f"opencode-{uuid4().hex}"
             output_items, usage = (
-                ([], {"input_tokens": 0, "output_tokens": 0})
+                ([], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None})
                 if timed_out
                 else parse_opencode_session(db_path, gym_reasoning=self.config.model_server is not None)
             )
@@ -1002,7 +1005,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
             usage=NeMoGymResponseUsage(
                 input_tokens=input_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=usage.get("cached_tokens")),
                 output_tokens=output_tokens,
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(
                     reasoning_tokens=usage.get("reasoning_tokens", 0)
@@ -1252,8 +1255,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 self._check_sandbox_setup(command, result)
             installer = f"{directory}/{RUNTIME_INSTALLER_FILE}"
             await sandbox.upload(RUNTIME_INSTALLER_SOURCE, installer)
-            # A pinned rg (below) replaces the installer's best-effort package install of ripgrep.
-            command = "NG_OPENCODE_SKIP_RIPGREP=1 " if ripgrep is not None else ""
+            # A pinned rg (below) replaces the installer's package install of ripgrep.
+            if ripgrep is not None:
+                command = "NG_OPENCODE_SKIP_RIPGREP=1 "
+            elif self.config.sandbox_ripgrep_download:
+                command = "NG_OPENCODE_ALLOW_RIPGREP_DOWNLOAD=1 "
+            else:
+                command = ""
             command += "bash " + " ".join(
                 quote(arg)
                 for arg in (
