@@ -130,10 +130,22 @@ class TokenCaptureSnapshot:
 
     capture_key: str
     entries: tuple[TokenEntry, ...]
+    # The episode-wide aggregate: any call of any agent instance was lost, or the episode was marked.
     incomplete: bool
     snapshot_id: str
     version: int
     engine_refusals: tuple[EngineRefusalRecord, ...] = ()
+    # The agent instances with a lost call of their own; ``None`` is the unnamed agent.
+    incomplete_agent_instances: frozenset[str | None] = frozenset()
+    # A mark with no model call, or one that cannot be placed on an agent instance: it masks every agent instance.
+    incomplete_episode: bool = False
+
+    def incomplete_for(self, agent_instance: str | None) -> bool:
+        """Whether this agent instance's sample is incomplete: by its own lost call, or episode-wide."""
+        if not self.incomplete_agent_instances and not self.incomplete_episode:
+            # A source that reports only the aggregate cannot place it, so it applies to everyone.
+            return self.incomplete
+        return self.incomplete_episode or agent_instance in self.incomplete_agent_instances
 
 
 @dataclass(frozen=True)
@@ -181,10 +193,15 @@ class LineageResolver(Protocol):
     Unstamped entries are invisible to resolution.
     """
 
-    async def resolve(self, rollout_id: str, request_items: list[dict]) -> LineageResolution:
+    async def resolve(
+        self, rollout_id: str, request_items: list[dict], *, identity: CallIdentity | None = None
+    ) -> LineageResolution:
         """Return whether the request is a root, resolved, or unresolved.
 
         ``request_items`` are the unmodified harness items.
+        Only calls of the request's own group (``identity``'s agent instance and model server) can be its parent.
+        A request whose only match was served by another model server for the same agent instance is a root
+        with reason ``model_server_changed``.
         The implementation must verify the recorded request context.
         A conflicting set of committed payloads for one call id must count as zero candidates.
         UNRESOLVED is always a safe answer; a wrong RESOLVED is caught later by digest verification.
@@ -247,8 +264,19 @@ class CaptureLedger(LineageResolver, Protocol):
         """
         ...
 
-    async def manifest(self, capture_key: str) -> dict:
+    async def manifest(
+        self,
+        capture_key: str,
+        *,
+        agent_instance: str | None = None,
+        agent_kind: str | None = None,
+        model_ref: str | None = None,
+    ) -> dict:
         """Return the rollout's token-free ledger as plain wire data.
+
+        The filters keep the records, failures, attempted and pending call ids of the calls with that agent
+        instance, agent kind, or serving model server name. Failures that apply to the whole episode are
+        returned under every filter. No filter returns everything.
 
         The shape validates as ``staging.records.RolloutManifest``:
         committed rows under ``records`` (each a ``CallRecord`` payload) and
@@ -258,8 +286,8 @@ class CaptureLedger(LineageResolver, Protocol):
         """
         ...
 
-    async def has_rows(self, rollout_id: str) -> bool:
-        """Return whether any ledger row (committed or failed) exists.
+    async def has_rows(self, rollout_id: str, *, identity: CallIdentity | None = None) -> bool:
+        """Return whether any ledger row (committed or failed) exists, of ``identity``'s group when given.
 
         A retired rollout raises ``RolloutRetiredError``, so admission can refuse to capture its late calls.
         """

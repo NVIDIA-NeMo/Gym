@@ -51,6 +51,8 @@ from nemo_gym.models.token_capture.records import (
 
 # Gym passes the call's identity on every intent and incomplete mark, so the kit's writes pass one too.
 _IDENTITY = CallIdentity(agent_instance="judge.1", model_ref=ModelRef(name="conformance-model"))
+# Another agent instance on the same model server: its requests must never resolve to ``_IDENTITY``'s calls.
+_OTHER_AGENT_INSTANCE = CallIdentity(agent_instance="assistant", model_ref=_IDENTITY.model_ref)
 
 
 class ConformanceError(AssertionError):
@@ -396,12 +398,17 @@ async def _check_lineage_visibility(
         request_items=_REQUEST,
         text="It is sunny.",
     )
+    # Gym resolves a request within its own group (agent instance and model server), so the committed call
+    # carries an identity and every probe passes one.
+    entry.agent_instance = _IDENTITY.agent_instance
+    entry.agent_kind = _IDENTITY.agent_kind
+    entry.model_ref = _IDENTITY.model_ref
     await sink.put(entry)
     # The fresh variant constructs its resolver only after the entry is durable.
     if store is None:
         store = lineage_factory()
     faithful = list(_REQUEST) + list(entry.output_items) + [{"role": "user", "content": "And tomorrow?"}]
-    resolution = await store.resolve(rollout_id, faithful)
+    resolution = await store.resolve(rollout_id, faithful, identity=_IDENTITY)
     _require(
         resolution.status == ParentResolutionStatus.RESOLVED,
         name,
@@ -414,14 +421,20 @@ async def _check_lineage_visibility(
         name,
         "resolved parent carries the wrong cumulative tokens",
     )
+    other_agent_instance = await store.resolve(rollout_id, faithful, identity=_OTHER_AGENT_INSTANCE)
+    _require(
+        other_agent_instance.status != ParentResolutionStatus.RESOLVED,
+        name,
+        "another agent instance's request resolved to this agent instance's call",
+    )
     rewritten = [{"role": "user", "content": "REWRITTEN"}] + list(entry.output_items)
-    rewritten_resolution = await store.resolve(rollout_id, rewritten)
+    rewritten_resolution = await store.resolve(rollout_id, rewritten, identity=_IDENTITY)
     _require(
         rewritten_resolution.status == ParentResolutionStatus.UNRESOLVED,
         name,
         f"a rewritten context resolved as {rewritten_resolution.status}",
     )
-    root = await store.resolve(rollout_id, [{"role": "user", "content": "fresh question"}])
+    root = await store.resolve(rollout_id, [{"role": "user", "content": "fresh question"}], identity=_IDENTITY)
     _require(
         root.status == ParentResolutionStatus.ROOT,
         name,
