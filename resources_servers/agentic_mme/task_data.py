@@ -28,6 +28,17 @@ class GoldenAnswer(BaseModel):
         return value
 
 
+class ImageFile(BaseModel):
+    """One task image that the server loads at seed, for a lent sandbox or its image tools."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Relative to image_root on the server's host; benchmarks/agentic_mme/prepare.py writes these files.
+    source: str = Field(min_length=1)
+    # Relative to the sandbox working directory, as the prompt names it.
+    target: str = Field(min_length=1)
+
+
 class TaskData(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -58,4 +69,11 @@ class TaskData(BaseModel):
     retrieval_replay: list[dict[str, Any]] = Field(
         default_factory=list,
         description="Recorded retrieval results for retrieval.mode=replay (read by the agent).",
+    )
+    image_files: list[ImageFile] | None = Field(
+        default=None,
+        description=(
+            "The task images, in prompt order. The server reads them at seed when it lends a sandbox or serves "
+            "the image tools; the Agentic-MME agent's own rows carry the images in the prompt instead."
+        ),
     )

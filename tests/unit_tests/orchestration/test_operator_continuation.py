@@ -20,15 +20,15 @@ import json
 
 import pytest
 
-from nemo_gym.orchestration.executors.resume_script import ACCOUNTING_UNKNOWN_PREFIX, RETRY_EXTENSION_NAME
-from nemo_gym.orchestration.executors.slurm import SlurmExecutor
-from nemo_gym.orchestration.jobs import load_submission_record
-from nemo_gym.orchestration.recovery import (
-    OPERATOR_CONTINUATION_JOURNAL_NAME,
+from nemo_gym.eval.recovery.decision import (
     OPERATOR_CONTINUATION_NOTE,
     UNKNOWN_BUDGET_HINT,
     UNKNOWN_BUDGET_REASON,
 )
+from nemo_gym.eval.recovery.evidence import OPERATOR_CONTINUATION_JOURNAL_NAME
+from nemo_gym.orchestration.executors.slurm import SlurmExecutor
+from nemo_gym.orchestration.executors.slurm.resume_script import ACCOUNTING_UNKNOWN_PREFIX, RETRY_EXTENSION_NAME
+from nemo_gym.orchestration.jobs import load_submission_record
 from tests.unit_tests.orchestration.test_eval_resubmit import _handle
 from tests.unit_tests.orchestration.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.orchestration.test_eval_resubmit import slurm_bin as slurm_bin
@@ -316,10 +316,10 @@ EXPLICIT_BUDGET = "--max-walltime HH:MM:SS --walltime-reason TEXT"
 def _exhausted_with_unknown_walltime(tmp_path):
     """The walltime test run as a Store run: one scored rollout, one that used every attempt, and a capped walltime
     whose used part is unreadable."""
-    from tests.unit_tests.orchestration.test_managed_recovery_selection import prepare_managed
+    from tests.helpers.recovery_store_runs import save_store_run
 
     job_dir = _timed_run(tmp_path)
-    prepare_managed(job_dir, "exhausted", n=2)
+    save_store_run(job_dir, "exhausted", n=2)
     (job_dir / ".gym_accumulated_walltime").write_text("unreadable\n")
     return job_dir
 
@@ -409,7 +409,7 @@ SCHEDULER_DOWN = "#!/bin/bash\necho 'squeue: error: Unable to contact the contro
 def _store_run_with_unknown_accounting(tmp_path, outcomes):
     """The walltime test run as a Store run (one scored rollout, then one per entry of ``outcomes``) whose infra-retry
     count is unreadable."""
-    from tests.unit_tests.orchestration.test_masked_infrastructure_recovery import _run
+    from tests.unit_tests.eval.recovery.test_masked_infrastructure_recovery import _run
 
     job_dir = _timed_run(tmp_path)
     for name in ("rollouts.jsonl", "rollouts_materialized_inputs.jsonl"):
@@ -446,7 +446,7 @@ def test_mixed_masks_name_the_partial_rerun_with_its_budget_and_never_a_budget_a
 
 def test_a_protocol_violation_keeps_its_producer_fix_over_a_masked_rerun(tmp_path, slurm_bin):
     from nemo_gym.orchestration.submit import inspect_recovery
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import PROTOCOL_VIOLATION
+    from tests.unit_tests.eval.recovery.test_recovery_decision import PROTOCOL_VIOLATION
     from tests.unit_tests.orchestration.test_rerun_masked_without_artifact import _kept
 
     violation = PROTOCOL_VIOLATION | {
@@ -471,7 +471,7 @@ def test_a_protocol_violation_keeps_its_producer_fix_over_a_masked_rerun(tmp_pat
 def test_an_admitted_rejudgment_waits_for_the_scheduler_before_any_budget(tmp_path, slurm_bin):
     from nemo_gym.orchestration.submit import recover
     from nemo_gym.rollouts.rollout_store import RolloutStore
-    from tests.unit_tests.orchestration.test_masked_infrastructure_recovery import _ANSWER
+    from tests.unit_tests.eval.recovery.test_masked_infrastructure_recovery import _ANSWER
 
     judge_failure = _ANSWER | {
         "_ng_failure_class": "judge_failed",
@@ -550,11 +550,11 @@ def test_a_chain_stopped_on_a_typed_failure_names_its_remedy_before_the_resume(t
 
 def test_the_verdict_of_an_inspection_repeats_the_options_it_was_asked_with(tmp_path, slurm_bin):
     from nemo_gym.orchestration.submit import inspect_recovery
-    from tests.unit_tests.orchestration.test_managed_recovery_selection import prepare_managed
+    from tests.helpers.recovery_store_runs import save_store_run
 
     job_dir = _timed_run(tmp_path)
     (job_dir / ".gym_infra_retries").write_text("1\n")
-    prepare_managed(job_dir, "exhausted", n=2)  # one rollout used every attempt
+    save_store_run(job_dir, "exhausted", n=2)  # one rollout used every attempt
 
     out = inspect_recovery(*_handle(job_dir), extend_attempts=1)
 
@@ -564,8 +564,8 @@ def test_the_verdict_of_an_inspection_repeats_the_options_it_was_asked_with(tmp_
 
 def test_a_terminal_protocol_row_beside_missing_rows_is_recovered_not_resubmitted_fresh(tmp_path, slurm_bin):
     from nemo_gym.orchestration.submit import inspect_recovery, recover
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import PROTOCOL_VIOLATION
-    from tests.unit_tests.orchestration.test_masked_infrastructure_recovery import _run
+    from tests.unit_tests.eval.recovery.test_masked_infrastructure_recovery import _run
+    from tests.unit_tests.eval.recovery.test_recovery_decision import PROTOCOL_VIOLATION
 
     violation = PROTOCOL_VIOLATION | {
         "_ng_failure_class": "environment_protocol_violation",
@@ -599,8 +599,8 @@ def test_a_terminal_protocol_row_beside_missing_rows_is_recovered_not_resubmitte
 
 def test_a_protocol_row_beside_a_spent_retry_budget_is_extended_not_resubmitted_fresh(tmp_path, slurm_bin):
     from nemo_gym.orchestration.submit import inspect_recovery, recover
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import PROTOCOL_VIOLATION
-    from tests.unit_tests.orchestration.test_masked_infrastructure_recovery import _run
+    from tests.unit_tests.eval.recovery.test_masked_infrastructure_recovery import _run
+    from tests.unit_tests.eval.recovery.test_recovery_decision import PROTOCOL_VIOLATION
 
     violation = PROTOCOL_VIOLATION | {
         "_ng_failure_class": "environment_protocol_violation",

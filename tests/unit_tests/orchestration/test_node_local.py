@@ -32,7 +32,7 @@ from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.executors.node_local import _RESTORE_SCRIPT, NODE_LOCAL_DIR_ENV, archive_wait_seconds
 from nemo_gym.orchestration.executors.script_templates import NODE_LOCAL_ARCHIVE_DONE_MARKER_ENV
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
-from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
+from nemo_gym.orchestration.executors.slurm.script import build_sbatch_script
 from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord
 
 
