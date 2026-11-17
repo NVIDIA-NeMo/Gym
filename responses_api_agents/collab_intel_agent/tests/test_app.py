@@ -21,7 +21,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import anyio
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from nemo_gym.config import ModelServerRef
@@ -29,6 +31,7 @@ from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
 from resources_servers.collab_intel.task_data import TaskData
 from responses_api_agents.collab_intel_agent import app as app_module
 from responses_api_agents.collab_intel_agent.app import CollabIntelAgent, CollabIntelRunRequest, split_reasoning
+from responses_api_agents.collab_intel_agent.boxed_exec import SandboxExecError
 
 
 DIMENSIONS = [f"d{i}" for i in range(8)]
@@ -132,7 +135,7 @@ def _agent_with_fake_cli(
     script.chmod(0o755)
     monkeypatch.setattr(CollabIntelAgent, "model_post_init", lambda self, context: None)  # no uv sync, no server
     agent = CollabIntelAgent.model_construct(config=SimpleNamespace(episode_timeout_s=timeout_s))
-    agent._python, agent._root = str(script), tmp_path
+    agent._python, agent._root, agent._boxes = str(script), tmp_path, None
     agent._env = lambda home, phase_key: {}
     return agent
 
@@ -234,7 +237,7 @@ def test_harness_env_is_an_allowlist(tmp_path, monkeypatch):
         name="a", judge_base_url="http://judge", judge_model="j", judge_extra={}, policy_model="p", policy_extra={}
     )
     agent = CollabIntelAgent.model_construct(config=config)
-    agent._tmp = tmp_path
+    agent._tmp, agent._boxes = tmp_path, None
     env = agent._env(tmp_path / "row", "k")
     assert "HF_TOKEN" not in env and env["PATH"] == "/usr/bin" and env["HOME"] == str(tmp_path / "row")
     assert {"CI_GYM_KEY", "HARNESS_OPENAI_COMPAT", "HARNESS_JUDGE_MODEL"} <= set(env)
@@ -254,11 +257,17 @@ TEST = [
 ]
 
 
-def _collect(tmp_path, monkeypatch, transcripts: dict, exit_code: int = 0) -> tuple[dict, dict]:
+def _collect(
+    tmp_path, monkeypatch, transcripts: dict, exit_code: int = 0, sandbox: dict | None = None
+) -> tuple[dict, dict]:
     """Run one row through run() with a fake harness that writes transcripts[version] (none for a missing version)
-    and calls the policy route once per phase. Returns the row and the collector's canonical trajectory."""
+    and calls the policy route once per phase. Returns the row and the collector's canonical trajectory. With
+    `sandbox`, each phase's sandbox release reports that observation."""
     tmp_path.mkdir(exist_ok=True)
     agent = _agent_with_fake_cli(tmp_path, None, exit_code, monkeypatch)
+    if sandbox is not None:
+        agent._boxes = SimpleNamespace(release=AsyncMock(return_value=sandbox))
+        monkeypatch.setattr(app_module, "get_server_url", lambda name: "http://agent")
     Path(agent._python).write_text(
         f"#!{sys.executable}\n"
         "import json, pathlib, sys\n"
@@ -339,6 +348,20 @@ def test_run_returns_both_phases_as_canonical_trajectory(tmp_path, monkeypatch):
     assert {(t["task_id"], t["rollout_id"]) for t in trajectory["turns"]} == {("7", "7-0")}
 
 
+def test_run_reports_each_phase_sandbox_as_an_agent_observation(tmp_path, monkeypatch):
+    passed = {"score": {"pass": True}, "evaluated_seat": "Ana"}
+    observation = {"kind": "sandbox", "role": "agent", "sandbox_id": "sbx-1", "outcome": "completed"}
+    row, _ = _collect(
+        tmp_path,
+        monkeypatch,
+        {"solo": passed | {"messages": SOLO}, "manipulation": passed | {"messages": TEST}},
+        sandbox=observation,
+    )
+    records = row["ng_agent_observations"]["records"]
+    assert [(r["kind"], r["sandbox_id"], r["outcome"]) for r in records] == [("sandbox", "sbx-1", "completed")] * 2
+    assert row["ng_agent_observations"]["source"] == "collab_intel_agent"
+
+
 def test_run_trajectory_keeps_only_evidence_that_exists(tmp_path, monkeypatch):
     # a failed gate: solo evidence only
     failed = {"score": {"pass": False}, "messages": SOLO}
@@ -351,3 +374,120 @@ def test_run_trajectory_keeps_only_evidence_that_exists(tmp_path, monkeypatch):
         ("solo", "failed", [])
     ]
     assert trajectory["turns"] == []
+
+
+def _argv_recorder(agent: CollabIntelAgent, tmp_path: Path) -> Path:
+    """Make the fake harness interpreter record its command line and exit without a transcript."""
+    argv_file = tmp_path / "argv.json"
+    Path(agent._python).write_text(
+        f"#!{sys.executable}\nimport json, sys\nopen({str(argv_file)!r}, 'w').write(json.dumps(sys.argv[1:]))\nsys.exit(1)\n"
+    )
+    return argv_file
+
+
+def test_the_harness_starts_through_boxed_cli_only_in_sandbox_mode(tmp_path, monkeypatch):
+    agent = _agent_with_fake_cli(tmp_path, None, 1, monkeypatch)
+    argv_file = _argv_recorder(agent, tmp_path)
+    asyncio.run(agent._run(tmp_path / "scenario", "solo", 0, tmp_path / "out"))
+    assert json.loads(argv_file.read_text())[:2] == ["-m", "collab_intel.harness.cli"]
+    agent._boxes = object()
+    asyncio.run(agent._run(tmp_path / "scenario", "solo", 0, tmp_path / "out"))
+    argv = json.loads(argv_file.read_text())
+    assert argv[0] == str(app_module.BOXED_CLI) and "-m" not in argv and argv[1] == str(tmp_path / "scenario")
+
+
+def test_the_sandbox_url_is_in_the_harness_env_only_in_sandbox_mode(tmp_path, monkeypatch):
+    monkeypatch.setattr(app_module, "get_server_url", lambda name: "http://agent")
+    monkeypatch.setattr(CollabIntelAgent, "model_post_init", lambda self, context: None)
+    config = SimpleNamespace(
+        name="a", judge_base_url="http://judge", judge_model="j", judge_extra={}, policy_model="p", policy_extra={}
+    )
+    agent = CollabIntelAgent.model_construct(config=config)
+    agent._tmp, agent._boxes = tmp_path, None
+    assert "CI_EXEC_URL" not in agent._env(tmp_path / "row", "k")
+    agent._boxes = object()
+    assert agent._env(tmp_path / "row", "k")["CI_EXEC_URL"] == "http://agent/ci_exec/k/run"
+
+
+def test_each_phase_releases_its_sandbox(tmp_path, monkeypatch):
+    agent = _agent_with_fake_cli(tmp_path, None, 1, monkeypatch)
+    agent._response_ids, agent._boxes = {}, SimpleNamespace(release=AsyncMock())
+    asyncio.run(agent._phase(tmp_path / "scenario", "solo", 0, tmp_path / "out"))
+    agent._boxes.release.assert_awaited_once()
+    assert isinstance(agent._boxes.release.await_args.args[0], str)
+
+
+def test_a_cancelled_phase_still_releases_its_sandbox(tmp_path, monkeypatch):
+    agent = _agent_with_fake_cli(tmp_path, None, 1, monkeypatch)
+    started, released = asyncio.Event(), []
+
+    async def run(*args):
+        started.set()
+        await asyncio.Event().wait()
+
+    async def release(key):
+        await asyncio.sleep(0)  # a checkpoint a cancelled scope would interrupt
+        released.append(key)
+
+    agent._run, agent._response_ids, agent._boxes = run, {}, SimpleNamespace(release=release)
+
+    async def go():
+        async with anyio.create_task_group() as group:
+            group.start_soon(agent._phase, tmp_path / "scenario", "solo", 0, tmp_path / "out")
+            await started.wait()
+            group.cancel_scope.cancel()
+
+    asyncio.run(go())
+    assert len(released) == 1
+
+
+def test_sandbox_mode_runs_on_one_worker_only(monkeypatch):
+    monkeypatch.setattr(CollabIntelAgent, "model_post_init", lambda self, context: None)
+    sandbox = CollabIntelAgent.model_construct(config=SimpleNamespace(code_execution="sandbox"))
+    assert "one worker" in sandbox.multiple_workers_unsupported_reason()
+    host = CollabIntelAgent.model_construct(config=SimpleNamespace(code_execution="host"))
+    assert host.multiple_workers_unsupported_reason() is None
+
+
+def test_the_exec_route_runs_a_command_and_fails_closed(monkeypatch):
+    monkeypatch.setattr(CollabIntelAgent, "model_post_init", lambda self, context: None)
+    agent = CollabIntelAgent.model_construct(config=SimpleNamespace())
+    request = SimpleNamespace(path_params={"phase_key": "k"}, json=AsyncMock(return_value={"argv": []}))
+    agent._boxes = SimpleNamespace(run=AsyncMock(return_value={"rc": 0}))
+    assert asyncio.run(agent.exec_in_sandbox(request)) == {"rc": 0}
+    agent._boxes.run.assert_awaited_once_with("k", {"argv": []})
+    agent._boxes = SimpleNamespace(run=AsyncMock(side_effect=SandboxExecError("the sandbox has network egress")))
+    refused = asyncio.run(agent.exec_in_sandbox(request))
+    assert (refused.status_code, json.loads(refused.body)) == (502, {"error": "the sandbox has network egress"})
+    agent._boxes = None
+    assert asyncio.run(agent.exec_in_sandbox(request)).status_code == 404  # host mode has no sandbox to run in
+
+
+def test_sandbox_mode_is_the_default_and_builds_the_spec_from_the_config(monkeypatch):
+    fields = app_module.CollabIntelAgentConfig.model_fields
+    assert (fields["code_execution"].default, fields["sandbox_provider"].default) == ("sandbox", "sandbox")
+    with pytest.raises(ValidationError):
+        app_module.SandboxSpecConfig(unknown=1)
+    built = {}
+    monkeypatch.setattr(
+        app_module, "BoxedExec", lambda provider, spec, **kw: built.update(provider=provider, spec=spec, **kw)
+    )
+    monkeypatch.setattr(CollabIntelAgent, "model_post_init", lambda self, context: None)
+    spec = app_module.SandboxSpecConfig(
+        image="img:1", provider_options={"network_policy": {"defaultAction": "deny"}}, metadata={"k": "v"}
+    )
+    config = SimpleNamespace(name="ci", sandbox_provider={"opensandbox": {"connection": {}}}, sandbox_spec=spec)
+    CollabIntelAgent.model_construct(config=config)._start_boxes()
+    assert built["provider"] == {"opensandbox": {"connection": {}}}
+    assert (built["spec"].image, built["spec"].workdir) == ("img:1", "/tmp")
+    assert built["spec"].provider_options == {"network_policy": {"defaultAction": "deny"}}
+    assert (built["require_no_egress"], built["start_retries"]) == (True, 2)
+    assert built["spec"].metadata == {"k": "v", "nemo_gym_server": "ci"}
+
+
+def test_the_benchmark_config_starts_sandboxes_without_network():
+    root = Path(app_module.__file__).resolve().parents[2]
+    config = yaml.safe_load((root / "benchmarks/collab_intel/config.yaml").read_text())
+    assert "nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml" in config["config_paths"]
+    agent = config["collab_intel_benchmark_agent"]["responses_api_agents"]["collab_intel_agent"]
+    assert agent["sandbox_spec"]["provider_options"]["network_policy"] == {"defaultAction": "deny"}

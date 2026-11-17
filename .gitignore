@@ -266,6 +266,7 @@ environments/harbor/*/*
 !environments/harbor/*/README.md
 !environments/harbor/*/*.yaml
 !environments/harbor/*/dataset.toml
+!environments/harbor/*/task_data.py
 environments/harbor/.harbor/
 
 # Files prepare writes beside the example Harbor datasets under environments/ (recorded image configurations,
