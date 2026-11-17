@@ -432,6 +432,19 @@ class SupportsSandboxBackgroundServices(Protocol):
 
 
 @runtime_checkable
+class SupportsSandboxExecScopedProcesses(Protocol):
+    """Optional: processes cannot outlive the exec that started them, and the provider can prove it.
+
+    ``exec_processes_terminated`` returns True only when no process started by any
+    exec of the sandbox can still run (every exec has returned and its process tree
+    is gone). A process supervisor that died without writing its receipt can then be
+    confirmed cleaned up from the provider side.
+    """
+
+    async def exec_processes_terminated(self, handle: SandboxHandle) -> bool: ...
+
+
+@runtime_checkable
 class SupportsSandboxNetwork(Protocol):
     """Optional direct networking between sandboxes, preserving service ports."""
 

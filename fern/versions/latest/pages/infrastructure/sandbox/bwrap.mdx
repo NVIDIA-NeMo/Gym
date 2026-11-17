@@ -1,0 +1,47 @@
+---
+title: "Bubblewrap Provider"
+description: "Run NeMo Gym sandboxes as per-command bubblewrap namespaces over a local directory."
+position: 2
+---
+
+The `bwrap` provider runs each sandboxed command under [bubblewrap](https://github.com/containers/bubblewrap) on the host of the Gym process. In practice that host is usually a Slurm/pyxis container of the task image. A sandbox is a directory, `<base_dir>/<id>/{workspace,tmp,home}`, so there is no long-lived container process, no daemon and no image unpack. Every `exec` spawns a fresh `bwrap` with these properties:
+
+- **Namespaces.** User, pid, ipc and uts namespaces are new. The network namespace is also new unless `network: host`.
+- **Capabilities.** All are dropped (`--cap-drop ALL`).
+- **Filesystem.** The host's system directories are bound read-only and the root is remounted read-only. Only the sandbox's own workspace, `/tmp` and home are writable.
+
+## Setup
+
+Use a pinned bwrap binary and pass its absolute path. Sandboxes need unprivileged user namespaces. Inside pyxis, add `/proc:/proc` to `--container-mounts`. Otherwise bwrap fails with "Can't mount proc … Operation not permitted".
+
+```yaml
+sandbox:
+  bwrap:
+    bwrap_path: /abs/path/to/bwrap-0.11.2/bwrap
+    base_dir: /raid/nemo-gym-bwrap   # node-local storage
+    workdir: /workspace
+    network: host                    # default: none (loopback only)
+    mounts:
+      - {src: /path/to/tools, dst: /tools, ro: true}
+```
+
+The provider README (`nemo_gym/sandbox/providers/bwrap/README.md`) has the full config reference: read-only bind lists, environment whitelist, concurrency and timeouts.
+
+## Behavior
+
+| Operation | bwrap behavior |
+| --- | --- |
+| Create | Creates the sandbox directory (mode 0700) and runs `true` once as a readiness probe. |
+| Exec | `bwrap <flags> -- /bin/bash -c <command>`, in `--chdir <cwd or workdir>`. The environment is whitelisted, and GPUs are hidden (`CUDA_VISIBLE_DEVICES=""`, `NVIDIA_VISIBLE_DEVICES=void`, fresh `/dev`). |
+| Timeout or cancel | SIGKILLs the bwrap process group, which tears down the command's whole pid namespace. Returns `error_type="timeout"`. |
+| Upload / download | Host-side file I/O. Paths may be under the workdir, `/tmp`, the home path or an extra mount. `..` and symlinks are refused. |
+| Status | `running` while the directory exists. |
+| Stop | Kills every recorded bwrap process of the sandbox, then deletes the directory. |
+
+Processes never outlive their exec, so there are no background services, endpoints or PTYs. `user`, `entrypoint` and `resources.gpu` are rejected. `image`, `ttl_s` and the cpu, memory and disk limits are ignored with a warning.
+
+## Sharing a sandbox
+
+`serialize()` returns `{provider, host, uid, base_dir, sandbox_id, workdir, network}`. `AsyncSandbox.connect` with a `bwrap` provider of the same config accepts it only on the same host and uid, with the same `base_dir`. The sandbox directory and its state file must also still exist. This lets a resources server create a task sandbox that an agent server in the same container borrows.
+
+Each exec has its own pid namespace, so a pid recorded by one exec cannot be signalled from another exec. Stop sandboxes through the provider rather than with `kill` commands run in later execs.

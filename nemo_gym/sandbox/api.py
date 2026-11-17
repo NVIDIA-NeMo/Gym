@@ -55,6 +55,7 @@ from nemo_gym.sandbox.providers import (
     SupportsSandboxSnapshot,
     create_provider,
 )
+from nemo_gym.sandbox.providers.base import SupportsSandboxExecScopedProcesses
 from nemo_gym.sandbox.resource_telemetry import (
     ResourceProvider,
     ResourceSampler,
@@ -855,6 +856,16 @@ class AsyncSandbox:
         if name not in declared:
             raise ValueError(f"Sidecar {name!r} was not declared in SandboxSpec.sidecars; declared: {declared!r}")
         return AsyncSandboxSidecar(self._provider, self._require_handle(), name)
+
+    async def exec_processes_terminated(self) -> bool:
+        """True only when the provider proves that no process of any exec of this sandbox can still run.
+
+        Providers without exec-scoped processes (``SupportsSandboxExecScopedProcesses``)
+        cannot prove it and always return False.
+        """
+        if not isinstance(self._provider, SupportsSandboxExecScopedProcesses):
+            return False
+        return await self._provider.exec_processes_terminated(self._require_handle())
 
     async def status(self) -> SandboxStatus:
         if self._handle is None:
