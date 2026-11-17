@@ -184,7 +184,8 @@ being enabled.
      "gpus_observed": true}
   ],
   "gpus": [
-    {"gpu_uuid": "GPU-5b0f...", "node_index": 0, "gpu_index": 0, "services": ["gym-vllm/policy-prefill"]}
+    {"gpu_uuid": "GPU-5b0f...", "node_index": 0, "gpu_index": 0, "gpu_name": "NVIDIA H100 80GB HBM3",
+     "services": ["gym-vllm/policy-prefill"]}
   ]
 }
 ```
@@ -217,7 +218,7 @@ job of `gym eval resubmit --recover` serves only the run's judge, so it writes i
 `<job dir>/reverification/<id>/rollouts_service_declaration.json`, and leaves the run's in place.
 
 **Joining GPU series to services.** DCGM exporter series carry the GPU's UUID in their `UUID` label
-and the NVML index in `gpu`. Match `UUID` to `gpus[].gpu_uuid` and the series' `slurm_job_id` resource
+and the NVML index in `gpu`; `gpus[].gpu_name` is the model `nvidia-smi` reports, left out when it has unusual characters. Match `UUID` to `gpus[].gpu_uuid` and the series' `slurm_job_id` resource
 attribute to the declaration's `slurm_job_id`; the row's `services` names the services that may use the
 GPU, whose entries in `services` give the layout. A row with one service does not show that the service
 used that GPU: compare its `gpus_per_node` with the GPUs listed for the node, and read the GPU's own

@@ -85,6 +85,9 @@ class DeclaredGpu(BaseModel):
     node_index: int
     # The NVML index `nvidia-smi` reports, which is DCGM's `gpu` label.
     gpu_index: int
+    # The GPU model `nvidia-smi` reports, such as `NVIDIA H100 80GB HBM3` (DCGM's `modelName` label); None when it
+    # was not listed.
+    gpu_name: str | None = None
     services: list[str]
 
 
