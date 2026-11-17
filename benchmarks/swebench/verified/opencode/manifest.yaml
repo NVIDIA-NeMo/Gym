@@ -4,8 +4,8 @@ experimental: true
 kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: coding
-description: SWE-bench Verified test-split software engineering tasks using prepared repair
-  prompts, OpenCode agent sessions in the benchmark's task sandbox, and binary patch-resolution
+description: SWE-bench Verified test-split software engineering tasks using prepared
+  repair prompts, an agent harness in the benchmark's task sandbox, and binary patch-resolution
   scoring.
 modality: text
 licensing: unknown
