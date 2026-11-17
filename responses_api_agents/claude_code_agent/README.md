@@ -315,6 +315,13 @@ local `/run` uses only its explicit `skills_ref`, and unseeded `/v1/responses` d
 not pick up configured skills. The collector's
 run-level skills option remains unsupported for materialized task rows.
 
+A Harbor task that declares `skills_dir` is taken, and the seed response declares `supports_task_skills`. At seed, for
+a borrowed task sandbox, the adapter reads `skills_dir` from `/tmp/.nemo-gym/task.json` inside the sandbox and copies
+that folder to the session's `CLAUDE_CONFIG_DIR/skills`, so Claude Code finds the skills through its own skill
+mechanism; the activation then runs without `--bare`, as it does for `skills.path`. A `skills_dir` that is not an
+absolute path or is not a folder in the sandbox fails the seed with a terminal message. The seed stages no MCP
+servers: a task that also declares MCP servers is refused for them, since this adapter rejects required grants.
+
 Sandbox requests accept one user text prompt (a string or a single user message),
 optionally preceded by one system message. Assistant/developer messages, multiple
 user turns, and request `instructions` are rejected with HTTP 422 so history or
