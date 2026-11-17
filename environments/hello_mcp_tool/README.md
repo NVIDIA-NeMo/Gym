@@ -11,10 +11,11 @@ For definitions of task, software environment, sandbox, verifier, and reward, se
 ## In this example
 
 - `task.toml` declares the `hello-tools` MCP server as a task requirement.
-- `environment/tools/server.py` implements a `get_greeting` tool.
+- `environment/tools/server.py` implements a `get_greeting` tool and logs each call to `/logs/agent/hello-tools-calls.jsonl`.
 - `environment/Dockerfile` installs the server and its dependencies in the task environment.
 - `instruction.md` asks the agent to use the tool and save its result.
-- `tests/test.sh` checks the saved result.
+- `tests/test.sh` checks that the tool was called for `NeMo Gym` and that its greeting was saved, so an agent that writes the greeting without the tool scores 0.
+- `solution/solve.sh` calls the tool over MCP, as an agent would, and saves the greeting.
 
 ## Run it
 
@@ -49,7 +50,7 @@ hello_mcp_tool [repeat 0]	oracle solved	1.0	1.2	public
 
 The task passed when its line reads `oracle solved` and reward `1.0`; the command then exits 0.
 
-Each command writes its results to its own folder: `results/harbor/validation/hello_mcp_tool/` for validate and `results/harbor/hello_mcp_tool/` for the agent run. In either folder, `rollouts_run_summary.json` lists each task's `status` and `reward`, and the paths of its verifier logs, where `reward.txt` and `test-stdout.txt` show what `tests/test.sh` wrote.
+Each command writes its results to its own folder: `results/harbor/validation/hello_mcp_tool/` for validate and `results/harbor/hello_mcp_tool/` for the agent run. In either folder, `rollouts_run_summary.json` lists each task's `status` and `reward`, and the paths of its verifier logs, where `reward.txt` and `test-stdout.txt` show what `tests/test.sh` wrote. `test-stdout.txt` also lists the `get_greeting` calls the server logged.
 
 ## Other examples
 
