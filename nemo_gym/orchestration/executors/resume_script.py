@@ -256,6 +256,7 @@ _gym_run_complete() {{
 # The saved config asks for an MLflow export unless it sets mlflow_tracking_required to false or leaves one of the three
 # MLflow names an exporter needs unset. An unreadable config, or an interpolated value, still asks for one.
 _gym_export_required() {{
+    [[ "${{GYM_SEPARATE_EXPORT:-0}}" != 1 ]] || return 1
     local _config="$_gym_artifacts/rollouts_resolved_config.yaml" _key _value
     [[ -r "$_config" ]] || return 0
     if grep -qxE 'mlflow_tracking_required:[[:space:]]*false' "$_config" 2>/dev/null; then
