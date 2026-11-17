@@ -204,7 +204,11 @@ Hermes calls the model from inside the sandbox through Gym's Model Server, which
 sandbox must reach the machine running `gym`. It also installs its runtime into each sandbox unless the image
 already holds it, so the sandbox needs outbound network access. Other
 harnesses that work inside the task sandbox can take its place: see
-[Harbor Environment Server](/main/agent-interactions/harbor).
+[Harbor Environment Server](/main/agent-interactions/harbor). OpenCode (`opencode_agent`) and Pi (`pi_agent`) ask
+the model for up to 131,072 output tokens per call, more than most hosted models allow (GPT-5 allows 128,000 and
+gpt-4.1 32,768); with them, add `--max-output-tokens <n>` within the model's cap, or the endpoint refuses every
+request (see
+[The model rejects every request](/main/troubleshooting/task-folders#the-model-rejects-every-request)).
 
 ## Bring in existing tasks
 

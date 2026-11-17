@@ -41,10 +41,13 @@ Both files expose the same `verify()` entry point. The difference is how much sc
 
 ```bash
 gym eval run environments/hello_verifier_reuse --agent opencode_agent --sandbox docker \
-  --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
+  --model-type openai_model --model <model> --model-url <url> --model-api-key <key> \
+  --max-output-tokens 16384
 ```
 
 The command uses OpenCode because it can work with files and tools in the task sandbox while keeping model choice separate. It uses Docker for a simple local sandbox. You can replace either one with another compatible agent or sandbox provider.
+
+`--max-output-tokens 16384` caps each OpenCode model call. Without it, OpenCode asks for up to 131,072 output tokens, more than most hosted models allow (GPT-5 allows 128,000 and gpt-4.1 32,768), so the endpoint refuses every request. 16,384 fits common hosted models and is far more than this example needs.
 
 ## Validate it
 

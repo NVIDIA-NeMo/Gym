@@ -122,7 +122,7 @@ SANDBOX_REACHABLE_SERVER_TYPES = ("responses_api_models",)
 SANDBOX_PROVIDER_CONFIG = "nemo_gym/sandbox/providers/{provider}/configs/{provider}.yaml"
 # `--max-output-tokens` sets `responses_create_params.max_output_tokens`, which a materialized task row cannot take:
 # the harness sends its own requests. A task-folder run hands the value to the harness's own output limit instead,
-# for harnesses whose config declares one (OpenCode, Pi, Kilo, OpenClaw).
+# for harnesses whose config declares one (such as OpenCode, Pi, Kilo and OpenClaw).
 MAX_OUTPUT_TOKENS_OVERRIDE = "responses_create_params.max_output_tokens"
 HARNESS_OUTPUT_LIMIT_FIELD = "max_output_tokens"
 # Harness-specific settings a Harbor run needs; keyed by the agent implementation folder.

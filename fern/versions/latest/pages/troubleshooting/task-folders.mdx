@@ -129,13 +129,21 @@ For them, `gym eval run` makes the Model Server advertise the machine's network 
 a sandbox reaches only when the network routes to it and no firewall blocks the port.
 
 When the hostname does not resolve, or resolves to loopback, Gym advertises the address of the interface the
-default route uses. The run stops only when there is no such route, for example offline.
+default route uses, on a laptop often its Wi-Fi or VPN address. The run stops only when there is no such route, for
+example offline.
 
-**Fix.** Run `gym` on a host the sandboxes can reach, such as a node inside the cluster network. Offline, or when the
-default route's interface is not the one the sandboxes reach (a VPN, several networks), add
-`+default_host=<an address the sandboxes reach>`. A deployment that
-needs other servers reachable sets `absolute_ip_server_types` or `default_host` (see
+**Fix.** Run `gym` on a host the sandboxes can reach, such as a node inside the cluster network. When the default
+route's interface is not the one the sandboxes reach (a VPN, several networks), set the Model Server's own `host`,
+such as `++policy_model.responses_api_models.openai_model.host=<address>` with `--model-type openai_model`. Offline,
+add `+default_host=<an address the sandboxes reach>`. A deployment that needs other servers reachable sets
+`absolute_ip_server_types` or `default_host` (see
 [Multi-Node Configuration](/main/reference/configuration#multi-node-configuration)).
+
+The Model Server listens on that one address, not on loopback or `0.0.0.0`, and checks no credential on incoming
+calls. During the run, any machine that can reach the address and port, such as another host on the same Wi-Fi,
+office network or VPN, can send it requests, which it forwards to `<url>` with your `--model-api-key`. The other
+servers stay on loopback. `+default_host` moves every server to the address, including the head server, whose
+`/global_config_dict_yaml` endpoint returns the merged configuration with that key. Run on a network you trust.
 
 ## The model rejects every request
 
@@ -145,10 +153,24 @@ the run summary names `model_request_rejected` as each such task's `failure_kind
 and the harness has one, the line after `Run summary written to` names `--max-output-tokens`.
 
 **Cause.** The endpoint refused the request as invalid before the model answered, so the run's settings are at
-fault and the episode is not graded. A common case is a harness output limit above the model's cap: OpenCode asks
-for up to 131,072 output tokens, and gpt-4.1 allows 32,768.
+fault and the episode is not graded. A common case is a harness output limit above the model's cap: OpenCode and Pi
+ask for up to 131,072 output tokens per model call unless their `max_output_tokens` is set. Most hosted models allow
+fewer, for example:
 
-**Fix.** Lower the limit with `--max-output-tokens <n>`, within the model's cap.
+| Model | Output-token cap |
+| --- | --- |
+| GPT-5 family | 128,000 |
+| gpt-4.1 | 32,768 |
+| gpt-4o, gpt-4o-mini | 16,384 |
+| o1, o3-mini, o4-mini | 100,000 |
+| Claude | 64,000 or 128,000, depending on the model |
+
+A parameter the model does not accept, such as a `temperature` other than 1 on an OpenAI reasoning model, fails the
+same way. A refusal after the model answered, or one that names the model's context window, is still graded.
+
+**Fix.** Pass `--max-output-tokens <n>` with `n` at or below the model's cap, such as `--max-output-tokens 32768`
+for gpt-4.1. Your provider's model documentation gives the cap. The `environments/hello_*` commands pass 16384,
+which fits every model above.
 
 ## A harness cannot install its runtime in the sandbox
 
