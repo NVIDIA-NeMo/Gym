@@ -24,8 +24,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 # These integration tests run real shells and scan /proc on shared CI runners.
+# CI has exceeded 10 s waiting for the cleanup receipt; allow scheduling and scan headroom.
 # Tight cancellation deadlines are covered separately by the SandboxSession unit tests.
-CLOSE_TIMEOUT = 10
+CLOSE_TIMEOUT = 30
 
 
 class ExecOnlySandbox:
@@ -146,6 +147,7 @@ async def test_exec_only_supervision_leaves_task_children_for_sandbox_owner(tmp_
             await asyncio.gather(task, return_exceptions=True)
         else:
             await task
+        assert state.session.cleanup is not None, await state.session.read_output_log()
         assert state.session.cleanup["cleanup_confirmed"] is True
         if ending == "timeout":
             assert state.session.cleanup["timed_out"] is True
