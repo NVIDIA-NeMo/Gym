@@ -44,7 +44,6 @@ from nemo_gym.config.global_config import MODEL_CALL_CAPTURE_DIR_KEY_NAME
 from nemo_gym.core.correlation import CorrelationPathError, client_session_id, resolve
 from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER, rollout_context
 from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
-from nemo_gym.core.filesystems import warn_if_unsuitable
 from nemo_gym.core.responses_api_types import SSE_KEEPALIVE
 from nemo_gym.models._checkpoint import (
     attach_capture_context,
@@ -67,6 +66,7 @@ from nemo_gym.models.token_capture.records import UNCOMMITTED_CALL_REASON, CallI
 from nemo_gym.models.token_capture.sink import CaptureContext, reset_token_sink, set_token_sink
 from nemo_gym.models.token_capture.store import make_token_store
 from nemo_gym.server_runtime.request_handling.rollout_context import scope_with_routed_path
+from nemo_gym.utils.filesystems import warn_if_unsuitable
 
 
 logger = logging.getLogger(__name__)

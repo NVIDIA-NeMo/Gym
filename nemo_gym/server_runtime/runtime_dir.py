@@ -24,7 +24,7 @@ import stat
 import uuid
 from typing import Optional
 
-from nemo_gym.core.processes import process_may_be_running
+from nemo_gym.utils.processes import process_may_be_running
 
 
 RUNTIME_ROOT = "/tmp"

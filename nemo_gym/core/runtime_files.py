@@ -37,7 +37,6 @@ import atexit
 import logging
 import os
 import re
-import shutil
 import stat
 import tempfile
 import threading
@@ -56,8 +55,9 @@ from nemo_gym.config.global_config import (
     maybe_get_global_config_dict,
 )
 from nemo_gym.core.episode_context import current_rollout_id
-from nemo_gym.core.filesystems import warn_if_unsuitable
-from nemo_gym.core.processes import process_may_be_running
+from nemo_gym.utils.file_trees import copy_tree, remove_tree
+from nemo_gym.utils.filesystems import warn_if_unsuitable
+from nemo_gym.utils.processes import process_may_be_running
 
 
 logger = logging.getLogger(__name__)
@@ -94,6 +94,137 @@ _save_executor = ThreadPoolExecutor(max_workers=_SAVE_WORKERS, thread_name_prefi
 _warned: set[str] = set()
 
 
+@contextmanager
+def request_temp_dir(name: str = "tmp", *, temp_dir: str | Path | None = None) -> Iterator[Path]:
+    """Create a temporary folder for one request and always remove it when the block exits.
+
+    ``name`` says what the folder holds; it starts the folder's name, so a reader of ``temp_dir`` can tell folders
+    apart.
+
+    The folder is under ``temp_dir``: this argument, which must be absolute, else the global ``temp_dir`` setting,
+    else ``<system temp>/nemo_gym-<user id>/``. Pass ``temp_dir`` from a server's own setting, or into a Ray task
+    that does not see Gym's configuration.
+    Processes and containers this process starts on the same node may use the folder; never send its path to another
+    Gym server, a Ray task or anything that may run on another node.
+    To keep what is in it, call :func:`save_dir` before the block exits.
+
+    This blocks on filesystem calls; use :func:`async_request_temp_dir` in a coroutine.
+    """
+    path = _create_temp_dir(name, temp_dir)
+    try:
+        yield path
+    finally:
+        remove_tree(path)
+
+
+@asynccontextmanager
+async def async_request_temp_dir(name: str = "tmp", *, temp_dir: str | Path | None = None) -> AsyncIterator[Path]:
+    """:func:`request_temp_dir` for a coroutine: creating and removing the folder run in a worker thread.
+
+    The removal is shielded from cancellation.
+    Under an anyio cancel scope, which cancels again at every await, the block can exit before the folder is gone;
+    the removal then finishes in the background.
+    """
+    creating = asyncio.ensure_future(asyncio.to_thread(_create_temp_dir, name, temp_dir))
+    try:
+        path = await asyncio.shield(creating)
+    except asyncio.CancelledError:
+        # The thread may still create the folder after this task is cancelled; remove it once it does.
+        creating.add_done_callback(_remove_created_dir)
+        raise
+    try:
+        yield path
+    finally:
+        # Shielded, so a second cancellation while the folder is being removed does not leave it behind.
+        await asyncio.shield(asyncio.to_thread(remove_tree, path))
+
+
+def session_temp_dir(name: str = "tmp", *, temp_dir: str | Path | None = None) -> Path:
+    """Create a temporary folder for one session, under ``temp_dir`` as :func:`request_temp_dir` places it.
+
+    Keep it on the session and remove it with :func:`remove_temp_dir` after the session's in-flight requests
+    finish, under the session's lock. Remove what remains when the server shuts down; the process exit removes
+    anything left after that.
+    """
+    return _create_temp_dir(name, temp_dir)
+
+
+def remove_temp_dir(path: Path) -> bool:
+    """Remove a folder from :func:`session_temp_dir`; return whether it is gone.
+
+    It refuses, with a warning, any path that is not a temporary folder this process created, so a wrong or empty
+    path never deletes something else. A failure is logged, never raised, so a caller can try again later. A folder
+    that is already gone counts as removed.
+    """
+    # Normalized first: pathlib keeps "..", so "<process folder>/.." would otherwise pass as a folder in it.
+    path = Path(os.path.normpath(path))
+    if not path.is_absolute() or path.parent not in _process_dirs.values() or path.name.startswith("process."):
+        _warn_once("refuse", "Not removing %s: it is not a temporary folder this process created.", path)
+        return False
+    return remove_tree(path)
+
+
+def process_temp_dir(name: str, *, temp_dir: str | Path | None = None) -> Path:
+    """Return the temporary folder called ``name`` that lasts as long as this process, creating it when missing.
+
+    Every call with the same ``name`` and ``temp_dir`` gets the same folder, for state shared across sessions,
+    such as a prepared workspace template; writers in it coordinate themselves. A server with several workers that
+    shares prepared state creates it in its main process before the workers start, and passes them the path.
+    The folder is removed when the process exits. A forked child gets its own.
+    """
+    _check_name(name)
+
+    def make(folder: Path) -> Path:
+        # A name has no dot, so this never collides with a request or session folder.
+        path = folder / f"process.{name}"
+        path.mkdir(exist_ok=True)
+        return path
+
+    return _in_process_dir(temp_dir, make)
+
+
+async def save_dir(
+    src: str | Path,
+    *,
+    server_name: str,
+    name: str,
+    label: str | None = None,
+    output_dir: str | Path | None = None,
+) -> Path | None:
+    """Copy a finished folder into the run's kept files once; return the folder it copied to, or ``None``.
+
+    ``name`` says what the files are, such as ``verification``, and groups them in the results.
+    The copy goes to a new folder ``<output>/<name>/<rollout>/<UTC time>-[<label>-]<random>``, where ``<output>``
+    is the server's ``output_dir`` or ``<results_dir>/<server_name>``. The rollout comes from the request, and is
+    ``no-rollout`` outside one.
+    Copies run on a few threads of their own, so a burst of them never holds up the server's other work.
+    A copy has no time limit. A caller that must not wait longer, such as a request with a time budget, wraps the
+    call in ``asyncio.wait_for``: it returns on time, and the copy finishes on its thread.
+
+    It never fails the request: a failed copy is logged, its partial folder removed, and it returns ``None``.
+    An entry it cannot read is skipped and logged, and the rest is kept.
+    It also returns ``None`` without copying when ``output_dir`` is relative, when no ``results_dir`` is set, and
+    while the calling task is being cancelled, so shutdown stays fast: it skips copies that have not started.
+    Call it in a ``finally`` so a failed request's files are kept too, and outside any ``asyncio.timeout`` block:
+    inside one that has expired, the task counts as being cancelled and nothing is kept.
+    """
+    _check_name(name)
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        logger.info("Not keeping %s for %s: the request is being cancelled.", src, server_name)
+        return None
+    dest = _kept_dir(server_name, name, label, output_dir)
+    if dest is None:
+        return None
+    try:
+        return await asyncio.get_running_loop().run_in_executor(_save_executor, copy_tree, Path(src), dest)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # copy_tree has logged it.
+        return None
+
+
 def _reset_after_fork() -> None:
     """Give a forked child state of its own: its parent's folders, locks and copy threads are not its own."""
     global _default_temp_dir, _checked_temp_parents, _process_dirs, _exit_handler_registered
@@ -106,64 +237,10 @@ def _reset_after_fork() -> None:
     _save_executor = ThreadPoolExecutor(max_workers=_SAVE_WORKERS, thread_name_prefix="nemo-gym-save-dir")
 
 
-os.register_at_fork(after_in_child=_reset_after_fork)
-
-
 def _warn_once(key: str, message: str, *args: object) -> None:
     if key not in _warned:
         _warned.add(key)
         logger.warning(message, *args)
-
-
-def _make_writable(path: str) -> None:
-    try:
-        os.chmod(path, stat.S_IMODE(os.lstat(path).st_mode) | stat.S_IRWXU)
-    except OSError:
-        pass
-
-
-def _remove_tree(path: str | Path) -> bool:
-    """Remove ``path`` and everything in it; return whether it is gone. Never raises.
-
-    A folder this process cannot write into, such as a read-only module cache a tool left behind, is made writable
-    and removed too. An entry that still cannot be removed, such as a file another user owns, is skipped, so the
-    rest of the tree is removed; what is left is logged once.
-    """
-    path = os.fspath(path)
-    retried: set[str] = set()
-    left: list[str] = []
-
-    def on_error(func: Callable[..., object], failed: str, error: BaseException) -> None:
-        if isinstance(error, FileNotFoundError):
-            return
-        if not isinstance(error, PermissionError) or failed in retried:
-            left.append(failed)
-            return
-        retried.add(failed)
-        if failed != path:
-            _make_writable(os.path.dirname(failed))
-        if not os.path.islink(failed):
-            _make_writable(failed)
-        try:
-            os.unlink(failed)
-        except IsADirectoryError:
-            shutil.rmtree(failed, onexc=on_error)
-        except FileNotFoundError:
-            pass
-        except OSError:
-            left.append(failed)
-
-    try:
-        shutil.rmtree(path, onexc=on_error)
-    except FileNotFoundError:
-        return True
-    except Exception:
-        # Such as a RecursionError from a very deep tree; the caller's own work must not fail with it.
-        logger.warning("Could not remove %s", path, exc_info=True)
-        return not os.path.lexists(path)
-    if left:
-        logger.warning("Could not remove %d entries under %s, such as %s", len(left), path, left[0])
-    return not os.path.lexists(path)
 
 
 def _host_id() -> str:
@@ -217,7 +294,7 @@ def _remove_stale_process_dirs(parent: Path) -> list[Path]:
             continue
         if process_may_be_running(int(match["pid"])):
             continue
-        if _remove_tree(entry.path):
+        if remove_tree(entry.path):
             removed.append(Path(entry.path))
     return removed
 
@@ -227,7 +304,7 @@ def _remove_own_process_dirs(pid: int) -> None:
     if os.getpid() != pid:
         return
     for folder in list(_process_dirs.values()):
-        _remove_tree(folder)
+        remove_tree(folder)
 
 
 def _process_dir(parent: Path) -> Path:
@@ -242,7 +319,7 @@ def _process_dir(parent: Path) -> Path:
             return folder
         folder = parent / _process_dir_name()
         # Before this process records it, a folder with this name can only be one a dead process of the same id left.
-        _remove_tree(folder)
+        remove_tree(folder)
         folder.mkdir()
         if not _exit_handler_registered:
             atexit.register(_remove_own_process_dirs, os.getpid())
@@ -354,98 +431,9 @@ def _create_temp_dir(name: str, temp_dir: str | Path | None) -> Path:
     return _in_process_dir(temp_dir, lambda folder: Path(tempfile.mkdtemp(prefix=f"{name}-", dir=folder)))
 
 
-@contextmanager
-def request_temp_dir(name: str = "tmp", *, temp_dir: str | Path | None = None) -> Iterator[Path]:
-    """Create a temporary folder for one request and always remove it when the block exits.
-
-    ``name`` says what the folder holds; it starts the folder's name, so a reader of ``temp_dir`` can tell folders
-    apart.
-
-    The folder is under ``temp_dir``: this argument, which must be absolute, else the global ``temp_dir`` setting,
-    else ``<system temp>/nemo_gym-<user id>/``. Pass ``temp_dir`` from a server's own setting, or into a Ray task
-    that does not see Gym's configuration.
-    Processes and containers this process starts on the same node may use the folder; never send its path to another
-    Gym server, a Ray task or anything that may run on another node.
-    To keep what is in it, call :func:`save_dir` before the block exits.
-
-    This blocks on filesystem calls; use :func:`async_request_temp_dir` in a coroutine.
-    """
-    path = _create_temp_dir(name, temp_dir)
-    try:
-        yield path
-    finally:
-        _remove_tree(path)
-
-
-@asynccontextmanager
-async def async_request_temp_dir(name: str = "tmp", *, temp_dir: str | Path | None = None) -> AsyncIterator[Path]:
-    """:func:`request_temp_dir` for a coroutine: creating and removing the folder run in a worker thread.
-
-    The removal is shielded from cancellation.
-    Under an anyio cancel scope, which cancels again at every await, the block can exit before the folder is gone;
-    the removal then finishes in the background.
-    """
-    creating = asyncio.ensure_future(asyncio.to_thread(_create_temp_dir, name, temp_dir))
-    try:
-        path = await asyncio.shield(creating)
-    except asyncio.CancelledError:
-        # The thread may still create the folder after this task is cancelled; remove it once it does.
-        creating.add_done_callback(_remove_created_dir)
-        raise
-    try:
-        yield path
-    finally:
-        # Shielded, so a second cancellation while the folder is being removed does not leave it behind.
-        await asyncio.shield(asyncio.to_thread(_remove_tree, path))
-
-
 def _remove_created_dir(creating: asyncio.Future[Path]) -> None:
     if not creating.cancelled() and creating.exception() is None:
-        _remove_tree(creating.result())
-
-
-def session_temp_dir(name: str = "tmp", *, temp_dir: str | Path | None = None) -> Path:
-    """Create a temporary folder for one session, under ``temp_dir`` as :func:`request_temp_dir` places it.
-
-    Keep it on the session and remove it with :func:`remove_temp_dir` after the session's in-flight requests
-    finish, under the session's lock. Remove what remains when the server shuts down; the process exit removes
-    anything left after that.
-    """
-    return _create_temp_dir(name, temp_dir)
-
-
-def remove_temp_dir(path: Path) -> bool:
-    """Remove a folder from :func:`session_temp_dir`; return whether it is gone.
-
-    It refuses, with a warning, any path that is not a temporary folder this process created, so a wrong or empty
-    path never deletes something else. A failure is logged, never raised, so a caller can try again later. A folder
-    that is already gone counts as removed.
-    """
-    # Normalized first: pathlib keeps "..", so "<process folder>/.." would otherwise pass as a folder in it.
-    path = Path(os.path.normpath(path))
-    if not path.is_absolute() or path.parent not in _process_dirs.values() or path.name.startswith("process."):
-        _warn_once("refuse", "Not removing %s: it is not a temporary folder this process created.", path)
-        return False
-    return _remove_tree(path)
-
-
-def process_temp_dir(name: str, *, temp_dir: str | Path | None = None) -> Path:
-    """Return the temporary folder called ``name`` that lasts as long as this process, creating it when missing.
-
-    Every call with the same ``name`` and ``temp_dir`` gets the same folder, for state shared across sessions,
-    such as a prepared workspace template; writers in it coordinate themselves. A server with several workers that
-    shares prepared state creates it in its main process before the workers start, and passes them the path.
-    The folder is removed when the process exits. A forked child gets its own.
-    """
-    _check_name(name)
-
-    def make(folder: Path) -> Path:
-        # A name has no dot, so this never collides with a request or session folder.
-        path = folder / f"process.{name}"
-        path.mkdir(exist_ok=True)
-        return path
-
-    return _in_process_dir(temp_dir, make)
+        remove_tree(creating.result())
 
 
 def _kept_dir(server_name: str, name: str, label: str | None, output_dir: str | Path | None) -> Path | None:
@@ -478,91 +466,4 @@ def _kept_dir(server_name: str, name: str, label: str | None, output_dir: str | 
     return output / name / rollout / leaf
 
 
-def _copy_dir(src: Path, dest: Path) -> Path:
-    """Copy the files under ``src`` into the new folder ``dest``.
-
-    Folders are created afresh, so they take the user's usual permissions rather than the temporary folder's
-    private ones, and files are copied by content: no permission, time or extended-attribute copies, each a metadata
-    operation on the shared storage ``dest`` is usually on. Symlinks are copied as symlinks, and sockets, pipes and
-    other special files are skipped. An entry that cannot be read is skipped, so the rest is kept; a failure to
-    write fails the copy, which removes what it copied.
-    """
-    unread: list[str] = []
-    created = False
-    try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.mkdir()
-        created = True
-        for root, dirs, files in os.walk(src, onerror=lambda error: unread.append(str(error.filename))):
-            target = dest / os.path.relpath(root, src)
-            for entry in [*dirs, *files]:
-                source = os.path.join(root, entry)
-                try:
-                    mode = os.lstat(source).st_mode
-                    link = os.readlink(source) if stat.S_ISLNK(mode) else None
-                    reader = open(source, "rb") if stat.S_ISREG(mode) else None
-                except OSError:
-                    unread.append(source)
-                    continue
-                if link is not None:
-                    os.symlink(link, target / entry)
-                elif reader is not None:
-                    # One create on the destination, with no stat of it, unlike shutil.copyfile.
-                    with reader, open(target / entry, "xb") as writer:
-                        shutil.copyfileobj(reader, writer)
-                elif stat.S_ISDIR(mode):
-                    (target / entry).mkdir()
-                else:
-                    logger.debug("Not keeping %s: it is not a regular file, a folder or a symlink.", source)
-    except BaseException:
-        # Logged here, since a cancelled caller no longer receives the error.
-        logger.warning("Could not keep %s at %s", src, dest, exc_info=True)
-        # Only a folder this copy created: dest.mkdir() fails on one that was already there.
-        if created:
-            _remove_tree(dest)
-        raise
-    if unread:
-        logger.warning("Kept %s without %d entries it could not read, such as %s", src, len(unread), unread[0])
-    return dest
-
-
-async def save_dir(
-    src: str | Path,
-    *,
-    server_name: str,
-    name: str,
-    label: str | None = None,
-    output_dir: str | Path | None = None,
-) -> Path | None:
-    """Copy a finished folder into the run's kept files once; return the folder it copied to, or ``None``.
-
-    ``name`` says what the files are, such as ``verification``, and groups them in the results.
-    The copy goes to a new folder ``<output>/<name>/<rollout>/<UTC time>-[<label>-]<random>``, where ``<output>``
-    is the server's ``output_dir`` or ``<results_dir>/<server_name>``. The rollout comes from the request, and is
-    ``no-rollout`` outside one.
-    Copies run on a few threads of their own, so a burst of them never holds up the server's other work.
-    A copy has no time limit. A caller that must not wait longer, such as a request with a time budget, wraps the
-    call in ``asyncio.wait_for``: it returns on time, and the copy finishes on its thread.
-
-    It never fails the request: a failed copy is logged, its partial folder removed, and it returns ``None``.
-    An entry it cannot read is skipped and logged, and the rest is kept.
-    It also returns ``None`` without copying when ``output_dir`` is relative, when no ``results_dir`` is set, and
-    while the calling task is being cancelled, so shutdown stays fast: it skips copies that have not started.
-    Call it in a ``finally`` so a failed request's files are kept too, and outside any ``asyncio.timeout`` block:
-    inside one that has expired, the task counts as being cancelled and nothing is kept.
-    """
-    _check_name(name)
-    task = asyncio.current_task()
-    if task is not None and task.cancelling():
-        logger.info("Not keeping %s for %s: the request is being cancelled.", src, server_name)
-        return None
-    dest = _kept_dir(server_name, name, label, output_dir)
-    if dest is None:
-        return None
-    try:
-        return await asyncio.get_running_loop().run_in_executor(_save_executor, _copy_dir, Path(src), dest)
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        # _copy_dir has logged it.
-        return None
+os.register_at_fork(after_in_child=_reset_after_fork)

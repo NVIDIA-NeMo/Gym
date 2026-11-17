@@ -796,7 +796,7 @@ class TestSaveDir:
 
         assert kept is None and copied
         assert not any((tmp_path / "results" / "swebench" / "verification" / "no-rollout").iterdir())
-        assert caplog.text.count("Could not keep") == 1
+        assert caplog.text.count("Could not copy") == 1
 
     async def test_a_failed_copy_never_removes_a_folder_it_did_not_create(
         self, set_global_config, tmp_path: Path, monkeypatch
@@ -831,11 +831,11 @@ class TestSaveDir:
                 await save
             release.set()
             for _ in range(200):
-                if "Could not keep" in caplog.text:
+                if "Could not copy" in caplog.text:
                     break
                 await asyncio.sleep(0.01)
 
-        assert "Could not keep" in caplog.text
+        assert "Could not copy" in caplog.text
 
     @NOT_ROOT
     async def test_what_cannot_be_read_is_skipped_and_the_rest_kept(
@@ -942,7 +942,7 @@ class TestSaveDir:
         loop.set_default_executor(default)
         lock, release = threading.Lock(), threading.Event()
         running = [0, 0]  # now, most at once
-        copy = runtime_files._copy_dir
+        copy = runtime_files.copy_tree
 
         def blocked_copy(src: Path, dest: Path) -> Path:
             with lock:
@@ -953,7 +953,7 @@ class TestSaveDir:
                 running[0] -= 1
             return copy(src, dest)
 
-        monkeypatch.setattr(runtime_files, "_copy_dir", blocked_copy)
+        monkeypatch.setattr(runtime_files, "copy_tree", blocked_copy)
         saves = [asyncio.create_task(save_dir(logs, server_name="swebench", name="verification")) for _ in range(8)]
         try:
             for _ in range(200):
