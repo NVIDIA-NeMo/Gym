@@ -177,11 +177,16 @@ def test_an_initializer_the_interpreter_cannot_parse_still_lists_its_files(tmp_p
             "nemo_gym/core/helpers.py",
             "low",
         ),
+        (
+            '_PUBLIC_API = {"Thing": "things"}\n_PUBLIC_API.get("unused", {"helper": "helpers"})\n',
+            "nemo_gym/core/helpers.py",
+            "low",
+        ),
+        ('_marker = 0; _PUBLIC_API = {"Thing": "things"}\n', "nemo_gym/core/things.py", "high"),
+        ('def unused():\n    _PUBLIC_API = {"helper": "helpers"}\n', "nemo_gym/core/helpers.py", "low"),
     ],
 )
-def test_comments_and_strings_neither_cut_nor_fake_an_export_table(
-    tmp_path: Path, init: str, path: str, tier: str
-) -> None:
+def test_only_top_level_table_assignments_list_files(tmp_path: Path, init: str, path: str, tier: str) -> None:
     before = {"nemo_gym/core/__init__.py": init}
     after = {**before, path: API[path] + "# edit\n"}
     assert grade(tmp_path, before, after)[0] == tier
@@ -191,11 +196,20 @@ def test_a_directory_named_like_an_initializer_is_skipped(tmp_path: Path) -> Non
     assert grade(tmp_path, {}, {"nemo_gym/aux/__init__.py/notes.txt": "x\n"})[0] == "low"
 
 
-def test_an_export_outside_the_tree_still_grades_its_initializer(tmp_path: Path) -> None:
-    after = {"nemo_gym/core/__init__.py": '_PUBLIC_API = {"Thing": "/outside", "Other": "../../../x"}\n'}
+def test_an_invalid_export_still_grades_its_initializer(tmp_path: Path) -> None:
+    after = {"nemo_gym/core/__init__.py": '_PUBLIC_API = {"Thing": "/outside", "Other": "../../../x", "Root": "/"}\n'}
     tier, evidence = grade(tmp_path, {}, after)
     assert tier == "high"
     assert "public surface: nemo_gym/core/__init__.py" in evidence
+
+
+def test_a_listed_file_replaced_by_a_symlink_loop_is_high(tmp_path: Path) -> None:
+    base = make_tree(tmp_path / "base", API)
+    head = make_tree(tmp_path / "head", API)
+    (head / "nemo_gym/core/things.py").unlink()
+    (head / "nemo_gym/core/things.py").symlink_to("things.py")
+    assert pr_risk.grade(base, head)[0] == "high"
+    assert pr_risk.grade(head, base)[0] == "high"
 
 
 def test_an_executable_bit_change_is_a_change(tmp_path: Path) -> None:

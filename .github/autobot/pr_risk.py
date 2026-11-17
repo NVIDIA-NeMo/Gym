@@ -29,8 +29,9 @@ never lower it. The tiers:
 Protected files are the path globs listed in ``protected_files.yaml`` next to this file, so the target branch's list
 applies; ``*`` also matches ``/``. Adding, modifying or deleting a matching path makes the change ``high``. Changed lines
 are added plus removed lines outside docs, lockfiles, JSONL data and binary files. The public surface is every file that
-defines ``nemo_gym``'s public API: each package initializer with an export table (``_PUBLIC_API``, or the
-root's ``_LAZY_EXPORTS``) and every submodule it lists; any change to one makes the change ``high``. Scoring is the code that computes
+defines ``nemo_gym``'s public API: each package initializer that assigns an export table (``_PUBLIC_API``, or the
+root's ``_LAZY_EXPORTS``) at the top level and every submodule it lists, or the whole package when the initializer
+does not parse; any change to one makes the change ``high``. Scoring is the code that computes
 rewards: resources servers and the shared verification, verifiers and metrics packages, excluding their tests and data.
 
 Standard library only, so it runs on Python 3.12 or newer without the repository installed.
@@ -40,11 +41,9 @@ import argparse
 import ast
 import difflib
 import filecmp
-import io
 import os
 import re
 import sys
-import tokenize
 from collections.abc import Iterator
 from fnmatch import fnmatch
 from pathlib import Path
@@ -137,55 +136,64 @@ def is_scoring(path: str) -> bool:
     return path.startswith(SCORING_PREFIXES) and not in_support_dir and not matches(path, DOC_PATTERNS)
 
 
-def module_path(package: Path, submodule: str) -> Path:
-    """Return the file that defines a dotted submodule of the package directory ``package``."""
-    stem = package.joinpath(*submodule.split("."))
-    init = stem / "__init__.py"
-    return init if init.is_file() else stem.with_suffix(".py")
+def listed_file(package: Path, value: object) -> Path | None:
+    """Return the file ``lazy_exports`` imports for the export ``value`` of ``package``, or ``None`` if invalid.
 
-
-def export_tables(source: str) -> list[str]:
-    """Return the source of each dict literal assigned to a top-level ``_PUBLIC_API`` or ``_LAZY_EXPORTS``.
-
-    The tables are found by tokens rather than by parsing, so syntax elsewhere in the file that this interpreter cannot
-    parse does not hide them, and comments or strings can neither cut nor fake one.
+    ``value`` names a submodule as dotted identifiers; a package's ``__init__.py`` wins over a same-named module.
     """
-    tables, table, depth, armed = [], [], 0, False
+    if not isinstance(value, str) or not all(part.isidentifier() for part in value.split(".")):
+        return None
+    stem = package.joinpath(*value.split("."))
     try:
-        for token in tokenize.generate_tokens(io.StringIO(source).readline):
-            if depth:
-                if token.type not in (tokenize.COMMENT, tokenize.NL):
-                    table.append(token.string)
-                    depth += {"{": 1, "}": -1}.get(token.string, 0) if token.type == tokenize.OP else 0
-                    if not depth:
-                        tables.append(" ".join(table))
-            elif armed and token.type == tokenize.OP and token.string == "{":
-                table, depth, armed = ["{"], 1, False
-            elif token.type == tokenize.NEWLINE:
-                armed = False
-            elif token.type == tokenize.NAME and token.start[1] == 0:
-                armed = token.string in EXPORT_TABLES
-    except (tokenize.TokenError, SyntaxError):
-        pass
+        is_package = (stem / "__init__.py").is_file()
+    except OSError:
+        is_package = False
+    return stem / "__init__.py" if is_package else stem.with_suffix(".py")
+
+
+def export_tables(source: str) -> list[ast.expr] | None:
+    """Return the values ``source`` assigns to ``_PUBLIC_API`` or ``_LAZY_EXPORTS`` at the top level.
+
+    Returns ``None`` when ``source`` does not parse.
+    """
+    try:
+        body = ast.parse(source).body
+    except (SyntaxError, ValueError, RecursionError):
+        return None
+    tables = []
+    for node in body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and node.value is not None:
+            targets = [node.target]
+        else:
+            continue
+        if any(isinstance(target, ast.Name) and target.id in EXPORT_TABLES for target in targets):
+            tables.append(node.value)
     return tables
 
 
 def public_surface(tree: Path) -> set[str]:
-    """Return each ``nemo_gym`` package initializer with an export table and every in-tree submodule it lists."""
+    """Return each ``nemo_gym`` package initializer with an export table and every submodule it lists.
+
+    When an initializer that names an export table does not parse, its whole package counts as public.
+    """
     paths = set()
     for init in (tree / "nemo_gym").rglob("__init__.py"):
         try:
-            tables = export_tables(init.read_text(errors="replace"))
+            source = init.read_text(errors="replace")
         except OSError:
+            continue
+        tables = export_tables(source)
+        if tables is None:
+            if any(name in source for name in EXPORT_TABLES):
+                paths.update({init, *init.parent.rglob("*.py")})
             continue
         for table in tables:
             paths.add(init)
-            try:
-                submodules = ast.literal_eval(table).values()
-            except (ValueError, SyntaxError, AttributeError):
-                continue
-            modules = [module_path(init.parent, value) for value in submodules if isinstance(value, str)]
-            paths.update(module for module in modules if module.resolve().is_relative_to(tree.resolve()))
+            values = table.values if isinstance(table, ast.Dict) else []
+            files = [listed_file(init.parent, value.value) for value in values if isinstance(value, ast.Constant)]
+            paths.update(file for file in files if file)
     return {path.relative_to(tree).as_posix() for path in paths}
 
 
