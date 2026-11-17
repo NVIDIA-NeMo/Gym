@@ -29,7 +29,7 @@ from typing import Any, ClassVar, Optional
 
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
-from pydantic import ConfigDict, Field, PrivateAttr
+from pydantic import ConfigDict, Field, PrivateAttr, field_validator
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.sandbox import (
@@ -83,6 +83,17 @@ class BirdSqlCatalogResourcesServerConfig(BirdSqlResourcesServerConfig):
     tool_timeout_s: float = Field(default=120, gt=0)
     cleanup_timeout_s: float = Field(default=60, gt=0)
     sandbox_ttl_s: float = Field(default=7200, gt=0)
+
+    @field_validator("catalog_environment", mode="before")
+    @classmethod
+    def _every_setting_has_a_value(cls, value: Any) -> Any:
+        unset = sorted(name for name, setting in dict(value or {}).items() if setting is None)
+        if unset:
+            raise ValueError(
+                f"catalog_environment has no value for {', '.join(unset)}. With benchmarks/birdbench/catalog_tools.yaml, "
+                f"pass the embedding endpoint's key as ++bird_catalog_api_key=<key>."
+            )
+        return value
 
 
 class BirdSqlCatalogSeedRequest(BaseSeedSessionRequest):

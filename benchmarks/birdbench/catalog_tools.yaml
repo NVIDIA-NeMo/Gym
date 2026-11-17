@@ -15,10 +15,8 @@ config_paths:
 prepare_script_args:
   catalog_tools: true
 
-# The image that holds Auto Ontology, the BIRD dev databases and their catalog (README.md), and the key of Auto
-# Ontology's embedding endpoint, which retrieve calls for each search.
+# The image that holds Auto Ontology, the BIRD dev databases and their catalog (README.md).
 bird_catalog_image: auto-ontology-eval/agent:bird
-bird_catalog_api_key: ???
 
 # A local Docker sandbox. It needs no access to Gym's servers, only to the embedding endpoint.
 bird_catalog_sandbox:
@@ -43,7 +41,9 @@ birdbench_bird_sql_resources_server:
       sandbox_config:
         image: ${bird_catalog_image}
       catalog_environment:
-        DEFAULT_MODELS_API_KEY: ${bird_catalog_api_key}
+        # The key of Auto Ontology's embedding endpoint, which retrieve calls for each search. Pass it as
+        # ++bird_catalog_api_key=<key>; the server refuses to start without it.
+        DEFAULT_MODELS_API_KEY: ${oc.select:bird_catalog_api_key,null}
 
 birdbench_bird_sql_simple_agent:
   responses_api_agents:

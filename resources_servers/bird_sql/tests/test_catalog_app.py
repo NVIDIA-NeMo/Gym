@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import (
@@ -50,6 +51,19 @@ def _server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **kwargs) -> BirdSq
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = {"bird_catalog_sandbox": {"docker": {}}}
     return BirdSqlCatalogResourcesServer(config=config, server_client=client)
+
+
+def test_a_catalog_setting_left_unset_refuses_the_config(tmp_path: Path) -> None:
+    # catalog_tools.yaml reads the embedding key with oc.select, so a run without ++bird_catalog_api_key gets null here.
+    with pytest.raises(ValidationError, match=r"no value for DEFAULT_MODELS_API_KEY.*\+\+bird_catalog_api_key"):
+        BirdSqlCatalogResourcesServerConfig(
+            host="127.0.0.1",
+            port=20099,
+            entrypoint="",
+            bird_sql_dir=str(tmp_path),
+            sandbox_provider="bird_catalog_sandbox",
+            catalog_environment={"DEFAULT_MODELS_API_KEY": None},
+        )
 
 
 def _call(call_id: str, name: str, arguments: dict) -> NeMoGymResponseFunctionToolCall:
