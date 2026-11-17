@@ -1056,7 +1056,9 @@ async def test_timeout_does_not_wait_for_output_that_a_surviving_process_keeps_o
             raise asyncio.TimeoutError
         await asyncio.Event().wait()
 
-    process = MagicMock(returncode=0, communicate=communicate)
+    process = MagicMock(returncode=None, communicate=communicate)
+    # A killed process has an exit code, which makes the run log the remaining error output.
+    process.kill.side_effect = lambda: setattr(process, "returncode", -9)
     with (
         patch("responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec", return_value=process),
         patch("responses_api_agents.opencode_agent.app._TIMEOUT_DRAIN_SECONDS", 0.05),
