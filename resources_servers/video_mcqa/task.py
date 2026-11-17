@@ -4,6 +4,7 @@
 """Benchmark-independent separation of model inputs, gold answers and provenance."""
 
 import re
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from typing import Literal, NotRequired, TypedDict, get_args
 
@@ -67,7 +68,12 @@ class VideoQuestion:
 
 @dataclass(frozen=True, slots=True)
 class VerifierMetadata:
-    """Server-side answer and provenance; never forwarded as model input."""
+    """Server-side answer, question and provenance; never forwarded as model input.
+
+    ``question`` and ``options`` are the question as asked: its text and its option texts in label order, without
+    labels. A judge model that reads an answer (answer policy llm_extraction_v1) gets the question from them, never
+    from the model's request.
+    """
 
     task_id: str
     expected_answer: str
@@ -77,11 +83,13 @@ class VerifierMetadata:
     video_id: str
     video_source: str
     video_sha256: str
+    question: str
+    options: tuple[str, ...]
     level: int | None = None
     group_id: str | None = None
 
     def __post_init__(self) -> None:
-        for name in ("task_id", "dataset_source", "video_id", "video_source"):
+        for name in ("task_id", "dataset_source", "video_id", "video_source", "question"):
             _text(getattr(self, name), name)
         _digest(self.dataset_revision, 40, "dataset_revision")
         _digest(self.video_sha256, 64, "video_sha256")
@@ -89,6 +97,12 @@ class VerifierMetadata:
             raise ValueError(f"option_count must be an integer from two to {len(LABELS)}")
         if not isinstance(self.expected_answer, str) or self.expected_answer not in tuple(LABELS[: self.option_count]):
             raise ValueError("expected_answer must be one available uppercase choice label")
+        if not isinstance(self.options, (tuple, list)) or len(self.options) != self.option_count:
+            raise ValueError("options must hold one text per choice, in label order")
+        for option in self.options:
+            _text(option, "option")
+        # A row read back from JSON holds a list.
+        object.__setattr__(self, "options", tuple(self.options))
         if self.level is not None and (type(self.level) is not int or self.level < 1):
             raise ValueError("level must be a positive integer or None")
         if self.group_id is not None:
@@ -96,7 +110,7 @@ class VerifierMetadata:
 
     @classmethod
     def from_question(cls, question: VideoQuestion, *, expected_answer: str) -> "VerifierMetadata":
-        """Bind a gold label to the exact question identity and choice range."""
+        """Bind a gold label to the exact question, its identity and choice range."""
         return cls(
             task_id=question.task_id,
             expected_answer=expected_answer,
@@ -106,6 +120,8 @@ class VerifierMetadata:
             video_id=question.video_id,
             video_source=question.video_source,
             video_sha256=question.video_sha256,
+            question=question.question,
+            options=question.options,
             level=question.level,
             group_id=question.group_id,
         )
@@ -125,11 +141,19 @@ class InputVideo(TypedDict):
     video_url: str
 
 
+class InputImage(TypedDict):
+    """One frame of a video sent as frames, already materialized by the media-preparation layer."""
+
+    type: Literal["input_image"]
+    image_url: str
+    detail: Literal["auto", "low", "high"]
+
+
 class UserMessage(TypedDict):
     """One user turn; no verifier metadata or benchmark system instructions."""
 
     role: Literal["user"]
-    content: list[InputText | InputVideo]
+    content: list[InputText | InputVideo | InputImage]
 
 
 class ResponsesCreateParams(TypedDict):
@@ -146,7 +170,13 @@ class PreparedTask(TypedDict):
     task_id: str
     setting: Setting
     responses_create_params: ResponsesCreateParams
-    verifier_metadata: dict[str, str | int | None]
+    verifier_metadata: dict[str, str | int | list[str] | None]
+
+
+def _verifier_metadata(question: VideoQuestion, *, expected_answer: str) -> dict[str, str | int | list[str] | None]:
+    """The row's verifier metadata, JSON-shaped as a row reads back: its options are a list."""
+    metadata = asdict(VerifierMetadata.from_question(question, expected_answer=expected_answer))
+    return {**metadata, "options": list(metadata["options"])}
 
 
 def _question_text(question: VideoQuestion, *, video_path: str | None = None) -> str:
@@ -182,14 +212,46 @@ def _letter_question_text(question: VideoQuestion, prompt: PromptStyle) -> str:
     return "\n".join((question.question, *options, "Answer with the option's letter from the given choices directly."))
 
 
+def video_parts(
+    *, video_url: str | None = None, frames: Sequence[tuple[str, str]] | None = None
+) -> list[InputText | InputVideo | InputImage]:
+    """A prepared video as user-turn parts: one ``input_video`` part, or the video as frames.
+
+    ``frames`` are ``(label, image_url)`` pairs in playback order. Each frame is its label as an ``input_text`` part
+    followed by the frame as an ``input_image`` part. A label holds text only, such as the frame's time; the model's
+    chat template places its image token at the image part. Give exactly one of ``video_url`` and ``frames``.
+    """
+    if (video_url is None) == (frames is None):
+        raise ValueError("Give the video either as video_url or as frames")
+    if video_url is not None:
+        _text(video_url, "video_url")
+        return [{"type": "input_video", "video_url": video_url}]
+    if isinstance(frames, (str, bytes)) or not frames:
+        raise ValueError("frames must be a nonempty sequence of (label, image_url) pairs")
+    parts: list[InputText | InputVideo | InputImage] = []
+    for label, image_url in frames:
+        _text(label, "frame label")
+        _text(image_url, "frame image_url")
+        parts.append({"type": "input_text", "text": label})
+        parts.append({"type": "input_image", "image_url": image_url, "detail": "auto"})
+    return parts
+
+
 def prepare_single_turn(
-    question: VideoQuestion, *, expected_answer: str, video_url: str, prompt: PromptStyle = "boxed"
+    question: VideoQuestion,
+    *,
+    expected_answer: str,
+    video_url: str | None = None,
+    frames: Sequence[tuple[str, str]] | None = None,
+    prompt: PromptStyle = "boxed",
 ) -> PreparedTask:
-    """Attach prepared video once; sampling remains an explicit external step."""
-    _text(video_url, "video_url")
+    """Attach the prepared video once, as one video part or as labelled frames (``video_parts``), then the question.
+
+    Sampling remains an explicit external step.
+    """
     if prompt not in get_args(PromptStyle):
         raise ValueError(f"Unknown prompt style {prompt!r}")
-    metadata = VerifierMetadata.from_question(question, expected_answer=expected_answer)
+    metadata = _verifier_metadata(question, expected_answer=expected_answer)
     return {
         "task_id": question.task_id,
         "setting": "single_turn",
@@ -200,7 +262,7 @@ def prepare_single_turn(
                 {
                     "role": "user",
                     "content": [
-                        {"type": "input_video", "video_url": video_url},
+                        *video_parts(video_url=video_url, frames=frames),
                         {
                             "type": "input_text",
                             "text": _question_text(question)
@@ -211,7 +273,7 @@ def prepare_single_turn(
                 }
             ],
         },
-        "verifier_metadata": asdict(metadata),
+        "verifier_metadata": metadata,
     }
 
 
@@ -220,7 +282,7 @@ def prepare_agentic(question: VideoQuestion, *, expected_answer: str, video_path
     _text(video_path, "video_path")
     if any(character in video_path for character in "\r\n"):
         raise ValueError("video_path must be a single-line sandbox path")
-    metadata = VerifierMetadata.from_question(question, expected_answer=expected_answer)
+    metadata = _verifier_metadata(question, expected_answer=expected_answer)
     return {
         "task_id": question.task_id,
         "setting": "agentic",
@@ -234,5 +296,5 @@ def prepare_agentic(question: VideoQuestion, *, expected_answer: str, video_path
                 }
             ]
         },
-        "verifier_metadata": asdict(metadata),
+        "verifier_metadata": metadata,
     }

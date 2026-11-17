@@ -1,7 +1,7 @@
 # lvbench_single_turn.yaml with answer extraction by a judge model, for LVBench rows prepared with
 # prompt "lvbench" (the benchmark's bare-letter prompt) and a cohort with answer_policy llm_extraction_v1.
-# The judge reads the question text and the final answer (never the video or the gold label) and returns the
-# chosen option, which is then scored. See resources_servers/video_mcqa/README.md.
+# The judge reads the row's question and options and the final answer (never the video or the gold label) and
+# returns the chosen option, which is then scored. See resources_servers/video_mcqa/README.md.
 lvbench:
   resources_servers:
     lvbench:

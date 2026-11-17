@@ -149,7 +149,6 @@ class VideoMMEV2ResourcesServer(SimpleResourcesServer):
         return await grade_final_answer(
             self.server_client,
             self.config,
-            body.responses_create_params,
             final_assistant_text(body.response),
             body.verifier_metadata,
             setting=body.setting,

@@ -30,7 +30,9 @@ the planned agentic setting; it does not force a tool call or add
 benchmark-specific system instructions.
 
 Both builders return the standard `responses_create_params` /
-`verifier_metadata` separation. Gold and provenance stay in verifier metadata.
+`verifier_metadata` separation. Gold and provenance stay in verifier metadata,
+with the question as asked (`question`, and `options` in label order), which a
+judge model reads under `llm_extraction_v1`; every row needs them.
 Changing the gold label while keeping the question/media fixed produces exactly
 the same model-facing request. Callers must forward **only**
 `responses_create_params` to the model, never the whole prepared row.

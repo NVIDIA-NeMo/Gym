@@ -13,6 +13,7 @@ import pytest
 from aiohttp import ClientResponseError
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
+from pydantic import ValidationError
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetricsRequest, ModelServerRef
@@ -29,7 +30,6 @@ from resources_servers.video_mcqa.scoring import (
     grade_answer,
     llm_extraction_prompt,
     parse_llm_choice,
-    prompt_text,
 )
 from resources_servers.video_mcqa.task import VerifierMetadata, VideoQuestion, prepare_single_turn
 from resources_servers.video_mcqa.tests.helpers import REVISION, lv_record, media, response, v1_record
@@ -115,6 +115,8 @@ def metadata(task_id: str = "videomme_v1:one") -> VerifierMetadata:
         video_id="shapes",
         video_source="https://example.invalid/shapes.mp4",
         video_sha256="b" * 64,
+        question="Which invented shape moves?",
+        options=("Circle", "Square", "Triangle", "Star"),
     )
 
 
@@ -143,7 +145,18 @@ def test_a_reply_that_names_no_option_is_unusable(reply) -> None:
         parse_llm_choice(reply, option_count=4)
 
 
-def test_judge_sees_prompt_text_and_answer_but_no_media_or_gold() -> None:
+QUESTION = "Which invented shape moves?\nA. Circle\nB. Square\nC. Triangle\nD. Star"
+
+
+@pytest.mark.parametrize(
+    "video",
+    [
+        {"video_url": "data:video/mp4;base64,SECRET_VIDEO"},
+        {"frames": [("Frame 1 at 0.5 seconds: ", "data:image/jpeg;base64,SECRET_FRAME")] * 3},
+    ],
+    ids=["video", "frames"],
+)
+def test_the_judge_reads_the_rows_question_and_options_and_nothing_else(video) -> None:
     row = prepare_single_turn(
         VideoQuestion(
             task_id="videomme_v1:one",
@@ -156,20 +169,21 @@ def test_judge_sees_prompt_text_and_answer_but_no_media_or_gold() -> None:
             options=("Circle", "Square", "Triangle", "Star"),
         ),
         expected_answer="B",
-        video_url="data:video/mp4;base64,SECRET_VIDEO",
         prompt="videomme_v1",
+        **video,
     )
-    text = prompt_text(row["responses_create_params"]["input"])
-    assert text.endswith("D. Star\nThe best answer is:") and "SECRET_VIDEO" not in text
-    request_text = llm_extraction_prompt(text, "Answer: B")
-    assert request_text == LLM_EXTRACTION_PROMPT.format(prompt=text, answer="Answer: B")
-    assert (
-        "<prompt>\nSelect the best answer" in request_text
-        and "<final_answer>\nAnswer: B\n</final_answer>" in request_text
+    stored = row["verifier_metadata"]
+    assert (stored["question"], stored["options"]) == (
+        "Which invented shape moves?",
+        ["Circle", "Square", "Triangle", "Star"],
     )
-    assert prompt_text("plain text") == "plain text"
-    system = {"role": "system", "content": "Be brief."}
-    assert prompt_text([system, *row["responses_create_params"]["input"]]).startswith("Be brief.\nSelect the best")
+    request_text = llm_extraction_prompt(VerifierMetadata(**stored), "Answer: B")
+    assert request_text == LLM_EXTRACTION_PROMPT.format(question=QUESTION, answer="Answer: B")
+    assert f"<question>\n{QUESTION}\n</question>" in request_text
+    assert "<final_answer>\nAnswer: B\n</final_answer>" in request_text
+    # Neither the video, its frames and their labels, nor the prompt's own instructions reach the judge.
+    for text in ("SECRET", "Frame 1", "Select the best answer", "The best answer is:", "example.invalid"):
+        assert text not in request_text
 
 
 @pytest.mark.parametrize(
@@ -233,8 +247,9 @@ async def test_the_judges_choice_is_scored(tmp_path, benchmark) -> None:
     assert set(call["json"].model_dump(exclude_unset=True)) == {"messages", "max_completion_tokens"}
     assert call["json"].max_completion_tokens == 512
     (message,) = call["json"].messages
-    question = rows[0]["responses_create_params"]["input"][0]["content"][1]["text"]
-    assert message == {"role": "user", "content": llm_extraction_prompt(question, "Answer: B")}
+    stored = VerifierMetadata(**rows[0]["verifier_metadata"])
+    assert message == {"role": "user", "content": llm_extraction_prompt(stored, "Answer: B")}
+    assert QUESTION in message["content"]
     assert "Probably" not in message["content"] and "example.invalid" not in message["content"]
     # A replay judges the saved answer again; a different reading is scored as read.
     replayed = await server.verify(VideoMCQAVerifyRequest.model_validate(result.model_dump()))
@@ -249,6 +264,28 @@ async def observed_verify(server, body) -> tuple[object, list | None]:
     finally:
         verifier_observability._active_verifier.reset(token)
     return result, invocation.grading_operations
+
+
+async def test_the_judge_never_reads_the_request(tmp_path) -> None:
+    server, rows, calls = make_server(tmp_path, '{"choice": "B"}')
+    row = copy.deepcopy(rows[0])
+    row["responses_create_params"]["input"][0]["content"][1]["text"] = "Which colour is the sky?\nA. Red\nB. Blue"
+    await server.verify(request(row, "Answer: B"))
+    assert QUESTION in calls[0]["json"].messages[0]["content"] and "sky" not in calls[0]["json"].messages[0]["content"]
+
+
+@pytest.mark.parametrize("missing", ["question", "options"])
+async def test_a_row_without_its_question_and_options_is_refused(tmp_path, missing) -> None:
+    server, rows, calls = make_server(tmp_path, '{"choice": "B"}')
+    row = copy.deepcopy(rows[0])
+    del row["verifier_metadata"][missing]
+    with pytest.raises(ValidationError, match=missing):
+        request(row, "Answer: B")
+    client = TestClient(server.setup_webserver())
+    body = {**row, "response": response("Answer: B")}
+    assert client.post("/verify", json=body).status_code == 422 and calls == []
+    with pytest.raises(ValueError, match="one text per choice"):
+        VerifierMetadata(**{**rows[0]["verifier_metadata"], "options": ["Circle", "Square"]})
 
 
 async def test_a_judged_grade_is_bound_to_the_judges_reply(tmp_path) -> None:
@@ -410,12 +447,16 @@ async def test_videomme_v2_scores_the_judges_choice(tmp_path) -> None:
         1.0,
         "llm_extraction_v1",
     )
-    assert "Respond with only the letter (A, B, or C)" in calls[0]["json"].messages[0]["content"]
+    stored = VerifierMetadata(**row["verifier_metadata"])
+    assert calls[0]["json"].messages[0]["content"] == llm_extraction_prompt(stored, "The square moves. Answer: B")
+    assert (
+        "Which shape moves?\nA. Circle\nB. Square\nC. Triangle\n</question>" in calls[0]["json"].messages[0]["content"]
+    )
     with pytest.raises(ValueError, match="needs judge_model_server"):
         VideoMMEV2ResourcesServer(config=VideoMMEV2ResourcesServerConfig(**config), server_client=client)
 
 
-@pytest.mark.parametrize("server_name", ["videomme_v2", "videomme_v1", "lvbench"])
+@pytest.mark.parametrize("server_name", ["videomme_v2", "videomme_v1", "lvbench", "video_mcqa"])
 def test_llm_extraction_configs_name_an_openai_compatible_judge(tmp_path, server_name) -> None:
     path = Path(__file__).parents[2] / server_name / "configs" / f"{server_name}_single_turn_llm_extraction.yaml"
     plain = OmegaConf.load(path.with_name(f"{server_name}_single_turn.yaml"))

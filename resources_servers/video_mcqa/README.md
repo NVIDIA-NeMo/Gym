@@ -1,17 +1,23 @@
 # Shared video MCQA preparation
 
-This package contains the common task contract, boxed-answer parser, local
-annotation adapters and accuracy verifier used by VideoMME-v1 and LVBench.
-VideoMME-v2 re-exports the common task/parser APIs and has its own grouped
-nonlinear scoring. These adapters do not configure agents, media processing,
-sampling, system prompts or compaction. The direct tests of the shared parser,
-task contract and accuracy code are in `tests/`.
+This package is the shared base for video multiple-choice questions: the task
+contract (each row keeps its question and options for the verifier), answer
+parsing by rule or by a judge model, local annotation adapters, and the
+fixed-cohort accuracy verifier. VideoMME-v1 and LVBench are cohorts of this
+verifier. VideoMME-v2 re-exports the common task/parser APIs and has its own
+grouped nonlinear scoring. Questions that come from no benchmark, such as a
+training set, run on the same verifier as a
+[question set](#question-sets). These adapters do not configure agents, media
+processing, sampling, system prompts or compaction. The direct tests of the
+shared parser, task contract and accuracy code are in `tests/`.
 
 ## Single-turn inputs
 
-A single-turn row's user turn holds one `input_video` part and the question
-text. Gym's stock `vllm_model` forwards the part to vLLM as a `video_url`, so a
-row can carry either URL form that vLLM accepts:
+A single-turn row's user turn holds the video and then the question text. The
+video is one `input_video` part or the video as
+[labelled frames](#a-video-as-labelled-frames). Gym's stock `vllm_model`
+forwards an `input_video` part to vLLM as a `video_url`, so a row can carry
+either URL form that vLLM accepts:
 
 - a `data:video/mp4;base64,...` URL, which needs no server setup (the committed
   examples use it);
@@ -88,8 +94,9 @@ instead, for the judge-read policy; see [letter prompts](#letter-prompts).
 
 `configs/video_mcqa_single_turn.yaml` serves this verifier without a benchmark
 subclass: the `benchmark` in its `video_mcqa_cohort_manifest` selects VideoMME-v1
-or LVBench scoring and metric names. Like the benchmark configs, it runs the
-stock `simple_agent` for one step through a `single_agent_turn_legacy`
+or LVBench scoring and metric names, and a manifest with a `question_set`
+selects a [question set](#question-sets). Like the benchmark configs, it runs
+the stock `simple_agent` for one step through a `single_agent_turn_legacy`
 Environment Server.
 
 ## Verification and metrics
@@ -98,6 +105,13 @@ Each run declares a complete cohort before inference: benchmark, official source
 URL, pinned dataset revision, setting, task IDs, reporting categories and repeat
 count. Verification rejects cross-benchmark, cross-setting and cross-revision
 results. Duplicate tasks or unexpected repeat indices cannot be aggregated.
+
+Each row's `verifier_metadata` holds the question as asked: `question` (its
+text) and `options` (the option texts in label order, without labels), beside
+`expected_answer` and `option_count`. `prepare_single_turn`, `prepare_agentic`
+and `prepare.py` write them from the annotation. They are required: a row
+without them fails validation and is not verified, so rows prepared before
+these fields existed must be prepared again.
 
 Default answer policy is `boxed_only_v1`. `boxed_or_letter_v1` is an explicit
 alternative for saved predictions that contain only a bare uppercase letter.
@@ -130,12 +144,13 @@ nonlinear score.
 the benchmarks' own prompts ask for. A judge model reports which option the
 final answer gives, and the verifier scores that option against the gold
 label. The judge gets one user message (`LLM_EXTRACTION_PROMPT` in
-`scoring.py`): the text of the prompt the policy model received, without its
-video, and the final answer, without its reasoning. It never gets the gold
-label or the verifier metadata, and it is told not to decide which option is
-correct. It replies with one JSON object, `{"choice": "<letter or none>"}`.
-The wording is the one NVIDIA's Video-MME-v2 evaluations use, so both read
-answers alike.
+`scoring.py`): the row's `question` followed by its `options` as `A. ...`
+lines, and the final answer, without its reasoning. The question comes from
+`verifier_metadata`, never from the request, so the video, its frames and
+whatever else the prompt holds never reach the judge. It never gets the gold
+label, and it is told not to decide which option is correct. It replies with
+one JSON object, `{"choice": "<letter or none>"}`. Its instructions are the
+ones NVIDIA's Video-MME-v2 evaluations give their judge.
 
 | Final answer | Outcome | Reward |
 | --- | --- | --- |
@@ -162,6 +177,7 @@ plus the judge:
 | VideoMME-v2 | `resources_servers/videomme_v2/configs/videomme_v2_single_turn_llm_extraction.yaml` |
 | VideoMME-v1 | `resources_servers/videomme_v1/configs/videomme_v1_single_turn_llm_extraction.yaml` |
 | LVBench | `resources_servers/lvbench/configs/lvbench_single_turn_llm_extraction.yaml` |
+| The cohort's: VideoMME-v1, LVBench or a [question set](#question-sets) | `resources_servers/video_mcqa/configs/video_mcqa_single_turn_llm_extraction.yaml` |
 
 Their judge, `video_mcqa_answer_judge`, is Gym's `openai_model` server, so any
 OpenAI-compatible chat model works, hosted or served with vLLM. Set it in
@@ -200,6 +216,112 @@ evaluation wording, after the video, so read their answers with
 | `lvbench` | The question, the `(A) ...` options, `Answer with the option's letter from the given choices directly.` | LVBench publishes no prompt; this is the common multiple-choice instruction of LLaVA-style evaluations (lmms-eval's default for Video-MME) |
 
 The lines are joined with newlines. Agentic rows keep the boxed prompt.
+
+## Question sets
+
+The shared verifier also scores questions that come from no benchmark, such as
+a training set or a custom evaluation set. Their cohort is a question set
+(`QuestionSetCohort` in `question_set.py`). An invented example:
+
+```json
+{
+  "question_set": "invented_video_mcq",
+  "dataset_source": "https://example.invalid/invented-video-mcq",
+  "dataset_revision": "<40-character revision of the question set>",
+  "setting": "single_turn",
+  "answer_policy": "llm_extraction_v1",
+  "task_ids": ["invented_video_mcq:0001", "invented_video_mcq:0002"]
+}
+```
+
+- `question_set` names the metrics: `mean/<question_set>`, and
+  `<question_set>/raw_acc`, `/coverage`, `/is_complete` and `/outcomes/*` as for
+  a benchmark, without categories (`<question_set>_agentic` for agentic rows).
+- `dataset_revision` is 40 lowercase hexadecimal characters that identify the
+  version of the question set, for example the commit that holds it or the
+  SHA-1 of its question file. `dataset_source` says where it comes from. Each
+  row's `verifier_metadata` carries the same two values.
+- Task IDs are unique and never use a benchmark's scope (`videomme_v1:`,
+  `lvbench:`), so benchmark and question-set rows cannot pass for one another.
+- A question may have from 2 to 26 options. Rows carry no `level` or
+  `group_id`.
+
+The rows follow the shared task contract (`task_id`, `setting`,
+`responses_create_params`, and `verifier_metadata` with `expected_answer`,
+`option_count`, `question`, `options` and the dataset and video identity).
+`prepare_single_turn` builds them.
+
+### A video as labelled frames
+
+A single-turn row may send the video as frames that were sampled ahead of
+time, one image part per frame:
+
+```json
+{
+  "role": "user",
+  "content": [
+    {"type": "input_text", "text": "Frame 1 at 0.25 seconds: "},
+    {"type": "input_image", "image_url": "file:///data/frames/clip/00000.jpg", "detail": "auto"},
+    {"type": "input_text", "text": "\nFrame 2 at 0.75 seconds: "},
+    {"type": "input_image", "image_url": "file:///data/frames/clip/00001.jpg", "detail": "auto"},
+    {"type": "input_text", "text": "Which invented shape moves first?\nA. Circle\nB. Square ..."}
+  ]
+}
+```
+
+- Each frame, in playback order, is its label as an `input_text` part directly
+  followed by the frame as an `input_image` part. The question, its options and
+  the answer instructions come last, in the final `input_text` part.
+  `prepare_single_turn(..., frames=[(label, image_url), ...])` (and
+  `task.video_parts`) build this layout.
+- A label holds text only, such as the frame's time. The model's chat template
+  places its image token at each image part, so a label never spells an image
+  token itself.
+- The model server must be able to read each `image_url`: a data URL, or a
+  `file://` URL under vLLM's `--allowed-local-media-path`.
+
+Grading reads the final answer only, as for any row. Under
+`llm_extraction_v1` the judge reads the row's `question` and `options`, so it
+sees the same question however many frames the row has.
+
+### Empty answers
+
+`empty_answer_reward` (resources server option, default unset) is the reward
+of an attempt that produced output but no final answer (outcome `no_answer`):
+reasoning only, an unfinished reasoning block, or an empty message. Training
+can set a penalty here. A response with no output at all stays at 0, because
+Gym's agents verify a failed run (`execution_failure_reward_zero`) as such a
+response and require exactly 0. Unset, attempts without an answer score 0.
+Either way accuracy metrics count a `no_answer` attempt as 0; an answer the
+judge reads no option in (`no_choice`), a wrong answer and execution failures
+stay at 0.
+
+### Training with a question set
+
+With NeMo RL, add a config to `env.nemo_gym.config_paths` and set the cohort,
+the judge and the server options under `env.nemo_gym`:
+
+```yaml
+env:
+  should_use_nemo_gym: true
+  should_mask_flagged_samples: true  # keep judge failures and failed model calls out of the loss
+  nemo_gym:
+    config_paths:
+    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+    - resources_servers/video_mcqa/configs/video_mcqa_single_turn_llm_extraction.yaml
+    video_mcqa_cohort_manifest: /data/invented_video_mcq/question_set.json
+    judge_base_url: https://judge.example.com/v1
+    judge_api_key: ${oc.env:JUDGE_API_KEY}
+    judge_model_name: my-judge-model
+    video_mcqa:
+      resources_servers:
+        video_mcqa:
+          empty_answer_reward: -0.5
+```
+
+Each row needs `agent_ref: {type: responses_api_agents, name:
+video_mcqa_single_turn}`. With a rule-based policy, use
+`configs/video_mcqa_single_turn.yaml`, which has no judge.
 
 ## Example data
 
