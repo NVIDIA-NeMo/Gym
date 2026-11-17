@@ -33,8 +33,8 @@ from nemo_gym.verification.judge import JUDGE_CALL_MAX_ATTEMPTS
 
 ROOT = Path(__file__).resolve().parents[3]
 README = ROOT / "benchmarks/browsecomp/README.md"
-SESSIONS = "benchmarks/browsecomp/configs/browsecomp_opencode_sessions.yaml"
-RELAY = "benchmarks/browsecomp/configs/browsecomp_opencode.yaml"
+SESSIONS = "benchmarks/browsecomp/configs/browsecomp_opencode.yaml"
+RELAY = "benchmarks/browsecomp/configs/browsecomp_opencode_legacy_agent.yaml"
 AGENT = "browsecomp_opencode_agent"
 ENVIRONMENT = "browsecomp_opencode_environment_server"
 RESOURCES = "search_browsecomp_resources_server"

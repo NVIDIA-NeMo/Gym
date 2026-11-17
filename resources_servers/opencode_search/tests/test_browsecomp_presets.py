@@ -29,8 +29,8 @@ from tests.unit_tests.benchmarks.test_browsecomp_opencode_configs import EXPORT_
 
 ROOT = Path(__file__).resolve().parents[3]
 README = ROOT / "benchmarks/browsecomp/README.md"
-SESSIONS = "benchmarks/browsecomp/configs/browsecomp_opencode_sessions.yaml"
-RELAY = "benchmarks/browsecomp/configs/browsecomp_opencode.yaml"
+SESSIONS = "benchmarks/browsecomp/configs/browsecomp_opencode.yaml"
+RELAY = "benchmarks/browsecomp/configs/browsecomp_opencode_legacy_agent.yaml"
 AGENT = "browsecomp_opencode_agent"
 RESOURCES = "search_browsecomp_resources_server"
 RELAY_AGENT = "opencode_sandboxed_search_agent"

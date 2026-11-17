@@ -1,3 +1,6 @@
+# BrowseComp on the deprecated opencode_sandboxed_agent through a legacy_agent relay; training
+# keeps this preset. browsecomp_opencode.yaml runs the same questions on opencode_agent sessions,
+# for evaluation only, and benchmarks/browsecomp/README.md lists how the two differ.
 config_paths:
 - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_search_agent.yaml
 - resources_servers/opencode_search/configs/opencode_search.yaml

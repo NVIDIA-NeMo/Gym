@@ -6,10 +6,10 @@
 # lends it to the agent's session. After the session closes, verify reads how the run ended from the plugins' log,
 # stops the sandbox and grades the last answer with the judge.
 #
-# browsecomp_opencode.yaml runs the same questions on the deprecated opencode_sandboxed_agent through a legacy_agent
-# relay. This preset repeats that agent's settings where opencode_agent has them, and benchmarks/browsecomp/README.md
-# lists what still differs. The two presets' scores are separate measurements until a paired comparison shows they
-# agree.
+# browsecomp_opencode_legacy_agent.yaml runs the same questions on the deprecated opencode_sandboxed_agent through a
+# legacy_agent relay. This preset repeats that agent's settings where opencode_agent has them, and
+# benchmarks/browsecomp/README.md lists what still differs. The two presets' scores are separate measurements until a
+# paired comparison shows they agree.
 #
 # Besides a policy model config (vllm_model.yaml) and a sandbox provider config, a run supplies:
 # - the judge's endpoint and model in search_judge_base_url and search_judge_model_name, and its key in
@@ -56,8 +56,8 @@ search_browsecomp_resources_server:
           responses_api_agents/opencode_sandboxed_agent/plugins/nemo_gym_web_guard.js
         /tmp/nemo-gym-plugin-nemo_gym_tool_surface.js:
           responses_api_agents/opencode_sandboxed_agent/plugins/nemo_gym_tool_surface.js
-      # The relay agent's opencode_env in browsecomp_opencode.yaml, as the lent sandbox's environment, since
-      # opencode_agent takes none of its own. An empty value sets nothing. The config test keeps the two equal.
+      # The relay agent's opencode_env in browsecomp_opencode_legacy_agent.yaml, as the lent sandbox's environment,
+      # since opencode_agent takes none of its own. An empty value sets nothing. The config test keeps the two equal.
       episode_sandbox_env:
         # OpenCode lists its websearch tool for the nemo_gym model provider only with this set.
         OPENCODE_ENABLE_EXA: "true"
@@ -77,7 +77,7 @@ search_browsecomp_resources_server:
         NEMO_GYM_MAX_TURNS: "400"
         # Read by nemo_gym_turn_budget.js, which removes the task tool from every request.
         NEMO_GYM_DISABLE_SUBAGENTS: "1"
-        # Opt-in arms, off unless set where the run starts, as in browsecomp_opencode.yaml.
+        # Opt-in arms, off unless set where the run starts, as in browsecomp_opencode_legacy_agent.yaml.
         NEMO_GYM_DISABLE_BASH: ${oc.env:NEMO_GYM_DISABLE_BASH,""}
         NEMO_GYM_FIX_GREP_DESCRIPTION: ${oc.env:NEMO_GYM_FIX_GREP_DESCRIPTION,""}
         OPENCODE_WEBSEARCH_TYPE: ${oc.env:OPENCODE_WEBSEARCH_TYPE,""}
@@ -161,8 +161,8 @@ browsecomp_opencode_agent:
           # OpenCode would start at 242,144.
           reserved: 70144
       datasets:
-      # browsecomp_opencode.yaml's questions in the same order, as rows that hold only the user turn: opencode_agent
-      # refuses a request that sets tools and adds a system message to its own instructions.
+      # browsecomp_opencode_legacy_agent.yaml's questions in the same order, as rows that hold only the user turn:
+      # opencode_agent refuses a request that sets tools and adds a system message to its own instructions.
       - name: browsecomp
         type: benchmark
         jsonl_fpath: benchmarks/browsecomp/data/browsecomp_opencode_benchmark.jsonl
@@ -206,8 +206,9 @@ browsecomp_opencode_environment_server:
       # its expiry does.
       cleanup_timeout_seconds: 600
 
-# The judge, named by the run: use browsecomp_opencode.yaml's endpoint and model to compare the two presets. Pinned to
-# loopback, since the lent sandbox may reach the policy model's host and the judge spends its key for any caller.
+# The judge, named by the run: use browsecomp_opencode_legacy_agent.yaml's endpoint and model to compare the two
+# presets. Pinned to loopback, since the lent sandbox may reach the policy model's host and the judge spends its key
+# for any caller.
 search_judge_model:
   responses_api_models:
     vllm_model:

@@ -64,8 +64,15 @@ and grades the final answer with an LLM judge:
 
 | Preset | Agent | How an episode runs |
 | --- | --- | --- |
-| `configs/browsecomp_opencode.yaml` | `opencode_sandboxed_search_agent`, the deprecated `opencode_sandboxed_agent` | A `legacy_agent` relay calls the agent's own `/run`, which seeds the Resources Server, runs OpenCode in the sandbox it gets back, and calls `/verify` |
-| `configs/browsecomp_opencode_sessions.yaml` | `browsecomp_opencode_agent`, an `opencode_agent` | `single_agent_turn_legacy` seeds the Resources Server, which starts the sandbox, stages the OpenCode plugins in it and lends it to the agent's session. After the session closes, `/verify` reads how the run ended from the plugins' log and stops the sandbox before grading; `/close_session` then fences the session, and releases the sandbox if verify did not run |
+| `configs/browsecomp_opencode.yaml` | `browsecomp_opencode_agent`, an `opencode_agent` | `single_agent_turn_legacy` seeds the Resources Server, which starts the sandbox, stages the OpenCode plugins in it and lends it to the agent's session. After the session closes, `/verify` reads how the run ended from the plugins' log and stops the sandbox before grading; `/close_session` then fences the session, and releases the sandbox if verify did not run |
+| `configs/browsecomp_opencode_legacy_agent.yaml` | `opencode_sandboxed_search_agent`, the deprecated `opencode_sandboxed_agent` | A `legacy_agent` relay calls the agent's own `/run`, which seeds the Resources Server, runs OpenCode in the sandbox it gets back, and calls `/verify` |
+
+`configs/browsecomp_opencode.yaml` was the relay preset until the session preset took its name. A launcher, overlay or
+training config that composes it for the relay must now name `configs/browsecomp_opencode_legacy_agent.yaml`. Under the
+old name it gets the session preset, which does not compose without the OpenCode pins and the judge (see
+[Run the session preset](#run-the-session-preset)) and declares no `opencode_sandboxed_search_agent`, so a relay launch
+fails instead of running the other harness. A relay run started under the old name resumes under the new one: the
+preset's settings are unchanged, and the identity a run saves for its resume holds no config file path.
 
 The session preset repeats the relay preset's settings where `opencode_agent` has them: OpenCode 1.17.11 with its
 stock system prompt and thinking on; the same questions and user turn (`prepare_opencode.py` writes them without the
@@ -137,11 +144,11 @@ failure row: it carries its kind in `failure_kind` and the reason in `failure_re
 
 ### Training
 
-Training keeps the relay preset. Both presets score a rollout the judge gave no verdict 0, which an evaluation counts
-in its score and its acceptance gate counts as an evaluation-side fault. That 0 says nothing about the model, so a
-training run masks the rollout instead: set `unparseable_verdict_policy: mask` on the Resources Server, in NeMo RL's
-environment config (under `env.nemo_gym`) or with
-`++search_browsecomp_resources_server.resources_servers.opencode_search.unparseable_verdict_policy=mask` on a Gym
+Training keeps the relay preset, `configs/browsecomp_opencode_legacy_agent.yaml`. Both presets score a rollout the
+judge gave no verdict 0, which an evaluation counts in its score and its acceptance gate counts as an evaluation-side
+fault. That 0 says nothing about the model, so a training run masks the rollout instead: set
+`unparseable_verdict_policy: mask` on the Resources Server, in NeMo RL's environment config (under `env.nemo_gym`) or
+with `++search_browsecomp_resources_server.resources_servers.opencode_search.unparseable_verdict_policy=mask` on a Gym
 rollout collection (see `resources_servers/opencode_search/README.md`). Every row the Resources Server masks, a run that
 ended on its budget included, also sets `instance_config.mask_sample`, where NeMo RL reads the mask that keeps a sample
 out of the loss.
@@ -237,7 +244,7 @@ Then start the servers and collect rollouts. Compose a sandbox provider config, 
 
 ```bash
 gym env start \
-    --config benchmarks/browsecomp/configs/browsecomp_opencode_sessions.yaml \
+    --config benchmarks/browsecomp/configs/browsecomp_opencode.yaml \
     --config responses_api_models/vllm_model/configs/vllm_model.yaml \
     --config <sandbox provider config> \
     ++policy_base_url=... ++policy_api_key=... ++policy_model_name=...
@@ -245,7 +252,7 @@ gym env start \
 gym eval run --no-serve <the same --config and ++ arguments> \
     --agent browsecomp_opencode_agent \
     --input benchmarks/browsecomp/data/browsecomp_opencode_benchmark.jsonl \
-    --output results/browsecomp_opencode_sessions/rollouts.jsonl \
+    --output <output file> \
     ++route_failures_to_sidecar=true
 ```
 
@@ -324,17 +331,18 @@ SMOKE="++policy_base_url=http://127.0.0.1:8900/v1 ++policy_api_key=dummy ++polic
     ++search_judge_model.responses_api_models.vllm_model.model=scripted-judge ++inference_api_key=dummy \
     ++use_absolute_ip=true ++uvicorn_logging_show_200_ok=true"
 
-gym env start --config benchmarks/browsecomp/configs/browsecomp_opencode_sessions.yaml \
+gym env start --config benchmarks/browsecomp/configs/browsecomp_opencode.yaml \
     --config responses_api_models/vllm_model/configs/vllm_model.yaml --config <sandbox provider config> $SMOKE
 
-gym eval run --no-serve --config benchmarks/browsecomp/configs/browsecomp_opencode_sessions.yaml \
+gym eval run --no-serve --config benchmarks/browsecomp/configs/browsecomp_opencode.yaml \
     --config responses_api_models/vllm_model/configs/vllm_model.yaml --config <sandbox provider config> $SMOKE \
-    --agent browsecomp_opencode_agent --input smoke.jsonl --output results/smoke-sessions/rollouts.jsonl \
+    --agent browsecomp_opencode_agent --input <input file> --output <output file> \
     --limit 5 --num-repeats 2 --concurrency 2 ++route_failures_to_sidecar=true
 ```
 
 With `++uvicorn_logging_show_200_ok=true` the logs show each episode's calls in order: `/seed_session`, the agent
 session, the model calls, the agent's close, `/verify` and `/close_session`. Run the relay preset the same way, with
+`--config benchmarks/browsecomp/configs/browsecomp_opencode_legacy_agent.yaml` in place of the session preset's,
 `--agent opencode_sandboxed_search_agent` and `prepare.py`'s rows; it has no `/close_session`. In a run with the search
 cache on (`NEMO_GYM_EXA_CACHE_ROOT`), drop `++uvicorn_logging_show_200_ok=true` from `SMOKE`: it turns on every
 server's access log, which would record the search key that the sandbox's searches send to the Resources Server's

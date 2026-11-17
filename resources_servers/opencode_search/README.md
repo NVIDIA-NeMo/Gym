@@ -224,8 +224,8 @@ a crash an episode starts over from its input.
 
 Supported harnesses, each in the `allowed_agents` of the config that pairs it:
 
-* `opencode_agent`, on the episode seed. `benchmarks/browsecomp/configs/browsecomp_opencode_sessions.yaml`
-  runs it through `single_agent_turn_legacy` and stages the OpenCode plugins that the relay agent uploads.
+* `opencode_agent`, on the episode seed. `benchmarks/browsecomp/configs/browsecomp_opencode.yaml` runs it
+  through `single_agent_turn_legacy` and stages the OpenCode plugins that the relay agent uploads.
   That config admits no other harness, on purpose: the model's tools are OpenCode's own, shaped by those
   plugins, and this server serves no tools, so another harness would run a different benchmark. The
   pairing is for evaluation only, as `opencode_agent`'s session path is; training keeps the relay
@@ -235,8 +235,13 @@ Supported harnesses, each in the `allowed_agents` of the config that pairs it:
   ([Failure accounting](../../benchmarks/browsecomp/README.md#failure-accounting)) and the session
   pairing's [time limits](../../benchmarks/browsecomp/README.md#time-limits).
 * `opencode_sandboxed_agent`, on the agent-run seed, as `configs/opencode_search.yaml` declares. It serves
-  no agent sessions, so its configs (`benchmarks/browsecomp/configs/browsecomp_opencode.yaml` and
-  `configs/opencode_search_example.yaml`) declare a `legacy_agent` relay in front of it.
+  no agent sessions, so its configs (`benchmarks/browsecomp/configs/browsecomp_opencode_legacy_agent.yaml`
+  and `configs/opencode_search_example.yaml`) declare a `legacy_agent` relay in front of it.
+
+`benchmarks/browsecomp/configs/browsecomp_opencode.yaml` was the relay pairing until the session pairing
+took its name; the relay pairing is now `browsecomp_opencode_legacy_agent.yaml` beside it. A launch that
+relies on the relay must switch to the new path: under the old one it gets the session pairing, which
+does not compose without its OpenCode pins and judge and declares no `opencode_sandboxed_search_agent`.
 
 The episode seed lends its sandbox to any session harness that accepts `sandbox_access`; the harness brings
 its tools. With lending on, the server refuses `num_workers` above 1: lent sandboxes live in one worker's
@@ -341,7 +346,7 @@ startup refuses a setting that cannot work:
 across a changed semantic setting and counts a `null` as a value, so the relay preset, which resolves
 none of them, still resumes a run started before these settings existed. See
 `configs/opencode_search.yaml`; wired up in `benchmarks/browsecomp/configs/browsecomp_opencode.yaml`
-(relay) and `benchmarks/browsecomp/configs/browsecomp_opencode_sessions.yaml` (episode sessions). The
+(episode sessions) and `benchmarks/browsecomp/configs/browsecomp_opencode_legacy_agent.yaml` (relay). The
 session preset takes `episode_export_dir` from `BROWSECOMP_OPENCODE_EXPORT_DIR`, the variable that also
 sets the agent's `export_dir`, and leaves `episode_export_copy_dir` to a run's overlay.
 
