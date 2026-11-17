@@ -41,6 +41,7 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.verification import JudgeError
 from resources_servers.opencode_search.app import (
+    _JUDGE_TEMPLATE_ECHO,
     _PLUGIN_LOG_MAX_BYTES,
     _PLUGIN_LOG_ROW_CHARS,
     PLUGIN_LOG_INCOMPLETE,
@@ -621,34 +622,70 @@ def test_a_verify_after_the_close_is_masked_as_lost(workdir) -> None:
 
 
 @pytest.mark.parametrize("seed", ["episode", "agent_run"])
-def test_a_judge_without_a_verdict_is_masked_and_an_identical_retry_is_graded(workdir, seed) -> None:
-    """No verdict is not a measured 0: the row is masked, and the verify is not replayed but graded again. Gym judges
-    a masked judge_unparseable row again from the answer it saved, unless it went to the failures sidecar
-    (tests/unit_tests/eval/test_reverify_saved_results.py covers that selection); while it scored 0, no re-judge
-    picked it up."""
+def test_a_judge_without_a_verdict_scores_0_against_the_evaluation_and_an_identical_retry_is_graded(
+    workdir, seed
+) -> None:
+    """By default (unparseable_verdict_policy "zero", for evaluation) a rollout the judge gave no verdict scores 0,
+    unmasked, with the kind and the outcome applied to it on the row: a 0 counted against the evaluation, not the
+    model, which Gym counts in the score and settles without judging it again. The grade is not kept, so an identical
+    retry of the verify asks the judge again."""
     server = _server(workdir if seed == "episode" else None)
     client = TestClient(server.setup_webserver())
     assert client.post("/seed_session", json=_seed() if seed == "episode" else _row()).status_code == 200
     judge = _mock_judge(server, NO_VERDICT)
+    # Request fields named like the applied outcome: the grade's win.
+    requested = {"failure_outcome_action": "fail", "failure_outcome_attribution": "model"}
 
-    inconclusive = client.post("/verify", json=_verify_body())
+    inconclusive = client.post("/verify", json=_verify_body(**requested))
 
     assert inconclusive.status_code == 200, inconclusive.text
-    assert _graded(inconclusive) == (0.0, True, "judge_unparseable", False)
-    assert inconclusive.json()["judge_parsed"] is False
+    row = inconclusive.json()
+    assert _graded(inconclusive) == (0.0, False, "judge_unparseable", False)
+    assert (row["failure_outcome_action"], row["failure_outcome_attribution"]) == ("count_as_zero", "evaluation")
+    assert row["failure_reason"] == "The judge gave no parseable verdict in 2 attempt(s); scored 0"
+    assert (row["judge_parsed"], row["judge_attempts"], row["extracted_final_answer"]) == (False, 2, "")
+    assert row["final_text"] == "Exact Answer: Paris" and "instance_config" not in row
     assert judge.await_count == 2  # judge_max_attempts
-    # What that selection reads besides the kind: the answer on the row, and no failures-sidecar class.
-    assert inconclusive.json()["response"]["output"] and inconclusive.json().get("_ng_failure_class") is None
 
     _mock_judge(server, CORRECT)
-    retried = client.post("/verify", json=_verify_body())
+    retried = client.post("/verify", json=_verify_body(**requested))
     assert _graded(retried) == (1.0, False, None, True)
+    assert {"failure_outcome_action", "failure_outcome_attribution"}.isdisjoint(retried.json())
 
 
-def test_a_budget_ending_keeps_its_kind_when_the_judge_gives_no_verdict(workdir) -> None:
+@pytest.mark.parametrize("seed", ["episode", "agent_run"])
+def test_with_the_mask_policy_a_judge_without_a_verdict_masks_the_row_for_training(workdir, seed) -> None:
+    """unparseable_verdict_policy "mask", which a training run sets: the reward measures nothing about the model, so
+    the row is masked, also in its instance_config, where NeMo RL reads the mask. Gym judges a masked
+    judge_unparseable row again from the answer it saved, unless it went to the failures sidecar
+    (tests/unit_tests/eval/test_reverify_saved_results.py covers that selection)."""
+    server = _server(workdir if seed == "episode" else None, unparseable_verdict_policy="mask")
+    client = TestClient(server.setup_webserver())
+    assert client.post("/seed_session", json=_seed() if seed == "episode" else _row()).status_code == 200
+    _mock_judge(server, NO_VERDICT)
+
+    inconclusive = client.post("/verify", json=_verify_body(instance_config={"split": "train"}))
+
+    assert inconclusive.status_code == 200, inconclusive.text
+    row = inconclusive.json()
+    assert _graded(inconclusive) == (0.0, True, "judge_unparseable", False)
+    assert row["instance_config"] == {"split": "train", "mask_sample": True}
+    assert row["failure_reason"] == "The judge gave no parseable verdict in 2 attempt(s); masked"
+    assert {"failure_outcome_action", "failure_outcome_attribution"}.isdisjoint(row)
+    # What that selection reads besides the kind: the answer on the row, and no failures-sidecar class.
+    assert row["judge_parsed"] is False and row["response"]["output"] and row.get("_ng_failure_class") is None
+
+    _mock_judge(server, CORRECT)
+    retried = client.post("/verify", json=_verify_body(instance_config={"split": "train"}))
+    assert _graded(retried) == (1.0, False, None, True)
+    assert retried.json()["instance_config"] == {"split": "train"}
+
+
+@pytest.mark.parametrize("policy", ["zero", "mask"])
+def test_a_budget_ending_keeps_its_kind_when_the_judge_gives_no_verdict(workdir, policy) -> None:
     """Recovery re-judges a judge_unparseable row from a payload that carries no ending, which would grade a capped
-    run unmasked; agent_limit keeps it masked, as when the judge gave a verdict."""
-    server = _server(workdir)
+    run unmasked; agent_limit keeps it masked, as when the judge gave a verdict, under either policy."""
+    server = _server(workdir, unparseable_verdict_policy=policy)
     client = TestClient(server.setup_webserver())
     _mock_judge(server, NO_VERDICT)
 
@@ -656,6 +693,23 @@ def test_a_budget_ending_keeps_its_kind_when_the_judge_gives_no_verdict(workdir)
 
     assert _graded(verified) == (0.0, True, "agent_limit", False)
     assert verified.json()["judge_parsed"] is False
+    assert verified.json()["instance_config"] == {"mask_sample": True}
+
+
+def test_a_judge_that_echoes_the_template_line_gives_no_verdict_unless_the_answer_is_that_line(workdir) -> None:
+    """A judge reply whose extracted answer is exactly the template's line repeated the template instead of grading.
+    When the model's answer is that line itself, the judge's verdict on it counts."""
+    server = _server(workdir)
+    client = TestClient(server.setup_webserver())
+    _mock_judge(server, f"extracted_final_answer: {_JUDGE_TEMPLATE_ECHO}\nreasoning: none\ncorrect: no")
+
+    echoed = client.post("/verify", json=_verify_body())
+    client.cookies.clear()
+    graded = client.post("/verify", json=_verify_body(f"Exact Answer: {_JUDGE_TEMPLATE_ECHO}"))
+
+    assert _graded(echoed) == (0.0, False, "judge_unparseable", False)
+    assert _graded(graded) == (0.0, False, None, True)
+    assert graded.json()["extracted_final_answer"] == _JUDGE_TEMPLATE_ECHO
 
 
 def test_a_judge_that_never_answers_sends_the_row_to_the_failures_sidecar(workdir) -> None:
@@ -674,10 +728,12 @@ def test_a_judge_that_never_answers_sends_the_row_to_the_failures_sidecar(workdi
     assert _graded(client.post("/verify", json=_verify_body())) == (1.0, False, None, True)
 
 
-def test_judge_replies_without_a_verdict_trip_the_dead_judge_breaker(workdir) -> None:
-    """Such a row is masked, so it leaves the quality metrics as quietly as an unreachable judge's: verify answers 500
-    once judge_max_consecutive_failures of them come in a row, and a verdict starts the count again."""
-    server = _server(workdir, judge_max_consecutive_failures=2)
+@pytest.mark.parametrize("policy", ["zero", "mask"])
+def test_judge_replies_without_a_verdict_trip_the_dead_judge_breaker(workdir, policy) -> None:
+    """Such a row scores 0 or is masked, as quietly as an unreachable judge's leaves the score, under either policy:
+    verify answers 500 once judge_max_consecutive_failures of them come in a row, and a verdict starts the count
+    again."""
+    server = _server(workdir, judge_max_consecutive_failures=2, unparseable_verdict_policy=policy)
     client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
 
     def verify(judge_reply: str) -> Any:
@@ -685,9 +741,10 @@ def test_judge_replies_without_a_verdict_trip_the_dead_judge_breaker(workdir) ->
         client.cookies.clear()
         return client.post("/verify", json=_verify_body())
 
-    assert _graded(verify(NO_VERDICT)) == (0.0, True, "judge_unparseable", False)
+    without_a_verdict = (0.0, policy == "mask", "judge_unparseable", False)
+    assert _graded(verify(NO_VERDICT)) == without_a_verdict
     assert _graded(verify(CORRECT)) == (1.0, False, None, True)
-    assert _graded(verify(NO_VERDICT)) == (0.0, True, "judge_unparseable", False)
+    assert _graded(verify(NO_VERDICT)) == without_a_verdict
     tripped = verify(NO_VERDICT)
 
     assert tripped.status_code == 500, tripped.text
@@ -1947,9 +2004,10 @@ def test_the_outcome_a_row_names_is_the_one_verify_applied_whatever_the_request_
         assert {"failure_outcome_action", "failure_outcome_attribution"}.isdisjoint(reply.json())
 
 
-def test_a_row_masked_without_a_grade_names_its_failure_and_gives_a_reason(workdir) -> None:
-    """A lost session, a judge without a verdict and a judge that never answered each leave a masked row, not counted
-    as graded, that says why."""
+def test_a_row_left_without_a_grade_names_its_failure_and_gives_a_reason(workdir) -> None:
+    """A lost session, a judge without a verdict and a judge that never answered each leave a row, not counted as
+    graded, that says why: the first and the last masked, also where NeMo RL reads the mask, and the judge without a
+    verdict scored 0 against the evaluation."""
     server = _server(workdir)
     client = TestClient(server.setup_webserver())
     assert client.post("/seed_session", json=_seed()).status_code == 200
@@ -1964,11 +2022,50 @@ def test_a_row_masked_without_a_grade_names_its_failure_and_gives_a_reason(workd
 
     assert [_graded(reply) for reply in replies] == [
         (0.0, True, "session_lost", False),
-        (0.0, True, "judge_unparseable", False),
+        (0.0, False, "judge_unparseable", False),
         (0.0, True, "judge_failed", False),
     ]
     reasons = [reply.json()["failure_reason"] for reply in replies]
     assert all(isinstance(reason, str) and reason.strip() for reason in reasons), reasons
+    masks = [reply.json().get("instance_config") for reply in replies]
+    assert masks == [{"mask_sample": True}, None, {"mask_sample": True}]
+
+
+@pytest.mark.parametrize("instance_config", [None, {"split": "train"}], ids=["none_sent", "sent"])
+def test_every_row_verify_masks_sets_mask_sample_in_its_instance_config(workdir, instance_config) -> None:
+    """NeMo RL masks a sample's loss by its instance_config.mask_sample, not by the row's mask_sample, so every row
+    verify masks sets both, over the request's own instance_config: a budget ending, graded or with an empty answer, a
+    judge without a verdict under the mask policy, and a lost session. A row verify does not mask keeps the request's
+    instance_config as it was sent."""
+    server = _server(workdir, unparseable_verdict_policy="mask")
+    client = TestClient(server.setup_webserver())
+    sent = {} if instance_config is None else {"instance_config": instance_config}
+
+    def verify(judge_reply: str, answer: str = "Exact Answer: Paris", **fields: Any) -> dict[str, Any]:
+        _mock_judge(server, judge_reply)
+        client.cookies.clear()
+        return client.post("/verify", json=_verify_body(answer, **sent, **fields)).json()
+
+    masked = [
+        verify(CORRECT, opencode_terminal_reason="max_iteration"),
+        verify(CORRECT, "", opencode_terminal_reason="context_window"),
+        verify(NO_VERDICT),
+    ]
+    client.cookies.clear()
+    assert client.post("/seed_session", json=_seed()).status_code == 200
+    assert client.post("/close_session", json=_close()).status_code == 200
+    masked.append(client.post("/verify", json=_verify_body(**sent)).json())
+    unmasked = [verify(CORRECT), verify(WRONG), verify(CORRECT, "")]
+
+    assert [row["failure_kind"] for row in masked] == [
+        "agent_limit",
+        "model_context_limit",
+        "judge_unparseable",
+        "session_lost",
+    ]
+    assert all(row["mask_sample"] for row in masked)
+    assert [row["instance_config"] for row in masked] == [(instance_config or {}) | {"mask_sample": True}] * 4
+    assert [(row["mask_sample"], row.get("instance_config")) for row in unmasked] == [(False, instance_config)] * 3
 
 
 def test_a_judge_that_never_answers_trips_the_dead_judge_breaker(workdir) -> None:
@@ -1996,7 +2093,7 @@ def test_a_judge_that_never_answers_trips_the_dead_judge_breaker(workdir) -> Non
 
 
 def test_a_zero_limit_turns_the_dead_judge_breaker_off(workdir) -> None:
-    """With judge_max_consecutive_failures 0, rollouts without a verdict are masked one by one, and verify never
+    """With judge_max_consecutive_failures 0, rollouts without a verdict are scored 0 one by one, and verify never
     answers 500."""
     server = _server(workdir, judge_max_consecutive_failures=0)
     client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
@@ -2008,7 +2105,7 @@ def test_a_zero_limit_turns_the_dead_judge_breaker_off(workdir) -> None:
         replies.append(client.post("/verify", json=_verify_body()))
 
     assert [reply.status_code for reply in replies] == [200] * 5
-    assert {_graded(reply) for reply in replies} == {(0.0, True, "judge_unparseable", False)}
+    assert {_graded(reply) for reply in replies} == {(0.0, False, "judge_unparseable", False)}
 
 
 # single_agent_turn's verify body for an episode: the task_data keys flat at the top level, then the request, the

@@ -136,8 +136,11 @@ from resources_servers.opencode_search.task_data import TaskData
 
 LOGGER = logging.getLogger(__name__)
 
-# A judge that echoes this instead of grading has repeated the template back at us.
-_JUDGE_TEMPLATE_ECHO = "The final exact answer extracted from the [response]"
+# The answer a judge reply says it extracted from the response, as parse_judge_verdict reads it.
+_EXTRACTED_ANSWER = re.compile(r"extracted_final_answer:\s*(.+?)(?:\n|$)")
+# The grading template's own instruction for that line, read with the same pattern so the two cannot drift: a judge
+# that gives exactly this as the extracted answer has repeated the template back at us instead of grading.
+_JUDGE_TEMPLATE_ECHO = _EXTRACTED_ANSWER.search(JUDGE_PROMPT_TEMPLATE).group(1).strip()
 
 # Every line the OpenCode plugins report starts with this marker.
 _PLUGIN_MARKER = "[nemo-gym-plugin] "
@@ -202,11 +205,16 @@ def _last_assistant_text(response: NeMoGymResponse) -> str:
     return text
 
 
-def parse_judge_verdict(text: str) -> Tuple[bool, str, bool]:
-    """Parse a judge reply into (is_correct, extracted_answer, parsed_ok).
+def parse_judge_verdict(text: str, response: str = "") -> Tuple[bool, str, bool]:
+    """Parse a judge reply to the grading of response into (is_correct, extracted_answer, parsed_ok).
 
     The LAST 'correct: yes|no' wins: reasoning judges echo the template inside their think
     block, so a first-match parse grades the echo instead of the verdict.
+
+    A reply whose extracted answer is exactly the template's instruction for it (_JUDGE_TEMPLATE_ECHO) repeated the
+    template instead of grading, and is unparsed, unless response holds that line itself, which the judge may then
+    have extracted: its verdict counts. An extracted answer that only quotes part of the instruction, or adds to it, is
+    graded on its verdict.
     """
     matches = list(re.finditer(r"correct:\s*(yes|no)\b", text or "", re.IGNORECASE))
     if not matches:
@@ -214,10 +222,10 @@ def parse_judge_verdict(text: str) -> Tuple[bool, str, bool]:
 
     is_correct = matches[-1].group(1).lower() == "yes"
 
-    ans_matches = list(re.finditer(r"extracted_final_answer:\s*(.+?)(?:\n|$)", text or ""))
+    ans_matches = list(_EXTRACTED_ANSWER.finditer(text or ""))
     extracted = ans_matches[-1].group(1).strip() if ans_matches else ""
 
-    if extracted and _JUDGE_TEMPLATE_ECHO in extracted:
+    if extracted == _JUDGE_TEMPLATE_ECHO and _JUDGE_TEMPLATE_ECHO not in (response or ""):
         return False, "", False
 
     return is_correct, extracted, True
@@ -497,13 +505,20 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     judge_retry_delay_seconds: float = 30.0
     judge_retry_timeout_seconds: float = 120.0
     # Verify answers 500 once this many rollouts in a row fail to grade: the judge never answered, or never gave a
-    # parseable verdict (verify masks that row). It goes on answering 500 for each later rollout without a verdict
-    # until a verdict resets the count. The first 500 ends a relay run without route_failures_to_sidecar; otherwise
-    # each is a failure row. Guards the silent-starvation mode where a dead judge masks every sample and the run burns
-    # its wall producing nothing.
+    # parseable verdict (verify scores that row 0, or masks it, by unparseable_verdict_policy). It goes on answering
+    # 500 for each later rollout without a verdict until a verdict resets the count. The first 500 ends a relay run
+    # without route_failures_to_sidecar; otherwise each is a failure row. Guards the silent-starvation mode where a dead
+    # judge masks or zeroes every sample and the run burns its wall producing nothing.
     # Counted per ROLLOUT, not per attempt, so one transient burst cannot trip it. 0 disables.
     # With num_workers > 1, each worker counts the rollouts it graded, so the breaker trips in each worker separately.
     judge_max_consecutive_failures: int = 25
+    # What verify does with a rollout the judge gave no parseable verdict in any attempt; one that ended on its budget
+    # keeps that ending's kind and mask either way. "zero", the default, for evaluation: the row scores 0, unmasked, and
+    # the 0 is counted against the evaluation rather than the model (failure_kind judge_unparseable,
+    # failure_outcome_action count_as_zero, failure_outcome_attribution evaluation). "mask", which a training run sets:
+    # the reward measures nothing about the model, so the row is masked (mask_sample, and instance_config.mask_sample,
+    # which NeMo RL reads), and Gym's recovery judges it again. Named and valued as in webvoyager_judge.
+    unparseable_verdict_policy: Literal["zero", "mask"] = "zero"
     # Budget covers reasoning + final message combined. 2048 makes reasoning judges burn the
     # whole budget thinking, emitting no final message, which reads as an unparseable verdict.
     judge_max_output_tokens: int = 10240
@@ -572,9 +587,9 @@ class SearchVerifyResponse(BaseVerifyResponse):
     judge_attempts: int
     judge_time_taken: float
     # True when the reward is not a measurement of the answer: the session was lost before verify,
-    # or the judge gave no verdict (reward 0). Also true when the rollout ran out of budget rather
-    # than answering wrongly; that row keeps its judged reward. Gym's aggregate metrics leave masked
-    # rows out of the quality scores.
+    # or the judge gave no verdict with unparseable_verdict_policy "mask" (reward 0). Also true when the rollout ran
+    # out of budget rather than answering wrongly; that row keeps its judged reward. Gym's aggregate metrics leave
+    # masked rows out of the quality scores. A masked row also sets instance_config.mask_sample (_training_mask).
     mask_sample: bool = False
     # Whether grading reached a result: the judge's verdict, or the empty answer that needs none.
     # False for a lost session, a judge that gave no verdict and an episode scored 0 for its plugin log.
@@ -649,6 +664,18 @@ _NOT_GRADED: Dict[str, Any] = {
     "failure_outcome_action": None,
     "failure_outcome_attribution": None,
 }
+
+
+def _training_mask(body: SearchVerifyRequest, masked: bool) -> Dict[str, Any]:
+    """For a masked row, the request's instance_config with mask_sample set; nothing for another row.
+
+    NeMo RL masks a sample's loss by its instance_config.mask_sample rather than by the row's own mask_sample, so every
+    row this server masks sets both, as judge_failsafe does for the rows it answers with.
+    """
+    if not masked:
+        return {}
+    instance_config = getattr(body, "instance_config", None)
+    return {"instance_config": {**(instance_config if isinstance(instance_config, dict) else {}), "mask_sample": True}}
 
 
 async def _stop(sandbox: AsyncSandbox) -> None:
@@ -888,9 +915,9 @@ class SearchResourcesServer(SimpleResourcesServer):
         """Grade final_text against ground_truth. Returns a dict of result fields.
 
         Two failure modes are deliberately kept distinct: a judge that answered but could not be
-        parsed returns judge_parsed False, which verify masks as inconclusive, while a judge that
-        never answered is infrastructure noise and raises JudgeError so judge_failsafe routes the
-        row to the failures sidecar. Both count toward judge_max_consecutive_failures.
+        parsed returns judge_parsed False, which _grade scores 0 or masks (unparseable_verdict_policy),
+        while a judge that never answered is infrastructure noise and raises JudgeError so judge_failsafe
+        routes the row to the failures sidecar. Both count toward judge_max_consecutive_failures.
         """
         answer = re.sub(r"<think>.*?</think>", "", final_text or "", flags=re.DOTALL).strip()
 
@@ -913,7 +940,7 @@ class SearchResourcesServer(SimpleResourcesServer):
         started = time()
         last_error: Optional[str] = None
         # Did the judge ever actually reply? A judge that answers but cannot be parsed leaves a
-        # masked row in the rollouts (see verify); only a judge we could never reach is
+        # row scored 0 or masked in the rollouts (see _grade); only a judge we could never reach is
         # infrastructure noise worth routing to the failures sidecar.
         had_response = False
         for attempt in range(self.config.judge_max_attempts):
@@ -924,7 +951,7 @@ class SearchResourcesServer(SimpleResourcesServer):
                     self.config.judge_timeout_seconds if attempt == 0 else self.config.judge_retry_timeout_seconds
                 )
                 _judge_response, judge_text = await self._call_judge(judge_create_params, timeout_s)
-                is_correct, extracted, parsed_ok = parse_judge_verdict(judge_text)
+                is_correct, extracted, parsed_ok = parse_judge_verdict(judge_text, response=answer)
                 if parsed_ok:
                     self._judge_consecutive_failures = 0
                     return {
@@ -948,8 +975,8 @@ class SearchResourcesServer(SimpleResourcesServer):
             if attempt + 1 < self.config.judge_max_attempts:
                 await asyncio.sleep(max(0.0, self.config.judge_retry_delay_seconds))
 
-        # The rollout went ungraded either way. A verdict that never parsed leaves the quality metrics as quietly as a
-        # judge that never answered, since verify masks it, so both count toward the breaker.
+        # The rollout went ungraded either way, so both count toward the breaker: a verdict that never parsed scores the
+        # row 0 or masks it as quietly as a judge that never answered sends it to the failures sidecar.
         self._judge_consecutive_failures += 1
         outcome = "gave no parseable verdict in" if had_response else "unreachable after"
         print(
@@ -961,7 +988,7 @@ class SearchResourcesServer(SimpleResourcesServer):
 
         if had_response:
             # The judge talked to us every time and we could never read a verdict out of it. There
-            # is no grade to report: verify masks the row as inconclusive, so a regrade can revisit it.
+            # is no grade to report: _grade scores the row 0 or masks it, by unparseable_verdict_policy.
             return {
                 "reward": 0.0,
                 "extracted_final_answer": "",
@@ -1122,10 +1149,10 @@ class SearchResourcesServer(SimpleResourcesServer):
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
         """Gym's default aggregate metrics, which leave mask_sample rows out of the quality scores.
 
-        A masked row is either not a measurement (a lost session, a judge that gave no verdict) or
-        a rollout that ran out of budget, which keeps its judged reward. The flag stays on every
-        row, so a training consumer can mask on it and an analysis can split on it or recompute a
-        number over every row.
+        A masked row is either not a measurement (a lost session, a judge that gave no verdict under
+        unparseable_verdict_policy "mask") or a rollout that ran out of budget, which keeps its judged
+        reward. The flag stays on every row, so a training consumer can mask on it and an analysis can
+        split on it or recompute a number over every row.
         """
         masked = sum(1 for vr in body.verify_responses if vr.get("mask_sample"))
         if masked:
@@ -1155,7 +1182,8 @@ class SearchResourcesServer(SimpleResourcesServer):
         async with self.verifying(session_id, allow_missing=True) as verification:
             lost = self._lost_session_reason(request, verification)
             if lost is not None:
-                return SearchVerifyResponse(**(body.model_dump() | _NOT_GRADED | lost_session_verification(lost)))
+                lost_row = _NOT_GRADED | lost_session_verification(lost) | _training_mask(body, True)
+                return SearchVerifyResponse(**(body.model_dump() | lost_row))
             evidence = verification.retained
             if not isinstance(evidence, _VerifyEvidence):
                 # Read and copied while the sandbox still runs: it is stopped before the judge. A read that fails
@@ -1484,6 +1512,12 @@ class SearchResourcesServer(SimpleResourcesServer):
         call: unmasked, with evaluation_completed false, and with the outcome applied to it on the row, a 0 counted as
         the model's (failure_outcome_action count_as_zero, failure_outcome_attribution model). Gym counts it in the
         score, reports it under its failure_kind, settles it and never judges it again.
+
+        A rollout the judge gave no parseable verdict, unless it ended on its budget, follows
+        unparseable_verdict_policy: "zero" scores it 0 as the evaluation's (count_as_zero, attribution evaluation),
+        which Gym counts in the score, settles and does not judge again; "mask" masks it, and Gym judges it again from
+        its saved answer. Either way judge_parsed and evaluation_completed are false, so an identical retry of the verify
+        asks the judge again. Every masked grade also sets instance_config.mask_sample (_training_mask).
         """
         if plugin_log_fault is not None:
             failure_kind, failure_reason = plugin_log_fault
@@ -1506,13 +1540,17 @@ class SearchResourcesServer(SimpleResourcesServer):
         if not final_text.strip():
             # The agent produced no answer at all. That is a real zero, not judge noise, and
             # spending a judge call on an empty string would only add latency.
-            return _NOT_GRADED | {
-                "reward": 0.0,
-                "mask_sample": masked,
-                "failure_kind": failure_kind,
-                "failure_reason": failure_reason,
-                "evaluation_completed": True,
-            }
+            return (
+                _NOT_GRADED
+                | {
+                    "reward": 0.0,
+                    "mask_sample": masked,
+                    "failure_kind": failure_kind,
+                    "failure_reason": failure_reason,
+                    "evaluation_completed": True,
+                }
+                | _training_mask(body, masked)
+            )
 
         try:
             result = await self._judge_answer(
@@ -1525,12 +1563,20 @@ class SearchResourcesServer(SimpleResourcesServer):
             # inconclusive there.
             body.evaluation_completed = False
             raise
+        outcome_action = outcome_attribution = None
         if not result["judge_parsed"] and not masked:
-            # Without a verdict the reward measures nothing. A budget ending keeps its own kind, and judge_parsed and
-            # evaluation_completed record the missing verdict: recovery re-judges a judge_unparseable row from its
-            # saved answer, with no ending to mask it again.
-            masked, failure_kind = True, JUDGE_UNPARSEABLE
+            # Without a verdict the reward measures nothing about the answer, and the judge failed rather than the
+            # model. An evaluation counts it as a 0 against the evaluation, with its kind; a training run masks it. A
+            # budget ending keeps its own kind and mask, and judge_parsed and evaluation_completed record the missing
+            # verdict: recovery re-judges a masked judge_unparseable row from its saved answer, with no ending to mask
+            # it again.
+            failure_kind = JUDGE_UNPARSEABLE
             failure_reason = f"The judge gave no parseable verdict in {result['judge_attempts']} attempt(s)"
+            if self.config.unparseable_verdict_policy == "mask":
+                masked, failure_reason = True, f"{failure_reason}; masked"
+            else:
+                failure_reason = f"{failure_reason}; scored 0"
+                outcome_action, outcome_attribution = OutcomeAction.COUNT_AS_ZERO, FailureClass.EVALUATION
 
         return {
             "reward": result["reward"],
@@ -1543,9 +1589,9 @@ class SearchResourcesServer(SimpleResourcesServer):
             "failure_kind": failure_kind,
             "failure_reason": failure_reason,
             "evaluation_completed": result["judge_parsed"],
-            "failure_outcome_action": None,
-            "failure_outcome_attribution": None,
-        }
+            "failure_outcome_action": outcome_action,
+            "failure_outcome_attribution": outcome_attribution,
+        } | _training_mask(body, masked)
 
 
 if __name__ == "__main__":

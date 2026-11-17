@@ -25,11 +25,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.verification import JudgeError
+from resources_servers.browsecomp_advanced_harness.judge_prompt import JUDGE_PROMPT_TEMPLATE
 from resources_servers.opencode_search.app import (
+    _JUDGE_TEMPLATE_ECHO,
     SearchResourcesServer,
     SearchResourcesServerConfig,
     SearchVerifyRequest,
@@ -78,13 +81,42 @@ class TestParseJudgeVerdict:
         """'correct: yesterday' is not a yes verdict."""
         assert parse_judge_verdict("correct: yesterday the model answered") == (False, "", False)
 
+    def test_the_echo_is_the_templates_whole_line_for_the_extracted_answer(self):
+        """Read from the template, so the guard cannot drift from it."""
+        assert f"\nextracted_final_answer: {_JUDGE_TEMPLATE_ECHO}\n" in JUDGE_PROMPT_TEMPLATE
+        assert _JUDGE_TEMPLATE_ECHO.startswith("The final exact answer extracted from the [response]. ")
+
     def test_template_echo_is_unparsed(self):
-        """A judge that repeats the template instead of grading must not score the row."""
-        text = (
-            "extracted_final_answer: The final exact answer extracted from the [response]. "
-            "Put the extracted answer as 'None'...\ncorrect: yes"
-        )
+        """A judge that repeats the template's line instead of grading must not score the row."""
+        text = f"extracted_final_answer: {_JUDGE_TEMPLATE_ECHO}\ncorrect: yes"
+        assert parse_judge_verdict(text, response="Exact Answer: Paris") == (False, "", False)
         assert parse_judge_verdict(text) == (False, "", False)
+
+    @pytest.mark.parametrize(
+        "extracted",
+        [
+            # Part of the template's line, as a judge that cut it short gives it.
+            "The final exact answer extracted from the [response]. Put the extracted answer as 'None'...",
+            # The template's sentence with more after it, as from a response that quotes it.
+            "The final exact answer extracted from the [response] is Paris",
+            _JUDGE_TEMPLATE_ECHO + " Paris",
+        ],
+        ids=["part_of_the_line", "sentence_and_more", "line_and_more"],
+    )
+    def test_an_extracted_answer_that_is_not_exactly_the_template_line_is_graded(self, extracted):
+        """Only the template's whole line is an echo: anything else the judge extracted is graded on its verdict."""
+        text = f"extracted_final_answer: {extracted}\nreasoning: differs\ncorrect: no"
+        assert parse_judge_verdict(text, response="Exact Answer: Paris") == (False, extracted, True)
+
+    def test_an_answer_that_is_the_template_line_is_graded_on_the_verdict(self):
+        """When the response holds the template's line itself, a judge that extracts it has graded it: the verdict
+        counts, rather than the row leaving the score as a judge failure."""
+        text = f"extracted_final_answer: {_JUDGE_TEMPLATE_ECHO}\nreasoning: not an answer\ncorrect: no"
+        assert parse_judge_verdict(text, response=f"Exact Answer: {_JUDGE_TEMPLATE_ECHO}") == (
+            False,
+            _JUDGE_TEMPLATE_ECHO,
+            True,
+        )
 
     def test_case_insensitive(self):
         is_correct, _, parsed_ok = parse_judge_verdict("Correct: YES")
@@ -193,6 +225,25 @@ class TestJudgeRetryLadder:
         """By default verify answers 500 once 25 rollouts in a row are left without a verdict."""
         assert SearchResourcesServerConfig.model_fields["judge_max_consecutive_failures"].default == 25
 
+    def test_a_verdict_that_never_parses_scores_0_unless_a_run_masks_it(self):
+        """unparseable_verdict_policy is "zero", for evaluation, unless a run sets "mask", as training does; no other
+        value is accepted."""
+        assert SearchResourcesServerConfig.model_fields["unparseable_verdict_policy"].default == "zero"
+        settings = dict(
+            host="0.0.0.0",
+            port=0,
+            entrypoint="app.py",
+            name="opencode_search",
+            sandbox_provider="opensandbox",
+            sandbox_config={},
+            sandbox_image="image",
+            judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
+        )
+        masking = SearchResourcesServerConfig(**settings, unparseable_verdict_policy="mask")
+        assert masking.unparseable_verdict_policy == "mask"
+        with pytest.raises(ValidationError, match="unparseable_verdict_policy"):
+            SearchResourcesServerConfig(**settings, unparseable_verdict_policy="drop")
+
 
 def _verify_request(**extra) -> SearchVerifyRequest:
     return SearchVerifyRequest.model_validate(
@@ -265,6 +316,8 @@ class TestMaskedTerminalFailureKinds:
         assert verified.reward == 1.0
         assert verified.failure_kind == kind
         assert verified.failure_reason
+        # Where NeMo RL reads the mask: without it, a training run would train on the capped run's reward.
+        assert verified.instance_config == {"mask_sample": True}
 
     @pytest.mark.parametrize("reward", [0.0, 1.0])
     async def test_normal_ending_has_no_failure_fields(self, monkeypatch, reward):
@@ -277,6 +330,8 @@ class TestMaskedTerminalFailureKinds:
         assert verified.reward == reward
         assert verified.failure_kind is None
         assert verified.failure_reason is None
+        assert (verified.failure_outcome_action, verified.failure_outcome_attribution) == (None, None)
+        assert getattr(verified, "instance_config", None) is None
 
 
 # A search, as the search plugin in a sandbox sends it to the proxy: one JSON-RPC tool call.

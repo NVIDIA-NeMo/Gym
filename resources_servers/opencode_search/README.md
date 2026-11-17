@@ -18,13 +18,25 @@ Reward is 1.0 for a `correct: yes` verdict, else 0.0. Four cases are deliberatel
 | case | outcome |
 | --- | --- |
 | agent produced no answer | reward 0.0, no judge call spent |
-| judge answered but the verdict could not be parsed | retried; a parse that never succeeds is masked (`mask_sample`, `failure_kind: judge_unparseable` unless the run ended on its budget), not a measured zero |
+| judge answered but the verdict could not be parsed | retried; a parse that never succeeds scores 0.0, unmasked, as a 0 counted against the evaluation rather than the model (`failure_kind: judge_unparseable`), or is masked with `unparseable_verdict_policy: mask`, which training sets (see [Training](#training)); a run that ended on its budget keeps that ending's kind and mask either way |
 | judge never answered (endpoint down) | `JudgeError` → `judge_failsafe` → failures sidecar, not a fabricated zero |
 | an episode's plugin log is missing, unsafe to read or lacks a required line | reward 0.0, no judge call spent, counted as the model's 0 (see [Plugin log](#sessions)) |
 
 The verdict parser takes the LAST `correct: yes|no` match: reasoning judges echo the rubric inside
-their think block, and a first-match parse grades the echo. A reply that echoes the template instead
-of grading counts as unparsed.
+their think block, and a first-match parse grades the echo. A reply whose extracted answer is exactly
+the template's own line for it ("The final exact answer extracted from the [response]. Put the
+extracted answer as 'None' ...") repeated the template instead of grading, and counts as unparsed,
+unless the graded answer holds that line itself. An extracted answer that only quotes part of that
+line, or adds to it, is graded on its verdict.
+
+A verdict that never parses scores the row 0 by default (`unparseable_verdict_policy: zero`, for
+evaluation): `reward` 0.0, `mask_sample` false, `evaluation_completed` and `judge_parsed` false,
+`failure_kind: judge_unparseable`, a `failure_reason` that gives the attempts, and the applied outcome
+`failure_outcome_action: count_as_zero` with `failure_outcome_attribution: evaluation`. Gym counts it in
+the score, as a wrong answer was counted before, reports it under `judge_unparseable` in the coverage's
+`counted_zero_kinds`, and counts it as an evaluation-side fault in the acceptance gate, so a judge that
+often gives no verdict fails the gate rather than lowering the score unseen. Gym does not judge such a
+row again; an identical retry of its verify asks the judge again.
 
 Each of the `judge_max_attempts` attempts (4 by default) is one `call_judge`, which sends the request
 up to three times on a timeout, a lost connection or a 408, 429 or 5xx reply, with at most 2 s and then
@@ -36,33 +48,34 @@ also sends a timed-out or refused request again until `global_aiohttp_internal_r
 (600 s by default) is spent, which stretches that to about two hours.
 
 Both judge failures count toward `judge_max_consecutive_failures` (default 25, counted by each worker; 0
-turns it off): once that many rollouts in a row are left without a verdict, verify answers 500 rather
-than masking every remaining row, and a verdict starts the count again. Changed: a reply without a
-parseable verdict now counts too; before, only a judge that never answered counted, and a reply without
-a verdict scored the row 0, as a wrong answer. The server does not refuse seeds after a trip: each later
-rollout whose judge also fails runs its agent and then answers 500, until a verdict resets the count. On
-the relay pairing that 500 fails the agent's `/run`: with `route_failures_to_sidecar` off (the default)
-the first one ends the run, and with it on each becomes a failures-sidecar row. On an episode session
-each becomes a non-terminal failure row, and collection continues. Watch the failure rows for judge
-failures.
+turns it off), under either `unparseable_verdict_policy`: once that many rollouts in a row are left
+without a verdict, verify answers 500 rather than scoring 0 or masking every remaining row, and a verdict
+starts the count again. Changed: a reply without a parseable verdict now counts too; before, only a judge
+that never answered counted, and a reply without a verdict scored the row 0, as a wrong answer, with no
+`failure_kind`. The server does not refuse seeds after a trip: each later rollout whose judge also fails
+runs its agent and then answers 500, until a verdict resets the count. On the relay pairing that 500
+fails the agent's `/run`: with `route_failures_to_sidecar` off (the default) the first one ends the run,
+and with it on each becomes a failures-sidecar row. On an episode session each becomes a non-terminal
+failure row, and collection continues. Watch the failure rows for judge failures.
 
 `inconclusive_verification_retries`, which `AGENTS.md` asks for when verification starts sandboxes,
 does not apply: verify starts no sandbox of its own, and an episode's plugin log exists only in the
 sandbox the agent ran in, which cannot be replaced. The judge's own attempts are the grading retry, and
-a plugin log that cannot be read answers 500, so the episode fails ungraded and runs again on resume.
-Neither outcome is recorded as a measured 0; a plugin log that was read, or found missing or unsafe to
-read, is a result about the run, and one that fails the check scores 0 (see Sessions).
+a plugin log that cannot be read answers 500, so the episode fails ungraded and runs again on resume. A
+plugin log that was read, or found missing or unsafe to read, is a result about the run, and one that
+fails the check scores 0 (see Sessions).
 
 Every verify response carries `evaluation_completed`: true when grading reached a result (a verdict, or
 an empty answer), false when the judge gave no verdict or never answered, when the session was lost and
 when an episode was scored 0 for its plugin log. A rollout that ended on its budget keeps its judged
 reward and is masked, with the ending's `failure_kind`; when the judge gave it no verdict, it keeps that
-kind, with `judge_parsed` and `evaluation_completed` false. Verify masks the endings `max_iteration`, `context_window` and
-`agent_timed_out` when the verify body's `opencode_terminal_reason` names one. `opencode_sandboxed_agent`
-sends only `max_iteration` or `context_window`, read from the turn-budget plugin's lines in its run
-output; on an episode session with `plugin_log_path` set, verify reads them from the plugin log
-instead (see Sessions). Gym's aggregate metrics leave masked rows out of the quality scores; the
-reward stays on each row.
+kind, with `judge_parsed` and `evaluation_completed` false. Verify masks the endings `max_iteration`,
+`context_window` and `agent_timed_out` when the verify body's `opencode_terminal_reason` names one.
+`opencode_sandboxed_agent` sends only `max_iteration` or `context_window`, read from the turn-budget
+plugin's lines in its run output; on an episode session with `plugin_log_path` set, verify reads them
+from the plugin log instead (see Sessions). Gym's aggregate metrics leave masked rows out of the quality
+scores; the reward stays on each row. Every row verify masks also sets `instance_config.mask_sample`
+(see [Training](#training)).
 
 A verify that grades a saved answer again (`gym eval reverify`, which `REVERIFY_MODE: STATELESS` allows,
 or recovery re-judging a row whose judge failed) cannot mask a budget ending, on either pairing: its
@@ -71,9 +84,36 @@ log. A row that ended on its budget comes back from such a verify graded and unm
 reason it cannot score an episode 0 for its plugin log: `gym eval reverify` grades such a row's saved
 answer. Recovery never re-judges one.
 
-Gym judges a `judge_unparseable` row again from its saved answer, on either pairing, at the end of
-the collection and when the run resumes, and replaces it once the judge gives a verdict. Changed:
-before, a reply without a verdict scored the row 0, and no re-judge picked it up.
+Gym judges a masked `judge_unparseable` row (`unparseable_verdict_policy: mask`) again from its saved
+answer, on either pairing, at the end of the collection and when the run resumes, and replaces it once
+the judge gives a verdict. A row scored 0 under the default policy is settled, and no re-judge picks it
+up, as none picked up the 0 such a row scored before.
+
+### Training
+
+Training keeps the relay pairing. A rollout the judge gave no verdict says nothing about the model, so
+a training run masks it rather than train on a 0: set `unparseable_verdict_policy: mask` on this server.
+In NeMo RL's environment config:
+
+```yaml
+env:
+  nemo_gym:
+    search_browsecomp_resources_server:
+      resources_servers:
+        opencode_search:
+          unparseable_verdict_policy: mask
+```
+
+or `++search_browsecomp_resources_server.resources_servers.opencode_search.unparseable_verdict_policy=mask`
+on a Gym rollout collection (both BrowseComp presets name the server instance
+`search_browsecomp_resources_server`). Such a row then has `mask_sample` true,
+`failure_kind: judge_unparseable`, a `failure_reason` that ends in "masked", and no applied outcome.
+NeMo RL masks a sample's loss by its `instance_config.mask_sample`, not by the row's own `mask_sample`,
+so every row this server masks also sets that field, over the request's other `instance_config` fields,
+as `judge_failsafe` does for its rows: a rollout that ended on its budget, a judge without a verdict
+under this policy and a lost session. A row whose judge never answered is masked the same way by
+`judge_failsafe`. A run that leaves the default trains on such a rollout as a 0. The judge's failures
+count toward `judge_max_consecutive_failures` under either policy, so a dead judge still stops the run.
 
 ## Sessions
 
@@ -220,8 +260,8 @@ the provider reclaims it after `ttl_s`. On this path:
   response as a `session_release_failed` failure, and the sandbox stays registered until a later stop or
   shutdown.
 
-The grading semantics above (masked verdict-less rows, the breaker's count, `evaluation_completed`) and
-verify-once with 409 apply on this path too.
+The grading semantics above (verdict-less rows under `unparseable_verdict_policy`, the breaker's count,
+`evaluation_completed`, the training mask) and verify-once with 409 apply on this path too.
 
 A session gets no tools from this server: the BrowseComp session preset sets
 `resources_tool_transports: []`, and OpenCode's web tools reach the web from the sandbox. The web-search
@@ -304,3 +344,6 @@ none of them, still resumes a run started before these settings existed. See
 (relay) and `benchmarks/browsecomp/configs/browsecomp_opencode_sessions.yaml` (episode sessions). The
 session preset takes `episode_export_dir` from `BROWSECOMP_OPENCODE_EXPORT_DIR`, the variable that also
 sets the agent's `export_dir`, and leaves `episode_export_copy_dir` to a run's overlay.
+
+`unparseable_verdict_policy` decides a rollout the judge gave no verdict, on either pairing: `zero` (the
+default, for evaluation) or `mask` (for training; see [Training](#training)). Neither preset sets it.

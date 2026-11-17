@@ -123,7 +123,7 @@ whatever export the run left, unless its `/run` fails:
 | `/verify` cannot read the plugin log | Not applicable: the agent reads its run output | `/verify` answers 500 when the read fails, times out or comes back cut short or malformed: a non-terminal failure row |
 | The run budget runs out | Graded, not masked | The same |
 | The episode outlives `default_episode_timeout_seconds` | No episode deadline | A non-terminal failure row ("Episode timed out") |
-| The judge gives no verdict in any attempt | Masked, `judge_unparseable` (a run that ended on its budget keeps that kind) | The same |
+| The judge gives no verdict in any attempt | Scored 0, unmasked, `judge_unparseable`, as a 0 counted against the evaluation (`failure_outcome_action: count_as_zero`, `failure_outcome_attribution: evaluation`); masked instead with `unparseable_verdict_policy: mask`, which training sets (see [Training](#training)). A run that ended on its budget keeps that kind and mask | The same |
 | The judge never answers | A `judge_failed` failures-sidecar row | The same |
 | `judge_max_consecutive_failures` rollouts in a row get no verdict | `/verify` answers 500 for that rollout and each later one without a verdict, until a verdict resets the count, so the agent's `/run` answers 500: a failure row | The same `/verify` 500: a non-terminal failure row |
 
@@ -134,6 +134,17 @@ without it, the first one ends the run. A session-preset failure is a failure ro
 kind for a `/verify` that failed, such as `provider_io_timeout` for a plugin-log read that timed out, the session row
 carries it in its `_ng_failure_events`, as the cause of the failed episode. A row scored 0 for its plugin log is no
 failure row: it carries its kind in `failure_kind` and the reason in `failure_reason`.
+
+### Training
+
+Training keeps the relay preset. Both presets score a rollout the judge gave no verdict 0, which an evaluation counts
+in its score and its acceptance gate counts as an evaluation-side fault. That 0 says nothing about the model, so a
+training run masks the rollout instead: set `unparseable_verdict_policy: mask` on the Resources Server, in NeMo RL's
+environment config (under `env.nemo_gym`) or with
+`++search_browsecomp_resources_server.resources_servers.opencode_search.unparseable_verdict_policy=mask` on a Gym
+rollout collection (see `resources_servers/opencode_search/README.md`). Every row the Resources Server masks, a run that
+ended on its budget included, also sets `instance_config.mask_sample`, where NeMo RL reads the mask that keeps a sample
+out of the loss.
 
 ### Time limits
 
@@ -147,7 +158,7 @@ The session preset's limits, from admission to cleanup:
 | Run | `timeout: 21600`, from when the session's one activation holds a concurrency slot | `opencode_agent` | OpenCode is stopped; the `incomplete` response is graded on what the run produced, not masked |
 | Agent close | `session_close_timeout_seconds: 300` for each phase of the close, and `cleanup_timeout_seconds` for the whole close | `opencode_agent`; `single_agent_turn_legacy` for the whole close | The close fails, and the episode with it, before `/verify`: a non-terminal failure row |
 | Episode | `default_episode_timeout_seconds: 25200`, from the seed through `/verify` | `single_agent_turn_legacy` | A non-terminal failure row ("Episode timed out"); the cleanup then closes both sessions |
-| Judge | `judge_timeout_seconds: 300` for each request of the first attempt and `judge_retry_timeout_seconds: 120` for each request of a later one, up to `judge_max_attempts: 4`, `judge_retry_delay_seconds: 30` apart. Each attempt is one `call_judge`, which tries up to 3 times after a timeout, a lost connection, 408, 429 or 5xx | `opencode_search`, in `/verify` | No verdict in any attempt: masked, `judge_unparseable`. No reply at all: a `judge_failed` failures-sidecar row |
+| Judge | `judge_timeout_seconds: 300` for each request of the first attempt and `judge_retry_timeout_seconds: 120` for each request of a later one, up to `judge_max_attempts: 4`, `judge_retry_delay_seconds: 30` apart. Each attempt is one `call_judge`, which tries up to 3 times after a timeout, a lost connection, 408, 429 or 5xx | `opencode_search`, in `/verify` | No verdict in any attempt: scored 0 as `judge_unparseable`, or masked with `unparseable_verdict_policy` set to `mask`. No reply at all: a `judge_failed` failures-sidecar row |
 | Cleanup | `cleanup_timeout_seconds: 600` for each step after the episode: the agent's close if it is still open, then the resources server's | `single_agent_turn_legacy` | Logged ("Episode cleanup timed out") and recorded in the row's failure report as `session_release_failed`; the row keeps its result, and a sandbox still running is stopped when the server shuts down or reclaimed after `ttl_s` |
 | Sandbox lifetime | `sandbox_config.ttl_s: 27000` | The sandbox provider | The provider reclaims the sandbox |
 
