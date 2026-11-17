@@ -28,7 +28,7 @@ from nemo_gym.eval.recovery.planner import decide_from_collected
 from nemo_gym.eval.recovery.trials import final_zero_trials
 from tests.helpers.recovery_health import _gate, _run
 from tests.unit_tests.eval.recovery.test_recovery_health_binding import collect, save_rows, setup
-from tests.unit_tests.orchestration.test_trajectory_evidence_reporting import _simulated_user_shape
+from tests.unit_tests.eval.recovery.test_trajectory_evidence_reporting import _simulated_user_shape
 
 
 def _reject(call: dict, *, status: int | None, kind: str | None = "model_request_error", event_id: str = "ctx-1"):

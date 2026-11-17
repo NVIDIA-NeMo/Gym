@@ -3,7 +3,7 @@
 """The row ``GymnasiumAgent.run`` returns reaches the collector and the trial gate as observed.
 
 Each row is the agent's own ``model_dump(mode="json")`` from a run with fake model and environment servers, kept in
-``fixtures/gymnasium-agent-rows-fake-servers.json``; the agent's tests check that it still returns exactly these rows,
+``tests/unit_tests/fixtures/gymnasium-agent-rows-fake-servers.json``; the agent's tests check that it still returns exactly these rows,
 so this core test needs no server code. The model server's capture of the call is written to a ``CaptureStore`` from
 the same response the fake model server returned, and ``enrich_run_result`` joins the agent's observations to it and
 projects ``ng_trajectory``, as ``ng_collect_rollouts`` does. The row is then written to a job dir and read by the
@@ -27,7 +27,7 @@ from tests.unit_tests.eval.recovery.test_verifier_recorded_trial_coverage import
 
 
 ROLLOUT_ID = "handoff_0"
-FAKE_SERVER_ROWS = Path(__file__).parent / "fixtures/gymnasium-agent-rows-fake-servers.json"
+FAKE_SERVER_ROWS = Path(__file__).resolve().parents[2] / "fixtures/gymnasium-agent-rows-fake-servers.json"
 
 
 async def _collected_run(tmp_path, case: str):

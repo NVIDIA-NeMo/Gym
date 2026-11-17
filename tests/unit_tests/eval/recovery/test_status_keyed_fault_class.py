@@ -23,7 +23,7 @@ last captured call failed. A trial whose agent run failed but whose answer was g
 import pytest
 
 from tests.helpers.recovery_health import _gate, _run
-from tests.unit_tests.orchestration.test_trajectory_evidence_reporting import _simulated_user_shape
+from tests.unit_tests.eval.recovery.test_trajectory_evidence_reporting import _simulated_user_shape
 
 
 def _fail_last_request(call: dict, *, status: int | None, event_id: str = "rejected-1") -> None:
