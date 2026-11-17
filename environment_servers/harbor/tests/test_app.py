@@ -127,6 +127,22 @@ def uploaded_file(sandbox, name: str) -> list[bytes]:
 
 
 class TestRewardFile:
+    def test_non_numeric_keys_beside_a_numeric_reward_are_metrics_not_errors(self, tmp_path):
+        # Harbor keeps reward.json as written and the benchmark reads `reward`; a judge that writes a nested
+        # `details` block or a `reason` string beside the score keeps its score here too.
+        (tmp_path / "reward.json").write_text(
+            json.dumps({"reward": 1.0, "details": {"match": True, "samples": [1, 2]}, "reason": "ok", "ssim": 0.5})
+        )
+        rewards, problem = parse_reward_file(tmp_path)
+        assert problem is None and rewards == {"reward": 1.0, "ssim": 0.5}
+        assert select_reward(rewards) == 1.0
+        # Without a numeric `reward` every key is a component, so a non-numeric key is still a malformed file.
+        (tmp_path / "reward.json").write_text(json.dumps({"accuracy": 1.0, "details": {"a": 1}}))
+        rewards, problem = parse_reward_file(tmp_path)
+        assert rewards is None and "'details' is not a finite number" in problem
+        (tmp_path / "reward.json").write_text(json.dumps({"reward": True, "details": {"a": 1}}))
+        assert parse_reward_file(tmp_path)[0] is None
+
     def test_text_and_json(self, tmp_path):
         (tmp_path / "reward.txt").write_text("0.5\n")
         assert parse_reward_file(tmp_path) == ({"reward": 0.5}, None)
@@ -290,6 +306,25 @@ class TestEpisode:
         assert payload["episode_id"] == {"rollout_id": "r1", "attempt": 0}
         assert "sb-1" not in response.text and "sandbox" not in payload["result"]
         assert sandbox.stopped
+
+    @pytest.mark.parametrize("context", [None, {}, {"agent": {"values": {"tag": "figure"}}}])
+    @pytest.mark.parametrize("nested", [False, True], ids=["flat", "task_data"])
+    def test_run_rejects_unsupported_agent_context_before_setup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, context: object, nested: bool
+    ) -> None:
+        server, task, sandbox, created = make_server(tmp_path, monkeypatch)
+        body = episode(task).model_dump(mode="json")
+        task_input = body["task"]["task_input"]
+        target = task_input["task_data"] if nested else task_input
+        target["agent_context"] = context
+
+        with TestClient(server.setup_webserver()) as client:
+            response = client.post("/run", json=body)
+
+        assert response.status_code == 422, response.text
+        assert "agent_context" in response.text
+        assert created == [] and sandbox.execs == []
+        assert server.server_client.calls == []
 
     async def test_a_flat_single_turn_row_runs_as_the_canonical_one(self, tmp_path, monkeypatch):
         """Review (CI bot, round 34): a single-turn `/run` request with the task fields beside
@@ -499,6 +534,26 @@ class TestEpisode:
         assert spec.metadata["harbor_task"] == "hello"
         assert spec.metadata["nemo_gym_environment_server"] == "harbor_environment_server"
         assert spec.user is None  # no USER in the Dockerfile and no [agent].user: the image's own default
+
+    def test_tb4_overlay_leaves_the_shared_s3_bucket_out_of_agent_and_verifier(self, tmp_path, monkeypatch):
+        """The Terminal-Bench 4 deployment overlay opts every sandbox out of the cell's shared /mnt/s3-data bucket."""
+        root = Path(__file__).resolve().parents[3]
+        merged = OmegaConf.to_container(
+            OmegaConf.merge(
+                OmegaConf.load(root / "nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml"),
+                OmegaConf.load(root / "environments/harbor/terminal_bench_4/harbor_sandbox.yaml"),
+            ),
+            resolve=False,
+        )
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+        monkeypatch.setattr("environment_servers.harbor.sandboxes.get_global_config_dict", lambda: merged)
+        verifier_environment = HarborEnvironment(docker_image="org/verifier:1")
+        for spec in (
+            server._sandbox_spec(task, "/app"),
+            server._sandbox_spec(task, None, environment=verifier_environment, role="verifier"),
+        ):
+            assert spec.metadata["nemo.nvidia.com/s3-hostpath"] == "false"
+            assert spec.metadata["sandbox-api"] == "opensandbox-sdk"
 
     def test_sandbox_spec_user_is_the_dockerfile_user_for_the_task_image_only(self, tmp_path, monkeypatch):
         server, task, _, _ = make_server(tmp_path, monkeypatch, dockerfile="FROM ubuntu:24.04\nUSER agent\n")
@@ -1713,6 +1768,77 @@ class TestVerify:
         assert result.failure_kind == "harbor:missing_reward"
         assert "pytest exploded" in result.failure_reason
         assert result.verifier_return_code == 1
+
+    async def separately_verified(self, tmp_path, monkeypatch, verifier):
+        """An episode whose turn verifies in a fresh sandbox (``verifier``), the agent's being an ``AgentSandbox``."""
+        toml = TASK_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n')
+        toml += '\n[verifier.environment]\ndocker_image = "org/verifier:1"\n'
+        server, task, _, _ = make_server(tmp_path, monkeypatch, AgentSandbox(), toml=toml)
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+
+        async def create_verifier(task, *, episode_key=None):
+            server._sandboxes[f"{episode_key}/verifier"] = verifier
+            return verifier
+
+        monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
+        return await run_episode(server, task)
+
+    async def test_exit_75_without_a_reward_is_masked_only_on_the_separate_path(self, tmp_path, monkeypatch):
+        # EX_TEMPFAIL from a separately run test.sh and no valid reward: the verifier could not grade (judge
+        # service or asset download unavailable), so the rollout is masked with the stdout tail as the reason.
+        unavailable = {"test-stdout.txt": "verifier unavailable: judge route HTTP 403 (not available for this key)"}
+        exit_75 = SandboxExecResult(stdout="", stderr="", return_code=75)
+        response = await self.separately_verified(
+            tmp_path, monkeypatch, FakeSandbox(verifier_files=unavailable, test_result=exit_75)
+        )
+        result = response.result
+        assert result.reward == 0.0 and result.mask_sample is True and result.verifier_mode == "separate"
+        assert result.failure_kind == "harbor:verifier_unavailable"
+        assert result.verifier_return_code == 75
+        assert "exited 75" in result.failure_reason and "judge route HTTP 403" in result.failure_reason
+        # A malformed reward file beside the code is the verifier's own: still masked, not an invalid reward.
+        response = await self.separately_verified(
+            tmp_path,
+            monkeypatch,
+            FakeSandbox(verifier_files={**unavailable, "reward.txt": "maybe"}, test_result=exit_75),
+        )
+        assert response.result.mask_sample is True
+        assert response.result.failure_kind == "harbor:verifier_unavailable"
+        # A valid written reward wins over the exit code.
+        response = await self.separately_verified(
+            tmp_path,
+            monkeypatch,
+            FakeSandbox(verifier_files={"reward.json": json.dumps({"reward": 1})}, test_result=exit_75),
+        )
+        assert response.result.reward == 1.0 and response.result.failure_kind is None
+        # Any other nonzero exit without a reward is a measured 0 on either path: the agent can cause those.
+        response = await self.separately_verified(
+            tmp_path,
+            monkeypatch,
+            FakeSandbox(
+                verifier_files={"test-stdout.txt": "curl: (22) 429 Too Many Requests"},
+                test_result=SandboxExecResult(stdout="", stderr="", return_code=22),
+            ),
+        )
+        assert response.result.mask_sample is False and response.result.failure_kind == "harbor:missing_reward"
+        # A malformed reward with an ordinary exit is the ordinary invalid reward.
+        response = await self.separately_verified(
+            tmp_path,
+            monkeypatch,
+            FakeSandbox(verifier_files={"reward.txt": "maybe"}, test_result=SandboxExecResult("", "", 1)),
+        )
+        assert response.result.mask_sample is False and response.result.failure_kind == "harbor:invalid_reward"
+        # In the agent's sandbox (shared mode) the code is not trusted: a measured 0, as on any other exit, with
+        # the ignored code in the reason.
+        _, _, _, response = await self.verified(
+            tmp_path, monkeypatch, FakeSandbox(verifier_files=unavailable, test_result=exit_75)
+        )
+        result = response.result
+        assert result.mask_sample is False and result.reward == 0.0 and result.verifier_mode == "shared"
+        assert result.failure_kind == "harbor:missing_reward" and result.verifier_return_code == 75
+        assert "exited 75 in the agent's sandbox" in result.failure_reason
 
     async def test_invalid_reward_scores_zero(self, tmp_path, monkeypatch):
         sandbox = FakeSandbox(verifier_files={"reward.txt": "maybe"})

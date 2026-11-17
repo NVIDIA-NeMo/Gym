@@ -59,10 +59,10 @@ from nemo_gym.server_runtime.base_resources_server import (  # noqa: E402
 from nemo_gym.server_runtime.base_server import SimpleServer  # noqa: E402
 from nemo_gym.server_runtime.mcp_auto_exposure import (  # noqa: E402
     TOKEN_HEADER,
-    _to_result,
     bind_route,
     install_auto_exposure,
     maybe_auto_expose,
+    to_call_tool_result,
 )
 from nemo_gym.server_runtime.request_handling.disconnect import ClientDisconnectCancellationMiddleware  # noqa: E402
 from nemo_gym.server_runtime.request_handling.exception_handling import ExceptionHandlingMiddleware  # noqa: E402
@@ -460,7 +460,7 @@ def test_non_json_2xx_response_passes_through_as_text():
 
 
 def test_tool_output_images_become_image_content_after_the_text():
-    result = _to_result(
+    result = to_call_tool_result(
         {
             "ok": True,
             "tool_output_images": [
@@ -497,14 +497,14 @@ def test_tool_output_images_keep_the_structured_content_that_an_output_schema_re
         ],
     }
 
-    result = _to_result(payload, output_schema={"type": "object"})
+    result = to_call_tool_result(payload, output_schema={"type": "object"})
 
     assert result.structuredContent == {"ok": True}
     assert [content.type for content in result.content] == ["text", "image"]
 
 
 def test_a_result_without_images_keeps_its_structured_content():
-    assert _to_result({"ok": True}).structuredContent == {"ok": True}
+    assert to_call_tool_result({"ok": True}).structuredContent == {"ok": True}
 
 
 def test_sequential_calls_keep_sessions_isolated_and_ordered():

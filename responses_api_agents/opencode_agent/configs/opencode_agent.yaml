@@ -29,6 +29,7 @@ opencode_agent:
       # (*_sha256), which is checked inside the sandbox.
       sandbox_ripgrep_path: null  # e.g. ripgrep 15.1.0, the build OpenCode 1.17.11 downloads
       sandbox_ripgrep_sha256: null
+      sandbox_ripgrep_download: false  # true: without rg, OpenCode downloads one on demand instead of setup failing
       sandbox_plugin_dependencies_path: null  # tar of package.json, package-lock.json and node_modules
       sandbox_plugin_dependencies_sha256: null
       export_dir: null  # absolute sandbox directory outside the workdir; keeps OpenCode session exports after close

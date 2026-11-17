@@ -1413,6 +1413,24 @@ class TestRolloutCollection:
             "response_status": "completed",
         }
 
+    def test_trajectory_model_call_carries_the_captured_agent_instance_and_kind(self) -> None:
+        row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        result = {
+            "ng_model_call_capture": {
+                "calls": [
+                    {"model_call_id": "named", "agent_instance": "judge.1", "agent_kind": "judge"},
+                    {"model_call_id": "unnamed"},
+                ]
+            }
+        }
+
+        trajectory = _build_trajectory_record(row, result)
+
+        assert [(call.model_call_id, call.agent_instance, call.agent_kind) for call in trajectory.model_calls] == [
+            ("named", "judge.1", "judge"),
+            ("unnamed", None, None),
+        ]
+
     def test_trajectory_keeps_each_captured_calls_total_duration(self) -> None:
         # A saved row keeps every captured call's start, end and total duration, a failed call's too, so a reader can
         # tell how long the model server took inside the agent's window.
@@ -3108,8 +3126,10 @@ class TestRolloutCollection:
 
         # Read the actual persisted rows as the recovery/health gate does. A policy zero remains measured and
         # settled despite evaluation_completed=False; a policy FAIL remains terminal and outside the score.
-        from nemo_gym.orchestration.recovery import decide_from_collected, metric_coverage, trial_faults
-        from tests.unit_tests.orchestration.test_evaluation_health import _run
+        from nemo_gym.eval.recovery.gate import metric_coverage
+        from nemo_gym.eval.recovery.planner import decide_from_collected
+        from nemo_gym.eval.recovery.trials import trial_faults
+        from tests.helpers.recovery_health import _run
 
         collected = _run(2).model_copy(update={"results": persisted, "failures": failures})
         decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
@@ -11180,6 +11200,36 @@ class TestValidateAgentNames:
         with pytest.raises(ValueError, match="exists but is not an agent instance"):
             RolloutCollectionHelper._validate_agent_names(self._rows("math_rs"), cfg)
 
+    def test_agent_type_points_at_its_instances(self) -> None:
+        """NVIDIA-NeMo/Gym#4725: `--agent simple_agent` names the agent type, not the instance."""
+        cfg = OmegaConf.create(
+            {
+                "ontology_simple_agent": {"responses_api_agents": {"simple_agent": {}}},
+                "other_simple_agent": {"responses_api_agents": {"simple_agent": {}}},
+            }
+        )
+        with pytest.raises(ValueError) as error:
+            RolloutCollectionHelper._validate_agent_names(self._rows("simple_agent"), cfg)
+        message = str(error.value)
+        assert "an agent type, not an instance; use 'ontology_simple_agent', 'other_simple_agent'" in message
+        assert "Agent instances in this run: 'ontology_simple_agent', 'other_simple_agent'" in message
+
+    def test_a_run_without_agent_instances_says_so(self) -> None:
+        cfg = self._cfg(extra={"math_rs": {"resources_servers": {"impl": {}}}})
+        with pytest.raises(ValueError, match="Agent instances in this run: none. "):
+            RolloutCollectionHelper._validate_agent_names(self._rows("simple_agent"), cfg)
+
+    def test_listed_agent_instances_are_capped_at_ten(self) -> None:
+        cfg = OmegaConf.create(
+            {f"env_{index:02d}_agent": {"responses_api_agents": {"simple_agent": {}}} for index in range(12)}
+        )
+        with pytest.raises(ValueError) as error:
+            RolloutCollectionHelper._validate_agent_names(self._rows("simple_agent"), cfg)
+        message = str(error.value)
+        assert "use 'env_00_agent', " in message and "'env_09_agent' and 2 more)" in message
+        assert "'env_10_agent'" not in message
+        assert "Agent instances in this run: 'env_00_agent', " in message and "'env_09_agent' and 2 more." in message
+
 
 # A merged config shaped like real ones: one RS instance, agents pointing at RSes via the
 # resources_server.name edge, plus a self-contained agent that declares no RS.
@@ -15506,6 +15556,124 @@ class TestRunRecordWriter:
                 delete_model_call_capture=True,
             )
         assert self._lines(run_dir / "rollouts-step_3.jsonl") == [written]
+
+    @pytest.mark.parametrize("scope_rollout_ids", [True, False])
+    async def test_a_caller_with_unique_ids_can_keep_them_in_a_recorded_shard(
+        self, tmp_path: Path, scope_rollout_ids: bool
+    ) -> None:
+        capture_dir = tmp_path / "capture"
+        global_config = {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)}
+        row = TestEnrichRunResult._row() | {ROLLOUT_ID_KEY_NAME: "gate-7"}
+        dispatched_ids: list[str] = []
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict=global_config)
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                dispatched_ids.append(maybe_rollout_id_from_run_body(examples[0]))
+                TestEnrichRunResult._store_call(capture_dir, dispatched_ids[0], "c1", "first")
+                future = Future()
+                future.set_result(
+                    _CompletedRollout(row=examples[0], result={"reward": 1.0, "response": {}}, rollout_latency_ms=1.0)
+                )
+                return iter([future])
+
+        run_dir = tmp_path / "run"
+        [completion] = list(
+            Helper().run_examples(
+                [row], record_output_dir=run_dir, record_shard="step_1", scope_rollout_ids=scope_rollout_ids
+            )
+        )
+        _, returned = await completion
+
+        # By default the shard scopes the id; opted out, the id the caller dispatched comes back unchanged.
+        [dispatched] = dispatched_ids
+        assert (dispatched == "gate-7") is not scope_rollout_ids
+        assert dispatched.endswith("gate-7")
+        assert maybe_rollout_id_from_run_body(returned) == dispatched
+        [written] = self._lines(run_dir / "rollouts-step_1.jsonl")
+        assert [call["model_call_id"] for call in written["ng_model_call_capture"]["calls"]] == ["c1"]
+
+    async def test_a_row_without_an_explicit_id_keeps_its_task_and_rollout_id_when_unscoped(
+        self, tmp_path: Path
+    ) -> None:
+        row = {key: value for key, value in TestEnrichRunResult._row().items() if key != ROLLOUT_ID_KEY_NAME}
+        dispatched_ids: list[str] = []
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict={})
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                dispatched_ids.append(maybe_rollout_id_from_run_body(examples[0]))
+                future = Future()
+                future.set_result(
+                    _CompletedRollout(row=examples[0], result={"reward": 1.0, "response": {}}, rollout_latency_ms=1.0)
+                )
+                return iter([future])
+
+        [completion] = list(
+            Helper().run_examples([row], record_output_dir=tmp_path, record_shard="s", scope_rollout_ids=False)
+        )
+        _, returned = await completion
+        expected = f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
+        assert dispatched_ids == [expected] and maybe_rollout_id_from_run_body(returned) == expected
+
+    @pytest.mark.parametrize("scope_rollout_ids", [True, False])
+    async def test_an_id_dispatched_again_shares_its_capture_only_when_unscoped(
+        self, tmp_path: Path, scope_rollout_ids: bool
+    ) -> None:
+        capture_dir = tmp_path / "capture"
+        global_config = {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)}
+        row = TestEnrichRunResult._row() | {ROLLOUT_ID_KEY_NAME: "gate-7"}
+        calls = iter(["call1", "call2"])
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict=global_config)
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                TestEnrichRunResult._store_call(
+                    capture_dir, maybe_rollout_id_from_run_body(examples[0]), next(calls), "x"
+                )
+                future = Future()
+                future.set_result(
+                    _CompletedRollout(row=examples[0], result={"reward": 1.0, "response": {}}, rollout_latency_ms=1.0)
+                )
+                return iter([future])
+
+        for shard in ("s1", "s2"):
+            [completion] = list(
+                Helper().run_examples(
+                    [row], record_output_dir=tmp_path / "run", record_shard=shard, scope_rollout_ids=scope_rollout_ids
+                )
+            )
+            await completion
+
+        def captured(shard: str) -> list[str]:
+            [written] = self._lines(tmp_path / "run" / f"rollouts-{shard}.jsonl")
+            return [call["model_call_id"] for call in written["ng_model_call_capture"]["calls"]]
+
+        # Unscoped, nothing checks across calls: the second shard reads the first one's capture file too.
+        assert captured("s1") == ["call1"]
+        assert captured("s2") == (["call2"] if scope_rollout_ids else ["call1", "call2"])
+
+    def test_rows_that_share_an_id_are_refused_with_or_without_scoping(self, tmp_path: Path) -> None:
+        row = TestEnrichRunResult._row() | {ROLLOUT_ID_KEY_NAME: "gate-7"}
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict={})
+
+        for scope_rollout_ids in (True, False):
+            with pytest.raises(ValueError, match="would share one rollout"):
+                Helper().run_examples(
+                    [row, dict(row)],
+                    record_output_dir=tmp_path / str(scope_rollout_ids),
+                    record_shard="s",
+                    scope_rollout_ids=scope_rollout_ids,
+                )
 
     def test_a_shard_whose_every_rollout_failed_still_has_its_rollouts_file(self, tmp_path: Path) -> None:
         from nemo_gym.rollouts.rollout_collection import _RunRecordWriter

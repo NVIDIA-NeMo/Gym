@@ -5,8 +5,9 @@
 
 from typing import Any
 
-from fastapi import FastAPI
-from pydantic import ConfigDict, PositiveFloat
+from fastapi import FastAPI, HTTPException
+from fastapi.exceptions import RequestValidationError
+from pydantic import ConfigDict, PositiveFloat, ValidationError
 
 from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
@@ -53,17 +54,28 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
-        # Flat rows still run the episode protocol through run_request, so its episodes checkpoint too.
+        # Flat rows still run the episode protocol through run_request, so its episodes checkpoint too, and their
+        # cleanups finish at shutdown.
         self.setup_environment_checkpoint(app)
+        self.setup_shutdown_sweep(app)
         app.post("/run")(self.run_legacy)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
         return app
 
     async def run_legacy(self, row: dict[str, Any]) -> dict[str, Any]:
         is_episode_request = "episode_id" in row and "task" in row
-        request = (
-            SingleAgentTurnRequest.model_validate(row) if is_episode_request else self._episode_request_from_row(row)
-        )
+        try:
+            request = (
+                SingleAgentTurnRequest.model_validate(row)
+                if is_episode_request
+                else self._episode_request_from_row(row)
+            )
+        except ValidationError as error:
+            # A row that fails the episode request model, such as a malformed agent_context, gets a terminal 422, as on
+            # the episode request route, instead of a 500 that a caller retries.
+            raise RequestValidationError(error.errors(include_url=False)) from None
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from None
         response = await self.run_request(request)
         # An episode request is answered with the episode reply it asks for; only a flat row gets a flat result.
         return response.model_dump(mode="json") if is_episode_request else self._legacy_result(response)
