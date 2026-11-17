@@ -22,7 +22,6 @@ from nemo_gym._public_api import lazy_exports
 
 
 if TYPE_CHECKING:
-    from nemo_gym.data.tasks.harbor.build_options import BuildOptions
     from nemo_gym.data.tasks.harbor.compose_overlay import (
         ComposeOverlayError,
         HarborComposeOverlay,
@@ -56,7 +55,6 @@ if TYPE_CHECKING:
         STEP_METADATA_KEY,
         HarborTaskInput,
         materialize_task,
-        taskset_mapping,
     )
     from nemo_gym.data.tasks.harbor.models import (
         HarborArtifact,
@@ -67,7 +65,7 @@ if TYPE_CHECKING:
         HarborTaskStep,
         HarborVerifier,
     )
-    from nemo_gym.data.tasks.harbor.prepare import ORACLE_AGENT, prepare_target
+    from nemo_gym.data.tasks.harbor.prepare import ORACLE_AGENT
     from nemo_gym.data.tasks.harbor.publish import answer_write_command
     from nemo_gym.data.tasks.harbor.python_verifier import VERIFIER_FILE, VerifierShim, write_shim
     from nemo_gym.data.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE, MAIN_SERVICE
@@ -87,7 +85,6 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
-    "BuildOptions": "build_options",
     "AGENT_TIMEOUT_METADATA_KEY": "materialize",
     "BUILT_IMAGES_FILE": "records",
     "ComposeOverlayError": "compose_overlay",
@@ -139,11 +136,9 @@ _PUBLIC_API = {
     "merged_mcp_servers": "compose_overlay",
     "overlay_files": "compose_overlay",
     "plan_task_compose_volumes": "image_configs",
-    "prepare_target": "prepare",
     "record_compose_images": "image_configs",
     "reusable_record": "image_configs",
     "task_declares_gpus": "image_configs",
-    "taskset_mapping": "materialize",
     "without_restated_main_build": "image_configs",
     "wrap_first_instruction": "compose_overlay",
     "write_shim": "python_verifier",
