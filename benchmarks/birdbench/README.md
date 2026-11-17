@@ -193,3 +193,20 @@ secret's contents, so the catalog stage also takes a digest of the file's settin
 (`sk-`, `nvapi-`): another model or endpoint rebuilds the catalog, and a new key alone does not. The build stops before
 Docker when the BIRD dev extraction lacks a database that `dev.json` names, and fails when a model call failed after
 Auto Ontology's retries or a database has no vectors, since Auto Ontology logs both and goes on.
+
+### The Auto Ontology agent
+
+`auto_ontology_agent.yaml` runs BIRD dev with `responses_api_agents/auto_ontology_agent` in place of `simple_agent`:
+each episode gets a sandbox from the catalog image, and Auto Ontology's `run_episode` runs there on the policy's Model
+Server, with Auto Ontology's own prompts and tools (`retrieve`, `run_sql`, `submit`). The agent answers with the
+submitted query in a fenced `sql` block, which `bird_sql` grades as it grades `simple_agent`'s. Each row gives the
+agent the task in its agent context, with no schema:
+
+```bash
+gym eval prepare --config benchmarks/birdbench/auto_ontology_agent.yaml   # data/birdbench_sqlite_dev_auto_ontology_agent.jsonl
+gym eval run --config benchmarks/birdbench/auto_ontology_agent.yaml --model-type vllm_model --split benchmark \
+  --output results/auto_ontology_agent/rollouts.jsonl ++auto_ontology_api_key=<key>
+```
+
+`auto_ontology_api_key` is the key of the embedding endpoint the catalog was built with: retrieval embeds each
+search. See the agent's README for its sandbox and network.

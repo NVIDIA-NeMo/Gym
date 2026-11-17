@@ -218,6 +218,42 @@ class TestPrepareSplit:
         assert birdbench_prepare.output_fpath_for("sqlite", "dev").name == "birdbench_sqlite_dev.jsonl"
 
 
+class TestAgentContext:
+    def test_rows_give_the_task_in_the_agent_context_without_a_schema(self, prepared):
+        rows = prepared(
+            [_entry(question="How many students?", evidence="students refers to the students table")],
+            agent_context=True,
+        )
+
+        (row,) = rows
+        assert row["agent_context"] == {
+            "agent": {
+                "values": {
+                    "question": "How many students?",
+                    "evidence": "students refers to the students table",
+                    "database": "db1",
+                }
+            }
+        }
+        assert row["responses_create_params"]["input"][0]["content"] == row["question"]
+        assert "sql_context" not in row
+        # No schema is built for rows that show none.
+        assert _FakeDbHandle.instances == []
+
+    def test_rows_go_to_their_own_file(self, prepared, tmp_path):
+        prepared([_entry()], agent_context=True)
+        assert (tmp_path / "data" / "birdbench_sqlite_dev_auto_ontology_agent.jsonl").is_file()
+        assert not (tmp_path / "data" / "birdbench_sqlite_dev.jsonl").exists()
+
+    def test_without_evidence_the_task_has_none(self, prepared):
+        rows = prepared([_entry(evidence="hint")], agent_context=True, include_evidence=False)
+        assert rows[0]["agent_context"]["agent"]["values"]["evidence"] == ""
+
+    def test_only_sqlite(self, prepared):
+        with pytest.raises(ValueError, match="dialect='sqlite'"):
+            prepared([_entry()], agent_context=True, dialect="spark")
+
+
 class TestCli:
     def test_flags_are_forwarded_to_prepare(self, monkeypatch):
         seen = {}
@@ -229,6 +265,7 @@ class TestCli:
             "dialect": "spark",
             "split": "train",
             "train_dir": None,
+            "agent_context": False,
         }
 
     def test_defaults_are_dev_sqlite_with_evidence(self, monkeypatch):
