@@ -138,3 +138,24 @@ other flags pass through to `gym eval run`.
 
 `rollouts.jsonl` has one row per rollout (prompt, response, reward, verifier fields like `extracted_sql` and
 `failure_reason`).
+
+## Auto Ontology
+
+[Auto Ontology](https://github.com/NVIDIA/auto-ontology) answers a question from a catalog of the database: its tables
+and columns, the business terms and definitions compiled over them, and embeddings to search both. Its ReAct agent
+searches the catalog, tests queries and submits one. The Auto Ontology agent runs it in Gym, in a sandbox of its own
+for each episode, from the catalog image.
+
+### The catalog image
+
+```bash
+benchmarks/birdbench/auto_ontology/build_image.sh <models.env>   # tag: nemo-gym/bird-catalog:dev
+```
+
+The image holds Auto Ontology at the commit `build_image.sh` pins, installed from its own repository and lock file,
+the BIRD dev databases and their catalog. The build (`auto_ontology/build_catalog.py`) migrates the catalog with Auto
+Ontology's Alembic migrations, then for each database ingests the schema, writes BIRD's column descriptions (from its
+`database_description` CSVs, which a SQLite database does not carry), embeds the described catalog and compiles the
+semantic layer. `<models.env>` holds the model keys (`DEFAULT_MODELS_API_KEY`, and `*_MODEL` settings where they differ
+from Auto Ontology's defaults); it reaches the build as a BuildKit secret, never a layer. The build fails when a model
+call failed after Auto Ontology's retries or a database has no vectors, since Auto Ontology logs both and goes on.
