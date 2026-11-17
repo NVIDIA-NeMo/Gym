@@ -71,6 +71,9 @@ _NO_ROLLOUT = "no-rollout"
 # How many save_dir copies one process runs at once. They get their own threads, so queued copies never hold the
 # event loop's default executor, which DNS lookups and other file work need.
 _SAVE_WORKERS = 4
+# How many threads one process uses to create and remove request folders, for the same reason: a burst of
+# requests removing large trees must not hold the default executor's threads from sandbox calls and DNS lookups.
+_TEMP_DIR_WORKERS = 8
 # Each process keeps its temporary folders in one folder of its own under a parent, named for the process:
 # nemo-gym-<host boot id>-<pid namespace>-<pid>. Folders inside it carry no process data.
 # PID namespace numbers repeat across hosts (every host's initial namespace has the same one), so the boot id is
@@ -90,6 +93,7 @@ _exit_handler_registered = False
 # Requests start their temporary folders in worker threads, so a burst of first requests arrives together.
 _first_use_lock = threading.Lock()
 _save_executor = ThreadPoolExecutor(max_workers=_SAVE_WORKERS, thread_name_prefix="nemo-gym-save-dir")
+_temp_dir_executor = ThreadPoolExecutor(max_workers=_TEMP_DIR_WORKERS, thread_name_prefix="nemo-gym-temp-dir")
 # Warnings this process has already logged, so each is reported once.
 _warned: set[str] = set()
 
@@ -119,13 +123,14 @@ def request_temp_dir(name: str = "tmp", *, temp_dir: str | Path | None = None) -
 
 @asynccontextmanager
 async def async_request_temp_dir(name: str = "tmp", *, temp_dir: str | Path | None = None) -> AsyncIterator[Path]:
-    """:func:`request_temp_dir` for a coroutine: creating and removing the folder run in a worker thread.
+    """:func:`request_temp_dir` for a coroutine: creating and removing the folder run on threads of their own.
 
     The removal is shielded from cancellation.
     Under an anyio cancel scope, which cancels again at every await, the block can exit before the folder is gone;
     the removal then finishes in the background.
     """
-    creating = asyncio.ensure_future(asyncio.to_thread(_create_temp_dir, name, temp_dir))
+    loop = asyncio.get_running_loop()
+    creating = loop.run_in_executor(_temp_dir_executor, _create_temp_dir, name, temp_dir)
     try:
         path = await asyncio.shield(creating)
     except asyncio.CancelledError:
@@ -136,7 +141,7 @@ async def async_request_temp_dir(name: str = "tmp", *, temp_dir: str | Path | No
         yield path
     finally:
         # Shielded, so a second cancellation while the folder is being removed does not leave it behind.
-        await asyncio.shield(asyncio.to_thread(remove_tree, path))
+        await asyncio.shield(loop.run_in_executor(_temp_dir_executor, remove_tree, path))
 
 
 def session_temp_dir(name: str = "tmp", *, temp_dir: str | Path | None = None) -> Path:
@@ -227,13 +232,14 @@ async def save_dir(
 def _reset_after_fork() -> None:
     """Give a forked child state of its own: its parent's folders, locks and copy threads are not its own."""
     global _default_temp_dir, _checked_temp_parents, _process_dirs, _exit_handler_registered
-    global _first_use_lock, _save_executor
+    global _first_use_lock, _save_executor, _temp_dir_executor
     _default_temp_dir = None
     _checked_temp_parents = set()
     _process_dirs = {}
     _exit_handler_registered = False
     _first_use_lock = threading.Lock()
     _save_executor = ThreadPoolExecutor(max_workers=_SAVE_WORKERS, thread_name_prefix="nemo-gym-save-dir")
+    _temp_dir_executor = ThreadPoolExecutor(max_workers=_TEMP_DIR_WORKERS, thread_name_prefix="nemo-gym-temp-dir")
 
 
 def _warn_once(key: str, message: str, *args: object) -> None:
@@ -432,7 +438,8 @@ def _create_temp_dir(name: str, temp_dir: str | Path | None) -> Path:
 
 def _remove_created_dir(creating: asyncio.Future[Path]) -> None:
     if not creating.cancelled() and creating.exception() is None:
-        remove_tree(creating.result())
+        # A done callback runs on the event loop, so the removal goes to a thread.
+        _temp_dir_executor.submit(remove_tree, creating.result())
 
 
 def _kept_dir(server_name: str, name: str, label: str | None, output_dir: str | Path | None) -> Path | None:
