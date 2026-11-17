@@ -128,7 +128,6 @@ def test_a_masked_infrastructure_result_at_the_attempt_cap_is_exhausted_and_not_
     assert "used every attempt since the last resubmit" in decision.reason
 
 
-
 def test_a_masked_infrastructure_result_at_the_attempt_cap_is_not_settled(tmp_path):
     """Never measured, it settles its rollout only once a recovery measures it, as the coverage counts it."""
     output, _ = _run(tmp_path, [[_masked("session_lost")] * 3])
@@ -136,6 +135,7 @@ def test_a_masked_infrastructure_result_at_the_attempt_cap_is_not_settled(tmp_pa
     selected = {row["_ng_task_index"]: row for row in store.selected("success")}
     assert store.settled(selected[0]) and not store.settled(selected[1])
     assert store.coverage()["settled"] == 1
+
 
 def test_an_attempt_extension_reopens_an_exhausted_masked_infrastructure_result(tmp_path):
     output, _ = _run(tmp_path, [[_masked("session_lost")] * 3])
