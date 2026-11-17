@@ -1227,6 +1227,11 @@ class CodexAgent(SimpleResponsesAPIAgent):
             input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=usage["cached_input_tokens"]),
             output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=usage["reasoning_tokens"]),
         )
+        if gradable_limit and not completed and (started or output or state.model_attempts):
+            # Codex (0.144.4 and 0.154.0) records no usage for an output-limited (incomplete) response and writes a
+            # call's token_count only after its tools finish. A run stopped at its output or wall-time budget can
+            # therefore have calls missing from both the CLI total and the session-file total, so its usage is unknown.
+            response_usage = None
         # A failed run that may be scored can have done model work after the CLI's last usage total.
         if (reported_model_error or gradable) and not completed:
             native_usage = parse_codex_usage(state.native_transcript)
