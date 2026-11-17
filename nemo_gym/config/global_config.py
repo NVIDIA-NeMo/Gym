@@ -290,6 +290,7 @@ ROLLOUT_STOP_AGENT_TYPES = frozenset(
         "pi_agent",
         "prime_agent",
         "qwen_code_agent",
+        "stirrup_agent",
         "terminus_2_agent",
     }
 )

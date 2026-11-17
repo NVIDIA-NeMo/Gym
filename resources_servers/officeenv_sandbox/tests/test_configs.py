@@ -14,7 +14,7 @@ from opensandbox import Sandbox
 pytest.importorskip("officeenv", reason="OfficeEnv is not installed (README.md, 'The OfficeEnv version')")
 
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServerConfig
-from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config import ROLLOUT_STOP_AGENT_TYPES, GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.sandbox import create_provider, resolve_provider_config
 from nemo_gym.sandbox.providers.opensandbox import provider as opensandbox_provider
 from resources_servers.officeenv_sandbox.app import OfficeEnvSandboxConfig
@@ -31,6 +31,7 @@ CAPPED = {
     "codex": ([f"{CONFIGS}/officeenv_sandbox_codex.yaml", DOCKER], "codex", "codex_agent"),
     "opencode": ([f"{CONFIGS}/officeenv_sandbox_opencode.yaml", DOCKER], "opencode", "opencode_agent"),
     "openclaw": ([f"{CONFIGS}/officeenv_sandbox_openclaw.yaml", DOCKER], "openclaw", "openclaw_agent"),
+    "stirrup": ([f"{CONFIGS}/officeenv_sandbox_stirrup.yaml", DOCKER], "stirrup", "stirrup_agent"),
 }
 # Every sandboxed harness config, by the harness it runs
 SANDBOXED = {name: paths for name, (paths, _, _) in CAPPED.items()} | {
@@ -102,6 +103,15 @@ def test_the_admitted_episodes_follow_pis_concurrency(monkeypatch, concurrency: 
     pi = {"officeenv_sandbox_pi_agent": {"responses_api_agents": {"pi_agent": {"concurrency": concurrency}}}}
     config = _compose(monkeypatch, CAPPED["pi-opensandbox"][0], pi if concurrency else None)
     assert _environment(config, "pi")["max_concurrent_episodes"] == (concurrency or 8)  # 8: Pi's default
+
+
+@pytest.mark.parametrize("harness", ["pi", "pi-opensandbox", "stirrup"])
+def test_pi_and_stirrup_runs_end_once_their_task_has_ended(monkeypatch, harness: str) -> None:
+    # The environment server stops the run (POST /rollouts/{rollout_id}/stop, as completed) once complete_task has
+    # ended the episode's task, so no model call follows it; it starts only for an agent type whose run it can stop.
+    config_paths, name, agent_type = CAPPED[harness]
+    assert _environment(_compose(monkeypatch, config_paths), name)["end_on_task_state"] is True
+    assert agent_type in ROLLOUT_STOP_AGENT_TYPES
 
 
 def test_a_sandbox_create_outlasts_its_request_and_readiness_wait(monkeypatch, caplog) -> None:

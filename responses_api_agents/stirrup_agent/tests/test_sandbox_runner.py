@@ -154,6 +154,50 @@ def test_a_cancelled_run_reports_the_turns_it_completed(tmp_path, resources, mar
     assert (workdir / "report.txt").read_text() == "draft\n"
 
 
+async def _cancelled_while_a_tool_call_runs(payload: dict, tmp_path: Path, started: Path) -> dict:
+    task = asyncio.ensure_future(run(payload, tmp_path, Observer()))
+    deadline = time.monotonic() + 30
+    while not started.exists():
+        assert time.monotonic() < deadline, "the second tool call never started"
+        await asyncio.sleep(0.05)
+    task.cancel()
+    return await task
+
+
+@pytest.mark.parametrize(("marker_exists", "stop_reason"), [(False, "wall_time"), (True, "cancelled")])
+def test_a_stopped_run_ends_with_the_turn_whose_tool_call_was_running(tmp_path, resources, marker_exists, stop_reason):
+    """The supervisor ends the run while a turn's tool call waits for its answer, as the call that ended the task
+    waits until the run is over: the run ends with that turn's reply, whose call has no answer."""
+    workdir = tmp_path / "root"
+    workdir.mkdir()
+    marker = tmp_path / "stop-requested"
+    if marker_exists:
+        marker.touch()
+    model = _ModelServer(
+        [
+            _call("code_exec", json.dumps({"cmd": "echo draft > report.txt"})),
+            _call("code_exec", json.dumps({"cmd": "touch started && sleep 10"})),
+            None,
+        ]
+    )
+    payload = {**_payload(model.base_url, resources.base_url, workdir), "stop_request_path": str(marker)}
+    try:
+        output = asyncio.run(_cancelled_while_a_tool_call_runs(payload, tmp_path, workdir / "started"))
+    finally:
+        model.close()
+
+    calls = [item for item in output["output_items"] if item["type"] == "function_call"]
+    answers = [item for item in output["output_items"] if item["type"] == "function_call_output"]
+    assert output["stop_reason"] == stop_reason
+    assert output["observations"]["status"] == "incomplete"
+    assert output["observations"]["model_response_ids"] == ["chatcmpl-1", "chatcmpl-2"]
+    assert len(answers) == 1
+    assert len(calls) == 2
+    assert "sleep 10" in calls[-1]["arguments"]
+    assert output["output_items"][-1]["type"] == "function_call"
+    assert [t["tool_name"] for t in output["observations"]["tool_calls"]] == ["code_exec"]
+
+
 def test_sigterm_makes_the_runner_write_its_partial_report(tmp_path, resources):
     workdir = tmp_path / "root"
     workdir.mkdir()

@@ -373,6 +373,11 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             raise
         return state
 
+    def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
+        # A rollout stop (POST /rollouts/{rollout_id}/stop) ends the runner under its supervisor, as at the deadline;
+        # the runner reports the run so far, with the turn that was running.
+        return state.session if isinstance(state, StirrupSessionState) else None
+
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         if not isinstance(state, StirrupSessionState):
             raise TypeError("Expected Stirrup session state")
@@ -451,13 +456,18 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
                 close_timeout=self.config.session_close_timeout_seconds,
             )
         except TimeoutError:
-            # The runner normally stops at the deadline and writes its partial report. If the supervisor overran
-            # too, the episode is still a timeout when that report is there, and an infrastructure failure when not.
+            # The runner normally stops at the deadline (or on a rollout stop, which ends it as at the deadline) and
+            # writes its partial report. If the supervisor overran too, the episode is still a timeout when that
+            # report is there, and an infrastructure failure when not.
             artifacts = state.session.artifacts
             if not (isinstance(artifacts, dict) and artifacts.get("stop_reason") == "wall_time"):
                 raise
             state.resources_cookies = artifacts["resources_cookies"]
             output = artifacts
+        stop_reason = output["stop_reason"]
+        if stop_reason == "wall_time" and state.session.expired:
+            # The supervisor ends a run a rollout stop asked for as at its deadline; ng_rollout_stop says so instead.
+            stop_reason = None
         usage = _usage(output["usages"])
         if usage is None and output.get("model_error") and not output["observations"]["model_response_ids"]:
             # The only request was rejected before any processing: a known zero. A request killed in flight may
@@ -475,13 +485,15 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             metadata={
                 "elapsed_seconds": str(output["elapsed_seconds"]),
                 AGENT_TIMEOUT_METADATA_KEY: str(timeout),
-                **({"stop_reason": output["stop_reason"]} if output["stop_reason"] else {}),
+                **({"stop_reason": stop_reason} if stop_reason else {}),
             },
             status=output["observations"]["status"],
             error={"code": "server_error", "message": output["model_error"]} if output.get("model_error") else None,
             usage=usage,
         )
-        return self.report_outcome(response, output)
+        # A run a rollout stop ended keeps its incomplete status (a stop once the task has ended: completed) and
+        # carries the stop's marker.
+        return self.report_rollout_stop(self.report_outcome(response, output), state.session)
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()

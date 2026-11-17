@@ -6,6 +6,8 @@ import asyncio
 import json
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -15,6 +17,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from nemo_gym.agents import (
+    ROLLOUT_STOP_METADATA_KEY,
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
     SandboxPythonRuntime,
@@ -232,6 +235,69 @@ def test_an_agent_that_runs_out_of_wall_time_answers_with_its_partial_run_as_inc
     assert (root / "report.txt").read_text() == "draft\n"
     invocation = next(r for r in closed.json()["agent_observations"]["records"] if "model_calls" in r)
     assert invocation["status"] == "incomplete"
+
+
+def test_a_run_stopped_once_its_task_has_ended_answers_as_completed_and_ends_with_its_last_call(
+    agent, root, monkeypatch
+):
+    """POST /rollouts/{rollout_id}/stop with completed (the environment server's stop once the task has ended) ends
+    the runner while its last call waits for an answer, as the call that ended the task waits until the run is over.
+    The run answers as completed, marked as stopped and not as a timeout, and ends with that call."""
+    resources = _Resources(_resources_app([]))
+    model = _ModelServer(
+        [
+            _call("code_exec", json.dumps({"cmd": "echo draft > report.txt"})),
+            _call("code_exec", json.dumps({"cmd": "touch started && sleep 30"})),
+            None,
+        ]
+    )
+    monkeypatch.setattr(StirrupAgentWrapper, "resolve_model_base_url", lambda *_: model.base_url)
+    tool_access = _TOOL_ACCESS.model_copy(update={"base_url": resources.base_url})
+    responses = []
+    try:
+        # One event loop for the activation and the stop, as in a server.
+        with TestClient(agent.setup_webserver()) as client:
+            _seed(client, sandbox_access=_sandbox_access(str(root)), tool_accesses=[tool_access])
+            activation = threading.Thread(
+                target=lambda: responses.append(
+                    client.post(
+                        f"/ng-rollout/{_EPISODE.capture_key}/v1/responses",
+                        json={
+                            "input": [{"role": "user", "content": "Write the report."}],
+                            "model": "policy",
+                            "tools": _TOOLS,
+                        },
+                    )
+                )
+            )
+            activation.start()
+            deadline = time.monotonic() + 60
+            while not (root / "started").exists():
+                assert time.monotonic() < deadline, "the second tool call never started"
+                time.sleep(0.05)
+            stop = client.post(
+                f"/rollouts/{_EPISODE.capture_key}/stop", json={"reason": "task_ended", "completed": True}
+            )
+            activation.join(120)
+            closed = _close(client)
+    finally:
+        model.close()
+        resources.close()
+
+    assert stop.status_code == 200, stop.text
+    assert stop.json()["stopped"]
+    (response,) = responses
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (body["status"], body["incomplete_details"]) == ("completed", None)
+    assert json.loads(body["metadata"][ROLLOUT_STOP_METADATA_KEY]) == {"reason": "task_ended", "completed": True}
+    assert "stop_reason" not in body["metadata"]
+    calls = [item for item in body["output"] if item["type"] == "function_call"]
+    assert len(calls) == 2
+    assert "sleep 30" in calls[-1]["arguments"]
+    assert body["output"][-1]["type"] == "function_call"
+    assert (root / "report.txt").read_text() == "draft\n"
+    assert closed.status_code == 200, closed.text
 
 
 def test_a_failed_episode_still_closes_with_its_evidence(agent, client, root, monkeypatch):

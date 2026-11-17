@@ -401,6 +401,7 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
         client = DynamicMaxTokensChatCompletionsClient(api_key="gym", **payload["client"])
         shell = LocalShell(payload["workdir"], scratch)
         observer.watch_model_calls(client)
+        replies = _Replies.watch(client)
         observer.watch_tool_calls(NeMoAgent)
         observer.shell = shell
         agent = NeMoAgent(
@@ -427,9 +428,13 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
             try:
                 finish_params, history, _ = await session.run(messages)
             except asyncio.CancelledError:
-                # SIGTERM from the supervisor, at the deadline or on a close: report the turns completed so far.
+                # SIGTERM from the supervisor, at the deadline, on a rollout stop or on a close: report the turns
+                # completed so far and the reply of the turn that was running, whose tool calls had not answered. A
+                # stop once the task has ended lands so: the call that ended the task waits for its answer until the
+                # run is over, and that call is the run's last.
                 asyncio.current_task().uncancel()
-                finish_params, history = None, _completed_turns(session, messages)
+                finish_params = None
+                history = _with_reply_in_flight(_completed_turns(session, messages), replies.last)
                 stop_reason = _stop_reason(payload)
             except APIStatusError as error:
                 if not _rejected_by_model(error):
@@ -477,6 +482,39 @@ def _completed_turns(session: Any, messages: list[Any]) -> list[list[Any]]:
     """The message history as of the start of the turn that was running, from Stirrup's per-turn snapshot."""
     state = session._current_run_state
     return [list(messages)] if state is None else [*state.full_msg_history, state.msgs]
+
+
+class _Replies:
+    """The policy model's last reply, as Stirrup's client returned it (``generate``)."""
+
+    def __init__(self) -> None:
+        self.last: Any = None
+
+    @classmethod
+    def watch(cls, client: Any) -> "_Replies":
+        replies = cls()
+        generate = client.generate
+
+        async def recorded_generate(*args: Any, **kwargs: Any) -> Any:
+            reply = await generate(*args, **kwargs)
+            replies.last = reply
+            return reply
+
+        client.generate = recorded_generate
+        return replies
+
+
+def _with_reply_in_flight(history: list[list[Any]], reply: Any) -> list[list[Any]]:
+    """``history`` ending with the turn that was running: its reply, whose tool calls had not answered yet.
+
+    Only a reply that calls tools and is not in the history yet is the running turn's; a compaction summary calls
+    none.
+    """
+    if reply is None or not getattr(reply, "tool_calls", None):
+        return history
+    if any(message is reply for turn in history for message in turn):
+        return history
+    return [*history[:-1], [*history[-1], reply]] if history else [[reply]]
 
 
 def _rejected_by_model(error: APIStatusError) -> bool:

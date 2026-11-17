@@ -1,0 +1,43 @@
+# OfficeEnv's sandboxed episodes (configs/officeenv_sandbox_episodes.yaml) for Stirrup, on rows whose apps are commands
+# (`cli`: sandbox/prepare_rows.py --exposure cli). Stirrup borrows each episode's sandbox and runs its runner there; the
+# model reaches the apps through their commands and moves files with the file API, all in Stirrup's shell (code_exec),
+# so the episode grants no MCP tools. Compose and run as configs/officeenv_sandbox.yaml shows, with this config and
+# `--agent officeenv_sandbox_stirrup_agent`. Stirrup installs its runtime in each sandbox at session start (Python
+# packages), so its sandboxes need the package index, or an image with the runtime installed.
+#
+# Once the episode's task has ended (complete_task), the environment server stops Stirrup's run before its next model
+# call (end_on_task_state, as for Pi): the run answers as completed and ends with the call that ended the task.
+config_paths:
+  - resources_servers/officeenv_sandbox/configs/officeenv_sandbox_episodes.yaml
+  - responses_api_agents/stirrup_agent/configs/stirrup_agent.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+# The episodes' server under Stirrup's own name, as configs/officeenv_sandbox.yaml explains for Pi.
+officeenv_sandbox_stirrup_resources_server:
+  _inherit_from: officeenv_sandbox_resources_server
+  resources_servers:
+    officeenv_sandbox:
+      verified: false
+
+# Gym's Stirrup (responses_api_agents/stirrup_agent), under this config's own name.
+officeenv_sandbox_stirrup_agent:
+  _inherit_from: stirrup_agent
+  responses_api_agents:
+    stirrup_agent:
+      # The run's own bound, under the episode's (the sandbox TTL in officeenv_sandbox_episodes.yaml).
+      sandbox_runner_timeout_seconds: 1800
+
+officeenv_sandbox_stirrup_environment_server:
+  _inherit_from: single_agent_turn_legacy
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        name: officeenv_sandbox_stirrup_resources_server
+      agent_server:
+        name: officeenv_sandbox_stirrup_agent
+      resources_tool_transports: []
+      # Stop the run once the episode's task has ended (POST /rollouts/{rollout_id}/stop, as completed).
+      end_on_task_state: true
+      # No more episodes than Stirrup runs at once (`concurrency`), as configs/officeenv_sandbox.yaml explains for Pi.
+      max_concurrent_episodes: ${officeenv_sandbox_stirrup_agent.responses_api_agents.stirrup_agent.concurrency}
+      queue_timeout_seconds: 86400
