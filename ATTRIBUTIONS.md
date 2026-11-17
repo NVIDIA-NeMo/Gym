@@ -11,6 +11,14 @@ All third-party software is used without modification unless otherwise noted
 
 ---
 
+## WildClawBench instruction prefix
+
+`responses_api_agents/wildclawbench_agent/worker.py` retains the actor instruction
+prefix from `eval/run_batch.py` in [internlm/WildClawBench](https://github.com/internlm/WildClawBench),
+revision `0c6551f798f8028bdfdd065f10d8d6b048a7fd06`, under MIT.
+The benchmark license and notice are in `benchmarks/wildclawbench/third-party-notices.md`.
+Native task execution is an external dependency, not vendored here.
+
 ## MiMo music scorer
 
 `resources_servers/mimo_music/scorer/` vendors the music scorer and
@@ -22621,6 +22629,23 @@ and NVIDIA copyright notice:
 # Copyright (c) 2025 NVIDIA Corporation. All rights reserved.
 ```
 
+
+## OpenCode multimodal evaluation adapters
+
+Dataset access and redistribution terms remain the dataset publishers' terms;
+these source-code licenses do not license the benchmark data. Catalog manifests
+record unknown dataset licensing where an applicable license has not been established.
+
+| Adapted source | Exact revision | Affected Gym files | Source license |
+| --- | --- | --- | --- |
+| [VLMEvalKit matching utilities and prompts](https://github.com/open-compass/VLMEvalKit/tree/ebac2d9bda8fa28dc426a3b2ccc8f53c886dc0c5/vlmeval) | `ebac2d9bda8fa28dc426a3b2ccc8f53c886dc0c5` | `resources_servers/opencode_multimodal_benchmarks/mcq.py`, `reporting.py`; `benchmarks/opencode_multimodal_benchmarks/data.py` | Apache-2.0; original source-file URLs are in each header |
+| [VTC-Bench evaluator subtree](https://github.com/zhuzil/VTC-Bench/blob/5e0a5533f597b0c56dae7d9705771498202ab19b/eval/eval/VLMEvalKit/vlmeval/dataset/image_vqa.py) | `5e0a5533f597b0c56dae7d9705771498202ab19b` | `resources_servers/opencode_multimodal_benchmarks/vtcbench.py` | Apache-2.0 for the VLMEvalKit evaluator subtree; no assertion about dataset licensing |
+| [ZeroBench scoring example](https://github.com/jonathan-roberts1/zerobench/blob/0debbe43deddfe54f9965a6fdfd4f70a20d8ab62/README.md#code) | `0debbe43deddfe54f9965a6fdfd4f70a20d8ab62` | `resources_servers/opencode_multimodal_benchmarks/zerobench.py` | MIT |
+
+Full applicable notices for confirmed sources are retained in the component
+`third-party-notices.md` files. BabyVision is outside this integration; an attribution to a
+VLMEvalKit source file with that name records helper-code provenance only.
+
 ## OfficeQA reference scorer
 
 `resources_servers/officeqa/verifiers/officeqa_pro.py` adapts Databricks'
@@ -22628,3 +22653,7 @@ and NVIDIA copyright notice:
 revision `7b9a3c154ef9fb40215bb67934afc43e6799de16`, under Apache-2.0.
 The scorer header retains the Databricks copyright, applicable upstream notice,
 and modification record. The scoring behavior is unchanged.
+
+## SaaS-Bench
+
+Source: https://github.com/UniPat-AI/SaaS-Bench at `48c22deb18b98c0ed78f81e7f3be82bc162de2c8`. Runtime: Apache-2.0; task data and verifiers: CC-BY-4.0. Original copyright: SaaS-Bench Authors. NVIDIA modifications are identified in each changed file; NVIDIA extensions are Apache-2.0. See [vendoring details](responses_api_agents/saas_bench_agent/benchmark/VENDORING.md).

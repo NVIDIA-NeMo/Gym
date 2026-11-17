@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -896,3 +897,24 @@ class TestServeBenchmark:
             pass
 
         assert _FakeRunHelper.started_with.skip_exporters
+
+
+class TestReadJsonlRows:
+    def test_a_row_with_unicode_line_separators_is_read_whole(self, tmp_path: Path) -> None:
+        from nemo_gym.environment.benchmark_preparation import read_jsonl_rows
+
+        text = "a b\u0085c\x0bd\x0ce"
+        path = tmp_path / "rows.jsonl"
+        path.write_text(
+            "".join(json.dumps({"q": text, "n": n}, ensure_ascii=False) + "\n" for n in range(2)), encoding="utf-8"
+        )
+
+        assert read_jsonl_rows(path) == [{"q": text, "n": 0}, {"q": text, "n": 1}]
+
+    def test_blank_lines_are_skipped(self, tmp_path: Path) -> None:
+        from nemo_gym.environment.benchmark_preparation import read_jsonl_rows
+
+        path = tmp_path / "rows.jsonl"
+        path.write_text('{"a": 1}\n\n{"a": 2}\n   \n', encoding="utf-8")
+
+        assert read_jsonl_rows(path) == [{"a": 1}, {"a": 2}]

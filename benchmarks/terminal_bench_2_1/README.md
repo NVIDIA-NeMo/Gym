@@ -2,8 +2,8 @@
 
 Terminal-Bench 2.1 evaluates agents on tasks in isolated containers. The benchmark
 prepares task data and owns sandbox setup, verification, and cleanup. Pi, Codex,
-OpenCode, OpenClaw, and Copilot can run their model/tool loops in the task sandbox through
-Gym's Environment Server.
+OpenCode, OpenClaw, Copilot, and CrewAI can run their model/tool loops in the task sandbox
+through Gym's Environment Server.
 
 - Integration profile: `custom-gym-verifier`
 - Scorer: `terminal_bench_2_1`
@@ -19,6 +19,12 @@ git -C benchmarks/terminal_bench_2_1/terminal-bench-2-1 \
   checkout --detach 7131e4375048a0e408a8fb404b5f499d726b695b
 python benchmarks/terminal_bench_2_1/prepare.py
 ```
+
+`prepare()` also takes `task_revision`, a full commit of the task repository. It checks that commit out, cloning
+first if the checkout is missing, so two runs read the same tasks. Through the CLI, pass it as
+`++prepare_script_args.task_revision=<commit>` at the top level; in a YAML config it is the top-level
+`prepare_script_args: {task_revision: <commit>}`. Without it the checkout is left as it is, and a fresh
+clone reads the repository's default branch.
 
 Keep task tests and solutions on the host; do not mount the benchmark checkout
 into task containers. Resources uploads verifier assets after the agent closes
@@ -83,10 +89,12 @@ the harness for this taskset.
 | [OpenCode](../../responses_api_agents/opencode_agent/README.md) | `responses_api_agents/opencode_agent/configs/opencode_agent.yaml` | `opencode_agent` | `context_window: 32768`, `max_output_tokens: 8192`, `timeout: 600` |
 | [OpenClaw](../../responses_api_agents/openclaw_agent/README.md) | `responses_api_agents/openclaw_agent/configs/openclaw_agent.yaml` | `openclaw_agent` | `context_window: 32768`, `model_timeout_seconds: 600`, `timeout: 600` |
 | [Copilot](../../responses_api_agents/copilot_agent/README.md) | `responses_api_agents/copilot_agent/configs/copilot_agent.yaml` | `copilot_agent` | `context_window: 32768`, `max_output_tokens: 8192`, `timeout: 600` |
+| [CrewAI](../../responses_api_agents/crewai_agent/README.md) (development pairing) | `responses_api_agents/crewai_agent/configs/crewai_agent.yaml` | `crewai_agent` | `context_window_size: 131072`, `shell_timeout_seconds: 300`, `timeout: 900` |
 
-Pi, Codex, OpenCode, and OpenClaw are allowed by this benchmark. Copilot remains experimental pending
-full qualification; use `--allow-unsupported-pairing` to try its smoke settings. These are single-task
-smoke settings; adjust context windows and budgets for your model and evaluation.
+Pi, Codex, OpenCode, and OpenClaw are allowed by this benchmark. Copilot and CrewAI remain
+unsupported development pairings pending full benchmark qualification; add
+`--allow-unsupported-pairing` to both `gym env start` and `gym eval run` when selecting either.
+These are single-task smoke settings; adjust context windows and budgets for your model and evaluation.
 See each harness's README for runtime prerequisites and model requirements.
 
 ### Model and sandbox provider

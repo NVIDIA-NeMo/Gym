@@ -55,6 +55,7 @@ def test_conversion_preserves_model_and_verifier_fields_without_mutating_source(
         "_ng_attempt_index": 1,
         "_ng_rollout_id": "rollout",
         "_ng_custom_metadata": "collector-only",
+        "_rowidx": 7,
     }
     original = deepcopy(row)
     task = materialize_task(row, taskset="test")
@@ -138,7 +139,9 @@ def test_collation_routes_declared_taskset_without_rewriting_shared_source(tmp_p
     configs = GlobalConfigDictParser().filter_for_server_instance_configs(global_config)
     assert len(configs) == 2
     with pytest.warns(DeprecationWarning, match="stripped legacy agent_ref"):
-        paths = TrainDataProcessor()._collate_samples_single_type(dataset["type"], configs, task_data_validation="off")
+        paths = TrainDataProcessor()._collate_samples_single_type(
+            dataset["type"], configs, task_data_validation="off", output_dir=tmp_path / "prepared"
+        )
     materialized, flat = ([json.loads(line) for line in path.read_text().splitlines()] for path in paths)
     assert len(materialized) == len(flat) == 4
     assert materialized[0] == materialized[1]
@@ -190,7 +193,8 @@ def test_collation_routes_declared_taskset_without_rewriting_shared_source(tmp_p
 
 @pytest.mark.parametrize("task_index", [100, 200])
 @pytest.mark.parametrize("explicit_rollout_id", [False, True])
-def test_collation_preserves_shard_and_retry_identity(tmp_path, task_index, explicit_rollout_id):
+@pytest.mark.parametrize("skip_token_capture", [False, True])
+def test_collation_preserves_shard_and_retry_identity(tmp_path, task_index, explicit_rollout_id, skip_token_capture):
     row = {
         "responses_create_params": {"input": "same prompt across shards"},
         "_ng_task_index": task_index,
@@ -199,6 +203,8 @@ def test_collation_preserves_shard_and_retry_identity(tmp_path, task_index, expl
     }
     if explicit_rollout_id:
         row["_ng_rollout_id"] = f"shard-{task_index}"
+    if skip_token_capture:
+        row["_ng_skip_token_capture"] = True
     source = tmp_path / "source.jsonl"
     source.write_text(json.dumps(row) + "\n")
     output = tmp_path / "collated"
@@ -253,6 +259,7 @@ def test_collation_preserves_shard_and_retry_identity(tmp_path, task_index, expl
     request = SingleAgentTurnRequest.model_validate(_episode_request_body(loaded))
     assert request.episode_id.rollout_id == (f"shard-{task_index}" if explicit_rollout_id else f"{task_index}-0")
     assert request.episode_id.attempt == 2
+    assert request.skip_token_capture is skip_token_capture
 
 
 @pytest.mark.parametrize(
@@ -298,7 +305,9 @@ def test_prompt_config_is_applied_before_materialization(tmp_path):
     configs = GlobalConfigDictParser().filter_for_server_instance_configs(
         OmegaConf.create(_resources_server("rs", [dataset]))
     )
-    (path,) = TrainDataProcessor()._collate_samples_single_type("benchmark", configs, task_data_validation="off")
+    (path,) = TrainDataProcessor()._collate_samples_single_type(
+        "benchmark", configs, task_data_validation="off", output_dir=tmp_path / "prepared"
+    )
     row = json.loads(path.read_text())
     assert row["task_id"] == {"taskset": "bench", "task_id": "i1"}
     assert row["task_input"]["responses_create_params"]["input"] == [
@@ -333,7 +342,9 @@ def test_collation_rejects_misplaced_fields_before_materialization(tmp_path, tas
         OmegaConf.create(_resources_server("resources", [dataset], implementation="code_gen"))
     )
     with pytest.raises(ValueError, match=r"wire reads from verifier_metadata.*unit_tests \(1 rows\)"):
-        TrainDataProcessor()._collate_samples_single_type("example", configs, task_data_validation="error")
+        TrainDataProcessor()._collate_samples_single_type(
+            "example", configs, task_data_validation="error", output_dir=tmp_path / "prepared"
+        )
 
 
 class CustomTaskInput(BaseModel):
@@ -357,7 +368,9 @@ def test_custom_task_collation_metrics_validation_and_dispatch(tmp_path):
     metrics = processor._validate_samples_and_aggregate_metrics_single_dataset(configs[0].datasets[0])
     assert metrics.offending_example_idxs == []
     assert metrics.metrics.number_of_examples == 2
-    (path,) = processor._collate_samples_single_type("example", configs, task_data_validation="error")
+    (path,) = processor._collate_samples_single_type(
+        "example", configs, task_data_validation="error", output_dir=tmp_path / "prepared"
+    )
     prepared = [json.loads(line) for line in path.read_text().splitlines()]
     assert prepared == [{"task_id": {"taskset": "custom", "task_id": "0"}, "task_input": row}] * 2
     validator = TaskDataValidator("external_custom", TypeAdapter(CustomTaskInput), str(path))
@@ -399,3 +412,32 @@ def test_single_agent_task_data_container_merges_flat_fields_and_rejects_conflic
 def test_single_agent_input_rejects_invalid_task_data_container(invalid):
     with pytest.raises(ValidationError):
         SingleAgentTurnTaskInput.model_validate({"responses_create_params": {"input": "x"}, "task_data": invalid})
+
+
+@pytest.mark.parametrize("unexpected", [None, "unknown_task_field"])
+def test_rl_stream_index_stays_outside_strict_seed_task(unexpected: str | None) -> None:
+    class StrictSeed(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        question: str
+
+    row = {
+        "_rowidx": 7,
+        "_ng_task_index": 3,
+        "_ng_rollout_index": 7,
+        "_ng_rollout_id": "rollout",
+        "responses_create_params": {"input": "Answer the question"},
+        "question": "What is 2 + 2?",
+    }
+    if unexpected is not None:
+        row[unexpected] = "must remain visible to schema validation"
+    request = SingleAgentTurnRequest.model_validate(
+        {"episode_id": {"rollout_id": "rollout"}, "task": materialize_task(row, taskset="test")}
+    )
+    assert row["_rowidx"] == 7
+    task_data = request.task.task_input.task_data
+    assert "_rowidx" not in task_data
+    if unexpected is None:
+        assert StrictSeed.model_validate(task_data).question == row["question"]
+    else:
+        with pytest.raises(ValidationError, match="extra_forbidden"):
+            StrictSeed.model_validate(task_data)

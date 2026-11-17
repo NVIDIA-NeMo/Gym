@@ -1,0 +1,4 @@
+config_paths:
+  - benchmarks/agentvista/config.yaml
+
+agentvista_harness: opencode
