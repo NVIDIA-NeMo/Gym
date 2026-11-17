@@ -96,8 +96,9 @@ manifest alongside rollout records for audit.
 Docker `network=none` enforces the offline network namespace at container creation. Dropping all
 capabilities and applying `no-new-privileges` prevent the workload from restoring network interfaces
 through normal privileged operations. Before handing control to the agent, a fail-closed admission
-probe requires only loopback interfaces and tests direct IPv4/IPv6 TCP plus UDP/TCP DNS to both the
-configured resolvers and public resolvers. Even a DNS refusal response rejects admission. Probe
+probe requires loopback and allows the Linux fallback tunnel devices `sit0` and `ip6tnl0` only
+when they are down. It tests direct IPv4/IPv6 TCP and UDP/TCP DNS against configured and public
+resolvers. Even a DNS refusal response rejects admission. Probe
 failure follows the existing failed-seed cleanup path. The probe is a deployment check, not a substitute
 for provider enforcement. Docker itself remains a shared-kernel runtime, not a VM escape defense.
 

@@ -80,8 +80,16 @@ def admit_agent_image(
 # for direct-IP tests. A DNS error response still proves packets escaped and must reject admission.
 OFFLINE_NETWORK_PROBE = r"""
 import ipaddress, os, socket, struct
-if {name for _, name in socket.if_nameindex()} != {"lo"}:
-    raise RuntimeError("offline sandbox has a non-loopback network interface")
+interfaces = {name for _, name in socket.if_nameindex()}
+if "lo" not in interfaces:
+    raise RuntimeError("offline sandbox is missing its loopback interface")
+for name in interfaces - {"lo"}:
+    # Linux can create these fallback tunnel devices even in an empty network namespace.
+    if name not in {"sit0", "ip6tnl0"}:
+        raise RuntimeError("offline sandbox has an unexpected non-loopback network interface")
+    with open(f"/sys/class/net/{name}/flags") as stream:
+        if int(stream.read(), 16) & 1:  # IFF_UP
+            raise RuntimeError("offline sandbox has an active non-loopback network interface")
 resolvers = {"1.1.1.1", "8.8.8.8"}
 with open("/etc/resolv.conf") as stream:
     for line in stream:

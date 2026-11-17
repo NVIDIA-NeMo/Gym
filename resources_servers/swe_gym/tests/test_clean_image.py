@@ -228,7 +228,7 @@ def test_probe_rejects_network_interface_before_policy_code():
         exec(OFFLINE_NETWORK_PROBE, {"__builtins__": vars(builtins) | {"__import__": import_probe}})
 
 
-@pytest.mark.parametrize("escape", [None, "ip", "udp", "tcp"])
+@pytest.mark.parametrize("escape", [None, "ip", "udp", "tcp", "tunnel-up"])
 def test_probe_checks_direct_ip_and_actual_and_external_dns(monkeypatch, escape):
     import builtins
     import socket
@@ -266,17 +266,20 @@ def test_probe_checks_direct_ip_and_actual_and_external_dns(monkeypatch, escape)
             raise TimeoutError("blocked")
 
     original_open = builtins.open
-    monkeypatch.setattr(socket, "if_nameindex", lambda: [(1, "lo")])
+
+    def open_probe_file(path, *args, **kwargs):
+        if path == "/etc/resolv.conf":
+            return io.StringIO("nameserver 10.0.0.53\n")
+        if path in {"/sys/class/net/sit0/flags", "/sys/class/net/ip6tnl0/flags"}:
+            return io.StringIO("0x81" if escape == "tunnel-up" else "0x80")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "if_nameindex", lambda: [(1, "lo"), (2, "sit0"), (3, "ip6tnl0")])
     monkeypatch.setattr(socket, "socket", FakeSocket)
-    monkeypatch.setattr(
-        builtins,
-        "open",
-        lambda path, *a, **kw: (
-            io.StringIO("nameserver 10.0.0.53\n") if path == "/etc/resolv.conf" else original_open(path, *a, **kw)
-        ),
-    )
+    monkeypatch.setattr(builtins, "open", open_probe_file)
     if escape:
-        with pytest.raises(RuntimeError, match="egress succeeded"):
+        message = "active non-loopback" if escape == "tunnel-up" else "egress succeeded"
+        with pytest.raises(RuntimeError, match=message):
             exec(OFFLINE_NETWORK_PROBE, {})
     else:
         exec(OFFLINE_NETWORK_PROBE, {})
