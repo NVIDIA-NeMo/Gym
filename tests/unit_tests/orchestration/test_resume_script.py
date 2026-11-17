@@ -1519,8 +1519,8 @@ def test_inspection_names_a_chain_stopped_on_a_producer_protocol_violation(tmp_p
 
 
 def test_inspection_names_a_chain_stopped_on_node_local_archives_that_do_not_restore(tmp_path):
-    from nemo_gym.orchestration.executors.slurm.resume_script import DRIVER_NODE_LOCAL_RESTORE_FAILED_REASON
     from nemo_gym.eval.recovery.planner import decide_from_collected
+    from nemo_gym.orchestration.executors.slurm.resume_script import DRIVER_NODE_LOCAL_RESTORE_FAILED_REASON
     from tests.helpers.recovery_evidence import collect, ident, write_job_dir
 
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
