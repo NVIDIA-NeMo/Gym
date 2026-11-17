@@ -12,13 +12,7 @@ import pytest
 from fastapi import HTTPException
 
 import nemo_gym.client.http_client
-from nemo_gym.agents import (
-    AGENT_OUTCOME_METADATA_KEY,
-    AgentCloseSessionRequest,
-    AgentOutcome,
-    AgentSeedRejectedError,
-    AgentSeedSessionRequest,
-)
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentCloseSessionRequest, AgentOutcome, AgentSeedSessionRequest
 from nemo_gym.client import GlobalAIOHTTPAsyncClientConfig, ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
@@ -915,36 +909,27 @@ class TestNativeSessions:
         _, client, _, _ = self._client(monkeypatch)
         assert client.post("/v1/agent_sessions", json=_seed_body(with_sandbox=False)).status_code == 422
 
-    def test_seed_refuses_a_required_tool_grant_it_cannot_use(self, monkeypatch):
+    def test_seed_refuses_a_required_tool_grant_it_cannot_use(self, monkeypatch, caplog):
         """Terminus 2 drives only its terminal. The Harbor environment server grants a task's MCP servers as
         required, so a seed that took them would run the task without its tools: it is refused, terminally, before
-        the sandbox is touched."""
+        the sandbox is touched, naming every required grant."""
         agent, client, _, connect = self._client(monkeypatch)
-        grants = [_mcp_grant("web", required=False), _mcp_grant("user-server", required=True)]
+        grants = [
+            _mcp_grant("web", required=False),
+            _mcp_grant("b-server", required=True),
+            _mcp_grant("a-server", required=True),
+        ]
 
-        response = client.post("/v1/agent_sessions", json=_seed_body(tool_accesses=grants))
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.agents.base_responses_api_agent"):
+            response = client.post("/v1/agent_sessions", json=_seed_body(tool_accesses=grants))
 
+        detail = "Terminus 2 runs only its terminal; required tool grants it cannot use: a-server, b-server"
         assert response.status_code == 422
-        assert response.json()["detail"] == (
-            "Terminus 2 runs only its terminal; required tool grants it cannot use: user-server"
-        )
+        assert response.json()["detail"] == detail
+        # Logged as an agent seed rejection, which only AgentSeedRejectedError is.
+        assert f"Refused agent session seed ag-1: {detail}" in caplog.text
         connect.assert_not_awaited()
         assert "ag-1" not in agent._session_records
-
-    async def test_the_refusal_is_an_agent_seed_rejection_naming_every_required_grant(self, monkeypatch):
-        agent, _, _, connect = self._client(monkeypatch)
-        grants = [_mcp_grant("b-server", required=True), _mcp_grant("a-server", required=True)]
-
-        with pytest.raises(AgentSeedRejectedError) as refused:
-            await agent._seed_agent_session_state(
-                AgentSeedSessionRequest.model_validate(_seed_body(tool_accesses=grants))
-            )
-
-        assert refused.value.status_code == 422
-        assert refused.value.detail == (
-            "Terminus 2 runs only its terminal; required tool grants it cannot use: a-server, b-server"
-        )
-        connect.assert_not_awaited()
 
     def test_seed_skips_an_optional_tool_grant(self, monkeypatch):
         """Only a grant the environment requires is refused; an optional one may be left unused."""

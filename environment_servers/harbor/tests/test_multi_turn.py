@@ -1688,19 +1688,10 @@ GRANTED_USER_SERVER = {
 }
 
 
-async def test_task_mcp_servers_are_granted_as_required(tmp_path, monkeypatch):
-    server, task, _, _ = make_server(tmp_path, monkeypatch, toml=TASK_TOML + MCP_TOML)
-
-    await server.run_request(request_for(task))
-
-    (seed,) = server.server_client.seed_bodies()
-    # Only the streamable-http entry can be granted; the URL is the sidecar's own host, as declared.
-    assert seed["tool_accesses"] == [GRANTED_USER_SERVER]
-
-
 async def test_every_turns_session_is_seeded_with_the_task_mcp_grant(tmp_path, monkeypatch):
     """One agent session per step: each step's seed carries the grant, since a session that was not handed the
-    server would run that step without its tools."""
+    server would run that step without its tools. Only the streamable-http entry can be granted, with the sidecar's
+    own host as declared; the SSE one reaches the harness in task.json only."""
     server, task, sandbox, _ = multi_turn_server(
         tmp_path,
         monkeypatch,

@@ -1259,33 +1259,21 @@ class TestAgentStage:
         assert response.result.reward == 1.0
         assert any("test.sh" in call["command"] for call in sandbox.execs)
 
-    async def test_a_task_whose_mcp_servers_are_all_streamable_http_runs_on_a_harness_without_task_json(
-        self, tmp_path, monkeypatch
-    ):
-        """Hermes or Pi read no task.json, but take required MCP grants, or fail their seed when they cannot."""
-        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=TASK_TOML + GRANTABLE_MCP_SERVER)
-        server.server_client.supports_task_tool_context = False
-
-        response = await run_episode(server, task)
-
-        assert response.failure is None, response.failure
-        assert response.result.reward == 1.0
-        (seed,) = server.server_client.seed_bodies()
-        assert [(access["name"], access["required"]) for access in seed["tool_accesses"]] == [("user-server", True)]
-        assert any("test.sh" in call["command"] for call in sandbox.execs)
-
     @pytest.mark.parametrize("supports_task_tool_context", [True, False])
     async def test_a_streamable_http_mcp_server_is_granted_to_every_harness_as_required(
         self, tmp_path, monkeypatch, supports_task_tool_context
     ):
         """The grant does not depend on the harness reading task.json or on any server setting: a task that declares
-        an MCP server hands it to the agent, and an agent that cannot connect fails instead of running without it."""
-        server, task, _, _ = make_server(tmp_path, monkeypatch, toml=TASK_TOML + GRANTABLE_MCP_SERVER)
+        an MCP server hands it to the agent, and an agent that cannot connect fails instead of running without it.
+        Hermes or Pi read no task.json, so they take such a task through the grant alone."""
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=TASK_TOML + GRANTABLE_MCP_SERVER)
         server.server_client.supports_task_tool_context = supports_task_tool_context
 
         response = await run_episode(server, task)
 
         assert response.failure is None, response.failure
+        assert response.result.reward == 1.0
+        assert any("test.sh" in call["command"] for call in sandbox.execs)
         (seed,) = server.server_client.seed_bodies()
         assert seed["tool_accesses"] == [
             {
