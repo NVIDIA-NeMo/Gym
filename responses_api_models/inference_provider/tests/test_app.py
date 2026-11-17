@@ -14,13 +14,13 @@
 # limitations under the License.
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from nemo_gym.base_responses_api_model import CaptureStore
-from nemo_gym.observability.model_calls import read_model_call_records
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import NeMoGymAsyncOpenAI, ServerClient
+from nemo_gym.models import CaptureStore
+from nemo_gym.rollouts import read_model_call_records
 from responses_api_models.inference_provider.app import (
     InferenceProvider,
     InferenceProviderConfig,
@@ -403,7 +403,7 @@ class TestResponses:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         mock_data = _mock_chat_response(content="Hello from the model!")
 
@@ -426,7 +426,7 @@ class TestResponses:
         assert data["status"] == "completed"
         [record] = read_model_call_records(CaptureStore(tmp_path), "0-0")
         assert record.response_status == "completed"
-        assert record.finish_reason is None
+        assert record.finish_reason == "stop"
         assert len(data["output"]) == 1
         assert data["output"][0]["type"] == "message"
         assert data["output"][0]["content"][0]["text"] == "Hello from the model!"
@@ -436,7 +436,7 @@ class TestResponses:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         async def mock_create_chat(**kwargs):
             return _mock_chat_response()
@@ -453,7 +453,7 @@ class TestResponses:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         async def mock_create_chat(**kwargs):
             return _mock_chat_response()
@@ -485,7 +485,7 @@ class TestResponses:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         mock_data = _mock_chat_response(
             content=None,
@@ -543,7 +543,7 @@ class TestResponses:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         mock_data = _mock_chat_response(content="<think>Let me reason about this...</think>The answer is 42.")
 
@@ -570,7 +570,7 @@ class TestResponses:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         mock_data = _mock_chat_response(content="<think>Let me reason about this...</think>The answer is 42.")
 
@@ -616,7 +616,7 @@ class TestResponses:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         mock_data = _mock_chat_response(content="Hi!")
         mock_data["usage"] = {
@@ -676,7 +676,7 @@ class TestResponses:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         mock_data = _mock_chat_response(content="Truncated output...", finish_reason="length")
 
@@ -697,7 +697,7 @@ class TestResponses:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         mock_data = _mock_chat_response(content="", finish_reason="content_filter")
 
@@ -728,7 +728,7 @@ class TestResponses:
         server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
         server._client.create_chat_completion = AsyncMock(side_effect=mock_create_chat)
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         client.post("/v1/responses", json={"input": "hello world"})
 
@@ -740,7 +740,7 @@ class TestResponses:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         called_kwargs = {}
 
@@ -786,3 +786,24 @@ class TestConcurrency:
     async def test_semaphore_limits_concurrency(self, monkeypatch: MonkeyPatch) -> None:
         server = _make_server(num_concurrent_requests=2)
         assert server._semaphore._value == 2
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "recorded"),
+    [("stop", "stop"), ("tool_calls", "tool_calls"), ("length", "max_output_tokens")],
+)
+async def test_responses_note_the_finish_reason_for_the_model_call_record(finish_reason, recorded) -> None:
+    from types import SimpleNamespace
+
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+    from nemo_gym.trajectory import build_model_call_record
+
+    server = _make_server()
+    server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+    server._client.create_chat_completion = AsyncMock(return_value=_mock_chat_response(finish_reason=finish_reason))
+    request = MagicMock(state=SimpleNamespace())
+
+    response = await server.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="hi"))
+
+    exchange = {"response": response.model_dump(mode="json"), **request.state.nemo_gym_model_execution}
+    assert build_model_call_record(exchange, call_index=0).finish_reason == recorded

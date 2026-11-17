@@ -7,22 +7,32 @@ import json
 import os
 import shutil
 import signal
+import sqlite3
 import sys
 from pathlib import Path
 
 import pytest
 
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.sandbox.providers.base import SandboxExecResult
-from responses_api_agents.kilocode_agent import sandbox_runner
+from nemo_gym.agents import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SUPERVISOR_FILE, SandboxSession
+from nemo_gym.agents.utils.supervisor_client import LAUNCH_CLAIM_FILE, SUPERVISOR_PID_FILE
+from nemo_gym.sandbox import SandboxExecResult
+from nemo_gym.trajectory import AgentInvocation
 from responses_api_agents.kilocode_agent.sandbox import KiloSandboxSession
+from responses_api_agents.kilocode_agent.tests.test_observability import database, family
 from responses_api_agents.kilocode_agent.tests.test_sandbox import seed
 
 
-pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux child-subreaper and /proc required")
+pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc required")
+
+# These integration tests run real shells and scan /proc on shared CI runners.
+# Tight cancellation deadlines are covered separately by the SandboxSession unit tests.
+CLOSE_TIMEOUT = 10
 
 
 class ExecOnlySandbox:
+    # File copies do not wait for the supervised exec in this local provider.
+    uploads_independent_of_execs = True
+
     def __init__(self):
         self.cancelled_launch = False
         self.lost_launch = False
@@ -40,7 +50,7 @@ class ExecOnlySandbox:
         self.disconnected = True
 
     async def exec(self, command, *, cwd=None, timeout_s=30):
-        launch = "--receipt" in command and "process_supervisor.py" in command
+        launch = "--receipt" in command and "process_supervisor.sh" in command
         if launch:
             self.deadline = timeout_s
             self.delayed_command = command
@@ -74,8 +84,8 @@ def make_session(tmp_path):
         provider_name="local",
         session=SandboxSession(sandbox=provider, session_dir=str(directory), workdir=str(workdir), harness="KiloCode"),
     )
-    shutil.copyfile(sandbox_runner.__file__, directory / "sandbox_runner.py")
-    assert not (directory / "process_supervisor.py").exists()
+    shutil.copyfile(HARNESS_RUNNER_SCRIPT, directory / HARNESS_RUNNER_FILE)
+    assert not (directory / "process_supervisor.sh").exists()
     return state, provider, workdir
 
 
@@ -84,31 +94,41 @@ def activate(state, code, timeout=0.5):
         stage_activation=lambda: state.stage_activation(command=[sys.executable, "-c", code], config="{}"),
         collect=state.collect_artifacts,
         timeout=timeout,
-        close_timeout=3,
+        close_timeout=CLOSE_TIMEOUT,
     )
 
 
+@pytest.mark.parametrize("detached", [False, True])
 @pytest.mark.parametrize("ending", ["natural", "timeout", "cancel", "close"])
-async def test_exec_only_supervision_reaps_detached_child(tmp_path, ending):
+@pytest.mark.parametrize("startup_delay", [0, 0.6])
+async def test_exec_only_supervision_reaps_harness_group(tmp_path, ending, detached, startup_delay):
     state, provider, workdir = make_session(tmp_path)
+    # A tool in Kilo's process group, or in its own session as Kilo starts shell tools.
     code = (
         "import subprocess,sys,time,pathlib; "
-        "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); "
+        f"time.sleep({startup_delay}); "
+        f"p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session={detached}); "
         "pathlib.Path('child.pid').write_text(str(p.pid)); "
         + ("print('{}')" if ending == "natural" else "time.sleep(60)")
     )
-    deadline = 0.5 if ending == "timeout" else 60
+    # Expire only after the detached child is ready; startup speed is not under test.
+    deadline = 60
     task = state.task = asyncio.create_task(activate(state, code, timeout=deadline))
     try:
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(30):
             while not (workdir / "child.pid").exists():
+                if task.done():
+                    await task
+                    pytest.fail("Harness exited before its child was ready")
                 await asyncio.sleep(0.01)
+        if ending == "timeout":
+            assert await state.session.expire(timeout=CLOSE_TIMEOUT)
         if ending == "cancel":
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
         elif ending == "close":
-            await state.close(timeout=3)
+            await state.close(timeout=CLOSE_TIMEOUT)
             await asyncio.gather(task, return_exceptions=True)
         else:
             artifacts = await task
@@ -116,23 +136,23 @@ async def test_exec_only_supervision_reaps_detached_child(tmp_path, ending):
         assert state.session.cleanup["cleanup_confirmed"] is True
         if ending == "timeout":
             assert state.session.cleanup["timed_out"] is True
-        child_pid = int((workdir / "child.pid").read_text())
-        if ending == "natural":
-            # Natural CLI exit has no adoption cutoff; the sandbox owner tears down detached tools.
-            os.kill(child_pid, 0)
-        else:
-            with pytest.raises(ProcessLookupError):
-                os.kill(child_pid, 0)
+        # The orphaned tool may linger as a zombie until init reaps it; it can no longer run.
+        try:
+            stat = Path(f"/proc/{(workdir / 'child.pid').read_text()}/stat").read_text()
+        except FileNotFoundError:
+            stat = ") X"
+        # Natural CLI exit has no stop cutoff; the sandbox owner tears down a detached tool.
+        assert (stat.rpartition(")")[2].split()[0] in ("Z", "X")) is not (detached and ending == "natural")
         assert provider.cancelled_launch is False
-        assert provider.deadline > deadline + 3 * 1
-        await state.close(timeout=3)
-        await state.close(timeout=3)
+        assert provider.deadline == pytest.approx(deadline + CLOSE_TIMEOUT + 30)
+        await state.close(timeout=CLOSE_TIMEOUT)
+        await state.close(timeout=CLOSE_TIMEOUT)
         assert provider.disconnected
         assert not Path(state.session.session_dir).exists()
     finally:
         try:
             if not state.session.closed:
-                await state.close(timeout=3)
+                await state.close(timeout=CLOSE_TIMEOUT)
         finally:
             if (workdir / "child.pid").exists():
                 try:
@@ -141,19 +161,46 @@ async def test_exec_only_supervision_reaps_detached_child(tmp_path, ending):
                     pass
 
 
-async def test_lost_launch_is_fenced_even_after_directory_retirement(tmp_path):
+async def test_observations_include_commits_still_in_the_wal(tmp_path):
+    state, _, _ = make_session(tmp_path)
+    path = Path(state.session.session_dir) / "kilo.db"
+    database(path, family())
+    # An open connection keeps the latest commit in kilo.db-wal, as a stopped Kilo can leave it.
+    with sqlite3.connect(path) as connection:
+        connection.execute("pragma wal_checkpoint(truncate)")
+        connection.execute("insert into session values ('new-child', 'root', 2)")
+        connection.commit()
+        artifacts = await activate(state, "print('{}')", timeout=60)
+    records = artifacts.observations.records
+    invocations = {record.invocation_id for record in records if isinstance(record, AgentInvocation)}
+    assert {"root", "new-child"} <= invocations
+    await state.close(timeout=CLOSE_TIMEOUT)
+
+
+@pytest.mark.parametrize("retired", [False, True], ids=["before_retirement", "after_retirement"])
+async def test_lost_launch_is_fenced_before_and_after_directory_retirement(tmp_path, retired):
     state, provider, workdir = make_session(tmp_path)
     provider.lost_launch = True
     with pytest.raises(TimeoutError, match="lost launch response"):
-        await activate(state, "open('started','w').close()")
+        await activate(state, "open('started','w').close()", timeout=10)
     assert state.session.cleanup["cleanup_confirmed"] is True
     assert state.session.cleanup["return_code"] is None
     assert state.session.cleanup["error"] is None
-    await state.close(timeout=3)
     provider.lost_launch = False
+    session_dir = Path(state.session.session_dir)
+    if retired:
+        await state.close(timeout=CLOSE_TIMEOUT)
+    else:
+        # The supervisor is still in place, so only the stop's launch claim can fence the delayed command.
+        assert (session_dir / SUPERVISOR_FILE).exists()
     await provider.exec(provider.delayed_command, cwd=str(workdir))
+    # Under a broken claim the stop file halts the harness before it writes this; the PID file shows the start.
     assert not (workdir / "started").exists()
-    assert not Path(state.session.session_dir).exists()
+    if not retired:
+        assert not (session_dir / SUPERVISOR_PID_FILE).exists()
+        assert (session_dir / LAUNCH_CLAIM_FILE).readlink() == Path("stop")
+        await state.close(timeout=CLOSE_TIMEOUT)
+    assert not session_dir.exists()
 
 
 async def test_terminal_failed_receipt_releases_borrowed_session(tmp_path):
@@ -167,7 +214,7 @@ async def test_terminal_failed_receipt_releases_borrowed_session(tmp_path):
     }
     path = Path(state.session.session_dir) / "cleanup.json"
     path.write_text(json.dumps(receipt))
-    await state.close(timeout=3)
+    await state.close(timeout=CLOSE_TIMEOUT)
     assert provider.disconnected
     assert state.session.closed
     assert state.session.cleanup is None

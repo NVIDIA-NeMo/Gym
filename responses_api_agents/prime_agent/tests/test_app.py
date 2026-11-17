@@ -23,8 +23,9 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import pytest
 import yaml
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -32,7 +33,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseReasoningItem,
 )
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.prime_agent.app import (
     PrimeAgent,
     PrimeAgentConfig,
@@ -56,11 +56,16 @@ def _config(**kwargs) -> PrimeAgentConfig:
     )
 
 
+@pytest.fixture(autouse=True)
+def _no_host_install():
+    # Host-path tests never install the real CLI; the lazy-install test patches it itself.
+    with patch("responses_api_agents.prime_agent.app.ensure_prime_agent"):
+        yield
+
+
 def _make_agent(**kwargs) -> PrimeAgent:
-    with patch("responses_api_agents.prime_agent.app.PrimeAgent.model_post_init"):
-        agent = PrimeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
-    agent.sem = asyncio.Semaphore(agent.config.concurrency)
-    return agent
+    # Startup installs nothing on the host, so the agent is built as served.
+    return PrimeAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
 
 
 def _message_end(role, content, **extra) -> str:
@@ -79,14 +84,18 @@ class TestSanity:
         agent = _make_agent(concurrency=4)
         assert agent.sem._value == 4
 
-    def test_model_post_init_checks_pinned_version(self) -> None:
+    def test_host_runtime_installs_on_first_host_call_only(self) -> None:
         agent = _make_agent(prime_agent_version="0.7.0")
-        with (
-            patch("responses_api_agents.prime_agent.app.ensure_prime_agent") as ensure,
-            patch("responses_api_agents.prime_agent.app.shutil.which", return_value="/bin/prime-agent"),
-        ):
+        with patch("responses_api_agents.prime_agent.app.ensure_prime_agent") as ensure:
+            # Startup installs nothing on the host: agent sessions install inside the task sandbox.
             agent.model_post_init(None)
+            ensure.assert_not_called()
 
+            async def twice() -> None:
+                await agent._ensure_local_runtime()
+                await agent._ensure_local_runtime()
+
+            asyncio.run(twice())
         ensure.assert_called_once_with("0.7.0")
 
 
@@ -116,7 +125,7 @@ class TestParsePrimeAgentEvents:
     def test_empty(self) -> None:
         items, usage = parse_prime_agent_events("")
         assert items == []
-        assert usage == {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
+        assert usage == {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None}
 
     def test_assistant_text_and_usage(self) -> None:
         line = _message_end(
@@ -129,6 +138,22 @@ class TestParsePrimeAgentEvents:
         assert isinstance(items[0], NeMoGymResponseOutputMessage)
         assert items[0].content[0].text == "the answer is 4"
         assert usage == {"input_tokens": 105, "output_tokens": 20, "cached_tokens": 5}
+
+    @pytest.mark.parametrize(
+        ("cache_reads", "expected"),
+        [([5, 7], 12), ([5, 0], None), ([0, 5], None), ([5, None], None)],
+    )
+    def test_cached_tokens_sum_only_measured_cache_reads(self, cache_reads, expected) -> None:
+        lines = "\n".join(
+            _message_end(
+                "assistant",
+                [{"type": "text", "text": "ok"}],
+                usage={"input": 10, "output": 1, **({} if cache_read is None else {"cacheRead": cache_read})},
+            )
+            for cache_read in cache_reads
+        )
+        # Pi writes cacheRead=0 when the backend reported no cache details, so zero is not a measurement.
+        assert parse_prime_agent_events(lines)[1]["cached_tokens"] == expected
 
     def test_user_and_non_terminal_events_ignored(self) -> None:
         user = _message_end("user", [{"type": "text", "text": "hi"}])
@@ -165,7 +190,14 @@ class TestParsePrimeAgentEvents:
         line = _message_end("assistant", [], stopReason="error", errorMessage="model failed")
         items, usage = parse_prime_agent_events(line)
         assert items == []
-        assert usage == {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
+        assert usage == {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None}
+
+    def test_retried_model_error_keeps_the_run(self) -> None:
+        error = _message_end("assistant", [], stopReason="error", errorMessage="503")
+        done = _message_end("assistant", [{"type": "text", "text": "ok"}], usage={"output": 3})
+        items, usage = parse_prime_agent_events(f"{error}\n{done}")
+        assert [item.content[0].text for item in items] == ["ok"]
+        assert usage["output_tokens"] == 3
 
     def test_reasoning_is_preserved_separately(self) -> None:
         line = _message_end(
@@ -189,12 +221,13 @@ class TestResponses:
         agent = _make_agent()
         request = MagicMock()
         request.path_params = {}
-        result = ([], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}, "test-model", False)
+        result = ([], {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None}, "test-model", False)
         with patch.object(PrimeAgent, "_run_prime_agent", new=AsyncMock(return_value=result)):
             response = await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="hello"))
 
         assert len(response.output) == 1
         assert response.output[0].content[0].text == ""
+        assert response.usage.input_tokens_details.cached_tokens is None
 
     async def test_timeout_preserves_partial_output_and_sets_metadata(self) -> None:
         agent = _make_agent()
@@ -300,7 +333,7 @@ class TestRunPrimeAgent:
         assert socket.parent.parent == Path("/tmp")
         assert not socket.parent.exists()
         assert output[0].content[0].text == "partial answer"
-        assert usage == {"input_tokens": 7, "output_tokens": 3, "cached_tokens": 0}
+        assert usage == {"input_tokens": 7, "output_tokens": 3, "cached_tokens": None}
         assert model == agent.config.model
         assert timed_out is True
 
@@ -413,7 +446,7 @@ class TestEnvironmentAndCommand:
         socket = tmp_path / "daemon.sock"
         command = agent._build_command("solve it", "be exact", socket)
         assert command[:6] == ["prime-agent", "--print", "--mode", "json", "--no-session", "--daemon-socket"]
-        assert command[-3:] == ["be exact", "--no-skills", "solve it"]
+        assert command[-4:] == ["be exact", "--no-skills", "--", "solve it"]
         assert command[command.index("--daemon-socket") + 1] == str(socket)
         assert command[command.index("--model") + 1] == "test-model"
         assert command[command.index("--thinking") + 1] == "high"

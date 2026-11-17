@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.client import SESSION_ID_KEY
 from resources_servers.swebench_pro.app import SWEBenchProInstanceRequest, SWEBenchProSeedSessionRequest
 from resources_servers.swebench_pro.tests.test_app import make_server, request_body
 from resources_servers.swebench_pro.verification import VerificationResult, inconclusive_reason

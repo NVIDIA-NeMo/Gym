@@ -14,7 +14,8 @@ Preparation validates all 198 source records, unique Record IDs, and nonempty
 question/answer translations for each selected language. Missing translations
 are errors, never English fallbacks. Source whitespace is preserved. Explanations
 and translation-review fields are not included in model input. Stable row UUIDs
-are derived from the language and source Record ID.
+are derived from the language and source Record ID, and each row's `task_id` is
+`<language>/<Record ID>`, so it is unique across the selected languages.
 
 ## Configuration
 
@@ -150,10 +151,10 @@ as incomplete, never removed from the denominator. Keep the original artifacts
 and record the verifier commit alongside both scores.
 
 Preparation and composition regressions are collected by the normal core CI
-suite from `tests/unit_tests/test_indic_gpqa_diamond.py`:
+suite from `tests/unit_tests/benchmarks/test_indic_gpqa_diamond.py`:
 
 ```bash
-pytest tests/unit_tests/test_indic_gpqa_diamond.py
+pytest tests/unit_tests/benchmarks/test_indic_gpqa_diamond.py
 ```
 
 ## Prepare data

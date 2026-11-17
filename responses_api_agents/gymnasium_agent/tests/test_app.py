@@ -14,15 +14,16 @@
 # limitations under the License.
 import asyncio
 import json
+import re
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import anyio
 import pytest
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, ModelServerRef, ResourcesServerRef
+from nemo_gym.core import NeMoGymResponse
 from responses_api_agents.gymnasium_agent.app import GymnasiumAgent, GymnasiumAgentConfig, GymnasiumAgentRunRequest
 
 
@@ -259,6 +260,71 @@ class TestRun:
         assert urls.count("/close") == 0
         model_calls = [(u, h) for (u, h) in seen if u == model_path]
         assert model_calls == [(model_path, None)]
+
+    @pytest.mark.asyncio
+    async def test_step_failure_fields_reach_the_run_response(self):
+        agent = _make_agent()
+        model_path = "/ng-rollout/2-0/v1/responses"
+        payloads = {
+            "/reset": [{"observation": "go", "info": {}}],
+            model_path: [_model_response("move A")],
+            "/step": [
+                {
+                    "observation": None,
+                    "reward": 0.25,
+                    "terminated": False,
+                    "truncated": True,
+                    "info": {"score": 0.25},
+                    "mask_sample": True,
+                    "failure_kind": "my_env:user_sim_failed",
+                    "failure_reason": "user simulator returned no usable reply in 3 attempts",
+                }
+            ],
+        }
+
+        async def _post(server_name, url_path, json=None, cookies=None, headers=None, **kw):
+            return _FakeHttpResp(payloads[url_path].pop(0))
+
+        agent.server_client.post = AsyncMock(side_effect=_post)
+        req = MagicMock()
+        req.cookies = {}
+        body = GymnasiumAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "play"}]},
+            **{TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0},
+        )
+        result = await agent.run(req, body)
+        assert result.truncated is True
+        assert result.reward == 0.25
+        assert result.info == {"score": 0.25}
+        assert result.mask_sample is True
+        assert result.failure_kind == "my_env:user_sim_failed"
+        assert result.failure_reason == "user simulator returned no usable reply in 3 attempts"
+        dumped = result.model_dump(mode="json")
+        assert dumped["mask_sample"] is True and dumped["failure_kind"] == "my_env:user_sim_failed"
+
+    @pytest.mark.asyncio
+    async def test_step_without_failure_fields_is_a_valid_sample(self):
+        agent = _make_agent()
+        model_path = "/ng-rollout/2-0/v1/responses"
+        payloads = {
+            "/reset": [{"observation": "go", "info": {}}],
+            model_path: [_model_response("move A")],
+            "/step": [{"observation": None, "reward": 1.0, "terminated": True, "truncated": False, "info": {}}],
+        }
+
+        async def _post(server_name, url_path, json=None, cookies=None, headers=None, **kw):
+            return _FakeHttpResp(payloads[url_path].pop(0))
+
+        agent.server_client.post = AsyncMock(side_effect=_post)
+        req = MagicMock()
+        req.cookies = {}
+        body = GymnasiumAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "play"}]},
+            **{TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0},
+        )
+        result = await agent.run(req, body)
+        assert result.mask_sample is False
+        assert result.failure_kind is None and result.failure_reason is None
 
     @pytest.mark.asyncio
     async def test_successful_rollout_survives_close_http_failure(self):
@@ -742,3 +808,180 @@ class TestRun:
         assert result.response.usage.total_tokens == 36
         assert result.response.usage.input_tokens_details.cached_tokens == 7
         assert result.response.usage.output_tokens_details.reasoning_tokens == 10
+
+
+class TestEnvironmentRewardRecord:
+    async def _run(self, steps, *, max_steps=10, model_responses=None, rollout_keys=True):
+        agent = _make_agent(max_steps=max_steps)
+        payloads = {
+            "/reset": [{"observation": "go", "info": {}}],
+            ("/ng-rollout/2-0/v1/responses" if rollout_keys else "/v1/responses"): model_responses
+            or [_model_response("a") for _ in steps],
+            "/step": list(steps),
+        }
+
+        async def _post(server_name, url_path, json=None, cookies=None, headers=None, **kw):
+            return _FakeHttpResp(payloads[url_path].pop(0))
+
+        agent.server_client.post = AsyncMock(side_effect=_post)
+        body = GymnasiumAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "play"}]},
+            **({TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0} if rollout_keys else {}),
+        )
+        return await agent.run(MagicMock(cookies={}), body)
+
+    @pytest.mark.asyncio
+    async def test_a_finished_episode_saves_the_environments_summed_reward(self):
+        result = await self._run(
+            [
+                {"observation": "o", "reward": 0.25, "terminated": False, "truncated": False, "info": {}},
+                {"observation": None, "reward": 0.5, "terminated": True, "truncated": False, "info": {}},
+            ]
+        )
+        row = result.model_dump(mode="json")
+        assert row["reward"] == 0.75
+        assert row["result"] == {"reward_info": {"reward": 0.75}}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "last_step",
+        [
+            {"observation": None, "reward": 0.0, "terminated": True, "truncated": False, "mask_sample": True},
+            {
+                "observation": None,
+                "reward": 0.0,
+                "terminated": True,
+                "truncated": False,
+                "failure_kind": "judge_failed",
+            },
+        ],
+    )
+    async def test_an_episode_the_environment_failed_saves_no_reward_record(self, last_step):
+        row = (await self._run([last_step])).model_dump(mode="json")
+        assert "result" not in row
+
+    @pytest.mark.asyncio
+    async def test_an_episode_the_environment_ends_with_truncated_and_no_failure_saves_the_record(self):
+        step = {"observation": None, "reward": 0.5, "terminated": False, "truncated": True, "info": {}}
+        responses = [_model_response("a") | {"id": "r1"}]
+        row = (await self._run([step], model_responses=responses)).model_dump(mode="json")
+        assert row["truncated"] is True
+        assert row["result"] == {"reward_info": {"reward": 0.5}}
+        assert row["ng_agent_observations"]["records"][0]["status"] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_an_episode_cut_by_the_step_limit_saves_no_reward_record(self):
+        step = {"observation": "o", "reward": 0.0, "terminated": False, "truncated": False, "info": {}}
+        row = (await self._run([step], max_steps=1)).model_dump(mode="json")
+        assert row["truncated"] is True and "result" not in row
+
+
+class TestAgentObservation:
+    """The agent's one invocation and the model responses it asked for, so a cut-off answer joins its owner."""
+
+    @staticmethod
+    def _responses(ids, last_status="completed"):
+        responses = []
+        for index, response_id in enumerate(ids):
+            response = _model_response("a")
+            response["id"] = response_id
+            if index == len(ids) - 1:
+                response["status"] = last_status
+            responses.append(response)
+        return responses
+
+    @pytest.mark.asyncio
+    async def test_a_finished_episode_records_one_completed_invocation_with_every_model_response(self):
+        steps = [
+            {"observation": "o", "reward": 0.0, "terminated": False, "truncated": False, "info": {}},
+            {"observation": None, "reward": 1.0, "terminated": True, "truncated": False, "info": {}},
+        ]
+        row = (
+            await TestEnvironmentRewardRecord()._run(steps, model_responses=self._responses(["r1", "r2"]))
+        ).model_dump(mode="json")
+        (invocation,) = row["ng_agent_observations"]["records"]
+        assert invocation["status"] == "completed"
+        assert [call["response_id"] for call in invocation["model_calls"]] == ["r1", "r2"]
+        assert invocation["conversation"] == row["responses_create_params"]["input"] + row["response"]["output"]
+
+    @pytest.mark.asyncio
+    async def test_an_answer_the_model_cut_off_is_an_incomplete_invocation_not_a_missing_one(self):
+        step = {"observation": None, "reward": 0.0, "terminated": True, "truncated": False, "info": {}}
+        row = (
+            await TestEnvironmentRewardRecord()._run([step], model_responses=self._responses(["r1"], "incomplete"))
+        ).model_dump(mode="json")
+        (invocation,) = row["ng_agent_observations"]["records"]
+        assert invocation["status"] == "incomplete"
+        assert [call["response_id"] for call in invocation["model_calls"]] == ["r1"]
+
+    @pytest.mark.asyncio
+    async def test_an_episode_cut_by_the_step_limit_is_an_incomplete_invocation(self):
+        step = {"observation": "o", "reward": 0.0, "terminated": False, "truncated": False, "info": {}}
+        row = (await TestEnvironmentRewardRecord()._run([step], max_steps=1)).model_dump(mode="json")
+        (invocation,) = row["ng_agent_observations"]["records"]
+        assert invocation["status"] == "incomplete"
+
+    @pytest.mark.asyncio
+    async def test_a_run_without_a_rollout_identity_records_no_invocation(self):
+        step = {"observation": None, "reward": 0.0, "terminated": True, "truncated": False, "info": {}}
+        row = (await TestEnvironmentRewardRecord()._run([step], rollout_keys=False)).model_dump(mode="json")
+        assert "ng_agent_observations" not in row
+
+    @pytest.mark.asyncio
+    async def test_a_completed_response_with_incomplete_details_is_an_incomplete_invocation(self):
+        step = {"observation": None, "reward": 0.0, "terminated": True, "truncated": False, "info": {}}
+        response = _model_response("a") | {
+            "id": "r1",
+            "status": "completed",
+            "incomplete_details": {"reason": "max_output_tokens"},
+        }
+        row = (await TestEnvironmentRewardRecord()._run([step], model_responses=[response])).model_dump(mode="json")
+        (invocation,) = row["ng_agent_observations"]["records"]
+        assert invocation["status"] == "incomplete"
+
+    @pytest.mark.asyncio
+    async def test_a_response_with_an_empty_id_is_not_added_to_the_model_calls(self):
+        steps = [
+            {"observation": "o", "reward": 0.0, "terminated": False, "truncated": False, "info": {}},
+            {"observation": None, "reward": 1.0, "terminated": True, "truncated": False, "info": {}},
+        ]
+        responses = [_model_response("a") | {"id": ""}, _model_response("b") | {"id": "r2"}]
+        row = (await TestEnvironmentRewardRecord()._run(steps, model_responses=responses)).model_dump(mode="json")
+        (invocation,) = row["ng_agent_observations"]["records"]
+        assert [call["response_id"] for call in invocation["model_calls"]] == ["r2"]
+
+
+# The rows the core hand-off test (tests/unit_tests/orchestration/test_gymnasium_agent_handoff.py) feeds to the
+# collector and the trial gate. Each is what ``GymnasiumAgent.run`` returns for the case's step and model response
+# with fake model and environment servers; only the random invocation id is fixed.
+FAKE_SERVER_ROWS = (
+    Path(__file__).resolve().parents[3]
+    / "tests/unit_tests/orchestration/fixtures/gymnasium-agent-rows-fake-servers.json"
+)
+FIXED_INVOCATION_ID = "gymnasium_" + "0" * 32
+
+
+async def _fake_servers_row(step: dict, response: dict) -> dict:
+    agent = _make_agent()
+    payloads = {"/reset": [{"observation": "go", "info": {}}], "/step": [step]}
+
+    async def _post(server_name, url_path, json=None, cookies=None, headers=None, **kw):
+        return _FakeHttpResp(response if url_path.endswith("/v1/responses") else payloads[url_path].pop(0))
+
+    agent.server_client.post = AsyncMock(side_effect=_post)
+    body = GymnasiumAgentRunRequest(
+        responses_create_params={"input": [{"role": "user", "content": "play"}]},
+        **{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "_ng_rollout_id": "handoff_0"},
+    )
+    row = (await agent.run(MagicMock(cookies={}), body)).model_dump(mode="json")
+    (invocation,) = row["ng_agent_observations"]["records"]
+    assert re.fullmatch(r"gymnasium_[0-9a-f]{32}", invocation["invocation_id"])
+    invocation["invocation_id"] = FIXED_INVOCATION_ID
+    return row
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["finished", "cut_off"])
+async def test_the_agent_still_returns_the_rows_the_core_hand_off_test_reads(case):
+    fixture = json.loads(FAKE_SERVER_ROWS.read_text())[case]
+    assert await _fake_servers_row(fixture["step"], fixture["response"]) == fixture["row"]

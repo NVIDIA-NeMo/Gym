@@ -39,7 +39,17 @@ from typing import Any
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.config import get_global_config_dict
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    SandboxResources,
+    SandboxSpec,
+    cpu_cap_env,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
@@ -47,11 +57,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.utils import cpu_cap_env
-from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.swe_next.verification import (
     VerificationInputs,
     VerificationResult,
@@ -59,6 +65,7 @@ from resources_servers.swe_next.verification import (
     run_verification,
     verification_files,
 )
+from resources_servers.swebench.agent_network import AgentNetworkConfig
 from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
 from resources_servers.swebench.patch_capture import (
     PatchCapture,
@@ -110,7 +117,7 @@ async def hide_grading_artifacts(sandbox: AsyncSandbox, workdir: str) -> None:
         print(f"Failed to hide grading artifacts in {workdir}: {result.stdout}\n{result.stderr}", file=sys.stderr)
 
 
-class SWENextResourcesServerConfig(BaseResourcesServerConfig):
+class SWENextResourcesServerConfig(BaseResourcesServerConfig, AgentNetworkConfig):
     is_verifying_golden_patch: bool = False
     # "worktree" (diff of the working tree) or "committed" (committed work only); see swebench/patch_capture.py.
     patch_capture_mode: PatchCaptureMode = "worktree"
@@ -183,6 +190,7 @@ class SWENextResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
+        self.config.check_agent_network_provider(get_global_config_dict())
         self._session_id_to_sandbox: dict[str, AsyncSandbox] = {}
         self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
         self._session_id_to_base_commit: dict[str, str] = {}
@@ -196,7 +204,9 @@ class SWENextResourcesServer(SimpleResourcesServer):
             expected_output_json=body.expected_output_json,
         )
 
-    async def _create_sandbox(self, body: SWENextInstanceRequest, files: dict[str, str] | None = None) -> AsyncSandbox:
+    async def _create_sandbox(
+        self, body: SWENextInstanceRequest, files: dict[str, str] | None = None, *, for_agent: bool = False
+    ) -> AsyncSandbox:
         global_config_dict = get_global_config_dict()
         provider_config = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
         provider_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
@@ -226,7 +236,7 @@ class SWENextResourcesServer(SimpleResourcesServer):
                 "instance_id": body.instance_id[:63],
             },
             resources=sandbox_resources,
-            provider_options=self.config.sandbox_config.get("provider_options", {}),
+            provider_options=self.config.sandbox_provider_options(provider_config, for_agent=for_agent),
         )
         sandbox = AsyncSandbox(provider_config)
         await sandbox.start(spec)
@@ -289,7 +299,7 @@ class SWENextResourcesServer(SimpleResourcesServer):
         self._session_id_to_pristine_untracked.pop(session_id, None)
         self._session_id_to_base_commit.pop(session_id, None)
 
-        sandbox = await self._create_sandbox(body)
+        sandbox = await self._create_sandbox(body, for_agent=True)
         await hide_grading_artifacts(sandbox, body.workdir)
         await self._init_git_repo(sandbox, body.workdir)
         if self.config.apply_anti_cheating:

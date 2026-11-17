@@ -16,7 +16,9 @@ from it.
 2. Extraction: first ```` ```python ```` fence, else first bare fence, else the raw text. A completed response with no
    usable assistant text, or a source that is empty, not valid UTF-8, holds a NUL byte or exceeds
    `max_candidate_source_bytes`, scores 0.0 (`candidate_source_limit`) before any sandbox is created. A response that
-   did not complete is marked for regeneration (`response_incomplete`).
+   stopped at `max_output_tokens` with status `incomplete` and no response error scores 0.0
+   (`response_truncated`), preserving its truncation metadata and preventing regeneration on resume.
+   Other incomplete responses are marked for regeneration (`response_incomplete`).
 3. A reference preflight runs the task's reference solution and compares every outcome with the stored expectations.
    Candidate code runs only after the preflight passes. The preflight outcome is cached per task, so a task's
    reference runs once per server process (`reference_cache_dir` also keeps entries on disk for later processes).
@@ -123,6 +125,15 @@ whatever the outcome. A failed check refuses to serve and names one of seven cat
   print plain digits; or the bounded download failed or returned other bytes.
 - `provider_exec`: only the `id -u` or the import-check command raised, or the host's bounded wait on it expired.
 
+`score_comparator_uncertain_as_incorrect: true` opts into scoring completed answers
+with `comparator_uncertain` as zero only after successful reference preflight and a completed
+candidate comparison reporting undecided symbolic/unordered equivalence or an exhausted
+per-case proof budget. The category is retained for separate reporting. Those rows are
+unmasked and do not trigger regeneration on resume. The default is false; reference/preflight
+uncertainty, invalid expectations, unsupported observations, comparator errors, and provider
+failures remain unscored in either mode. Unknown uncertainty reasons also remain unscored.
+Record this option in the evaluation protocol when comparing results.
+
 `startup_probe: false` skips the startup sandbox and its checks, but not the `image_missing` check. Gym gives every
 server `server_spinup_timeout_seconds` (default 600 s) to become ready and the probe's sandbox create counts against
 it, so on a provider with a slow first image pull raise it above `execution.create_timeout_s` plus a margin, for
@@ -226,20 +237,21 @@ grader call itself raised.
 
 | Status | Category | When |
 |---|---|---|
-| 413 | `request_limit` | the request body is larger than 10 MiB |
 | 422 | `request_invalid` | not a JSON object, or a bad request shape (see below) |
 | 422 | `task_invalid` | `/seed_session` only: the task fields fail validation |
 | 503 | `server_not_ready` | `/verify` with the grader not running, once the request, task and source checks pass |
 
 A bad request shape is invalid prompt parameters, tools or `tool_choice`, or, on `/verify`, a `response` that is not a
-valid response. `responses_create_params` or `response` above 1 MiB, or beyond the JSON node, depth or type limits (an
-integer wider than 63 bits, a non-finite number), is `request_invalid` too; only a body above 10 MiB is
-`request_limit`. On `/verify` an invalid task is not an error status: it is a 200 row with category `task_invalid`,
+valid response. Prompt and response envelopes retain JSON node, depth and type limits (including integers wider
+than 63 bits and non-finite numbers), but have no byte cap in this grader. HTTP transport limits follow the
+standard Gym server/deployment policy. Task, executable-source and result limits are unchanged.
+
+On `/verify` an invalid task is not an error status: it is a 200 row with category `task_invalid`,
 terminal. `server_not_ready` is answered only after the request, task and source checks have passed, so while the
 grader is not running (before startup finishes or after shutdown) an invalid task, an incomplete response or an
 unusable source still gets its 200 row.
 
-Categories. Scored: `passed`, `candidate_mismatch`, `candidate_invalid_output`, `candidate_source_limit`,
+Categories. Scored: `passed`, `response_truncated`, `candidate_mismatch`, `candidate_invalid_output`, `candidate_source_limit`,
 `candidate_source_error`, `candidate_timeout`, `candidate_exception`, `candidate_encoding_error`,
 `candidate_worker_abort`. Unscorable, terminal (`verifier_error`): `task_invalid` (a row that fails task
 validation, or a stored expectation or policy the comparator cannot represent) and `reference_mismatch` (the

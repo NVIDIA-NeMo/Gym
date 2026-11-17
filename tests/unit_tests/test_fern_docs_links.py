@@ -252,7 +252,7 @@ class TestFernDocsLinks(unittest.TestCase):
                 canonical_links += line.count("/tutorials/evaluation-tutorials")
 
         self.assertEqual([], broken_links)
-        self.assertEqual(8, canonical_links)
+        self.assertEqual(21, canonical_links)
 
     def test_main_training_tutorial_links_include_the_tutorials_section(self):
         """`training-tutorials` sits under the same `section: Tutorials` as `evaluation-tutorials`.
@@ -296,7 +296,6 @@ class TestFernDocsLinks(unittest.TestCase):
             with self.subTest(version=version):
                 pages = REPO_ROOT / f"fern/versions/{version}/pages/evaluation"
                 broken_links = []
-                canonical_links = 0
                 expected_target = (
                     "/reference/cli-commands#gym-eval-profile"
                     if version == "latest"
@@ -307,10 +306,13 @@ class TestFernDocsLinks(unittest.TestCase):
                     for line_number, line in enumerate(page.read_text().splitlines(), start=1):
                         if "#eval-profile" in line:
                             broken_links.append(f"{page.relative_to(REPO_ROOT)}:{line_number}")
-                        canonical_links += line.count(expected_target)
 
                 self.assertEqual([], broken_links)
-                self.assertEqual(2, canonical_links)
+                for name in ("index.mdx", "benchmarks.mdx"):
+                    self.assertIn(
+                        f'<Card title="Reward Profiling" href="{expected_target}">',
+                        (pages / name).read_text(),
+                    )
 
     def test_internal_pages_are_linked_by_path_not_by_absolute_url(self):
         """An absolute docs.nvidia.com link pins the reader to the default version.
@@ -430,6 +432,19 @@ class TestFernDocsLinks(unittest.TestCase):
                 slug_labels.append(f"{page.relative_to(REPO_ROOT)}: [{label}]")
 
         self.assertEqual([], slug_labels)
+
+    def test_latest_pages_do_not_repeat_the_title_as_a_heading(self):
+        # Fern renders the frontmatter title as the page heading, so a body "# <title>" shows it twice.
+        pages = REPO_ROOT / "fern/versions/latest/pages"
+        repeated = []
+
+        for page in sorted(pages.rglob("*.mdx")):
+            text = page.read_text()
+            title = re.search(r'^title:\s*"?(.*?)"?\s*$', text, re.M)
+            if title and re.search(rf"^# {re.escape(title.group(1))}\s*$", text, re.M):
+                repeated.append(page.relative_to(pages).as_posix())
+
+        self.assertEqual([], repeated)
 
     def test_latest_r070_copy_review_items(self):
         pages = REPO_ROOT / "fern/versions/latest/pages"

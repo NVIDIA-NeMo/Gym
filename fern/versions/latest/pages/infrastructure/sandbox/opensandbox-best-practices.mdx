@@ -157,16 +157,18 @@ timeouts do not help a full cluster.
 
 ## Retries: creates yes, commands no
 
-`create.retries` is safe: a failed create leaves nothing behind. `operations.retries` (shipped:
-`5`, exponential backoff from `retry_delay_s` to `retry_max_delay_s`) covers the SDK calls after
-create — status and endpoint lookups, file transfer, close — plus a command submit that failed at
-TCP connect before the body reached the exec daemon. All of those are idempotent or provably never
-started, so retrying them is safe. `operations.command_retries`
-defaults to `0` and should stay there for agent commands, because a proxy `502` on
-`POST /command` does not mean the command never started — the server maps every transport error
-to 502, including a dropped read *after* the body reached the exec daemon, which runs commands on
-a context a dropped connection never cancels. A retried `git apply` runs twice. Raise it only for
-provably idempotent workloads.
+`create.retries` bounds allocation attempts; Gym cleans up known failed sandboxes and attempts to reap
+orphans when creation times out. `create.outcome_policy` selects whether another attempt is allowed.
+
+`operations.retries` bounds retries of eligible runtime requests, such as status, endpoint and log reads.
+`operations.outcome_policy` selects `retry` or `fail`; the provider also checks replay safety. A retry rule
+does not establish that a mutation or command submission is safe to repeat.
+
+Command submissions are single-attempt. `operations.command_retries` remains accepted for config compatibility,
+but increasing it does not enable replay. A TCP failure or proxy `502` is insufficient proof that the command
+never started: a dropped response can leave the command running. A retried `git apply` could run twice.
+After a successful background submission, Gym retries status reads for the same execution ID within the
+existing recovery and client-wait deadlines; it does not submit another command.
 
 Keep `create.skip_health_check: false`. Skipping it lets your first command race a pod whose exec
 daemon is not listening yet, and the resulting 502 kills the rollout.
@@ -243,8 +245,8 @@ Things to know:
 | `DELETE` → `404` / "Failed to terminate sandbox" | Already gone (TTL or earlier stop). | Nothing; the provider treats it as success. |
 | Status poll → `404 unknown execution` on a live sandbox | Stale sandbox→IP routing during create/delete storms. | Treat as a lost execution and recreate; do not tear down other sandboxes. |
 | `Server disconnected` / `Connection reset by peer` on a long stream | Load-balancer idle timeout or a server worker restart. | `background_exec: true`; keep `keepalive_expiry_s` below the server's idle timeout. |
-| `SandboxPtyError: PTY session already has an attached client` on every retry | The sandbox's backend died while the proxy still records the old attachment. | Report the death. Environments must catch `SandboxPtyError` in `verify()`; one unhandled 500 on `/run` can abort the whole eval. |
-| Whole sandbox dies with `137` after one heavy command | Group OOM kill (fan-out above). | Cap parallelism, bash timeout; more memory alone rarely fixes it. See [detecting OOM from the client](/infrastructure/sandbox/opensandbox-debugging#detecting-oom-from-the-client). |
+| `provider_pty_busy` / `PTY session already has an attached client` | Attachment was refused; this alone does not establish that the backend died. | Forward the sandbox `NgFailureEvent` to the owning task's outcome policy. Check the existing attachment and sandbox status before retrying. |
+| Whole sandbox dies after one heavy command, possibly with exit `137` | OOM is one possible cause; exit 137 alone does not confirm it. | Check [current-sandbox OOM evidence](/infrastructure/sandbox/opensandbox-debugging#detecting-oom-from-the-client) before classifying the failure. |
 
 Sandboxes run with the default capability set — no `SYS_PTRACE`, no `SYS_ADMIN`. `strace`/`gdb`
 attach and mount namespaces fail for that reason, not because of your config.

@@ -19,8 +19,8 @@ from typing import Any, Optional
 
 from aiohttp import ClientError, ClientTimeout
 
+from nemo_gym.client import request
 from nemo_gym.sandbox import SandboxEndpoint
-from nemo_gym.server_utils import request
 from resources_servers.enterpriseops_gym.task_data import DATABASE_ID_HEADER
 
 
