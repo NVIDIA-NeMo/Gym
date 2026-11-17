@@ -14,7 +14,7 @@ from omegaconf import OmegaConf
 from pydantic import ValidationError
 
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServerConfig
-from nemo_gym.config_types import DatasetConfig
+from nemo_gym.config import DatasetConfig
 from nemo_gym.data import TaskDataValidator, load_task_data_schema
 from resources_servers.video_mcqa.tests.helpers import response
 from resources_servers.video_qa_rubric.app import (
