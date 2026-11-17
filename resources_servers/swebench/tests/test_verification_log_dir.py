@@ -126,15 +126,25 @@ def test_kept_logs_are_copied_under_the_server_results(monkeypatch: MonkeyPatch,
     assert not harness.log_root.exists()
 
 
-def test_a_verify_that_fails_still_removes_its_logs(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("keep", [False, True])
+def test_a_verify_that_fails_removes_its_temporary_logs_and_keeps_a_copy_when_asked(
+    monkeypatch: MonkeyPatch, tmp_path: Path, keep: bool
+) -> None:
     harness = _Harness(error=RuntimeError("harness crashed"))
     monkeypatch.setattr(swebench_app, "run_instance", harness)
 
-    TestClient(_server(monkeypatch, tmp_path, keep=False).setup_webserver(), raise_server_exceptions=False).post(
+    TestClient(_server(monkeypatch, tmp_path, keep=keep).setup_webserver(), raise_server_exceptions=False).post(
         "/verify", json=_REQUEST
     )
 
     assert harness.log_root is not None and not harness.log_root.exists()
+    if keep:
+        # A failed verify's logs are the ones someone debugs.
+        [kept] = (tmp_path / "swebench" / "verification").rglob("test_output.txt")
+        assert kept.read_text() == "test log"
+        assert "-astropy__astropy-12907-attempt1-" in str(kept)
+    else:
+        assert not any(tmp_path.iterdir())
 
 
 def test_the_old_setting_still_loads_and_says_how_to_keep_logs(caplog: pytest.LogCaptureFixture) -> None:
