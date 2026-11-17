@@ -62,12 +62,14 @@ from nemo_gym.config.global_config import (
     rollout_run_labels,
 )
 from nemo_gym.core import VERIFIER_ERROR
+from nemo_gym.core.episode_types import AGENT_INSTANCES_KEY
 from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.rollouts.rollout_collection import (
     NG_RESULT_TYPE_KEY,
     _coverage_report,
     _get_max_rollout_attempts,
     _rollout_request_debug_summary,
+    _without_agent_instance_responses,
     is_omitted_rollout_row,
     is_terminal_failure,
     matches_failure_class,
@@ -1154,6 +1156,8 @@ async def _call_aggregate_metrics(
                 response_metadata["metadata"] = {"nemo_gym_context_window_exceeded": context_marker}
             if response_metadata:
                 entry["response"] = response_metadata
+            if AGENT_INSTANCES_KEY in entry:
+                entry[AGENT_INSTANCES_KEY] = _without_agent_instance_responses(entry[AGENT_INSTANCES_KEY])
             stripped.append(entry)
 
         agg_request = AggregateMetricsRequest(verify_responses=stripped)

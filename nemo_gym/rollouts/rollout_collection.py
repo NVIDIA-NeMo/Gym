@@ -94,12 +94,13 @@ from nemo_gym.config.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
+from nemo_gym.core.correlation import validate_agent_instance
 from nemo_gym.core.episode_context import (
     check_rollout_id_length,
     maybe_rollout_id_from_run_body,
     skips_token_capture,
 )
-from nemo_gym.core.episode_types import EpisodeId, TaskId, is_materialized_task_row
+from nemo_gym.core.episode_types import AGENT_INSTANCES_KEY, EpisodeId, TaskId, is_materialized_task_row
 from nemo_gym.core.failure_kinds import (
     AGENT_ROUTE_FAILED,
     CANCELLED,
@@ -736,6 +737,20 @@ def _reply_failure_report(response: Mapping[str, Any]) -> tuple[FailureReport, .
         return (FailureReport(omitted=True),)
 
 
+def _without_agent_instance_responses(agent_instances: object) -> object:
+    """Return a row's ``agent_instances`` map without each entry's rebuilt ``response``, for /aggregate_metrics.
+
+    Token capture delivery writes every agent instance's token-level response into its entry. Like the row's
+    top-level ``response``, it is generated content that aggregation does not read. The row's map is not modified.
+    """
+    if not isinstance(agent_instances, dict):
+        return agent_instances
+    return {
+        name: {key: value for key, value in entry.items() if key != "response"} if isinstance(entry, dict) else entry
+        for name, entry in agent_instances.items()
+    }
+
+
 def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
     """Turn a ``BaseEpisodeResponse`` into the rollout record the collector stores.
 
@@ -820,6 +835,12 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
     reply_report = _reply_failure_report(response)
     if reply_report:
         record = FailureReportRow.merged_into(record, *reply_report)
+    agent_instances = response.get(AGENT_INSTANCES_KEY)
+    if agent_instances:
+        # Each agent instance's terminal call and optional reward, next to the episode's top-level reward.
+        record[AGENT_INSTANCES_KEY] = {
+            validate_agent_instance(name): dict(entry) for name, entry in agent_instances.items()
+        }
     return record
 
 
@@ -5127,6 +5148,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     response_metadata["metrics"] = metrics
                 if response_metadata:
                     entry["response"] = response_metadata
+                if AGENT_INSTANCES_KEY in entry:
+                    entry[AGENT_INSTANCES_KEY] = _without_agent_instance_responses(entry[AGENT_INSTANCES_KEY])
                 stripped.append(entry)
 
             agg_response = None

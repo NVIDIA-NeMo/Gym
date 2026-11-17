@@ -2282,6 +2282,41 @@ class TestCallAggregateMetrics:
         assert "output" not in sent["response"]
         assert json.dumps(response, sort_keys=True) == original
 
+    async def test_each_agent_instance_s_rebuilt_response_is_stripped_before_sending(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A row's ``agent_instances`` entries reach /aggregate_metrics without their token-level ``response``."""
+        rebuilt = {"output": [{"prompt_token_ids": [1, 2], "generation_token_ids": [3]}]}
+        rows = [{AGENT_REF_KEY_NAME: {"name": "agent_a"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}]
+        results = [
+            {
+                "reward": 0.8,
+                TASK_INDEX_KEY_NAME: 0,
+                "agent_instances": {
+                    "assistant": {"terminal_response_id": "resp_a1", "response": dict(rebuilt), "mask_sample": False},
+                    "user": {"terminal_response_id": "resp_u1"},
+                },
+            }
+        ]
+        posted_payloads: list = []
+
+        async def capture_post(**kwargs):
+            posted_payloads.append(kwargs["json"].verify_responses)
+            return MagicMock()
+
+        mock_client = self._patch(monkeypatch, {"agent_a": "rs_a"})
+        mock_client.post = capture_post
+
+        await _call_aggregate_metrics(results, rows, tmp_path / "rollouts.jsonl")
+
+        ((sent,),) = posted_payloads
+        assert sent["agent_instances"] == {
+            "assistant": {"terminal_response_id": "resp_a1", "mask_sample": False},
+            "user": {"terminal_response_id": "resp_u1"},
+        }
+        # The saved row keeps each agent instance's response.
+        assert results[0]["agent_instances"]["assistant"]["response"] == rebuilt
+
     async def test_returns_none_when_no_results(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """No results → no aggregate file written and None returned."""
         self._patch(monkeypatch, {"agent_a": "rs_a"})
