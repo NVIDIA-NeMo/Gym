@@ -248,7 +248,7 @@ async def test_a_restored_cohort_pruned_before_its_retire_lets_the_group_re_form
     config = config.model_copy(update={"max_terminal_cohorts": 1, "cohort_result_ttl_s": None})
     server, participant = seeded(config)
     await asyncio.gather(*(verify_as(server, SESSIONS[index], member(index)) for index in range(2)))
-    records = await participant.export(None)
+    records = await participant.export(None, checkpoint_id="c")
     await server.aclose()
 
     restored, restored_participant = await restore(config, records)
@@ -283,7 +283,7 @@ async def test_a_restored_attempt_record_evicted_before_its_cohort_takes_its_res
     )
     server, participant = seeded(config)
     await finish_cohort(server)
-    records = await participant.export(None)
+    records = await participant.export(None, checkpoint_id="c")
     await server.aclose()
 
     now = [100.0]
@@ -314,7 +314,7 @@ async def test_replayed_restored_group_refuses_finished_attempt_after_result_exp
     config = config.model_copy(update={"cohort_result_ttl_s": 10.0, "cohort_collection_timeout_s": 0.01})
     server, participant = seeded(config)
     await finish_cohort(server)
-    records = await participant.export(None)
+    records = await participant.export(None, checkpoint_id="c")
     await server.aclose()
 
     now = [100.0]
@@ -348,7 +348,7 @@ async def finished_states(config, attempt: int) -> dict:
     await asyncio.gather(
         *(verify_as(server, session_id, member(i, attempt=attempt)) for i, session_id in enumerate(sessions))
     )
-    states = await server.export_session_states(sessions)
+    states = await server.export_session_states(sessions, checkpoint_id="c")
     await server.aclose()
     return states
 
@@ -482,7 +482,7 @@ async def test_a_member_saved_under_the_previous_digest_scheme_is_compared_under
     server, participant = seeded(config, judge=AsyncMock(side_effect=member_0_wins))
     outcomes = await asyncio.gather(*(verify_as(server, SESSIONS[index], answers[index]) for index in range(2)))
     participant.ended(SESSIONS[0])
-    [record] = await participant.export(None)
+    [record] = await participant.export(None, checkpoint_id="c1")
     await server.aclose()
     # Serialized as main did before the scheme names existed, independently of the server's own helper.
     saved_bytes = json.dumps(
@@ -497,10 +497,10 @@ async def test_a_member_saved_under_the_previous_digest_scheme_is_compared_under
         "response_digest_scheme": genrm.PREVIOUS_RESPONSE_DIGEST_SCHEME,
     }
     records = [record.model_copy(update={"state": previous_state})]
-    for _ in range(checkpoints - 1):
+    for checkpoint_index in range(1, checkpoints):
         restored, restored_participant = await restore(config, records)
         # Another checkpoint lands before the member replays.
-        records = await restored_participant.export(None)
+        records = await restored_participant.export(None, checkpoint_id=f"c{checkpoint_index + 1}")
         assert [saved.state for saved in records] == [previous_state]
         await restored.aclose()
 
@@ -511,7 +511,9 @@ async def test_a_member_saved_under_the_previous_digest_scheme_is_compared_under
     replayed = await asyncio.wait_for(verify_as(restored, SESSIONS[1], answers[1]), timeout=0.5)
     assert replayed.reward == outcomes[1].reward
     # The replayed member still exports its saved scheme until its caller closes the session.
-    assert [saved.state for saved in await restored_participant.export(None)] == [previous_state]
+    assert [saved.state for saved in await restored_participant.export(None, checkpoint_id=f"c{checkpoints + 1}")] == [
+        previous_state
+    ]
     restored._run_single_comparison.assert_not_awaited()
     await restored.aclose()
 
@@ -594,7 +596,7 @@ async def test_a_superseded_cohort_takes_its_member_records_with_it(config):
     await until(lambda: "replacement" in server._session_members)
 
     assert set(server._session_members) == {"replacement"}
-    assert [record.state for record in await participant.export(None)] == [{}, {}]
+    assert [record.state for record in await participant.export(None, checkpoint_id="c")] == [{}, {}]
     replacement.cancel()
     await asyncio.gather(replacement, return_exceptions=True)
     await server.aclose()
@@ -965,7 +967,9 @@ async def test_finished_cohort_checkpoint_preserves_exact_report_without_rejudgi
         records[0].state.update(response_digest=previous_digest, response_digest_scheme=digest_scheme)
     restored, restored_participant = await restore(config, records)
     # A checkpoint before replay must retain both the saved digest scheme and the complete report.
-    assert [record.state for record in await restored_participant.export(None)] == [record.state for record in records]
+    assert [record.state for record in await restored_participant.export(None, checkpoint_id="c")] == [
+        record.state for record in records
+    ]
     replay, report = await observed(restored, 1)
     assert report.model_dump(mode="json") == results[1][1].model_dump(mode="json")
     if fails:
