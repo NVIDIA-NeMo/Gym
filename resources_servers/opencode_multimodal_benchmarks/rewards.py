@@ -6,7 +6,14 @@ import json
 import re
 from typing import Annotated, Any, ClassVar
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from nemo_gym.server_runtime import BaseVerifyResponse
 from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
@@ -31,7 +38,7 @@ class OpenCodeToolRewardConfig(BaseModel, extra="forbid"):
     shell_tool_names: tuple[Annotated[str, Field(min_length=1)], ...] | None = Field(
         default=None,
         min_length=1,
-        description="Shell tools sharing one count and bonus schedule. When set, overrides shell_tool_name.",
+        description="Shell tools sharing one count and bonus schedule. Set this or shell_tool_name, not both.",
     )
     correct_answer_reward_threshold: float = Field(default=1.0, gt=0, allow_inf_nan=False)
     correct_tool_call_bonuses: tuple[Annotated[float, Field(ge=0, allow_inf_nan=False)], ...] = Field(
@@ -59,9 +66,19 @@ class OpenCodeToolRewardConfig(BaseModel, extra="forbid"):
 
     @model_validator(mode="after")
     def default_failure_filter_to_shell(self) -> "OpenCodeToolRewardConfig":
+        if self.shell_tool_names is not None and "shell_tool_name" in self.model_fields_set:
+            raise ValueError("Set either shell_tool_name or shell_tool_names, not both")
         if "invalid_tool_call_names" not in self.model_fields_set:
             self.invalid_tool_call_names = self.effective_shell_tool_names
         return self
+
+    @model_serializer(mode="wrap")
+    def serialize_shell_selection(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data = handler(self)
+        if self.shell_tool_names is not None:
+            # A serialized plural config must not turn the unused singular default into an explicit conflict.
+            data.pop("shell_tool_name", None)
+        return data
 
     @field_validator("correct_tool_call_bonuses", "correct_bash_call_penalties")
     @classmethod

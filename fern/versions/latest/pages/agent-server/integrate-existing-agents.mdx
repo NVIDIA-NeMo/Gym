@@ -409,8 +409,9 @@ tool_rewards:
   invalid_tool_call_names: null
 ```
 
-`shell_tool_names` overrides `shell_tool_name` when supplied. It must be a nonempty
-list of nonempty names. Omitted or `null` retains the single-name setting and its
+Set either `shell_tool_name` or a non-null `shell_tool_names` list; setting both
+is rejected. The list must be nonempty and contain nonempty names. An omitted or
+`null` list retains the single-name setting and its
 default of `bash`. All selected names share one shell-call count and success-bonus
 schedule, including the existing `correct_bash_call_penalties` schedule. Duplicate
 comparison retains the tool name: identical arguments sent to different tools are
@@ -423,11 +424,12 @@ failed calls, not every call, and the existing correctness gates still apply.
 These settings control scoring; they do not enable tools in the harness.
 
 A nonzero shell exit must be reported as a failed tool observation.
-`shell_tool_name` controls shell counting, duplicate normalization and success
-bonuses; it does not infer exit status from tool output. Changing tool names does
-not supply missing execution evidence. OpenCode and a local Pi CLI smoke have
-been exercised. The Pi smoke registered its shell as `shell` and checked failure
-filtering and call-count penalties; it does not validate Pi sandbox sessions.
+The configured shell names control shell counting, duplicate normalization and
+success bonuses; they do not infer exit status from tool output. Changing tool names does
+not supply missing execution evidence. The historical OpenCode and local Pi CLI
+smoke reports cover single-shell settings. The Pi smoke registered its shell as
+`shell` and checked failure filtering and call-count penalties; it does not validate
+Pi sandbox sessions or the plural setting.
 
 These components replace `opencode_string_match_tool_rewards`,
 `opencode_mcqa_tool_rewards` and `opencode_math_tool_rewards`. Update component

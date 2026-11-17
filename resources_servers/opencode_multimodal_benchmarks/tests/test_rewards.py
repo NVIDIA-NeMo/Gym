@@ -234,9 +234,15 @@ def test_shell_names_reject_invalid_lists(names):
         OpenCodeToolRewardConfig(shell_tool_names=names)
 
 
-def test_shell_names_override_singular_and_default_failure_filter():
-    config = OpenCodeToolRewardConfig(shell_tool_name="legacy", shell_tool_names=["terminal", "exec"])
-    calls = [call(0, "terminal"), call(1, "exec"), call(2, "legacy")]
+@pytest.mark.parametrize("singular,plural", [("shell", ["terminal"]), ("bash", ["terminal"]), ("shell", ["shell"])])
+def test_shell_names_reject_an_explicit_singular_name(singular, plural):
+    with pytest.raises(ValidationError, match="Set either shell_tool_name or shell_tool_names, not both"):
+        OpenCodeToolRewardConfig(shell_tool_name=singular, shell_tool_names=plural)
+
+
+def test_shell_names_select_default_failure_filter():
+    config = OpenCodeToolRewardConfig(shell_tool_names=["terminal", "exec"])
+    calls = [call(0, "terminal"), call(1, "exec"), call(2, "unselected_shell")]
     records = execution_records(calls, statuses={str(i): ("error", None) for i in range(3)})
     result = score_opencode_tools(records, calls, 1.0, config)
     assert config.invalid_tool_call_names == ("terminal", "exec")
@@ -251,8 +257,44 @@ def test_null_or_singleton_shell_names_preserve_singular_behavior(names):
     calls = [call(i, "shell") for i in range(4)]
     records = execution_records(calls, statuses={"0": ("completed", 1)})
     singular = OpenCodeToolRewardConfig(shell_tool_name="shell")
-    plural = OpenCodeToolRewardConfig(shell_tool_name="shell", shell_tool_names=names)
+    plural = (
+        OpenCodeToolRewardConfig(shell_tool_name="shell", shell_tool_names=None)
+        if names is None
+        else OpenCodeToolRewardConfig(shell_tool_names=names)
+    )
     assert score_opencode_tools(records, calls, 1.0, plural) == score_opencode_tools(records, calls, 1.0, singular)
+
+
+@pytest.mark.parametrize("settings", [{}, {"shell_tool_name": "shell"}, {"shell_tool_names": ["terminal", "exec"]}])
+@pytest.mark.parametrize("failure_filter", [{}, {"invalid_tool_call_names": None}, {"invalid_tool_call_names": []}])
+def test_shell_selection_survives_config_serialization(settings, failure_filter):
+    from resources_servers.string_match_tool_rewards.app import ToolRewardConfig
+
+    config = ToolRewardConfig(
+        name="training_string", host="127.0.0.1", port=1, entrypoint="app.py", tool_rewards=settings | failure_filter
+    )
+    restored = ToolRewardConfig.model_validate_json(config.model_dump_json())
+    assert restored == config
+    assert restored.tool_rewards.effective_shell_tool_names == config.tool_rewards.effective_shell_tool_names
+    assert restored.tool_rewards.invalid_tool_call_names == config.tool_rewards.invalid_tool_call_names
+    assert ToolRewardConfig.model_validate(config.model_dump()) == config
+    if "shell_tool_names" in settings:
+        assert "shell_tool_name" not in config.model_dump()["tool_rewards"]
+
+
+@pytest.mark.parametrize("name", ["terminal", "exec"])
+@pytest.mark.parametrize("exit_code", [None, 0.0])
+def test_plural_shell_without_integer_exit_code_is_a_failure(name, exit_code):
+    config = OpenCodeToolRewardConfig(shell_tool_names=["terminal", "exec"])
+    calls = [call(0, name)]
+    # A non-integer zero must not bypass the type check through equality with integer zero.
+    result = score_opencode_tools(
+        execution_records(calls, statuses={"0": ("completed", exit_code)}), calls, 1.0, config
+    )
+    assert result.bash_call_count == 1
+    assert result.bash_success_count == 0
+    assert result.tool_error_count == 1
+    assert result.auxiliary_reward == pytest.approx(-0.05)
 
 
 @pytest.mark.parametrize("base,penalty", [(0.0, 0.0), (1.0, -0.175)])
@@ -290,9 +332,9 @@ def test_multiple_shell_names_share_bonus_cap_and_keep_duplicate_identity():
         correct_bash_call_penalties=(0.0,),
     )
     calls = [
-        call(0, "terminal", {"command": "echo hello"}),
-        call(1, "bash", {"command": "echo hello"}),
-        call(2, "bash", {"command": " echo hello ", "description": "same command"}),
+        call(0, "bash", {"command": "echo hello"}),
+        call(1, "terminal", {"command": "echo hello"}),
+        call(2, "terminal", {"command": " echo hello ", "description": "same command"}),
     ]
     records = execution_records(calls)
     exploration = score_opencode_tools(records, calls, 0.0, config)

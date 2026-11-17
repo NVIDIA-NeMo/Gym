@@ -7,10 +7,12 @@ benchmark metadata.
 Select `resources_servers: { math_tool_rewards: { entrypoint: app.py } }` and set
 `forward_agent_evidence: true` on the paired `single_agent_turn` environment.
 The shipped defaults are OpenCode-compatible. Other harnesses must provide canonical
-execution observations and set `tool_rewards.shell_tool_name` to their shell tool name.
-The failure filter `invalid_tool_call_names` defaults to that name unless explicitly set.
-A nonzero shell exit must be reported as a failed tool observation. `shell_tool_name`
-controls shell counting, duplicate normalization and success bonuses; it does not
+execution observations and set `tool_rewards.shell_tool_name` for one shell, or
+`tool_rewards.shell_tool_names` for a nonempty list sharing one count and bonus schedule.
+Do not set a singular name together with a non-null list. The failure filter
+`invalid_tool_call_names` defaults to the configured shell names unless explicitly set.
+A nonzero shell exit must be reported as a failed tool observation. The configured shell
+names control counting, duplicate normalization and success bonuses; they do not
 infer exit status from tool output.
 OpenCode and a local Pi CLI smoke have been exercised. The Pi smoke registered
 its shell as `shell` and checked default failure filtering and call-count penalties;
@@ -20,11 +22,10 @@ through `task_source`.
 See [training reward settings](../../benchmarks/opencode_multimodal_benchmarks/README.md#training-rewards-and-row-profiles)
 for defaults and overrides. `tool_rewards: null` disables shaping.
 
-The [saved-rollout comparison](../opencode_multimodal_benchmarks/tests/training_tool_rewards_replay.json)
-records all 12 before/after rewards from the OpenCode replay. These are integration
-checks, not benchmark scores. The [Pi smoke summary](../opencode_multimodal_benchmarks/tests/training_tool_rewards_pi_smoke.json)
-records 10 live synthetic episodes, 16 shell calls and 21 grading checks using
-GPT-4o-mini, including real nonzero exits and three-call usage penalties.
+The historical [replay](../opencode_multimodal_benchmarks/evidence/training_tool_rewards_replay.json),
+[Pi](../opencode_multimodal_benchmarks/evidence/training_tool_rewards_pi_smoke.json) and
+[OpenCode](../opencode_multimodal_benchmarks/evidence/training_tool_rewards_opencode_smoke.json) reports
+cover single-shell behavior; they are integration reports, not test fixtures or plural-setting validation.
 
 ## Configuration validation
 
