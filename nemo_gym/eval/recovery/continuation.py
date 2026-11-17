@@ -154,7 +154,7 @@ def continuation_admission(
         print(CONTINUATION_REASON_PREFIX + decision.reason)
         if decision.action != RecoveryAction.RESUBMIT:
             return "stop"
-        return "segment" if segment and not decision.counts.get(IdentityState.RETRYABLE) else "retry"
+        return "segment" if segment and decision.counts.get(IdentityState.MISSING) else "retry"
     except (OSError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
         print(f"{CONTINUATION_REASON_PREFIX}saved recovery evidence is unreadable: {type(error).__name__}: {error}")
         return "stop"

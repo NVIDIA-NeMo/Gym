@@ -243,3 +243,22 @@ def test_an_installer_error_with_a_credential_never_leaves_the_run_host(tmp_path
     decision = decide_from_collected(collected, max_infra_retries=2, max_walltime_s=None, live_job=False)
     assert secret not in decision.reason
     assert "driver_install_failed" in decision.reason
+
+
+def test_a_scheduler_cut_with_never_started_rows_stays_a_free_segment_beside_retryable_failures(tmp_path):
+    from nemo_gym.eval.recovery import continuation as recovery
+
+    # Two rows failed on provider errors earlier in the run and the allocation then ran out of walltime with work
+    # never started: the continuation is planned, so it must not spend the run's infra retries even if they are spent.
+    _cut_run(tmp_path, scored=1, in_flight=0, not_started=2, retryable=2)
+    (tmp_path / ".gym_infra_retries").write_text("2\n")
+    assert recovery.continuation_admission(str(tmp_path), 2, None, "0:15", "100", "TIMEOUT") == "segment"
+
+
+def test_a_scheduler_cut_with_only_retryable_failures_left_spends_an_infra_retry(tmp_path):
+    from nemo_gym.eval.recovery import continuation as recovery
+
+    _cut_run(tmp_path, scored=1, in_flight=0, not_started=0, retryable=2)
+    assert recovery.continuation_admission(str(tmp_path), 2, None, "0:15", "100", "TIMEOUT") == "retry"
+    (tmp_path / ".gym_infra_retries").write_text("2\n")
+    assert recovery.continuation_admission(str(tmp_path), 2, None, "0:15", "100", "TIMEOUT") == "stop"

@@ -27,11 +27,13 @@ from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
 
 
-def _cut_run(job, *, scored=2, in_flight=2, not_started=2, masked=0, unowned=0, allocation="100", chain=True):
-    """A run cut while ``in_flight`` reservations had no row; ``masked`` results and ``unowned`` failures."""
+def _cut_run(
+    job, *, scored=2, in_flight=2, not_started=2, masked=0, unowned=0, retryable=0, allocation="100", chain=True
+):
+    """A run cut while ``in_flight`` reservations had no row; ``masked`` results, ``unowned`` and ``retryable`` failures."""
     artifacts = job / "artifacts"
     artifacts.mkdir(parents=True, exist_ok=True)
-    total = scored + in_flight + not_started + masked + unowned
+    total = scored + in_flight + not_started + masked + unowned + retryable
     rows = [{"_ng_task_index": i, "_ng_rollout_index": 0} for i in range(total)]
     source = job / "source.jsonl"
     source.write_text("".join(json.dumps(row) + "\n" for row in rows))
@@ -58,6 +60,19 @@ def _cut_run(job, *, scored=2, in_flight=2, not_started=2, masked=0, unowned=0, 
                 row = dict(rows[index])
                 store.record_dispatch(row)
                 store.record_outcome(row | {"_ng_failure_class": "unowned_class", "failure_kind": "not_registered"})
+                index += 1
+            for _ in range(retryable):
+                row = dict(rows[index])
+                store.record_dispatch(row)
+                store.record_outcome(
+                    row
+                    | {
+                        "failure_kind": "provider_unavailable",
+                        "_ng_failure_class": "evaluation",
+                        "_ng_failure_terminal": False,
+                        "_ng_failure_max_attempts": 3,
+                    }
+                )
                 index += 1
             for _ in range(in_flight):
                 # Reserved and dispatched; the allocation ended before any outcome was saved.
