@@ -896,6 +896,7 @@ In place of `--benchmark`, a positional `TARGET` runs a dataset in the Harbor ta
 | `--sandbox PROVIDER` | Sandbox provider for the task containers (for example `opensandbox`, `docker`). Task targets only. Without it, `env.yaml` or a `--config` file must supply the `sandbox:` block, or every episode fails at seed. |
 | `--only-tasks PATTERNS`, `--exclude-tasks PATTERNS` | Comma-separated task names or globs to run or to leave out. Task targets only. |
 | `--skip-unloadable` | Run the tasks that load and record the rest in `skipped.json`. Without it, a task that does not load stops the run before any server starts. |
+| `+harbor_output_root=DIR` | Write the rows, run config, `skipped.json`, `images.json` and `verifier/` under `DIR/<taskset>/` instead of `results/harbor/<taskset>/` (a parameterized dataset also renders there). Task targets only. A run submitted with a `target` sets it to a folder in its job directory. |
 | `--config PATH` | Config file to load. Repeatable. |
 | `--benchmark NAME` | Load the named benchmark config. |
 | `--environment NAME` | Load the named environment config. Repeatable. |
