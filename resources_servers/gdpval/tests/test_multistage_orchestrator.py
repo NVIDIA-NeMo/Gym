@@ -37,7 +37,7 @@ from nemo_gym.config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
-from nemo_gym.core import maybe_rollout_id_from_run_body
+from nemo_gym.core import AGENT_TIMEOUT, maybe_rollout_id_from_run_body
 from nemo_gym.models import CaptureStore
 from nemo_gym.rollouts import (
     ENVIRONMENT_SERVER_FAILURE_CLASS,
@@ -4471,6 +4471,54 @@ class TestCachedDeliverableReuse:
         assert dispatched == []
         assert [call["json"]["stage_index"] for call in verified] == [0, 1]
         assert sorted(row["stage_index"] for row in persisted) == [0, 1]
+
+    @pytest.mark.parametrize("sidecar_flag", [True, False])
+    async def test_a_resume_judges_a_failed_judge_again_without_dispatching(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sidecar_flag: bool
+    ) -> None:
+        # A judge's failsafe reply carries the class alone: no verification stage and no reuse marker.
+        first_dispatched, first_verified, _ = await self._run_two_stages(
+            tmp_path,
+            monkeypatch,
+            cached=True,
+            first_failure_fields={NG_FAILURE_CLASS_KEY: "judge_failed", NG_TERMINAL_KEY: False},
+            retry_inprocess=False,
+        )
+        failures = failures_path_for(tmp_path / "rollouts.jsonl")
+        rows = [json.loads(line) for line in failures.read_text().splitlines()]
+        assert [row[NG_FAILURE_CLASS_KEY] for row in rows] == ["judge_failed"]
+        if not sidecar_flag:
+            # A sidecar written before the outcome was flagged: the resume must recognize the class itself.
+            failures.write_text("".join(json.dumps({**row, "reuse_cached_deliverable": None}) + "\n" for row in rows))
+        first_reference_ids = [call["json"].get("reference_ids") for call in first_verified]
+
+        dispatched, verified, persisted = await self._run_two_stages(
+            tmp_path, monkeypatch, cached=True, retry_inprocess=False, resume_from_cache=True
+        )
+
+        assert [row["stage_index"] for row in first_dispatched] == [0]
+        assert dispatched == [], "the answer being judged is never regenerated"
+        assert [call["json"]["stage_index"] for call in verified] == [0, 1]
+        assert verified[0]["json"]["reuse_cached_deliverable"] is True
+        assert sorted(row["stage_index"] for row in persisted) == [0, 1]
+        assert first_reference_ids == [] or verified[0]["json"].get("reference_ids") is not None
+
+    def test_a_terminal_or_other_failure_class_does_not_mark_a_row_for_cached_judging(self, tmp_path: Path) -> None:
+        out = tmp_path / "rollouts.jsonl"
+        out.write_bytes(b"")
+        base = {"stage_index": 0, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        failures_path_for(out).write_text(
+            "".join(
+                json.dumps(row) + "\n"
+                for row in (
+                    {**base, TASK_INDEX_KEY_NAME: 1, NG_FAILURE_CLASS_KEY: "judge_failed", NG_TERMINAL_KEY: True},
+                    {**base, TASK_INDEX_KEY_NAME: 2, NG_FAILURE_CLASS_KEY: AGENT_TIMEOUT},
+                    {**base, TASK_INDEX_KEY_NAME: 3, NG_FAILURE_CLASS_KEY: "judge_failed"},
+                )
+            )
+        )
+
+        assert load_reuse_cached_keys(out) == {0: {(3, 0)}}
 
     @pytest.mark.parametrize("failure_class", ["reference_missing", "transport_ineligible"])
     async def test_a_resume_judges_a_repairable_terminal_failure_again_without_dispatching(
