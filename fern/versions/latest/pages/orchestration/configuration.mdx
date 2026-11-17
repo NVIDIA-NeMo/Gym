@@ -108,6 +108,7 @@ A mapping with exactly one entry; its key is a name you choose (the examples use
 | `forward_env` | `[]` | Environment variable names to forward from the submitting shell to `sbatch`. Missing variables fail submission before staging. Values are sent over SSH stdin and are not stored in job artifacts. |
 | `node_pools` | `{}` | Named groups of nodes. See below. |
 | `extra_args` | `{}` | Extra job-level `#SBATCH` directives, written without leading dashes: `{comment: my-run}` becomes `#SBATCH --comment=my-run`. |
+| `lustre_md_stats` | `false` | When `true`, each benchmark's job records every node's Lustre metadata request counters at four points of the job, in `logs/lustre-md-stats-<slurm job id>.tsv`. Read it with `gym eval lustre-stats`. See [Lustre Metadata Load](/orchestration/how-to/lustre-metadata-stats). |
 
 Use `forward_env` with `runtime:` for credentials needed by a remote job:
 
@@ -251,7 +252,6 @@ The duplicate check only sees the settings written in the benchmark's `run` bloc
 | --- | --- |
 | `output_path` | Base directory on the cluster. Each submit creates a timestamped subdirectory here. |
 | `export` | Exports every benchmark runs after its rollouts, by exporter name. A benchmark's own `export` override them. See [export](#export). |
-| `lustre_md_stats` | `false` by default. Slurm only. When `true`, each benchmark's job records every node's Lustre metadata request counters at four points of the job, in `logs/lustre-md-stats-<slurm job id>.tsv`. Read it with `gym eval lustre-stats`. See [Lustre Metadata Load](/orchestration/how-to/lustre-metadata-stats). |
 
 ## otel
 
@@ -273,7 +273,6 @@ Schema validation runs when the config is composed, before anything is rendered 
 - **Multi-node data parallelism** requires `number_of_instances` to be evenly divisible by the number of nodes, unless the Ray Serve gateway is in use.
 - **Policy wiring** conflicts, as described above.
 - **Benchmark `command`** combined with `run` or `resumable` is rejected.
-- **`job.lustre_md_stats`** on Kubernetes compute is rejected.
 - **Pool agreement** (checked at render time, not by `--resolve-only`). Pools used together by one job must agree on `partition`, tasks, GPUs, and extra directives. A mismatch fails `--dry-run` and the real submit.
 
 Mount source existence, SSH reachability, and OTel destination checks happen later, at submit time.

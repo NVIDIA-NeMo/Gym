@@ -117,7 +117,7 @@ fi
 """
 
 
-# Bound on one snapshot of `job.lustre_md_stats`, so a hung read or a step that cannot start never holds the job.
+# Bound on one snapshot of `lustre_md_stats`, so a hung read or a step that cannot start never holds the job.
 LUSTRE_MD_STATS_TIMEOUT_S = 30
 
 # What each node runs: its MDC request counters as TSV rows. lctl omits an op whose count is 0, and lives in /usr/sbin,
@@ -130,7 +130,7 @@ lctl get_param 'mdc.*.md_stats' 2>/dev/null | awk -v OFS='\t' -v phase="$1" -v e
     mdt != "" && $3 == "samples" && $2 ~ /^[0-9]+$/ { print phase, epoch, node, mdt, $1, $2 }'"""
 
 _LUSTRE_MD_STATS_PRELUDE = """\
-# --- Lustre metadata stats (job.lustre_md_stats) ---
+# --- Lustre metadata stats (lustre_md_stats) ---
 # Rows: phase, epoch, node, MDT, op, cumulative count. A snapshot keeps the status it was called with.
 _gym_md_stats_file={stats_file}
 _gym_md_stats_node=$(cat <<'GYM_MD_STATS_NODE'

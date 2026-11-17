@@ -212,7 +212,7 @@ def test_a_benchmark_dir_yields_every_job_in_job_id_order(tmp_path):
 
 
 def test_a_dir_without_stats_names_the_setting(tmp_path):
-    with pytest.raises(FileNotFoundError, match="job.lustre_md_stats: true"):
+    with pytest.raises(FileNotFoundError, match="Slurm compute sets lustre_md_stats: true"):
         stats_files(tmp_path)
 
 

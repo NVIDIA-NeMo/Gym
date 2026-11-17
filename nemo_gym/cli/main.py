@@ -1647,7 +1647,7 @@ COMMANDS = {
     ),
     "eval lustre-stats": Command(
         target=_eval_lustre_stats,
-        summary="Summarize the Lustre metadata requests a submitted job made, per phase (job.lustre_md_stats).",
+        summary="Summarize the Lustre metadata requests a submitted Slurm job made, per phase (lustre_md_stats).",
         flags=(Flag(register=lambda p: p.add_argument("target", metavar="BENCHMARK_DIR_OR_TSV")), JSON),
     ),
     "eval health-check": Command(

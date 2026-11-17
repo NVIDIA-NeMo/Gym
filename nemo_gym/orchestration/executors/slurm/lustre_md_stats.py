@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Lustre metadata request counts of a submitted job, per phase (`job.lustre_md_stats`).
+"""Lustre metadata request counts of a submitted Slurm job, per phase (the compute's `lustre_md_stats`).
 
 The job script appends one TSV row per node, MDT and operation at each phase to
 `<benchmark dir>/logs/lustre-md-stats-<slurm job id>.tsv`:
@@ -182,7 +182,7 @@ def stats_files(target: Path) -> list[Path]:
             return files
     raise FileNotFoundError(
         f"No {STATS_FILE_PREFIX}<slurm job id>{STATS_FILE_SUFFIX} in {target / LOGS_DIRNAME} or {target}. "
-        "Lustre metadata stats are recorded only for a job submitted with job.lustre_md_stats: true."
+        "Lustre metadata stats are recorded only for a job whose Slurm compute sets lustre_md_stats: true."
     )
 
 

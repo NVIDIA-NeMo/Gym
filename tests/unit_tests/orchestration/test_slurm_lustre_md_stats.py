@@ -38,9 +38,16 @@ def _config(tmp_path: Path, *, md_stats: bool = True, nodes: int = 0, services=N
     return SubmitConfig.model_validate(
         {
             "services": {"vllm_model": _SERVICE} if services is None else services,
-            "compute": {"cluster": {"type": "slurm", "account": "acct", "node_pools": pools}},
+            "compute": {
+                "cluster": {
+                    "type": "slurm",
+                    "account": "acct",
+                    "node_pools": pools,
+                    **({"lustre_md_stats": True} if md_stats else {}),
+                }
+            },
             "driver": {"container": "gym:latest", "benchmarks": {"b": {"run": {}, "resumable": resumable}}},
-            "job": {"output_path": str(tmp_path / "jobs"), **({"lustre_md_stats": True} if md_stats else {})},
+            "job": {"output_path": str(tmp_path / "jobs")},
             "otel": {"enabled": otel},
         }
     )
@@ -69,7 +76,7 @@ def _without_snapshots(script: str) -> str:
 
 
 def test_off_by_default_the_script_has_no_snapshot(tmp_path):
-    assert _config(tmp_path, md_stats=False).job.lustre_md_stats is False
+    assert _config(tmp_path, md_stats=False).compute["cluster"].lustre_md_stats is False
     script = _script(tmp_path, md_stats=False)
     assert "md_stats" not in script
     assert "lctl" not in script

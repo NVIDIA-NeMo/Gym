@@ -1251,8 +1251,8 @@ and general-run progress counters update incrementally as results arrive.
 
 ### `gym eval lustre-stats`
 
-Summarize the Lustre metadata requests of a job submitted with `job.lustre_md_stats: true`. Pass the benchmark
-directory, which reads every `logs/lustre-md-stats-<slurm job id>.tsv` in it, or one such file:
+Summarize the Lustre metadata requests of a job whose Slurm compute sets `lustre_md_stats: true`. Pass the
+benchmark directory, which reads every `logs/lustre-md-stats-<slurm job id>.tsv` in it, or one such file:
 
 ```bash
 gym eval lustre-stats <job.output_path>/<gym job id>/<benchmark>

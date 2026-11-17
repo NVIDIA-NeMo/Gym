@@ -4,15 +4,17 @@ description: "Measure how many Lustre metadata requests a submitted job makes, p
 position: 6
 ---
 
-Lustre answers file lookups, opens, stats and locks on its metadata servers (MDTs). A job that sends too many of these requests slows the filesystem down for every user. Cluster admins judge a job by its metadata requests per second, per node, to each MDT. `job.lustre_md_stats` records those numbers, so you can compare a job before and after a fix.
+Lustre answers file lookups, opens, stats and locks on its metadata servers (MDTs). A job that sends too many of these requests slows the filesystem down for every user. Cluster admins judge a job by its metadata requests per second, per node, to each MDT. `lustre_md_stats` on the Slurm compute records those numbers, so you can compare a job before and after a fix.
 
 ```yaml
-job:
-  output_path: /lustre/me/gym-jobs
-  lustre_md_stats: true
+compute:
+  cluster:
+    type: slurm
+    account: my-account
+    lustre_md_stats: true
 ```
 
-It is off by default, and Slurm only. When it is off, the job script is unchanged.
+It is off by default. When it is off, the job script is unchanged. Kubernetes compute has no such field.
 
 ## What it records
 

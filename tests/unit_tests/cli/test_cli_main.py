@@ -2511,7 +2511,7 @@ def test_eval_lustre_stats_reads_the_stats_of_a_benchmark_dir(tmp_path, monkeypa
 
 @pytest.mark.parametrize(
     ("extra", "message"),
-    [([], "job.lustre_md_stats: true"), (["+x=1"], "does not accept Hydra overrides")],
+    [([], "Slurm compute sets lustre_md_stats: true"), (["+x=1"], "does not accept Hydra overrides")],
     ids=["no_stats", "override"],
 )
 def test_eval_lustre_stats_usage_errors(tmp_path, monkeypatch, capsys, extra, message):

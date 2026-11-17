@@ -912,7 +912,7 @@ def _render_watched_driver(driver: str, services: list[str]) -> str:
 
 
 def _render_lustre_md_stats_start(compute: SlurmComputeConfig, remote_bench_dir: Path, total_nodes: int) -> str:
-    """Define the `job.lustre_md_stats` snapshot and take the `start` one, before any service starts.
+    """Define the `lustre_md_stats` snapshot and take the `start` one, before any service starts.
 
     A multi-node job reads every node in one host step (no container: lctl is a host tool); one node reads in place.
     """
@@ -1369,7 +1369,7 @@ def build_sbatch_script(
         if export_tail is not None
         else ""
     )
-    md_stats = config.job.lustre_md_stats
+    md_stats = compute.lustre_md_stats
     driver_command = (
         marker_definition
         + (f"{gym_cmd}\n" if gym_cmd else "")

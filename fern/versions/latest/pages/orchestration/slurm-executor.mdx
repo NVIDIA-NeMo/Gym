@@ -36,7 +36,7 @@ A benchmark whose `sbatch` fails is recorded with its error and no job ID. The o
     ├── logs/
     │   ├── <service>-<slurm job id>.log
     │   ├── driver-<slurm job id>.log
-    │   └── lustre-md-stats-<slurm job id>.tsv   # only with job.lustre_md_stats
+    │   └── lustre-md-stats-<slurm job id>.tsv   # only with lustre_md_stats: true
     ├── artifacts/
     │   └── rollouts.jsonl       # plus the sibling files gym eval run writes
     ├── model-calls/             # captured model calls (observability on by default)
