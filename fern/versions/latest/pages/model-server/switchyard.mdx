@@ -64,10 +64,12 @@ gym eval run \
     --benchmark <name> \
     --model-type switchyard_model \
     --model switchyard \
+    --split benchmark \
+    --output results/<name>.jsonl \
     ++policy_model.responses_api_models.switchyard_model.deployment="$(pwd)/routes.toml"
 ```
 
-`deployment` must be an absolute path. It can also come from the `SWITCHYARD_DEPLOYMENT` environment variable, in which case the override can be dropped. A bad deployment fails at startup with Switchyard's validation error rather than as a timeout mid-run. `gym env start` takes the same flags when you want persistent servers for `gym eval run --no-serve`.
+`deployment` must be an absolute path. It can also come from the `SWITCHYARD_DEPLOYMENT` environment variable, in which case the override can be dropped. A bad deployment fails at startup with Switchyard's validation error rather than as a timeout mid-run. `gym env start` takes the same server and model flags (`--benchmark`, `--model-type`, `--model`) when you want persistent servers for `gym eval run --no-serve`; `--split` and `--output` are `gym eval run` flags and `gym env start` rejects them.
 
 <Note>
 **`--model` names a route, not a model.** It must match a route's `id` in `routes.toml`, or every call fails with `model_not_found`. Which model actually serves each call is Switchyard's decision. If the agent sets its own `model`, the server replaces it with the route, so the eval always measures routing.
@@ -83,6 +85,7 @@ for route in capable-only switchyard; do
         --benchmark <name> \
         --model-type switchyard_model \
         --model "$route" \
+        --split benchmark \
         --output "results/$route/rollouts.jsonl" \
         ++policy_model.responses_api_models.switchyard_model.deployment="$(pwd)/routes.toml" \
         ++policy_model.responses_api_models.switchyard_model.condition_dir="$PWD/results/$route"
@@ -153,6 +156,8 @@ gym eval run \
     --benchmark <name> \
     --model-type switchyard_model \
     --model switchyard \
+    --split benchmark \
+    --output results/<name>.jsonl \
     ++policy_model.responses_api_models.switchyard_model.switchyard_base_url=http://127.0.0.1:4000/v1
 ```
 
@@ -174,6 +179,8 @@ gym eval run \
     --benchmark <name> \
     --model-type switchyard_model \
     --model switchyard \
+    --split benchmark \
+    --output results/<name>.jsonl \
     ++policy_model.responses_api_models.switchyard_model.switchyard_base_url=http://127.0.0.1:4000/v1 \
     "++policy_model.responses_api_models.switchyard_model.session_id_headers=[x-switchyard-session-id,proxy_x_session_id]"
 ```

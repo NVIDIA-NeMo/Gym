@@ -15,7 +15,9 @@ gym list agents
 gym eval run \
     --benchmark terminal_bench_2_1/opencode \
     --agent-type terminus_2_sandboxed_agent \
-    --model-type vllm_model
+    --model-type vllm_model \
+    --split benchmark \
+    --output results/tb21_terminus_2.jsonl
 ```
 
 Each run writes its own `_aggregate_metrics.json` next to its rollouts file. Comparing those across harnesses *is* the ablation — for example (illustrative, not real output):
@@ -42,7 +44,8 @@ gym env start \
     --benchmark terminal_bench_2_1/opencode \
     --agent-type terminus_2_sandboxed_agent \
     --model-type vllm_model
-gym eval run --no-serve --agent terminal_bench_2_1_terminus_2_sandboxed_agent --input rows.jsonl
+gym eval run --no-serve --agent terminal_bench_2_1_terminus_2_sandboxed_agent \
+    --input rows.jsonl --output results/tb21_terminus_2.jsonl
 ```
 
 End-to-end rollouts collection (without the `--no-serve` flag) keeps working — rows stamped with the
