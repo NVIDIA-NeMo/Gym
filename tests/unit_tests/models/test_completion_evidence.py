@@ -205,3 +205,11 @@ def test_messages_evidence_matches_the_items_its_echo_converts_to():
     )
     expected = summarize_replay(replay_context([item.model_dump(mode="json") for item in items.input]))
     assert summarize_replay(replay_context(completion_replay_items(served))) == expected
+
+
+@pytest.mark.parametrize("blank", ["", " ", "\n\t"])
+def test_messages_replay_keeps_an_all_blank_turn(blank: str) -> None:
+    served = {"type": "message", "role": "assistant", "content": [{"type": "text", "text": blank}]}
+    original = deepcopy(served)
+    assert completion_replay_items(served)[0]["content"] == blank
+    assert served == original

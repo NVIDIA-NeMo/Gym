@@ -2622,6 +2622,11 @@ def test_messages_echo_with_blank_text_links_to_its_parent(tmp_path, stream):
 
     entries = TokenCaptureStore(tmp_path).read_entries("blank0")
     assert len(entries) == 2
+    assert entries[0].prompt_token_ids == PTOKS
+    assert entries[0].generation_token_ids == GTOKS
+    assert entries[0].generation_log_probs == LPS
+    assert entries[0].token_item_index == 0
+    assert entries[0].output_items[0]["content"][0]["text"] == " \n"
     assert entries[1].parent_resolution == ParentResolutionStatus.RESOLVED
     assert entries[1].parent_call_id == entries[0].model_call_id
 
