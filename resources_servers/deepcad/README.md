@@ -171,8 +171,17 @@ Corpus reference programs require an explicit `reference_sandbox_image` and use
 checksums are checked before use. Reference operation hints use static source
 analysis, consistently with the operation bonus. Invalid or quarantined references
 can use bounded deterministic replacements from the pinned catalog; replacements
-must retain the selected source and reference operation coverage. Provider and
-renderer outages propagate instead of silently changing the selected task.
+must retain the selected source and reference operation coverage. A first renderer
+crash, timeout, or reference-process kill propagates as an outage. Quarantine needs
+two matching failures from fresh renderer attempts; success clears the pending
+observation. SIGKILL/exit 137 is a possible memory-limit kill, not proof of OOM.
+Repeated failures are an operational heuristic; after repairing a shared runtime,
+remove the affected cache's `.failure.json` and confirmed rejection/timeout markers
+to retry the original references. Legacy single-failure markers are ignored.
+Provider errors and unclassified OCC/export errors still stop the batch. Investigate
+the logged asset first; if it is deterministically bad, exclude it from the input
+manifest and replacement catalog, then restart with fresh dataloader state (the
+sampler rejects changed manifests when restoring an old state).
 
 `prepare_opencode.py` accepts validated lazy rows without rendering. It marks the
 harness in their configuration; materialization then adds the workspace prompt and

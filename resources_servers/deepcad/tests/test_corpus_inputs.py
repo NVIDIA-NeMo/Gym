@@ -75,3 +75,47 @@ async def test_reference_source_operation_evidence_and_cache(reference):
         assert set(factory.call_args.args[1].files) == {"/sandbox/model.py", "/sandbox/runner.py"}
         assert await corpus_inputs.build_reference(root, record, config, root) == (target, ["box"])
         factory.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_code", [-9, 137, -11, 139])
+async def test_reference_process_kill_requires_confirmation(reference, exit_code):
+    root, record, config = reference
+    sandbox = AsyncMock()
+    sandbox.exec.side_effect = [SandboxExecResult("", "", exit_code), SandboxExecResult("Killed", "", 0)]
+    context = MagicMock(__aenter__=AsyncMock(return_value=sandbox), __aexit__=AsyncMock(return_value=False))
+    with patch.object(corpus_inputs, "AsyncSandbox", return_value=context):
+        with pytest.raises(corpus_inputs.ReferenceRejected, match="cause unverified") as error:
+            await corpus_inputs.build_reference(root, record, config, root)
+    assert error.value.confirmation_key == f"reference_signal:{exit_code}"
+    assert not (root / record["reference_step"]).exists()
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_with_kill_exit_is_still_an_outage(reference):
+    root, record, config = reference
+    sandbox = AsyncMock()
+    sandbox.exec.return_value = SandboxExecResult("", "", 137, "runtime")
+    context = MagicMock(__aenter__=AsyncMock(return_value=sandbox), __aexit__=AsyncMock(return_value=False))
+    with patch.object(corpus_inputs, "AsyncSandbox", return_value=context):
+        with pytest.raises(RuntimeError, match="provider failure"):
+            await corpus_inputs.build_reference(root, record, config, root)
+
+
+def test_renderer_preserves_process_failure_confirmation_key(tmp_path):
+    import json
+
+    from resources_servers.deepcad.dataset import lazy_inputs
+
+    request, output = tmp_path / "request.json", tmp_path / "row.json"
+    config = lazy_inputs.LazyRenderConfig(
+        dataset_root=str(tmp_path), renderer_python="python", cache_root=str(tmp_path), reference_sandbox_image="image"
+    )
+    request.write_text(json.dumps({"config": config.model_dump(), "record": {"source_kind": "cad_corpus"}}))
+    failure = corpus_inputs.ReferenceRejected("process killed", confirmation_key="reference_signal:137")
+    with patch.object(corpus_inputs, "render_corpus", side_effect=failure):
+        lazy_inputs.render(request, output)
+    assert json.loads(output.with_suffix(".rejected.json").read_text()) == {
+        "reason": "process killed",
+        "confirmation_key": "reference_signal:137",
+    }

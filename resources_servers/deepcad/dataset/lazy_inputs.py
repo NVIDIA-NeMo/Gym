@@ -79,6 +79,24 @@ def validate_row(row: dict[str, Any], record: dict[str, Any]) -> None:
         raise ValueError("Cached DeepCAD images must be self-contained")
 
 
+def _confirm_failure(target: Path, detail: dict[str, Any], config: LazyRenderConfig) -> None:
+    """Persist one observation; only a matching fresh attempt may quarantine it."""
+    pending = target.with_suffix(".failure.json")
+    identity = [
+        detail["confirmation_key"],
+        config.renderer_python,
+        config.timeout_s,
+        config.reference_execution_timeout_s,
+    ]
+    if pending.exists() and json.loads(pending.read_text()).get("identity") == identity:
+        detail["confirmation_count"] = 2
+        return
+    temporary = pending.with_suffix(".building")
+    temporary.write_text(json.dumps({"identity": identity, "detail": detail}))
+    temporary.replace(pending)
+    raise RuntimeError(f"Unconfirmed reference failure; retry in a fresh renderer: {detail['reason']}")
+
+
 def _materialize_one(example: dict[str, Any]) -> dict[str, Any]:
     lazy = example["deepcad_lazy"]
     config = LazyRenderConfig.model_validate(lazy["config"])
@@ -128,12 +146,21 @@ def _materialize_one(example: dict[str, Any]) -> dict[str, Any]:
         if rejected.exists():
             from resources_servers.deepcad.dataset.corpus_inputs import ReferenceRejected
 
-            raise ReferenceRejected(json.loads(rejected.read_text())["reason"])
+            detail = json.loads(rejected.read_text())
+            # Older releases quarantined a single renderer segfault.
+            ambiguous = detail.get("confirmation_key") or detail.get("status") == "segfault_quarantined"
+            ambiguous = ambiguous or detail["reason"].startswith(
+                ("Reference sandbox segfault:", "Reference program exceeded")
+            )
+            if not ambiguous or detail.get("confirmation_count") == 2:
+                raise ReferenceRejected(detail["reason"])
         # Budget-specific quarantine keeps retries and GRPO groups consistent.
         # Separate from invalid CAD; remove this marker to retry the reference.
         timed_out = root / f"{key}.timeout-{config.timeout_s}.json"
         if timed_out.exists() and not target.exists():
-            raise ReferenceRenderTimeout(json.loads(timed_out.read_text())["reason"])
+            detail = json.loads(timed_out.read_text())
+            if detail.get("confirmation_count") == 2:
+                raise ReferenceRenderTimeout(detail["reason"])
         if target.exists():
             row = json.loads(target.read_text())
         else:
@@ -182,12 +209,15 @@ def _materialize_one(example: dict[str, Any]) -> dict[str, Any]:
                         if record.get("source_kind") != "cad_corpus" or not config.reference_catalog:
                             raise
                         detail = {
-                            "reason": f"Reference render exceeded {config.timeout_s}s: {record['asset_id']}",
-                            "asset_id": record["asset_id"],
+                            "reason": f"Reference render exceeded {config.timeout_s}s: {record.get('asset_id', record['id'])}",
+                            "asset_id": record.get("asset_id"),
                             "source_sha256": record["source_sha256"],
                             "timeout_s": config.timeout_s,
                             "status": "render_timeout_unverified",
+                            "confirmation_key": "renderer_timeout",
                         }
+                        _confirm_failure(target, detail, config)
+                        detail["status"] = "render_timeout_confirmed"
                         temporary = timed_out.with_suffix(".building")
                         temporary.write_text(json.dumps(detail))
                         temporary.replace(timed_out)
@@ -195,8 +225,10 @@ def _materialize_one(example: dict[str, Any]) -> dict[str, Any]:
                         raise ReferenceRenderTimeout(detail["reason"]) from exc
                     failure = result.with_suffix(".rejected.json")
                     if process.returncode in (-signal.SIGSEGV, 128 + signal.SIGSEGV):
-                        # A native CAD/render crash belongs to this input; retain evidence
-                        # and use the same deterministic replacement as invalid references.
+                        if record.get("source_kind") != "cad_corpus" or not config.reference_catalog:
+                            raise RuntimeError(
+                                f"DeepCAD input render failed for {record['id']}: {process.stderr[-2000:]}"
+                            )
                         failure.write_text(
                             json.dumps(
                                 {
@@ -204,6 +236,7 @@ def _materialize_one(example: dict[str, Any]) -> dict[str, Any]:
                                     "return_code": process.returncode,
                                     "stderr": process.stderr[-2000:],
                                     "status": "segfault_quarantined",
+                                    "confirmation_key": f"renderer_signal:{process.returncode}",
                                 }
                             )
                         )
@@ -211,7 +244,9 @@ def _materialize_one(example: dict[str, Any]) -> dict[str, Any]:
                         from resources_servers.deepcad.dataset.corpus_inputs import ReferenceRejected
 
                         detail = json.loads(failure.read_text())
-                        detail.update(asset_id=record["asset_id"], source_sha256=record["source_sha256"])
+                        detail.update(asset_id=record.get("asset_id"), source_sha256=record["source_sha256"])
+                        if detail.get("confirmation_key"):
+                            _confirm_failure(target, detail, config)
                         temporary = rejected.with_suffix(".building")
                         temporary.write_text(json.dumps(detail))
                         temporary.replace(rejected)
@@ -224,6 +259,7 @@ def _materialize_one(example: dict[str, Any]) -> dict[str, Any]:
             temporary = target.with_suffix(".building")
             temporary.write_text(json.dumps(row) + "\n")
             temporary.replace(target)
+            target.with_suffix(".failure.json").unlink(missing_ok=True)
         validate_row(row, record)
     resolved = deepcopy(example)
     resolved.pop("deepcad_lazy")
@@ -375,7 +411,9 @@ def render(request: Path, output: Path) -> None:
         try:
             render_corpus({"record": record, "config": config.model_dump()}, output)
         except ReferenceRejected as exc:
-            output.with_suffix(".rejected.json").write_text(json.dumps({"reason": str(exc)}))
+            output.with_suffix(".rejected.json").write_text(
+                json.dumps({"reason": str(exc), "confirmation_key": exc.confirmation_key})
+            )
         return
     root = Path(config.dataset_root).resolve()
     paths = [(root / record[key]).resolve() for key in ("cad_json", "reference_step")]

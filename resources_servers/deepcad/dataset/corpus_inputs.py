@@ -18,7 +18,11 @@ from resources_servers.deepcad.operations import OPERATION_NAMES, extract_operat
 
 
 class ReferenceRejected(ValueError):
-    """Published source code failed CAD construction; not a renderer/service outage."""
+    """Reference failure; ambiguous process exits require a second fresh attempt."""
+
+    def __init__(self, reason: str, *, confirmation_key: str | None = None):
+        super().__init__(reason)
+        self.confirmation_key = confirmation_key
 
 
 def load_program(root: Path, record: dict) -> tuple[str, str]:
@@ -116,7 +120,8 @@ async def build_reference(root: Path, record: dict, config: dict, directory: Pat
         )
         if result.error_type == "timeout":
             raise ReferenceRejected(
-                f"Reference program exceeded its {config['reference_execution_timeout_s']}s execution budget: {record['asset_id']}"
+                f"Reference program exceeded its {config['reference_execution_timeout_s']}s execution budget: {record['asset_id']}",
+                confirmation_key="reference_execution_timeout",
             )
         if result.error_type:
             raise RuntimeError(f"Reference sandbox provider failure: {result.error_type}")
@@ -127,8 +132,11 @@ async def build_reference(root: Path, record: dict, config: dict, directory: Pat
             detail = (
                 f"Reference program failed for {record['asset_id']} (return_code={result.return_code}): {log.stdout}"
             )
-            if not result.error_type and result.return_code in (-signal.SIGSEGV, 128 + signal.SIGSEGV):
-                raise ReferenceRejected("Reference sandbox segfault: " + detail)
+            if result.return_code in (-signal.SIGSEGV, 128 + signal.SIGSEGV, -signal.SIGKILL, 128 + signal.SIGKILL):
+                raise ReferenceRejected(
+                    "Reference sandbox crash or kill (cause unverified): " + detail,
+                    confirmation_key=f"reference_signal:{result.return_code}",
+                )
             if not result.error_type and (
                 ('File "/sandbox/model.py"' in (log.stdout or "") or 'File "model.py"' in (log.stdout or ""))
                 or "Assign valid CadQuery solid geometry" in (log.stdout or "")
