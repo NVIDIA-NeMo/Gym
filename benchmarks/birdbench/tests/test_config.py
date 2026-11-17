@@ -60,3 +60,17 @@ def test_every_split_and_dialect_has_a_distinct_prepared_file():
     }
     assert len(paths) == len(birdbench_prepare.SPLITS) * len(birdbench_prepare.DIALECTS)
     assert birdbench_prepare.output_fpath_for("spark", "train").name == "birdbench_spark_train.jsonl"
+
+
+def test_the_dataset_runs_on_single_agent_turn_with_bird_sql_grading():
+    """BIRD dev's tasks route by their taskset to single_agent_turn, which drives simple_agent and bird_sql."""
+    cfg, dataset = _dataset()
+    server = cfg["environment_server_routes"][dataset["taskset"]]
+    ((kind, settings),) = cfg[server]["environment_servers"].items()
+    assert kind == "single_agent_turn"
+    assert (settings["agent_server"]["name"], settings["resources_server"]["name"]) == (
+        "birdbench_bird_sql_simple_agent",
+        "birdbench_bird_sql_resources_server",
+    )
+    # bird_sql's flat-row Environment Server for its example rows does not run beside it.
+    assert cfg["bird_sql_environment_server"] is None
