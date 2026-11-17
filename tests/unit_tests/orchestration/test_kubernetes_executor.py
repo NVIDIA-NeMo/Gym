@@ -456,7 +456,8 @@ def test_benchmark_command_is_forwarded_to_the_driver(tmp_path):
     assert "GYM_CMD" not in driver_script
 
 
-def test_benchmark_command_gets_policy_and_bench_dir_env_vars(tmp_path):
+@pytest.mark.parametrize("command", [None, "./run_my_harness.sh"])
+def test_benchmark_command_gets_policy_and_bench_dir_env_vars(tmp_path, command):
     # driver.policy_model injects policy_base_url/model_name/api_key into benchmark.run *after*
     # construction (see SubmitConfig._resolve_and_validate_placements), so this works even for a
     # `command` benchmark -- it just reaches the policy via env vars instead of CLI args.
@@ -469,7 +470,7 @@ def test_benchmark_command_gets_policy_and_bench_dir_env_vars(tmp_path):
             "driver": {
                 "container": "gym:latest",
                 "policy_model": "vllm_model",
-                "benchmarks": {"bench_a": {"command": "./run_my_harness.sh"}},
+                "benchmarks": {"bench_a": {"command": command}},
             },
             "job": {"output_path": str(tmp_path / "jobs")},
             "otel": {"enabled": False},
@@ -493,6 +494,8 @@ def test_benchmark_command_gets_policy_and_bench_dir_env_vars(tmp_path):
 
     env = {e["name"]: e["value"] for e in job["spec"]["template"]["spec"]["containers"][0]["env"]}
     assert env["NEMO_GYM_BENCH_DIR"] == str(run_dir)
+    if command is None:
+        return
     assert env["NEMO_GYM_POLICY_BASE_URL"] == "http://localhost:8000/v1"
     assert env["NEMO_GYM_POLICY_MODEL_NAME"] == "org/model"
     assert env["NEMO_GYM_POLICY_API_KEY"] == "dummy"
