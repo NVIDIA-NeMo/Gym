@@ -316,10 +316,10 @@ EXPLICIT_BUDGET = "--max-walltime HH:MM:SS --walltime-reason TEXT"
 def _exhausted_with_unknown_walltime(tmp_path):
     """The walltime test run as a Store run: one scored rollout, one that used every attempt, and a capped walltime
     whose used part is unreadable."""
-    from tests.unit_tests.orchestration.test_managed_recovery_selection import prepare_managed
+    from tests.helpers.recovery_store_runs import save_store_run
 
     job_dir = _timed_run(tmp_path)
-    prepare_managed(job_dir, "exhausted", n=2)
+    save_store_run(job_dir, "exhausted", n=2)
     (job_dir / ".gym_accumulated_walltime").write_text("unreadable\n")
     return job_dir
 
@@ -545,11 +545,11 @@ def test_a_chain_stopped_on_a_typed_failure_names_its_remedy_before_the_resume(t
 
 def test_the_verdict_of_an_inspection_repeats_the_options_it_was_asked_with(tmp_path, slurm_bin):
     from nemo_gym.orchestration.submit import inspect_recovery
-    from tests.unit_tests.orchestration.test_managed_recovery_selection import prepare_managed
+    from tests.helpers.recovery_store_runs import save_store_run
 
     job_dir = _timed_run(tmp_path)
     (job_dir / ".gym_infra_retries").write_text("1\n")
-    prepare_managed(job_dir, "exhausted", n=2)  # one rollout used every attempt
+    save_store_run(job_dir, "exhausted", n=2)  # one rollout used every attempt
 
     out = inspect_recovery(*_handle(job_dir), extend_attempts=1)
 

@@ -486,11 +486,11 @@ def test_recovered_judge_history_does_not_displace_an_unrelated_current_cause():
 def _spent_attempts_and_retries(tmp_path):
     """One scored and one exhausted rollout of a Store run whose infra-retry budget is used (3 of 3)."""
     from nemo_gym.eval.recovery.evidence import select_managed_evidence
-    from tests.unit_tests.orchestration.test_managed_recovery_selection import collect, prepare_managed
+    from tests.helpers.recovery_store_runs import collect_isolated, save_store_run
 
-    prepare_managed(tmp_path, "exhausted", n=2)
+    save_store_run(tmp_path, "exhausted", n=2)
     (tmp_path / ".gym_infra_retries").write_text("3\n")
-    return select_managed_evidence(collect(tmp_path), tmp_path)
+    return select_managed_evidence(collect_isolated(tmp_path), tmp_path)
 
 
 def _budget_verdict(collected, **options):
@@ -521,10 +521,10 @@ def test_spent_attempts_and_infra_retries_name_both_extensions_at_every_stop(tmp
 
 def test_spent_attempts_alone_still_name_only_the_attempt_extension(tmp_path):
     from nemo_gym.eval.recovery.evidence import select_managed_evidence
-    from tests.unit_tests.orchestration.test_managed_recovery_selection import collect, prepare_managed
+    from tests.helpers.recovery_store_runs import collect_isolated, save_store_run
 
-    prepare_managed(tmp_path, "exhausted", n=2)
-    decision, verdict = _budget_verdict(select_managed_evidence(collect(tmp_path), tmp_path))
+    save_store_run(tmp_path, "exhausted", n=2)
+    decision, verdict = _budget_verdict(select_managed_evidence(collect_isolated(tmp_path), tmp_path))
     assert decision.action == RecoveryAction.STOP
     assert verdict["action"] == (
         "your decision: continue the saved run (completed work is kept): "
@@ -535,10 +535,10 @@ def test_spent_attempts_alone_still_name_only_the_attempt_extension(tmp_path):
 def test_reservations_without_an_outcome_wait_for_the_allocation_not_a_fresh_submit(tmp_path):
     from nemo_gym.eval.recovery.evidence import select_managed_evidence
     from nemo_gym.eval.recovery.planner import decide_from_collected
-    from tests.unit_tests.orchestration.test_managed_recovery_selection import collect, prepare_managed
+    from tests.helpers.recovery_store_runs import collect_isolated, save_store_run
 
-    prepare_managed(tmp_path, "prior_reservation")
-    collected = select_managed_evidence(collect(tmp_path), tmp_path)
+    save_store_run(tmp_path, "prior_reservation")
+    collected = select_managed_evidence(collect_isolated(tmp_path), tmp_path)
     decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
     assert decision.action == RecoveryAction.STOP and "whether they ran is unknown" in decision.reason
 

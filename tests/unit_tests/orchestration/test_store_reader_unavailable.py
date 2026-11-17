@@ -28,10 +28,10 @@ from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
 from nemo_gym.orchestration.executors.slurm import judge_job as slurm_judge_job
 from nemo_gym.orchestration.executors.slurm import reader as slurm_reader
 from tests.helpers.recovery_cut_runs import _cut_run
+from tests.helpers.recovery_store_runs import collect_isolated, save_store_run
 from tests.unit_tests.orchestration.test_eval_resubmit import _handle, _resumable_run
 from tests.unit_tests.orchestration.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.orchestration.test_eval_resubmit import slurm_bin as slurm_bin
-from tests.unit_tests.orchestration.test_managed_recovery_selection import collect, prepare_managed
 from tests.unit_tests.orchestration.test_remote_managed_recovery import config
 from tests.unit_tests.orchestration.test_remote_reader_transport import _collected, _install, _job
 from tests.unit_tests.orchestration.test_resume_script import _run_prologue
@@ -62,9 +62,9 @@ def test_a_reader_that_ran_and_refused_the_artifacts_is_not_unavailable(tmp_path
 
 def test_a_local_reader_that_cannot_import_the_store_is_unavailable(tmp_path, monkeypatch):
     job = tmp_path / "job"
-    prepare_managed(job, "missing", n=2)
+    save_store_run(job, "missing", n=2)
     monkeypatch.setitem(sys.modules, "nemo_gym.rollouts.rollout_store", None)
-    result = select_managed_evidence(collect(job), job)
+    result = select_managed_evidence(collect_isolated(job), job)
     assert (result.managed_selection, result.managed_reader_unavailable) == (None, True)
 
 
@@ -114,7 +114,7 @@ def _remote_reader(monkeypatch, *, unavailable: bool, error: str) -> None:
 
 def _managed_run(tmp_path):
     job, _, _ = _resumable_run(tmp_path)
-    prepare_managed(job, "missing", n=2)
+    save_store_run(job, "missing", n=2)
     return job
 
 

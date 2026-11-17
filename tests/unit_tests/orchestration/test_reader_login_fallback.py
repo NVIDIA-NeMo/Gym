@@ -24,10 +24,10 @@ from nemo_gym.eval.recovery.planner import decide_from_collected
 from nemo_gym.orchestration.executors.connection import LocalConnection
 from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
 from nemo_gym.orchestration.executors.slurm import reader as slurm_reader
+from tests.helpers.recovery_store_runs import save_store_run
 from tests.unit_tests.orchestration.test_eval_resubmit import _handle, _resumable_run
 from tests.unit_tests.orchestration.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.orchestration.test_eval_resubmit import slurm_bin as slurm_bin
-from tests.unit_tests.orchestration.test_managed_recovery_selection import prepare_managed
 from tests.unit_tests.orchestration.test_reader_srun import fake_slurm as fake_slurm
 from tests.unit_tests.orchestration.test_remote_managed_recovery import config
 from tests.unit_tests.orchestration.test_remote_reader_transport import _collected, _install, _job
@@ -109,7 +109,7 @@ def test_a_collector_that_could_not_run_decides_nothing(tmp_path: Path, slurm_bi
     from nemo_gym.orchestration.submit import inspect_recovery
 
     job, _, _ = _resumable_run(tmp_path)
-    prepare_managed(job, "missing", n=2)
+    save_store_run(job, "missing", n=2)
     monkeypatch.setenv("NEMO_GYM_REMOTE_READER_SRUN", "-p cpu")
     reason = f"{NOT_STARTED}; the login-host fallback is forbidden"
     report = f"__GYM_READER_HOST:none\n__GYM_READER_FALLBACK:{reason}\n"

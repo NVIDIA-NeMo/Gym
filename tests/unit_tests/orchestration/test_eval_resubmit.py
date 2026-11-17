@@ -46,6 +46,7 @@ from nemo_gym.orchestration.jobs import (
     restore_index_entry,
 )
 from nemo_gym.orchestration.submit import _EXECUTORS_BY_NAME, resubmit
+from tests.helpers.recovery_store_runs import provider_failures_jsonl
 
 
 # Rendered by this Gym, so it carries the line a resubmitted job uses to resume.
@@ -1040,34 +1041,6 @@ def test_recover_refuses_a_job_sh_that_would_reset_the_budget(tmp_path: Path, sl
     assert (job_dir / RETRY_FILE_NAME).read_text() == "2\n"
 
 
-def _provider_failures(task: int, attempts: int, cap: int) -> str:
-    rows = [
-        {
-            "_ng_task_index": task,
-            "_ng_rollout_index": 0,
-            "_ng_attempt_index": attempt,
-            "failure_kind": "provider_unavailable",
-            "_ng_failure_class": "provider_unavailable",
-            "_ng_failure_terminal": False,
-            "_ng_failure_max_attempts": cap,
-            "_ng_failure_id": f"f{task}-{attempt}",
-            "_ng_failure_events": {
-                f"f{task}-{attempt}": {
-                    "event_id": f"f{task}-{attempt}",
-                    "boundary": "model",
-                    "failure_kind": "provider_unavailable",
-                    "operation": "model_request",
-                    "operation_id": f"op{task}",
-                    "attempt_id": f"a{task}-{attempt}",
-                    "cause_id": None,
-                }
-            },
-        }
-        for attempt in range(attempts)
-    ]
-    return "".join(json.dumps(row) + "\n" for row in rows)
-
-
 def _core_pending(job_dir: Path, monkeypatch: pytest.MonkeyPatch, cap: int) -> list[tuple[int, int]]:
     """The inputs rollout collection's resume would run (`_load_from_cache`), as a resume without resubmit loads it."""
     from types import SimpleNamespace
@@ -1092,7 +1065,7 @@ def test_recover_queues_nothing_when_every_unscored_identity_used_its_attempts(
     from nemo_gym.orchestration.submit import recover
 
     job_dir, _, _ = _resumable_run(tmp_path)
-    (job_dir / "artifacts" / "rollouts_failures.jsonl").write_text(_provider_failures(1, attempts=2, cap=2))
+    (job_dir / "artifacts" / "rollouts_failures.jsonl").write_text(provider_failures_jsonl(1, attempts=2, cap=2))
 
     out = recover(*_handle(job_dir))
 
@@ -1110,7 +1083,7 @@ def test_recover_queues_a_mixed_run_and_the_resume_runs_only_the_eligible_identi
     artifacts = job_dir / "artifacts"
     rows = [{"_ng_task_index": t, "_ng_rollout_index": 0} for t in range(3)]
     (artifacts / "rollouts_materialized_inputs.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
-    (artifacts / "rollouts_failures.jsonl").write_text(_provider_failures(1, attempts=2, cap=2))
+    (artifacts / "rollouts_failures.jsonl").write_text(provider_failures_jsonl(1, attempts=2, cap=2))
 
     out = recover(*_handle(job_dir))
 

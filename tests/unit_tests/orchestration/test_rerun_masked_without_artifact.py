@@ -32,11 +32,11 @@ from nemo_gym.eval.recovery.planner import (
     decide_from_collected,
 )
 from nemo_gym.rollouts.rollout_store import RolloutStore
+from tests.helpers.recovery_store_runs import collect_isolated
 from tests.unit_tests.eval.recovery.test_masked_infrastructure_recovery import _ANSWER, _masked, _run
 from tests.unit_tests.orchestration.test_eval_resubmit import _handle, _resumable_run
 from tests.unit_tests.orchestration.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.orchestration.test_eval_resubmit import slurm_bin as slurm_bin
-from tests.unit_tests.orchestration.test_managed_recovery_selection import collect
 
 
 FLAG = "--rerun-masked-without-artifact --rerun-reason"
@@ -62,7 +62,7 @@ def _approval(identity=(1, 0), attempt=0, attempts=0, reason="the patch artifact
 
 
 def _decide(job, **options):
-    selected = select_managed_evidence(collect(job), job)
+    selected = select_managed_evidence(collect_isolated(job), job)
     assert selected.managed_reader_error is None
     return decide_from_collected(selected, max_infra_retries=3, max_walltime_s=None, live_job=False, **options)
 
@@ -256,7 +256,7 @@ def test_an_unreadable_journal_line_reopens_nothing(tmp_path):
 
 def test_a_store_reader_that_predates_the_rerun_is_refused(tmp_path):
     _run(tmp_path, [[_kept()]])
-    selected = select_managed_evidence(collect(tmp_path), tmp_path)
+    selected = select_managed_evidence(collect_isolated(tmp_path), tmp_path)
     assert selected.rerun_masked_applied is True
     old = selected.model_copy(update={"rerun_masked_applied": None})
     decision = decide_from_collected(

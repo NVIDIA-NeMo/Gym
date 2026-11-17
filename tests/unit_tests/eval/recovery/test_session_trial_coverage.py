@@ -131,12 +131,12 @@ def test_session_metadata_is_reported_and_only_grading_or_failures_reject(mutati
 )
 def test_reader_checkpoint_fact_comes_from_bound_saved_config(tmp_path, config, expected):
     from nemo_gym.eval.recovery.evidence import select_managed_evidence
-    from tests.unit_tests.orchestration.test_managed_recovery_selection import collect, prepare_managed
+    from tests.helpers.recovery_store_runs import collect_isolated, save_store_run
 
-    prepare_managed(tmp_path, "healthy")
+    save_store_run(tmp_path, "healthy")
     path = tmp_path / "artifacts/rollouts_resolved_config.yaml"
     if config is not None:
         path.write_text(config)
-    selected = select_managed_evidence(collect(tmp_path), tmp_path)
+    selected = select_managed_evidence(collect_isolated(tmp_path), tmp_path)
     assert selected.managed_reader_error is None
     assert selected.checkpoint_enabled is expected

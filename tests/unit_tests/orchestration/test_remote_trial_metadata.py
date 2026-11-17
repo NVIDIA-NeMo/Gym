@@ -20,7 +20,8 @@ from nemo_gym.orchestration.executors.slurm.reader import (
 )
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
-from tests.unit_tests.orchestration.test_managed_recovery_selection import collect, saved_bytes
+from tests.helpers.recovery_store_runs import collect_isolated
+from tests.unit_tests.orchestration.test_managed_recovery_selection import saved_bytes
 from tests.unit_tests.orchestration.test_remote_managed_recovery import ProjectionConnection, config
 
 
@@ -64,7 +65,7 @@ def prepare_session(job, *, config_text="{}", result_type="single_agent_turn_leg
 
 
 def collected(job):
-    return collect(job).model_copy(update={"quality": QUALITY})
+    return collect_isolated(job).model_copy(update={"quality": QUALITY})
 
 
 @pytest.mark.parametrize(

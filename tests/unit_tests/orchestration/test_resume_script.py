@@ -323,11 +323,11 @@ def test_successor_is_killed_if_its_dependency_can_never_be_met(tmp_path):
 @pytest.mark.parametrize("exit_code,continues", [("75:0", True), ("76:0", False)])
 @pytest.mark.parametrize("max_retries", [0, 3])
 def test_incomplete_evaluation_chain_obeys_retryability(tmp_path, monkeypatch, exit_code, continues, max_retries):
-    from tests.unit_tests.orchestration.test_managed_recovery_selection import prepare_managed
+    from tests.helpers.recovery_store_runs import save_store_run
 
     monkeypatch.setenv("SLURM_JOB_ID", "100")
     # Real saved outcomes and untouched pending inputs, not an exit-code-only permission token.
-    prepare_managed(tmp_path, "missing" if continues else "healthy", n=2)
+    save_store_run(tmp_path, "missing" if continues else "healthy", n=2)
     result = _run_prologue(tmp_path, ResumeConfig(max_retries=max_retries), "FAILED", exit_code=exit_code)
     assert result.returncode == (0 if continues else 1), result.stdout
     assert ("REACHED_WORK" in result.stdout) is continues
@@ -1543,10 +1543,10 @@ _MLFLOW_CONFIG = "mlflow_tracking_uri: http://tracking.example\nmlflow_experimen
 
 def _finished_run(tmp_path, monkeypatch, case="healthy", config=_MLFLOW_CONFIG, receipt="current") -> None:
     """A managed run of two rollouts as its last segment left it: Store, saved config, aggregate and export receipt."""
-    from tests.unit_tests.orchestration.test_managed_recovery_selection import prepare_managed
+    from tests.helpers.recovery_store_runs import save_store_run
 
     monkeypatch.setenv("SLURM_JOB_ID", "100")
-    prepare_managed(tmp_path, case, n=2)
+    save_store_run(tmp_path, case, n=2)
     artifacts = tmp_path / "artifacts"
     (artifacts / "rollouts_resolved_config.yaml").write_text(config)
     (artifacts / "rollouts_aggregate_metrics.json").write_text("[]\n")

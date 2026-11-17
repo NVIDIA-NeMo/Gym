@@ -15,7 +15,7 @@ from nemo_gym.orchestration.executors.slurm.resume_script import EXPORT_RECEIPT_
 from nemo_gym.orchestration.executors.slurm.script import build_sbatch_script
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
-from tests.unit_tests.orchestration.test_managed_recovery_selection import prepare_managed
+from tests.helpers.recovery_store_runs import save_store_run
 from tests.unit_tests.orchestration.test_resume_script import _run_prologue
 from tests.unit_tests.rollouts.test_rollout_recovery import runner_config as runner_config
 
@@ -46,7 +46,7 @@ def test_installed_runtime_authorizes_only_selected_remaining_work(
 ):
     monkeypatch.setenv("SLURM_JOB_ID", "100")
     if case != "absent":
-        output = prepare_managed(
+        output = save_store_run(
             tmp_path,
             "infra" if case == "malformed" else "healthy" if case == "secondary_cleanup" else case,
             n=2 if case == "missing" else 1,
@@ -123,7 +123,7 @@ def test_mixed_saved_judge_and_missing_resumes_the_missing_work(tmp_path):
 
 def test_generated_container_command_invokes_preinstalled_reader_before_services(tmp_path, monkeypatch):
     monkeypatch.setenv("SLURM_JOB_ID", "100")
-    prepare_managed(tmp_path, "missing", n=2)
+    save_store_run(tmp_path, "missing", n=2)
     config = SubmitConfig.model_validate(
         {
             "services": {},
@@ -158,7 +158,7 @@ def test_generated_container_command_invokes_preinstalled_reader_before_services
 
 
 def test_exit75_without_installed_runtime_cannot_authorize_work(tmp_path):
-    prepare_managed(tmp_path, "missing", n=2)
+    save_store_run(tmp_path, "missing", n=2)
     result = _run_prologue(tmp_path, ResumeConfig(), "FAILED", exit_code="75:0", admission_command="false")
     assert "REACHED_WORK" not in result.stdout
     assert not (tmp_path / "sbatch_calls").exists()
@@ -170,7 +170,7 @@ def test_exit75_without_installed_runtime_cannot_authorize_work(tmp_path):
 )
 def test_stale_or_unbound_progress_cannot_waive_spent_retry_budget(tmp_path, monkeypatch, mutation):
     monkeypatch.setenv("SLURM_JOB_ID", "100")
-    prepare_managed(tmp_path, "missing", n=2)
+    save_store_run(tmp_path, "missing", n=2)
     report = tmp_path / "artifacts" / "rollouts_coverage.json"
     data = json.loads(report.read_text())
     if mutation == "missing_binding":
@@ -193,7 +193,7 @@ def test_stale_or_unbound_progress_cannot_waive_spent_retry_budget(tmp_path, mon
 
 
 def test_owned_infrastructure_cannot_exceed_carried_retry_budget(tmp_path):
-    prepare_managed(tmp_path, "infra")
+    save_store_run(tmp_path, "infra")
     (tmp_path / ".gym_infra_retries").write_text("3\n")
     result = _run_prologue(tmp_path, ResumeConfig(max_retries=3), "FAILED", exit_code="75:0")
     assert "REACHED_WORK" not in result.stdout
@@ -201,7 +201,7 @@ def test_owned_infrastructure_cannot_exceed_carried_retry_budget(tmp_path):
 
 
 def test_explicit_attempt_reset_does_not_reopen_unknown_selected_execution(tmp_path):
-    output = prepare_managed(tmp_path, "infra")
+    output = save_store_run(tmp_path, "infra")
     sidecar = output.with_name("rollouts_failures.jsonl")
     rows = [json.loads(line) for line in sidecar.read_text().splitlines()]
     rows[-1]["_ng_failure_id"] = "absent"
@@ -322,7 +322,7 @@ async def test_actual_collection_failure_reaches_installed_runtime_and_retry_bud
 @pytest.mark.parametrize("state", ["TIMEOUT", "PREEMPTED", "NODE_FAIL", "BOOT_FAIL"])
 @pytest.mark.parametrize("case", ["judge", "unknown_kill", "prior_reservation", "healthy"])
 def test_known_scheduler_event_cannot_bypass_saved_outcome_guards(tmp_path, state, case):
-    prepare_managed(tmp_path, case)
+    save_store_run(tmp_path, case)
     result = _run_prologue(tmp_path, ResumeConfig(), state)
     assert "REACHED_WORK" not in result.stdout, result.stdout + result.stderr
     assert not (tmp_path / "sbatch_calls").exists()
@@ -330,14 +330,14 @@ def test_known_scheduler_event_cannot_bypass_saved_outcome_guards(tmp_path, stat
 
 @pytest.mark.parametrize("state,debit", [("TIMEOUT", False), ("PREEMPTED", True)])
 def test_known_scheduler_event_preserves_untouched_work_semantics(tmp_path, state, debit):
-    prepare_managed(tmp_path, "missing", n=2)
+    save_store_run(tmp_path, "missing", n=2)
     result = _run_prologue(tmp_path, ResumeConfig(), state)
     assert "REACHED_WORK" in result.stdout, result.stdout + result.stderr
     assert (tmp_path / ".gym_infra_retries").exists() is debit
 
 
 def test_a_failing_installed_runtime_names_its_first_error_and_stops(tmp_path):
-    prepare_managed(tmp_path, "missing", n=2)
+    save_store_run(tmp_path, "missing", n=2)
     installer = tmp_path / "failing_installer.sh"
     installer.write_text(
         "#!/bin/bash\n"
