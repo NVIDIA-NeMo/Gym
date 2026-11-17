@@ -1030,9 +1030,19 @@ def test_a_policy_that_would_count_a_masked_row_as_zero_is_refused() -> None:
         make_server(outcome_policy={"by_stage": {"agent": {"default_action": "count_as_zero"}}})
 
 
-@pytest.mark.parametrize(
-    "failure_class,action", [("evaluation", "retry"), ("evaluation", "fail"), ("model", "retry"), ("model", "fail")]
-)
+def test_retry_for_a_kind_classified_as_the_model_is_refused() -> None:
+    # Recovery does not rerun a row attributed to the model, so the pairing would save a retry that never happens.
+    kind = "conversational_tool_use:simulator_call_failed"
+    with pytest.raises(ValueError, match="cannot be retried at the agent stage while it is classified as"):
+        make_server(
+            outcome_policy={
+                "classification": {"by_stage": {"agent": {"by_failure_kind": {kind: "model"}}}},
+                "by_stage": {"agent": {"default_action": "retry"}},
+            }
+        )
+
+
+@pytest.mark.parametrize("failure_class,action", [("evaluation", "retry"), ("evaluation", "fail"), ("model", "fail")])
 async def test_the_saved_decision_for_a_failed_simulator_follows_the_configured_policy(
     monkeypatch, failure_class: str, action: str
 ) -> None:

@@ -566,12 +566,18 @@ def _decision_policy(kind: str, failure_class: str, action: str) -> dict:
     }
 
 
-DECISIONS = [("evaluation", "retry"), ("evaluation", "fail"), ("model", "retry"), ("model", "fail")]
+DECISIONS = [("evaluation", "retry"), ("evaluation", "fail"), ("model", "fail")]
 
 
 def test_a_policy_that_would_count_a_masked_row_as_zero_is_refused() -> None:
     with pytest.raises(ValueError, match="supports only retry or fail"):
         make_server(outcome_policy={"by_stage": {"agent": {"default_action": "count_as_zero"}}})
+
+
+def test_retry_for_a_kind_classified_as_the_model_is_refused() -> None:
+    # Recovery does not rerun a row attributed to the model, so the pairing would save a retry that never happens.
+    with pytest.raises(ValueError, match="cannot be retried at the agent stage while it is classified as"):
+        make_server(outcome_policy=_decision_policy(f"{SERVER}:time_cap", "model", "retry"))
 
 
 class TestVerifyMasks:

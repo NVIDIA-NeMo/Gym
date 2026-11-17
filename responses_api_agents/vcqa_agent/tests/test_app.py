@@ -129,6 +129,18 @@ def test_a_policy_that_would_count_a_masked_row_as_zero_is_refused() -> None:
         _make_config(outcome_policy={"by_stage": {"agent": {"default_action": "count_as_zero"}}})
 
 
+def test_retry_for_a_kind_classified_as_the_model_is_refused() -> None:
+    # Recovery does not rerun a row attributed to the model, so the pairing would save a retry that never happens.
+    kind = "vcqa_agent:artifact_unavailable"
+    with pytest.raises(ValueError, match="cannot be retried at the agent stage while it is classified as"):
+        _make_config(
+            outcome_policy={
+                "classification": {"by_stage": {"agent": {"by_failure_kind": {kind: "model"}}}},
+                "by_stage": {"agent": {"default_action": "retry"}},
+            }
+        )
+
+
 class TestPathResolution:
     def test_relative_path_resolves_under_codebase(self) -> None:
         assert tools_mod._resolve_under_codebase("src/foo.py") == f"{CODEBASE_PATH}/src/foo.py"
@@ -700,7 +712,7 @@ class TestRunFailureIsolation:
 
     @pytest.mark.parametrize(
         "failure_class,action",
-        [("evaluation", "retry"), ("evaluation", "fail"), ("model", "retry"), ("model", "fail")],
+        [("evaluation", "retry"), ("evaluation", "fail"), ("model", "fail")],
     )
     async def test_the_saved_decision_follows_the_configured_policy(
         self, monkeypatch: pytest.MonkeyPatch, failure_class: str, action: str
