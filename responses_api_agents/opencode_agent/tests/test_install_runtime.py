@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import time
 from pathlib import Path
 
@@ -165,7 +166,7 @@ def test_rhel_certificate_bundle_does_not_require_root_or_package_manager(sandbo
     (root / "bin/apt-get").unlink()
     (root / "bin/rg").unlink()
     shutil.copy(root / "curl", root / "bin/curl")
-    result = run_installer(root, env | {"TEST_UID": "1000"})
+    result = run_installer(root, env | {"TEST_UID": "1000", "NG_OPENCODE_ALLOW_RIPGREP_DOWNLOAD": "1"})
     assert result.returncode == 19, result.stderr
     assert (root / "download.log").exists()
     assert not (root / "packages.log").exists()
@@ -201,9 +202,10 @@ def test_ripgrep_is_provisioned_even_with_a_cached_opencode(sandbox, cached):
     assert "OpenCode can download it on demand" not in result.stderr
 
 
+@pytest.mark.parametrize("download", [False, True])
 @pytest.mark.parametrize("cached", [False, True])
 @pytest.mark.parametrize("unavailable", ["nonroot", "no_manager", "apt_update", "apt_install", "apk"])
-def test_optional_ripgrep_failure_does_not_block_runtime(sandbox, cached, unavailable):
+def test_missing_ripgrep_fails_setup_unless_opencode_may_download_it(sandbox, download, cached, unavailable):
     root, env = sandbox
     (root / "bin/rg").unlink()
     shutil.copy(root / "curl", root / "bin/curl")
@@ -225,10 +227,23 @@ def test_optional_ripgrep_failure_does_not_block_runtime(sandbox, cached, unavai
     else:
         (root / "bin/apk").write_text("#!/bin/bash\nexit 100\n")
         (root / "bin/apk").chmod(0o755)
+    if download:
+        env["NG_OPENCODE_ALLOW_RIPGREP_DOWNLOAD"] = "1"
+    runtime_binary = root / "runtime/opencode"
+    cached_binary = runtime_binary.read_bytes() if cached else None
     result = run_installer(root, env)
-    assert result.returncode == (0 if cached else 19), result.stderr
-    assert "OpenCode can download it on demand" in result.stderr
-    assert (root / "download.log").exists() is not cached
+    if download:
+        assert result.returncode == (0 if cached else 19), result.stderr
+        assert "OpenCode can download it on demand" in result.stderr
+        assert (root / "download.log").exists() is not cached
+    else:
+        # Fails before OpenCode is downloaded or reused, naming every remedy.
+        assert result.returncode == 1, result.stderr
+        assert "OpenCode grep and glob tools need ripgrep" in result.stderr
+        assert "sandbox_ripgrep_path" in result.stderr and "sandbox_ripgrep_download" in result.stderr
+        assert not (root / "download.log").exists()
+        # The cached runtime stays as it was, and no runtime appears when none was cached.
+        assert (runtime_binary.read_bytes() if runtime_binary.exists() else None) == cached_binary
     if unavailable in {"nonroot", "no_manager"}:
         assert not (root / "packages.log").exists()
 
@@ -425,3 +440,97 @@ def test_reseeding_running_executable_publishes_a_separate_inode(sandbox):
             process.wait(timeout=10)
     assert not list(target.parent.glob(".opencode-*"))
     assert not (root / "download.log").exists() and not (root / "packages.log").exists()
+
+
+@pytest.mark.parametrize("pinned", [False, True])
+def test_pinned_ripgrep_replaces_the_best_effort_package_install(sandbox, pinned):
+    root, env = sandbox
+    (root / "bin/rg").unlink()
+    (root / "runtime").mkdir()
+    cached = root / "runtime/opencode"
+    cached.write_text("#!/bin/bash\necho 1.17.11\n")
+    cached.chmod(0o755)
+    result = run_installer(root, env | ({"NG_OPENCODE_SKIP_RIPGREP": "1"} if pinned else {}))
+    assert result.returncode == 0, result.stderr
+    assert (root / "packages.log").exists() is not pinned
+    assert ("ripgrep" in result.stderr or (root / "bin/rg").exists()) is not pinned
+
+
+ARCHES = ("x64-baseline", "x64-baseline-musl", "arm64", "arm64-musl")
+
+
+def opencode2_release(root: Path) -> str:
+    """Serve a release archive whose `opencode` prints OpenCode 2's version line through the fake curl; return its
+    SHA-256."""
+    staging = root / "release"
+    staging.mkdir()
+    (staging / "opencode").write_text("#!/bin/bash\necho 'opencode v2.2.7'\n")
+    (staging / "opencode").chmod(0o755)
+    archive = root / "release.tar.gz"
+    with tarfile.open(archive, "w:gz") as tar:
+        tar.add(staging / "opencode", arcname="opencode")
+    curl = root / "bin/curl"
+    curl.write_text(
+        '#!/bin/bash\necho "$*" > "$TEST_ROOT/download.log"\n'
+        'while [ $# -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done\ncp "$TEST_ROOT/release.tar.gz" "$out"\n'
+    )
+    curl.chmod(0o755)
+    return hashlib.sha256(archive.read_bytes()).hexdigest()
+
+
+def install_opencode2(root: Path, env: dict[str, str], digests: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [str(root / "bin/bash"), str(root / "install.sh"), str(root / "runtime"), "2.2.7", "", "", "", digests],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+
+@pytest.mark.parametrize("pinned", [True, False])
+def test_an_opencode_2_download_is_kept_only_with_its_pinned_digest(sandbox, pinned):
+    root, env = sandbox
+    digest = opencode2_release(root)
+    if not pinned:
+        digest = "0" * 64
+    result = install_opencode2(root, env, " ".join(f"{arch}={digest}" for arch in ARCHES))
+    assert "releases/download/v2.2.7/opencode-linux-" in (root / "download.log").read_text()
+    if pinned:
+        assert result.returncode == 0, result.stderr
+        # OpenCode 2 prints "opencode v<version>"; the installed runtime reports the requested release.
+        assert subprocess.run(
+            [str(root / "runtime/opencode"), "--version"], capture_output=True, text=True
+        ).stdout == ("opencode v2.2.7\n")
+    else:
+        assert result.returncode == 1
+        assert "OpenCode download digest mismatch" in result.stderr
+        assert not (root / "runtime/opencode").exists()
+        assert not (root / "runtime/opencode.tar.gz").exists()
+
+
+def test_an_opencode_2_download_without_a_digest_for_this_platform_is_refused(sandbox):
+    root, env = sandbox
+    opencode2_release(root)
+    result = install_opencode2(root, env, "unknown-arch=" + "0" * 64)
+    assert result.returncode == 1
+    assert "No pinned SHA-256 for opencode-linux-" in result.stderr
+    assert not (root / "download.log").exists()
+
+
+def test_opencode_2_version_line_is_accepted_for_cached_and_pinned_binaries(sandbox):
+    root, env = sandbox
+    (root / "runtime").mkdir()
+    (root / "runtime/opencode").write_text("#!/bin/bash\necho 'opencode v2.2.7'\n")
+    (root / "runtime/opencode").chmod(0o755)
+    assert install_opencode2(root, env, "").returncode == 0
+    assert not (root / "download.log").exists()
+    binary = root / "pinned-opencode"
+    binary.write_text("#!/bin/bash\necho 'opencode v2.2.7'\n")
+    binary.chmod(0o755)
+    result = seed_binary(root, env, binary, version="2.2.7")
+    assert result.returncode == 0, result.stderr
+    # Another release's version line is still refused.
+    (root / "runtime/opencode").unlink()
+    binary.write_text("#!/bin/bash\necho 'opencode v2.2.6'\n")
+    assert seed_binary(root, env, binary, version="2.2.7").returncode == 1

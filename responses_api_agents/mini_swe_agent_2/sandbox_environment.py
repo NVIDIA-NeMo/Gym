@@ -32,8 +32,7 @@ except ModuleNotFoundError:
             super().__init__()
 
 
-from nemo_gym.sandbox import Sandbox, SandboxResources, SandboxSpec
-from nemo_gym.sandbox.utils import rewrite_image
+from nemo_gym.sandbox import Sandbox, SandboxResources, SandboxSpec, rewrite_image
 
 
 @dataclass

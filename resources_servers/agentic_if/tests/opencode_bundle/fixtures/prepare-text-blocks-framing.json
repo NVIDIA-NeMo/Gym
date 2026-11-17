@@ -1,0 +1,97 @@
+{
+ "case": "prepare-text-blocks-framing",
+ "kind": "prepare",
+ "spec": {
+  "schema_version": 1,
+  "harness": "opencode",
+  "task_backend": "swe",
+  "tools": {
+   "tool_descriptions": {},
+   "tool_parameter_descriptions": {},
+   "tool_interfaces": {}
+  },
+  "workspace_files": {},
+  "events": [],
+  "checks": [],
+  "provenance": {}
+ },
+ "params": {
+  "input": [
+   {
+    "content": "Task",
+    "role": "user",
+    "type": "message"
+   }
+  ],
+  "parallel_tool_calls": true,
+  "tool_choice": "auto",
+  "tools": []
+ },
+ "opencode_request": {
+  "messages": [
+   {
+    "role": "system",
+    "content": "Native policy"
+   },
+   {
+    "role": "user",
+    "content": [
+     {
+      "type": "text",
+      "text": "Native task framing:\n"
+     },
+     {
+      "type": "text",
+      "text": "Task",
+      "cache_control": {
+       "type": "ephemeral"
+      }
+     },
+     {
+      "type": "text",
+      "text": "\nTerminal state: /app $"
+     }
+    ]
+   }
+  ],
+  "tools": []
+ },
+ "child_session": false,
+ "require_user_prompt": true,
+ "prepared": {
+  "payload": {
+   "messages": [
+    {
+     "role": "system",
+     "content": "Native policy"
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Native task framing:\n"
+      },
+      {
+       "type": "text",
+       "text": "Task",
+       "cache_control": {
+        "type": "ephemeral"
+       }
+      },
+      {
+       "type": "text",
+       "text": "\nTerminal state: /app $"
+      }
+     ]
+    }
+   ],
+   "tools": []
+  },
+  "names": {},
+  "allowed_names": [],
+  "execution_tools": {},
+  "restricted": false
+ },
+ "error": null
+}

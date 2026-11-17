@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from environment_servers.swe_together import runtime
+from nemo_gym.sandbox import PLACEMENT_GROUP_KEY
 
 
 def manifest(tmp_path):
@@ -102,6 +103,19 @@ async def test_cache_upload_once_and_direct_read_only_mounts(provisioner):
     first = await provisioner.prepare("one")
     second = await provisioner.prepare("two")
     assert first != second and provisioner.helper.uploads == 4
+    group = provisioner.helper.spec.metadata[PLACEMENT_GROUP_KEY]
+    assert group == provisioner.metadata()[PLACEMENT_GROUP_KEY]
+    assert provisioner.metadata({PLACEMENT_GROUP_KEY: "wrong-cell", "custom": "value"}) == {
+        "placement": "shared",
+        "custom": "value",
+        PLACEMENT_GROUP_KEY: group,
+    }
+    other = runtime.RuntimeProvisioner(
+        provider_config={},
+        manifest_path=Path(provisioner.manifest["artifacts"]["python"]["path"]).parent / "manifest.json",
+        helper_image="helper",
+    )
+    assert other.metadata()[PLACEMENT_GROUP_KEY] != group
     assert provisioner.helper.spec.provider_options["network_policy"] == {"defaultAction": "deny", "egress": []}
     artifacts = provisioner.manifest["artifacts"]
     for session, bundle in [("one", first), ("two", second)]:
@@ -237,6 +251,7 @@ async def test_failed_startup_retries_with_fresh_helper_and_provider(provisioner
     assert helper.stopped
     assert provisioner.helper is not helper and provisioner.provider is not provider
     await provisioner.prepare("two")
+    assert provisioner.helper.spec.metadata[PLACEMENT_GROUP_KEY] == helper.spec.metadata[PLACEMENT_GROUP_KEY]
     await provisioner.release("two")
     await provisioner.close()
 

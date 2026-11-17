@@ -8,7 +8,7 @@ from time import monotonic, time
 
 from aiohttp import ClientResponseError
 
-from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
+from nemo_gym.client import ServerClient, get_response_json, raise_for_status
 
 
 ERROR_BODY_CHARS = 8000

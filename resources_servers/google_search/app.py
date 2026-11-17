@@ -22,13 +22,14 @@ import trafilatura
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 logger = logging.getLogger(__name__)
@@ -160,3 +161,6 @@ class GoogleSearchResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     GoogleSearchResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = GoogleSearchResourcesServer.run_webserver()  # noqa: F401

@@ -14,7 +14,7 @@ from environment_servers.swe_together import evaluation
 from environment_servers.swe_together.judge_evidence import collect_judge_evidence
 from environment_servers.swe_together.schemas import SWETRequest
 from environment_servers.swe_together.task import TaskData
-from nemo_gym.rollout_observability import TrajectoryRecord
+from nemo_gym.trajectory import TrajectoryRecord
 
 
 SEED, ACTIVATE, CLOSE = "/v1/agent_sessions", "/ng-rollout/one-judge-test/v1/responses", "/v1/agent_sessions/close"

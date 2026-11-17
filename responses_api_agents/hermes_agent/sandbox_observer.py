@@ -8,8 +8,61 @@ from __future__ import annotations
 import json
 import threading
 from collections.abc import Iterable
+from contextvars import ContextVar
+from copy import deepcopy
 from time import monotonic, time
 from typing import Any
+
+
+# Compaction compatibility: tested with hermes-agent 0.6.0 at cmunley1/hermes-agent@26bb847a.
+# The runtime is pinned in requirements.txt. Revalidate these hooks and session_*
+# counters, plus auxiliary.compression routing in sandbox_runner.py, when changing that pin.
+# Source: https://github.com/cmunley1/hermes-agent/tree/26bb847a
+_COMPACTION_METHOD = "_compress_context"
+_CONTEXT_COMPRESSOR_ATTR = "context_compressor"
+_COMPRESSION_COUNT_ATTR = "compression_count"
+_COMPRESSED_TOKENS_ATTR = "last_prompt_tokens"
+_COMPACTION_MESSAGES_ARG = "messages"
+_COMPACTION_INPUT_TOKENS_ARG = "approx_tokens"
+_SUMMARY_CALL_FUNCTION = "call_llm"
+COMPRESSION_TASK = "compression"
+
+# Exported result field -> Hermes session counter; shared with sandbox_runner.py.
+SESSION_TOKEN_COUNTERS = {
+    "prompt_tokens": "session_prompt_tokens",
+    "completion_tokens": "session_completion_tokens",
+    "cache_read_tokens": "session_cache_read_tokens",
+    "reasoning_tokens": "session_reasoning_tokens",
+}
+# Chat Completions totals use the same names in the exported result.
+_USAGE_TOTAL_FIELDS = ("prompt_tokens", "completion_tokens")
+# Chat Completions details object, nested field, exported result field.
+_USAGE_DETAIL_FIELDS = (
+    ("prompt_tokens_details", "cached_tokens", "cache_read_tokens"),
+    ("completion_tokens_details", "reasoning_tokens", "reasoning_tokens"),
+)
+
+_SUMMARY_CAPTURE: ContextVar[Any] = ContextVar("gym_hermes_summary_capture", default=None)
+
+
+def _install_summary_capture() -> None:
+    # The pinned compressor calls this module-level function, including for
+    # delegated agents. ContextVar keeps overlapping invocations separate.
+    import agent.context_compressor as compressor
+
+    original = getattr(compressor, _SUMMARY_CALL_FUNCTION)
+    if getattr(original, "_gym_observed", False):
+        return
+
+    def observed(**kwargs: Any) -> Any:
+        response = original(**kwargs)
+        capture = _SUMMARY_CAPTURE.get()
+        if capture is not None and kwargs.get("task") == COMPRESSION_TASK:
+            capture(response)
+        return response
+
+    observed._gym_observed = True
+    setattr(compressor, _SUMMARY_CALL_FUNCTION, observed)
 
 
 class _ObservedChildren(list):
@@ -45,9 +98,13 @@ class SandboxHermesObserver:
             }
         }
         self._compactions: list[dict[str, Any]] = []
+        self._history: dict[str, tuple[list[dict[str, Any]], int]] = {}
+        self._summary_usage_unknown = False
+        self._summary_details_unknown = False
         self._gaps: list[dict[str, Any]] = []
 
     def instrument(self, agent: Any) -> "SandboxHermesObserver":
+        _install_summary_capture()
         self._instrument(agent, "root", wrap_conversation=False)
         return self
 
@@ -166,33 +223,86 @@ class SandboxHermesObserver:
         agent._interruptible_api_call = call
 
     def _wrap_compaction(self, agent: Any, invocation_id: str) -> None:
-        original = getattr(agent, "_compress_context", None)
+        original = getattr(agent, _COMPACTION_METHOD, None)
         if not callable(original):
-            self._gap("hermes_hook_unavailable", invocation_id, "_compress_context")
+            self._gap("hermes_hook_unavailable", invocation_id, _COMPACTION_METHOD)
             return
 
         def compact(*args: Any, **kwargs: Any) -> Any:
+            compressor = getattr(agent, _CONTEXT_COMPRESSOR_ATTR, None)
+            count_before = getattr(compressor, _COMPRESSION_COUNT_ATTR, None)
+            response_ids = []
+            summaries = []
+
+            def capture_response(response: Any) -> None:
+                if response.id:
+                    response_ids.append(response.id)
+                    self._invocations[invocation_id]["model_response_ids"].append(response.id)
+                summaries.append(response.choices[0].message.content)
+                usage = response.usage
+                if usage is not None:
+                    for field in _USAGE_TOTAL_FIELDS:
+                        value = getattr(usage, field, None)
+                        target = SESSION_TOKEN_COUNTERS[field]
+                        current = getattr(agent, target, None)
+                        if type(value) is int and type(current) is int:
+                            setattr(agent, target, current + value)
+                    for details, key, field in _USAGE_DETAIL_FIELDS:
+                        value = getattr(getattr(usage, details, None), key, None)
+                        target = SESSION_TOKEN_COUNTERS[field]
+                        current = getattr(agent, target, None)
+                        if type(value) is int and type(current) is int:
+                            setattr(agent, target, current + value)
+                        else:
+                            self._summary_details_unknown = True
+                            self._gap("compaction_usage_details_unavailable", invocation_id)
+                else:
+                    self._summary_usage_unknown = True
+                    self._gap("compaction_usage_unavailable", invocation_id)
+
+            def capture(response: Any) -> None:
+                try:
+                    capture_response(response)
+                except Exception as error:
+                    self._summary_usage_unknown = True
+                    self._gap("hermes_observer_error", invocation_id, f"compaction_response:{type(error).__name__}")
+
+            token = _SUMMARY_CAPTURE.set(capture)
             failed = False
+            before = deepcopy(args[0] if args else kwargs.get(_COMPACTION_MESSAGES_ARG, []))
+            result = None
             try:
-                return original(*args, **kwargs)
+                result = original(*args, **kwargs)
+                return result
             except BaseException:
                 failed = True
                 raise
             finally:
-                after = getattr(getattr(agent, "context_compressor", None), "last_prompt_tokens", None)
-                with self._lock:
-                    self._compactions.append(
-                        {
-                            "invocation_id": invocation_id,
-                            "observed_at": time(),
-                            "trigger": "context_pressure",
-                            "tokens_before": kwargs.get("approx_tokens"),
-                            "tokens_after": after if isinstance(after, int) and after >= 0 else None,
-                            "outcome": "failed" if failed else "completed",
-                        }
-                    )
+                _SUMMARY_CAPTURE.reset(token)
+                count_after = getattr(compressor, _COMPRESSION_COUNT_ATTR, None)
+                # Hermes invokes compression even when every message is protected.
+                # That no-op is not a completed compaction.
+                changed = count_before is not None and count_after != count_before
+                if changed and isinstance(result, tuple) and isinstance(result[0], list):
+                    retained, offset = self._history.get(invocation_id, ([], 0))
+                    self._history[invocation_id] = (retained + before[offset:], len(result[0]))
+                if failed or changed or response_ids:
+                    after = getattr(compressor, _COMPRESSED_TOKENS_ATTR, None)
+                    with self._lock:
+                        self._compactions.append(
+                            {
+                                "invocation_id": invocation_id,
+                                "observed_at": time(),
+                                "trigger": "automatic",
+                                "tokens_before": kwargs.get(_COMPACTION_INPUT_TOKENS_ARG),
+                                "tokens_after": after if type(after) is int and after >= 0 else None,
+                                "outcome": "failed" if failed else "completed",
+                                "summary": summaries[-1] if summaries else None,
+                                "model_calls": [{"response_id": value} for value in response_ids],
+                            }
+                        )
 
-        agent._compress_context = compact
+        setattr(agent, _COMPACTION_METHOD, compact)
 
     def _child_added(self, child: Any, parent_id: str) -> None:
         with self._lock:
@@ -238,13 +348,29 @@ class SandboxHermesObserver:
             tool["status"] = "failed" if failed else "completed"
             tool["error_type"] = "tool_result" if failed else None
 
+    def restore_messages(self, result: dict[str, Any], *, invocation_id: str = "root") -> dict[str, Any]:
+        """Export the executed conversation, retaining history removed from model context."""
+        result = dict(result)
+        if self._summary_usage_unknown:
+            result.update(dict.fromkeys(_USAGE_TOTAL_FIELDS))
+        if self._summary_details_unknown or self._summary_usage_unknown:
+            result.update(dict.fromkeys(field for _, _, field in _USAGE_DETAIL_FIELDS))
+        if invocation_id in self._history:
+            retained, offset = self._history[invocation_id]
+            result["messages"] = [*retained, *(result.get("messages") or [])[offset:]]
+        return result
+
     def _record_conversation(
         self,
         invocation_id: str,
         result: dict[str, Any] | None,
         error: BaseException | None,
     ) -> None:
-        messages = result.get("messages") if isinstance(result, dict) else []
+        messages = (
+            self.restore_messages(result, invocation_id=invocation_id).get("messages")
+            if isinstance(result, dict)
+            else []
+        )
         status = "failed" if error or (result and result.get("error")) else "unknown"
         if isinstance(result, dict) and status != "failed":
             if result.get("interrupted") or result.get("completed") is False:

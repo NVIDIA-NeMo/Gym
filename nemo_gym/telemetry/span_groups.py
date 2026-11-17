@@ -75,7 +75,7 @@ class GymSpanGroup:
     cross-process propagation: adopts an inbound ``traceparent`` as the span's parent."""
 
     HTTP_CLIENT = "http_client"
-    """Outbound spans around ``nemo_gym.server_utils.request`` — Gym's single aiohttp
+    """Outbound spans around ``nemo_gym.client.http_client.request`` — Gym's single aiohttp
     egress point. The egress half of cross-process propagation: injects ``traceparent``
     into the outgoing headers."""
 
@@ -105,7 +105,7 @@ class GymSpanGroup:
     CHECKPOINT = "checkpoint"
     """Partial-rollout checkpoint spans, in no preset but ``all``.
 
-    Each participant's control operations (prepare, commit, restore, resume, retire, and forget) get a span,
+    Each participant's control operations (prepare, commit, restore, resume, retire, forget, and release) get a span,
     with child spans for their export, write, read, and install steps.
     The controller's coordination calls get spans too.
     Enable the group with ``default,checkpoint``; the checkpoint metrics are recorded either way.

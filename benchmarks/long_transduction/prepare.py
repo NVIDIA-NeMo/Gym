@@ -1126,7 +1126,7 @@ def generate(force: bool = False) -> None:
     enc = _get_encoder()
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Gym installs the config's prepare_dependencies before calling prepare().
+    # Gym syncs the config's locked prepare_project before calling prepare().
     all_adjs, all_nouns = _load_word_lists()
 
     total = 0

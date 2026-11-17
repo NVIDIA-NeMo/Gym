@@ -1,5 +1,12 @@
 # Sandboxed Hermes with SWE-bench Pro
 
+> [!WARNING]
+> **Deprecated.** `hermes_sandboxed_agent` runs each episode through its own legacy `/run` path, behind a
+> `legacy_agent` environment server, and will be removed after the environment-server migration.
+> Do not build new benchmarks, agents or configs on this harness. Use
+> [`hermes_agent`](../hermes_agent/README.md#configure-and-run) with sandbox sessions under an environment server instead.
+> Existing configs keep working; the agent logs a deprecation warning when it starts.
+
 Runs **NousResearch/hermes-agent** inside the task container prepared by
 Gym's existing SWE-bench Pro resources server. Hermes uses its terminal and file
 tools in `/app`; Pro extracts and grades the patch through its existing verifier.
@@ -129,7 +136,7 @@ compile failures without infrastructure evidence keep their zero score.
 
 ```bash
 pytest responses_api_agents/hermes_sandboxed_agent/tests \
-  resources_servers/swebench_pro/tests tests/unit_tests/test_apptainer_provider.py
+  resources_servers/swebench_pro/tests tests/unit_tests/sandbox/test_apptainer_provider.py
 ruff check responses_api_agents/hermes_sandboxed_agent \
   resources_servers/swebench_pro nemo_gym/sandbox/providers/apptainer/provider.py
 ```

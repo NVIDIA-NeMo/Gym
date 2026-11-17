@@ -6,7 +6,7 @@ import asyncio
 import pytest
 from fastapi import HTTPException
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.nooa_agent.tests.test_app import agent, close, open_session
 
 

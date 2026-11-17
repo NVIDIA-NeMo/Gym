@@ -159,15 +159,27 @@ def test_optional_runtime_installer_matches_agent_torch_backend(tmp_path: Path) 
 
     assert result.returncode == 0, result.stderr
     argv = uv_argv.read_text(encoding="utf-8").splitlines()
-    assert argv[:5] == ["pip", "install", "--no-config", "--torch-backend", backend]
-    assert argv[5:7] == ["--python", str(venv / "bin/python")]
-    assert "numpy>=2.1,<2.5" in argv
-    assert "opencv-python-headless~=4.10.0.84" in argv
-    assert "torchvision==0.26.0" in argv
+    assert argv == [
+        "sync",
+        "--locked",
+        "--inexact",
+        "--project",
+        str(agent_dir / "runtime"),
+        "--python",
+        str(venv / "bin/python"),
+        "--no-dev",
+    ]
+    project = tomllib.loads((agent_dir / "runtime/pyproject.toml").read_text())
+    assert {dependency.requirement for dependency in runtime_dependencies.OPTIONAL_RUNTIME_DEPENDENCIES} <= set(
+        project["project"]["dependencies"]
+    )
+    assert backend == "cpu"
+    assert project["tool"]["uv"]["sources"]["torch"] == {"index": "pytorch-cpu"}
+    assert project["tool"]["uv"]["sources"]["torchvision"] == {"index": "pytorch-cpu"}
 
 
 def test_managed_requirements_cover_the_e2b_provider_imports() -> None:
-    """The managed agent venv is built from requirements.txt, not the sandbox extra.
+    """The managed agent venv is built from pyproject.toml, not the sandbox extra.
 
     Missing provider imports previously broke complete benchmark attempts.
     Follow the current provider implementation: upstream now owns the aiohttp
@@ -189,9 +201,9 @@ def test_managed_requirements_cover_the_e2b_provider_imports() -> None:
                 third_party.add(node.module.split(".")[0])
     third_party -= set(sys.stdlib_module_names) | {"nemo_gym"}
 
-    requirements = (agent_dir / "requirements.txt").read_text()
+    requirements = (agent_dir / "pyproject.toml").read_text()
     # httpx arrives with the e2b SDK; the rest must be pinned here by name.
     for module in sorted(third_party - {"httpx"}):
         assert module.replace("_", "-") in requirements, (
-            f"{module} is imported by the e2b provider but absent from requirements.txt"
+            f"{module} is imported by the e2b provider but absent from pyproject.toml"
         )

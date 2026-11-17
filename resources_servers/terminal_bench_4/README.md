@@ -1,5 +1,18 @@
 # TB4 resources server
 
+Each episode automatically uses one `nemo.nvidia.com/placement-group` value for its
+agent, verifier, EFS logs helper, and Compose services, seeds, and volume helpers.
+Point the CPU provider at the cell router to distribute episodes while keeping
+their storage and networking on one cell. Compose collections retain separate
+volume directories and cleanup ownership.
+
+With `environment.sandbox_split_endpoints: true`, any task whose agent or verifier
+requires a GPU sends every role and helper directly to `OPENSANDBOX_DOMAIN_GPU`
+using `OPENSANDBOX_API_KEY_GPU`; CPU tasks use the corresponding `_CPU` variables.
+Set the GPU domain to the direct GPU deployment, rather than the CPU router.
+Placement metadata is still sent to direct deployments, where it requires no
+special routing behavior.
+
 ## Contract
 
 `/seed_session` provisions the pinned task and returns its sandbox descriptor,
@@ -7,6 +20,11 @@ connection configuration, instruction, `task_id`, execution user, MCP/skills met
 and official agent timeout. An agent server connects to that sandbox and owns
 harness setup, model calls, and the rollout loop. `/verify` collects artifacts,
 runs the separate official verifier, and cleans up the task's resources.
+
+Collected directories are sanitized as Harbor sanitizes artifacts before a separate
+verifier reads them: symlinks that leave the artifact, FIFOs, sockets and device files
+are skipped one by one, and setuid/setgid bits are cleared. The rest of the directory
+is kept and graded. The artifact manifest lists each skipped entry under `refused`.
 
 Seed requests include `task_name`, `task_ref`, `dataset_ref`, and `rollout_id`.
 The task must match the configured manifest. The agent supplies a stable
@@ -37,38 +55,53 @@ denominator. `sandbox_resource_limit` retains the resource and provider evidence
 in the rollout and trial result; `verifier_result.source` is
 `sandbox_resource_limit`, and test counts remain null. The original agent
 termination and diagnostics are preserved, but the result carries no
-infrastructure-failure marker. Recognition requires an explicit provider death
-report. Setup failures, node-pressure evictions, unrelated sandbox losses, and a
+infrastructure-failure marker: the harness's failure events (such as a process
+cleanup the dead sandbox could not confirm) stay on the row as observations,
+with none selected as its failure. Recognition requires an explicit provider
+death report. OpenSandbox's report of an unavailable sandbox names no container,
+so it counts only when it carries the pod's own ephemeral-storage-limit eviction.
+Setup failures, node-pressure evictions, unrelated sandbox losses, and a
 verifier that fails to start retain their existing infrastructure-error handling.
 
-A verifier that runs but times out, or that leaves no reward file, an empty one
-or one that cannot be parsed, scores `reward: 0.0` and counts in the pass-rate
-denominator. This is how Terminal-Bench scores it: Harbor never retries these
-outcomes and counts a trial without a reward as 0. The response keeps
-`evaluation_completed: false`, names the exception in `failure_reason`, and sets
-`failure_kind: verifier_error`. Only the verifier's own budget makes a timeout: a
-provider call that times out within it, or a sandbox that reports no command
-outcome, keeps the infrastructure-error handling. So does a trial whose agent
-ended on an infrastructure failure, whatever its verifier did next, because
-Harbor decides a retry from the trial's first exception.
+An agent whose process was killed before it finished (`termination.reason:
+killed`) also records a completed `reward: 0.0` without starting a verifier, with
+`verifier_result.source` set to `agent_killed`. Once the process is gone, a kill by
+the agent's own command and one by the per-process OOM killer look the same, and
+either ends the attempt.
 
-The verifier command runs under the per-command limit
-`environment.default_exec_timeout_s`, and that limit must be at least the task's
-verifier budget (`[verifier].timeout_sec`, or its entry in
-`environment.verifier_timeout_overrides`). A shorter limit could end the
-verifier inside its budget, and the sandbox reports no evidence of that, so the
-missing reward would read as the task's own zero. The server therefore refuses
-to start when an override is longer than the limit, and refuses a task whose
-package budget is longer, when it loads and before any sandbox starts or the
-agent runs. The failure is `ExecLimitConfigurationError`, an infrastructure
-failure marked terminal so that a resume does not retry it, and its message
-names both values. Neither value is changed: raise the limit to fix it. An
-equal limit is supported, because the verifier's budget starts before the
-command is submitted and so expires first.
+A verifier that runs past its own deadline, or that leaves no reward file, an
+empty one or one that cannot be parsed, scores `reward: 0.0` and counts in the
+pass-rate denominator. This is how Terminal-Bench scores it: Harbor never retries
+these outcomes and counts a trial without a reward as 0. The response keeps
+`evaluation_completed: false`, names the exception in `failure_reason`, and sets
+`failure_kind: verifier_error`. Only the verifier's own deadline makes a timeout:
+a provider call that times out inside it, or a sandbox that reports no command
+outcome, stays ungraded. So does a trial whose agent ended on an infrastructure
+failure, whatever its verifier did next, because Harbor decides a retry from the
+trial's first exception.
+
+Preparation, test execution, reward retrieval and optional log transfer share the
+original total task verifier deadline. Each command receives only the remaining
+allowance; no phase starts a fresh budget. Infrastructure failures do not become
+protocol zeros. A confirmed completed command's
+successfully retrieved authoritative reward survives failures while collecting
+optional logs or cleaning up local staging; those failures remain in
+`verifier_diagnostics`. No verifier command is repeated.
+
+A provider timeout or a lost status wait inside the deadline is not the
+verifier's own timeout, so it remains ungraded. Environment-session results use the existing mask and failure fields;
+legacy post-answer verifier failures use the same ungraded outcome. Earlier agent
+infrastructure failures retain their legacy failure metadata. Saved answers are preserved,
+and unsupported TB4 reverification does not authorize another agent attempt.
+
+The existing configuration preflight still requires
+`environment.default_exec_timeout_s` to cover the effective task verifier budget.
+A deterministic incompatible configuration is rejected before task execution;
+other sandbox setup failures retain their existing retry behavior.
 
 The wire models in `models.py` are resources-owned. Agent implementations use
 their own HTTP models and need not import this server. `termination.reason` accepts
-`completed`, `timeout`, `nonzero_exit`, `cancelled`, and `infrastructure_error`;
+`completed`, `timeout`, `nonzero_exit`, `killed`, `cancelled`, and `infrastructure_error`;
 `agent_started` indicates whether execution began. `harness_metadata` is opaque
 result metadata, independent of the selected harness.
 
@@ -77,6 +110,17 @@ resume after resources-process restart. Shutdown drains active verification for
 the configured grace period, then interrupts grading and awaits cleanup, including
 provisioned sessions that never reached verification. Abrupt resources-process
 death stops renewal; provider TTL is the sandbox cleanup fallback.
+
+An attempt cut short is marked `interrupted` in its `result.json` and state
+record, with the reason (`agent_killed` or `resources_shutdown`), so no later
+reader takes it for a graded outcome. Each state record also keeps the Gym run id,
+task, rollout and attempt indices the request carried (`gym_identity`). When a
+resumed run sends a rollout again, as a new request, the server answers with the
+recorded attempt of the same run, task and rollout instead of running it again,
+marked `replayed_from`. It does so only when the agent finished normally and the
+verifier ran after it: a completed termination, no exception, no `interrupted`
+mark, and a completed, unmasked evaluation. Any other record runs the rollout as
+before.
 
 Model-call capture and harness trajectories belong to the agent server. Resource
 artifacts, including collected remote `/logs/agent` files, remain under the trial
@@ -100,7 +144,7 @@ Missing, malformed, or unsupported reports yield null counts. Verifier timeouts
 also yield null counts. Report parsing diagnostics identify the source file.
 The official reward and evaluation-completion rules remain unchanged.
 
-## Environment Server sessions (SandboxAccess)
+## Episode sessions (SandboxAccess)
 
 Harnesses that borrow a task sandbox through `SandboxAccess` (for example
 `codex_agent` behind `single_agent_turn` or `single_agent_turn_legacy`) use the
@@ -126,7 +170,7 @@ shared resources-session protocol instead of the contract above, as
   It then waits for in-flight provisioning or grading, stops anything still running
   without grading it (finishing even if the caller disconnects), and fences late seeds.
   A sandbox that cannot be stopped fails the close and keeps the fence; a repeated close
-  retries the deletion, and the provider TTL bounds it. A completed close is remembered
+  retries the deletion, and the provider TTL bounds it. A completed close keeps its fence
   for `session_close_retry_window_seconds` (default 300), so retried closes succeed and
   late seeds are rejected; set it to cover the caller's retry horizon.
 
@@ -137,7 +181,7 @@ endpoints are not supported in this mode.
 
 ## Other pinned Harbor datasets
 
-`manifest_path` selects the pinned dataset. It defaults to Terminal-Bench 4.0; a relative
+`manifest_path` selects the pinned dataset. It defaults to Terminal-Bench 4.1; a relative
 path is read from the repository root. Task names take the dataset's organization prefix, so
 [Terminal-Bench-Science](../../benchmarks/terminal_bench_science/README.md) serves
 `terminal-bench-science/<task>`. Its packages pass the same content-hash check.
@@ -178,9 +222,16 @@ For local checks on a workstation, a single-container task can also use Gym's `d
 sandbox provider. An offline verifier then runs with `docker run --network none`. EFS logs
 and Compose still require OpenSandbox.
 
+`environment.sandbox_provider` is an inline single-key provider block (the OpenSandbox default) or the name of a
+top-level sandbox block that a provider config defines, as DeepSWE's `sandbox_provider: sandbox` does. A name
+that no block defines stops the server at startup. A task that needs more than the selected provider offers (Compose
+without `SupportsSandboxNetwork`, an offline verifier outside OpenSandbox and Docker) raises `ProviderCapabilityError`
+at seed time: a terminal infrastructure failure that no retry repeats, with no sandbox started.
+
 `/verify` also reports `partial_credit`: the fraction of reported tests that passed
 (`num_tests_passed / num_tests_total`, so skipped tests count as not passed), never below the
-official reward. Without usable test counts it equals the official reward. `reward` stays the
+official reward. Terminal-Bench 4.1 verifiers report their rewardkit criteria as these tests, so
+4.1 values do not compare with 4.0 ones, which counted pytest cases. Without usable test counts it equals the official reward. `reward` stays the
 official binary grade. When the official evaluation did not complete, both are 0, so a mean over
 the same rows uses the same denominator for both. `evaluation_completed: false` and
 `infrastructure_error` mark those rows, which are left out of the default aggregates unless

@@ -11,8 +11,8 @@ from collections.abc import Callable, Iterable
 from time import monotonic, time
 from typing import Any
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseFunctionToolCall,
@@ -22,7 +22,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
     ContextCompactionObservation,
@@ -45,6 +45,21 @@ def _text(content: Any) -> str:
     return "" if content is None else str(content)
 
 
+def _input_image(part: Any) -> dict[str, str] | None:
+    """Return a Hermes image part as a Responses ``input_image`` part, or None for any other part.
+
+    Hermes reads both Chat Completions ``image_url`` parts, whose ``image_url`` is an object or a bare URL, and
+    Responses ``input_image`` parts. An exported conversation must not fail on either form after a completed run.
+    """
+    if not isinstance(part, dict) or part.get("type") not in ("image_url", "input_image"):
+        return None
+    image = part.get("image_url")
+    url, detail = (image.get("url"), image.get("detail")) if isinstance(image, dict) else (image, part.get("detail"))
+    if not isinstance(url, str) or not url:
+        return None
+    return {"type": "input_image", "image_url": url, "detail": detail or "auto"}
+
+
 def normalize_hermes_messages(messages: Iterable[Any], *, id_prefix: str = "hermes") -> list[NeMoGymResponseInputItem]:
     """Convert a Hermes conversation to ordered Gym Responses items."""
     output: list[NeMoGymResponseInputItem] = []
@@ -53,6 +68,14 @@ def normalize_hermes_messages(messages: Iterable[Any], *, id_prefix: str = "herm
             continue
         role, content = message.get("role"), _text(message.get("content"))
         if role in {"system", "user", "developer"}:
+            raw_content = message.get("content")
+            if role == "user" and isinstance(raw_content, list):
+                images = [_input_image(part) for part in raw_content]
+                if any(images):
+                    content = [
+                        image or {"type": "input_text", "text": _text([part])}
+                        for part, image in zip(raw_content, images)
+                    ]
             output.append(NeMoGymEasyInputMessage(role=role, content=content))
         elif role == "assistant":
             reasoning = message.get("reasoning")

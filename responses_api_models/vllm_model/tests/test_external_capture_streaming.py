@@ -12,24 +12,27 @@ import pytest
 from aiohttp import ClientResponseError
 from fastapi.testclient import TestClient
 
-from nemo_gym import chat_streaming, responses_streaming
-from nemo_gym.anthropic_converter import AnthropicConverter
-from nemo_gym.base_responses_api_model import _reconstruct_streamed_response
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.token_id_capture.adapters.vllm import VLLMCaptureAdapter
-from nemo_gym.token_id_capture.lineage import FileLineageStore
-from nemo_gym.token_id_capture.records import ENGINE_REFUSED_CALL_REASON, UNCOMMITTED_CALL_REASON
-from nemo_gym.token_id_capture.sink import current_capture_context
-from nemo_gym.token_id_capture.staging import resolve_terminal, select_terminal_call
-from nemo_gym.token_id_capture.staging.capture import RolloutTokenCapture
-from nemo_gym.token_id_capture.staging.rebuild import verify_and_linearize
-from nemo_gym.token_id_capture.staging.records import (
+from nemo_gym.client import ServerClient
+from nemo_gym.models import AnthropicConverter, chat_streaming, responses_streaming
+from nemo_gym.models.model_call_capture import _reconstruct_streamed_response
+from nemo_gym.models.token_capture import (
+    ENGINE_REFUSED_CALL_REASON,
+    UNCOMMITTED_CALL_REASON,
+    FileLineageStore,
+    VLLMCaptureAdapter,
+    current_capture_context,
+    resolve_terminal,
+)
+from nemo_gym.models.token_capture.staging import (
     WORKER_MISSING_COMMIT_COORDS_REASON,
     CaptureAdmission,
     RolloutManifest,
     RolloutReceipt,
+    RolloutTokenCapture,
     StagedCallBaseSnapshot,
     StageResult,
+    select_terminal_call,
+    verify_and_linearize,
 )
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 from responses_api_models.vllm_model_with_compaction.app import VLLMModelWithCompaction
@@ -131,7 +134,7 @@ def make_harness(tmp_path, monkeypatch):
                 "external_staging": True,
                 "external_staging_backend": backend,
                 "rebuild_response": False,
-                "lineage_store": "nemo_gym.token_id_capture.lineage:FileLineageStore",
+                "lineage_store": "nemo_gym.models.token_capture.lineage:FileLineageStore",
                 "lineage_store_kwargs": {"root": str(root)},
             }
         }

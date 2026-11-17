@@ -29,5 +29,5 @@ an age-bounded package retention policy owns cleanup.
 Focused validation runs with:
 
 ```bash
-uv run pytest tests/unit_tests/test_collect_downstream_junit.py
+uv run pytest tests/unit_tests/tooling/test_collect_downstream_junit.py
 ```

@@ -11,8 +11,8 @@ import pytest
 from PIL import Image
 from starlette.responses import Response
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from resources_servers.image_tools import (
     has_malformed_image_tool_markup,
 )
@@ -352,4 +352,5 @@ async def test_image_tools_agent_sums_usage_and_details_across_calls(
     result = await agent.responses(request=request, response=Response(), body=body.responses_create_params)
 
     assert server_client.post.await_count == 2
+    expected = expected | {"input_tokens_details": expected["input_tokens_details"] | {"cache_write_tokens": None}}
     assert result.usage.model_dump(mode="json") == expected

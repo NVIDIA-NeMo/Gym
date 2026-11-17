@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 
 
 if TYPE_CHECKING:
-    from nemo_gym.base_resources_server import BaseVerifyRequest
+    from nemo_gym.server_runtime import BaseVerifyRequest
 
 
 # =============================================================================

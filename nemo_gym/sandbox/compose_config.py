@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from nemo_gym.data.tasks.harbor.digest import is_covered
 from nemo_gym.sandbox.compose_fields import ComposeFieldError, _bytes, normalize_platform, service_gpus
 from nemo_gym.sandbox.compose_volumes import (
     LOGS_TREE,
@@ -31,7 +32,6 @@ from nemo_gym.sandbox.compose_volumes import (
     lexical_target,
     parse_volume,
 )
-from nemo_gym.tasks.harbor.digest import is_covered
 
 
 log = logging.getLogger(__name__)
@@ -54,7 +54,7 @@ def plan_compose_volumes(
     relative paths resolve against ``base_dir``, as Compose resolves them against the Compose file)
     becomes an upload into the service once it starts: the entry leaves ``volumes`` and joins
     ``x-sandbox.uploads`` as ``{"source": <host path>, "target": <container path>}``. With a task ``root``
-    given, such a source must be one the task digest covers (:func:`~nemo_gym.tasks.harbor.digest.is_covered`:
+    given, such a source must be one the task digest covers (:func:`~nemo_gym.data.tasks.harbor.digest.is_covered`:
     under ``environment/``, ``tests/``, ``solution/`` or ``steps/``, or one of the top-level task files, and
     not a name the digest skips), or it raises naming the path: an upload the digest does not see could change
     without changing the task's identity. Named volumes declared at top level stay, in long syntax, for the provider's shared

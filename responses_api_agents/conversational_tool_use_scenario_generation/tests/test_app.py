@@ -25,13 +25,13 @@ import pytest
 from fastapi import Request
 from omegaconf import OmegaConf
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import (
+from nemo_gym.config import (
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
+    ModelServerRef,
 )
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.conversational_tool_use_scenario_generation import app
 from responses_api_agents.conversational_tool_use_scenario_generation.app import (
     ConversationalToolUseScenarioGenerationAgent,
@@ -606,7 +606,7 @@ async def test_run_usage_sums_every_returned_completion() -> None:
     # Usage covers every completion the rollout received, not just the one its response text came from.
     assert result.response.usage.model_dump() == {
         "input_tokens": 2218,
-        "input_tokens_details": {"cached_tokens": 400},
+        "input_tokens_details": {"cached_tokens": 400, "cache_write_tokens": None},
         "output_tokens": 1474,
         "output_tokens_details": {"reasoning_tokens": 1200},
         "total_tokens": 3692,
@@ -639,7 +639,7 @@ async def test_run_usage_counted_when_no_completion_parses() -> None:
     assert result.response.id == "conversational_tool_use_scenario_generation_empty"
     assert result.response.usage.model_dump() == {
         "input_tokens": 300,
-        "input_tokens_details": {"cached_tokens": 20},
+        "input_tokens_details": {"cached_tokens": 20, "cache_write_tokens": None},
         "output_tokens": 74,
         "output_tokens_details": {"reasoning_tokens": 10},
         "total_tokens": 374,
