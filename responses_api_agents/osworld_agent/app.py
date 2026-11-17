@@ -1036,7 +1036,7 @@ def _normalize_chat_message(message: Any, *, structured: bool = False, preserve_
         result = {
             "content": message.content,
             "raw_content": message.content,
-            "reasoning_content": getattr(message, "reasoning_content", None) or model_extra.get("reasoning_content"),
+            "reasoning_content": None,
             "tool_calls": [
                 {
                     "id": getattr(call, "id", None),
@@ -1049,7 +1049,14 @@ def _normalize_chat_message(message: Any, *, structured: bool = False, preserve_
                 for call in (getattr(message, "tool_calls", None) or [])
             ],
         }
-        for field in ("prompt_token_ids", "generation_token_ids", "generation_log_probs", "routed_experts"):
+        for field in (
+            "reasoning_content",
+            "reasoning",
+            "prompt_token_ids",
+            "generation_token_ids",
+            "generation_log_probs",
+            "routed_experts",
+        ):
             value = getattr(message, field, None)
             if value is None:
                 value = model_extra.get(field)

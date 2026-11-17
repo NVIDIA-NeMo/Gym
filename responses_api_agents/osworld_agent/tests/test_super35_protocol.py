@@ -274,7 +274,10 @@ def test_renderer_and_request_changes_have_distinct_wire_contracts() -> None:
 
 
 @pytest.mark.parametrize("log_model_io", [False, True])
-def test_gym_transport_preserves_native_calls_and_forwards_tools(monkeypatch, tmp_path, log_model_io) -> None:
+@pytest.mark.parametrize("reasoning_field", ["reasoning_content", "reasoning"])
+def test_gym_transport_preserves_native_calls_and_forwards_tools(
+    monkeypatch, tmp_path, log_model_io, reasoning_field
+) -> None:
     from responses_api_agents.osworld_agent import app
 
     client = MagicMock()
@@ -287,9 +290,9 @@ def test_gym_transport_preserves_native_calls_and_forwards_tools(monkeypatch, tm
                 )
             )
         ],
-        reasoning_content="Click the target.",
         model_extra={},
     )
+    setattr(message, reasoning_field, "\nClick the target.\n")
     client.chat.completions.create.return_value = SimpleNamespace(
         choices=[SimpleNamespace(message=message, finish_reason="tool_calls")]
     )
@@ -314,6 +317,8 @@ def test_gym_transport_preserves_native_calls_and_forwards_tools(monkeypatch, tm
         "chat_template_kwargs": {"enable_thinking": True, "truncate_history_thinking": False}
     }
     assert parse(response)[1] == ["pyautogui.click(960, 270)"]
+    assert response[reasoning_field] == "\nClick the target.\n"
+    assert parse(response)[2]["thought"] == "Click the target."
     assert response["content"] is None
     assert response["tool_calls"][0]["function"]["arguments"] == message.tool_calls[0].function.arguments
     assert client.chat.completions.create.call_args.kwargs["tools"] == list(SUPER35_TOOLS)
