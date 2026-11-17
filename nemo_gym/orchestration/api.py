@@ -389,6 +389,10 @@ class SlurmComputeConfig(BaseComputeConfig):
         return names
 
     walltime: str | None = None
+    # Opt-in standalone CPU export; None preserves the existing inline exporter.
+    export_partition: str | None = None
+    export_walltime: str = "00:30:00"
+    export_extra_args: dict[str, str] = Field(default_factory=dict)
     node_pools: dict[str, NodePool] = {}
     extra_args: dict[str, str] = {}  # Job-level #SBATCH directives (e.g. --comment, --mail-user).
 

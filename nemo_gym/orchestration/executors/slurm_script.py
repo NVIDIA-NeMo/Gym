@@ -36,6 +36,7 @@ from nemo_gym.orchestration.api import (
     VllmServiceConfig,  # used in _BUILDERS dispatch table
     effective_ray_serve,
 )
+from nemo_gym.orchestration.executors.export_job import render_export_job, render_export_submission
 from nemo_gym.orchestration.executors.otel import (
     COLLECTOR_DIR,
     COLLECTOR_FILE_SIGNALS,
@@ -819,7 +820,13 @@ def _render_collector_health_check(config: SubmitConfig, driver_node: int | None
     )
 
 
-def _render_collector_shutdown(config: SubmitConfig, remote_bench_dir: Path, driver_node: int | None = None) -> str:
+def _render_collector_shutdown(
+    config: SubmitConfig,
+    remote_bench_dir: Path,
+    driver_node: int | None = None,
+    *,
+    preserved_exit_var: str | None = None,
+) -> str:
     """Run after the driver: one more scrape interval so the final counters are seen, then a
     graceful stop, keeping the driver's exit code.
 
@@ -842,8 +849,8 @@ def _render_collector_shutdown(config: SubmitConfig, remote_bench_dir: Path, dri
         # pkill sees only its own node, and the collector runs beside the driver, here not on the batch host.
         signal = f'srun --overlap --nodelist="${{gym_nodes[{driver_node}]}}" --nodes=1 --ntasks=1 {signal}'
     return (
-        "DRIVER_RC=$?\n"
-        f"sleep {FINAL_SCRAPE_GRACE_SECONDS}\n"
+        (f"DRIVER_RC=${{{preserved_exit_var}}}\n" if preserved_exit_var else "DRIVER_RC=$?\n")
+        + f"sleep {FINAL_SCRAPE_GRACE_SECONDS}\n"
         f"{signal} || true\n"
         f"for _i in $(seq 1 {SHUTDOWN_WAIT_SECONDS}); do kill -0 {pid} 2>/dev/null || break; sleep 1; done\n"
         f"kill -TERM {pid} 2>/dev/null || true\n"
@@ -1226,6 +1233,7 @@ def build_sbatch_script(
     # Host PWD can resolve to an alias that is absent from the container bind mounts.
     driver_env["NEMO_GYM_BENCH_DIR"] = str(remote_bench_dir)
     exports = effective_exports(config, benchmark_name)
+    separate_export = bool(exports and compute.export_partition)
     export_tail = (
         render_export_tail(
             remote_bench_dir,
@@ -1245,9 +1253,11 @@ def build_sbatch_script(
                 for name, settings in exports.items()
             ],
         )
-        if exports
+        if exports and not separate_export
         else None
     )
+    if separate_export:
+        export_tail = render_export_tail(remote_bench_dir, [])
     extras = tuple(
         dict.fromkeys(
             ((GYM_TELEMETRY_EXTRA,) if instrumented else ())
@@ -1324,6 +1334,8 @@ def build_sbatch_script(
             f"--container-image={shlex.quote(config.driver.container)} {admission_entrypoint}"
         )
         resume_prologue = render_resume_prologue(resume, admission_command=admission_command)
+        if separate_export:
+            resume_prologue = "GYM_SEPARATE_EXPORT=1\n" + resume_prologue
 
     # Every service step but the collector, whose loss costs telemetry, not the run.
     watched = [
@@ -1342,8 +1354,65 @@ def build_sbatch_script(
     if resume:
         # A job that finished the run cancels the follow-up and sentinel it queued; its status stays the driver's.
         driver_command += "\n" + render_resume_epilogue()
+    if separate_export:
+        export_steps = [
+            (
+                name,
+                flatten_export_args(
+                    export_run_settings(
+                        name,
+                        settings,
+                        benchmark_name=benchmark_name,
+                        gym_job_id=remote_bench_dir.parent.name,
+                        bench_dir=remote_bench_dir,
+                    )
+                ),
+            )
+            for name, settings in exports.items()
+        ]
+        export_entrypoint = render_driver_entrypoint(
+            repo=gi.repo if gi else None,
+            ref=gi.ref if gi else None,
+            prepare_cmd=None,
+            command="true",
+            extras=export_install_extras(list(exports)),
+            export_tail=render_export_tail(remote_bench_dir, export_steps),
+        )
+        export_srun = (
+            f"srun --no-container-mount-home{driver_mounts_flag} "
+            f"--account={shlex.quote(compute.account)} "
+            f"--container-image={shlex.quote(config.driver.container)} "
+            f"--output={shlex.quote(str(remote_bench_dir / LOGS_DIRNAME / 'export-%j.log'))} "
+            f"{export_entrypoint}"
+        )
+        export_script = render_export_job(
+            bench_dir=remote_bench_dir,
+            partition=compute.export_partition,
+            account=compute.account,
+            walltime=compute.export_walltime,
+            extra_args=compute.export_extra_args,
+            export_command=export_srun,
+        )
+        submit = render_export_submission(bench_dir=remote_bench_dir, job_script=export_script)
+        marker = shlex.quote(str(remote_bench_dir / EVAL_SUCCEEDED_FILENAME))
+        # The marker is unique per allocation; an incomplete resumed run must not export.
+        complete_guard = (
+            f"[[ ! -s {shlex.quote(str(remote_bench_dir / '.gym_chain_incomplete'))} ]]" if resume else "true"
+        )
+        driver_command += (
+            "\n_gym_eval_final_rc=$?\n"
+            f'if [[ "$_gym_eval_final_rc" -eq 0 ]] && [[ -f {marker}."$SLURM_JOB_ID" ]] '
+            f"&& {complete_guard}; then\n{submit}\nfi\n"
+        )
     if observed:
-        driver_command += "\n" + _render_collector_shutdown(config, remote_bench_dir, driver_node)
+        driver_command += "\n" + _render_collector_shutdown(
+            config,
+            remote_bench_dir,
+            driver_node,
+            preserved_exit_var="_gym_eval_final_rc" if separate_export else None,
+        )
+    elif separate_export:
+        driver_command += '\nexit "$_gym_eval_final_rc"'
 
     return _SCRIPT_TEMPLATE.format(
         directives=directives,
