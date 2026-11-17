@@ -14,6 +14,8 @@
 # limitations under the License.
 """The `gym eval resubmit` command flow that the recovery decisions of tests/unit_tests/eval/recovery/test_recovery_unreadable_artifacts.py feed."""
 
+import os
+
 import pytest
 
 from nemo_gym.eval.recovery.decision import RecoveryAction
@@ -21,6 +23,11 @@ from nemo_gym.orchestration import submit
 from tests.unit_tests.eval.recovery.test_recovery_unreadable_artifacts import _run
 from tests.unit_tests.orchestration.test_eval_resubmit_decision import FakeExecutor
 from tests.unit_tests.orchestration.test_eval_resubmit_decision import fake_executor as fake_executor
+
+
+pytestmark = pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0, reason="root reads a file whatever its mode"
+)
 
 
 @pytest.mark.parametrize("name", ["rollouts_aggregate_metrics.json", "quality_summary.json"])
