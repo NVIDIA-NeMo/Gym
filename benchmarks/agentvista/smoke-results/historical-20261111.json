@@ -1,0 +1,84 @@
+{
+  "scope": "One source-bound task per harness/model combination; eight actor steps/turns maximum. This validates execution and judging, not benchmark accuracy or published-score parity.",
+  "task_source_sha256": "841518bd7b203837e9c451b871f71d907201eacb7ab57e61bcc8b0a4d779944b",
+  "original_source_commit": "a3385d51d0c3dd0c8501350a08d52065e3e94ab4",
+  "dataset_revision": "61de767ad8c72e258ac71a0aef952b89ca920a16",
+  "image": {
+    "sha256": "d97355314b764b47fd29c2acd1ba7bef55af24ed03ac0bcfdbd3c27739d4beb5"
+  },
+  "cases": [
+    {
+      "case": "default-super-ga",
+      "harness": "default",
+      "model": "local-policy",
+      "worker_gym_commit": "31d141ce165615238d394c72d2249456307fbfaf",
+      "task_id": "agentvista-000",
+      "driver_exit_code": 0,
+      "rows": 1,
+      "mask_sample": false,
+      "reward": 0.0,
+      "verify_status": "FAIL",
+      "native_events": 17,
+      "pipeline_passed": true,
+      "rollouts_sha256": "eaf1f6e3043958d1ddb596f42477b66c19f967b3db26982bfc6b81937455fb93"
+    },
+    {
+      "case": "opencode-super-ga",
+      "harness": "opencode",
+      "model": "local-policy",
+      "worker_gym_commit": "31d141ce165615238d394c72d2249456307fbfaf",
+      "task_id": "agentvista-000",
+      "driver_exit_code": 0,
+      "rows": 1,
+      "mask_sample": false,
+      "reward": 0.0,
+      "verify_status": "FAIL",
+      "native_events": 25,
+      "pipeline_passed": true,
+      "rollouts_sha256": "8cfbe9aef77b1faeefddf68a0c1f0f8134125233f39dacd8b8e1588e4bc07847"
+    },
+    {
+      "case": "opencode-kimi-k3-api",
+      "harness": "opencode",
+      "model": "hosted-policy",
+      "worker_gym_commit": "31d141ce165615238d394c72d2249456307fbfaf",
+      "task_id": "agentvista-000",
+      "driver_exit_code": 0,
+      "rows": 1,
+      "mask_sample": false,
+      "reward": 0.0,
+      "verify_status": "FAIL",
+      "native_events": 26,
+      "pipeline_passed": true,
+      "rollouts_sha256": "2d4d853e9c7eb7f1ca9c0a8a3b5d4bcdd2a60d5aafdbdd4b8dab3228ce61680e"
+    },
+    {
+      "case": "default-kimi-k3-api",
+      "harness": "default",
+      "model": "hosted-policy",
+      "worker_gym_commit": "4911f14eae91a38319897b94697c208b5d10b16f",
+      "task_id": "agentvista-000",
+      "driver_exit_code": 0,
+      "rows": 1,
+      "mask_sample": false,
+      "reward": 0.0,
+      "verify_status": "FAIL",
+      "native_events": 17,
+      "pipeline_passed": true,
+      "rollouts_sha256": "cd13a184cb77f479ba75402897c4de148eca12a565a86e5550805921be9abeee"
+    }
+  ],
+  "validation": {
+    "factory_native_collector": "All four runs readable, one expected/collected rollout each; both manifest metrics present. All four have num_scored=1, num_masked=0, num_verifier_errors=0.",
+    "final_default_kimi_launch": "Historical private execution details retained outside the public repository.",
+    "provider_replay_fix": "Removes provider-only index fields from copied tool-call envelopes at the Gym transport boundary. Original recorded history and tool argument strings remain intact.",
+    "super_request_equivalence": {
+      "calls": 8,
+      "all_super_request_messages_unchanged": true,
+      "unchanged_calls": 8,
+      "capture_sha256": "e5961f635c2c221581eb1ae46deea4d823032ed0edb9491bd1d83dbfa7ad1de0"
+    },
+    "earlier_default_kimi_attempt": "Masked after local HTTP 422 from provider tool-call index fields; excluded from scored results. The fresh final case above validates the fix."
+  },
+  "qualification": "Historical harness 2.1.1 execution audit only; superseded by review fixes. Not valid benchmark-accuracy evidence for harness 3.0.0."
+}

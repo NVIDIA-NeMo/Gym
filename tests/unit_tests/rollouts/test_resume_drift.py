@@ -150,6 +150,37 @@ def test_repeats_and_task_limits_are_semantic_in_the_collection_identity(tmp_pat
         validate_resume(path, current, materialized)
 
 
+@pytest.mark.parametrize(
+    ("saved", "resumed"),
+    [
+        ({"task_ids": ["a", "b"]}, {"task_ids": ["a", "c"]}),
+        ({"task_ids_fpath": "subset_v1.txt"}, {"task_ids_fpath": "subset_v2.txt"}),
+        ({"task_ids": ["a", "b"]}, {}),
+    ],
+)
+def test_a_resume_with_another_task_selection_is_refused(tmp_path: Path, saved: dict, resumed: dict) -> None:
+    path, materialized = saved_run(tmp_path, BASE, saved)
+    current = current_manifest(tmp_path, BASE, resumed)
+
+    with pytest.raises(ConfigError, match=r"semantic settings differ: collection\.task_ids"):
+        validate_resume(path, current, materialized)
+
+
+def test_a_task_id_file_that_now_selects_other_tasks_refuses_the_resume(tmp_path: Path) -> None:
+    # Same setting, edited file: the rows it selects differ, so the materialized inputs do.
+    selection = {"task_ids_fpath": "subset.txt"}
+    source = tmp_path / "input.jsonl"
+    source.write_text("{}\n")
+    materialized = tmp_path / "materialized.jsonl"
+    materialized.write_text(json.dumps({"task_id": "a"}) + "\n")
+    path = tmp_path / "rollouts_manifest.json"
+    RunManifest.create(source, [{"task_id": "a"}], selection, BASE).write(path)
+    current = RunManifest.create(source, [{"task_id": "b"}], selection, BASE)
+
+    with pytest.raises(ConfigError, match="current materialized inputs"):
+        validate_resume(path, current, materialized)
+
+
 def test_a_digest_only_manifest_keeps_the_digest_rule_and_says_why(tmp_path: Path) -> None:
     path, materialized = saved_run(tmp_path, BASE)
     config_identity_path_for(path).unlink()  # as a manifest from before identities were saved

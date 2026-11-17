@@ -62,93 +62,101 @@ UNKNOWN = AgentOutcome(failure_kind="unknown")
 # (evidence, decision, the default policy's action on the decided response)
 LADDER = {
     # 1. A rollout stop is graded like a timeout.
-    "stopped": (_evidence(stopped=True, timed_out=True), RunDecision("incomplete", "stopped"), OutcomeAction.VERIFY),
+    "stopped": (
+        _evidence(stopped=True, timed_out=True),
+        RunDecision(status="incomplete", stop_reason="stopped"),
+        OutcomeAction.VERIFY,
+    ),
     # 2. A context limit is graded with the partial work (decision 1).
     "context_limit": (
         _evidence(context_limit=True, has_result=False),
-        RunDecision("incomplete", "context_limit"),
+        RunDecision(status="incomplete", stop_reason="context_limit"),
         OutcomeAction.VERIFY,
     ),
     "context_limit_classified": (
         _evidence(error=AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT), has_result=False),
-        RunDecision("incomplete", "context_limit"),
+        RunDecision(status="incomplete", stop_reason="context_limit"),
         OutcomeAction.VERIFY,
     ),
     # 3. A deadline spent on our servers is retried.
     "infra": (
         _evidence(timed_out=True, infra_fault=_fault(), has_result=False),
-        RunDecision("failed", "infra", AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)),
+        RunDecision(status="failed", stop_reason="infra", outcome=AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)),
         OutcomeAction.RETRY,
     ),
     "infra_status": (
         _evidence(timed_out=True, infra_fault=_fault(MODEL_REQUEST_ERROR, status=503), model_replied=False),
-        RunDecision("failed", "infra", _model_error(503)),
+        RunDecision(status="failed", stop_reason="infra", outcome=_model_error(503)),
         OutcomeAction.RETRY,
     ),
     "infra_unnameable": (
         _evidence(timed_out=True, infra_fault=_fault(MODEL_REQUEST_ERROR), model_replied=False),
-        RunDecision("failed", "infra", UNKNOWN),
+        RunDecision(status="failed", stop_reason="infra", outcome=UNKNOWN),
         OutcomeAction.RETRY,
     ),
     # 4. A deadline is graded with what the run kept.
-    "timeout_after_reply": (_evidence(timed_out=True), RunDecision("incomplete", "timeout"), OutcomeAction.VERIFY),
+    "timeout_after_reply": (
+        _evidence(timed_out=True),
+        RunDecision(status="incomplete", stop_reason="timeout"),
+        OutcomeAction.VERIFY,
+    ),
     "timeout_before_reply": (
         _evidence(timed_out=True, model_replied=False, has_result=False),
-        RunDecision("incomplete", "timeout"),
+        RunDecision(status="incomplete", stop_reason="timeout"),
         OutcomeAction.VERIFY,
     ),
     # Until the deadline flip, an adapter that retried a deadline before any reply keeps doing so.
     "timeout_before_reply_kept_retried": (
         _evidence(timed_out=True, model_replied=False, retry_deadline_before_reply=True),
-        RunDecision("failed", "timeout", UNKNOWN),
+        RunDecision(status="failed", stop_reason="timeout", outcome=UNKNOWN),
         OutcomeAction.RETRY,
     ),
     "timeout_unknown_reply_kept_retried": (
         _evidence(timed_out=True, model_replied=None, retry_deadline_before_reply=True),
-        RunDecision("failed", "timeout", UNKNOWN),
+        RunDecision(status="failed", stop_reason="timeout", outcome=UNKNOWN),
         OutcomeAction.RETRY,
     ),
     "timeout_after_reply_not_retried": (
         _evidence(timed_out=True, model_replied=True, retry_deadline_before_reply=True),
-        RunDecision("incomplete", "timeout"),
+        RunDecision(status="incomplete", stop_reason="timeout"),
         OutcomeAction.VERIFY,
     ),
     # 5. An error the run ended on: the classified outcome, by the status table.
     "error_400_after_reply": (
         _evidence(error=_model_error(400)),
-        RunDecision("failed", "error", _model_error(400)),
+        RunDecision(status="failed", stop_reason="error", outcome=_model_error(400)),
         OutcomeAction.VERIFY,
     ),
     "error_401_after_reply": (
         _evidence(error=_model_error(401)),
-        RunDecision("failed", "error", _model_error(401)),
+        RunDecision(status="failed", stop_reason="error", outcome=_model_error(401)),
         OutcomeAction.FAIL,
     ),
     "error_429_before_reply": (
         _evidence(error=_model_error(429), model_replied=False),
-        RunDecision("failed", "error", _model_error(429)),
+        RunDecision(status="failed", stop_reason="error", outcome=_model_error(429)),
         OutcomeAction.RETRY,
     ),
     "error_503_before_reply": (
         _evidence(error=_model_error(503), model_replied=False),
-        RunDecision("failed", "error", _model_error(503)),
+        RunDecision(status="failed", stop_reason="error", outcome=_model_error(503)),
         OutcomeAction.RETRY,
     ),
     "error_transport": (
         _evidence(error=AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR), model_replied=False),
-        RunDecision("failed", "error", AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)),
+        RunDecision(status="failed", stop_reason="error", outcome=AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)),
         OutcomeAction.RETRY,
     ),
     "error_harness": (
         _evidence(error=AgentOutcome(failure_kind=AGENT_INVALID_OUTPUT)),
-        RunDecision("failed", "error", AgentOutcome(failure_kind=AGENT_INVALID_OUTPUT)),
+        RunDecision(status="failed", stop_reason="error", outcome=AgentOutcome(failure_kind=AGENT_INVALID_OUTPUT)),
         OutcomeAction.VERIFY,
     ),
     # A 4xx before any reply is the run's setup, for every harness (decision 4).
     **{
         f"error_{status}_before_reply": (
             _evidence(error=_model_error(status), model_replied=False, has_result=False),
-            RunDecision("failed", "error", REJECTED),
+            RunDecision(status="failed", stop_reason="error", outcome=REJECTED),
             OutcomeAction.FAIL,
         )
         for status in (400, 401, 403, 404, 413, 422)
@@ -156,57 +164,73 @@ LADDER = {
     # Without evidence that no reply arrived, the classified status decides.
     "error_400_reply_unknown": (
         _evidence(error=_model_error(400), model_replied=None),
-        RunDecision("failed", "error", _model_error(400)),
+        RunDecision(status="failed", stop_reason="error", outcome=_model_error(400)),
         OutcomeAction.VERIFY,
     ),
     # 6. A model or harness limit is graded with the partial work.
-    "output_limit": (_evidence(model_limit="output"), RunDecision("incomplete", "output_limit"), OutcomeAction.VERIFY),
-    "turn_limit": (_evidence(model_limit="turns"), RunDecision("incomplete", "agent_limit"), OutcomeAction.VERIFY),
+    "output_limit": (
+        _evidence(model_limit="output"),
+        RunDecision(status="incomplete", stop_reason="output_limit"),
+        OutcomeAction.VERIFY,
+    ),
+    "turn_limit": (
+        _evidence(model_limit="turns"),
+        RunDecision(status="incomplete", stop_reason="agent_limit"),
+        OutcomeAction.VERIFY,
+    ),
     # 7. A refusal is the model's answer (decision 5).
-    "refusal": (_evidence(refusal=True, has_result=False), RunDecision("completed", "refusal"), OutcomeAction.VERIFY),
+    "refusal": (
+        _evidence(refusal=True, has_result=False),
+        RunDecision(status="completed", stop_reason="refusal"),
+        OutcomeAction.VERIFY,
+    ),
     # 8. A usable result.
-    "completed": (_evidence(), RunDecision("completed", "completed"), OutcomeAction.VERIFY),
+    "completed": (_evidence(), RunDecision(status="completed", stop_reason="completed"), OutcomeAction.VERIFY),
     # 9. No usable result: retried by default (decision 3).
-    "no_result": (_evidence(has_result=False), RunDecision("failed", "no_result", RUN_ERROR), OutcomeAction.RETRY),
+    "no_result": (
+        _evidence(has_result=False),
+        RunDecision(status="failed", stop_reason="no_result", outcome=RUN_ERROR),
+        OutcomeAction.RETRY,
+    ),
     "no_result_before_reply": (
         _evidence(has_result=False, model_replied=False),
-        RunDecision("failed", "no_result", RUN_ERROR),
+        RunDecision(status="failed", stop_reason="no_result", outcome=RUN_ERROR),
         OutcomeAction.RETRY,
     ),
     # Precedence: the first matching row wins.
     "stopped_over_context_limit": (
         _evidence(stopped=True, context_limit=True, timed_out=True, infra_fault=_fault()),
-        RunDecision("incomplete", "stopped"),
+        RunDecision(status="incomplete", stop_reason="stopped"),
         OutcomeAction.VERIFY,
     ),
     "context_limit_over_infra_timeout": (
         _evidence(context_limit=True, timed_out=True, infra_fault=_fault()),
-        RunDecision("incomplete", "context_limit"),
+        RunDecision(status="incomplete", stop_reason="context_limit"),
         OutcomeAction.VERIFY,
     ),
     "infra_over_error": (
         _evidence(timed_out=True, infra_fault=_fault(PROVIDER_UNAVAILABLE), error=_model_error(400)),
-        RunDecision("failed", "infra", AgentOutcome(failure_kind=PROVIDER_UNAVAILABLE)),
+        RunDecision(status="failed", stop_reason="infra", outcome=AgentOutcome(failure_kind=PROVIDER_UNAVAILABLE)),
         OutcomeAction.RETRY,
     ),
     "timeout_over_error": (
         _evidence(timed_out=True, error=_model_error(401), model_replied=False),
-        RunDecision("incomplete", "timeout"),
+        RunDecision(status="incomplete", stop_reason="timeout"),
         OutcomeAction.VERIFY,
     ),
     "infra_ignored_without_deadline": (
         _evidence(infra_fault=_fault()),
-        RunDecision("completed", "completed"),
+        RunDecision(status="completed", stop_reason="completed"),
         OutcomeAction.VERIFY,
     ),
     "error_over_limit": (
         _evidence(error=_model_error(500), model_limit="output"),
-        RunDecision("failed", "error", _model_error(500)),
+        RunDecision(status="failed", stop_reason="error", outcome=_model_error(500)),
         OutcomeAction.RETRY,
     ),
     "limit_over_refusal": (
         _evidence(model_limit="turns", refusal=True),
-        RunDecision("incomplete", "agent_limit"),
+        RunDecision(status="incomplete", stop_reason="agent_limit"),
         OutcomeAction.VERIFY,
     ),
 }
@@ -305,8 +329,8 @@ def test_finish_response_does_not_mark_a_run_the_close_cancelled():
     [
         # A deadline that a rollout stop caused is a stop, as report_rollout_stop marks it.
         (True, True, "incomplete", True),
-        # A run that finished on its own before the stop took effect keeps its result.
-        (True, False, "completed", False),
+        # Session expiry already proves that the supervisor timed out, even if the adapter missed it.
+        (True, False, "incomplete", True),
         # Without a stop, a deadline is a timeout.
         (False, True, "incomplete", False),
     ],
@@ -382,4 +406,4 @@ def test_a_context_overflow_400_is_graded_incomplete_even_before_the_first_reply
     # Decision 1 wins over decision 4: the overflow is a context limit, not a rejected request.
     error = model_http_error_outcome(400, error_body=CONTEXT_OVERFLOW_BODY)
     evidence = RunEvidence(has_result=False, timed_out=False, model_replied=model_replied, error=error)
-    assert decide_outcome(evidence) == RunDecision("incomplete", "context_limit")
+    assert decide_outcome(evidence) == RunDecision(status="incomplete", stop_reason="context_limit")

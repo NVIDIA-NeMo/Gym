@@ -8,7 +8,12 @@ import json
 
 import pytest
 
-from nemo_gym.rollouts.harness_capabilities.behavior import inspect_behavior, model_checks, tool_checks
+from nemo_gym.rollouts.harness_capabilities.behavior import (
+    _terminal_error_reported,
+    inspect_behavior,
+    model_checks,
+    tool_checks,
+)
 from tests.unit_tests.rollouts.harness_capabilities.synthetic import evidence_and_witness
 
 
@@ -253,7 +258,7 @@ def test_judge_scenario_requires_witnessed_grade_and_verifier_ownership(missing)
         ),
     ],
 )
-def test_terminal_error_expects_the_outcome_ladders_report(status, outcome):
+def test_terminal_error_accepts_the_ladder_and_migrating_adapter_reports(status, outcome):
     from nemo_gym.rollouts.harness_capabilities.behavior import _terminal_error_reported
 
     attempts = [{"status_code": status, "request": {}, "response": {"error": {"message": "controlled failure"}}}]
@@ -273,4 +278,18 @@ def test_terminal_error_expects_the_outcome_ladders_report(status, outcome):
         if outcome["failure_kind"] == "model_request_rejected"
         else {"failure_kind": "model_request_rejected"}
     )
-    assert not _terminal_error_reported(attempts, response(other), status)
+    assert _terminal_error_reported(attempts, response(other), status) is (
+        outcome["failure_kind"] == "model_request_rejected"
+    )
+
+
+@pytest.mark.parametrize("status, reported", [(503, 500), (429, 503), (408, 429)])
+def test_terminal_error_requires_the_witnessed_status(status, reported):
+    # The statuses that stay model_request_error must carry the witnessed status, not any status.
+    attempts = [{"status_code": status, "request": {}, "response": {"error": {"message": "controlled failure"}}}]
+    response = {
+        "status": "failed",
+        "error": {"message": f"HTTP {status}: controlled failure"},
+        "metadata": {"ng_agent_outcome": json.dumps({"failure_kind": "model_request_error", "status_code": reported})},
+    }
+    assert not _terminal_error_reported(attempts, [response], status)

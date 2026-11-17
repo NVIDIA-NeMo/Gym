@@ -23,12 +23,12 @@ import shutil
 import signal
 import tempfile
 from asyncio import Semaphore
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import AsyncExitStack
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
-from time import time
+from time import monotonic, time
 from typing import Any, ClassVar, Literal, Mapping, Optional
 from uuid import uuid4
 
@@ -72,6 +72,7 @@ from nemo_gym.core import (
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
     FailureBoundary,
+    MediaFile,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -84,6 +85,8 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
     NgFailureEvent,
+    UnsupportedContentError,
+    split_text_and_media,
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -91,6 +94,7 @@ from nemo_gym.sandbox import (
     SandboxSpec,
     SandboxStatus,
     create_provider,
+    media_path,
     resolve_provider_config,
 )
 from nemo_gym.server_runtime import (
@@ -101,6 +105,7 @@ from nemo_gym.server_runtime import (
     is_retryable_dependency_status,
 )
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, ToolCallObservation
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.codex_agent.observability import (
     TESTED_CODEX_VERSION,
     associate_codex_compaction_calls,
@@ -352,7 +357,6 @@ def parse_exec_jsonl(
     *,
     structured_reasoning: bool = False,
     include_partial: bool = False,
-    conservative_usage_details: bool = False,
 ) -> tuple[list[Any], dict]:
     """Convert ``codex exec --json`` JSONL stdout into (output_items, metadata).
 
@@ -362,15 +366,18 @@ def parse_exec_jsonl(
     successful retry. Tool-shaped items are mapped to a
     ``function_call`` + ``function_call_output`` pair so verifiers see one uniform trajectory
     shape across agent harnesses; reasoning is buffered and prepended to the next assistant
-    message inside ``<think>`` tags (mirroring the Claude Code agent). Sandbox session callers use
-    ``conservative_usage_details`` because the pinned CLI defaults absent backend cache/reasoning
-    counters to zero: only positive integers establish measured details in this artifact.
+    message inside ``<think>`` tags (mirroring the Claude Code agent). The pinned CLI defaults absent
+    backend cache/reasoning counters to zero, so only positive integers establish measured details;
+    otherwise ``cached_input_tokens`` and ``reasoning_tokens`` are None.
     """
     output_items: list[Any] = []
     buffered_think: Optional[str] = None
-    metadata: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0, "cached_input_tokens": 0, "reasoning_tokens": 0}
-    if conservative_usage_details:
-        metadata.update(cached_input_tokens=None, reasoning_tokens=None)
+    metadata: dict[str, Any] = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_input_tokens": None,
+        "reasoning_tokens": None,
+    }
     usage_seen = False
     errors: list[str] = []
     unfinished: dict[str, dict[str, Any]] = {}
@@ -414,14 +421,11 @@ def parse_exec_jsonl(
                 ("reasoning_output_tokens", "reasoning_tokens"),
             ):
                 value = usage.get(source)
-                if conservative_usage_details:
-                    # Zero is ambiguous in Codex JSONL, not a known backend measurement.
-                    if type(value) is not int or value <= 0 or (usage_seen and metadata[target] is None):
-                        metadata[target] = None
-                    else:
-                        metadata[target] = (metadata[target] or 0) + value
+                # Zero is ambiguous in Codex JSONL, not a known backend measurement.
+                if type(value) is not int or value <= 0 or (usage_seen and metadata[target] is None):
+                    metadata[target] = None
                 else:
-                    metadata[target] += int(value or 0)
+                    metadata[target] = (metadata[target] or 0) + value
             usage_seen = True
             continue
 
@@ -975,14 +979,18 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     cwd=workdir,
                     timeout_s=self.config.sandbox_install_timeout_seconds,
                 )
-                reported = (checked.stdout or "").strip()
+                # OpenSandbox may merge stderr warnings into stdout. Match the exact version
+                # record without treating those diagnostics as part of the version string.
+                reported = [
+                    line.strip() for line in (checked.stdout or "").splitlines() if line.startswith("codex-cli ")
+                ]
                 if checked.error_type:
                     # A transport failure or timeout may pass on another attempt.
                     raise RuntimeError(
                         f"Codex could not check the runtime in {runtime} (error_type={checked.error_type}); "
                         f"stdout={checked.stdout}; stderr={checked.stderr}"
                     )
-                if checked.return_code != 0 or reported != f"codex-cli {self.config.codex_version}":
+                if checked.return_code != 0 or reported != [f"codex-cli {self.config.codex_version}"]:
                     # A missing runtime or another version fails the same way every time.
                     raise AgentSeedRejectedError(
                         f"Codex runtime in {runtime} does not run codex_version {self.config.codex_version} "
@@ -1017,7 +1025,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             raise
         return state
 
-    def _sandbox_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
+    def _sandbox_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str, list[MediaFile]]:
         """Validate and normalize input before consuming the session's activation."""
         unsupported = (
             "max_output_tokens",
@@ -1066,26 +1074,31 @@ class CodexAgent(SimpleResponsesAPIAgent):
         roles = [getattr(item, "role", None) for item in items]
         if roles not in (["user"], ["system", "user"], ["developer", "user"]):
             raise HTTPException(
-                422, "Codex in the task sandbox accepts one text user prompt with an optional system message"
+                422, "Codex in the task sandbox accepts one user prompt with an optional system message"
             )
+        media: list[MediaFile] = []
+        texts: list[str] = []
         for item in items:
-            if not isinstance(item.content, str) and any(
-                (part.get("type") if isinstance(part, dict) else getattr(part, "type", None)) != "input_text"
-                for part in item.content
-            ):
-                raise HTTPException(422, "Codex in the task sandbox only supports text input")
-
-        def text(item):
-            return (
+            try:
+                _, decoded = split_text_and_media(item.content)
+            except UnsupportedContentError as error:
+                raise HTTPException(422, f"Codex: {error}") from error
+            if decoded and item.role != "user":
+                raise HTTPException(422, "Codex accepts images only in the user prompt")
+            media.extend(decoded)
+            # Keep the existing text concatenation; the CLI places all attached images before it.
+            texts.append(
                 item.content
                 if isinstance(item.content, str)
-                else "".join(part["text"] if isinstance(part, dict) else part.text for part in item.content)
+                else "".join(
+                    part.get("text", "") if isinstance(part, dict) else getattr(part, "text", "")
+                    for part in item.content
+                )
             )
-
-        prompt = text(items[-1])
-        input_system = text(items[0]) if len(items) == 2 else None
+        prompt = texts[-1]
+        input_system = texts[0] if len(items) == 2 else None
         system = "\n\n".join(part for part in (self.config.system_prompt, body.instructions, input_system) if part)
-        return prompt, system
+        return prompt, system, media
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
@@ -1110,15 +1123,18 @@ class CodexAgent(SimpleResponsesAPIAgent):
         *,
         prompt: str,
         system: str,
+        media: Sequence[MediaFile] = (),
     ) -> NeMoGymResponse:
         mcp_servers, skipped_grants = self._granted_mcp_servers(state.request)
         invocation_id = state.request.episode_id.capture_key
         base_url = self._resolve_call_base_url(invocation_id)
         config = self._build_config(base_url, developer_instructions=system, mcp_servers=mcp_servers or None)
         config["model_providers"]["gym"]["http_headers"] = {"x-session-id": invocation_id}
-        await state.upload_text("home/.codex/config.toml", toml_dumps(config))
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
-        command = self._build_command("-", state.session.workdir)
+        # Codex's forced stdin prompt rejects empty text; an explicit empty argument accepts image-only input.
+        command = self._build_command("" if media and not prompt.strip() else "-", state.session.workdir)
+        image_args = [arg for file in media for arg in ("--image", media_path(file))]
+        command[command.index("--") : command.index("--")] = image_args
         command.remove("--ephemeral")
         command[0:1] = [
             f"{state.runtime}/node/bin/node",
@@ -1144,8 +1160,15 @@ class CodexAgent(SimpleResponsesAPIAgent):
         failure = None
         try:
             async with self.sem:
+                # The configuration can carry the MCP grant headers. Staging it inside the session's execute lets
+                # close cancel the upload before it releases the sandbox.
                 raw = await state.execute(
-                    payload, timeout=timeout, close_timeout=self.config.session_close_timeout_seconds
+                    payload,
+                    timeout=timeout,
+                    close_timeout=self.config.session_close_timeout_seconds,
+                    files={"home/.codex/config.toml": toml_dumps(config)},
+                    media=media,
+                    deadline=monotonic() + timeout,
                 )
         except BaseException as exc:
             failure = exc
@@ -1208,9 +1231,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
             "\n".join(json.dumps(event) for event in parse_events),
             structured_reasoning=True,
             include_partial=True,
-            conservative_usage_details=True,
         )
-        error = cleanup["error"] if cleanup else "Codex runner result unavailable"
+        error = lifecycle_error = cleanup["error"] if cleanup else "Codex runner result unavailable"
         errors = usage.get("errors") or []
         output_limited = (
             bool(errors)
@@ -1276,7 +1298,16 @@ class CodexAgent(SimpleResponsesAPIAgent):
             elif output or not state.model_attempts or any(a["status"] == 200 for a in state.model_attempts):
                 # Prior work without a usage artifact is unknown, not a zero-token run.
                 response_usage = None
-        conversation = [NeMoGymEasyInputMessage(role="user", content=prompt)]
+        # Native transcript items below remain authoritative. Keep supplied images in the fallback evidence too.
+        user_content = (
+            [
+                *({"type": "input_image", "image_url": file.to_data_uri(), "detail": "auto"} for file in media),
+                {"type": "input_text", "text": prompt},
+            ]
+            if media
+            else prompt
+        )
+        conversation = [NeMoGymEasyInputMessage(role="user", content=user_content)]
         if system:
             conversation.insert(0, NeMoGymEasyInputMessage(role="system", content=system))
         gaps = [
@@ -1337,6 +1368,24 @@ class CodexAgent(SimpleResponsesAPIAgent):
             state.observations = associate_codex_compaction_calls(
                 state.observations, state.model_attempts or [], model_ref=self.config.model_server
             )
+            if media and status != "failed" and not cleanup["timed_out"]:
+                # Codex replaces images it cannot decode with text and continues without them.
+                invocation = state.observations.records[0]
+                image_count = max(
+                    (
+                        sum(
+                            (part.get("type") if isinstance(part, dict) else getattr(part, "type", None))
+                            == "input_image"
+                            for part in item.content
+                        )
+                        for item in invocation.conversation
+                        if getattr(item, "role", None) == "user" and isinstance(item.content, list)
+                    ),
+                    default=0,
+                )
+                if image_count < len(media):
+                    error = lifecycle_error = f"Codex attached {image_count} of {len(media)} prompt images"
+                    invocation.status = "failed"
         else:
             gaps.append(ObservationGap(code="compaction_observations_unavailable"))
             gaps.append(ObservationGap(code=_MODEL_CALL_JOIN_GAP, detail="CLI events omit model response IDs"))
@@ -1419,9 +1468,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 evidence = replace(evidence, has_result=True)
         if failure is not None:
             raise failure
-        if cleanup is None or cleanup["error"]:
-            # The supervisor could not run or account for Codex: a lifecycle failure, not a result of the run.
-            message = f"Codex execution failed: {error}"
+        if lifecycle_error:
+            # A supervisor failure or missing required prompt images leaves no valid run to grade.
+            message = f"Codex execution failed: {lifecycle_error}"
             raise NgFailureEvent(
                 boundary=FailureBoundary.HARNESS,
                 failure_kind=AGENT_ROUTE_FAILED,
@@ -1829,6 +1878,15 @@ class CodexAgent(SimpleResponsesAPIAgent):
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
+        if any(
+            isinstance(getattr(item, "content", None), list)
+            and any(
+                (part.get("type") if isinstance(part, dict) else getattr(part, "type", None)) == "input_image"
+                for part in item.content
+            )
+            for item in body.input
+        ):
+            raise HTTPException(422, "Codex prompt images require an agent session")
         user_message, input_system = _extract_instruction(body.input)
         system_parts = [p for p in [self.config.system_prompt, input_system] if p]
         system_prompt = "\n\n".join(system_parts) if system_parts else None
@@ -1876,13 +1934,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
             parallel_tool_calls=body.parallel_tool_calls,
             usage=NeMoGymResponseUsage(
                 input_tokens=input_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(
-                    cached_tokens=usage.get("cached_input_tokens", 0)
-                ),
+                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=usage["cached_input_tokens"]),
                 output_tokens=output_tokens,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(
-                    reasoning_tokens=usage.get("reasoning_tokens", 0)
-                ),
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=usage["reasoning_tokens"]),
                 total_tokens=input_tokens + output_tokens,
             ),
             metadata={AGENT_TIMEOUT_METADATA_KEY: str(timeout)},
@@ -1907,10 +1961,12 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 raise HTTPException(409, "Codex activation does not match the seeded session and rollout route")
             if state.session.closing:
                 raise HTTPException(409, "Codex session is closing")
-            prompt, system = self._sandbox_input(body)
             if state.task is None:
+                prompt, system, media = self._sandbox_input(body)
                 state.activation_request = body.model_copy(deep=True)
-                state.task = asyncio.create_task(self._sandbox_response(state, body, prompt=prompt, system=system))
+                state.task = asyncio.create_task(
+                    self._sandbox_response(state, body, prompt=prompt, system=system, media=media)
+                )
             elif body != state.activation_request:
                 raise HTTPException(409, "Codex sessions support one activation; retry the same request")
             # The invocation belongs to the session; a disconnected waiter cannot cancel it.
@@ -1983,3 +2039,6 @@ class CodexAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     CodexAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = CodexAgent.run_webserver()  # noqa: F401

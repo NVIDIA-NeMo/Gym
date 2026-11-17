@@ -1,0 +1,723 @@
+{
+  "source_repository": "https://github.com/image2code/vision2code",
+  "revision": "000f2e162dd62fac5637c718e018d7123b3aff1e",
+  "source_file": "vision2code/evaluation/dataset_rubrics.py",
+  "sha256": "1bde2c93af5317861144bd91aa476238b4b17c5d6e4da0c74da8850f58c1b0bd",
+  "rubrics": {
+    "DocVQA": {
+      "definition": {
+        "dataset": "DocVQA",
+        "guidance": "Judge text and structure first. Be strict, but stay fair on hard infographics: if the source itself is visually dense or difficult, do not over-penalize ambiguity that is already present in the reference.",
+        "prompt_notes": [
+          "Visible text should be accurate and legible if the source is legible.",
+          "Layout should stay close to the reference, but exact decorative styling matters less than information and structure.",
+          "Moderate layout drift with exact text can still deserve a solid score."
+        ],
+        "categories": [
+          {
+            "id": "text_information_fidelity",
+            "label": "Text Information Fidelity",
+            "weight": 0.35,
+            "description": "Visible text, numbers, and key document information remain accurate."
+          },
+          {
+            "id": "document_structure_layout",
+            "label": "Document Structure and Layout",
+            "weight": 0.3,
+            "description": "Reading order, section placement, tables, blocks, and layout structure stay faithful."
+          },
+          {
+            "id": "legibility_noncrowding",
+            "label": "Legibility and Non-Crowding",
+            "weight": 0.2,
+            "description": "Content remains readable, not overly crowded, and reasonably well spaced."
+          },
+          {
+            "id": "key_visual_elements",
+            "label": "Key Visual Elements",
+            "weight": 0.15,
+            "description": "Important icons, tables, charts, callouts, or emphasis boxes remain present when they matter."
+          }
+        ],
+        "cap_profile": {
+          "critical_any_threshold": 1.5,
+          "critical_any_cap": 2.8,
+          "critical_pair_threshold": 2.5,
+          "critical_pair_cap": 4.0,
+          "top_score_trigger": 4.8,
+          "top_score_min_critical": 4.4,
+          "top_score_cap": 4.5
+        },
+        "extra_caps": [
+          {
+            "type": "material_key_text_error",
+            "cap_to": 2.5,
+            "reason": "Materially wrong key text or numbers cap the score on this dataset.",
+            "all_of": [],
+            "any_of": [
+              {
+                "id": "text_information_fidelity",
+                "max": 2.4
+              }
+            ]
+          }
+        ]
+      },
+      "user_prompt": [
+        {
+          "type": "text",
+          "text": "Reference image:"
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "IMAGE_DATA_URL"
+          }
+        },
+        {
+          "type": "text",
+          "text": "Candidate rendered image:"
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "IMAGE_DATA_URL"
+          }
+        },
+        {
+          "type": "text",
+          "text": "Evaluate the candidate recreation against the reference image using the dataset-specific rubric below.\n\nRubric version: recreation_rubric_v4_decimal_per_dataset\nRubric dataset: DocVQA\nScoring guidance: Judge text and structure first. Be strict, but stay fair on hard infographics: if the source itself is visually dense or difficult, do not over-penalize ambiguity that is already present in the reference.\n\nDataset-specific notes:\n- Visible text should be accurate and legible if the source is legible.\n- Layout should stay close to the reference, but exact decorative styling matters less than information and structure.\n- Moderate layout drift with exact text can still deserve a solid score.\n\nCategories:\nDataset: DocVQA\n- text_information_fidelity (weight 0.35): Visible text, numbers, and key document information remain accurate.\n- document_structure_layout (weight 0.30): Reading order, section placement, tables, blocks, and layout structure stay faithful.\n- legibility_noncrowding (weight 0.20): Content remains readable, not overly crowded, and reasonably well spaced.\n- key_visual_elements (weight 0.15): Important icons, tables, charts, callouts, or emphasis boxes remain present when they matter.\n\nReference metadata:\n{}\n\nReturn JSON with exactly these top-level keys:\n1) \"category_scores\"\n2) \"rationales\"\n3) \"strengths\"\n4) \"issues\"\n5) \"overall_summary\"\n\nRules:\n- 'category_scores' must contain every category id with a numeric score from 0.0 to 5.0.\n- Use decimals in increments of 0.1 when needed.\n- 'rationales' must contain the same keys, with one short rationale per category.\n- 'strengths' must be a short list of 1 to 3 bullets.\n- 'issues' must be a short list of 1 to 5 bullets.\n- 'overall_summary' must be 1 to 3 concise sentences.\n- Judge what matters for this dataset-specific rubric, not superficial similarity alone.\n- For easy datasets, preserve recreation structure, not just semantic content.\n- For hard or noisy references, be strict but do not penalize differences that the source itself makes ambiguous.\n- Use 0.0 or 1.0 for severe failures.\n- Do not compute the final 0.0 to 5.0 rating yourself; provide category scores only.\n"
+        }
+      ],
+      "failure": {
+        "rubric_version": "recreation_rubric_v4_decimal_per_dataset",
+        "rubric_dataset": "DocVQA",
+        "status": "render_failed",
+        "execution_status": "render_failed",
+        "execution_detail": "code_error",
+        "execution_error_present": true,
+        "reference_image_path": "",
+        "candidate_image_path": "",
+        "candidate_inspection": {},
+        "category_scores": {
+          "text_information_fidelity": {
+            "label": "Text Information Fidelity",
+            "description": "Visible text, numbers, and key document information remain accurate.",
+            "weight": 0.35,
+            "score_0_to_5": 0.0,
+            "weighted_score_0_to_5": 0.0,
+            "rationale": "Candidate image unavailable because generation or render failed: code_error",
+            "is_critical": true
+          },
+          "document_structure_layout": {
+            "label": "Document Structure and Layout",
+            "description": "Reading order, section placement, tables, blocks, and layout structure stay faithful.",
+            "weight": 0.3,
+            "score_0_to_5": 0.0,
+            "weighted_score_0_to_5": 0.0,
+            "rationale": "Candidate image unavailable because generation or render failed: code_error",
+            "is_critical": true
+          },
+          "legibility_noncrowding": {
+            "label": "Legibility and Non-Crowding",
+            "description": "Content remains readable, not overly crowded, and reasonably well spaced.",
+            "weight": 0.2,
+            "score_0_to_5": 0.0,
+            "weighted_score_0_to_5": 0.0,
+            "rationale": "Candidate image unavailable because generation or render failed: code_error",
+            "is_critical": false
+          },
+          "key_visual_elements": {
+            "label": "Key Visual Elements",
+            "description": "Important icons, tables, charts, callouts, or emphasis boxes remain present when they matter.",
+            "weight": 0.15,
+            "score_0_to_5": 0.0,
+            "weighted_score_0_to_5": 0.0,
+            "rationale": "Candidate image unavailable because generation or render failed: code_error",
+            "is_critical": false
+          }
+        },
+        "raw_score_0_to_5": 0.0,
+        "raw_visual_score_0_to_5": 0.0,
+        "provisional_rating_0_to_5": 0.0,
+        "applied_caps": [
+          {
+            "type": "execution_failure",
+            "cap_to": 0.0,
+            "reason": "Execution did not produce a valid render: code_error",
+            "changed_final_rating": true
+          }
+        ],
+        "final_rating_0_to_5": 0.0,
+        "strengths": [],
+        "issues": [
+          "Render failed before visual evaluation: code_error"
+        ],
+        "overall_summary": "The generated code did not produce a valid rendered image, so the sample receives the minimum rating."
+      },
+      "golden": [
+        {
+          "parsed": {
+            "category_scores": {
+              "text_information_fidelity": 4,
+              "document_structure_layout": 4,
+              "legibility_noncrowding": 4,
+              "key_visual_elements": 4
+            },
+            "rationales": {}
+          },
+          "expected": {
+            "category_scores": {
+              "text_information_fidelity": {
+                "label": "Text Information Fidelity",
+                "description": "Visible text, numbers, and key document information remain accurate.",
+                "weight": 0.35,
+                "score_0_to_5": 4.0,
+                "weighted_score_0_to_5": 1.4,
+                "rationale": "",
+                "is_critical": true
+              },
+              "document_structure_layout": {
+                "label": "Document Structure and Layout",
+                "description": "Reading order, section placement, tables, blocks, and layout structure stay faithful.",
+                "weight": 0.3,
+                "score_0_to_5": 4.0,
+                "weighted_score_0_to_5": 1.2,
+                "rationale": "",
+                "is_critical": true
+              },
+              "legibility_noncrowding": {
+                "label": "Legibility and Non-Crowding",
+                "description": "Content remains readable, not overly crowded, and reasonably well spaced.",
+                "weight": 0.2,
+                "score_0_to_5": 4.0,
+                "weighted_score_0_to_5": 0.8,
+                "rationale": "",
+                "is_critical": false
+              },
+              "key_visual_elements": {
+                "label": "Key Visual Elements",
+                "description": "Important icons, tables, charts, callouts, or emphasis boxes remain present when they matter.",
+                "weight": 0.15,
+                "score_0_to_5": 4.0,
+                "weighted_score_0_to_5": 0.6,
+                "rationale": "",
+                "is_critical": false
+              }
+            },
+            "raw_score_0_to_5": 4.0,
+            "final_rating_0_to_5": 0.0,
+            "applied_caps": [
+              {
+                "type": "candidate_missing_or_unreadable",
+                "cap_to": 0.0,
+                "reason": "Candidate image is missing or unreadable.",
+                "changed_final_rating": true
+              }
+            ]
+          }
+        },
+        {
+          "parsed": {
+            "category_scores": {
+              "text_information_fidelity": 1,
+              "document_structure_layout": 2,
+              "legibility_noncrowding": 3,
+              "key_visual_elements": 4
+            },
+            "rationales": {}
+          },
+          "expected": {
+            "category_scores": {
+              "text_information_fidelity": {
+                "label": "Text Information Fidelity",
+                "description": "Visible text, numbers, and key document information remain accurate.",
+                "weight": 0.35,
+                "score_0_to_5": 1.0,
+                "weighted_score_0_to_5": 0.35,
+                "rationale": "",
+                "is_critical": true
+              },
+              "document_structure_layout": {
+                "label": "Document Structure and Layout",
+                "description": "Reading order, section placement, tables, blocks, and layout structure stay faithful.",
+                "weight": 0.3,
+                "score_0_to_5": 2.0,
+                "weighted_score_0_to_5": 0.6,
+                "rationale": "",
+                "is_critical": true
+              },
+              "legibility_noncrowding": {
+                "label": "Legibility and Non-Crowding",
+                "description": "Content remains readable, not overly crowded, and reasonably well spaced.",
+                "weight": 0.2,
+                "score_0_to_5": 3.0,
+                "weighted_score_0_to_5": 0.6,
+                "rationale": "",
+                "is_critical": false
+              },
+              "key_visual_elements": {
+                "label": "Key Visual Elements",
+                "description": "Important icons, tables, charts, callouts, or emphasis boxes remain present when they matter.",
+                "weight": 0.15,
+                "score_0_to_5": 4.0,
+                "weighted_score_0_to_5": 0.6,
+                "rationale": "",
+                "is_critical": false
+              }
+            },
+            "raw_score_0_to_5": 2.15,
+            "final_rating_0_to_5": 0.0,
+            "applied_caps": [
+              {
+                "type": "candidate_missing_or_unreadable",
+                "cap_to": 0.0,
+                "reason": "Candidate image is missing or unreadable.",
+                "changed_final_rating": true
+              },
+              {
+                "type": "critical_category_floor",
+                "cap_to": 2.8,
+                "reason": "At least one critical category received a very low score.",
+                "changed_final_rating": false
+              },
+              {
+                "type": "multiple_critical_weaknesses",
+                "cap_to": 4.0,
+                "reason": "Both critical categories are weak enough to limit the final score.",
+                "changed_final_rating": false
+              },
+              {
+                "type": "material_key_text_error",
+                "cap_to": 2.5,
+                "reason": "Materially wrong key text or numbers cap the score on this dataset.",
+                "changed_final_rating": false
+              }
+            ]
+          }
+        },
+        {
+          "parsed": {
+            "category_scores": {
+              "text_information_fidelity": 5,
+              "document_structure_layout": 5,
+              "legibility_noncrowding": 5,
+              "key_visual_elements": 5
+            },
+            "rationales": {}
+          },
+          "expected": {
+            "category_scores": {
+              "text_information_fidelity": {
+                "label": "Text Information Fidelity",
+                "description": "Visible text, numbers, and key document information remain accurate.",
+                "weight": 0.35,
+                "score_0_to_5": 5.0,
+                "weighted_score_0_to_5": 1.75,
+                "rationale": "",
+                "is_critical": true
+              },
+              "document_structure_layout": {
+                "label": "Document Structure and Layout",
+                "description": "Reading order, section placement, tables, blocks, and layout structure stay faithful.",
+                "weight": 0.3,
+                "score_0_to_5": 5.0,
+                "weighted_score_0_to_5": 1.5,
+                "rationale": "",
+                "is_critical": true
+              },
+              "legibility_noncrowding": {
+                "label": "Legibility and Non-Crowding",
+                "description": "Content remains readable, not overly crowded, and reasonably well spaced.",
+                "weight": 0.2,
+                "score_0_to_5": 5.0,
+                "weighted_score_0_to_5": 1.0,
+                "rationale": "",
+                "is_critical": false
+              },
+              "key_visual_elements": {
+                "label": "Key Visual Elements",
+                "description": "Important icons, tables, charts, callouts, or emphasis boxes remain present when they matter.",
+                "weight": 0.15,
+                "score_0_to_5": 5.0,
+                "weighted_score_0_to_5": 0.75,
+                "rationale": "",
+                "is_critical": false
+              }
+            },
+            "raw_score_0_to_5": 5.0,
+            "final_rating_0_to_5": 0.0,
+            "applied_caps": [
+              {
+                "type": "candidate_missing_or_unreadable",
+                "cap_to": 0.0,
+                "reason": "Candidate image is missing or unreadable.",
+                "changed_final_rating": true
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "EEE-Bench": {
+      "definition": {
+        "dataset": "EEE-Bench",
+        "guidance": "Focus on circuit topology, component identity, labels, values, signs, and current or voltage direction. Be lenient on stylistic drawing differences such as zig-zag versus curved resistor style when the component identity is still clearly correct.",
+        "prompt_notes": [
+          "Wrong direction, sign, label, or connectivity matters more than cosmetic symbol style.",
+          "Component identity must be preserved even if the drawn shape style varies slightly.",
+          "Treat small labels and values as potentially important."
+        ],
+        "categories": [
+          {
+            "id": "circuit_topology_connectivity",
+            "label": "Circuit Topology and Connectivity",
+            "weight": 0.35,
+            "description": "Wiring relationships, placement relationships, and the overall circuit topology are correct."
+          },
+          {
+            "id": "component_identity_symbols",
+            "label": "Component Identity and Symbols",
+            "weight": 0.25,
+            "description": "Resistors, capacitors, sources, and other component identities remain correct."
+          },
+          {
+            "id": "labels_values_directions",
+            "label": "Labels, Values, and Directions",
+            "weight": 0.25,
+            "description": "Current directions, voltage labels, signs, and numeric values remain accurate."
+          },
+          {
+            "id": "readability_completeness",
+            "label": "Readability and Completeness",
+            "weight": 0.15,
+            "description": "The circuit is readable, uncluttered, and not missing major visible content."
+          }
+        ],
+        "cap_profile": {
+          "critical_any_threshold": 1.5,
+          "critical_any_cap": 2.8,
+          "critical_pair_threshold": 2.5,
+          "critical_pair_cap": 4.0,
+          "top_score_trigger": 4.8,
+          "top_score_min_critical": 4.4,
+          "top_score_cap": 4.5
+        },
+        "extra_caps": [
+          {
+            "type": "circuit_semantic_error",
+            "cap_to": 2.5,
+            "reason": "Wrong topology, wrong labels or values, or wrong current or voltage direction cap the score on this dataset.",
+            "all_of": [],
+            "any_of": [
+              {
+                "id": "circuit_topology_connectivity",
+                "max": 2.4
+              },
+              {
+                "id": "labels_values_directions",
+                "max": 2.4
+              }
+            ]
+          }
+        ]
+      },
+      "user_prompt": [
+        {
+          "type": "text",
+          "text": "Reference image:"
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "IMAGE_DATA_URL"
+          }
+        },
+        {
+          "type": "text",
+          "text": "Candidate rendered image:"
+        },
+        {
+          "type": "image_url",
+          "image_url": {
+            "url": "IMAGE_DATA_URL"
+          }
+        },
+        {
+          "type": "text",
+          "text": "Evaluate the candidate recreation against the reference image using the dataset-specific rubric below.\n\nRubric version: recreation_rubric_v4_decimal_per_dataset\nRubric dataset: EEE-Bench\nScoring guidance: Focus on circuit topology, component identity, labels, values, signs, and current or voltage direction. Be lenient on stylistic drawing differences such as zig-zag versus curved resistor style when the component identity is still clearly correct.\n\nDataset-specific notes:\n- Wrong direction, sign, label, or connectivity matters more than cosmetic symbol style.\n- Component identity must be preserved even if the drawn shape style varies slightly.\n- Treat small labels and values as potentially important.\n\nCategories:\nDataset: EEE-Bench\n- circuit_topology_connectivity (weight 0.35): Wiring relationships, placement relationships, and the overall circuit topology are correct.\n- component_identity_symbols (weight 0.25): Resistors, capacitors, sources, and other component identities remain correct.\n- labels_values_directions (weight 0.25): Current directions, voltage labels, signs, and numeric values remain accurate.\n- readability_completeness (weight 0.15): The circuit is readable, uncluttered, and not missing major visible content.\n\nReference metadata:\n{}\n\nReturn JSON with exactly these top-level keys:\n1) \"category_scores\"\n2) \"rationales\"\n3) \"strengths\"\n4) \"issues\"\n5) \"overall_summary\"\n\nRules:\n- 'category_scores' must contain every category id with a numeric score from 0.0 to 5.0.\n- Use decimals in increments of 0.1 when needed.\n- 'rationales' must contain the same keys, with one short rationale per category.\n- 'strengths' must be a short list of 1 to 3 bullets.\n- 'issues' must be a short list of 1 to 5 bullets.\n- 'overall_summary' must be 1 to 3 concise sentences.\n- Judge what matters for this dataset-specific rubric, not superficial similarity alone.\n- For easy datasets, preserve recreation structure, not just semantic content.\n- For hard or noisy references, be strict but do not penalize differences that the source itself makes ambiguous.\n- Use 0.0 or 1.0 for severe failures.\n- Do not compute the final 0.0 to 5.0 rating yourself; provide category scores only.\n"
+        }
+      ],
+      "failure": {
+        "rubric_version": "recreation_rubric_v4_decimal_per_dataset",
+        "rubric_dataset": "EEE-Bench",
+        "status": "render_failed",
+        "execution_status": "render_failed",
+        "execution_detail": "code_error",
+        "execution_error_present": true,
+        "reference_image_path": "",
+        "candidate_image_path": "",
+        "candidate_inspection": {},
+        "category_scores": {
+          "circuit_topology_connectivity": {
+            "label": "Circuit Topology and Connectivity",
+            "description": "Wiring relationships, placement relationships, and the overall circuit topology are correct.",
+            "weight": 0.35,
+            "score_0_to_5": 0.0,
+            "weighted_score_0_to_5": 0.0,
+            "rationale": "Candidate image unavailable because generation or render failed: code_error",
+            "is_critical": true
+          },
+          "component_identity_symbols": {
+            "label": "Component Identity and Symbols",
+            "description": "Resistors, capacitors, sources, and other component identities remain correct.",
+            "weight": 0.25,
+            "score_0_to_5": 0.0,
+            "weighted_score_0_to_5": 0.0,
+            "rationale": "Candidate image unavailable because generation or render failed: code_error",
+            "is_critical": true
+          },
+          "labels_values_directions": {
+            "label": "Labels, Values, and Directions",
+            "description": "Current directions, voltage labels, signs, and numeric values remain accurate.",
+            "weight": 0.25,
+            "score_0_to_5": 0.0,
+            "weighted_score_0_to_5": 0.0,
+            "rationale": "Candidate image unavailable because generation or render failed: code_error",
+            "is_critical": false
+          },
+          "readability_completeness": {
+            "label": "Readability and Completeness",
+            "description": "The circuit is readable, uncluttered, and not missing major visible content.",
+            "weight": 0.15,
+            "score_0_to_5": 0.0,
+            "weighted_score_0_to_5": 0.0,
+            "rationale": "Candidate image unavailable because generation or render failed: code_error",
+            "is_critical": false
+          }
+        },
+        "raw_score_0_to_5": 0.0,
+        "raw_visual_score_0_to_5": 0.0,
+        "provisional_rating_0_to_5": 0.0,
+        "applied_caps": [
+          {
+            "type": "execution_failure",
+            "cap_to": 0.0,
+            "reason": "Execution did not produce a valid render: code_error",
+            "changed_final_rating": true
+          }
+        ],
+        "final_rating_0_to_5": 0.0,
+        "strengths": [],
+        "issues": [
+          "Render failed before visual evaluation: code_error"
+        ],
+        "overall_summary": "The generated code did not produce a valid rendered image, so the sample receives the minimum rating."
+      },
+      "golden": [
+        {
+          "parsed": {
+            "category_scores": {
+              "circuit_topology_connectivity": 4,
+              "component_identity_symbols": 4,
+              "labels_values_directions": 4,
+              "readability_completeness": 4
+            },
+            "rationales": {}
+          },
+          "expected": {
+            "category_scores": {
+              "circuit_topology_connectivity": {
+                "label": "Circuit Topology and Connectivity",
+                "description": "Wiring relationships, placement relationships, and the overall circuit topology are correct.",
+                "weight": 0.35,
+                "score_0_to_5": 4.0,
+                "weighted_score_0_to_5": 1.4,
+                "rationale": "",
+                "is_critical": true
+              },
+              "component_identity_symbols": {
+                "label": "Component Identity and Symbols",
+                "description": "Resistors, capacitors, sources, and other component identities remain correct.",
+                "weight": 0.25,
+                "score_0_to_5": 4.0,
+                "weighted_score_0_to_5": 1.0,
+                "rationale": "",
+                "is_critical": true
+              },
+              "labels_values_directions": {
+                "label": "Labels, Values, and Directions",
+                "description": "Current directions, voltage labels, signs, and numeric values remain accurate.",
+                "weight": 0.25,
+                "score_0_to_5": 4.0,
+                "weighted_score_0_to_5": 1.0,
+                "rationale": "",
+                "is_critical": false
+              },
+              "readability_completeness": {
+                "label": "Readability and Completeness",
+                "description": "The circuit is readable, uncluttered, and not missing major visible content.",
+                "weight": 0.15,
+                "score_0_to_5": 4.0,
+                "weighted_score_0_to_5": 0.6,
+                "rationale": "",
+                "is_critical": false
+              }
+            },
+            "raw_score_0_to_5": 4.0,
+            "final_rating_0_to_5": 0.0,
+            "applied_caps": [
+              {
+                "type": "candidate_missing_or_unreadable",
+                "cap_to": 0.0,
+                "reason": "Candidate image is missing or unreadable.",
+                "changed_final_rating": true
+              }
+            ]
+          }
+        },
+        {
+          "parsed": {
+            "category_scores": {
+              "circuit_topology_connectivity": 1,
+              "component_identity_symbols": 2,
+              "labels_values_directions": 3,
+              "readability_completeness": 4
+            },
+            "rationales": {}
+          },
+          "expected": {
+            "category_scores": {
+              "circuit_topology_connectivity": {
+                "label": "Circuit Topology and Connectivity",
+                "description": "Wiring relationships, placement relationships, and the overall circuit topology are correct.",
+                "weight": 0.35,
+                "score_0_to_5": 1.0,
+                "weighted_score_0_to_5": 0.35,
+                "rationale": "",
+                "is_critical": true
+              },
+              "component_identity_symbols": {
+                "label": "Component Identity and Symbols",
+                "description": "Resistors, capacitors, sources, and other component identities remain correct.",
+                "weight": 0.25,
+                "score_0_to_5": 2.0,
+                "weighted_score_0_to_5": 0.5,
+                "rationale": "",
+                "is_critical": true
+              },
+              "labels_values_directions": {
+                "label": "Labels, Values, and Directions",
+                "description": "Current directions, voltage labels, signs, and numeric values remain accurate.",
+                "weight": 0.25,
+                "score_0_to_5": 3.0,
+                "weighted_score_0_to_5": 0.75,
+                "rationale": "",
+                "is_critical": false
+              },
+              "readability_completeness": {
+                "label": "Readability and Completeness",
+                "description": "The circuit is readable, uncluttered, and not missing major visible content.",
+                "weight": 0.15,
+                "score_0_to_5": 4.0,
+                "weighted_score_0_to_5": 0.6,
+                "rationale": "",
+                "is_critical": false
+              }
+            },
+            "raw_score_0_to_5": 2.2,
+            "final_rating_0_to_5": 0.0,
+            "applied_caps": [
+              {
+                "type": "candidate_missing_or_unreadable",
+                "cap_to": 0.0,
+                "reason": "Candidate image is missing or unreadable.",
+                "changed_final_rating": true
+              },
+              {
+                "type": "critical_category_floor",
+                "cap_to": 2.8,
+                "reason": "At least one critical category received a very low score.",
+                "changed_final_rating": false
+              },
+              {
+                "type": "multiple_critical_weaknesses",
+                "cap_to": 4.0,
+                "reason": "Both critical categories are weak enough to limit the final score.",
+                "changed_final_rating": false
+              },
+              {
+                "type": "circuit_semantic_error",
+                "cap_to": 2.5,
+                "reason": "Wrong topology, wrong labels or values, or wrong current or voltage direction cap the score on this dataset.",
+                "changed_final_rating": false
+              }
+            ]
+          }
+        },
+        {
+          "parsed": {
+            "category_scores": {
+              "circuit_topology_connectivity": 5,
+              "component_identity_symbols": 5,
+              "labels_values_directions": 5,
+              "readability_completeness": 5
+            },
+            "rationales": {}
+          },
+          "expected": {
+            "category_scores": {
+              "circuit_topology_connectivity": {
+                "label": "Circuit Topology and Connectivity",
+                "description": "Wiring relationships, placement relationships, and the overall circuit topology are correct.",
+                "weight": 0.35,
+                "score_0_to_5": 5.0,
+                "weighted_score_0_to_5": 1.75,
+                "rationale": "",
+                "is_critical": true
+              },
+              "component_identity_symbols": {
+                "label": "Component Identity and Symbols",
+                "description": "Resistors, capacitors, sources, and other component identities remain correct.",
+                "weight": 0.25,
+                "score_0_to_5": 5.0,
+                "weighted_score_0_to_5": 1.25,
+                "rationale": "",
+                "is_critical": true
+              },
+              "labels_values_directions": {
+                "label": "Labels, Values, and Directions",
+                "description": "Current directions, voltage labels, signs, and numeric values remain accurate.",
+                "weight": 0.25,
+                "score_0_to_5": 5.0,
+                "weighted_score_0_to_5": 1.25,
+                "rationale": "",
+                "is_critical": false
+              },
+              "readability_completeness": {
+                "label": "Readability and Completeness",
+                "description": "The circuit is readable, uncluttered, and not missing major visible content.",
+                "weight": 0.15,
+                "score_0_to_5": 5.0,
+                "weighted_score_0_to_5": 0.75,
+                "rationale": "",
+                "is_critical": false
+              }
+            },
+            "raw_score_0_to_5": 5.0,
+            "final_rating_0_to_5": 0.0,
+            "applied_caps": [
+              {
+                "type": "candidate_missing_or_unreadable",
+                "cap_to": 0.0,
+                "reason": "Candidate image is missing or unreadable.",
+                "changed_final_rating": true
+              }
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "license": "Apache-2.0"
+}

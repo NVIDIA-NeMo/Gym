@@ -476,7 +476,9 @@ class BenchmarkRunConfig(_StrictModel):
     # Shell script the driver runs INSTEAD of `gym eval run`, for a benchmark whose
     # harness is not Gym's own runner -- one that provisions external machines and
     # drives Gym from there, for instance. `prepare` still runs first, and the
-    # driver exports NEMO_GYM_BENCH_DIR plus the policy's base URL, model name and
+    # driver exports NEMO_GYM_BENCH_DIR for both native and command benchmarks, using
+    # the bound run directory rather than the host working-directory alias. Command
+    # benchmarks additionally receive the policy's base URL, model name and
     # API key (when driver.policy_model is set) so the script can reach the served
     # model without repeating its address.
     command: str | None = None
