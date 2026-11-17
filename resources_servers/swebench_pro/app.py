@@ -716,23 +716,30 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             eval_sandbox: AsyncSandbox | None = None
             start_time = time()
             try:
-                async with asyncio.timeout(_attempt_budget(self.config.verification_attempt_timeout, deadline)):
-                    eval_sandbox = await self._create_sandbox(body, files=sandbox_files)
-                    eval_sandbox_start_time_taken = time() - start_time
-                    verification_start = time()
-                    result, kept_logs = await run_keeping_logs(
-                        lambda logs: self._run_verification(
+
+                async def run_attempt(logs: Path) -> VerificationResult:
+                    nonlocal eval_sandbox, eval_sandbox_start_time_taken, patch_verification_time_taken
+                    # The timeout ends before the logs are kept: inside an expired one, nothing could be copied.
+                    async with asyncio.timeout(_attempt_budget(self.config.verification_attempt_timeout, deadline)):
+                        eval_sandbox = await self._create_sandbox(body, files=sandbox_files)
+                        eval_sandbox_start_time_taken = time() - start_time
+                        verification_start = time()
+                        attempt_result = await self._run_verification(
                             sandbox=eval_sandbox,
                             inputs=inputs,
                             log_dir=logs,
                             timeout_s=self.config.evaluation_timeout,
-                        ),
-                        keep=self.config.keep_verification_logs,
-                        server_name=self.config.name,
-                        instance_id=body.instance_id,
-                        attempt=attempt,
-                    )
-                    patch_verification_time_taken = time() - verification_start
+                        )
+                        patch_verification_time_taken = time() - verification_start
+                        return attempt_result
+
+                result, kept_logs = await run_keeping_logs(
+                    run_attempt,
+                    keep=self.config.keep_verification_logs,
+                    server_name=self.config.name,
+                    instance_id=body.instance_id,
+                    attempt=attempt,
+                )
             except Exception as exc:
                 attempt_error = exc
                 eval_sandbox_start_time_taken = time() - start_time
