@@ -178,7 +178,7 @@ async def test_the_judges_reasoning_is_not_part_of_its_judgment() -> None:
         assert (await server.verify(request())).reward == 1.0
 
 
-async def test_a_rejected_judgment_is_asked_for_again() -> None:
+async def test_a_rejected_judgment_is_asked_for_again(caplog) -> None:
     server, calls = make_server(
         judgment(60, 40, score=90),  # the total does not follow from the points
         "I would give it 100 points.",  # not JSON
@@ -187,8 +187,13 @@ async def test_a_rejected_judgment_is_asked_for_again() -> None:
         judgment(60, 40),
         judge_max_attempts=5,
     )
-    result = await server.verify(request())
+    with caplog.at_level("WARNING", logger="resources_servers.openqa_rubric.app"):
+        result = await server.verify(request())
     assert (result.reward, result.judge_attempts, len(calls)) == (1.0, 5, 5)
+    # Each failed attempt is logged with its reason, never with the answer.
+    reasons = [record.getMessage() for record in caplog.records]
+    assert len(reasons) == 4 and "differs from the rubric's arithmetic" in reasons[0]
+    assert not any("orange square" in reason for reason in reasons)
 
 
 async def test_a_judge_that_fails_every_attempt_raises_a_judge_failure() -> None:

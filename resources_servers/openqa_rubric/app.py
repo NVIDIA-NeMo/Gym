@@ -11,6 +11,7 @@ judge ``ModelServerRef`` and Gym's ``call_judge``.
 
 import asyncio
 import json
+import logging
 import math
 import random
 from collections import Counter
@@ -53,6 +54,8 @@ from resources_servers.openqa_rubric.task_data import RubricDict, Text
 from resources_servers.video_mcqa.scoring import EXECUTION_FAILURE_METADATA_KEY, final_answer_text
 from resources_servers.video_mcqa.task import Setting
 
+
+logger = logging.getLogger(__name__)
 
 Outcome = Literal["graded", "empty_answer", "execution_failure", "infrastructure_failure"]
 OUTCOMES: tuple[Outcome, ...] = ("graded", "empty_answer", "execution_failure", "infrastructure_failure")
@@ -265,6 +268,9 @@ class OpenQARubricResourcesServer(SimpleResourcesServer):
                     raise  # another Gym failure, such as a judge provider stop: not this loop's to retry
                 if isinstance(error, NgFailureEvent) and not _is_retryable(error):
                     raise  # an auth or bad-request reply fails the same way again
+                logger.warning(
+                    "Rubric judge attempt %d/%d failed: %s: %s", attempt, attempts, type(error).__name__, error
+                )
                 if attempt == attempts:
                     raise JudgeError(
                         f"The rubric judge failed {attempts} attempts: {type(error).__name__}: {error}"

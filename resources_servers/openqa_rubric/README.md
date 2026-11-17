@@ -125,12 +125,31 @@ answers can learn to please itself.
 (`resources_servers/video_mcqa/data/example_videos`, inlined as MP4 data URLs), built with `prepare_single_turn`.
 License: Apache 2.0.
 
+`data/example_rollouts.jsonl` holds one rollout per row from `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16`
+(BF16, one GPU) served by vLLM `0.32.0rc1.dev190+g3f1bcfd82` with the model card's video settings and the model's
+default sampling. To fit one GPU, the same served model was also the judge (`max_completion_tokens` 16,384); a training
+run should use a separate, stronger judge.
+
 ```bash
-gym env start "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml,resources_servers/openqa_rubric/configs/openqa_rubric.yaml]"
+vllm serve nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16 --max-model-len 131072 \
+  --trust-remote-code --video-pruning-rate 0.5 --reasoning-parser nemotron_v3 \
+  --media-io-kwargs '{"video": {"fps": 2, "num_frames": 256}}'
+gym env start "+config_paths=[responses_api_models/vllm_model/configs/vllm_model.yaml,resources_servers/openqa_rubric/configs/openqa_rubric.yaml]" \
+  +policy_base_url=http://127.0.0.1:8000/v1 +policy_api_key=EMPTY \
+  +policy_model_name=nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16 \
+  +judge_base_url=http://127.0.0.1:8000/v1 +judge_api_key=EMPTY \
+  +judge_model_name=nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16 \
+  ++openqa_rubric.resources_servers.openqa_rubric.judge_chat_completion_create_params.max_completion_tokens=16384
 gym eval run --no-serve --agent openqa_rubric_single_turn \
     --input resources_servers/openqa_rubric/data/example.jsonl \
     --output resources_servers/openqa_rubric/data/example_rollouts.jsonl --limit 5
 ```
+
+Three answers earn full points (the blue background and the yellow diamond, one red dot, the bar moving down; the
+judge's first judgment of the bar was rejected by the arithmetic check and its second accepted). "An orange
+rectangle moves from the left to the right" earns 60 of 100: the direction criterion, but not the square. On the
+counter the model runs out of its 16,384 output tokens without an answer (`empty_answer`, 0, no judge call).
+`mean/rubric_score` is 0.72.
 
 ## Tests
 
