@@ -5,7 +5,8 @@
 
 A run of ``gym dataset validate`` or ``gym eval run <task target>`` leaves its evidence in several places:
 the rollouts JSONL and its sidecars (failures, materialized inputs, aggregate metrics), the prepared rows with
-the data processor's ``_prepare.jsonl`` and ``_metrics.json`` beside them, the collated collector input under
+the data processor's ``_metrics.json`` beside them and ``_prepare.jsonl`` under the run's
+``<rollouts stem>/preprocessed_datasets/prepared/<split>/``, the collated collector input under
 ``<rollouts stem>/preprocessed_datasets/``, the run config, the health check's ``quality_summary.json`` and
 ``rollout_verdicts.jsonl``, and one verifier log folder per verification under the server's ``artifacts_dir``
 (with ``test-stdout.txt``, the reward file, the ATIF ``trajectory.json`` and, in separate mode, the collected
@@ -466,8 +467,10 @@ def build_run_summary(
         "aggregate_metrics": _written_after(post_collection["aggregate_metrics"], own("rollouts"), base),
         **_health_reports(own("rollouts"), base),
         "rows": _existing(rows_path, base),
-        # The data processor's per-declaration copy of the rows and their dataset metrics, beside the rows.
-        "rows_prepare": _existing(rows_path.with_name(f"{rows_path.stem}_prepare.jsonl"), base),
+        # The Harbor run has one declaration; its prepared copy is owned by this run and split.
+        "rows_prepare": _existing(
+            preprocessed / "prepared" / split / f"{rows_path.stem}_prepare.jsonl" if split else None, base
+        ),
         "rows_metrics": _existing(rows_path.with_name(f"{rows_path.stem}_metrics.json"), base),
         "preprocessed_datasets": _existing(preprocessed, base),
         "collector_input": _existing(preprocessed / f"{split}.jsonl" if split else None, base),

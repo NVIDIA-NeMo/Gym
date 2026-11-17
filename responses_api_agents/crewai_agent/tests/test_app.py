@@ -36,7 +36,7 @@ from nemo_gym.sandbox import (
     SandboxAccess,
     SandboxSpec,
 )
-from nemo_gym.server_runtime import DirectHTTPToolAccess
+from nemo_gym.server_runtime import BaseRunRequest, DirectHTTPToolAccess
 from responses_api_agents.crewai_agent import app
 from responses_api_agents.crewai_agent.app import CrewAIAgent, CrewAIAgentConfig
 from responses_api_agents.crewai_agent.sandbox_runner import configure_crewai
@@ -216,9 +216,11 @@ async def test_an_activation_outside_the_seeded_session_is_refused():
     with pytest.raises(HTTPException) as unseeded:
         await agent.responses(_request(), _body())
     with pytest.raises(HTTPException) as legacy:
-        await agent.run(_request(), SimpleNamespace())
+        await agent.run(BaseRunRequest(responses_create_params=_body()))
 
-    assert unseeded.value.status_code == legacy.value.status_code == 409
+    assert unseeded.value.status_code == 409
+    assert legacy.value.status_code == 422
+    assert "does not implement /run" in legacy.value.detail
 
 
 # --- episodes on the local provider -----------------------------------------------------------------------
@@ -406,6 +408,7 @@ async def test_a_crew_that_runs_out_of_time_answers_incomplete(
     assert time.monotonic() - started < 60
     assert (response.status, response.metadata["crewai_stop_reason"]) == ("incomplete", "timeout")
     assert ROLLOUT_STOP_METADATA_KEY not in response.metadata
+    assert len(model.requests) == 2
     assert (workdir / "partial.txt").read_text() == "partial\n"
     # The second model call never returned, so the run's usage is unknown.
     assert response.usage is None
@@ -551,23 +554,61 @@ async def test_retry_exhaustion_keeps_actual_status_and_deterministic_rejections
 @linux_only
 @pytest.mark.parametrize("stop_method", ["rollout_stop", "deadline"])
 async def test_activation_stop_or_deadline_cancels_model_retry_after_sleep(
-    lent_sandbox, runtime, monkeypatch, stop_method
-):
+    lent_sandbox: tuple[AsyncSandbox, SandboxAccess], runtime: Path, monkeypatch: pytest.MonkeyPatch, stop_method: str
+) -> None:
     _, access = lent_sandbox
     model = _model(monkeypatch, (429, {"error": {"message": "busy"}}, {"Retry-After": "60"}))
-    agent, request = _agent(timeout=10 if stop_method == "deadline" else 1800), _request()
+    agent, request = _agent(timeout=1800, session_close_timeout_seconds=15), _request()
+    retry_waiting = runtime / "retry-waiting"
     try:
         await agent.seed_agent_session(request, _seed(sandbox_access=access))
-        activation = asyncio.create_task(agent.responses(request, _body()))
-        async with asyncio.timeout(30):
-            while not model.requests:
-                await asyncio.sleep(0.05)
-        await asyncio.sleep(0.2)
-        if stop_method == "rollout_stop":
-            stop = await agent.stop_rollout(_EPISODE.capture_key)
-            assert stop.stopped
-        response = await asyncio.wait_for(activation, 15)
-        close = await asyncio.wait_for(agent.close_agent_session(request, _close_body()), 10)
+        activation = None
+        try:
+            # Observe the retry delay in the child interpreter, not a host-side mock or an HTTP request
+            # that the runner may not have read yet. Leave the real delay and cancellation unchanged.
+            runner = runtime / "sandbox_runner.py"
+            entrypoint = 'if __name__ == "__main__":'
+            source = runner.read_text()
+            assert source.count(entrypoint) == 1
+            runner.write_text(
+                source.replace(
+                    entrypoint,
+                    entrypoint
+                    + "\n    original_retry_wait = _retry_wait_seconds"
+                    + "\n    def observed_retry_wait(retry, retry_after):"
+                    + "\n        seconds = original_retry_wait(retry, retry_after)"
+                    + f"\n        marker = Path({str(retry_waiting)!r})"
+                    + "\n        pending = marker.with_suffix('.tmp')"
+                    + "\n        pending.write_text(str(seconds))"
+                    + "\n        pending.replace(marker)"
+                    + "\n        return seconds"
+                    + "\n    _retry_wait_seconds = observed_retry_wait",
+                )
+            )
+            activation = asyncio.create_task(agent.responses(request, _body()))
+            async with asyncio.timeout(30):
+                while not retry_waiting.exists():
+                    if activation.done():
+                        await activation
+                        pytest.fail("The crew finished before entering the model retry wait")
+                    await asyncio.sleep(0.05)
+            assert float(retry_waiting.read_text()) == 60
+            assert not activation.done()
+            if stop_method == "rollout_stop":
+                stop = await agent.stop_rollout(_EPISODE.capture_key)
+                assert stop.stopped
+            else:
+                state = agent._require_agent_session(agent._agent_session_id_from_request(request))
+                Path(state.session.session_dir, EXPIRE_REQUEST_FILE).touch()
+            # Allow the supervisor's TERM grace and reaping, but end before the 60-second retry fires.
+            response = await asyncio.wait_for(activation, 30)
+        finally:
+            try:
+                close = await asyncio.wait_for(agent.close_agent_session(request, _close_body()), 30)
+            finally:
+                if activation is not None:
+                    activation.cancel()
+                    await asyncio.gather(activation, return_exceptions=True)
     finally:
         model.close()
     assert close.cleanup_confirmed and response.status == "incomplete"
@@ -719,12 +760,21 @@ async def test_a_deadline_during_a_command_answers_incomplete_with_the_call_canc
     model = _model(
         monkeypatch, completion(None, ("shell", {"command": "echo partial > partial.txt; sleep 30"}), id="chatcmpl-1")
     )
+    # As above, distinguish a deadline in the command from one spent importing the runtime.
+    episode = asyncio.create_task(_episode(_agent(timeout=30), access))
     try:
-        response, close = await _episode(_agent(timeout=5), access)
+        async with asyncio.timeout(25):
+            while not (workdir / "partial.txt").exists():
+                await asyncio.sleep(0.05)
+        response, close = await asyncio.wait_for(episode, 60)
     finally:
+        if not episode.done():
+            episode.cancel()
+        await asyncio.gather(episode, return_exceptions=True)
         model.close()
 
     assert response.status == "incomplete"
+    assert len(model.requests) == 1
     assert (workdir / "partial.txt").read_text() == "partial\n"
     [invocation] = _records(close, "agent_invocation")
     [tool] = _records(close, "tool_call")
