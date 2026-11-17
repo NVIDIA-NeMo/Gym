@@ -47,9 +47,9 @@ def test_prospective_welch_uses_same_uncertainty_as_gym_and_hand_arithmetic() ->
 def test_nct_power_matches_independent_normal_chi_square_integral() -> None:
     # Four scores per arm, variance four: mean-difference variance two and df six.
     result = power_for_counts([PlanningCell("m", "b", 4.0, 4.0)], [4], [4], parameters=PlanningParameters())
-    critical = t.isf(0.05, 6)
+    critical_value = t.isf(0.05, 6)
     expected = quad(
-        lambda value: norm.sf(critical * sqrt(value / 6) - 1 / sqrt(2)) * chi2.pdf(value, 6),
+        lambda value: norm.sf(critical_value * sqrt(value / 6) - 1 / sqrt(2)) * chi2.pdf(value, 6),
         0,
         np.inf,
     )[0]
@@ -73,13 +73,19 @@ def test_joint_allocation_matches_independent_exhaustive_cost_oracle(
     cell = PlanningCell("m", "b", variance, variance * 1.5, repeat_step=step, repeat_cost=2.5)
     result = plan_repeats([cell], parameters=parameters)
     # This independent SciPy oracle enumerates the whole bounded rectangle,
-    # whereas production bounds cost with a feasible incumbent and batches by arm.
-    legal = np.arange(max(step, int(np.ceil(2 / step)) * step), 65, step)
-    baseline, candidate = np.meshgrid(legal, legal, indexing="ij")
-    a, b = variance / baseline, variance * 1.5 / candidate
-    degrees = (a + b) ** 2 / (a**2 / (baseline - 1) + b**2 / (candidate - 1))
-    power = nct.sf(t.isf(0.05, degrees), degrees, 1 / np.sqrt(a + b))
-    optimum = np.min((baseline + experiments * candidate)[power >= 0.8])
+    # whereas production bounds cost with a feasible count pair and batches by arm.
+    legal_counts = np.arange(max(step, int(np.ceil(2 / step)) * step), 65, step)
+    baseline_counts, candidate_counts = np.meshgrid(legal_counts, legal_counts, indexing="ij")
+    baseline_mean_variance, candidate_mean_variance = variance / baseline_counts, variance * 1.5 / candidate_counts
+    degrees_of_freedom = (baseline_mean_variance + candidate_mean_variance) ** 2 / (
+        baseline_mean_variance**2 / (baseline_counts - 1) + candidate_mean_variance**2 / (candidate_counts - 1)
+    )
+    power = nct.sf(
+        t.isf(0.05, degrees_of_freedom),
+        degrees_of_freedom,
+        1 / np.sqrt(baseline_mean_variance + candidate_mean_variance),
+    )
+    optimum = np.min((baseline_counts + experiments * candidate_counts)[power >= 0.8])
     assert result.total_additional_passes == optimum
     assert result.total_cost == 2.5 * optimum
     assert result.statistics.power >= 0.8
@@ -146,6 +152,23 @@ def test_existing_baseline_need_not_follow_new_repeat_step_or_count_cap() -> Non
     assert result.total_cost == 24
 
 
+def test_existing_baseline_can_exceed_fixed_width_integer_range() -> None:
+    existing = 2**80
+    cell = PlanningCell("m", "b", 1.0, 1.0, existing_baseline_repeats=existing)
+    result = plan_repeats([cell], parameters=PlanningParameters(baseline_mode="existing", max_repeats=64))
+    assert result.baseline_counts == (existing,)
+    assert 2 <= result.candidate_counts[0] <= 64
+    assert result.statistics.power >= 0.8
+    assert result.total_cost == result.total_additional_passes == result.candidate_counts[0]
+
+
+def test_large_repeat_cap_preserves_the_minimum_feasible_allocation() -> None:
+    cell = PlanningCell("m", "b", 1.0, 1.0)
+    result = plan_repeats([cell], parameters=PlanningParameters(max_repeats=2**80))
+    assert result.total_additional_passes == result.total_cost == 27
+    assert result.statistics.power >= 0.8
+
+
 def test_count_limit_and_infeasible_search_fail_with_actionable_context() -> None:
     with pytest.raises(ValueError, match="max_repeats=2"):
         plan_repeats([PlanningCell("m", "b", 100.0, 100.0)], parameters=PlanningParameters(max_repeats=2))
@@ -160,15 +183,26 @@ def test_count_limit_and_infeasible_search_fail_with_actionable_context() -> Non
 
 @pytest.mark.parametrize("mode", ["optimize", "existing"])
 @pytest.mark.parametrize("experiments", [2, 10**400])
-def test_repeat_cost_overflow_is_rejected_before_infeasible_power(mode: str, experiments: int) -> None:
-    cell = PlanningCell(
-        "m", "b", 25.0, 25.0, repeat_cost=1e308, existing_baseline_repeats=20_000 if mode == "existing" else None
-    )
+@pytest.mark.parametrize("cell_count", [1, 2])
+def test_repeat_cost_overflow_is_rejected_before_infeasible_power(
+    mode: str, experiments: int, cell_count: int
+) -> None:
+    cells = [
+        PlanningCell(
+            "m",
+            f"b{index}",
+            25.0,
+            25.0,
+            repeat_cost=1e308,
+            existing_baseline_repeats=20_000 if mode == "existing" else None,
+        )
+        for index in range(cell_count)
+    ]
     parameters = PlanningParameters(
         baseline_mode=mode, candidate_experiments=experiments, margin_points=0.1, max_repeats=4
     )
     with pytest.raises(ValueError, match="Repeat costs overflowed after multiplying by candidate_experiments"):
-        plan_repeats([cell], parameters=parameters)
+        plan_repeats(cells, parameters=parameters)
 
 
 def test_suite_buys_more_cheap_passes_and_explicitly_reports_local_solution() -> None:

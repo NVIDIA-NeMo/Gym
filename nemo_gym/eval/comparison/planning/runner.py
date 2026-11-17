@@ -55,8 +55,8 @@ def load_repeat_planning_manifest(path: Path) -> RepeatPlanningManifest:
 
 def build_repeat_planning_result(config: RepeatPlanningCLIConfig, command: str) -> RepeatPlanningResult:
     """Plan one aggregate and validate its fixed counts against simulated Welch decisions."""
-    path = Path(config.repeat_plan_fpath).resolve()
-    manifest = load_repeat_planning_manifest(path)
+    plan_path = Path(config.repeat_plan_fpath).resolve()
+    manifest = load_repeat_planning_manifest(plan_path)
     try:
         parameters = PlanningParameters(
             baseline_mode=manifest.baseline.mode,
@@ -67,7 +67,7 @@ def build_repeat_planning_result(config: RepeatPlanningCLIConfig, command: str) 
             expected_delta_points=manifest.expected_delta_points,
             max_repeats=manifest.max_repeats,
         )
-        cells = [
+        planning_cells = [
             PlanningCell(
                 model=cell.model,
                 benchmark=cell.benchmark,
@@ -82,10 +82,10 @@ def build_repeat_planning_result(config: RepeatPlanningCLIConfig, command: str) 
             )
             for cell in manifest.cells
         ]
-        allocation = plan_repeats(cells, parameters=parameters)
+        allocation = plan_repeats(planning_cells, parameters=parameters)
         simulation = (
             simulate_plan(
-                cells,
+                planning_cells,
                 allocation,
                 parameters=parameters,
                 trials=manifest.validation_trials,
@@ -95,18 +95,18 @@ def build_repeat_planning_result(config: RepeatPlanningCLIConfig, command: str) 
             else None
         )
     except (ValueError, OverflowError) as error:
-        raise ConfigError(f"Cannot plan repeats for '{path}': {error}") from error
+        raise ConfigError(f"Cannot plan repeats for '{plan_path}': {error}") from error
 
-    results = []
+    cell_results = []
     for index, cell in enumerate(manifest.cells):
-        baseline = allocation.baseline_counts[index]
-        candidate = allocation.candidate_counts[index]
-        new_baseline = allocation.additional_baseline_counts[index]
-        results.append(
+        baseline_count = allocation.baseline_counts[index]
+        candidate_count = allocation.candidate_counts[index]
+        new_baseline_count = allocation.additional_baseline_counts[index]
+        cell_results.append(
             RepeatPlanningCellResult(
                 model=cell.model,
                 benchmark=cell.benchmark,
-                weight=1 / len(cells),
+                weight=1 / len(planning_cells),
                 baseline_std_points=cell.baseline_std_points,
                 candidate_std_points=(
                     cell.baseline_std_points if cell.candidate_std_points is None else cell.candidate_std_points
@@ -114,18 +114,19 @@ def build_repeat_planning_result(config: RepeatPlanningCLIConfig, command: str) 
                 repeat_step=cell.repeat_step,
                 repeat_cost=cell.repeat_cost,
                 existing_baseline_repeats=cell.existing_baseline_repeats or 0,
-                baseline_repeats=baseline,
-                new_baseline_repeats=new_baseline,
-                candidate_repeats_per_experiment=candidate,
-                candidate_repeats_all_experiments=manifest.candidate_experiments * candidate,
-                new_repeat_cost=cell.repeat_cost * (new_baseline + manifest.candidate_experiments * candidate),
+                baseline_repeats=baseline_count,
+                new_baseline_repeats=new_baseline_count,
+                candidate_repeats_per_experiment=candidate_count,
+                candidate_repeats_all_experiments=manifest.candidate_experiments * candidate_count,
+                new_repeat_cost=cell.repeat_cost
+                * (new_baseline_count + manifest.candidate_experiments * candidate_count),
             )
         )
     totals = RepeatPlanningTotals(
-        existing_baseline_passes=sum(cell.existing_baseline_repeats for cell in results),
-        new_baseline_passes=sum(cell.new_baseline_repeats for cell in results),
-        candidate_passes_per_experiment=sum(cell.candidate_repeats_per_experiment for cell in results),
-        candidate_passes_all_experiments=sum(cell.candidate_repeats_all_experiments for cell in results),
+        existing_baseline_passes=sum(cell.existing_baseline_repeats for cell in cell_results),
+        new_baseline_passes=sum(cell.new_baseline_repeats for cell in cell_results),
+        candidate_passes_per_experiment=sum(cell.candidate_repeats_per_experiment for cell in cell_results),
+        candidate_passes_all_experiments=sum(cell.candidate_repeats_all_experiments for cell in cell_results),
         total_additional_passes=allocation.total_additional_passes,
         total_cost=allocation.total_cost,
     )
@@ -133,9 +134,9 @@ def build_repeat_planning_result(config: RepeatPlanningCLIConfig, command: str) 
         generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         nemo_gym_version=__version__,
         command=command,
-        plan_fpath=path,
+        plan_fpath=plan_path,
         settings=manifest,
-        cells=results,
+        cells=cell_results,
         allocation=allocation,
         simulation=simulation,
         totals=totals,

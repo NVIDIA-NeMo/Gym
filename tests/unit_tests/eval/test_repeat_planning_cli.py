@@ -154,14 +154,14 @@ def test_manifest_requires_a_baseline_score_sd() -> None:
 
 
 def test_manifest_enforces_cell_identity_and_aggregation_scope() -> None:
-    first = {"model": "a", "benchmark": "omni", "baseline_std_points": 1}
+    first_cell = {"model": "a", "benchmark": "omni", "baseline_std_points": 1}
     with pytest.raises(ValidationError, match="unique"):
-        RepeatPlanningManifest.model_validate(_manifest(aggregation_level="suite", cells=[first, first]))
-    second = {**first, "model": "b"}
+        RepeatPlanningManifest.model_validate(_manifest(aggregation_level="suite", cells=[first_cell, first_cell]))
+    second_cell = {**first_cell, "model": "b"}
     with pytest.raises(ValidationError, match="exactly one"):
-        RepeatPlanningManifest.model_validate(_manifest(cells=[first, second]))
+        RepeatPlanningManifest.model_validate(_manifest(cells=[first_cell, second_cell]))
     with pytest.raises(ValidationError, match="same model"):
-        RepeatPlanningManifest.model_validate(_manifest(aggregation_level="model", cells=[first, second]))
+        RepeatPlanningManifest.model_validate(_manifest(aggregation_level="model", cells=[first_cell, second_cell]))
 
 
 def test_real_cli_plans_score_sds_and_preserves_full_precision(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -265,14 +265,14 @@ def test_cli_measured_score_sds_match_gym_on_orthogonal_metric_observations(tmp_
     def observations(count: int, first_std: float, second_std: float) -> list[list[float]]:
         # Centered vectors (a,-a,0,...) and (b,b,-2b,0,...) have zero dot
         # product. Their exact sample SDs are the supplied normalized SDs.
-        first = first_std / 100 * math.sqrt((count - 1) / 2)
-        second = second_std / 100 * math.sqrt((count - 1) / 6)
+        first_amplitude = first_std / 100 * math.sqrt((count - 1) / 2)
+        second_amplitude = second_std / 100 * math.sqrt((count - 1) / 6)
         rows = [[0.5, 0.5] for _ in range(count)]
-        rows[0][0] += first
-        rows[1][0] -= first
-        rows[0][1] += second
-        rows[1][1] += second
-        rows[2][1] -= 2 * second
+        rows[0][0] += first_amplitude
+        rows[1][0] -= first_amplitude
+        rows[0][1] += second_amplitude
+        rows[1][1] += second_amplitude
+        rows[2][1] -= 2 * second_amplitude
         return rows
 
     scales = [MetricScale(0, 1), MetricScale(0, 1)]
@@ -284,13 +284,13 @@ def test_cli_measured_score_sds_match_gym_on_orthogonal_metric_observations(tmp_
     )
     assert baseline.sample_variance == pytest.approx(5.0)
     assert candidate.sample_variance == pytest.approx(6.25)
-    gym = aggregate_welch([BenchmarkSamples(baseline, candidate)], confidence_level=0.9)
-    assert gym.variance == pytest.approx(5 / baseline.count + 6.25 / candidate.count)
-    assert gym.delta == pytest.approx(0, abs=1e-12)
-    assert result.allocation.statistics.variance == pytest.approx(gym.variance)
-    assert result.allocation.statistics.standard_error == pytest.approx(gym.standard_error)
-    assert result.allocation.statistics.degrees_of_freedom == pytest.approx(gym.degrees_of_freedom)
-    assert result.allocation.statistics.half_width == pytest.approx(gym.ci_high)
+    comparison_statistics = aggregate_welch([BenchmarkSamples(baseline, candidate)], confidence_level=0.9)
+    assert comparison_statistics.variance == pytest.approx(5 / baseline.count + 6.25 / candidate.count)
+    assert comparison_statistics.delta == pytest.approx(0, abs=1e-12)
+    assert result.allocation.statistics.variance == pytest.approx(comparison_statistics.variance)
+    assert result.allocation.statistics.standard_error == pytest.approx(comparison_statistics.standard_error)
+    assert result.allocation.statistics.degrees_of_freedom == pytest.approx(comparison_statistics.degrees_of_freedom)
+    assert result.allocation.statistics.half_width == pytest.approx(comparison_statistics.ci_high)
 
 
 @pytest.mark.parametrize("level", ["model", "suite"])
@@ -313,19 +313,19 @@ def test_real_cli_keeps_equal_benchmark_weights_with_different_score_sds(
         ),
     )
     result = _run_cli(plan, tmp_path / "reports", monkeypatch)
-    first, second = result.cells
+    first_cell, second_cell = result.cells
     assert [cell.weight for cell in result.cells] == [0.5, 0.5]
     expected_variance = 0.25 * (
-        4 / first.baseline_repeats
-        + 4 / first.candidate_repeats_per_experiment
-        + 2 / second.baseline_repeats
-        + 2 / second.candidate_repeats_per_experiment
+        4 / first_cell.baseline_repeats
+        + 4 / first_cell.candidate_repeats_per_experiment
+        + 2 / second_cell.baseline_repeats
+        + 2 / second_cell.candidate_repeats_per_experiment
     )
     assert result.allocation.statistics.variance == pytest.approx(expected_variance)
     assert result.totals.total_cost == (
-        first.new_baseline_repeats
-        + first.candidate_repeats_per_experiment
-        + 3 * (second.new_baseline_repeats + second.candidate_repeats_per_experiment)
+        first_cell.new_baseline_repeats
+        + first_cell.candidate_repeats_per_experiment
+        + 3 * (second_cell.new_baseline_repeats + second_cell.candidate_repeats_per_experiment)
     )
     assert result.settings.aggregation_level == level
     assert result.allocation.statistics.power >= result.settings.target_power
@@ -391,34 +391,36 @@ def test_cli_measured_score_sds_match_gym_for_related_metric_observations(
         ),
     )
     result = _run_cli(plan, tmp_path / "reports", monkeypatch)
-    control, measured = result.cells
-    assert measured.baseline_std_points**2 == measured.candidate_std_points**2 == composite_variance
+    control_cell, composite_cell = result.cells
+    assert composite_cell.baseline_std_points**2 == composite_cell.candidate_std_points**2 == composite_variance
     assert [cell.weight for cell in result.cells] == [0.5, 0.5]
 
-    def observations(count: int, std: float, sign: int) -> list[list[float]]:
-        distance = std * math.sqrt((count - 1) / 2)
+    def observations(count: int, standard_deviation: float, sign: int) -> list[list[float]]:
+        distance = standard_deviation * math.sqrt((count - 1) / 2)
         rows = [[50.0, 50.0] for _ in range(count)]
         rows[0] = [50 - distance, 50 - sign * distance]
         rows[1] = [50 + distance, 50 + sign * distance]
         return rows
 
     samples = []
-    for cell, std, sign in ((control, 1.0, 1), (measured, 2.0, second_sign)):
+    for cell, standard_deviation, sign in ((control_cell, 1.0, 1), (composite_cell, 2.0, second_sign)):
         baseline = summarize_sample(
-            normalize_and_average_metrics_per_repeat(observations(cell.baseline_repeats, std, sign), scales)
+            normalize_and_average_metrics_per_repeat(
+                observations(cell.baseline_repeats, standard_deviation, sign), scales
+            )
         )
         candidate = summarize_sample(
             normalize_and_average_metrics_per_repeat(
-                observations(cell.candidate_repeats_per_experiment, std, sign), scales
+                observations(cell.candidate_repeats_per_experiment, standard_deviation, sign), scales
             )
         )
         samples.append(BenchmarkSamples(baseline, candidate))
-    gym = aggregate_welch(samples, confidence_level=0.9)
+    comparison_statistics = aggregate_welch(samples, confidence_level=0.9)
     statistics = result.allocation.statistics
-    assert statistics.variance == pytest.approx(gym.variance)
-    assert statistics.standard_error == pytest.approx(gym.standard_error)
-    assert statistics.degrees_of_freedom == pytest.approx(gym.degrees_of_freedom)
-    assert statistics.half_width == pytest.approx(gym.ci_high)
+    assert statistics.variance == pytest.approx(comparison_statistics.variance)
+    assert statistics.standard_error == pytest.approx(comparison_statistics.standard_error)
+    assert statistics.degrees_of_freedom == pytest.approx(comparison_statistics.degrees_of_freedom)
+    assert statistics.half_width == pytest.approx(comparison_statistics.ci_high)
 
 
 def test_cli_rejects_an_entirely_constant_score(tmp_path: Path, monkeypatch, capsys) -> None:
