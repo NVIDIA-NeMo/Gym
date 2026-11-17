@@ -313,9 +313,11 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
             "with response.created and then sends response.in_progress every this many seconds; the item and "
             "terminal events that follow are unchanged. These events name the response before it exists, so "
             "the response the stream serves (and capture records) takes the id they announced; servers whose "
-            "response ids come from an upstream Responses API refuse the setting at startup. A call that fails "
-            "after the stream opened ends with response.failed instead of an HTTP error status. Off (null) by "
-            "default, which sends nothing until the response is complete."
+            "response ids come from an upstream Responses API refuse the setting at startup. openai_model and "
+            "its subclasses accept it for requests that send store: false, because the upstream does not store "
+            "such a response under its id; their other requests stay buffered under the upstream's id. A call "
+            "that fails after the stream opened ends with response.failed instead of an HTTP error status. Off "
+            "(null) by default, which sends nothing until the response is complete."
         ),
     )
     custom_tool_strategy: CustomToolStrategy = Field(
@@ -385,12 +387,28 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         A keepalive stream (``stream_keepalive_s``) names its response before ``responses()`` returns,
         so that response takes the announced id. An id an upstream Responses API issued must reach the
-        client unchanged, so a server that serves those cannot keep a stream alive.
+        client unchanged, so a server that serves those keeps a stream alive only for the requests
+        ``_renames_unstored_responses`` covers.
+        """
+        return False
+
+    def _renames_unstored_responses(self) -> bool:
+        """Whether a keepalive stream may replace the upstream id of a response to a ``store: false`` request.
+
+        A Responses API does not store a response it created with ``store: false``: no later HTTP
+        request can retrieve that response or name it as ``previous_response_id``. A server whose
+        ``responses()`` sends the request's ``store`` to its upstream unchanged can therefore serve that
+        response under the id its keepalive stream announced. Its other streaming requests stay
+        buffered and keep the upstream's id.
         """
         return False
 
     def setup_webserver(self) -> FastAPI:
-        if self.config.stream_keepalive_s is not None and not self._mints_response_ids():
+        if (
+            self.config.stream_keepalive_s is not None
+            and not self._mints_response_ids()
+            and not self._renames_unstored_responses()
+        ):
             raise ValueError(
                 f"stream_keepalive_s is not supported on {type(self).__name__}: its responses carry the ids "
                 "an upstream Responses API issued, which a keepalive stream cannot announce before they exist"
@@ -616,7 +634,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     ) -> StreamingResponse:
         """Serve the same converted response to capture and Responses SSE clients."""
         keepalive_s = self.config.stream_keepalive_s
-        if keepalive_s is None:
+        # An upstream's id is replaced only for a response the upstream does not store.
+        announces_id = self._mints_response_ids() or (self._renames_unstored_responses() and params.store is False)
+        if keepalive_s is None or not announces_id:
             return await self._stream_buffered_responses(request, self._invoke_responses(request, params), ns_map)
 
         # Keepalive events name the response before it exists, so the response takes this id.

@@ -263,6 +263,10 @@ class SimpleModelServer(SimpleResponsesAPIModel):
         # OpenAI and subclasses such as LiteLLM retain their opt-in HTTP policy.
         return error.status in self.config.propagate_upstream_http_status_codes
 
+    def _renames_unstored_responses(self) -> bool:
+        # responses() sends the request's `store` upstream: the request's value overrides extra_body.
+        return True
+
     def model_post_init(self, context):
         self._client = NeMoGymAsyncOpenAI(
             base_url=self.config.openai_base_url,
