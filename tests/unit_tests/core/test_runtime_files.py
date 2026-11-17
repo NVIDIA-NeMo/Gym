@@ -255,8 +255,51 @@ class TestRequestTempDir:
             (path / "cache" / "module" / "file.go").write_text("x")
             os.chmod(path / "cache" / "module", 0o500)
             os.chmod(path / "cache", 0o500)
+            # A folder with no permissions at all cannot even be listed until it is made readable.
+            (path / "locked").mkdir()
+            (path / "locked" / "file").write_text("x")
+            os.chmod(path / "locked", 0)
 
         assert not path.exists()
+
+    def test_an_entry_that_cannot_be_removed_leaves_the_rest_removed(
+        self, set_global_config, tmp_path: Path, monkeypatch, caplog
+    ) -> None:
+        # Such as a file a container wrote as root into a bind mount: everything else must still go.
+        set_global_config({"temp_dir": str(tmp_path)})
+        unlink = os.unlink
+
+        def refuse_stuck(path, *args, **kwargs):
+            if os.path.basename(path) == "stuck":
+                raise PermissionError(1, "Operation not permitted", path)
+            return unlink(path, *args, **kwargs)
+
+        with caplog.at_level("WARNING"):
+            with request_temp_dir("workspace") as path:
+                for name in ("a", "stuck", "z"):
+                    (path / name).mkdir()
+                    (path / name / "file").write_text("x")
+                (path / "stuck" / "file").rename(path / "stuck" / "stuck")
+                monkeypatch.setattr(os, "unlink", refuse_stuck)
+            monkeypatch.setattr(os, "unlink", unlink)
+
+        assert sorted(p.name for p in path.iterdir()) == ["stuck"]
+        assert list((path / "stuck").iterdir()) == [path / "stuck" / "stuck"]
+        assert "Could not remove" in caplog.text
+
+    def test_an_unexpected_error_while_removing_never_replaces_the_requests_own(
+        self, set_global_config, tmp_path: Path, monkeypatch
+    ) -> None:
+        # A very deep tree makes shutil.rmtree raise RecursionError.
+        set_global_config({"temp_dir": str(tmp_path)})
+
+        def deep(path, *args, **kwargs):
+            raise RecursionError("maximum recursion depth exceeded")
+
+        with pytest.raises(RuntimeError, match="the request's own"):
+            with request_temp_dir("workspace"):
+                monkeypatch.setattr(shutil, "rmtree", deep)
+                raise RuntimeError("the request's own error")
 
     def test_a_stale_folder_with_this_process_name_is_cleared_before_use(
         self, set_global_config, tmp_path: Path
@@ -485,6 +528,9 @@ class TestSessionTempDir:
 
         assert elsewhere.exists() and session.exists() and process.exists() and other.exists()
         assert "is not a temporary folder this process created" in caplog.text
+        # Warned once in all, so a stream of wrong paths does not grow what the process remembers.
+        assert caplog.text.count("is not a temporary folder") == 1
+        assert len(runtime_files._warned) == 1
 
 
 class TestProcessTempDir:
@@ -521,6 +567,23 @@ class TestProcessTempDir:
 
         assert process_temp_dir("image-cache") == first
         assert first.is_dir()
+
+    @pytest.mark.parametrize("removed", ["process folder", "temp_dir"])
+    def test_a_late_recovery_keeps_what_another_thread_made_again(
+        self, set_global_config, tmp_path: Path, removed: str
+    ) -> None:
+        # Two threads hit the same outside removal; one makes the folders again before the other recovers.
+        set_global_config({"temp_dir": str(tmp_path / "temp")})
+        session = session_temp_dir("session")
+        shutil.rmtree(session.parent if removed == "process folder" else tmp_path / "temp")
+        again = session_temp_dir("session")
+        (again / "state.json").write_text("{}")
+
+        runtime_files._forget(tmp_path / "temp")
+        late = session_temp_dir("session")
+
+        assert (again / "state.json").exists()
+        assert late.parent == again.parent
 
 
 class TestProcessLifetime:
@@ -576,6 +639,7 @@ _CHILD = textwrap.dedent(
     pid = os.fork()
     if pid == 0:
         ok = rf._first_use_lock.acquire(blocking=False) and rf._save_executor is not parent_executor
+        ok = ok and not rf._checked_temp_parents and not rf._process_dirs and rf._default_temp_dir is None
         rf._first_use_lock.release()
         child = rf.session_temp_dir("child", temp_dir=temp_dir)
         ok = ok and child.parent != session.parent and not rf.remove_temp_dir(session)
@@ -715,22 +779,74 @@ class TestSaveDir:
         assert caplog.text.count("No results_dir") == 1
 
     async def test_a_failed_copy_returns_none_and_leaves_no_partial_folder(
-        self, set_global_config, tmp_path: Path, monkeypatch
+        self, set_global_config, tmp_path: Path, monkeypatch, caplog
     ) -> None:
         set_global_config({"results_dir": str(tmp_path / "results")})
         copied = []
-        copyfile = shutil.copyfile
+        copyfileobj = shutil.copyfileobj
 
         def fail_second_copy(*args, **kwargs):
             if copied:
                 raise OSError(28, "No space left on device")
-            copied.append(copyfile(*args, **kwargs))
+            copied.append(copyfileobj(*args, **kwargs))
 
-        monkeypatch.setattr(shutil, "copyfile", fail_second_copy)
-        kept = await save_dir(self._logs(tmp_path), server_name="swebench", name="verification")
+        monkeypatch.setattr(shutil, "copyfileobj", fail_second_copy)
+        with caplog.at_level("WARNING"):
+            kept = await save_dir(self._logs(tmp_path), server_name="swebench", name="verification")
 
         assert kept is None and copied
         assert not any((tmp_path / "results" / "swebench" / "verification" / "no-rollout").iterdir())
+        assert caplog.text.count("Could not keep") == 1
+
+    async def test_a_copy_that_fails_after_its_request_is_cancelled_is_logged(
+        self, set_global_config, tmp_path: Path, monkeypatch, caplog
+    ) -> None:
+        # The cancelled request no longer receives the copy's error, so the copy itself must report it.
+        set_global_config({"results_dir": str(tmp_path / "results")})
+        started, release = threading.Event(), threading.Event()
+
+        def slow_failing_copy(*args, **kwargs):
+            started.set()
+            release.wait(5)
+            raise OSError(2, "No such file or directory")
+
+        monkeypatch.setattr(shutil, "copyfileobj", slow_failing_copy)
+        with caplog.at_level("WARNING"):
+            save = asyncio.create_task(save_dir(self._logs(tmp_path), server_name="swebench", name="verification"))
+            await asyncio.to_thread(started.wait, 5)
+            save.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await save
+            release.set()
+            for _ in range(200):
+                if "Could not keep" in caplog.text:
+                    break
+                await asyncio.sleep(0.01)
+
+        assert "Could not keep" in caplog.text
+
+    @NOT_ROOT
+    async def test_what_cannot_be_read_is_skipped_and_the_rest_kept(
+        self, set_global_config, tmp_path: Path, caplog
+    ) -> None:
+        set_global_config({"results_dir": str(tmp_path / "results")})
+        logs = self._logs(tmp_path)
+        (logs / "unreadable.log").write_text("x")
+        os.chmod(logs / "unreadable.log", 0)
+        (logs / "locked").mkdir()
+        os.chmod(logs / "locked", 0)
+
+        try:
+            with caplog.at_level("WARNING"):
+                kept = await save_dir(logs, server_name="swebench", name="verification")
+        finally:
+            os.chmod(logs / "locked", 0o700)
+
+        assert kept is not None
+        assert (kept / "report.json").read_text() == "{}"
+        assert (kept / "sub" / "test_output.txt").read_text() == "ok"
+        assert not (kept / "unreadable.log").exists()
+        assert "without 2 entries it could not read" in caplog.text
 
     async def test_a_failed_request_keeps_its_files_from_a_finally(self, set_global_config, tmp_path: Path) -> None:
         set_global_config({"results_dir": str(tmp_path / "results"), "temp_dir": str(tmp_path / "temp")})

@@ -126,16 +126,19 @@ def _remove_tree(path: str | Path) -> bool:
     """Remove ``path`` and everything in it; return whether it is gone. Never raises.
 
     A folder this process cannot write into, such as a read-only module cache a tool left behind, is made writable
-    and removed too. What cannot be removed is logged.
+    and removed too. An entry that still cannot be removed, such as a file another user owns, is skipped, so the
+    rest of the tree is removed; what is left is logged once.
     """
     path = os.fspath(path)
     retried: set[str] = set()
+    left: list[str] = []
 
     def on_error(func: Callable[..., object], failed: str, error: BaseException) -> None:
         if isinstance(error, FileNotFoundError):
             return
         if not isinstance(error, PermissionError) or failed in retried:
-            raise error
+            left.append(failed)
+            return
         retried.add(failed)
         if failed != path:
             _make_writable(os.path.dirname(failed))
@@ -147,13 +150,19 @@ def _remove_tree(path: str | Path) -> bool:
             shutil.rmtree(failed, onexc=on_error)
         except FileNotFoundError:
             pass
+        except OSError:
+            left.append(failed)
 
     try:
         shutil.rmtree(path, onexc=on_error)
     except FileNotFoundError:
         return True
-    except OSError:
+    except Exception:
+        # Such as a RecursionError from a very deep tree; the caller's own work must not fail with it.
         logger.warning("Could not remove %s", path, exc_info=True)
+        return not os.path.lexists(path)
+    if left:
+        logger.warning("Could not remove %d entries under %s, such as %s", len(left), path, left[0])
     return not os.path.lexists(path)
 
 
@@ -281,7 +290,7 @@ def _temp_parent(temp_dir: str | Path | None) -> Path:
     elif configured := (maybe_get_global_config_dict() or {}).get(TEMP_DIR_KEY_NAME):
         parent, source = Path(configured), "the temp_dir setting"
     else:
-        parent, source = None, "the default temp_dir"
+        parent, source = _default_temp_dir, "the default temp_dir"
     if parent is not None and parent in _checked_temp_parents:
         return parent
     with _first_use_lock:
@@ -308,13 +317,20 @@ def _temp_parent(temp_dir: str | Path | None) -> Path:
 
 
 def _forget(parent: Path) -> None:
-    """Drop what this process knows about ``parent`` after something outside removed it, so it is checked again."""
+    """Drop what this process knows about ``parent`` after something outside removed it, so it is checked again.
+
+    Only what is really gone is dropped: another thread that hit the same removal may already have made the folders
+    again, and its new process folder must not count as a dead process's leftover.
+    """
     global _default_temp_dir
     with _first_use_lock:
-        _checked_temp_parents.discard(parent)
-        _process_dirs.pop(parent, None)
-        if parent == _default_temp_dir:
-            _default_temp_dir = None
+        if not parent.is_dir():
+            _checked_temp_parents.discard(parent)
+            if parent == _default_temp_dir:
+                _default_temp_dir = None
+        folder = _process_dirs.get(parent)
+        if folder is not None and not folder.is_dir():
+            del _process_dirs[parent]
 
 
 def _in_process_dir(temp_dir: str | Path | None, make: Callable[[Path], _T]) -> _T:
@@ -408,7 +424,7 @@ def remove_temp_dir(path: Path) -> bool:
     # Normalized first: pathlib keeps "..", so "<process folder>/.." would otherwise pass as a folder in it.
     path = Path(os.path.normpath(path))
     if not path.is_absolute() or path.parent not in _process_dirs.values() or path.name.startswith("process."):
-        _warn_once(f"refuse:{path}", "Not removing %s: it is not a temporary folder this process created.", path)
+        _warn_once("refuse", "Not removing %s: it is not a temporary folder this process created.", path)
         return False
     return _remove_tree(path)
 
@@ -468,27 +484,41 @@ def _copy_dir(src: Path, dest: Path) -> Path:
     Folders are created afresh, so they take the user's usual permissions rather than the temporary folder's
     private ones, and files are copied by content: no permission, time or extended-attribute copies, each a metadata
     operation on the shared storage ``dest`` is usually on. Symlinks are copied as symlinks, and sockets, pipes and
-    other special files are skipped. A failed copy removes what it copied.
+    other special files are skipped. An entry that cannot be read is skipped, so the rest is kept; a failure to
+    write fails the copy, which removes what it copied.
     """
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.mkdir()
+    unread: list[str] = []
     try:
-        for root, dirs, files in os.walk(src):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.mkdir()
+        for root, dirs, files in os.walk(src, onerror=lambda error: unread.append(str(error.filename))):
             target = dest / os.path.relpath(root, src)
             for entry in [*dirs, *files]:
                 source = os.path.join(root, entry)
-                mode = os.lstat(source).st_mode
-                if stat.S_ISLNK(mode):
-                    os.symlink(os.readlink(source), target / entry)
+                try:
+                    mode = os.lstat(source).st_mode
+                    link = os.readlink(source) if stat.S_ISLNK(mode) else None
+                    reader = open(source, "rb") if stat.S_ISREG(mode) else None
+                except OSError:
+                    unread.append(source)
+                    continue
+                if link is not None:
+                    os.symlink(link, target / entry)
+                elif reader is not None:
+                    # One create on the destination, with no stat of it, unlike shutil.copyfile.
+                    with reader, open(target / entry, "xb") as writer:
+                        shutil.copyfileobj(reader, writer)
                 elif stat.S_ISDIR(mode):
                     (target / entry).mkdir()
-                elif stat.S_ISREG(mode):
-                    shutil.copyfile(source, target / entry)
                 else:
                     logger.debug("Not keeping %s: it is not a regular file, a folder or a symlink.", source)
     except BaseException:
+        # Logged here, since a cancelled caller no longer receives the error.
+        logger.warning("Could not keep %s at %s", src, dest, exc_info=True)
         _remove_tree(dest)
         raise
+    if unread:
+        logger.warning("Kept %s without %d entries it could not read, such as %s", src, len(unread), unread[0])
     return dest
 
 
@@ -508,11 +538,12 @@ async def save_dir(
     ``no-rollout`` outside one.
     Copies run on a few threads of their own, so a burst of them never holds up the server's other work.
 
-    It never fails the request: a failed copy is logged and returns ``None``.
+    It never fails the request: a failed copy is logged, its partial folder removed, and it returns ``None``.
+    An entry it cannot read is skipped and logged, and the rest is kept.
     It also returns ``None`` without copying when ``output_dir`` is relative, when no ``results_dir`` is set, and
     while the calling task is being cancelled, so shutdown stays fast: it skips copies that have not started.
     Call it in a ``finally`` so a failed request's files are kept too, and outside any ``asyncio.timeout`` block:
-    inside one, the task counts as being cancelled and nothing is kept.
+    inside one that has expired, the task counts as being cancelled and nothing is kept.
     """
     _check_name(name)
     task = asyncio.current_task()
@@ -527,5 +558,5 @@ async def save_dir(
     except asyncio.CancelledError:
         raise
     except Exception:
-        logger.warning("Could not keep %s at %s", src, dest, exc_info=True)
+        # _copy_dir has logged it.
         return None
