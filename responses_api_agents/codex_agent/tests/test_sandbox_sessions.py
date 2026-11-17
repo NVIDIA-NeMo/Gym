@@ -126,6 +126,31 @@ def test_a_task_without_skills_copies_nothing(setup, context):
     assert not any(" cp -R -- " in call.args[0] for call in sandbox.exec.await_args_list)
 
 
+def test_an_owned_sandbox_reads_no_task_context(setup):
+    """A sandbox the agent creates is not a task sandbox: a ``task.json`` left in it names skills the task never
+    declared, so the seed must not read it or copy from it."""
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image", "workdir": "/agent-workspace"}
+    sandbox.expected_workdir = "/agent-workspace"
+    sandbox.start = AsyncMock()
+    hold_task_context(sandbox, json.dumps({"mcp_servers": [], "skills_dir": "/workspace/skills"}))
+    body = seed()
+    body.sandbox_access = None
+    module = "responses_api_agents.codex_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox", return_value=sandbox),
+        patch(f"{module}.resolve_provider_config"),
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        created = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        assert agent._session_records[body.agent_session_id].state.session.owns_sandbox is True
+        commands = [call.args[0] for call in sandbox.exec.await_args_list]
+        assert not any("task.json" in command or " cp -R -- " in command for command in commands)
+        client.post("/v1/agent_sessions/close", json=close_body(body.agent_session_id)).raise_for_status()
+
+
 def test_skills_that_cannot_be_staged_refuse_the_seed_and_release_the_sandbox(setup):
     agent, sandbox = setup
     hold_task_context(sandbox, json.dumps({"skills_dir": "/workspace/skills"}), copy_code=2)

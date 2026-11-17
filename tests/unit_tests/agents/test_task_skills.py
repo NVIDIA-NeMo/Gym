@@ -69,6 +69,25 @@ async def test_paths_with_spaces_and_shell_characters_are_copied_as_written(loca
     assert not (local_sandbox.root / "pwned").exists()
 
 
+async def test_a_declared_folder_that_holds_no_skills_is_copied_all_the_same(local_sandbox) -> None:
+    """The baseline arm of a skills comparison declares ``skills_dir`` over a folder with no skills in it: the task
+    still counts as one that declares skills, so the harness sets up the same discovery folder for both arms."""
+    source = local_sandbox.root / "skills"
+    source.mkdir()
+    (source / "README.md").write_text("Reference notes, not a skill.\n")
+    local_sandbox.context.write_text(json.dumps({"mcp_servers": [], "skills_dir": str(source)}))
+    destination = local_sandbox.root / "config" / "skills"
+
+    assert await stage_task_skills(local_sandbox.sandbox, str(destination)) == str(source)
+    assert [entry.name for entry in destination.iterdir()] == ["README.md"]
+
+    (source / "README.md").unlink()
+    emptied = local_sandbox.root / "config-2" / "skills"
+
+    assert await stage_task_skills(local_sandbox.sandbox, str(emptied)) == str(source)
+    assert emptied.is_dir() and list(emptied.iterdir()) == []
+
+
 @pytest.mark.parametrize(
     "context",
     [
