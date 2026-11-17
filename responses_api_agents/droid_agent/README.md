@@ -82,15 +82,21 @@ binary into `/tmp/nemo-gym-droid-runtime-<version>`, checks that it reports the 
 records the binary's SHA-256. Later seeds in the same sandbox reuse a runtime whose binary is
 unchanged. A lock serializes concurrent installers. The sandbox needs no network for installation.
 
-The task image needs bash, `ps` (procps), coreutils (`sha256sum`, `timeout`), `tar` and `gzip`, and
-glibc: Droid publishes no musl build, so an image with musl and no glibc, such as Alpine, is refused at
-seed. A glibc image that also carries musl's loader is served. A root image without bash or `ps` gets
-them from `apt-get` at seed; any other image without them is refused at seed. Without `ps`, Droid
-reports most foreground `Execute` calls as `Error: Command terminated by signal: SIGKILL`, even ones
-that finished, and slim images such as `python:3.13-slim` ship without procps. The image needs no
-Python or Node.
-Installation needs about 500 MB free under `/tmp` (the package and the unpacked binary), and the
-installed runtime keeps about 325 MB.
+The task image needs bash, coreutils (`sha256sum`, `timeout`), `tar` and `gzip`, and glibc: Droid
+publishes no musl build, so an image with musl and no glibc, such as Alpine, is refused at seed. A
+glibc image that also carries musl's loader is served. A root image without bash gets it
+from `apt-get`; any other image without bash is refused at seed. The image needs no Python or Node.
+With Droid 1.1.0, installation needs about 500 MB free under `/tmp` (the package and the unpacked
+binary), and the installed runtime keeps about 325 MB. Droid 1.12.1 needs about 30 MB more to
+install, and its runtime keeps about 345 MB.
+
+The image needs no `ps`. Droid runs `ps -o ppid= -p <pid>` once per `Execute` call, and without an
+answer it reports most foreground calls as `Error: Command terminated by signal: SIGKILL`, even
+ones that finished. Slim images such as `python:3.13-slim` ship without procps, so the installer
+writes a `ps` that answers this one call from `/proc` into the runtime's `fallback-bin` directory,
+and the adapter appends that directory to Droid's `PATH`. The image's own `ps` is used when it has
+one. In an image without one, the model's shell commands find this `ps` too: it fails any other
+call with a message that the image has no procps. Nothing is installed into the task image.
 
 ## Requests and settings
 
@@ -203,6 +209,8 @@ tool call started a subagent (its own transcript stays in Droid's private sessio
 
 ## Limits
 
+- The fallback `ps` answers the one call Droid 1.1.0 and 1.12.1 make. When you add a Droid version,
+  check a smoke run on an image without procps for `Execute` results that report SIGKILL.
 - Droid is distributed under Factory's proprietary terms (`UNLICENSED` on npm). The adapter
   downloads the published binary at seed; it vendors nothing.
 - Glibc Linux sandboxes only (x86-64 or arm64).

@@ -80,19 +80,14 @@ LOG = logging.getLogger(__name__)
 DEFAULT_DROID_VERSION = "1.1.0"
 # The bootstrap's exit status for an image Droid cannot run in, which seed refuses as final.
 _UNSERVABLE_IMAGE = 78
-# Bootstrap with POSIX sh; the runtime installer, the harness runner and the supervisor require Bash. Droid also
-# requires ps: without it, Droid reports most foreground Execute calls as killed by SIGKILL, even ones that finished.
-# Slim images (python:*-slim and other Debian slim bases) ship without procps. There is no apk branch: Droid has no
-# musl build, so an Alpine image is refused either way, before anything is installed into it.
-_SANDBOX_BOOTSTRAP = f"""missing=""
-command -v bash >/dev/null 2>&1 || missing="bash"
-command -v ps >/dev/null 2>&1 || missing="$missing procps"
-if [ -n "$missing" ]; then
-    [ "$(id -u)" = 0 ] || {{ echo "Droid sandbox sessions require bash and ps (procps): preinstall$missing or use a root image." >&2; exit {_UNSERVABLE_IMAGE}; }}
+# Bootstrap with POSIX sh; the runtime installer, the harness runner and the supervisor require Bash. There is no
+# apk branch: Droid has no musl build, so an Alpine image is refused either way, before bash is installed into it.
+_BASH_BOOTSTRAP = f"""if ! command -v bash >/dev/null 2>&1; then
+    [ "$(id -u)" = 0 ] || {{ echo "Droid sandbox sessions require bash: preinstall it or use a root image." >&2; exit {_UNSERVABLE_IMAGE}; }}
     if command -v apt-get >/dev/null 2>&1; then
-        apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $missing || exit 1
+        apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash || exit 1
     else
-        echo "Droid sandbox sessions require bash and ps (procps): preinstall$missing (automatic installation requires apt-get)." >&2
+        echo "Droid sandbox sessions require bash: preinstall it (automatic installation requires apt-get)." >&2
         exit {_UNSERVABLE_IMAGE}
     fi
 fi
@@ -259,7 +254,7 @@ class DroidAgent(SimpleResponsesAPIAgent):
                     await sandbox.start(spec)
                     self._check_setup(await sandbox.exec(f"mkdir -p -- {quote(workdir)}", cwd="/", timeout_s=30))
                 prepared = await sandbox.exec(
-                    _SANDBOX_BOOTSTRAP + f"test -d {quote(workdir)} && umask 077 && mkdir -p {quote(directory)}/home",
+                    _BASH_BOOTSTRAP + f"test -d {quote(workdir)} && umask 077 && mkdir -p {quote(directory)}/home",
                     cwd="/",
                     timeout_s=self.config.sandbox_install_timeout_seconds,
                 )

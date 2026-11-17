@@ -606,6 +606,8 @@ async def test_stage_and_collect_use_session_files(monkeypatch):
     assert command.argv == ["bash", "/s/harness_runner.sh", "/s/params.sh"]
     assert set(uploads) == {"/s/settings.json", "/s/prompt.txt", "/s/params.sh"}
     assert "/s/events.jsonl" in uploads["/s/params.sh"]
+    # The runtime's fallback ps goes last on Droid's PATH, behind any ps the image has.
+    assert "setup='export PATH=\"${PATH:+$PATH:}\"/r/fallback-bin'\n" in uploads["/s/params.sh"]
     artifacts = await session.collect_artifacts()
     assert artifacts.events == files["/s/events.jsonl"] and len(artifacts.stderr) == 16000
     assert session.runtime_info.pid == 7
@@ -619,13 +621,15 @@ def test_droid_keeps_the_task_home_while_its_state_moves_to_the_session(tmp_path
     (runtime / "droid").write_text(
         "#!/usr/bin/env bash\n"
         'mkdir -p "$FACTORY_HOME_OVERRIDE/.factory/sessions"\n'
-        'printf \'{"type":"tool_result","id":"c1","value":"%s %s %s %s"}\\n\' "$HOME" "$PWD" "$FACTORY_AIRGAP_ENABLED" "$*"\n'
+        'printf \'{"type":"tool_result","id":"c1","value":"%s %s %s %s %s"}\\n\' '
+        '"$HOME" "$PWD" "$FACTORY_AIRGAP_ENABLED" "$*" "$PATH"\n'
     )
     (runtime / "droid").chmod(0o755)
     session_dir, workdir, home = tmp_path / "session", tmp_path / "app", tmp_path / "task-home"
     for directory in (session_dir, workdir, home):
         directory.mkdir()
     params = {
+        "setup": f'export PATH="${{PATH:+$PATH:}}"{runtime}/fallback-bin',
         "cwd": str(workdir),
         "command": [str(runtime / "droid"), "exec", "--file", f"{session_dir}/prompt.txt"],
         "env": {"FACTORY_HOME_OVERRIDE": f"{session_dir}/home", "FACTORY_AIRGAP_ENABLED": "1"},
@@ -641,7 +645,8 @@ def test_droid_keeps_the_task_home_while_its_state_moves_to_the_session(tmp_path
     )
     assert finished.returncode == 0
     [event] = map(json.loads, Path(session_dir, "events.jsonl").read_text().splitlines())
-    assert event["value"] == f"{home} {workdir} 1 exec --file {session_dir}/prompt.txt"
+    path = f"{os.environ['PATH']}:{runtime}/fallback-bin"
+    assert event["value"] == f"{home} {workdir} 1 exec --file {session_dir}/prompt.txt {path}"
     assert not list(home.iterdir()) and not list(workdir.iterdir())
     assert (session_dir / "home" / ".factory" / "sessions").is_dir()
 
@@ -734,48 +739,6 @@ def test_sandbox_droid_cannot_run_in_is_refused_as_final(monkeypatch, probe, boo
     assert reason in check_agent_seed_rejected(instance.setup_webserver(), seed())
     download.assert_not_awaited()
     assert not instance._session_records
-
-
-@pytest.mark.skipif(not Path("/bin/sh").is_file(), reason="needs /bin/sh")
-@pytest.mark.parametrize(
-    "present,uid,apt,status,installed,message",
-    [
-        (("bash", "ps"), 0, True, 0, None, ""),
-        # Droid reports foreground Execute calls as SIGKILLed without ps, so a slim image gets procps.
-        (("bash",), 0, True, 0, "procps", ""),
-        ((), 0, True, 0, "bash procps", ""),
-        (("bash",), 1000, True, 78, None, "preinstall procps or use a root image"),
-        (("bash",), 0, False, 78, None, "preinstall procps (automatic installation requires apt-get)"),
-    ],
-)
-def test_bootstrap_installs_the_tools_droid_needs(tmp_path, present, uid, apt, status, installed, message):
-    tools = tmp_path / "bin"
-    tools.mkdir()
-    log = tmp_path / "apt.log"
-
-    def stub(name: str, body: str) -> None:
-        path = tools / name
-        path.write_text(f"#!/bin/sh\n{body}\n")
-        path.chmod(0o755)
-
-    stub("id", f"echo {uid}")
-    for name in present:
-        stub(name, "exit 0")
-    if apt:
-        stub("apt-get", f'[ "$1" = update ] || echo "$@" >> {log}')
-    done = subprocess.run(
-        ["/bin/sh", "-c", app._SANDBOX_BOOTSTRAP],
-        env={"PATH": str(tools)},
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert done.returncode == status, done.stderr
-    assert message in done.stderr
-    if installed is None:
-        assert not log.exists()
-    else:
-        assert log.read_text().split() == ["install", "-y", "--no-install-recommends", *installed.split()]
 
 
 @pytest.mark.asyncio
