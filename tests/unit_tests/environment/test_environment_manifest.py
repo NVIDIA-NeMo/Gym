@@ -677,7 +677,7 @@ def test_capabilities_are_a_list_of_capabilities_or_specializations_or_unknown(c
 @pytest.mark.parametrize(
     ("capability", "message"),
     [
-        ("codng", "'codng' is not in EvalBench's capability taxonomy .* Did you mean `coding`\\?"),
+        ("codng", "'codng' is not in the capability taxonomy .* Did you mean `coding`\\?"),
         ("codng/code_generation", "Did you mean `coding/code_generation`\\?"),
         # A specialization is only valid under its own capability.
         ("reasoning/code_generation", "'code_generation' is not a specialization of 'reasoning'.* causal_reasoning"),
@@ -696,7 +696,7 @@ def test_an_unknown_capability_is_rejected_with_the_values_it_could_be(capabilit
 
 
 @pytest.mark.parametrize("domains", [["finance"], ["medicine", "law"], ["general"], ["other"], [], "unknown"])
-def test_domains_are_a_list_of_evalbench_domains_or_unknown(domains: object) -> None:
+def test_domains_are_a_list_from_the_domain_list_or_unknown(domains: object) -> None:
     raw = _manifest() | {"domains": domains}
 
     manifest = EnvironmentManifest.model_validate(raw)
@@ -709,9 +709,9 @@ def test_domains_are_a_list_of_evalbench_domains_or_unknown(domains: object) -> 
 @pytest.mark.parametrize(
     ("domain", "message"),
     [
-        ("financ", "'financ' is not in EvalBench's domain list .* Did you mean `finance`\\?"),
-        # Gym's own `domain` categories are not EvalBench domains.
-        ("coding", "'coding' is not in EvalBench's domain list"),
+        ("financ", "'financ' is not in the domain list .* Did you mean `finance`\\?"),
+        # Gym's own `domain` categories are not in the domain list.
+        ("coding", "'coding' is not in the domain list"),
     ],
 )
 def test_an_unknown_domain_is_rejected_with_a_suggestion(domain: str, message: str) -> None:
@@ -720,7 +720,7 @@ def test_an_unknown_domain_is_rejected_with_a_suggestion(domain: str, message: s
     with pytest.raises(ValidationError, match=message) as error:
         EnvironmentManifest.model_validate(raw)
     assert [issue["loc"] for issue in error.value.errors()] == [("domains",)]
-    assert "evalbench_taxonomy.yaml" in str(error.value)
+    assert "capabilities_and_domains.yaml" in str(error.value)
     assert _schema_errors(raw)
 
 
@@ -752,5 +752,5 @@ def test_the_schema_lists_exactly_the_values_validation_accepts() -> None:
 
     assert manifest.capabilities == capabilities and manifest.domains == domains
     assert {"coding", "coding/code_generation", "safety/agentic_action_safety"} <= set(capabilities)
-    # `domains: unknown` is how a manifest says it does not know, so EvalBench's own `unknown` domain is not listed.
+    # `domains: unknown` is how a manifest says it does not know, so the list has no `unknown` domain.
     assert {"general", "other"} <= set(domains) and "unknown" not in domains

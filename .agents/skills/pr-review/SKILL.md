@@ -119,7 +119,7 @@ Apply the checks for the areas the diff touches.
   the literal `unknown` is supported by `capabilities`, `domains`,
   `requirements.gpu` and `requirements.network`. Check that `capabilities`
   and `domains` match what the tasks exercise and need; validation only
-  checks that the values are in EvalBench's lists. An empty list means none
+  checks that each value is in the capability taxonomy or domain list. An empty list means none
   applies, which is a claim to check, not a default. New or modified metadata must not leave scaffold
   `TODO` values. For an existing manifest, review the affected declarations
   without requiring unrelated metadata backfilling. A setup or protocol

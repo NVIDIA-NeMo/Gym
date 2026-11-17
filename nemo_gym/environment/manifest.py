@@ -45,10 +45,10 @@ GitRef = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, p
 PythonCallable = Annotated[str, StringConstraints(strip_whitespace=True, pattern=CALLABLE_PATTERN)]
 GitHubLogin = Annotated[str, StringConstraints(strip_whitespace=True, pattern=GITHUB_LOGIN_PATTERN)]
 
-EVALBENCH_TAXONOMY_PATH = Path(__file__).with_name("evalbench_taxonomy.yaml")
+CAPABILITIES_AND_DOMAINS_PATH = Path(__file__).with_name("capabilities_and_domains.yaml")
 
 
-class _EvalBenchTaxonomy(NamedTuple):
+class _CapabilitiesAndDomains(NamedTuple):
     capability_taxonomy_version: str
     domain_list_version: str
     # Each capability with its specializations, in the file's order.
@@ -65,10 +65,10 @@ class _EvalBenchTaxonomy(NamedTuple):
 
 
 @cache
-def _evalbench_taxonomy() -> _EvalBenchTaxonomy:
-    """EvalBench's capability taxonomy and domain list, read once from :data:`EVALBENCH_TAXONOMY_PATH`."""
-    data = yaml.safe_load(EVALBENCH_TAXONOMY_PATH.read_text(encoding="utf-8"))
-    return _EvalBenchTaxonomy(
+def _capabilities_and_domains() -> _CapabilitiesAndDomains:
+    """The capability taxonomy and domain list, read once from :data:`CAPABILITIES_AND_DOMAINS_PATH`."""
+    data = yaml.safe_load(CAPABILITIES_AND_DOMAINS_PATH.read_text(encoding="utf-8"))
+    return _CapabilitiesAndDomains(
         capability_taxonomy_version=data["capability_taxonomy_version"],
         domain_list_version=data["domain_list_version"],
         capabilities={name: tuple(body["specializations"]) for name, body in data["capabilities"].items()},
@@ -77,47 +77,46 @@ def _evalbench_taxonomy() -> _EvalBenchTaxonomy:
 
 
 def _check_capability(value: str) -> str:
-    taxonomy = _evalbench_taxonomy()
+    lists = _capabilities_and_domains()
     capability, slash, specialization = value.partition("/")
-    specializations = taxonomy.capabilities.get(capability)
+    specializations = lists.capabilities.get(capability)
     if specializations is not None and (not slash or specialization in specializations):
         return value
     if specializations is not None:
         raise ValueError(
-            f"'{specialization}' is not a specialization of '{capability}' in EvalBench's capability taxonomy "
-            f"({taxonomy.capability_taxonomy_version}). Its specializations are: {', '.join(specializations)}."
+            f"'{specialization}' is not a specialization of '{capability}' in the capability taxonomy "
+            f"({lists.capability_taxonomy_version}). Its specializations are: {', '.join(specializations)}."
         )
     raise ValueError(
-        f"'{value}' is not in EvalBench's capability taxonomy ({taxonomy.capability_taxonomy_version}); write "
-        f"<capability> or <capability>/<specialization>.{did_you_mean(value, taxonomy.capability_names())} "
-        "The values are listed in nemo_gym/environment/evalbench_taxonomy.yaml."
+        f"'{value}' is not in the capability taxonomy ({lists.capability_taxonomy_version}); write "
+        f"<capability> or <capability>/<specialization>.{did_you_mean(value, lists.capability_names())} "
+        "The values are listed in nemo_gym/environment/capabilities_and_domains.yaml."
     )
 
 
 def _check_domain(value: str) -> str:
-    taxonomy = _evalbench_taxonomy()
-    if value in taxonomy.domains:
+    lists = _capabilities_and_domains()
+    if value in lists.domains:
         return value
     raise ValueError(
-        f"'{value}' is not in EvalBench's domain list ({taxonomy.domain_list_version})."
-        f"{did_you_mean(value, taxonomy.domains)} "
-        "The values are listed in nemo_gym/environment/evalbench_taxonomy.yaml."
+        f"'{value}' is not in the domain list ({lists.domain_list_version}).{did_you_mean(value, lists.domains)} "
+        "The values are listed in nemo_gym/environment/capabilities_and_domains.yaml."
     )
 
 
 def _list_capabilities(schema: dict[str, Any]) -> None:
-    schema["enum"] = _evalbench_taxonomy().capability_names()
+    schema["enum"] = _capabilities_and_domains().capability_names()
 
 
 def _list_domains(schema: dict[str, Any]) -> None:
-    schema["enum"] = list(_evalbench_taxonomy().domains)
+    schema["enum"] = list(_capabilities_and_domains().domains)
 
 
-# Items are checked by EnvironmentManifest.validate_evalbench_values once the field is known to be a list, so a bad
+# Items are checked by EnvironmentManifest.validate_listed_values once the field is known to be a list, so a bad
 # item gives one error rather than one per branch of `list | "unknown"`. The schema lists the values for editors.
 # The lists are read when a manifest is first validated or the schema is built, not when this module is imported.
-EvalBenchCapability = Annotated[str, Field(json_schema_extra=_list_capabilities)]
-EvalBenchDomain = Annotated[str, Field(json_schema_extra=_list_domains)]
+ListedCapability = Annotated[str, Field(json_schema_extra=_list_capabilities)]
+ListedDomain = Annotated[str, Field(json_schema_extra=_list_domains)]
 
 
 class EnvironmentKind(StrEnum):
@@ -391,21 +390,21 @@ class EnvironmentManifest(_ManifestModel):
         json_schema_extra={"uniqueItems": True},
         description="Whether the environment is meant for evaluation, training or both; unknown when absent.",
     )
-    capabilities: list[EvalBenchCapability] | Literal["unknown"] | None = Field(
+    capabilities: list[ListedCapability] | Literal["unknown"] | None = Field(
         default=None,
         json_schema_extra={"uniqueItems": True},
         description=(
-            "Skills the environment exercises, from EvalBench's capability taxonomy, each written <capability> or "
+            "Skills the environment exercises, from the capability taxonomy, each written <capability> or "
             "<capability>/<specialization>, for example coding/code_generation. The first entry is the main "
             "capability, and its top level (the part before the slash) is the environment's coarse category, used "
             "for listings and charts. An empty list when none applies, or unknown."
         ),
     )
-    domains: list[EvalBenchDomain] | Literal["unknown"] | None = Field(
+    domains: list[ListedDomain] | Literal["unknown"] | None = Field(
         default=None,
         json_schema_extra={"uniqueItems": True},
         description=(
-            "Fields of expertise the tasks need, from EvalBench's domain list, with the main domain first; an empty "
+            "Fields of expertise the tasks need, from the domain list, with the main domain first; an empty "
             "list when none applies, or unknown."
         ),
     )
@@ -462,7 +461,7 @@ class EnvironmentManifest(_ManifestModel):
 
     @field_validator("capabilities", "domains")
     @classmethod
-    def validate_evalbench_values(cls, value: list[str] | str | None, info: ValidationInfo) -> list[str] | str | None:
+    def validate_listed_values(cls, value: list[str] | str | None, info: ValidationInfo) -> list[str] | str | None:
         if not isinstance(value, list):
             return value
         check = _check_capability if info.field_name == "capabilities" else _check_domain

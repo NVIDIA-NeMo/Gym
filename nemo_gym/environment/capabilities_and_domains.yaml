@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# EvalBench's capability taxonomy and domain list: the values a manifest's `capabilities` and `domains` may name.
-# Only the value lists are copied. To move to a newer EvalBench version, replace this whole file and its two
-# version keys. EvalBench's `unknown` domain is left out: a manifest that does not know writes `domains: unknown`.
+# The capability taxonomy and domain list: the values a manifest's `capabilities` and `domains` may name. They are
+# kept identical to the lists NVIDIA's internal evaluation tooling uses, at the versions the two keys below name. To
+# move to a newer version, replace this whole file and both keys. The source's `unknown` domain is left out: a
+# manifest that does not know writes `domains: unknown`.
 capability_taxonomy_version: capability_taxonomy_v0_1
 domain_list_version: enrichment_tags_v0_1
 
