@@ -10,7 +10,7 @@ import orjson
 import pytest
 from aiohttp import ClientConnectionError, ClientResponseError
 from omegaconf import OmegaConf
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict
 
 from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
@@ -564,15 +564,16 @@ def test_an_agent_that_runs_its_own_loop_is_checked_only_when_driven_one_step_at
     assert server.config.max_episode_steps is None
 
 
-def test_the_task_state_is_read_between_steps_only() -> None:
-    with pytest.raises(ValidationError, match="set max_episode_steps too"):
-        SingleAgentTurnEnvironmentServerConfig(
-            name="environment",
-            host="environment",
-            port=8002,
-            entrypoint="app.py",
-            resources_server={"type": "resources_servers", "name": "resources"},
-            agent_server={"type": "responses_api_agents", "name": "agent"},
-            cleanup_timeout_seconds=10,
-            end_on_task_state=True,
-        )
+def test_without_max_episode_steps_end_on_task_state_stops_the_agents_own_loop_instead() -> None:
+    # tests/unit_tests/orchestration/test_single_agent_turn_task_end_stop.py covers that run.
+    config = SingleAgentTurnEnvironmentServerConfig(
+        name="environment",
+        host="environment",
+        port=8002,
+        entrypoint="app.py",
+        resources_server={"type": "resources_servers", "name": "resources"},
+        agent_server={"type": "responses_api_agents", "name": "agent"},
+        cleanup_timeout_seconds=10,
+        end_on_task_state=True,
+    )
+    assert (config.end_on_task_state, config.max_episode_steps) == (True, None)

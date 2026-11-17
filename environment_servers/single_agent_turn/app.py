@@ -13,7 +13,7 @@ from uuid import uuid4
 from aiohttp import ClientConnectorError, ConnectionTimeoutError
 from fastapi import Body
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel, ConfigDict, Field, PositiveInt, TypeAdapter, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PositiveInt, TypeAdapter, ValidationError
 
 from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
@@ -26,6 +26,8 @@ from nemo_gym.agents import (
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
     OutcomeAction,
+    RolloutStopRequest,
+    RolloutStopResponse,
     agent_outcome_policy,
     confirmed_policy_response_timeout,
     verification_failure_fields,
@@ -33,6 +35,7 @@ from nemo_gym.agents import (
 from nemo_gym.client import get_response_json, raise_boundary_failure, rollout_path_prefix
 from nemo_gym.config import (
     AGENT_SESSION_AGENT_TYPES,
+    ROLLOUT_STOP_AGENT_TYPES,
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,
     STEP_DRIVEN_AGENT_TYPES,
@@ -64,6 +67,7 @@ from nemo_gym.metrics import add_perf_metrics
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     RESOURCES_TASK_STATE_PATH,
+    RESOURCES_TASK_STATE_RELEASE_PATH,
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
     CheckpointMode,
@@ -100,6 +104,14 @@ from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 LOGGER = logging.getLogger(__name__)
+
+# end_on_task_state for an agent that runs its own loop: how long one watching read of the task state waits for the
+# task to end (GET /task_state's wait_s), and the least time between two reads, for a resources server that answers at
+# once. Once the run of an ended task is stopped, how long its activation is waited for before the call that ended the
+# task is answered anyway: the stop's own bound (ROLLOUT_STOP_TIMEOUT_SECONDS) and the harness's grace after it.
+TASK_STATE_WAIT_SECONDS = 30.0
+TASK_STATE_POLL_SECONDS = 1.0
+RUN_STOP_WAIT_SECONDS = 120.0
 
 
 class ToolSession(BaseModel):
@@ -167,18 +179,17 @@ class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
     end_on_task_state: bool = Field(
         default=False,
         description=(
-            "With max_episode_steps, read the resources session's task state after each step "
-            f"(GET {RESOURCES_TASK_STATE_PATH}, ResourcesTaskState) and end the episode once the task has ended, "
-            "before the next model call. For a resources server whose task ends through its state rather than "
+            "End the episode once the resources session reports that its task has ended "
+            f"(GET {RESOURCES_TASK_STATE_PATH}, ResourcesTaskState), before the next model call. With "
+            "max_episode_steps the state is read after each step. Without it the agent runs its own loop, so the "
+            "server watches the session while the agent runs and stops the run once the task has ended "
+            "(POST /rollouts/{rollout_id}/stop, as completed); the resources server answers the call that ended the "
+            f"task only after the run has stopped ({RESOURCES_TASK_STATE_RELEASE_PATH}), so no model call follows it. "
+            "The agent must then be of a type whose run can be stopped in flight (ROLLOUT_STOP_AGENT_TYPES), which "
+            "the server checks at startup. For a resources server whose task ends through its state rather than "
             "through one tool's call"
         ),
     )
-
-    @model_validator(mode="after")
-    def _task_state_is_read_between_steps(self) -> "SingleAgentTurnEnvironmentServerConfig":
-        if self.end_on_task_state and self.max_episode_steps is None:
-            raise ValueError("end_on_task_state reads the task state between steps: set max_episode_steps too")
-        return self
 
 
 class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequest, SingleAgentTurnResponse]):
@@ -198,6 +209,8 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         self._check_mcp_server_names()
         if self.config.max_episode_steps is not None:
             self._check_step_driven_agent()
+        elif self.config.end_on_task_state:
+            self._check_stoppable_agent()
 
     def checkpoint_mode_in_effect(self) -> CheckpointMode:
         # The step loop records no boundary between steps, so an episode it drives starts over after a crash.
@@ -209,9 +222,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         and it must run the tools it calls, or a step taken after the task ended, within the same activation, would
         count. ``execute_tools`` is read as the agent's config reads it, so a string ``"false"`` is false."""
         name = self.config.agent_server.name
-        instance = self.server_client.global_config_dict.get(name)
-        agents = instance.get("responses_api_agents") if isinstance(instance, (dict, DictConfig)) else None
-        agent_type = next(iter(agents), None) if isinstance(agents, (dict, DictConfig)) and len(agents) == 1 else None
+        agent_type = self._bound_agent_type()
         config = get_first_server_config_dict(self.server_client.global_config_dict, name) if agent_type else {}
         problems = []
         if agent_type not in AGENT_SESSION_AGENT_TYPES:
@@ -228,6 +239,24 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 f"Environment Server {self.config.name!r} drives {name!r} one step per activation "
                 f"(max_episode_steps: {self.config.max_episode_steps}), but " + "; ".join(problems)
             )
+
+    def _check_stoppable_agent(self) -> None:
+        """Refuse to end on the task state an agent that runs its own loop whose run cannot be stopped in flight: its
+        type must be one whose run ``POST /rollouts/{rollout_id}/stop`` ends (``ROLLOUT_STOP_AGENT_TYPES``), or the run
+        would go on after its task has ended."""
+        agent_type = self._bound_agent_type()
+        if agent_type not in ROLLOUT_STOP_AGENT_TYPES:
+            raise ValueError(
+                f"Environment Server {self.config.name!r} ends {self.config.agent_server.name!r}'s run once its task "
+                f"has ended (end_on_task_state without max_episode_steps), but its type {agent_type!r} cannot stop a "
+                f"run in flight (ROLLOUT_STOP_AGENT_TYPES: {', '.join(sorted(ROLLOUT_STOP_AGENT_TYPES))})"
+            )
+
+    def _bound_agent_type(self) -> str | None:
+        """The type of the agent server this server binds, as its config names it (None if it names no one type)."""
+        instance = self.server_client.global_config_dict.get(self.config.agent_server.name)
+        agents = instance.get("responses_api_agents") if isinstance(instance, (dict, DictConfig)) else None
+        return next(iter(agents), None) if isinstance(agents, (dict, DictConfig)) and len(agents) == 1 else None
 
     def _check_mcp_server_names(self) -> None:
         """Refuse a pairing that grants two MCP endpoints listed under one name: every harness names a tool after
@@ -743,6 +772,8 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             )
         if self.config.max_episode_steps is not None:
             return await self._run_steps(request, handles, params)
+        if self.config.end_on_task_state:
+            return await self._run_to_task_end(request, handles, params)
         # The episode's only activation.
         # A restore before its reply invokes it again, and the agent gives the reply it already gave.
         return await self._activate_agent(request, handles, params, activation=1)
@@ -815,18 +846,103 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             raise
         return response.model_copy(update={"output": outputs, "usage": usage})
 
+    async def _run_to_task_end(
+        self, request: SingleAgentTurnRequest, handles: "SessionHandles", params: Any
+    ) -> NeMoGymResponse:
+        """Run the agent's own loop in the episode's one activation, and stop the run once its task has ended.
+
+        The resources session is watched before the agent runs (``GET /task_state?watch=true``), so the resources
+        server answers the call that ends the task only once this server releases it. Once the task has ended, the run
+        is stopped as completed (``POST /rollouts/{rollout_id}/stop``), and the call is released only after the
+        activation has answered, the run over: the agent never reads that call's answer while its run could go on, so
+        no model call follows the call that ended the task. A run that ends first leaves nothing to stop. A failed read
+        or stop fails the episode, as a failed read fails a step-driven one.
+        """
+        await self._read_task_state(handles, watch=True)
+        activation = asyncio.create_task(self._activate_agent(request, handles, params, activation=1))
+        watcher = asyncio.create_task(self._wait_for_task_end(handles, activation))
+        released = False
+        try:
+            await asyncio.wait({activation, watcher}, return_when=asyncio.FIRST_COMPLETED)
+            if not activation.done() and watcher.result():
+                try:
+                    if await self._stop_run(request):
+                        await asyncio.wait({activation}, timeout=RUN_STOP_WAIT_SECONDS)
+                finally:
+                    released = True
+                    await self._release_task_end(handles)
+            return await activation
+        finally:
+            for task in (watcher, activation):
+                task.cancel()
+            await asyncio.gather(watcher, activation, return_exceptions=True)
+            if not released:
+                await self._release_task_end(handles)
+
+    async def _wait_for_task_end(self, handles: "SessionHandles", activation: "asyncio.Task[Any]") -> bool:
+        """Watch the resources session while the activation runs: True once its task has ended, False if the
+        activation ends first. A server that answers a read at once is read again no sooner than
+        TASK_STATE_POLL_SECONDS later."""
+        loop = asyncio.get_running_loop()
+        while not activation.done():
+            started = loop.time()
+            if await self._read_task_state(handles, watch=True, wait_s=TASK_STATE_WAIT_SECONDS):
+                return True
+            await asyncio.sleep(max(0.0, TASK_STATE_POLL_SECONDS - (loop.time() - started)))
+        return False
+
+    async def _stop_run(self, request: SingleAgentTurnRequest) -> bool:
+        """Stop the agent's run of the episode as completed, its task having ended (``POST /rollouts/{rollout_id}/stop``
+        with the episode's rollout): whether a run was stopped. A 404, no run of the rollout open there any more, stops
+        nothing; any other failure fails the episode."""
+        try:
+            stop_http_response = await self.server_client.post(
+                server_name=self.config.agent_server.name,
+                url_path=f"/rollouts/{request.episode_id.capture_key}/stop",
+                json=RolloutStopRequest(reason="task_ended", completed=True),
+            )
+            content = await stop_http_response.read()
+            if stop_http_response.status == 404:
+                return False
+            await raise_boundary_failure(stop_http_response, content=content)
+            return RolloutStopResponse.model_validate_json(content).stopped
+        except Exception as error:
+            raise dependency_failure(error, stage="agent") from error
+
+    async def _release_task_end(self, handles: "SessionHandles") -> None:
+        """Release the call that ended the task, if one waits, and stop watching the session
+        (``RESOURCES_TASK_STATE_RELEASE_PATH``). A failure is logged: verification and close release it too."""
+        try:
+            release_http_response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path=RESOURCES_TASK_STATE_RELEASE_PATH,
+                cookies=handles.resources_cookies,
+            )
+            await release_http_response.read()
+        except Exception:
+            LOGGER.warning(
+                "Could not release the task end of resources session %s", handles.resources_session_id, exc_info=True
+            )
+
     async def _task_ended(self, handles: "SessionHandles") -> bool:
-        """Whether the episode's task has ended, as its resources session reports it (``RESOURCES_TASK_STATE_PATH``).
+        """Whether the episode's task has ended, as its resources session reports it (``RESOURCES_TASK_STATE_PATH``)."""
+        return await self._read_task_state(handles)
+
+    async def _read_task_state(self, handles: "SessionHandles", *, watch: bool = False, wait_s: float = 0.0) -> bool:
+        """Whether the episode's task has ended, as its resources session reports it (``RESOURCES_TASK_STATE_PATH``):
+        with ``watch`` as the server that stops the session's run once it has, and waiting up to ``wait_s`` for it.
 
         A session the resources server no longer holds (404 with ``failure_kind: session_lost``) ends the episode too:
         it goes on to ``/verify``, which masks it, as when a tool call finds the session gone. Any other failed read
         fails the episode.
         """
+        query = {**({"watch": "true"} if watch else {}), **({"wait_s": f"{wait_s:g}"} if wait_s else {})}
         try:
             state_http_response = await self.server_client.get(
                 server_name=self.config.resources_server.name,
                 url_path=RESOURCES_TASK_STATE_PATH,
                 cookies=handles.resources_cookies,
+                **({"params": query} if query else {}),
             )
             content = await state_http_response.read()
             if state_http_response.status == 404 and _names_lost_session(content):

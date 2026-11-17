@@ -165,7 +165,11 @@ whose `task_data` holds the row's fields other than `responses_create_params`. T
 session takes the request's `resources_session_id`, which the seed's session cookie also names;
 the agent calls the same `POST /<tool_name>` routes with that cookie, and `/verify` grades the
 episode as for an agent. `GET /task_state` (Gym's `ResourcesTaskState`, `{"task_ended": ...}`) says whether the
-session's task has ended: the user app's task row left `pending`. Seeding the same ID again for the same episode returns the same session,
+session's task has ended: the user app's task row left `pending`. An environment server that stops an agent's own
+loop once the task ends (`end_on_task_state` without `max_episode_steps`) reads it with `watch=true`: the call that
+ends that session's task is then answered only after the environment server releases it (`POST /task_state/release`),
+at most `task_end_hold_seconds` (180) later, so no model call follows it; `wait_s` makes a read wait for the end.
+Seeding the same ID again for the same episode returns the same session,
 and `/close_session` releases a world that verification has not. After a close, a seed of the same
 ID is refused for `session_close_retry_window_seconds`. These seeds carry no tool list, so they
 report no `tool_drift`.

@@ -67,6 +67,21 @@ Each activation sends the whole conversation, with every step before it, numbers
 
 The agent must be of a type that takes one step per such activation, listed in `STEP_DRIVEN_AGENT_TYPES` (`nemo_gym.config`; today the simple agent), since keeping an agent session is not enough, and it must run the tools it calls. The server checks that at startup, since a step taken after the task ended, within one activation, would count. A Resources Server whose pairing needs this agent can set `allowed_agents`, so that `gym env resolve` refuses another `--agent-type` template composed in place of its agent before anything starts. `single_agent_turn_legacy` takes these settings too, for flat rows as well as episode requests. The step loop records no checkpoint boundary between steps, so its episodes take part in checkpoints as restarts.
 
+### Stopping an agent's own loop when its task ends
+
+An agent that runs its own loop, such as a harness in a sandbox, cannot be stopped between steps. With `end_on_task_state` and no `max_episode_steps`, the server watches the episode's Resources session while the agent runs, and stops the run once the task has ended:
+
+```yaml
+environment_servers:
+  single_agent_turn:
+    resources_tool_transports: [mcp]
+    end_on_task_state: true
+```
+
+Before the agent runs, the server reads `GET /task_state?watch=true`, and from then on the Resources Server holds its answer to the call that ends the task. While the agent runs, the server reads the state again, each read waiting up to 30 s for the end (`wait_s`). Once the task has ended, it stops the run with `POST /rollouts/{rollout_id}/stop` and `{"reason": "task_ended", "completed": true}`, waits for the activation to answer (at most 120 s), and only then releases the held call (`POST /task_state/release`). The harness never reads that call's answer while its run could go on, so no model call follows the call that ended the task. The stopped run answers as completed, and its metadata's `ng_rollout_stop` says `"completed": true`. A run that ends first is not stopped. A lost session (404 naming `failure_kind: session_lost`) counts as the task's end; any other failed read, or a failed stop, fails the episode.
+
+The agent must be of a type whose run `POST /rollouts/{rollout_id}/stop` can end in flight, listed in `ROLLOUT_STOP_AGENT_TYPES` (`nemo_gym.config`); the server checks that at startup. The stop writes a marker the harness's supervisor watches, so the sandbox provider must let an upload run while the harness's command does (`uploads_independent_of_execs`): Docker and the local provider do, and OpenSandbox does with `operations.background_exec: true`, which Gym's OpenSandbox config sets.
+
 With partial-rollout checkpointing on, the agent of an episode that grants `mcp` access or any tool server holds an MCP session token that names the episode's attempt, and the Resources Server refuses that token once a restore replaces the attempt. An episode that grants any tool server restarts from its input after a crash instead of continuing from a checkpoint. One that grants only `mcp` access continues from a checkpoint only if its agent borrows the sandbox the Resources seed lent (`sandbox_access`) and re-binds restored sessions to new tool grants (`rebinds_tool_accesses`, as the OpenCode agent does). Otherwise it restarts from its input.
 
 A restore rebuilds a borrowed sandbox under a new ID. When the replacement attempt continues an episode whose agent had not closed yet, it first seeds the Resources and agent sessions again: the Resources Server returns the restored sandbox, and the agent re-binds its restored session to that sandbox and to the replacement attempt's tool grants, such as a new MCP session token. Seeding again is idempotent, so a checkpoint does not wait for it, and a crash during it seeds again after the next restore. An episode without a borrowed sandbox seeds nothing again.

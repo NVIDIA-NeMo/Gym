@@ -437,7 +437,16 @@ class ResourcesCloseSessionResponse(BaseModel):
 # A resources server whose task ends through its state, rather than through one tool's call, answers this route for
 # an episode's resources session (its session cookie) with ResourcesTaskState. single_agent_turn's step loop
 # (end_on_task_state) reads it between steps and ends the episode once the task has ended.
+#
+# An agent that runs its own loop cannot be stopped between steps, so single_agent_turn (end_on_task_state without
+# max_episode_steps) watches the session instead: a read with ``watch=true`` says the caller stops the session's run
+# once its task ends, and the server then answers the call that ends the task only after the caller releases it
+# (RESOURCES_TASK_STATE_RELEASE_PATH), so no model call can follow that call. ``wait_s`` makes a read wait up to that
+# many seconds for the task to end.
 RESOURCES_TASK_STATE_PATH = "/task_state"
+# The watching environment server posts here, with the session cookie, once the session's run has stopped or it stops
+# watching: the server answers the call that ended the task, if one waits, and holds none of the session's calls again.
+RESOURCES_TASK_STATE_RELEASE_PATH = "/task_state/release"
 
 
 class ResourcesTaskState(BaseModel):
@@ -446,6 +455,12 @@ class ResourcesTaskState(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     task_ended: bool
+
+
+class ResourcesTaskStateRelease(BaseModel):
+    """``POST /task_state/release``: whether a call that ended the session's task was waiting to be answered."""
+
+    released: bool
 
 
 class ResourcesSeedRejectedError(HTTPException, ValueError):

@@ -54,6 +54,7 @@ from nemo_gym.config.global_config import (
     ALLOW_UNSUPPORTED_PAIRING_KEY_NAME,
     DEFAULT_HEAD_SERVER_PORT,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
+    ROLLOUT_STOP_AGENT_TYPES,
     STEP_DRIVEN_AGENT_TYPES,
     USE_ABSOLUTE_IP,
     UV_CACHE_DIR_KEY_NAME,
@@ -3751,6 +3752,19 @@ class TestComposeUnboundAgent:
 
         assert reading == STEP_DRIVEN_AGENT_TYPES
         assert STEP_DRIVEN_AGENT_TYPES <= AGENT_SESSION_AGENT_TYPES
+
+    def test_rollout_stop_agent_types_match_the_agent_apps(self) -> None:
+        """Every agent app that returns its sandbox session for a rollout stop is listed, and nothing else is; each
+        keeps agent sessions."""
+        agents_root = Path(nemo_gym.config.global_config.__file__).parents[2] / "responses_api_agents"
+        stopping = {
+            app.parent.name
+            for app in agents_root.glob("*/app.py")
+            if "def _rollout_sandbox_session(" in app.read_text(encoding="utf-8")
+        }
+
+        assert stopping == ROLLOUT_STOP_AGENT_TYPES
+        assert ROLLOUT_STOP_AGENT_TYPES <= AGENT_SESSION_AGENT_TYPES
 
     def test_langgraph_swap_keeps_unrelated_session_tool_grants(self) -> None:
         config = self._session_environment_config("langgraph_agent")
