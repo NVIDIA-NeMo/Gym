@@ -203,7 +203,10 @@ def test_configured_component_collates_generic_rows_with_strict_validation(tmp_p
     instance, error = maybe_get_server_instance_config("llm_judge_with_tools", OmegaConf.create(definition))
     assert error is None, error
     (output,) = TrainDataProcessor()._collate_samples_single_type(
-        type="example", server_instance_configs=[instance], task_data_validation="error"
+        type="example",
+        server_instance_configs=[instance],
+        task_data_validation="error",
+        output_dir=tmp_path / "collated",
     )
     materialized = json.loads(output.read_text())
     assert materialized["task_id"] == {"taskset": "judge", "task_id": "capital"}
@@ -246,7 +249,9 @@ def test_committed_examples_pass_ci_data_validation_and_strict_collation(tmp_pat
         output_dirpath=str(tmp_path / "collated"), mode="example_validation", task_data_validation="error"
     )
     instances = processor.load_and_validate_server_instance_configs(settings, parsed)
-    paths = processor._collate_samples_single_type("example", instances, task_data_validation="error")
+    paths = processor._collate_samples_single_type(
+        "example", instances, task_data_validation="error", output_dir=tmp_path / "collated"
+    )
     materialized = [json.loads(line) for path in paths for line in path.read_text().splitlines()]
     assert len(materialized) == len(rows) == 5
     for index, (row, task) in enumerate(zip(rows, materialized, strict=True)):
