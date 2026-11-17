@@ -4,6 +4,8 @@
 
 import argparse
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -22,12 +24,24 @@ ROOT = BENCHMARK_DIR.parents[1]
 
 @pytest.mark.parametrize(
     ("preset", "harness"),
-    [("terminus_2", "terminus_2_sandboxed_agent"), ("opencode", "opencode_agent")],
+    [("terminus_2", "terminus_2_agent"), ("opencode", "opencode_agent")],
 )
 def test_preset_runs_the_entry_with_its_harness(preset: str, harness: str) -> None:
     benchmark = harbor_benchmark(BENCHMARK_DIR / f"{preset}.yaml")
     assert benchmark.target == "terminal_bench_2_1"
     assert (benchmark.agent.instance_name, benchmark.agent.impl_name) == (harness, harness)
+
+
+@pytest.mark.parametrize("harness", ["terminus_2_agent", "opencode_agent"])
+def test_model_server_reads_the_harness_header_without_its_app(harness: str) -> None:
+    """A model server imports the harness package in its own environment to read the assistant-message header, so
+    the package must not load the harness's app (Terminus 2's needs Harbor, which only the agent's environment has)."""
+    code = (
+        f"import sys; import responses_api_agents.{harness} as p; getattr(p, '_assistant_message_header', None); "
+        f"sys.exit('responses_api_agents.{harness}.app' in sys.modules)"
+    )
+    result = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
 
 
 def _merged_num_repeats(tmp_path: Path, preset: str, agent_type: str | None, overrides: list[str]) -> int:

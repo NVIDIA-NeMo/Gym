@@ -4,7 +4,7 @@ Terminal-Bench 2.1 evaluates agents on 89 terminal tasks, each in its own contai
 
 | Preset | Harness | Runs on |
 | --- | --- | --- |
-| `terminal_bench_2_1/terminus_2` | Terminus 2 (`terminus_2_sandboxed_agent` agent sessions) | Harbor environment server |
+| `terminal_bench_2_1/terminus_2` | Harbor's Terminus 2 (`terminus_2_agent` agent sessions) | Harbor environment server |
 | `terminal_bench_2_1/opencode` | OpenCode (`opencode_agent`) | Harbor environment server |
 | `terminal_bench_2_1/nooa` | NOOA | `single_agent_turn` on the `terminal_bench_2_1` resources server |
 | `terminal_bench_2_1/inkling_small` | Terminus 2, pinned rows with a terminal-interaction note | the resources server's `legacy_agent` relay |
@@ -91,8 +91,12 @@ server. Scores on the two paths are not interchangeable:
   (`context_length_exceeded`) and every rollout scores 0 without a recorded failure. Drop the per-call caps, as
   [`policy_model_override.yaml`](../nemotron_3.5_super/policy_model_override.yaml) does, when you run
   `opencode_legacy_agent` against such an endpoint.
-- **Terminus 2.** Both paths run `terminus_2_sandboxed_agent` with the same settings; on Harbor its run limit is the
-  task's agent budget rather than 10,800 seconds.
+- **Terminus 2 harness.** `terminus_2` runs `terminus_2_agent` (Harbor's Terminus 2 at the Harbor commit its
+  `pyproject.toml` pins) in place of `terminus_2_sandboxed_agent` (Harbor 0.22.0); treat their scores as separate
+  measurements. `terminus_2_agent` samples at temperature 0.7 and caps each model call at 2,400 seconds;
+  `terminus_2_sandboxed_agent` leaves the temperature to the model server and caps each call at 600 seconds. Both
+  summarize proactively at 8,000 tokens and bound the whole run at 10,800 seconds; on Harbor the run limit is the
+  task's agent budget.
 
 ### From the resources-server commands
 

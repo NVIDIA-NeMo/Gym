@@ -1,10 +1,10 @@
 # Terminal-Bench 2.1 with Terminus 2, run through the Harbor environment server on the 89 pinned task folders of
 # environments/harbor/terminal_bench_2_1 (`gym dataset pull terminal_bench_2_1` fetches them). The server starts each
-# task's prebuilt image, lends the sandbox to terminus_2_sandboxed_agent's agent session and grades the episode with
-# the task's own tests. `--agent-type` runs another harness on the same tasks. See README.md, "Run".
+# task's prebuilt image, lends the sandbox to terminus_2_agent's agent session (Harbor's Terminus 2) and grades the
+# episode with the task's own tests. `--agent-type` runs another harness on the same tasks. See README.md, "Run".
 harbor_target: terminal_bench_2_1
 config_paths:
-- responses_api_agents/terminus_2_sandboxed_agent/configs/terminus_2_sandboxed_agent.yaml
+- responses_api_agents/terminus_2_agent/configs/terminus_2_agent.yaml
 
 # Eight rollouts per task, as on the resources-server path; `--num-repeats` replaces it.
 num_repeats: 8

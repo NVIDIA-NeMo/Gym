@@ -19,7 +19,7 @@ determinism: unknown
 config_path: ../terminus_2.yaml
 harbor_target: terminal_bench_2_1
 resources_server: null
-agent_server: terminus_2_sandboxed_agent
+agent_server: terminus_2_agent
 datasets: []
 model_server: policy_model
 canonical_split: benchmark
