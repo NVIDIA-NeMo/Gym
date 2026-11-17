@@ -685,6 +685,80 @@ HEALTH_CHECK_ATTRIBUTE = "nemo.gym.health.check"
 HEALTH_CHECKS_ATTRIBUTE = "nemo.gym.health.checks"
 
 
+TOOL_CALLS_INSTRUMENT = "gym.tool.calls_total"
+TOOL_DURATION_INSTRUMENT = "gym.tool.duration_ms"
+TOOL_NAME_ATTRIBUTE = "nemo.gym.tool.name"
+TOOL_STATUS_ATTRIBUTE = "nemo.gym.tool.status"
+TOOL_TIMING_BOUNDARY_ATTRIBUTE = "nemo.gym.tool.timing_boundary"
+TOOL_TIMING_SOURCE_ATTRIBUTE = "nemo.gym.tool.timing_source"
+TOOL_CLOCK_DOMAIN_ATTRIBUTE = "nemo.gym.tool.clock_domain"
+TOOL_SPAN_ID_ATTRIBUTE = "nemo.gym.tool.span_id"
+TOOL_CALL_ID_ATTRIBUTE = "nemo.gym.tool.call_id"
+TOOL_MODEL_CALL_ID_ATTRIBUTE = "nemo.gym.tool.model_call_id"
+TOOL_AGENT_INSTANCE_ATTRIBUTE = "nemo.gym.agent.instance"
+# Tool names are free-form, so a metric keeps the first names a process sees and counts the rest as `other`.
+TOOL_NAME_LIMIT = 64
+# A longer name is no bounded label either.
+TOOL_NAME_MAX_LENGTH = 128
+TOOL_NAME_OTHER = "other"
+TOOL_NAME_UNKNOWN = "unknown"
+_tool_names_seen: set[str] = set()
+_tool_names_lock = threading.Lock()
+
+
+def bounded_tool_name(name: Optional[str]) -> str:
+    """The tool name as a metric label: as recorded while fewer than ``TOOL_NAME_LIMIT`` names are in use."""
+    if not name:
+        return TOOL_NAME_UNKNOWN
+    if len(name) > TOOL_NAME_MAX_LENGTH:
+        return TOOL_NAME_OTHER
+    with _tool_names_lock:
+        if name in _tool_names_seen:
+            return name
+        if len(_tool_names_seen) < TOOL_NAME_LIMIT:
+            _tool_names_seen.add(name)
+            return name
+    return TOOL_NAME_OTHER
+
+
+def record_tool_call(name: Optional[str], *, status: str, durations: Mapping[str, Optional[float]]) -> None:
+    """Count one recorded tool execution, and record each measured duration under the boundary it measures.
+
+    A boundary without a duration records nothing, so a missing measurement never reads as 0 ms.
+    """
+    attributes = {TOOL_NAME_ATTRIBUTE: bounded_tool_name(name), TOOL_STATUS_ATTRIBUTE: status}
+    _record_counter(TOOL_CALLS_INSTRUMENT, "Tool executions recorded in finished rollouts.", attributes)
+    for boundary, duration_ms in durations.items():
+        if duration_ms is not None:
+            _record_histogram(
+                TOOL_DURATION_INSTRUMENT,
+                "ms",
+                "Recorded duration of one tool execution, by timing boundary.",
+                duration_ms,
+                {**attributes, TOOL_TIMING_BOUNDARY_ATTRIBUTE: boundary},
+            )
+
+
+def tool_span_attributes(tool: Any, timing: Any) -> dict[str, Any]:
+    """Attributes of a `gym.tool` span. The full tool name goes here; spans have no cardinality limit."""
+    attributes = {
+        TOOL_STATUS_ATTRIBUTE: tool.status,
+        TOOL_TIMING_BOUNDARY_ATTRIBUTE: timing.boundary,
+        TOOL_TIMING_SOURCE_ATTRIBUTE: timing.timing_source,
+        # Without a clock domain the endpoints come from the harness's clock and may be skewed against Gym's.
+        TOOL_CLOCK_DOMAIN_ATTRIBUTE: timing.clock_domain or "unknown",
+        TOOL_CALL_ID_ATTRIBUTE: tool.tool_call_id,
+    }
+    optional = {
+        TOOL_NAME_ATTRIBUTE: tool.tool_name,
+        TOOL_SPAN_ID_ATTRIBUTE: tool.span_id,
+        TOOL_MODEL_CALL_ID_ATTRIBUTE: tool.model_call_id,
+        TOOL_AGENT_INSTANCE_ATTRIBUTE: tool.agent_instance,
+        "error.type": tool.error_type,
+    }
+    return attributes | {key: value for key, value in optional.items() if value}
+
+
 def record_rollout_health(verdict: str, *, outcome: str, flagged_checks: Iterable[str]) -> None:
     """Count one health-evaluated rollout and each distinct check that flagged it."""
     _record_counter(
