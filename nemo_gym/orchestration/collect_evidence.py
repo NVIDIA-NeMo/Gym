@@ -100,7 +100,7 @@ COLLECT_SCRIPT = (
     + f"JUDGE_JOB_JOURNAL_NAME = {JUDGE_JOB_JOURNAL_NAME!r}\n"
     + f"JUDGE_JOB_ACK_JOURNAL_NAME = {JUDGE_JOB_ACK_JOURNAL_NAME!r}\n"
     + r"""
-import hashlib, json, math, os, re, sys
+import glob, hashlib, json, math, os, re, sys
 d = sys.argv[1]
 def job_identity():
     try:
@@ -1041,6 +1041,8 @@ try:
     collection_driver = driver_name if driver_name and "${" not in driver_name and driver_name.lower() not in ("null", "~") else None
 except OSError:
     pass
+# The attempts the driver saved so far: the evidence that a run it did not finish has something to resume.
+collection_driver_attempts = len(glob.glob(os.path.join(a, "rollouts_recovery", "attempt-*")))
 quality = None
 try:
     run = json.load(open(os.path.join(a, "quality_summary.json")))["run"]
@@ -1154,7 +1156,7 @@ collected = {"materialized": rows("rollouts_materialized_inputs.jsonl"), "result
                   "walltime_state": "unknown" if unknown_accounting else num(".gym_accumulated_walltime")[1], "job_chain": chain,
                   "chain_incomplete": os.path.exists(os.path.join(d, ".gym_chain_incomplete")),
                   "quality": quality, "score": score, "mlflow": mlflow, "managed_store": any(managed_store),
-                  "collection_driver": collection_driver,
+                  "collection_driver": collection_driver, "collection_driver_attempts": collection_driver_attempts,
                   "coverage_allocation_id": coverage_allocation_id, "coverage_writer_unrecorded": coverage_writer_unrecorded,
                   "coverage_scored": coverage_scored,
                   "benchmark_metric_coverage": benchmark_metric_coverage, "task_selection": task_selection}

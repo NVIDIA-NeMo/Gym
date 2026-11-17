@@ -1752,6 +1752,8 @@ class CollectedEvidence(BaseModel):
     # The ``rollout_collection_driver`` the saved config names, or None. A driver keeps its resumable work where it
     # chooses, so the absence of the top-level inventory is no proof that nothing was saved.
     collection_driver: str | None = None
+    # How many attempts that driver saved under ``rollouts_recovery``; a driver that died at startup saved none.
+    collection_driver_attempts: int = 0
     source_digests: dict[str, str | None] | None = None
     # Job-dir accounting file -> sha256 (None when absent) at collection, plus the saved resume_config.
     accounting_snapshot: dict[str, str | None] | None = None
@@ -2344,7 +2346,13 @@ def _decide_from_collected(
             **unread,
         )
     if collected.materialized is None:
-        if live_job is False and collected.collection_driver and not collected.results and not collected.failures:
+        if (
+            live_job is False
+            and collected.collection_driver
+            and collected.collection_driver_attempts
+            and not collected.results
+            and not collected.failures
+        ):
             # The driver runs its own passes and writes the top-level Store when they end, so a run it did not finish
             # has no inventory here while its attempts hold the saved work. Its resume (``resume_from_cache``) is
             # what continues them; a fresh restart would resume the same way under a fresh budget and a false reason.

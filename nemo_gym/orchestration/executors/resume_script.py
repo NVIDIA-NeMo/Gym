@@ -746,10 +746,14 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
     esac
     # A segment that timed out before Gym wrote the task inventory saved nothing to resume, and the next one would
     # repeat the same startup under the same walltime: the chain ends and names the fresh restart instead. A
-    # collection driver keeps its own saved attempts and writes the inventory when its passes end, so its run
-    # continues: the driver resumes them.
-    _gym_driver=$(sed -n 's/^rollout_collection_driver:[[:space:]]*//p' "$OUTPUT_DIR/artifacts/rollouts_resolved_config.yaml" 2>/dev/null | head -n 1)
-    if [[ "$_prev_state" == TIMEOUT && ! -e "$OUTPUT_DIR/artifacts/rollouts_materialized_inputs.jsonl" && ( -z "$_gym_driver" || "$_gym_driver" == null || "$_gym_driver" == "~" ) ]]; then
+    # collection driver keeps its own saved attempts and writes the inventory when its passes end, so a run whose
+    # driver saved an attempt continues: the driver resumes it. The driver is read as the evidence collector reads it:
+    # quotes, a trailing comment, a null spelling or an interpolation name none.
+    _gym_driver=$(sed -n 's/^rollout_collection_driver:[[:space:]]*//p' "$OUTPUT_DIR/artifacts/rollouts_resolved_config.yaml" 2>/dev/null | head -n 1 | sed 's/#.*//' | tr -d '[:space:]' | tr -d "'" | tr -d '"')
+    if [[ "${{_gym_driver,,}}" == null || "$_gym_driver" == "~" || "$_gym_driver" == *'${{'* ]]; then _gym_driver=""; fi
+    _gym_driver_saved=0
+    if [[ -n "$_gym_driver" ]] && compgen -G "$OUTPUT_DIR/artifacts/rollouts_recovery/attempt-*" > /dev/null; then _gym_driver_saved=1; fi
+    if [[ "$_prev_state" == TIMEOUT && ! -e "$OUTPUT_DIR/artifacts/rollouts_materialized_inputs.jsonl" && "$_gym_driver_saved" == 0 ]]; then
         _gym_run_dir="${{OUTPUT_DIR%/*}}"
         _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended TIMEOUT: {pre_inventory_reason}; fresh restart: {fresh_restart_command}"
     fi

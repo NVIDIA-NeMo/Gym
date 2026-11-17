@@ -401,6 +401,57 @@ def test_the_guard_continues_a_driver_run_that_timed_out_before_the_task_invento
     assert not (job / ".gym_chain_incomplete").exists()
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        "rollout_collection_driver: 'null'",
+        'rollout_collection_driver: "null"',
+        "rollout_collection_driver: null  # none",
+        "rollout_collection_driver: Null",
+        "rollout_collection_driver: ~",
+        "rollout_collection_driver: ${oc.select:driver,null}",
+        "rollout_collection_driver:",
+    ],
+)
+def test_a_config_that_names_no_driver_ends_the_chain_whatever_its_spelling(tmp_path, line):
+    # The guard reads the driver as the evidence collector does: a quoted, commented, capitalized or interpolated
+    # null names none, so a saved attempt directory does not keep the chain going.
+    job = tmp_path / "gym-job-x" / "gsm8k"
+    (job / "artifacts" / "rollouts_recovery" / "attempt-0").mkdir(parents=True)
+    (job / "artifacts" / "rollouts_resolved_config.yaml").write_text(line + "\n")
+    result = _run_prologue(job, ResumeConfig(max_retries=2), "TIMEOUT", exit_code="0:15", elapsed="14400")
+    assert (result.returncode, "REACHED_WORK" in result.stdout) == (1, False), result.stdout + result.stderr
+    assert (job / ".gym_chain_incomplete").exists()
+
+
+def test_a_driver_that_saved_no_attempt_ends_the_chain_after_a_timeout_before_the_inventory(tmp_path):
+    # A driver that dies at startup (an import error, a bad module:function) writes nothing, so repeating the same
+    # segment under the same walltime would repeat the same startup: the chain ends and names the fresh restart.
+    job = tmp_path / "gym-job-x" / "gsm8k"
+    (job / "artifacts").mkdir(parents=True)
+    (job / "artifacts" / "rollouts_resolved_config.yaml").write_text(
+        "rollout_collection_driver: benchmarks.demo.collection:collect\n"
+    )
+    result = _run_prologue(job, ResumeConfig(max_retries=2), "TIMEOUT", exit_code="0:15", elapsed="14400")
+    assert (result.returncode, "REACHED_WORK" in result.stdout) == (1, False), result.stdout + result.stderr
+    assert "fresh restart: gym eval resubmit gym-job-x gsm8k --recover" in (job / ".gym_chain_incomplete").read_text()
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "rollout_collection_driver: 'benchmarks.demo.collection:collect'",
+        'rollout_collection_driver: "benchmarks.demo.collection:collect"  # the pass',
+    ],
+)
+def test_a_quoted_or_commented_driver_with_a_saved_attempt_continues(tmp_path, line):
+    job = tmp_path / "gym-job-x" / "gsm8k"
+    (job / "artifacts" / "rollouts_recovery" / "attempt-0").mkdir(parents=True)
+    (job / "artifacts" / "rollouts_resolved_config.yaml").write_text(line + "\n")
+    result = _run_prologue(job, ResumeConfig(max_retries=2), "TIMEOUT", exit_code="0:15", elapsed="14400")
+    assert (result.returncode, "REACHED_WORK" in result.stdout) == (0, True), result.stdout + result.stderr
+
+
 def test_a_preemption_before_the_task_inventory_still_spends_an_infra_retry(tmp_path):
     job = tmp_path / "gym-job-x" / "gsm8k"
     (job / "artifacts").mkdir(parents=True)

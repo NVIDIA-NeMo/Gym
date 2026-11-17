@@ -21,6 +21,7 @@ presentation supply explicit ``unit_quality`` inputs at the gate boundary instea
 
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -237,6 +238,19 @@ def test_a_driver_run_cut_before_its_inventory_resumes_its_saved_attempts(tmp_pa
     assert collected.collection_driver == "benchmarks.demo.collection:collect"
     assert d.action == RecoveryAction.RESUBMIT
     assert "benchmarks.demo.collection:collect" in d.reason and "fresh" not in d.reason
+
+
+def test_a_driver_run_that_saved_no_attempt_is_a_fresh_restart_not_a_resume(tmp_path) -> None:
+    # A driver that died at startup (an import error, a bad module:function) saved nothing for a resume to continue.
+    job = _driver_run_cut_before_its_inventory(tmp_path)
+    shutil.rmtree(job / "artifacts" / "rollouts_recovery")
+
+    collected = collect(job)
+    d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+
+    assert collected.collection_driver == "benchmarks.demo.collection:collect"
+    assert collected.collection_driver_attempts == 0
+    assert d.action == RecoveryAction.FRESH_RESTART and "inventory" in d.reason
 
 
 def test_a_run_without_a_driver_or_inventory_is_still_a_fresh_restart(tmp_path) -> None:
