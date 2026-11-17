@@ -1,0 +1,251 @@
+---
+title: "Multi-Step Task Folders"
+description: "Write a task folder with [[steps]] that runs as several turns in one sandbox, each with its own instruction and verifier, rolled up into one reward."
+position: 5
+---
+
+A task folder with `[[steps]]` tables is a multi-step task. The `harbor` Environment Server runs it as one episode of
+several **turns** on one sandbox: one turn per step, in order, each with its own instruction and verifier. The turns'
+rewards roll up into the episode's reward.
+
+This page covers what steps change. For the single-step shape, see [Author Task Folders](/main/data/task-folders/harbor-tasks)
+and [Task Folder Format](/main/data/task-folders/task-folder-format).
+
+## The steps shape
+
+```toml
+# task.toml
+multi_step_reward_strategy = "mean"   # or "final"
+
+[[steps]]
+name = "01-select-cake-base"
+[steps.agent]
+timeout_sec = 1800.0
+
+[[steps]]
+name = "02-select-frosting"
+```
+
+```text
+my-task/
+├── task.toml
+├── instruction.md          # optional, never sent to the agent
+├── environment/            # shared by every turn
+├── tests/test.sh           # every step's base verifier (optional)
+└── steps/
+    ├── 01-select-cake-base/
+    │   ├── instruction.md  # the turn's instruction (required)
+    │   ├── workdir/        # merged into the working directory (optional)
+    │   │   └── setup.sh    # run before the agent (optional)
+    │   ├── tests/          # layered over tests/ (optional)
+    │   └── solution/       # the step's reference solution (optional)
+    └── 02-select-frosting/
+```
+
+Step names are unique folder names of letters, digits, `.`, `_` and `-`, starting with a letter or digit. Every
+step needs `steps/<name>/instruction.md` and a `test.sh` in `steps/<name>/tests/` or `tests/`.
+[Python verifiers](/main/data/task-folders/task-folder-verifiers#python-verifiers) are single-step only. Gym's rows carry one `turns` entry per step instead of one `responses_create_params`.
+
+| Step key | Default | What it does |
+| --- | --- | --- |
+| `name` | required | The step's folder under `steps/`. |
+| `[steps.agent].timeout_sec` | `[agent].timeout_sec` | The turn's agent budget. |
+| `[steps.agent].user` | `[agent].user` | The turn's agent user. |
+| `[steps.verifier].timeout_sec` | `600` | The step's verifier budget. It never falls back to `[verifier].timeout_sec`. |
+| `[steps.verifier].user`, `env` | `[verifier]` | Applied over the task's values. |
+| `[steps.verifier].environment_mode` | resolved per step | `shared` or `separate`. |
+| `[steps.verifier.environment]` | none | The step's verifier sandbox, replacing `[verifier.environment]` rather than merging with it. Selects `separate`. |
+| `[[steps.verifier.collect]]` | `[]` | Collect hooks, after the task's. |
+| `[steps.healthcheck]` | none | Polled before the agent. Same keys as `[environment.healthcheck]`; see [Task settings](/main/data/task-folders/task-folder-format#task-settings). |
+| `artifacts` | `[]` | Collected after the task's, between the turn's agent and its verifier. |
+| `min_reward` | none | Stops the episode after this step when the turn misses it. See [Early stop](#early-stop). |
+
+The dataset's `timeout_multiplier` scales the steps' agent and verifier budgets too, the 600-second default included,
+but not their collect hooks or health checks. See
+[Dataset settings](/main/data/task-folders/task-folder-format#dataset-settings).
+
+## What runs in each turn
+
+1. **Clean up.** After a turn verified in the agent's sandbox, `/tests` and `/logs/verifier` are emptied and
+   `/logs/agent/trajectory.json` is removed, keeping only declared
+   [sidecar inputs](/main/data/task-folders/task-folder-verifiers#sidecar-inputs). Everything else the agent left stays.
+2. **Prepare.** Switch to the step's agent user, merge `workdir/`, run `setup.sh`, poll `[steps.healthcheck]`.
+3. **Run the agent.** A fresh session receives `steps/<name>/instruction.md` as its only input, under the step's
+   agent budget, or the harness's own cap if lower, such as `opencode_agent`'s `timeout`. It keeps no conversation
+   from earlier steps unless you [continue one harness session](#continue-one-harness-session).
+4. **Collect artifacts and verify.**
+
+The top-level `instruction.md` is never sent, so it can hold material the agent must not see. Each verifier's
+transcript holds its own turn alone. A job-level `prompt_template` wraps the first turn's instruction only.
+
+## Prepare each step
+
+`steps/<name>/workdir/` is merged into the working directory as root-owned files with the folder's modes: same-named
+files are replaced and nothing else is removed. Its `setup.sh` then runs there as the turn's agent user, bounded by
+the server's `step_setup_timeout_s`, else the step's agent budget. It stays in place, so the agent can read it. A
+`setup.sh` outside `workdir/` is not run. Processes earlier turns left keep running, so do not rely on `setup.sh` to
+undo what an earlier step did.
+
+```toml
+[[steps]]
+name = "02-serve"
+[steps.healthcheck]
+command = "curl -sf http://localhost:8000/health"
+start_period_sec = 20.0
+retries = 5
+```
+
+`[steps.healthcheck]` then polls as the turn's agent user. Once `start_period_sec` has passed, `retries` failures in a
+row (at least one) fail it; an attempt past its `timeout_sec` counts as a failure. `[environment.healthcheck]` runs
+only at seed.
+
+| Preparation failure | `failure_kind` |
+| --- | --- |
+| `setup.sh` exits non-zero or overruns | `harbor:step_setup_failed` |
+| `workdir/` cannot unpack over what earlier turns left | `harbor:step_workdir_failed` |
+| `[steps.healthcheck]` never passes | `harbor:step_healthcheck_failed` |
+
+The failed turn runs no agent or verifier, and the episode stops. A sandbox that cannot run the command, clear the
+previous turn's grading files, switch the user or place the oracle's solution is an outage, which Gym retries, even
+when an earlier agent caused it.
+
+## Artifacts per step
+
+```toml
+[[steps]]
+name = "checkpoint_1"
+artifacts = [{ source = "/app", destination = "app", exclude = [".venv", "node_modules"] }]
+```
+
+After each turn's agent, in both verifier modes, the server runs `main`'s collect hooks (the task's, then the step's)
+and collects `main`'s entries among `/logs/artifacts`, the task's `artifacts` and the step's into that turn's verifier
+log folder. It then does the same for the sidecars. `artifacts/manifest.json` records each entry's `origin`
+(`convention`, `task` or `step`) and `status`. Sidecars keep running between turns.
+
+## Verification per step
+
+By default each turn verifies in the agent's sandbox. The verifier is the task's `tests/` with `steps/<name>/tests/`
+on top, run with the step's `[steps.verifier]` user and `env`. Each turn writes its own
+[reward file](/main/data/task-folders/task-folder-verifiers#reward-files) and log folder.
+
+Each step resolves its mode on its own: its `[steps.verifier].environment_mode`, else `separate` when it declares
+`[steps.verifier.environment]`, else the task's mode. With the server's `separate_verifier_for_artifacts: true`, a turn
+whose task or step declares `artifacts` verifies separately too.
+
+```toml
+[verifier]
+environment_mode = "separate"
+
+[verifier.environment]
+docker_image = "org/verifier:1"
+
+[[steps]]
+name = "01-plan"
+[steps.verifier]
+environment_mode = "shared"
+
+[[steps]]
+name = "02-build"
+[steps.verifier.environment]
+docker_image = "org/build-verifier:1"
+```
+
+A separate turn verifies in a fresh sandbox, as in
+[Shared and separate verification](/main/data/task-folders/task-folder-verifiers#shared-and-separate-verification), from
+`[steps.verifier.environment]`, else `[verifier.environment]`, else a copy of `[environment]`. The agent's sandbox
+keeps running unless this is the last step. The episode's `verifier_mode` is the one every turn used, or `mixed`.
+
+## Reward roll-up
+
+| `multi_step_reward_strategy` | Episode reward |
+| --- | --- |
+| `mean` (default) | Mean over the turns that ran. `verifier_rewards` keys average the same way, a missing key counting 0. |
+| `final` | The last turn that ran. |
+
+A turn whose verifier wrote no valid reward file, timed out or not, counts as a measured 0 and ends the episode. A
+masked turn masks the episode.
+
+A failed preparation at step 2 or later is a measured 0 too, so a failed step 2 of 3 scores the first turn's reward
+divided by 2 under `mean`. Harbor leaves that turn out; Gym counts it, so an agent that breaks the next step's setup
+is penalized. At step 1 no agent has acted, so the episode is a terminal failure with the step's `failure_kind`: no
+row in `rollouts.jsonl`, one in `rollouts_failures.jsonl`, and no retry.
+
+The result lists each turn under `turns`. The episode's `response` comes from the last turn whose agent ran, and
+`stopped_after_turn` names the step after which it stopped early.
+
+## Early stop
+
+The episode stops after a turn that is masked, writes no valid reward file, or misses `min_reward`. A number gates
+the reward file's `reward` key, so a `reward.json` with only component keys always misses it. A table such as
+`{ core_pass_rate = 0.5 }` gates each key it names. An agent failure that `agent_outcome_policy` retries or fails
+ends the episode ungraded.
+
+## Reference solutions per step
+
+`gym dataset validate` runs the oracle. Before each turn the server places `steps/<name>/solution/` at `/solution`,
+else the task's top-level `solution/`, and the oracle runs `/solution/solve.sh`. A task is validated only when every
+step has a `solve.sh`. A step `solution/` folder without one leaves that step, and so the task, unvalidated. See
+[Reference answers](/main/data/task-folders/task-folder-verifiers#reference-answers).
+
+## Agent user per step
+
+When a step's `[steps.agent].user` differs from the user in place, the sandbox's default user, the working
+directory's owner and the harness's user switch to it. Files inside keep their owners, so the new user may not be
+able to write them. The verifier keeps its own user. A user with a group (`name:group`) is refused at seed on every
+sandbox provider except Docker.
+
+## Episode time budget
+
+With `enforce_task_timeouts: true` (the default), the episode deadline starts once the sandbox is ready. It sums, per
+turn, the harness setup allowance, the `setup.sh` bound, the health check's worst case, the agent and verifier budgets
+with `verifier_grace_s`, and the collect hooks, plus a sandbox start per separate turn. Above
+`default_episode_timeout_seconds` (21,600), the deadline follows the task's own bound, with a warning. With `false`,
+the default is the deadline, and a task that cannot fit one sandbox start in it is refused at seed. Past its deadline,
+an episode fails as retryable: `harbor:task_deadline` with `true`, `Episode timed out` with `false`.
+
+## Compose sidecars
+
+Size a sidecar the steps share with `deploy.resources.limits` (or `reservations`, or the legacy `cpus` and
+`mem_limit`). Without any of them it runs at the provider's default size. See
+[Multi-Container Tasks](/main/data/task-folders/compose-tasks).
+
+## Continue one harness session
+
+The server's `turn_sessions` setting is `fresh` (default: one session per step) or `continue` (one session for the
+episode, so the agent keeps its conversation). Set it as shown in
+[Configure the server](/main/agent-interactions/harbor#configure-the-server):
+
+```bash
+gym eval run <dataset> --agent opencode_agent ... \
+  ++harbor_environment_server.environment_servers.harbor.turn_sessions=continue
+```
+
+`continue` needs a harness that declares multi-turn continuation; today only `opencode_agent` does. Otherwise, or
+when the task's steps switch agent users, each multi-step episode fails at seed, unretried, before its sandbox starts.
+
+Each step keeps its own instruction, budget, verification and early stop. Between steps the harness process exits and
+its conversation state stays on disk in the sandbox, until the session closes before the last step's verifier.
+
+| Mode | Episode `ng_trajectory`, `ng_agent_observations` | Per-turn records |
+| --- | --- | --- |
+| `fresh` | Empty when more than one session ran | One per turn |
+| `continue` | The cumulative session | None |
+
+Under `continue`, the episode's `responses_create_params` and `response` hold only the last activation. Read
+`ng_trajectory`, or turn on [model-call capture](/main/model-server/model-call-capture).
+
+## What is refused
+
+| Refused | When |
+| --- | --- |
+| A missing `steps/<name>/` folder, `instruction.md` or `test.sh` | Load |
+| A separate step with a `steps/<name>/tests/` folder, even one without a Dockerfile, and no `docker_image` in its verifier environment; declare one | Load |
+| `environment_mode = "shared"` with `[steps.verifier.environment]` | Load |
+| A network restriction on `[steps.agent]`, `[steps.verifier]` or its environment | Load |
+| A `[verifier]` network restriction while any step verifies shared | Load |
+| `steps/<first step>/trajectory.json`, for every agent but the oracle | Seed |
+| A step user with a group, outside Docker | Seed |
+| `turn_sessions: continue` with a harness that cannot continue, or with steps that switch users | Seed |
+
+The legacy keys `version` and `multi_step_reward_mode` load: `version` is read as `schema_version`, and
+`multi_step_reward_mode` is dropped in favor of `multi_step_reward_strategy`. See also [What the loader refuses](/main/data/task-folders/task-folder-format#what-the-loader-refuses).

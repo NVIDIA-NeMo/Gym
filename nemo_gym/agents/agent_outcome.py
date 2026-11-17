@@ -14,7 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, ClassVar, Literal
 
-from aiohttp import ClientConnectorError, ClientResponseError
+from aiohttp import ClientConnectorError, ClientResponseError, ConnectionTimeoutError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from nemo_gym.client.openai_client import MODEL_RESPONSE_TIMEOUT_REASON
@@ -27,6 +27,7 @@ from nemo_gym.core.failure_kinds import (
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
     MODEL_REQUEST_REJECTED,
+    MODEL_SERVER_QUEUE_TIMEOUT,
     MODEL_TRANSPORT_ERROR,
     PROVIDER_COMMAND_OUTCOME_UNKNOWN,
     PROVIDER_INTERNAL_ERROR,
@@ -60,6 +61,11 @@ if TYPE_CHECKING:
 AGENT_OUTCOME_METADATA_KEY = "ng_agent_outcome"
 # Response metadata naming the outcome ladder's row that decided the response (``RunDecision.stop_reason``).
 AGENT_STOP_REASON_METADATA_KEY = "ng_agent_stop_reason"
+# Response metadata a harness adapter sets to "true" when the last prompt made at least as many model calls as the
+# harness's own step limit allows. The harness may only ask for a final answer at that limit (OpenCode adds a note and
+# still offers the tools), so the mark says the limit was reached, not how the model answered. The environment decides
+# whether a marked answer is scored.
+HARNESS_STEP_LIMIT_METADATA_KEY = "harness_step_limit_reached"
 
 
 class AgentOutcome(BaseModel):
@@ -108,6 +114,7 @@ class AgentOutcomePolicyConfig(OutcomePolicyConfig):
             # The model never answered a request the run's setup made invalid: not graded, and a retry fails the same.
             MODEL_REQUEST_REJECTED: OutcomeAction.FAIL,
             MODEL_TRANSPORT_ERROR: OutcomeAction.RETRY,
+            MODEL_SERVER_QUEUE_TIMEOUT: OutcomeAction.RETRY,
             # Transient sandbox-provider failures reported by an agent: the episode runs again, which is not a
             # replay of the uncertain operation inside the provider.
             **dict.fromkeys(
@@ -206,12 +213,39 @@ def confirmed_policy_response_timeout(report: FailureReport | None) -> bool:
     )
 
 
+def queued_policy_response_timeout(report: FailureReport | None) -> bool:
+    """Whether a confirmed policy response timeout (``confirmed_policy_response_timeout``) waited in the model
+    server's queue: every attempt recorded the server's queue at its timeout, with requests waiting.
+
+    An attempt without a queue reading, or with an empty queue, keeps the timeout the model's.
+    """
+    if not confirmed_policy_response_timeout(report):
+        return False
+    final = report.events[report.failure_id]
+    attempts = [
+        event
+        for event in report.events.values()
+        if event.boundary == FailureBoundary.MODEL
+        and event.operation == "model_request"
+        and event.operation_id == final.operation_id
+    ]
+    return all(
+        isinstance(event.details, ModelFailureDetails)
+        and event.details.server_requests_waiting is not None
+        and event.details.server_requests_waiting > 0
+        for event in attempts
+    )
+
+
 # The classified policy-request timeout whose outcome an agent boundary selects.
 POLICY_TIMEOUT_OPERATION = "agent.policy_request"
 
 
 def policy_timeout_failure(error: ClientResponseError) -> NgFailureEvent | None:
     """The agent's policy-timeout failure for a failed model reply, or ``None``.
+
+    The kind is ``MODEL_SERVER_QUEUE_TIMEOUT`` when every attempt waited in the model server's queue
+    (``queued_policy_response_timeout``), else ``MODEL_POLICY_RESPONSE_TIMEOUT``.
 
     The reply's report must show that the final model call timed out after its upload on every attempt
     (``confirmed_policy_response_timeout``). The failure is caused by ``error``, so its reply keeps the model's
@@ -220,10 +254,16 @@ def policy_timeout_failure(error: ClientResponseError) -> NgFailureEvent | None:
     report = FailureHeader.decode(error.headers)
     if not confirmed_policy_response_timeout(report):
         return None
+    # Waiting in the model server's queue is that server's capacity, not the model's answer.
+    queued = queued_policy_response_timeout(report)
     failure = NgFailureEvent(
         boundary=FailureBoundary.AGENT,
-        failure_kind=MODEL_POLICY_RESPONSE_TIMEOUT,
-        failure_reason="Policy model request timed out on every attempt",
+        failure_kind=MODEL_SERVER_QUEUE_TIMEOUT if queued else MODEL_POLICY_RESPONSE_TIMEOUT,
+        failure_reason=(
+            "Policy model request timed out on every attempt while the model server queued requests"
+            if queued
+            else "Policy model request timed out on every attempt"
+        ),
         operation=POLICY_TIMEOUT_OPERATION,
         operation_id=report.events[report.failure_id].operation_id,
     )
@@ -427,7 +467,7 @@ def reported_agent_failure(response: "NeMoGymResponse") -> NgFailureEvent | None
 
 def model_request_not_sent(response: "NeMoGymResponse") -> bool:
     """Whether every attempt of the model request a response's report selects failed to connect, so the request was
-    never sent."""
+    never sent. A refused connection and a connection timeout both mean it was never made."""
     report = FailureReport.model_validate(response.model_extra["failure_report"])
     selected = report.events[report.failure_id]
     if (
@@ -445,12 +485,15 @@ def model_request_not_sent(response: "NeMoGymResponse") -> bool:
     if any(not event.operation_id or not event.attempt_id for event in observed):
         return False
     attempts = [event for event in observed if event.operation_id == selected.operation_id]
-    connector_type = f"{ClientConnectorError.__module__}.{ClientConnectorError.__qualname__}"
+    unconnected_types = {
+        f"{error_type.__module__}.{error_type.__qualname__}"
+        for error_type in (ClientConnectorError, ConnectionTimeoutError)
+    }
     return len({event.attempt_id for event in attempts}) == len(attempts) and all(
         isinstance(event.details, ModelFailureDetails)
         and event.details.request_upload_complete is False
         and event.foreign_error is not None
-        and event.foreign_error.exception_type == connector_type
+        and event.foreign_error.exception_type in unconnected_types
         for event in attempts
     )
 

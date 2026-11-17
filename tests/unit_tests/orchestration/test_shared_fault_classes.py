@@ -103,6 +103,16 @@ def test_a_run_that_owns_its_serving_can_count_a_policy_timeout_as_a_server_faul
     assert task["criteria"]["evaluation"]["policy_timeout_counts_as_model"] is False
 
 
+def test_a_queued_policy_timeout_is_a_server_fault():
+    from collections import Counter
+
+    kind = failure_kinds.MODEL_SERVER_QUEUE_TIMEOUT
+    assert kind in failure_kinds.SERVER_FAULT_KINDS and kind not in failure_kinds.MODEL_FAULT_KINDS
+    report = fault_report(Counter({kind: 1}), 100)
+    assert report["evaluation"]["kinds"] == {kind: 1} and report["evaluation"]["server"] == 1
+    assert report["model"]["count"] == 0
+
+
 def test_the_setting_is_a_strict_boolean():
     with pytest.raises(ValueError):
         GateCriteria(policy_timeout_counts_as_model="no")

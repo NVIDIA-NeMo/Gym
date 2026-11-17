@@ -54,9 +54,7 @@ stacks as the NumPy 1.26/SciPy 1.13 era and the 2025 current era, but does not d
 environment lockfiles. Use the exact interpreter paths from the run being reproduced and record
 their package inventories with the result.
 
-The benchmark requires two resolved interpreters and fails with a clear error otherwise. The
-original `scicode` benchmark remains backward-compatible and continues to use its resources
-server's current interpreter unless `grading_interpreters` is configured.
+The benchmark requires two resolved interpreters and fails with a clear error otherwise.
 
 ## Run
 
@@ -135,7 +133,8 @@ existing grading helper and generated program as files, checks the image's
 interpreter and test-data checksum, executes the grader, and deletes the sandbox
 in a `finally` block. The sandbox also has a finite TTL for interrupted clients.
 No grading environment or HDF5 is needed on the Gym host. API, image, preflight,
-and killed-process failures raise infrastructure errors instead of becoming
-incorrect model answers; ordinary assertions and code timeouts retain their
-existing failure semantics. Keep failed rows unscored and investigate before
-retrying. This backend does not resume or mutate an existing local evaluation.
+and unconfirmed termination failures remain inconclusive. A provider-confirmed
+`provider_oom_killed` during generated-code execution fails that grading attempt;
+a subproblem still passes if either configured interpreter passes. Ordinary
+assertions and code timeouts retain their existing failure semantics. Investigate
+incomplete rows before retrying. This backend does not resume or mutate an existing local evaluation.

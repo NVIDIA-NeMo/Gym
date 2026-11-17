@@ -1,0 +1,278 @@
+# SPDX-FileCopyrightText: Modifications Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Source: https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/saas_bench/apps.yaml
+# Original license: Apache-2.0; Copyright: SaaS-Bench Authors.
+# Task-G Rollout App Registry
+#
+# Port formula (docker-run apps): BASE_PORT + slot_id * slot_offset + app_index
+# Default: 30000 + slot_id * 20 + app_index
+#
+# Container naming: rollout_{slot_id}_{app_name}
+#
+# Fields:
+#   app_index            : unique offset within a slot block (0-indexed)
+#   fixed_port           : port used in no-isolation mode
+#   container_port       : port the service listens on inside the container
+#   start                : docker run command; {container}, {port}, {hostname} substituted
+#   health_path          : URL path used by readiness probe; accepts 200/301/302/303/401/403
+#   ready_contains       : response marker(s) required before the app is handed to an agent
+#   startup_wait         : MAX seconds to wait for readiness; raises if not ready in time
+#   start_type: compose  : uses compose_template_file instead of docker run
+#   compose_template_file: path to .yml.tpl; $prefix, $port, $hostname substituted
+#   compose_volumes      : named volume suffixes to remove on stop
+
+apps:
+
+  # -- Software Engineering & Project Management ----------------------------
+
+  code-server:
+    app_index: 0
+    fixed_port: 6041
+    container_port: 8080
+    start: >-
+      docker run -d --name {container}
+      -e PASSWORD=8a128206e2177bce1e48e565 -u 0
+      -p {port}:8080
+      code-server-bundle:latest
+    health_path: "/"
+    startup_wait: 900
+
+  openproject:
+    app_index: 1
+    fixed_port: 6047
+    container_port: 80
+    start: "docker run -d --name {container} -p {port}:80 -e OPENPROJECT_HOST__NAME={hostname}:{port} -e OPENPROJECT_HTTPS=false -e SECRET_KEY_BASE=secret mw-openproject:latest"
+    health_path: "/health_checks/default"
+    startup_wait: 360
+
+  metabase:
+    app_index: 2
+    fixed_port: 6100
+    container_port: 80
+    start: "docker run -d --name {container} -p {port}:80 mw-metabase:latest"
+    health_path: "/"
+    startup_wait: 180
+
+  baserow:
+    app_index: 3
+    fixed_port: 6009
+    container_port: 6806
+    pg_port_offset: 15  # Expose internal Postgres: pg_port = port + 15 (must stay within slot_offset=20)
+    start: "docker run -d --name {container} -p {port}:6806 -p {pg_port}:5432 -e BASEROW_PUBLIC_URL=http://{hostname}:{port} mw-baserow:latest"
+    health_path: "/login"
+    startup_wait: 600
+
+  # -- Business Operations & Finance ----------------------------------------
+
+  twenty:
+    app_index: 4
+    fixed_port: 6039
+    container_port: 3000
+    start: "docker run -d --name {container} -p {port}:3000 -e SERVER_URL=http://{hostname}:{port} -e FRONTEND_URL=http://{hostname}:{port} mw-twenty:latest"
+    health_path: "/"
+    # Node serves HTTP immediately, then the SPA can stick on
+    # "Sorry, something went wrong" until Postgres/API are actually up.
+    ready_consecutive: 6
+    ready_not_contains:
+      - "Sorry, something went wrong"
+      - "Application error"
+    startup_wait: 360
+
+  bigcapital:
+    app_index: 5
+    fixed_port: 6068
+    container_port: 80
+    start: "docker run -d --name {container} -p {port}:80 mw-bigcapital:latest"
+    # Nginx serves the SPA before the Node/MariaDB backend is ready. Probing
+    # the root allows /api/auth/meta to return 502 on the first login screen.
+    health_path: "/api/auth/meta"
+    ready_contains: ['"signup_disabled"']
+    ready_consecutive: 2
+    startup_wait: 600
+
+  hrms:
+    app_index: 6
+    fixed_port: 6077
+    container_port: 8000
+    start: "docker run -d --name {container} -p {port}:8000 mw-hrms:latest"
+    health_path: "/"
+    startup_wait: 1200
+
+  pretix:
+    app_index: 7
+    fixed_port: 6089
+    container_port: 80
+    start_type: compose
+    compose_template_file: docker/pretix.yml.tpl
+    compose_volumes:
+      - -data
+      - -db-data
+      - -redis-data
+    health_path: "/control/login/"
+    startup_wait: 600
+
+  # -- Healthcare Administration ---------------------------------------------
+
+  openemr:
+    app_index: 8
+    fixed_port: 6085
+    container_port: 80
+    start: "docker run -d --name {container} -p {port}:80 mw-openemr:latest"
+    health_path: "/interface/login/login.php?site=default"
+    startup_wait: 1200
+
+  opnform:
+    app_index: 9
+    fixed_port: 6046
+    container_port: 8080
+    start: "docker run -d --name {container} -p {port}:8080 -e APP_URL=http://{hostname}:{port} mw-opnform:latest"
+    health_path: "/"
+    startup_wait: 120
+
+  # -- Team Collaboration & Document Workflow --------------------------------
+
+  onlyoffice:
+    app_index: 10
+    fixed_port: 6027
+    container_port: 80
+    start_type: compose
+    compose_template_file: docker/onlyoffice.yml.tpl
+    compose_volumes:
+      - _mysql_data
+      - _es_data
+      - _community_data
+      - _community_logs
+      - _community_letsencrypt
+      - _ds_data
+      - _ds_logs
+      - _ds_cache
+      - _ds_files
+      - _ds_fonts
+    health_path: "/auth.aspx"
+    startup_wait: 180
+    # Probe the Community UI route: Docs also returns 200 at / but has no API.
+    # Community nginx binds before the Mono services finish their final restart.
+    # Wait through that short 200/502 transition before declaring the stack ready.
+    ready_consecutive: 5
+
+  mattermost:
+    app_index: 11
+    fixed_port: 6002
+    container_port: 8065
+    start_type: compose
+    compose_template_file: docker/mattermost.yml.tpl
+    compose_volumes:
+      - -config
+      - -data
+      - -logs
+      - -plugins
+      - -client-plugins
+      - -bleve-indexes
+      - -pg-data
+    health_path: "/api/v4/system/ping"
+    startup_wait: 360
+
+  owncloud:
+    app_index: 12
+    fixed_port: 6018
+    container_port: 8080
+    start_type: compose
+    compose_template_file: docker/owncloud.yml.tpl
+    compose_volumes: []
+    health_path: "/status.php"
+    # /status.php can be served before OwnCloud has completed initialization.
+    ready_contains: '"installed":true'
+    ready_consecutive: 2
+    startup_wait: 180
+
+  roundcubemail:
+    app_index: 13
+    fixed_port: 7101
+    container_port: 80
+    # Full mail stack (docker-mailserver). On NRT/slirp, slot.py injects
+    # NETWORK_INTERFACE=tap0 PERMIT_DOCKER=none (eth0 does not exist under slirp).
+    start: "docker run -d --name {container} -p {port}:80 mw-roundcubemail:latest"
+    health_path: "/"
+    startup_wait: 300
+    ready_consecutive: 5
+
+  # -- Agriculture / Media New Apps --------------------------------------------------
+
+  grocy:
+    app_index: 14
+    fixed_port: 7079
+    container_port: 80
+    start: "docker run -d --name {container} -p {port}:80 mw-grocy:latest"
+    health_path: "/"
+    startup_wait: 60
+
+  recipya:
+    app_index: 15
+    fixed_port: 7033
+    container_port: 8078
+    # Image has seeded DB/images but no config.json → interactive setup under -d
+    # binds a random port. Mount a seed config so serve uses 8078 immediately.
+    start: "docker run -d --name {container} -p {port}:8078 -v {repo_root}/docker/seeds/recipya/config.json:/root/.config/Recipya/config.json:ro -e RECIPYA_SERVER_URL=http://{hostname}:{port} -e RECIPYA_SERVER_PORT=8078 -e RECIPYA_SERVER_BYPASS_GUIDE=true mw-recipya:latest"
+    health_path: "/"
+    startup_wait: 90
+
+  farmos:
+    app_index: 16
+    fixed_port: 7038
+    container_port: 80
+    start: "docker run -d --name {container} -p {port}:80 mw-farmos:latest"
+    health_path: "/"
+    startup_wait: 120
+
+  e-label:
+    app_index: 17
+    fixed_port: 6055
+    container_port: 8080
+    # Bundled MSSQL crashes when soft stack is unlimited (legacy VA layout). Cap
+    # stack via --ulimit and a wrapper that ulimit -s before entrypoint-aio.sh.
+    start: "docker run -d --name {container} -p {port}:8080 --ulimit stack=8388608:8388608 -v {repo_root}/docker/seeds/elabel-entrypoint.sh:/elabel-entrypoint.sh:ro --entrypoint /bin/bash mw-elabel:latest /elabel-entrypoint.sh"
+    health_path: "/"
+    startup_wait: 240
+    ready_consecutive: 3
+
+  siyuan:
+    app_index: 18
+    fixed_port: 7037
+    container_port: 6806
+    start: "docker run -d --name {container} -p {port}:6806 -e SIYUAN_ACCESS_AUTH_CODE=siyuan6037 mw-siyuan:latest"
+    health_path: "/"
+    startup_wait: 300
+
+  watcharr:
+    app_index: 19
+    fixed_port: 7043
+    container_port: 3080
+    start: "docker run -d --name {container} -p {port}:3080 mw-watcharr:latest"
+    health_path: "/"
+    startup_wait: 60
+
+  booklore:
+    app_index: 20
+    fixed_port: 7004
+    container_port: 6004
+    start: "docker run -d --name {container} -p {port}:6004 mw-booklore:latest"
+    # nginx serves the frontend before the Java API is ready. Wait for the
+    # unauthenticated backend setup endpoint before handing the app to agents.
+    health_path: "/api/v1/setup/status"
+    startup_wait: 60
+
+  mediacms:
+    app_index: 21
+    fixed_port: 6024
+    container_port: 80
+    start: "docker run -d --name {container} -p {port}:80 mw-mediacms:latest"
+    health_path: "/"
+    startup_wait: 120
+
+  photoprism:
+    app_index: 22
+    fixed_port: 6103
+    container_port: 2342
+    start: "docker run -d --name {container} -p {port}:2342 -e PHOTOPRISM_SITE_URL=http://{hostname}:{port}/ mw-photoprism:latest"
+    health_path: "/api/v1/status"
+    startup_wait: 300

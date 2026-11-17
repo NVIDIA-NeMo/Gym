@@ -1,0 +1,12 @@
+wildclaw_agent:
+  responses_api_agents:
+    wildclawbench_agent:
+      entrypoint: app.py
+      resources_server: null
+      source_root: ${oc.env:WILDCLAW_ROOT}
+      worker_python: ${oc.env:WILDCLAW_PYTHON}
+      output_root: ${oc.env:WILDCLAW_OUTPUT_ROOT}
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model_name: ${policy_model_name}

@@ -97,9 +97,9 @@ class LegacySignal(NamedTuple):
 
 
 LEGACY_TIMEOUT_SIGNALS = (
-    LegacySignal(
-        "_ng_failure_class", "agent_timeout", "resources_servers/gdpval/app.py", "NG_FAILURE_CLASS_KEY: AGENT_TIMEOUT"
-    ),
+    # GDPVal no longer masks an agent wall-time stop as a `_ng_failure_class` failure: the row is a scored loss
+    # that keeps `failure_kind`.
+    LegacySignal("failure_kind", "agent_timeout", "resources_servers/gdpval/app.py", '"failure_kind": AGENT_TIMEOUT'),
     LegacySignal(
         "_ng_failure_class", "timeout_exceeded", "responses_api_agents/pinchbench/app.py", 'return "timeout_exceeded"'
     ),
@@ -111,6 +111,12 @@ LEGACY_TIMEOUT_SIGNALS = (
     ),
     LegacySignal("agent_timed_out", None, "responses_api_agents/codex_agent/app.py", '"agent_timed_out": timed_out}'),
     LegacySignal("agent_timeout_error", None, "responses_api_agents/harbor_agent/app.py", "agent_timeout_error=int("),
+    LegacySignal(
+        "opencode_error_type",
+        "timeout",
+        "responses_api_agents/opencode_sandboxed_agent/app.py",
+        '"opencode_error_type": run_error_type or getattr(result, "error_type", None)',
+    ),
     LegacySignal(
         "eval_timed_out", None, "resources_servers/swebench_pro/app.py", '"eval_timed_out": result.timed_out'
     ),
