@@ -1043,3 +1043,29 @@ async def test_create_uses_daemonize_for_instance_start(
     # The readiness probe (exec) must NOT use the daemonizing path.
     exec_calls = [c for c in rec.calls if "exec" in c["argv"]]
     assert exec_calls and all(c["daemonize"] is False for c in exec_calls)
+
+
+@pytest.mark.parametrize("workdir_arg", [None, ["--workdir", "/custom"], ["--workdir=/custom"], ["-W", "/custom"]])
+async def test_containment_uses_private_disk_backed_workdir(fake_binary, monkeypatch, tmp_path, workdir_arg):
+    staging = tmp_path / "staging"
+    monkeypatch.setattr(apptainer_provider.tempfile, "mkdtemp", lambda prefix: str(staging.mkdir() or staging))
+    provider, rec = _make_provider(
+        monkeypatch,
+        lambda argv: (0, "", ""),
+        create={"extra_start_args": ["--containall", *(workdir_arg or [])]},
+        probe={"command": None},
+    )
+    handle = await provider.create(SandboxSpec(image="ubuntu:22.04"))
+    try:
+        await provider.exec(handle, "true")
+        argv = rec.calls[0]["argv"]
+        if workdir_arg:
+            assert _contains_seq(argv, workdir_arg)
+            assert not (staging / ".apptainer-workdir").exists()
+        else:
+            private = staging / ".apptainer-workdir"
+            assert _contains_seq(argv, ["--workdir", str(private)])
+            assert private.stat().st_mode & 0o777 == 0o700
+    finally:
+        await provider.close(handle)
+    assert not staging.exists()

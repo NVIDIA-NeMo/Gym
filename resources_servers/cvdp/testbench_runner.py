@@ -23,17 +23,26 @@ import posixpath
 import shlex
 import tarfile
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import yaml
 
+from nemo_gym.core import PROVIDER_UNAVAILABLE, VERIFIER_ERROR
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxCreateError,
     SandboxSpec,
     resolve_provider_config,
     resolve_provider_metadata,
+)
+from nemo_gym.verification import SandboxVerificationError
+from resources_servers.cvdp.repository_workspace import (
+    RepositoryChanges,
+    apply_changes,
+    extract_snapshot,
+    resolve_archive,
 )
 
 
@@ -143,7 +152,7 @@ def _resolve_service_image(
     svc = (compose_data.get("services") or {}).get(service_name, {})
     image = str(svc.get("image") or "").removeprefix("docker://")
     if image:
-        return image, None
+        return config.image_overrides.get(image, image), None
     if not svc.get("build"):
         return "", None
     key = _service_build_key(compose_data, service_name, harness_files, config)
@@ -161,6 +170,7 @@ def _parse_compose_service(compose_content: str, service_name: str) -> Dict[str,
         "volumes": service.get("volumes", []),
         "working_dir": service.get("working_dir", "/code/rundir"),
         "environment": service.get("environment", {}),
+        "env_file": service.get("env_file"),
     }
 
 
@@ -224,7 +234,7 @@ def _parse_dot_env(content: str) -> Dict[str, str]:
 
 
 def _build_env(environment: Any, dot_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
-    """Merge workspace src/.env vars with a compose ``environment`` field into a
+    """Merge service env-file vars with a compose ``environment`` field into a
     plain {key: value} dict. dot_env is applied first so compose values win."""
     env: Dict[str, str] = {}
     if dot_env:
@@ -301,14 +311,64 @@ class TestbenchRunner:
                 raise ValueError(f"invalid CVDP prepared image manifest: {manifest_path}")
             self._prepared_images.update({str(key): str(value) for key, value in images.items()})
 
+    def check_prepared_images(self, inputs: Iterable[Path]) -> set[str]:
+        """Check dataset image mappings before any model calls or sandbox starts."""
+        required: set[str] = set()
+        checked_repositories: set[str] = set()
+        missing: dict[str, set[str]] = {}
+        for path in inputs:
+            with path.open(encoding="utf-8") as stream:
+                for line in stream:
+                    if not line.strip():
+                        continue
+                    meta = json.loads(line).get("verifier_metadata") or {}
+                    digest = meta.get("repository_workspace_sha256")
+                    if digest and digest not in checked_repositories:
+                        resolve_archive(self.config.prepared_repository_dir, digest)
+                        checked_repositories.add(digest)
+                    files = meta.get("harness_files") or {}
+                    compose = yaml.safe_load(_apply_substitutions(files.get("docker-compose.yml") or "", self.config))
+                    for name, service in ((compose or {}).get("services") or {}).items():
+                        image, key = _resolve_service_image(compose, name, files, self.config, self._prepared_images)
+                        if key:
+                            required.add(key)
+                        if key and not image:
+                            missing.setdefault(key, set()).add(name)
+                        elif not image or (image.startswith("__") and image.endswith("__")):
+                            raise ValueError(
+                                f"CVDP service {name!r} has no configured image ({image!r}). "
+                                "Configure its image before collecting rollouts."
+                            )
+                        elif (image.startswith(("/", "./", "../")) or image.endswith(".sif")) and not Path(
+                            image
+                        ).is_file():
+                            raise ValueError(f"CVDP verifier image does not exist: {image}")
+        if missing:
+            details = "; ".join(
+                f"{key} (services: {', '.join(sorted(names))})" for key, names in sorted(missing.items())
+            )
+            raise ValueError(
+                f"CVDP dataset requires {len(missing)} missing prepared image mapping(s): {details}. "
+                "Run resources_servers/cvdp/prepare.py for this dataset and configure prepared_image_manifest "
+                "before collecting rollouts. Use --check-only to validate preparation without building images."
+            )
+        return required
+
     async def run(
         self,
         rtl_files: Dict[str, str],
         harness_files: Dict[str, Optional[str]],
         task_id: str,
         context_files: Optional[Dict[str, str]] = None,
+        *,
+        repository_workspace_sha256: str = "",
+        repository_changes: Optional[RepositoryChanges] = None,
     ) -> Tuple[int, str, List[Dict]]:
-        """Run the task harness against the supplied RTL files."""
+        """Run the task harness against the supplied RTL files.
+
+        A nonzero exit code is the harness's verdict on the RTL. When the sandbox or the workspace transfer fails,
+        no verdict exists and ``SandboxVerificationError`` is raised instead.
+        """
         context_files = context_files or {}
         tmp_root = self.config.harness_workspace_dir.strip()
         if tmp_root:
@@ -316,8 +376,20 @@ class TestbenchRunner:
         with tempfile.TemporaryDirectory(prefix=f"cvdp_{task_id}_", dir=tmp_root or None) as workdir:
             workdir_path = Path(workdir)
 
+            if repository_workspace_sha256:
+                try:
+                    archive = resolve_archive(self.config.prepared_repository_dir, repository_workspace_sha256)
+                    extract_snapshot(archive, workdir_path)
+                    if repository_changes is not None:
+                        apply_changes(workdir_path, repository_changes)
+                except (OSError, ValueError, tarfile.TarError) as error:
+                    raise SandboxVerificationError(
+                        VERIFIER_ERROR, f"Heavy repository restore failed: {error}"
+                    ) from error
+            harness_root = workdir_path / ".cvdp_harness" if repository_workspace_sha256 else workdir_path
+
             for d in ["rtl", "verif", "docs", "src", "rundir"]:
-                (workdir_path / d).mkdir()
+                (harness_root / d).mkdir(parents=True, exist_ok=True)
             if self.config.container_tmp_bind_path:
                 (workdir_path / "rundir" / "tmp").mkdir(parents=True, exist_ok=True)
 
@@ -329,7 +401,7 @@ class TestbenchRunner:
                 content = _apply_substitutions(content, self.config)
                 if filepath.endswith("docker-compose.yml"):
                     compose_content = content
-                dest = _safe_workspace_path(workdir_path, filepath)
+                dest = _safe_workspace_path(harness_root, filepath)
                 if dest is None:
                     print(f"Skipping unsafe harness file path: {filepath}")
                     continue
@@ -341,7 +413,7 @@ class TestbenchRunner:
                     print(f"Failed to write file: {filepath}")
 
             if compose_content is None:
-                return 1, "No docker-compose.yml found in harness_files", []
+                raise SandboxVerificationError(VERIFIER_ERROR, "No docker-compose.yml found in harness_files")
 
             # Write companion files from input.context — mirrors
             # repository.restore_files(self.context). Preserves the full
@@ -376,7 +448,7 @@ class TestbenchRunner:
             compose_data = yaml.safe_load(compose_content)
             services = list((compose_data.get("services") or {}).keys())
             if not services:
-                return 1, "No services found in docker-compose.yml", []
+                raise SandboxVerificationError(VERIFIER_ERROR, "No services found in docker-compose.yml")
 
             # Preserve shared workspace state across services.
             archive_path = workdir_path.parent / f"{workdir_path.name}.tar.gz"
@@ -385,11 +457,13 @@ class TestbenchRunner:
             service_results: List[Dict] = []
             try:
                 for service in services:
+                    service_kwargs = {"repository_workspace": True} if repository_workspace_sha256 else {}
                     exit_code, output = await self._run_service(
                         archive_path,
                         service,
                         compose_content,
                         harness_files,
+                        **service_kwargs,
                     )
                     service_results.append({"service": service, "exit_code": exit_code, "stderr": output})
             finally:
@@ -411,7 +485,9 @@ class TestbenchRunner:
         create = dict(apptainer.get("create") or {})
         create.setdefault("start_timeout_s", self.config.container_timeout)
         create.setdefault("mount_point", self.config.container_transfer_dir)
-        create.setdefault("extra_start_args", ["--writable-tmpfs"])
+        create.setdefault(
+            "extra_start_args", ["--writable-tmpfs", "--containall", "--no-mount", "hostfs,bind-paths,cwd"]
+        )
         exec_cfg = dict(apptainer.get("exec") or {})
         exec_cfg.setdefault("default_timeout_s", self.config.container_timeout)
         exec_cfg.setdefault("concurrency", max(32, self.config.num_processes * 4))
@@ -429,6 +505,8 @@ class TestbenchRunner:
         service: str,
         compose_content: str,
         harness_files: Optional[Dict[str, Optional[str]]] = None,
+        *,
+        repository_workspace: bool = False,
     ) -> Tuple[int, str]:
         """Run one Compose service in a sandbox."""
         svc = _parse_compose_service(compose_content, service)
@@ -442,33 +520,65 @@ class TestbenchRunner:
         )
         if not image:
             if build_key:
-                return (
-                    1,
+                # The run was not provisioned with this harness image; the RTL was never simulated.
+                raise SandboxVerificationError(
+                    VERIFIER_ERROR,
                     f"No prepared image for service '{service}' (build key {build_key}). "
                     "Run resources_servers/cvdp/prepare.py for this dataset",
                 )
-            return 1, f"No image defined for service '{service}'"
+            raise SandboxVerificationError(VERIFIER_ERROR, f"No image defined for service '{service}'")
 
         cmd_parts = _build_command(svc["entrypoint"], svc["command"])
         if not cmd_parts:
-            return 1, f"Service '{service}' has no explicit command. Image-default commands are not portable"
+            raise SandboxVerificationError(
+                VERIFIER_ERROR, f"Service '{service}' has no explicit command. Image-default commands are not portable"
+            )
 
         workspace = posixpath.normpath(self.config.container_workspace)
         transfer_dir = posixpath.normpath(self.config.container_transfer_dir)
         if not workspace.startswith("/") or workspace == "/":
-            return 1, f"container_workspace must be an absolute non-root path: {workspace!r}"
+            raise SandboxVerificationError(
+                VERIFIER_ERROR, f"container_workspace must be an absolute non-root path: {workspace!r}"
+            )
         if not transfer_dir.startswith("/") or transfer_dir == "/":
-            return 1, f"container_transfer_dir must be an absolute non-root path: {transfer_dir!r}"
+            raise SandboxVerificationError(
+                VERIFIER_ERROR, f"container_transfer_dir must be an absolute non-root path: {transfer_dir!r}"
+            )
+        if transfer_dir == workspace:
+            raise SandboxVerificationError(
+                VERIFIER_ERROR, "container_transfer_dir must differ from container_workspace"
+            )
         try:
-            links = _compose_workspace_links(svc["volumes"], workspace)
+            if repository_workspace:
+                # Upstream AgenticRepository mounts its project volume at /code,
+                # and mounts the protected harness and run directory separately.
+                links = [(f"{workspace}/.cvdp_harness/src", "/src"), (f"{workspace}/.cvdp_harness/rundir", "/rundir")]
+            else:
+                links = _compose_workspace_links(svc["volumes"], workspace)
         except ValueError as exc:
-            return 1, str(exc)
+            raise SandboxVerificationError(VERIFIER_ERROR, str(exc)) from exc
 
         dot_env: Dict[str, str] = {}
-        for path, content in (harness_files or {}).items():
-            if content is not None and posixpath.normpath(path) == "src/.env":
-                dot_env = _parse_dot_env(content)
-                break
+        env_files = svc["env_file"]
+        if env_files is None:
+            env_paths = ["src/.env"]
+        elif isinstance(env_files, str):
+            env_paths = [env_files]
+        elif isinstance(env_files, list) and all(isinstance(path, str) for path in env_files):
+            env_paths = env_files
+        else:
+            raise SandboxVerificationError(VERIFIER_ERROR, f"Unsupported env_file for service '{service}'")
+        files = {posixpath.normpath(path): content for path, content in (harness_files or {}).items()}
+        for path in env_paths:
+            normalized = posixpath.normpath(path)
+            if normalized.startswith("/") or normalized == ".." or normalized.startswith("../"):
+                raise SandboxVerificationError(VERIFIER_ERROR, f"Unsafe env_file path for service '{service}': {path}")
+            content = files.get(normalized)
+            if content is None:
+                if env_files is not None:
+                    raise SandboxVerificationError(VERIFIER_ERROR, f"Missing env_file for service '{service}': {path}")
+                continue
+            dot_env.update(_parse_dot_env(content))
         env = _build_env(svc["environment"], dot_env)
         if self.config.container_tmp_bind_path:
             env.update(_build_runtime_tmp_env(self.config.container_tmp_bind_path))
@@ -487,8 +597,8 @@ class TestbenchRunner:
                 ]
             )
 
-        working_dir = svc["working_dir"] or f"{workspace}/rundir"
-        if working_dir != workspace and not working_dir.startswith(f"{workspace}/"):
+        working_dir = "/rundir" if repository_workspace else svc["working_dir"] or f"{workspace}/rundir"
+        if not repository_workspace and working_dir != workspace and not working_dir.startswith(f"{workspace}/"):
             working_dir = f"{workspace}/rundir"
         command = shlex.join(
             [
@@ -524,9 +634,11 @@ class TestbenchRunner:
                     cwd="/",
                     timeout_s=self.config.container_timeout,
                 )
-                if setup.return_code != 0:
+                if setup.return_code != 0 or setup.error_type:
                     combined = (setup.stderr or "") + (setup.stdout or "")
-                    return 1, f"workspace setup failed for service '{service}': {combined}"
+                    raise SandboxVerificationError(
+                        VERIFIER_ERROR, f"workspace setup failed for service '{service}': {combined}"
+                    )
 
                 result = await sandbox.exec(
                     command,
@@ -535,26 +647,51 @@ class TestbenchRunner:
                     timeout_s=self.config.container_timeout,
                 )
 
+                if result.error_type == "timeout":
+                    # Stop the sandbox before doing further work: simulator children can still be flushing
+                    # files after the command times out, so archiving here can race with those writes.
+                    combined = (result.stderr or "") + (result.stdout or "")
+                    return -1, f"sandbox exec timed out after {self.config.container_timeout}s\n{combined}"
+
+                # A host-backed workspace can also hold the transfer archives. Exclude them so
+                # the snapshot neither archives itself nor carries inputs into the next service.
+                transfer_relative = posixpath.relpath(transfer_dir, workspace)
+                # The provider's private temporary/home storage is runtime state, not project output.
+                snapshot_exclude = " --exclude=./.apptainer-workdir"
+                if transfer_relative != ".." and not transfer_relative.startswith("../"):
+                    snapshot_exclude += f" --exclude={shlex.quote('./' + transfer_relative)}"
                 snapshot = await sandbox.exec(
-                    f"tar -czf {shlex.quote(output_archive)} -C {shlex.quote(workspace)} .",
+                    f"tar -czf {shlex.quote(output_archive)}{snapshot_exclude} -C {shlex.quote(workspace)} .",
                     timeout_s=self.config.container_timeout,
                 )
-                if snapshot.return_code == 0:
+                if snapshot.return_code == 0 and not snapshot.error_type:
                     next_archive = workspace_archive.with_name(f"{workspace_archive.name}.next")
                     await sandbox.download(output_archive, next_archive)
                     next_archive.replace(workspace_archive)
                 else:
                     combined = (snapshot.stderr or "") + (snapshot.stdout or "")
-                    return 1, f"workspace snapshot failed for service '{service}': {combined}"
+                    raise SandboxVerificationError(
+                        VERIFIER_ERROR, f"workspace snapshot failed for service '{service}': {combined}"
+                    )
+        except SandboxVerificationError:
+            raise
         except SandboxCreateError as exc:
-            return 1, f"sandbox create failed for service '{service}': {exc}"
+            raise SandboxVerificationError(
+                PROVIDER_UNAVAILABLE, f"sandbox create failed for service '{service}': {exc}"
+            ) from exc
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            return 1, f"sandbox operation failed for service '{service}': {exc}"
+            raise SandboxVerificationError(
+                VERIFIER_ERROR, f"sandbox operation failed for service '{service}': {exc}"
+            ) from exc
 
-        if result.error_type == "timeout":
-            return -1, f"sandbox exec timed out after {self.config.container_timeout}s"
+        if result.error_type or result.return_code is None:
+            raise SandboxVerificationError(
+                VERIFIER_ERROR,
+                f"sandbox exec reported no exit code for service '{service}': {result.error_type}: "
+                f"{result.stderr or result.stdout or ''}",
+            )
 
         combined = (result.stderr or "") + (result.stdout or "")
         return result.return_code, combined

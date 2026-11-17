@@ -20,9 +20,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
+from fastapi.responses import JSONResponse
 
 from nemo_gym.client import ServerClient
+from nemo_gym.eval.rollout_reverification import _is_judge_failure
+from nemo_gym.rollouts.rollout_recovery import has_saved_generation
 from nemo_gym.sandbox import SandboxCreateError, SandboxExecResult
+from nemo_gym.verification import JudgeError, SandboxVerificationError, judge_failsafe
 from resources_servers.cvdp.app import (
     CVDPResourcesServer,
     CVDPResourcesServerConfig,
@@ -296,6 +300,21 @@ class TestCVDPServerVerify:
         assert result.container_exit_code is None
 
     @pytest.mark.asyncio
+    async def test_verify_empty_output_grades_harvested_rtl_files(self):
+        body_dict = _make_body(output_text="")
+        body_dict["rtl_files"] = {"rtl/foo.sv": SAMPLE_RTL}
+        with patch.object(
+            self.server._harness,
+            "run",
+            new_callable=AsyncMock,
+            return_value=(0, "", []),
+        ) as run:
+            result = await self.server.verify(_make_request(body_dict))
+        run.assert_awaited_once()
+        assert result.reward == 1.0
+        assert result.extracted_rtl == {"rtl/foo.sv": SAMPLE_RTL}
+
+    @pytest.mark.asyncio
     async def test_verify_plain_text_goes_to_harness(self):
         body_dict = _make_body(output_text="I am unable to generate this design.")
         with patch.object(
@@ -350,14 +369,14 @@ class TestCVDPServerVerify:
         assert result.container_exit_code == -1
 
     @pytest.mark.asyncio
-    async def test_verify_missing_compose_returns_zero_reward(self):
+    async def test_verify_missing_compose_is_masked_not_zero(self):
         harness_no_compose = {"src/.env": "SIM=icarus\n"}
         body_dict = _make_body(
             output_text=f"```systemverilog\n{SAMPLE_RTL}\n```",
             harness_files=harness_no_compose,
         )
-        result = await self.server.verify(_make_request(body_dict))
-        assert result.reward == 0.0
+        with pytest.raises(JudgeError, match="No docker-compose.yml"):
+            await self.server.verify(_make_request(body_dict))
 
     @pytest.mark.asyncio
     async def test_verify_multi_file_json_response(self):
@@ -536,31 +555,21 @@ class TestCVDPServerVerifySubjective:
         assert result.bleu_score is None  # Not a subjective category
 
 
-# ---------------------------------------------------------------------------
-# Apptainer-dependent tests (skipped if apptainer is not installed)
-# ---------------------------------------------------------------------------
-
-_SKIP_APPTAINER = pytest.mark.skipif(
-    shutil.which("apptainer") is None,
-    reason="apptainer not installed",
-)
-
-
-@_SKIP_APPTAINER
-class TestApptainerHarness:
-    """Smoke tests that require a real Apptainer installation."""
+class TestHarnessConfigDefects:
+    """A defect in the task's harness files fails before any sandbox starts, so it needs no Apptainer."""
 
     def setup_method(self):
         self.server = _make_server()
 
     @pytest.mark.asyncio
-    async def test_missing_compose_returns_error_exit_code(self):
-        exit_code, stderr, services = await self.server._harness.run(
-            rtl_files={"rtl/foo.sv": SAMPLE_RTL},
-            harness_files={},  # no compose file
-            task_id="test",
-        )
-        assert exit_code != 0
+    async def test_missing_compose_is_a_verifier_error(self):
+        with pytest.raises(SandboxVerificationError) as caught:
+            await self.server._harness.run(
+                rtl_files={"rtl/foo.sv": SAMPLE_RTL},
+                harness_files={},  # no compose file
+                task_id="test",
+            )
+        assert caught.value.failure_kind == "verifier_error"
 
 
 # ---------------------------------------------------------------------------
@@ -583,6 +592,26 @@ def _make_request(body_dict: dict):
 class TestVerifyConsumesRtlFiles:
     def setup_method(self):
         self.server = _make_server()
+
+    @pytest.mark.asyncio
+    async def test_repository_changes_are_graded_and_retained_without_chat_text(self):
+        body_dict = _make_body(output_text="")
+        body_dict["verifier_metadata"]["repository_workspace_sha256"] = "a" * 64
+        changes = {"archive": "saved-delta", "changed_count": 1, "deleted": ["old.v"]}
+        body_dict["repository_changes"] = changes
+        self.server._harness.run = AsyncMock(return_value=(0, "passed", []))
+        result = await self.server.verify(_make_request(body_dict))
+        assert result.reward == 1.0
+        assert not result.parse_failed
+        assert result.model_dump()["repository_changes"] == changes
+        self.server._harness.run.assert_awaited_once_with(
+            rtl_files={},
+            harness_files=body_dict["verifier_metadata"]["harness_files"],
+            task_id=body_dict["verifier_metadata"]["task_id"],
+            context_files={},
+            repository_workspace_sha256="a" * 64,
+            repository_changes=changes,
+        )
 
     @pytest.mark.asyncio
     async def test_rtl_files_take_precedence_over_text_parse(self):
@@ -657,6 +686,14 @@ class TestBuildRuntimeTmpEnv:
 
 
 class TestPreparedImages:
+    def test_explicit_image_override_uses_local_sif(self):
+        server = _make_server()
+        server.config.image_overrides = {"hdlc/sim:osvb": "/images/cvdp-arm.sif"}
+        compose = {"services": {"direct": {"image": "docker://hdlc/sim:osvb"}}}
+        image, key = _resolve_service_image(compose, "direct", {}, server.config, {})
+        assert image == "/images/cvdp-arm.sif"
+        assert key is None
+
     def test_direct_image_needs_no_manifest(self):
         server = _make_server()
         compose = yaml.safe_load(_COMPOSE_WITH_CMD)
@@ -705,11 +742,15 @@ class _FakeHandle:
 
 
 class _FakeProvider:
-    def __init__(self, exec_result, create_error=None, name="fake", snapshot_result=None):
+    def __init__(
+        self, exec_result, create_error=None, name="fake", snapshot_result=None, setup_result=None, upload_error=None
+    ):
         self.name = name
         self._exec_result = exec_result
         self._create_error = create_error
         self._snapshot_result = snapshot_result
+        self._setup_result = setup_result
+        self._upload_error = upload_error
         self.created = []
         self.execs = []
         self.closed = []
@@ -726,12 +767,14 @@ class _FakeProvider:
     async def exec(self, handle, command, *, cwd=None, env=None, timeout_s=None, user=None):
         self.execs.append({"command": command, "cwd": cwd, "env": env, "timeout_s": timeout_s})
         if "cvdp-workspace.tar.gz" in command and "tar -xzf" in command:
-            return SandboxExecResult(stdout="", stderr="", return_code=0)
+            return self._setup_result or SandboxExecResult(stdout="", stderr="", return_code=0)
         if "cvdp-workspace-out.tar.gz" in command and "tar -czf" in command:
             return self._snapshot_result or SandboxExecResult(stdout="", stderr="", return_code=0)
         return self._exec_result
 
     async def upload_file(self, handle, source_path, target_path):
+        if self._upload_error is not None:
+            raise self._upload_error
         self.uploads.append((Path(source_path), target_path))
         self._uploaded_archive = Path(source_path)
 
@@ -768,7 +811,18 @@ class TestRunServiceProvider:
     def setup_method(self):
         self.server = _make_server()
 
-    async def _run(self, tmp_path, fake, compose):
+    @pytest.mark.asyncio
+    async def test_transfer_archives_inside_workspace_are_excluded_from_snapshot(self, tmp_path):
+        self.server.config.container_transfer_dir = "/code/.cvdp-transfer"
+        fake = _FakeProvider(SandboxExecResult(stdout="hi\n", stderr="", return_code=0))
+        exit_code, _ = await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        assert exit_code == 0
+        snapshot = next(call["command"] for call in fake.execs if "tar -czf" in call["command"])
+        assert "--exclude=./.cvdp-transfer" in snapshot
+        assert "--exclude=./.apptainer-workdir" in snapshot
+        assert fake.downloads[0][0] == "/code/.cvdp-transfer/cvdp-workspace-out.tar.gz"
+
+    async def _run(self, tmp_path, fake, compose, harness_files=None):
         (tmp_path / "rtl").mkdir(exist_ok=True)
         (tmp_path / "src").mkdir(exist_ok=True)
         archive = tmp_path.parent / f"{tmp_path.name}.tar.gz"
@@ -779,11 +833,42 @@ class TestRunServiceProvider:
                 archive,
                 "direct",
                 compose,
-                {"src/.env": "SIM=icarus\n"},
+                harness_files if harness_files is not None else {"src/.env": "SIM=icarus\n"},
             )
         finally:
             archive.unlink(missing_ok=True)
             archive.with_name(f"{archive.name}.next").unlink(missing_ok=True)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("env_file", ["./src/nested/.env", ["src/base.env", "./src/nested/.env"]])
+    async def test_declared_nested_env_files_reach_verifier(self, tmp_path, env_file):
+        fake = _FakeProvider(SandboxExecResult(stdout="hi\n", stderr="", return_code=0))
+        compose = yaml.safe_load(_COMPOSE_WITH_CMD)
+        compose["services"]["direct"].update(env_file=env_file, environment={"SIM": "icarus"})
+        await self._run(
+            tmp_path,
+            fake,
+            yaml.safe_dump(compose),
+            {
+                "src/base.env": "VERILOG_SOURCES=wrong.sv\nBASE_ONLY=kept\n",
+                "src/nested/.env": "VERILOG_SOURCES=/code/rtl/top.sv\nSIM=verilator\n",
+                "src/.env": "VERILOG_SOURCES=should_not_be_loaded.sv\n",
+            },
+        )
+        env = next(item["env"] for item in fake.execs if "echo hi" in item["command"])
+        assert env["VERILOG_SOURCES"] == "/code/rtl/top.sv"
+        assert env["SIM"] == "icarus"
+        if isinstance(env_file, list):
+            assert env["BASE_ONLY"] == "kept"
+
+    @pytest.mark.asyncio
+    async def test_missing_declared_env_file_is_inconclusive(self, tmp_path):
+        fake = _FakeProvider(SandboxExecResult(stdout="", stderr="", return_code=0))
+        compose = yaml.safe_load(_COMPOSE_WITH_CMD)
+        compose["services"]["direct"]["env_file"] = "src/missing.env"
+        with pytest.raises(SandboxVerificationError, match="Missing env_file"):
+            await self._run(tmp_path, fake, yaml.safe_dump(compose), {})
+        assert fake.created == []
 
     @pytest.mark.asyncio
     async def test_create_exec_close_and_payload(self, tmp_path):
@@ -810,43 +895,81 @@ class TestRunServiceProvider:
         assert len(fake.closed) == 1
 
     @pytest.mark.asyncio
-    async def test_no_command_returns_portability_error(self, tmp_path):
+    async def test_no_command_is_verifier_error_not_a_zero(self, tmp_path):
         fake = _FakeProvider(SandboxExecResult(stdout="", stderr="", return_code=0))
-        exit_code, output = await self._run(tmp_path, fake, _COMPOSE_NO_CMD)
-        assert exit_code == 1
-        assert "no explicit command" in output
+        with pytest.raises(SandboxVerificationError, match="no explicit command") as caught:
+            await self._run(tmp_path, fake, _COMPOSE_NO_CMD)
+        assert caught.value.failure_kind == "verifier_error"
         assert fake.created == []
 
     @pytest.mark.asyncio
     async def test_timeout_maps_to_negative_one(self, tmp_path):
-        fake = _FakeProvider(SandboxExecResult(stdout=None, stderr="timed out", return_code=125, error_type="timeout"))
+        fake = _FakeProvider(
+            SandboxExecResult(stdout="waiting for valid", stderr="timed out\n", return_code=125, error_type="timeout"),
+            snapshot_result=SandboxExecResult(stdout="", stderr="file changed as we read it", return_code=1),
+        )
         exit_code, output = await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
         assert exit_code == -1
         assert "timed out after 30s" in output
+        assert "waiting for valid" in output
+        assert not any("tar -czf" in call["command"] for call in fake.execs)
+        assert fake.downloads == []
         assert len(fake.closed) == 1
 
     @pytest.mark.asyncio
-    async def test_create_failure_returns_error(self, tmp_path):
+    @pytest.mark.parametrize("return_code", [-9, -15])
+    async def test_terminated_process_result_is_preserved_and_closed(self, tmp_path, return_code):
+        fake = _FakeProvider(SandboxExecResult(stdout=None, stderr=None, return_code=return_code))
+        exit_code, output = await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        assert exit_code == return_code
+        assert output == ""
+        assert len(fake.closed) == 1
+
+    @pytest.mark.asyncio
+    async def test_create_failure_is_provider_unavailable(self, tmp_path):
         fake = _FakeProvider(
             SandboxExecResult(stdout="", stderr="", return_code=0),
             create_error=SandboxCreateError("boom"),
         )
-        exit_code, output = await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
-        assert exit_code == 1
-        assert "sandbox create failed" in output
+        with pytest.raises(SandboxVerificationError, match="sandbox create failed.*boom") as caught:
+            await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        assert caught.value.failure_kind == "provider_unavailable"
         assert fake.execs == []
         assert fake.closed == []
 
     @pytest.mark.asyncio
-    async def test_snapshot_failure_is_not_silently_ignored(self, tmp_path):
+    @pytest.mark.parametrize(
+        "fake_kwargs,reason",
+        [
+            ({"snapshot_result": SandboxExecResult(stdout="", stderr="disk full", return_code=1)}, "snapshot failed"),
+            ({"setup_result": SandboxExecResult(stdout="", stderr="tar: corrupt", return_code=2)}, "setup failed"),
+            ({"upload_error": OSError("transfer dir not mounted")}, "operation failed"),
+        ],
+        ids=["snapshot", "workspace_setup", "upload"],
+    )
+    async def test_workspace_transfer_failure_is_verifier_error(self, tmp_path, fake_kwargs, reason):
+        fake = _FakeProvider(SandboxExecResult(stdout="hi\n", stderr="", return_code=0), **fake_kwargs)
+        with pytest.raises(SandboxVerificationError, match=reason) as caught:
+            await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        assert caught.value.failure_kind == "verifier_error"
+        assert len(fake.closed) == 1
+
+    @pytest.mark.asyncio
+    async def test_exec_without_exit_code_is_verifier_error(self, tmp_path):
         fake = _FakeProvider(
-            SandboxExecResult(stdout="hi\n", stderr="", return_code=0),
-            snapshot_result=SandboxExecResult(stdout="", stderr="disk full", return_code=1),
+            SandboxExecResult(stdout=None, stderr="instance vanished", return_code=None, error_type="provider_error")
         )
+        with pytest.raises(SandboxVerificationError, match="no exit code.*provider_error") as caught:
+            await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        assert caught.value.failure_kind == "verifier_error"
+        assert len(fake.closed) == 1
+
+    @pytest.mark.asyncio
+    async def test_failing_testbench_keeps_its_exit_code(self, tmp_path):
+        fake = _FakeProvider(SandboxExecResult(stdout="", stderr="FAILED: assertion error", return_code=1))
         exit_code, output = await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
-        assert exit_code == 1
-        assert "workspace snapshot failed" in output
-        assert "disk full" in output
+        assert (exit_code, output) == (1, "FAILED: assertion error")
+        assert len(fake.closed) == 1
 
     @pytest.mark.asyncio
     async def test_tmp_bind_path_added(self, tmp_path):
@@ -864,3 +987,71 @@ class TestRunServiceProvider:
         exit_code, _ = await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
         assert exit_code == 0
         assert fake.created[0].provider_options == {}
+
+
+# ---------------------------------------------------------------------------
+# /verify through judge_failsafe: infrastructure failures vs testbench verdicts
+# ---------------------------------------------------------------------------
+
+_RTL_ANSWER = f"```systemverilog\n{SAMPLE_RTL}\n```"
+
+
+class TestVerifyInfrastructureFailure:
+    """The harness runs for real through AsyncSandbox; only the provider is a test double."""
+
+    async def _verify(self, fake, body_dict) -> dict:
+        server = _make_server()
+        server._harness._sandbox_provider = fake
+        # The wrapper SimpleResourcesServer registers on /verify.
+        result = await judge_failsafe(server.verify)(body=_make_request(body_dict))
+        return json.loads(result.body) if isinstance(result, JSONResponse) else result.model_dump(mode="json")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "fake_kwargs,kind",
+        [
+            ({"create_error": SandboxCreateError("no free instance")}, "provider_unavailable"),
+            ({"setup_result": SandboxExecResult(stdout="", stderr="tar: corrupt", return_code=2)}, "verifier_error"),
+            ({"upload_error": OSError("transfer dir not mounted")}, "verifier_error"),
+        ],
+        ids=["create", "workspace_setup", "upload"],
+    )
+    async def test_model_answer_is_kept_for_reverify(self, fake_kwargs, kind):
+        fake = _FakeProvider(SandboxExecResult(stdout="", stderr="", return_code=0), **fake_kwargs)
+        row = await self._verify(fake, _make_body(output_text=_RTL_ANSWER))
+        assert row["_ng_failure_class"] == row["failure_kind"] == "judge_failed"
+        assert f"CVDP harness infrastructure failure ({kind})" in row["failure_reason"]
+        assert row["mask_sample"] is True and row.get("container_exit_code") is None
+        assert row["response"]["output"][0]["content"][0]["text"] == _RTL_ANSWER
+        # gym eval reverify --judge-failed-only selects this row and simulates its saved RTL again; no regeneration.
+        assert _is_judge_failure(row) and has_saved_generation(row)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "exec_result,reward",
+        [
+            (SandboxExecResult(stdout="1 passed", stderr="", return_code=0), 1.0),
+            (SandboxExecResult(stdout="", stderr="FAILED: assertion error", return_code=1), 0.0),
+            (SandboxExecResult(stdout=None, stderr="timed out", return_code=125, error_type="timeout"), 0.0),
+        ],
+        ids=["passing_rtl", "failing_rtl", "hanging_rtl"],
+    )
+    async def test_testbench_verdict_is_scored(self, exec_result, reward):
+        row = await self._verify(_FakeProvider(exec_result), _make_body(output_text=_RTL_ANSWER))
+        assert row["reward"] == reward
+        assert row["mask_sample"] is False and "_ng_failure_class" not in row
+        assert row["extracted_rtl"]["rtl/foo.sv"].strip() == SAMPLE_RTL
+        assert not _is_judge_failure(row)
+
+    @pytest.mark.asyncio
+    async def test_agent_written_rtl_is_masked_not_scored(self):
+        """Reverification cannot replay rtl_files, so the sample is masked with the files kept."""
+        body = _make_body(output_text="done") | {"rtl_files": {"rtl/foo.sv": SAMPLE_RTL}}
+        fake = _FakeProvider(
+            SandboxExecResult(stdout="", stderr="", return_code=0), create_error=SandboxCreateError("no free instance")
+        )
+        row = await self._verify(fake, body)
+        assert row["mask_sample"] is True and row["reward"] == 0.0
+        assert row["failure_kind"] == "provider_unavailable" and "no free instance" in row["failure_reason"]
+        assert row["extracted_rtl"] == {"rtl/foo.sv": SAMPLE_RTL}
+        assert "_ng_failure_class" not in row

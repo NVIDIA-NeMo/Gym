@@ -31,6 +31,8 @@ lets this file stay focused on the contract and scoring.
 import asyncio
 import logging
 import time
+from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from cvdp_lib.cvdp_constants import (
@@ -51,8 +53,12 @@ from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
+    observe_programmatic_grading,
+    observe_verifier_sandbox,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import JudgeError, SandboxVerificationError
+from resources_servers.cvdp.repository_workspace import RepositoryChanges
 from resources_servers.cvdp.testbench_runner import TestbenchRunner
 
 
@@ -66,7 +72,7 @@ _helpers = ModelHelpers()
 
 class CVDPResourcesServerConfig(BaseResourcesServerConfig):
     oss_sim_image: str = "ghcr.io/hdl/sim/osvb"
-    oss_pnr_image: str = "ghcr.io/hdl/impl/pnr"
+    oss_pnr_image: str = Field(default_factory=lambda data: data["oss_sim_image"])
     eda_sim_image: str = ""  # Set to a commercial EDA image (e.g. Cadence Xcelium)
     container_timeout: int = 600
     num_processes: int = 4  # Max concurrent verifier sandboxes
@@ -78,6 +84,8 @@ class CVDPResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_spec: Dict[str, Any] = Field(default_factory=dict)
     prepared_images: Dict[str, str] = Field(default_factory=dict)
     prepared_image_manifest: str = ""
+    prepared_repository_dir: str = ""
+    image_overrides: Dict[str, str] = Field(default_factory=dict)
 
 
 # ----------------------------
@@ -91,7 +99,8 @@ class CVDPVerifierMetadata(BaseModel):
     difficulty: str = ""
     target_files: List[str] = []  # Empty for code-comprehension categories
     harness_files: Dict[str, Optional[str]] = {}  # Empty for code-comprehension categories
-    context_files: Dict[str, str] = {}  # Companion RTL from input.context (non-target files needed for compilation)
+    context_files: Dict[str, str] = {}  # Starting files, including target RTL that the agent must repair
+    repository_workspace_sha256: str = ""
     subjective_reference: Optional[str] = None  # Reference answer for code-comprehension categories (6,8,9,10)
 
 
@@ -101,12 +110,14 @@ class CVDPRunRequest(BaseRunRequest):
 
 class CVDPVerifyRequest(CVDPRunRequest, BaseVerifyRequest):
     verifier_metadata: Dict[str, Any]
+    repository_changes: Optional[RepositoryChanges] = None
     rtl_files: Optional[Dict[str, str]] = (
         None  # files the agent already wrote to disk in the sandbox (agentic flow). When present, these are graded directly instead of re-parsing RTL out of the model's chat text.
     )
 
 
 class CVDPVerifyResponse(BaseVerifyResponse):
+    repository_changes: Optional[RepositoryChanges] = Field(default=None, exclude_if=lambda value: value is None)
     task_id: Optional[str] = None
     category: Optional[str] = None  # e.g. "cid003" — for CVDP report
     difficulty: Optional[str] = None  # e.g. "easy" — for CVDP report
@@ -174,6 +185,20 @@ class CVDPResourcesServer(SimpleResourcesServer):
             self.config,
             named_sandbox_configs=getattr(self.server_client, "global_config_dict", None),
         )
+        global_config = getattr(self.server_client, "global_config_dict", None)
+        if isinstance(global_config, Mapping) and isinstance(global_config.get("split"), str):
+            inputs: set[Path] = set()
+            for instance in global_config.values():
+                if not isinstance(instance, Mapping):
+                    continue
+                for agent in (instance.get("responses_api_agents") or {}).values():
+                    if (agent.get("resources_server") or {}).get("name") != self.config.name:
+                        continue
+                    for dataset in agent.get("datasets") or []:
+                        if dataset.get("type") == global_config["split"]:
+                            path = Path(dataset["jsonl_fpath"])
+                            inputs.add(path if path.is_absolute() else Path(__file__).resolve().parents[2] / path)
+            self._harness.check_prepared_images(sorted(inputs))
 
         # Warn if commercial EDA image is not configured.
         # Categories 12, 13, 14 require a commercial EDA image (e.g. Cadence Xcelium).
@@ -210,25 +235,33 @@ class CVDPResourcesServer(SimpleResourcesServer):
                         break
 
         has_model_output = bool(model_out and model_out.strip())
-        if not has_model_output:
-            return CVDPVerifyResponse(
-                **body.model_dump(),
-                reward=0.0,
-                task_id=meta.task_id,
-                category=category,
-                difficulty=difficulty,
-                extracted_rtl=None,
-                container_exit_code=None,
-                container_stderr=None,
-                container_services=None,
-                execution_time=0.0,
-                parse_failed=False,
+        gradeable_files = (
+            bool(body.rtl_files) or bool(meta.repository_workspace_sha256 and body.repository_changes is not None)
+        ) and category_num not in CODE_COMPREHENSION_CATEGORIES
+        if not has_model_output and not gradeable_files:
+            return observe_programmatic_grading(
+                lambda: CVDPVerifyResponse(
+                    **body.model_dump(),
+                    reward=0.0,
+                    task_id=meta.task_id,
+                    category=category,
+                    difficulty=difficulty,
+                    extracted_rtl=None,
+                    container_exit_code=None,
+                    container_stderr=None,
+                    container_services=None,
+                    execution_time=0.0,
+                    parse_failed=False,
+                )
             )
 
         # Route: code-comprehension categories use subjective scoring,
         # code-generation categories use the docker-compose harness.
         if category_num in CODE_COMPREHENSION_CATEGORIES:
-            return self._verify_subjective(body, meta, category, difficulty, category_num, model_out)
+            # BLEU/ROUGE against the reference is a reviewed synchronous calculation bound to the graded response.
+            return observe_programmatic_grading(
+                lambda: self._verify_subjective(body, meta, category, difficulty, category_num, model_out)
+            )
 
         return await self._verify_objective(body, meta, category, difficulty, model_out)
 
@@ -300,7 +333,13 @@ class CVDPResourcesServer(SimpleResourcesServer):
         # Agentic flow: the agent ran in its own sandbox and reports the files it
         # wrote on disk. Grade those directly. Model-only flow: fall back to
         # parsing RTL out of the model's text response.
-        if body.rtl_files:
+        if meta.repository_workspace_sha256 and body.repository_changes is not None:
+            # A heavy agent can legitimately leave the baseline unchanged. Retain the
+            # response-text fallback only when no project changes were collected.
+            rtl_files = dict(body.rtl_files or {})
+            if not body.repository_changes.get("changed_count") and not body.repository_changes.get("deleted"):
+                rtl_files = rtl_files or _parse_model_response(model_out, meta.target_files) or {}
+        elif body.rtl_files:
             rtl_files = dict(body.rtl_files)
         else:
             rtl_files = _parse_model_response(model_out, meta.target_files)
@@ -309,41 +348,95 @@ class CVDPResourcesServer(SimpleResourcesServer):
         # agent can retry with a fresh model completion — mirrors CVDP's
         # LLM_RETRY_COUNT loop in dataset_processor.py.
         if rtl_files is None:
-            return CVDPVerifyResponse(
-                **body.model_dump(),
-                reward=0.0,
-                task_id=meta.task_id,
-                category=category,
-                difficulty=difficulty,
-                extracted_rtl=None,
-                container_exit_code=None,
-                container_stderr="parse_failed: could not extract RTL from model output",
-                container_services=[],
-                execution_time=0.0,
-                parse_failed=True,
+            return observe_programmatic_grading(
+                lambda: CVDPVerifyResponse(
+                    **body.model_dump(),
+                    reward=0.0,
+                    task_id=meta.task_id,
+                    category=category,
+                    difficulty=difficulty,
+                    extracted_rtl=None,
+                    container_exit_code=None,
+                    container_stderr="parse_failed: could not extract RTL from model output",
+                    container_services=[],
+                    execution_time=0.0,
+                    parse_failed=True,
+                )
             )
 
         async with self._semaphore:
             t0 = time.time()
-            exit_code, stderr, service_results = await self._harness.run(
-                rtl_files=rtl_files or {},
-                harness_files=meta.harness_files,
-                task_id=meta.task_id,
-                context_files=meta.context_files,
-            )
+            try:
+                repository_kwargs = {}
+                if meta.repository_workspace_sha256:
+                    repository_kwargs = {
+                        "repository_workspace_sha256": meta.repository_workspace_sha256,
+                        "repository_changes": body.repository_changes,
+                    }
+                exit_code, stderr, service_results = await self._harness.run(
+                    rtl_files=rtl_files or {},
+                    harness_files=meta.harness_files,
+                    task_id=meta.task_id,
+                    context_files=meta.context_files,
+                    **repository_kwargs,
+                )
+            except SandboxVerificationError as e:
+                observe_verifier_sandbox(
+                    {
+                        "role": "verifier",
+                        "provider": "docker-compose",
+                        "outcome": "sandbox_error",
+                        "error_type": e.failure_kind,
+                        "wall_time_s": time.time() - t0,
+                    }
+                )
+                # The harness never judged this RTL, so the sample gets no score.
+                logging.warning("CVDP %s harness infrastructure failure (%s): %s", meta.task_id, e.failure_kind, e)
+                if body.rtl_files:
+                    # Reverification rebuilds /verify from the saved response only and cannot replay files the
+                    # agent wrote, so mask the sample and keep the files for diagnosis.
+                    return CVDPVerifyResponse(
+                        **body.model_dump(),
+                        reward=0.0,
+                        mask_sample=True,
+                        failure_kind=e.failure_kind,
+                        failure_reason=str(e),
+                        task_id=meta.task_id,
+                        category=category,
+                        difficulty=difficulty,
+                        extracted_rtl=rtl_files,
+                        container_stderr=str(e),
+                        execution_time=time.time() - t0,
+                    )
+                # judge_failsafe turns this into a masked judge_failed row that keeps the response, the class
+                # recovery re-verifies from the saved answer, so the RTL is simulated again, not regenerated.
+                raise JudgeError(f"CVDP harness infrastructure failure ({e.failure_kind}): {e}") from e
             execution_time = time.time() - t0
 
-        return CVDPVerifyResponse(
-            **body.model_dump(),
-            reward=1.0 if exit_code == 0 else 0.0,
-            task_id=meta.task_id,
-            category=category,
-            difficulty=difficulty,
-            extracted_rtl=rtl_files,
-            container_exit_code=exit_code,
-            container_stderr=stderr,
-            container_services=service_results,
-            execution_time=execution_time,
+        # The docker-compose harness is this verifier's sandbox: its lifecycle facts are observed as such, and the
+        # pass/fail decision on its exit code is the reviewed calculation that binds the graded response.
+        observe_verifier_sandbox(
+            {
+                "role": "verifier",
+                "provider": "docker-compose",
+                "outcome": "completed",
+                "exit_code": exit_code,
+                "wall_time_s": execution_time,
+            }
+        )
+        return observe_programmatic_grading(
+            lambda: CVDPVerifyResponse(
+                **body.model_dump(),
+                reward=1.0 if exit_code == 0 else 0.0,
+                task_id=meta.task_id,
+                category=category,
+                difficulty=difficulty,
+                extracted_rtl=rtl_files,
+                container_exit_code=exit_code,
+                container_stderr=stderr,
+                container_services=service_results,
+                execution_time=execution_time,
+            )
         )
 
 

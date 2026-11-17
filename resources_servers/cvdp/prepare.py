@@ -17,6 +17,7 @@ import yaml
 
 from resources_servers.cvdp.app import CVDPResourcesServerConfig
 from resources_servers.cvdp.testbench_runner import (
+    TestbenchRunner,
     _apply_substitutions,
     _normalize_build_file,
     _safe_workspace_path,
@@ -118,14 +119,16 @@ def prepare_images(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("inputs", nargs="+", type=Path, help="Converted CVDP JSONL dataset(s)")
-    parser.add_argument("--image-prefix", required=True, help="Registry/repository for prepared verifier images")
+    parser.add_argument("--image-prefix", help="Registry/repository for prepared verifier images")
+    parser.add_argument("--check-only", action="store_true", help="Check manifest coverage without building images")
+    parser.add_argument("--prepared-repository-dir", default="", help="Prepared heavy repository snapshots")
     parser.add_argument(
         "--manifest",
         type=Path,
         default=Path("resources_servers/cvdp/data/prepared_images.json"),
     )
     parser.add_argument("--oss-sim-image", default="ghcr.io/hdl/sim/osvb")
-    parser.add_argument("--oss-pnr-image", default="ghcr.io/hdl/impl/pnr")
+    parser.add_argument("--oss-pnr-image", help="Synthesis base image; defaults to --oss-sim-image")
     parser.add_argument("--eda-sim-image", default="")
     parser.add_argument("--push", action="store_true", help="Push built images to the configured repository")
     parser.add_argument("--force", action="store_true", help="Rebuild keys already present in the manifest")
@@ -137,9 +140,17 @@ def main() -> None:
         name="cvdp",
         entrypoint="app.py",
         oss_sim_image=args.oss_sim_image,
-        oss_pnr_image=args.oss_pnr_image,
+        oss_pnr_image=args.oss_pnr_image or args.oss_sim_image,
         eda_sim_image=args.eda_sim_image,
+        prepared_image_manifest=str(args.manifest) if args.check_only and args.manifest.exists() else "",
+        prepared_repository_dir=args.prepared_repository_dir,
     )
+    if args.check_only:
+        required = TestbenchRunner(config).check_prepared_images(args.inputs)
+        print(f"Validated {len(required)} image recipe(s). Manifest: {args.manifest}")
+        return
+    if not args.image_prefix:
+        parser.error("--image-prefix is required when building images")
     images = prepare_images(
         args.inputs,
         args.image_prefix,

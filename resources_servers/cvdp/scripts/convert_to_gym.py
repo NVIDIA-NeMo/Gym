@@ -35,25 +35,26 @@ def _get_category_num(entry: dict) -> int | None:
 
 
 def _get_target_files(entry: dict) -> list[str]:
-    """All output.context keys — matches dataset_processor.py line 1117."""
-    output_context = (entry.get("output") or {}).get("context") or {}
+    """Target paths from processed output.context or the published patch map."""
+    output_context = (entry.get("output") or {}).get("context")
+    if output_context is None:
+        output_context = entry.get("patch") or {}
     return list(output_context.keys())
 
 
 def _get_harness_files(entry: dict) -> dict[str, str | None]:
     """Docker-compose + test scripts — passed as-is, matching CVDP."""
-    return (entry.get("harness") or {}).get("files") or {}
+    harness = entry.get("harness") or {}
+    return harness.get("files", harness) or {}
 
 
 def _get_context_files(entry: dict) -> dict[str, str]:
-    """Companion RTL files from input.context that the model doesn't generate
-    but are needed for compilation (e.g. floor_to_seven_segment.sv).
+    """Keep every starting file, including buggy target RTL for repair tasks.
 
-    Returns input.context files that are NOT in output.context (i.e. not
-    target files the model is asked to produce)."""
-    input_context = (entry.get("input") or {}).get("context") or {}
-    target_keys = set(_get_target_files(entry))
-    return {k: v for k, v in input_context.items() if k not in target_keys and v}
+    Output/reference patches identify target paths but never supply starting content.
+    """
+    input_context = (entry.get("input") or {}).get("context", entry.get("context")) or {}
+    return {k: v for k, v in input_context.items() if isinstance(v, str)}
 
 
 def _get_subjective_reference(entry: dict) -> str | None:

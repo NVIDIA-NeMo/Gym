@@ -2,10 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-from unittest.mock import patch
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
-from resources_servers.cvdp.app import CVDPResourcesServerConfig
+import pytest
+from omegaconf import OmegaConf
+
+from nemo_gym.client import ServerClient
+from resources_servers.cvdp.app import CVDPResourcesServer, CVDPResourcesServerConfig
 from resources_servers.cvdp.prepare import _write_context, prepare_images
+from resources_servers.cvdp.testbench_runner import TestbenchRunner as CVDPTestbenchRunner
 
 
 def _config() -> CVDPResourcesServerConfig:
@@ -16,6 +22,19 @@ def _config() -> CVDPResourcesServerConfig:
         entrypoint="app.py",
         oss_pnr_image="registry.example/cvdp-pnr:base",
     )
+
+
+def test_default_synthesis_image_follows_configured_simulator() -> None:
+    config = CVDPResourcesServerConfig(
+        host="0.0.0.0", port=0, name="cvdp", entrypoint="app.py", oss_sim_image="/images/sim.sif"
+    )
+    assert config.oss_pnr_image == "/images/sim.sif"
+
+
+def test_composed_synthesis_image_follows_simulator_override() -> None:
+    config = OmegaConf.load(Path(__file__).resolve().parents[1] / "configs/cvdp.yaml")
+    config.cvdp.resources_servers.cvdp.oss_sim_image = "/images/overridden.sif"
+    assert config.cvdp.resources_servers.cvdp.oss_pnr_image == "/images/overridden.sif"
 
 
 def test_write_context_pins_python39_get_pip(tmp_path) -> None:
@@ -127,3 +146,78 @@ def test_prepare_skips_dataset_without_build_services(tmp_path) -> None:
 
     assert images == {}
     run.assert_not_called()
+
+
+def _build_dataset(tmp_path):
+    row = {
+        "verifier_metadata": {
+            "harness_files": {
+                "docker-compose.yml": "services:\n  direct:\n    build: .\n",
+                "Dockerfile": "FROM registry.example/base:latest\nRUN true\n",
+            }
+        }
+    }
+    path = tmp_path / "tasks.jsonl"
+    path.write_text(json.dumps(row) + "\n")
+    return path
+
+
+def test_check_prepared_images_rejects_missing_recipes_without_building(tmp_path) -> None:
+    dataset = _build_dataset(tmp_path)
+    with patch("resources_servers.cvdp.prepare.subprocess.run") as run:
+        with pytest.raises(ValueError, match="1 missing prepared image mapping.*direct"):
+            CVDPTestbenchRunner(_config()).check_prepared_images([dataset])
+    run.assert_not_called()
+
+
+def test_check_prepared_images_accepts_manifest_and_rejects_missing_local_image(tmp_path) -> None:
+    dataset = _build_dataset(tmp_path)
+    manifest = tmp_path / "images.json"
+    with patch("resources_servers.cvdp.prepare.subprocess.run"):
+        images = prepare_images([dataset], "registry.example/prepared", manifest, _config(), push=False, force=False)
+    config = _config().model_copy(update={"prepared_image_manifest": str(manifest)})
+    assert CVDPTestbenchRunner(config).check_prepared_images([dataset]) == set(images)
+    config.prepared_image_manifest = ""
+    config.prepared_images = dict.fromkeys(images, str(tmp_path / "missing.sif"))
+    with pytest.raises(ValueError, match="verifier image does not exist"):
+        CVDPTestbenchRunner(config).check_prepared_images([dataset])
+
+
+def test_check_prepared_images_rejects_unconfigured_commercial_image(tmp_path) -> None:
+    dataset = tmp_path / "commercial.jsonl"
+    dataset.write_text(
+        json.dumps(
+            {
+                "verifier_metadata": {
+                    "harness_files": {"docker-compose.yml": "services:\n  direct:\n    image: __VERIF_EDA_IMAGE__\n"}
+                }
+            }
+        )
+        + "\n"
+    )
+    with pytest.raises(ValueError, match="no configured image.*__VERIF_EDA_IMAGE__"):
+        CVDPTestbenchRunner(_config()).check_prepared_images([dataset])
+    config = _config().model_copy(update={"eda_sim_image": "registry.example/eda:test"})
+    assert CVDPTestbenchRunner(config).check_prepared_images([dataset]) == set()
+
+
+@pytest.mark.parametrize("selected_split", ["validation", "benchmark"])
+def test_server_checks_selected_dataset_images_at_startup(tmp_path, selected_split) -> None:
+    dataset = _build_dataset(tmp_path)
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {
+        "split": selected_split,
+        "agent": {
+            "responses_api_agents": {
+                "cvdp_agent": {
+                    "resources_server": {"name": "cvdp"},
+                    "datasets": [{"type": "validation", "jsonl_fpath": str(dataset)}],
+                }
+            }
+        },
+    }
+    if selected_split == "validation":
+        with pytest.raises(ValueError, match="missing prepared image mapping"):
+            CVDPResourcesServer(config=_config(), server_client=client)
+    else:
+        CVDPResourcesServer(config=_config(), server_client=client)
