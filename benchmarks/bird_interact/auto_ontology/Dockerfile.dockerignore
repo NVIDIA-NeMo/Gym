@@ -1,0 +1,3 @@
+# The build context is the repository root: send only this directory.
+*
+!benchmarks/bird_interact/auto_ontology/

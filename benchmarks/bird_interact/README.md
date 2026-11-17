@@ -14,6 +14,7 @@ recipe.
 | `a_interact.yaml` | Lite | a-Interact: the agent calls tools, `ask` among them | 300 |
 | `full.yaml` | Full: 22 databases | c-Interact | 600 |
 | `full_a_interact.yaml` | Full | a-Interact | 600 |
+| `auto_ontology_agent.yaml`, `full_auto_ontology_agent.yaml` | Lite, Full | c-Interact with Auto Ontology's ReAct agent; see [Auto Ontology](#auto-ontology) | 300, 600 |
 
 Every task has a follow-up question, its phase 2. Both kinds of task run: query tasks (195 in Lite, 410 in Full) and
 management tasks (105 in Lite, 190 in Full). As in BIRD-Interact, each phase is graded by its own category: a query
@@ -89,6 +90,54 @@ gym eval run --benchmark bird_interact --model-type vllm_model --split benchmark
   and how to point the a-Interact server at an MCP-only harness such as Codex.
 - **Outputs hold the ground truth.** Each row the run writes, such as `results/*_materialized_inputs.jsonl`, carries
   the task's solution SQL and test cases. Keep the run's outputs private, as the ground truth itself.
+
+## Auto Ontology
+
+`auto_ontology_agent.yaml` (Lite) and `full_auto_ontology_agent.yaml` (Full) run c-Interact with
+[Auto Ontology](https://github.com/NVIDIA/auto-ontology)'s ReAct agent in place of `simple_agent`, on the
+[`auto_ontology_agent`](../../responses_api_agents/auto_ontology_agent/README.md) Agent Server. For each episode, the
+agent starts a sandbox of its own from the catalog image: the release's databases and Auto Ontology's catalog of them.
+Each turn runs one Auto Ontology episode there, with Auto Ontology's prompts and tools (`retrieve`, `run_sql`,
+`submit`) and the server's `ask_user`. The query that Auto Ontology accepts goes to the server's `submit_sql`, which
+grades it as it grades the query of any agent.
+
+1. Build the release's database image (step 1), then the catalog image:
+
+   ```bash
+   benchmarks/bird_interact/auto_ontology/build_image.sh lite <models env>
+   ```
+
+   `<models env>` is a `KEY=VALUE` file with Auto Ontology's model keys: `DEFAULT_MODELS_API_KEY`, and `EMBED_*` or
+   `*_MODEL` settings where they differ from Auto Ontology's defaults. The build embeds and compiles each database of
+   the release with these models. The keys reach the build as a BuildKit secret, so no image layer holds them. Use
+   `full` for Full.
+2. Prepare and run:
+
+   ```bash
+   gym eval prepare --config benchmarks/bird_interact/auto_ontology_agent.yaml
+   gym eval run --config benchmarks/bird_interact/auto_ontology_agent.yaml --model-type vllm_model --split benchmark \
+     --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
+     --output results/bird_interact_lite_c_auto_ontology.jsonl ++auto_ontology_api_key=<embedding key>
+   ```
+
+   `auto_ontology_api_key` is the key of the embedding endpoint that the catalog was built with. Retrieval calls it
+   for each search.
+
+What differs from `simple_agent`:
+
+- **The catalog holds the schema only**, as c-Interact shows it to an agent. It holds no column meanings, which
+  c-Interact does not show, and no knowledge base, part of which each task hides. The agent gets the task's visible
+  knowledge from the first request, as evidence. auto-ontology-eval builds its BIRD-Interact catalog the same way.
+- **Prompts.** The agent reads the ADK's texts (the database, the visible knowledge, the request, the debug message
+  and the follow-up question) and gives them to Auto Ontology's own prompts. The ADK's instruction does not reach the
+  model. A section on asking the user, with the questions that are left, is added to Auto Ontology's system prompt.
+- **Turns.** Each turn is a new Auto Ontology episode. Its evidence carries the earlier answers of the user and the
+  earlier queries, with the server's reply to the last one.
+- **Management tasks.** Auto Ontology runs read-only queries only, so it cannot solve a management task. Compare its
+  scores on the query tasks, as auto-ontology-eval runs only those.
+- **The pin.** The image builds the Auto Ontology that `benchmarks/birdbench/auto_ontology/build_image.sh` pins, the
+  one Gym runs. It holds NVIDIA/auto-ontology#559, the hook that lets a caller add tools to a ReAct episode, which
+  `ask_user` needs.
 
 ## Results
 
