@@ -19,7 +19,7 @@ timing) is observability evidence. A run whose every answer is bound to its grad
 trajectory evidence it lacks reported by kind; a trial whose answer is not bound to any grading stays unverified.
 """
 
-from tests.unit_tests.eval.recovery.test_evaluation_health import _gate, _run
+from tests.helpers.recovery_health import _gate, _run
 
 
 SUBSTEPS = {

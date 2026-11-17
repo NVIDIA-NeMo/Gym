@@ -31,10 +31,10 @@ from nemo_gym.orchestration.executors.connection import LocalConnection
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.executors.slurm.script import build_sbatch_script
 from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord, load_submission_record
+from tests.helpers.recovery_evidence import INFRA
 from tests.unit_tests.orchestration.test_eval_resubmit import _handle
 from tests.unit_tests.orchestration.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.orchestration.test_eval_resubmit import slurm_bin as slurm_bin
-from tests.unit_tests.orchestration.test_eval_resubmit_decision import INFRA
 
 
 def _submit_config(tmp_path: Path, policy: dict | None) -> SubmitConfig:

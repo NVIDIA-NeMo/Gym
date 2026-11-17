@@ -28,7 +28,7 @@ from nemo_gym.eval.recovery.gate import (
 from nemo_gym.eval.recovery.trials import (
     fault_report,
 )
-from tests.unit_tests.eval.recovery.test_evaluation_health import _gate, _run
+from tests.helpers.recovery_health import _gate, _run
 from tests.unit_tests.orchestration.test_eval_resubmit_decision import (  # noqa: F401
     complete_job,
     fake_executor,
@@ -234,7 +234,7 @@ def test_explicit_counted_zero_without_mask_uses_the_result_default():
 def test_collector_preserves_policy_decision_with_omitted_failure_evidence(tmp_path):
     import json
 
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect
+    from tests.helpers.recovery_evidence import collect
 
     source = _policy_zero(kind="provider_unavailable")
     row = source.results[0]
@@ -478,7 +478,7 @@ def test_recovered_stage_failure_does_not_turn_success_into_a_final_fault():
 def test_collector_preserves_final_failure_stage_for_shared_health_classification(tmp_path):
     import json
 
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect
+    from tests.helpers.recovery_evidence import collect
 
     source = _stage_zero("agent")
     artifacts = tmp_path / "artifacts"
@@ -496,7 +496,8 @@ def test_collector_preserves_final_failure_stage_for_shared_health_classificatio
 
 def test_recovery_uses_configured_class_after_policy_save_reload(tmp_path):
     from nemo_gym.eval.recovery.policy import RecoveryOutcomePolicyConfig
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import INFRA, _decide, ident, write_job_dir
+    from tests.helpers.recovery_evidence import INFRA, ident, write_job_dir
+    from tests.unit_tests.orchestration.test_eval_resubmit_decision import _decide
 
     row = ident(0, **INFRA)
     row.update(

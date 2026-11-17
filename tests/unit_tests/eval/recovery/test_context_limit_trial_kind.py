@@ -26,7 +26,7 @@ import pytest
 
 from nemo_gym.eval.recovery.planner import decide_from_collected
 from nemo_gym.eval.recovery.trials import final_zero_trials
-from tests.unit_tests.eval.recovery.test_evaluation_health import _gate, _run
+from tests.helpers.recovery_health import _gate, _run
 from tests.unit_tests.eval.recovery.test_recovery_health_binding import collect, save_rows, setup
 from tests.unit_tests.orchestration.test_trajectory_evidence_reporting import _simulated_user_shape
 

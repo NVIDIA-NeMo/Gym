@@ -255,11 +255,7 @@ def test_sdk_registers_wrapped_policy_metrics_in_real_conversation(tmp_path):
 @pytest.mark.parametrize("exit_code", [None, -1, 0, 1, 124, 125])
 def test_host_verifier_evidence_survives_response_and_collection(tmp_path, monkeypatch, exit_code):
     from nemo_gym.eval.recovery.grading import grading_artifact
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import (
-        SAVED_ANSWER,
-        collect_with_score,
-        write_job_dir,
-    )
+    from tests.helpers.recovery_evidence import SAVED_ANSWER, collect_with_score, write_job_dir
 
     monkeypatch.setattr(SkillsBenchHarborAgent, "model_post_init", lambda self, context: None)
     agent = SkillsBenchHarborAgent.model_construct(config=_config(opensandbox=True))

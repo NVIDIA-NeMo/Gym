@@ -12,9 +12,9 @@ from nemo_gym.eval.recovery.trials import (
     trial_counts,
 )
 from nemo_gym.server_runtime.verifier_observability import observe_verifier
+from tests.helpers.recovery_evidence import collect_with_score, ident, write_job_dir
+from tests.helpers.recovery_health import fixture
 from tests.unit_tests.eval.recovery.test_llm_judge_trial_coverage import _dep, _judge_call, _own
-from tests.unit_tests.eval.recovery.test_tool_trial_coverage import fixture
-from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect_with_score, ident, write_job_dir
 
 
 def _record(row, **change):

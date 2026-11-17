@@ -30,12 +30,8 @@ from nemo_gym.eval.recovery.evidence import (
     COLLECT_SCRIPT,
     CollectedEvidence,
 )
-from tests.unit_tests.orchestration.test_eval_resubmit_decision import (
-    complete_job,
-    ident,
-    produce_quality,
-    write_job_dir,
-)
+from tests.helpers.recovery_evidence import ident, produce_quality, write_job_dir
+from tests.unit_tests.orchestration.test_eval_resubmit_decision import complete_job
 
 
 # Counts binary reads of artifacts/rollouts.jsonl. MUTATE=append adds a row just before the parse opens the file.

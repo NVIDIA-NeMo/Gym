@@ -11,28 +11,7 @@ from nemo_gym.eval.recovery.evidence import CollectedEvidence
 from nemo_gym.eval.recovery.gate import trial_health
 from nemo_gym.eval.recovery.planner import decide_from_collected
 from nemo_gym.eval.recovery.trials import _observed_trial_operations
-
-
-FIXTURES = Path(__file__).parent / "fixtures"
-
-
-def recorded_run(name: str) -> str:
-    """A recorded run's collected evidence as JSON: its file, or its base file with the values its patch sets."""
-    path = FIXTURES / f"{name}.json"
-    if path.exists():
-        return path.read_text()
-    patch = json.loads((FIXTURES / f"{name}.patch.json").read_text())
-    run = json.loads((FIXTURES / patch["base"]).read_text())
-    for keys, value in patch["set"]:
-        node = run
-        for key in keys[:-1]:
-            node = node[key]
-        node[keys[-1]] = value
-    return json.dumps(run)
-
-
-def fixture(case="healthy"):
-    return CollectedEvidence.model_validate_json(recorded_run(f"cpu-tool-trial-{case}"))
+from tests.helpers.recovery_health import fixture, recorded_run
 
 
 def health(collected):

@@ -526,7 +526,7 @@ def test_only_a_definite_refusal_of_the_follow_up_is_a_typed_stop(tmp_path, repl
 def test_recovery_resubmits_a_run_whose_follow_up_the_scheduler_refused(tmp_path):
     from nemo_gym.eval.recovery.decision import RecoveryAction
     from nemo_gym.eval.recovery.planner import decide_from_collected
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect, ident, write_job_dir
+    from tests.helpers.recovery_evidence import collect, ident, write_job_dir
 
     # The segment's prologue took its follow-up claim, and the scheduler refused the submission.
     job = write_job_dir(tmp_path, n=2, results=[ident(0, reward=1.0)], failures=[])
@@ -552,7 +552,7 @@ def test_a_follow_up_submission_without_a_definite_reply_stays_unknown_and_logs_
 
 def test_inspection_names_a_chain_stopped_on_a_refused_follow_up(tmp_path):
     from nemo_gym.eval.recovery.planner import decide_from_collected
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect, ident, write_job_dir
+    from tests.helpers.recovery_evidence import collect, ident, write_job_dir
 
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
     line = f"{FOLLOW_UP_SUBMISSION_REFUSED}: sbatch exited 1: sbatch: error: QOSMaxSubmitJobPerUserLimit"
@@ -1307,7 +1307,7 @@ def test_a_finished_run_clears_the_provisional_line(tmp_path):
 
 def test_inspection_names_a_continuation_that_died_before_its_guard(tmp_path):
     from nemo_gym.eval.recovery.planner import decide_from_collected
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect, ident, write_job_dir
+    from tests.helpers.recovery_evidence import collect, ident, write_job_dir
 
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
     (job / INCOMPLETE_MARKER_NAME).write_text(_provisional_line("777") + "\n")
@@ -1476,7 +1476,7 @@ def test_a_cancelled_follow_up_keeps_a_deliberate_stop_and_replaces_a_provisiona
 
 def test_inspection_names_a_follow_up_cancelled_before_it_started(tmp_path):
     from nemo_gym.eval.recovery.planner import decide_from_collected
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect, ident, write_job_dir
+    from tests.helpers.recovery_evidence import collect, ident, write_job_dir
 
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
     line = "Follow-up 777 was cancelled before it started (job 100 ended TIMEOUT); the chain stopped."
@@ -1491,7 +1491,7 @@ def test_inspection_names_a_follow_up_cancelled_before_it_started(tmp_path):
 def test_inspection_names_a_chain_stopped_on_rejected_sandbox_credentials(tmp_path):
     from nemo_gym.eval.recovery.planner import decide_from_collected
     from nemo_gym.orchestration.executors.slurm.resume_script import CREDENTIALS_REJECTED_REASON
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect, ident, write_job_dir
+    from tests.helpers.recovery_evidence import collect, ident, write_job_dir
 
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
     line = f"Previous job 100 ended FAILED: {CREDENTIALS_REJECTED_REASON}"
@@ -1506,7 +1506,7 @@ def test_inspection_names_a_chain_stopped_on_rejected_sandbox_credentials(tmp_pa
 def test_inspection_names_a_chain_stopped_on_a_producer_protocol_violation(tmp_path):
     from nemo_gym.eval.recovery.planner import decide_from_collected
     from nemo_gym.orchestration.executors.slurm.resume_script import PROTOCOL_VIOLATION_REASON
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect, ident, write_job_dir
+    from tests.helpers.recovery_evidence import collect, ident, write_job_dir
 
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
     line = f"Previous job 100 ended FAILED: {PROTOCOL_VIOLATION_REASON}"
@@ -1521,7 +1521,7 @@ def test_inspection_names_a_chain_stopped_on_a_producer_protocol_violation(tmp_p
 def test_inspection_names_a_chain_stopped_on_an_exhausted_grading_quota(tmp_path):
     from nemo_gym.eval.recovery.planner import decide_from_collected
     from nemo_gym.orchestration.executors.slurm.resume_script import QUOTA_EXHAUSTED_REASON
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect, ident, write_job_dir
+    from tests.helpers.recovery_evidence import collect, ident, write_job_dir
 
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
     line = f"Previous job 100 ended FAILED: {QUOTA_EXHAUSTED_REASON}"

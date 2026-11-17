@@ -22,7 +22,7 @@ last captured call failed. A trial whose agent run failed but whose answer was g
 
 import pytest
 
-from tests.unit_tests.eval.recovery.test_evaluation_health import _gate, _run
+from tests.helpers.recovery_health import _gate, _run
 from tests.unit_tests.orchestration.test_trajectory_evidence_reporting import _simulated_user_shape
 
 

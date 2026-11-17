@@ -25,7 +25,7 @@ from nemo_gym.eval.recovery.gate import operator_verdict
 from nemo_gym.eval.recovery.planner import decide_from_collected
 from nemo_gym.orchestration import submit
 from nemo_gym.orchestration.executors import resume_script
-from tests.unit_tests.eval.recovery.test_evaluation_health import _run
+from tests.helpers.recovery_health import _run
 from tests.unit_tests.orchestration.test_eval_resubmit import _handle
 from tests.unit_tests.orchestration.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.orchestration.test_eval_resubmit import slurm_bin as slurm_bin

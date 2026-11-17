@@ -6,7 +6,7 @@ import pytest
 
 from nemo_gym.eval.recovery.planner import decide_from_collected
 from nemo_gym.eval.recovery.trials import _observed_trial_operations
-from tests.unit_tests.eval.recovery.test_tool_trial_coverage import fixture
+from tests.helpers.recovery_health import fixture
 
 
 def _judged(mutate):

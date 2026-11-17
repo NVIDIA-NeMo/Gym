@@ -25,7 +25,7 @@ from nemo_gym.eval.recovery.decision import (
 )
 from nemo_gym.eval.recovery.evidence import CollectedEvidence
 from nemo_gym.eval.recovery.gate import operator_verdict, operator_verdict_line, with_operator_verdict
-from tests.unit_tests.eval.recovery.test_evaluation_health import _gate, _run
+from tests.helpers.recovery_health import _gate, _run
 
 
 def _ready(collected):

@@ -23,8 +23,8 @@ incomplete reason of ``max_output_tokens`` or ``max_tokens``, or output tokens a
 
 import pytest
 
-from tests.unit_tests.eval.recovery.test_evaluation_health import _gate, _run
-from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect_with_score, ident, write_job_dir
+from tests.helpers.recovery_evidence import collect_with_score, ident, write_job_dir
+from tests.helpers.recovery_health import _gate, _run
 
 
 def _incomplete(row: dict, *, message: bool = False) -> None:

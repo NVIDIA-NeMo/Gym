@@ -29,7 +29,7 @@ from nemo_gym.eval.recovery.evidence import CollectedEvidence
 from nemo_gym.eval.recovery.gate import trial_verdict
 from nemo_gym.eval.recovery.grading import grading_artifact
 from nemo_gym.eval.recovery.planner import decide_from_collected
-from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect_with_score, ident, write_job_dir
+from tests.helpers.recovery_evidence import collect_with_score, ident, write_job_dir
 
 
 FIXTURE = Path(__file__).parent / "fixtures/cpu-grading-mcqa-healthy.json"

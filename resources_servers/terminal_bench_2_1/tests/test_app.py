@@ -826,7 +826,7 @@ async def test_applied_outcome_decision_is_part_of_the_result_and_survives_a_sav
 ) -> None:
     """A configured verifier zero is a saved decision, so recovery counts it without a successful verification."""
     from nemo_gym.core.outcome_policy import is_policy_counted_zero
-    from tests.unit_tests.eval.recovery.test_evaluation_health import _gate
+    from tests.helpers.recovery_health import _gate
     from tests.unit_tests.eval.recovery.test_shared_fault_classes import _policy_zero
 
     async def execute(command, **kwargs):

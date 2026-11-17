@@ -46,6 +46,17 @@ from nemo_gym.eval.recovery.policy import RecoveryOutcomePolicyConfig
 from nemo_gym.orchestration import submit
 from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+from tests.helpers.recovery_evidence import (
+    INFRA,
+    SAVED_ANSWER,
+    _judge_failure,
+    collect,
+    collect_with_score,
+    final_model_zero,
+    ident,
+    produce_quality,
+    write_job_dir,
+)
 
 
 class _StartsWith:
@@ -64,82 +75,6 @@ HEALTH_UNKNOWN = _StartsWith("response/trial health unknown: ['")
 
 
 # The saved answer a judge failure keeps beside its row; re-verification re-judges it.
-
-# Use the response serialized by the actual typed producer/verifier contract, not an output-only placeholder.
-SAVED_ANSWER = NeMoGymResponse(
-    id="response-saved",
-    object="response",
-    created_at=0,
-    model="synthetic",
-    output=[
-        {
-            "id": "message-saved",
-            "type": "message",
-            "role": "assistant",
-            "status": "completed",
-            "content": [{"type": "output_text", "text": "B", "annotations": []}],
-        }
-    ],
-    parallel_tool_calls=False,
-    tool_choice="auto",
-    tools=[],
-).model_dump(mode="json")
-
-
-def ident(task: int, **extra) -> dict:
-    return {"_ng_task_index": task, "_ng_rollout_index": 0, **extra}
-
-
-def write_job_dir(
-    root: Path,
-    *,
-    n: int,
-    results: list[dict],
-    failures: list[dict],
-    offset: int | None = None,
-    retries: int | None = None,
-    walltime: int | None = None,
-    chain: list[str] = (),
-) -> Path:
-    art = root / "artifacts"
-    art.mkdir(parents=True)
-    (art / "rollouts_materialized_inputs.jsonl").write_text(
-        "".join(json.dumps(ident(t, responses_create_params={"input": f"prompt {t}"})) + "\n" for t in range(n))
-    )
-    (art / "rollouts.jsonl").write_text("".join(json.dumps(r) + "\n" for r in results))
-    (art / "rollouts_failures.jsonl").write_text("".join(json.dumps(r) + "\n" for r in failures))
-    if offset is not None:
-        (art / "rollouts_resubmit_offset").write_text(str(offset))
-    if retries is not None:
-        (root / ".gym_infra_retries").write_text(str(retries))
-    if walltime is not None:
-        (root / ".gym_accumulated_walltime").write_text(str(walltime))
-    if chain:
-        (root / ".gym_job_chain").write_text("\n".join(chain))
-    return root
-
-
-def collect(job_dir: Path) -> CollectedEvidence:
-    out = subprocess.run(
-        [sys.executable, "-c", COLLECT_SCRIPT, str(job_dir)], capture_output=True, text=True, check=True
-    )
-    return CollectedEvidence.model_validate_json(out.stdout)
-
-
-INFRA = dict(
-    failure_kind="provider_unavailable",
-    _ng_failure_terminal=False,
-    _ng_failure_max_attempts=3,
-    _ng_failure_events={
-        "e": {
-            "boundary": "model",
-            "operation": "chat_completions",
-            "operation_id": "op",
-            "attempt_id": "a1",
-            "cause_id": None,
-        }
-    },
-)
 
 
 def test_collector_reads_identity_and_cause_fields_only_and_honours_the_resubmit_offset(tmp_path) -> None:
@@ -491,20 +426,6 @@ def unit_quality(*, expected, healthy=True, verdicts=None, partial=False, reason
     }
 
 
-def produce_quality(job: Path) -> None:
-    """Use current raw saved rows; a grade-only fixture has unobserved response/trial health."""
-    from nemo_gym.rollouts.rollout_health import run_health_checks
-
-    run_health_checks(job / "artifacts" / "rollouts.jsonl", workers=1)
-
-
-def collect_with_score(job_dir: Path, key: str) -> CollectedEvidence:
-    out = subprocess.run(
-        [sys.executable, "-c", COLLECT_SCRIPT, str(job_dir), key], capture_output=True, text=True, check=True
-    )
-    return CollectedEvidence.model_validate_json(out.stdout)
-
-
 def complete_job(tmp_path: Path) -> Path:
     job = write_job_dir(tmp_path / "job", n=4, results=[ident(t, reward=1.0) for t in range(4)], failures=[])
     (job / "artifacts" / "rollouts_aggregate_metrics.json").write_text(json.dumps({"agent": {"mean/reward": 0.75}}))
@@ -588,37 +509,6 @@ def test_gate_summary_from_collected_reads_the_named_score_and_passes_only_when_
     assert HEALTH_UNKNOWN in task["warnings"]
     missing_key = collect_with_score(job, json.dumps(["agent", "no_such_metric"]))
     assert gate_summary_from_collected(d, missing_key, max_unhealthy_fraction=0.02)["score"] is None
-
-
-def final_model_zero(task: int, rollout: int) -> dict:
-    """A terminal counts-as-zero sidecar row whose root event is the agent's policy request, caused by the model."""
-    return {
-        "_ng_task_index": task,
-        "_ng_rollout_index": rollout,
-        "_ng_failure_class": "agent_run_error",
-        "failure_kind": "model_transport_error",
-        "_ng_failure_terminal": True,
-        "_ng_failure_counts_as_zero": True,
-        "_ng_failure_id": f"f-{task}-{rollout}",
-        "_ng_failure_events": {
-            f"f-{task}-{rollout}": {
-                "boundary": "agent",
-                "operation": "agent.policy_request",
-                "failure_kind": "model_transport_error",
-                "operation_id": "op-1",
-                "attempt_id": "att-1",
-                "cause_id": "cause",
-            },
-            "cause": {
-                "boundary": "model",
-                "operation": "model_request",
-                "failure_kind": "model_request_error",
-                "operation_id": "op-2",
-                "attempt_id": "att-3",
-                "cause_id": None,
-            },
-        },
-    }
 
 
 def test_final_model_zeros_stay_done_and_are_not_dispatched_again(tmp_path, fake_executor) -> None:
@@ -2042,10 +1932,6 @@ def test_review_policy_never_reopens_settled_or_missing_outcomes(tmp_path):
         assert d.identities["missing"] == [(2, 0)]
         [missing] = [e for e in d.evidence if e.identity == (2, 0)]
         assert missing.events == [] and missing.failure_kind is None and missing.failure_id is None
-
-
-def _judge_failure(task: int, **extra) -> dict:
-    return ident(task, _ng_failure_class="judge_failed", failure_kind="judge_failed", **extra)
 
 
 @pytest.mark.parametrize("where", ["results", "failures"])

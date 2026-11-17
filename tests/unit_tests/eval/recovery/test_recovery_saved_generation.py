@@ -422,7 +422,7 @@ def test_persisted_null_original_input_does_not_fall_back_to_partial(tmp_path):
     from nemo_gym.eval.recovery.policy import _saved_answer
     from nemo_gym.eval.rollout_reverification import _rollout_response
     from nemo_gym.rollouts.rollout_recovery import has_saved_generation
-    from tests.unit_tests.orchestration.test_eval_resubmit_decision import _judge_failure, collect, write_job_dir
+    from tests.helpers.recovery_evidence import _judge_failure, collect, write_job_dir
 
     row = _judge_failure(0, response=None) | {"_ng_failure_partial_response": response()}
     job = write_job_dir(tmp_path / "job", n=1, results=[], failures=[row])
