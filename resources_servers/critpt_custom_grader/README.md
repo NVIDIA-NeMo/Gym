@@ -438,10 +438,10 @@ semantic validator sets `RLIMIT_FSIZE` to 161,546,240 bytes instead, because its
 `job_timeout_s`, `cleanup_timeout_s`, `max_candidate_source_bytes`, `max_concurrent_jobs`), `comparison`
 (`default_rtol`, `default_atol`), `reference_cache_dir` (memory only when null) and `startup_probe`.
 `semantic_validators` registers operator validators (see [Semantic answer validators](#semantic-answer-validators)).
-The agentic recipe adds `answer_source` (`output_text`, the default, or `finish_tool`), `agentic_execution`
+The agentic recipe adds `answer_source` (`output_text`, the default, or `finish_tool`) and `agentic_execution`
 (`sandbox_provider`, `sandbox_spec`, `command_timeout_s`, `provider_timeout_margin_s`, `max_command_bytes`,
-`max_output_bytes`, `max_sessions`, `create_timeout_s`, `close_timeout_s`) and `agentic_max_response_bytes` (see
-[Agentic code execution](#agentic-code-execution)).
+`max_output_bytes`, `max_sessions`, `create_timeout_s`, `close_timeout_s`); see
+[Agentic code execution](#agentic-code-execution).
 
 `sandbox_spec.files` maps an absolute sandbox path to text that the sandbox API uploads when a sandbox starts; every
 grading sandbox gets the same files, the candidate's included. `sandbox_spec.workdir` must exist in the image
@@ -481,7 +481,6 @@ grader call itself raised.
 
 | Status | Category | When |
 |---|---|---|
-| 413 | `request_limit` | the request body is larger than 10 MiB (in `finish_tool` mode: 8 MiB plus twice `agentic_max_response_bytes`, 72 MiB by default) |
 | 422 | `request_invalid` | not a JSON object, or a bad request shape (see below) |
 | 422 | `task_invalid` | `/seed_session` only: the task fields fail validation |
 | 422 | `session_identity_required` | `/seed_session` with `agentic_execution` only: the request is not an episode seed (it has no `resources_session_id`) |
@@ -490,19 +489,19 @@ grader call itself raised.
 | 503 | `server_not_ready` | `/verify` with the grader not running, once the request, task and source checks pass; `/seed_session` with `agentic_execution` before startup has finished or after shutdown |
 
 A bad request shape is invalid prompt parameters, tools or `tool_choice`, or, on `/verify`, a `response` that is not a
-valid response. `responses_create_params` or `response` above 1 MiB, or beyond the JSON node, depth or type limits (an
-integer wider than 63 bits, a non-finite number), is `request_invalid` too; only a body above the table's limit is
-`request_limit`. On `/verify` an invalid task is not an error status: it is a 200 row with category `task_invalid`,
+valid response. Prompt and response envelopes retain JSON node, depth and type limits (including integers wider
+than 63 bits and non-finite numbers), but have no byte cap in this grader. HTTP transport limits follow the
+standard Gym server/deployment policy. Task, executable-source and result limits are unchanged.
+
+On `/verify` an invalid task is not an error status: it is a 200 row with category `task_invalid`,
 terminal. `server_not_ready` is answered only after the request, task and source checks have passed, so while the
 grader is not running (before startup finishes or after shutdown) an invalid task, an incomplete response or an
 unusable source still gets its 200 row.
 
-In `finish_tool` mode a saved trajectory holds every turn, so `response` may be as large as
-`agentic_max_response_bytes` (32 MiB by default, from 1 MiB to 128 MiB); `responses_create_params` stays at 1 MiB.
-`/finish` reads a body up to `agentic_max_response_bytes` and `/code_exec` one up to 1 MiB. Both answer a larger or
-malformed body with 422 and a category-only `detail` (`invalid_finish`, `invalid_code_exec`), which Stirrup returns
-to the model. `/code_exec` also answers 404 when the request names no resources session or the server holds no
-usable one for it (never seeded, closed or failed). That 404 carries Gym's lost-session body,
+In `finish_tool` mode `/finish` and `/code_exec` answer a malformed body with 422 and a category-only `detail`
+(`invalid_finish`, `invalid_code_exec`), which Stirrup returns to the model. As on `/verify` and `/seed_session`, the
+grader sets no byte cap on their bodies. `/code_exec` also answers 404 when the request names no resources session
+or the server holds no usable one for it (never seeded, closed or failed). That 404 carries Gym's lost-session body,
 `{"detail": {"failure_kind": ..., "message": ...}}`, whose `failure_kind` is `session_lost`, or `session_expired` on
 the call that finds the session past `agentic_execution.sandbox_spec.ttl_s`. It answers 503 with the category-only
 `detail` `execution_unavailable` when the execution sandbox or its provider fails to run the command, or while the

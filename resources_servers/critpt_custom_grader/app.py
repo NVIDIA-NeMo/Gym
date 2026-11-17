@@ -2,9 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """HTTP adapter over the sandbox-API grader, with optional per-episode execution tools.
 
-Standard SimpleResourcesServer routes. ``/verify`` and ``/seed_session`` read the whole request body, refuse one larger
-than MAX_REQUEST_BYTES (in ``finish_tool`` mode, than the limit ``agentic_max_response_bytes`` gives), then parse and
-validate it inside the handler, so a malformed or oversized request answers a
+Standard SimpleResourcesServer routes. ``/verify`` and ``/seed_session`` parse and validate the request body
+inside the handler, so a malformed request answers a
 category-only error and never reaches core's body-logging validation handler. These two handlers never log request
 bodies, validation details, provider exceptions or task sources; the stock typed routes (``/close_session``,
 ``/aggregate_metrics``) keep core's behaviour.
@@ -87,7 +86,6 @@ from resources_servers.critpt_custom_grader.submission import (
     finish_acknowledgement,
 )
 from resources_servers.critpt_custom_grader.task_data import (
-    MAX_TASK_BYTES,
     SemanticValidatorDefinition,
     TaskData,
     bounded_json,
@@ -98,8 +96,6 @@ from resources_servers.critpt_custom_grader.task_data import (
 
 logger = logging.getLogger(__name__)
 
-MAX_RESPONSE_BYTES = 1_048_576
-MAX_REQUEST_BYTES = 2 * MAX_TASK_BYTES + 2 * MAX_RESPONSE_BYTES
 _DOMAINS = frozenset({"reference", "comparator", "candidate"})
 _RESOLVED = frozenset({"deleted", "not_created"})
 # Candidate-code extraction: first ```python fence, else first bare ``` fence, else the whole response text.
@@ -185,7 +181,6 @@ class CritPtCustomGraderConfig(BaseResourcesServerConfig):
     score_comparator_uncertain_as_incorrect: bool = False
     answer_source: Literal["output_text", "finish_tool"] = "output_text"
     agentic_execution: AgenticExecutionConfig | None = None
-    agentic_max_response_bytes: int = Field(default=33_554_432, ge=MAX_RESPONSE_BYTES, le=134_217_728, strict=True)
     verified: bool = False
     description: str | None = None
     value: str | None = None
@@ -253,7 +248,7 @@ class CritPtRunRequest(BaseRunRequest):
     @field_validator("responses_create_params")
     @classmethod
     def public_params(cls, value: dict, info: ValidationInfo) -> dict:
-        bounded_json(value, max_bytes=MAX_RESPONSE_BYTES)
+        bounded_json(value, max_bytes=None)
         NeMoGymResponseCreateParamsNonStreaming.model_validate(value)
         if (info.context or {}).get("answer_source") == "finish_tool":
             if any(
@@ -274,8 +269,8 @@ class CritPtVerifyRequest(CritPtRunRequest, BaseVerifyRequest):
 
     @field_validator("response")
     @classmethod
-    def saved_response(cls, value: dict, info: ValidationInfo) -> dict:
-        bounded_json(value, max_bytes=(info.context or {}).get("max_response_bytes", MAX_RESPONSE_BYTES))
+    def saved_response(cls, value: dict) -> dict:
+        bounded_json(value, max_bytes=None)
         NeMoGymResponse.model_validate(value)
         return value
 
@@ -415,12 +410,7 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
         return get_global_config_dict() if isinstance(self.config.sandbox_provider, str) else None
 
     def _validation_context(self) -> dict[str, Any]:
-        return {
-            "answer_source": self.config.answer_source,
-            "max_response_bytes": self.config.agentic_max_response_bytes
-            if self.config.answer_source == "finish_tool"
-            else MAX_RESPONSE_BYTES,
-        }
+        return {"answer_source": self.config.answer_source}
 
     def _execution_sessions(self) -> AgenticExecutionSessions | None:
         cfg = self.config.agentic_execution
@@ -529,16 +519,9 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
                 self._grader = self._provider = None
                 self._probe_info = {}
 
-    async def _read_json(
-        self, request: Request, *, max_bytes: int | None = None
-    ) -> tuple[dict | None, JSONResponse | None]:
-        if max_bytes is None:
-            max_bytes = MAX_REQUEST_BYTES
-            if self.config.answer_source == "finish_tool":
-                max_bytes = 2 * MAX_TASK_BYTES + 2 * self.config.agentic_max_response_bytes
+    @staticmethod
+    async def _read_json(request: Request) -> tuple[dict | None, JSONResponse | None]:
         body = await request.body()
-        if len(body) > max_bytes:
-            return None, _error("request_limit", 413)
         try:
             value = json.loads(body.decode("utf-8"))
         except (ValueError, UnicodeError, RecursionError):
@@ -599,7 +582,7 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
 
     async def finish(self, request: Request) -> JSONResponse:
         """Acknowledge the exact submitted answer without evaluating it or reading execution files."""
-        value, error = await self._read_json(request, max_bytes=self.config.agentic_max_response_bytes)
+        value, error = await self._read_json(request)
         try:
             if error is not None:
                 raise ValueError("invalid finish")
@@ -611,7 +594,7 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
 
     async def code_exec(self, request: Request) -> JSONResponse:
         """Run a command in this episode's persistent offline execution sandbox."""
-        value, error = await self._read_json(request, max_bytes=MAX_RESPONSE_BYTES)
+        value, error = await self._read_json(request)
         try:
             if error is not None:
                 raise ValueError("invalid command")

@@ -10,11 +10,18 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.orchestration.executors.slurm import _remote_managed_evidence, _remote_managed_reader_script
-from nemo_gym.orchestration.recovery import _managed_trial_metadata, select_managed_evidence
+from nemo_gym.eval.recovery.evidence import (
+    _managed_trial_metadata,
+    select_managed_evidence,
+)
+from nemo_gym.orchestration.executors.slurm.reader import (
+    _remote_managed_evidence,
+    _remote_managed_reader_script,
+)
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
-from tests.unit_tests.orchestration.test_managed_recovery_selection import collect, saved_bytes
+from tests.helpers.recovery_store_runs import collect_isolated
+from tests.unit_tests.orchestration.test_managed_recovery_selection import saved_bytes
 from tests.unit_tests.orchestration.test_remote_managed_recovery import ProjectionConnection, config
 
 
@@ -58,7 +65,7 @@ def prepare_session(job, *, config_text="{}", result_type="single_agent_turn_leg
 
 
 def collected(job):
-    return collect(job).model_copy(update={"quality": QUALITY})
+    return collect_isolated(job).model_copy(update={"quality": QUALITY})
 
 
 @pytest.mark.parametrize(
@@ -152,7 +159,7 @@ def test_caller_still_rejects_other_replaced_evidence(tmp_path):
 
 
 def test_missing_caller_helper_source_stops_before_bootstrap(tmp_path, monkeypatch):
-    from nemo_gym.orchestration.executors import slurm
+    from nemo_gym.orchestration.executors.slurm import reader as slurm_reader
 
     prepare_session(tmp_path)
     raw = collected(tmp_path)
@@ -160,9 +167,9 @@ def test_missing_caller_helper_source_stops_before_bootstrap(tmp_path, monkeypat
     def missing_source():
         raise OSError("source unavailable")
 
-    monkeypatch.setattr(slurm, "_remote_managed_reader_script", missing_source)
+    monkeypatch.setattr(slurm_reader, "_remote_managed_reader_script", missing_source)
     conn = ProjectionConnection(AssertionError("must not connect"))
-    result = slurm._remote_managed_evidence(conn, raw, tmp_path, config())
+    result = slurm_reader._remote_managed_evidence(conn, raw, tmp_path, config())
     assert result.managed_selection is None
     assert result.managed_reader_error
     assert conn.commands is None

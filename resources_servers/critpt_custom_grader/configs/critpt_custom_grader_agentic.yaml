@@ -16,7 +16,6 @@ critpt_custom_grader:
       description: Agentic Python problem solving with offline code execution and local sandboxed grading
       value: Grade structured submissions to generic CritPt-like tasks
       answer_source: finish_tool
-      agentic_max_response_bytes: 33554432
       sandbox_provider: execution_sandbox
       sandbox_spec:
         image: ${oc.env:CRITPT_CUSTOM_GRADER_IMAGE}
