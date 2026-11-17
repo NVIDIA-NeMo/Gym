@@ -11,7 +11,7 @@ import pytest
 
 from benchmarks.molmo2_videotrack import prepare
 from benchmarks.molmo2_videotrack.tests import synthetic
-from nemo_gym.environment import load_manifest, resolve_manifest_config_path
+from nemo_gym.environment.manifest import load_manifest, resolve_manifest_config_path
 from nemo_gym.environment.validation import _mirror_differences, _resolve_manifest_composition
 from nemo_gym.eval.eval_plan import PlanBenchmark, PlanGym, build_eval_plan
 
@@ -250,3 +250,19 @@ def test_committed_example_rows_are_the_synthetic_clips() -> None:
         for part in row["responses_create_params"]["input"][0]["content"]
         if part["type"] == "input_image"
     )
+
+
+def test_a_clip_folder_with_another_number_of_frames_is_refused(dataset: Path) -> None:
+    """Such a folder was not trimmed to the clip, or was extracted at another frame rate."""
+    clip_dir = dataset / "videos" / "sports" / "sports_clip"
+    # Frame 19 is not one of the sampled frames (0, 6, 12, 18), so only the count gives the folder away.
+    (clip_dir / "00019.jpg").write_bytes((clip_dir / "00018.jpg").read_bytes())
+
+    with pytest.raises(ValueError, match=r"sports/sports_clip holds 20 frames but its annotations cover 19"):
+        prepare.prepare()
+    assert not prepare.OUTPUT_FPATH.exists()
+
+    (clip_dir / "00019.jpg").unlink()
+    (clip_dir / "00017.jpg").unlink()
+    with pytest.raises(ValueError, match=r"holds 18 frames but its annotations cover 19"):
+        prepare.prepare()

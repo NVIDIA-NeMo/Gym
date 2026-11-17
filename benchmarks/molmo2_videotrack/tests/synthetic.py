@@ -1,5 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# `rle_string` in this file follows `rleToString` in pycocotools:
+# https://github.com/cocodataset/cocoapi/blob/8c9bcc3cf640524c4c20a9c40e89cb6a2f2fa0e9/common/maskApi.c#L204-L216
+# Revision 8c9bcc3cf640524c4c20a9c40e89cb6a2f2fa0e9, BSD-2-Clause:
+#
+#   Microsoft COCO Toolbox. version 2.0
+#   Code written by Piotr Dollar and Tsung-Yi Lin, 2015.
+#   Copyright (c) 2014, Piotr Dollar and Tsung-Yi Lin. All rights reserved.
+#   Licensed under the Simplified BSD License; the full text is in ATTRIBUTIONS.md.
 """Synthetic Molmo2-VideoTrackEval-layout clips: bright rectangles drifting over a dark background.
 
 Used by the prepare tests and to generate the committed example rows, which

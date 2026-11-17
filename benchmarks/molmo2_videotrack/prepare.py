@@ -4,7 +4,7 @@
 
 The dataset (allenai/Molmo2-VideoTrackEval) ships annotations only. The video
 frames come from five source datasets with their own terms and must be
-extracted once with the dataset's `scripts/preprocess_videos.py`, giving
+extracted once with `extract_frames.py` in this folder, giving
 
     <root>/data/<category>/*.parquet
     <root>/videos/<category>/<clip>/<local frame index, 5 digits>.jpg
@@ -69,7 +69,7 @@ def dataset_root() -> Path:
     if not root:
         raise RuntimeError(
             f"MOLMO2_VIDEOTRACK_ROOT is not set. {HF_REPO} ships annotations only; set it to a directory holding "
-            "data/<category>/*.parquet and the frames extracted by the dataset's scripts/preprocess_videos.py."
+            "data/<category>/*.parquet and the frames extracted by benchmarks/molmo2_videotrack/extract_frames.py."
         )
     return Path(root)
 
@@ -114,6 +114,15 @@ def convert(row: dict[str, Any], category: str, videos_dir: Path) -> dict[str, A
         raise FileNotFoundError(
             f"Molmo2-VideoTrackEval: clip {category}/{row['clip']} is missing {len(missing)} of {len(frames)} "
             f"required 1 fps frames (first: {missing[0] if missing else clip_dir}). Refusing a partial evaluation."
+        )
+    # The annotation arrays hold one entry per frame of the clip. A folder with another number of frames was not
+    # trimmed to the clip, or was extracted at another frame rate, and its images would be scored against the
+    # annotations of other frames.
+    present = sum(1 for _ in clip_dir.glob("*.jpg"))
+    if present != int(row["n_frames"]):
+        raise ValueError(
+            f"Molmo2-VideoTrackEval: clip {category}/{row['clip']} holds {present} frames but its annotations "
+            f"cover {row['n_frames']}. Build the folder with benchmarks/molmo2_videotrack/extract_frames.py."
         )
 
     content: list[dict[str, Any]] = [

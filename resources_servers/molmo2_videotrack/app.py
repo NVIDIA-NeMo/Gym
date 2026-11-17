@@ -1,5 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# This file contains code adapted from two other projects:
+#
+# 1. `rle_runs` follows `rleFrString` in pycocotools:
+#    https://github.com/cocodataset/cocoapi/blob/8c9bcc3cf640524c4c20a9c40e89cb6a2f2fa0e9/common/maskApi.c#L218-L231
+#    Revision 8c9bcc3cf640524c4c20a9c40e89cb6a2f2fa0e9, BSD-2-Clause:
+#
+#      Microsoft COCO Toolbox. version 2.0
+#      Code written by Piotr Dollar and Tsung-Yi Lin, 2015.
+#      Copyright (c) 2014, Piotr Dollar and Tsung-Yi Lin. All rights reserved.
+#      Licensed under the Simplified BSD License; the full text is in ATTRIBUTIONS.md.
+#
+# 2. `NATIVE_COORDS_PATTERN`, `NATIVE_ID_XY_PATTERN`, `NATIVE_FRAME_GROUP_PATTERN` and the frame-group
+#    branch of `_parse_native_markup` follow `coord_regex`, `points_regex`, `frame_regex` and
+#    `extract_multi_image_points` in Molmo2:
+#    https://github.com/allenai/molmo2/blob/f3cb1085fbb97c4a4d7fdcadd77cf871bf37a88a/olmo/preprocessing/point_formatter.py#L131-L179
+#    Revision f3cb1085fbb97c4a4d7fdcadd77cf871bf37a88a, Apache-2.0.
 """Molmo2-VideoTrackEval verifier: text-referred point tracking, scored against masks.
 
 Each task is one referring expression over one video clip, which may match
@@ -236,8 +253,8 @@ def parse_tracks(text: str) -> dict[int, list[Point]]:
 def rle_runs(counts: Any) -> list[int]:
     """Run lengths of a COCO RLE mask, from the compressed string or a plain list.
 
-    The string packs each run as a base-48 varint; from the third run on, a run
-    is stored as its difference from the run two places before it.
+    The string packs each run as a varint of 5-bit groups, one per character (offset 48);
+    from the fourth run on, a run is stored as its difference from the run two places before it.
     """
     if not isinstance(counts, (str, bytes)):
         return [int(run) for run in counts]

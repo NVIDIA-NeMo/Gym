@@ -251,6 +251,8 @@ upstream copyright header and adds an NVIDIA modifications block.
 | Harbor | Apache-2.0 (vendored unmodified) | `nemo_gym/data/tasks/harbor/harbor_compat.py` (`environment_content_hash` and `_CONTENT_HASH_IGNORE_NAMES` from `src/harbor/environments/definition.py`, `_sanitize_docker_image_name` from `src/harbor/environments/docker/docker.py`, at tag `v0.22.0`; bodies byte-for-byte, the private sanitiser exposed without its leading underscore) | https://github.com/harbor-framework/harbor |
 | NeMo Skills `generic/math` prompt | Apache-2.0 (vendored unmodified) | `resources_servers/ns_tools/prompts/generic/math.yaml` (upstream `nemo_skills/prompt/config/generic/math.yaml`, byte-for-byte below a provenance header) | https://github.com/NVIDIA-NeMo/Skills |
 | OpenCode max-steps prompt | MIT (vendored unmodified) | `nemo_gym/models/token_capture/harness_notes/opencode.py` (`OPENCODE_MAX_STEPS_PROMPT`, upstream `packages/core/src/session/runner/max-steps.ts`, verbatim) | https://github.com/anomalyco/opencode |
+| pycocotools (COCO API) | BSD-2-Clause (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/molmo2_videotrack/app.py` (`rle_runs`, a Python port of `rleFrString`) and `benchmarks/molmo2_videotrack/tests/synthetic.py` (`rle_string`, a Python port of `rleToString`), both from upstream `common/maskApi.c` | https://github.com/cocodataset/cocoapi |
+| Molmo2 | Apache-2.0 (original and NVIDIA modifications) | `resources_servers/molmo2_videotrack/app.py` (`NATIVE_COORDS_PATTERN`, `NATIVE_ID_XY_PATTERN`, `NATIVE_FRAME_GROUP_PATTERN` and the frame-group branch of `_parse_native_markup`, from `coord_regex`, `points_regex`, `frame_regex` and `extract_multi_image_points` in upstream `olmo/preprocessing/point_formatter.py`) | https://github.com/allenai/molmo2 |
 
 - Upstream license: reproduced in full in the Apple MIT License section below
 - Subcomponent notices: `resources_servers/toolsandbox/tool_sandbox/ACKNOWLEDGEMENTS`
@@ -262,6 +264,8 @@ upstream copyright header and adds an NVIDIA modifications block.
 - ChemReason-Bench: pinned at upstream revision `c0b9ac2933708fcca47b1795492952cbf280e194`. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required; its `LICENSE` leaves the copyright holder unfilled, so no upstream notice exists to reproduce. NVIDIA modifications are noted in-file and in `resources_servers/chemreason_bench/README.md`. Benchmark rows committed as test fixtures are CC BY 4.0 (upstream `DATA_LICENSE`), attributed in that README.
 - NeMo Skills `generic/math` prompt: vendored, unmodified, from upstream revision `da85a881d972e6fec847b90cf553a0bf9bf10638` (https://github.com/NVIDIA-NeMo/Skills/blob/da85a881d972e6fec847b90cf553a0bf9bf10638/nemo_skills/prompt/config/generic/math.yaml), the revision `resources_servers/ns_tools/requirements.txt` pins, because the pinned `nemo-skills-tools` package ships no prompt YAMLs. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required. The file header records the same source, revision and license.
 - OpenCode max-steps prompt: copied verbatim from upstream revision `67aec2212010d67775c35e696d8b8b54902eb338` (OpenCode 1.17.11, https://github.com/anomalyco/opencode/blob/67aec2212010d67775c35e696d8b8b54902eb338/packages/core/src/session/runner/max-steps.ts), because token capture must recognize the exact text OpenCode sends at its step limit. Upstream is MIT; its license is reproduced in full in the OpenCode MIT License section below. The file header records the same source, revision and license.
+- pycocotools: adapted from upstream revision `8c9bcc3cf640524c4c20a9c40e89cb6a2f2fa0e9` (https://github.com/cocodataset/cocoapi/blob/8c9bcc3cf640524c4c20a9c40e89cb6a2f2fa0e9/common/maskApi.c#L204-L231), so that the verifier reads the dataset's compressed COCO masks without a compiled dependency. Upstream is BSD-2-Clause; its license is reproduced in full in the pycocotools BSD-2-Clause License section below. Both file headers record the same source, revision, license and copyright notice.
+- Molmo2: adapted from upstream revision `f3cb1085fbb97c4a4d7fdcadd77cf871bf37a88a` (https://github.com/allenai/molmo2/blob/f3cb1085fbb97c4a4d7fdcadd77cf871bf37a88a/olmo/preprocessing/point_formatter.py#L131-L179), so that answers in Molmo2's own point markup parse as that model's code parses them. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required. NVIDIA modifications (whitespace after a frame delimiter, the `<tracks>` forms, overflow handling) are noted in-file. The file header records the same source, revision and license.
 
 ---
 
@@ -22585,6 +22589,42 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+---
+
+## pycocotools BSD-2-Clause License (COCO mask run-length code)
+
+Applies to `rle_runs` in `resources_servers/molmo2_videotrack/app.py` and `rle_string` in
+`benchmarks/molmo2_videotrack/tests/synthetic.py`.
+
+```text
+Copyright (c) 2014, Piotr Dollar and Tsung-Yi Lin
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+The views and conclusions contained in the software and documentation are those
+of the authors and should not be interpreted as representing official policies,
+either expressed or implied, of the FreeBSD Project.
 ```
 
 ---

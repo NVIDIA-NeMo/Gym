@@ -21,8 +21,35 @@ No rows are filtered. `prepare.py` refuses to run if an annotation file or any r
 the benchmark file only once every row has converted, so a failed run leaves no partial file and does not touch one
 from an earlier complete run.
 
-Frames must be extracted once with the dataset's own `scripts/preprocess_videos.py`, which writes
-`videos/<category>/<clip>/<index>.jpg` with `index` aligned to the annotation arrays.
+### Extracting the frames
+
+The dataset has no frame-extraction script, so this folder has one. Each annotation row covers frames
+`[start_frame, end_frame]` of one source video, and [`extract_frames.py`](extract_frames.py) writes
+`videos/<category>/<clip>/<index>.jpg`, where `index` counts from the clip's first frame, so file `index` is the
+frame that entry `index` of the annotation arrays describes. Download the source datasets under their own terms and
+run, from the repository root:
+
+```bash
+python -m benchmarks.molmo2_videotrack.extract_frames --root /path/to/Molmo2-VideoTrackEval \
+    --aptv2 /path/to/APTv2/videos --dancetrack /path/to/dancetrack/val --sportsmot /path/to/sportsmot/val \
+    --sav /path/to/sav_test/JPEGImages_24fps --personpath22 /path/to/personpath22/videos
+```
+
+| Category | Source | Frame `j = start_frame + index` of the source video |
+| --- | --- | --- |
+| animal | APTv2 | `<video>/<j, 4 digits>.jpg` |
+| dance | DanceTrack, validation split | `<video>/img1/<j + 1, 8 digits>.jpg` |
+| sports | SportsMOT, validation split | `<video>/img1/<j + 1, 6 digits>.jpg` |
+| misc | SA-V, test split | `<video>/<4 * j, 5 digits>.jpg`: the annotations are at 6 fps and SA-V's frames at 24 fps |
+| person | PersonPath22, test split | frame `j`, counted from 0, of `<video>.mp4` as `ffmpeg` decodes it |
+
+PersonPath22 needs `ffmpeg` on `PATH`, and the videos as PersonPath22's own download script writes them, including
+the ones it fetches and re-encodes from MEVA, VIRAT and PathTrack. A category whose folder is not given is skipped,
+and a complete clip folder is kept, so the script can be run once per source and repeated after an interruption.
+
+The frames of the reported run were built with these mappings. `prepare.py` refuses a clip folder whose number of
+frames differs from the annotation's `n_frames`: such a folder was not trimmed to the clip, or was extracted at
+another frame rate, and its images would be scored against the annotations of other frames.
 
 ## Task contract
 
@@ -55,6 +82,9 @@ for example vLLM started with `--allowed-local-media-path <frames dir>`.
 | `MOLMO2_VIDEOTRACK_ROOT` | Required. Dataset root holding `data/` and `videos/` |
 | `MOLMO2_VIDEOTRACK_FRAME_URL_ROOT` | Path at which the model server sees `<root>/videos`, when it differs |
 | `MOLMO2_VIDEOTRACK_EMBED_FRAMES=1` | Embed frames as data URLs, for endpoints that cannot read local files |
+
+Agent harnesses that accept images only as base64 data URLs, such as `opencode_agent` and `pi_agent`, reject the
+default `file://` rows with HTTP 422; prepare the rows for them with `MOLMO2_VIDEOTRACK_EMBED_FRAMES=1`.
 
 ## Scoring
 
