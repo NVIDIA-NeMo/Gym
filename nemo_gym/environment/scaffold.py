@@ -28,6 +28,7 @@ from nemo_gym.environment.manifest import (
     IntegrationProfile,
     IntendedUse,
     ManifestDataset,
+    ManifestRequirements,
     Reward,
     dump_manifest,
 )
@@ -294,7 +295,7 @@ def _manifest(composition: _Composition) -> EnvironmentManifest:
         ],
         "capabilities": "unknown",
         "domains": "unknown",
-        "requirements": {"gpu": "unknown", "network": "unknown"},
+        "requirements": dict.fromkeys(ManifestRequirements.model_fields, "unknown"),
         "reward": composition.reward,
         "determinism": Determinism.UNKNOWN,
         "resources_server": composition.resource_implementation,
