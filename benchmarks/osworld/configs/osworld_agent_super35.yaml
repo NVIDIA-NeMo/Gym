@@ -34,7 +34,7 @@ osworld_super35_agent:
   responses_api_agents:
     osworld_agent:
       runner_name: nemotron_super35_agent
-      model_protocol_id: nemotron-super35-tool-xml-v1
+      model_protocol_id: nemotron-super35-tool-xml-v2
       history_policy:
         name: sink_window
         params:

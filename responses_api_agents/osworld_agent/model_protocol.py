@@ -4,8 +4,9 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Literal, Mapping, Sequence
 
 from responses_api_agents.osworld_agent.trajectory import stable_id
 
@@ -53,12 +54,29 @@ class OSWorldModelProtocol:
     chat_template_kwargs_thinking: Mapping[str, Any] | None = None
     chat_template_kwargs_non_thinking: Mapping[str, Any] | None = None
     parse_retry_template: str | None = None
+    tools: Sequence[Mapping[str, Any]] | None = None
+    tool_choice: Literal["auto"] | None = None
+    coordinate_types: frozenset[str] | None = None
+    preserve_response: bool = False
+    python_execution: Literal["direct", "exec"] = "direct"
 
     def __post_init__(self) -> None:
         if (self.message_renderer is None) != (self.message_renderer_id is None):
             raise ValueError("A protocol message_renderer requires a message_renderer_id, and vice versa")
         if self.message_renderer is not None and not self.message_renderer_id:
             raise ValueError("message_renderer_id must be nonempty")
+        if (self.tools is None) != (self.tool_choice is None):
+            raise ValueError("Protocol API tools and tool_choice must be configured together")
+
+    def check_coordinate_type(self, coordinate_type: str) -> None:
+        if self.coordinate_types is not None and coordinate_type not in self.coordinate_types:
+            raise ValueError(
+                f"Protocol {self.protocol_id!r} does not support coordinate_type={coordinate_type!r}; "
+                f"expected one of {sorted(self.coordinate_types)}"
+            )
+
+    def request_tools(self) -> list[dict[str, Any]] | None:
+        return deepcopy([dict(tool) for tool in self.tools]) if self.tools is not None else None
 
     def system_prompt(self, *, thinking: bool, password: str) -> str:
         template = self.system_prompt_thinking if thinking else self.system_prompt_non_thinking
@@ -91,6 +109,14 @@ class OSWorldModelProtocol:
             extensions["chat_template_kwargs"] = template_kwargs
         if self.parse_retry_template is not None:
             extensions["parse_retry_template"] = self.parse_retry_template
+        if self.tools is not None:
+            extensions.update(tools=self.request_tools(), tool_choice=self.tool_choice)
+        if self.coordinate_types is not None:
+            extensions["coordinate_types"] = sorted(self.coordinate_types)
+        if self.preserve_response:
+            extensions["preserve_response"] = True
+        if self.python_execution != "direct":
+            extensions["python_execution"] = self.python_execution
         wire_material.update(extensions)
         return {
             "schema_version": self.schema_version,

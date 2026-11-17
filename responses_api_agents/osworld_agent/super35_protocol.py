@@ -23,7 +23,46 @@ from typing import Any
 from responses_api_agents.osworld_agent.model_protocol import OSWorldModelProtocol, ProtocolMessageContext
 
 
-SUPER35_PROTOCOL_ID = "nemotron-super35-tool-xml-v1"
+SUPER35_PROTOCOL_ID = "nemotron-super35-tool-xml-v2"
+SUPER35_TOOLS = (
+    {
+        "type": "function",
+        "function": {
+            "name": "exec_py",
+            "description": "Execute Python for desktop control.",
+            "parameters": {
+                "type": "object",
+                "properties": {"code_block": {"type": "string"}},
+                "required": ["code_block"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "computer.wait",
+            "description": "Wait for the next desktop observation. No arguments.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "computer.terminate",
+            "description": "Finish the task with an explicit status and optional answer.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string", "enum": ["success", "failure"]},
+                    "answer": {"type": "string"},
+                },
+                "required": ["status"],
+                "additionalProperties": False,
+            },
+        },
+    },
+)
 _THINK = re.compile(r"<think>\s*(.*?)\s*</think>", re.DOTALL)
 _CALL = re.compile(
     r"<tool_call>\s*<function=([A-Za-z_][A-Za-z0-9_.-]*)>\s*(.*?)\s*</function>\s*</tool_call>",
@@ -54,31 +93,6 @@ normalized x and y coordinates in [0, 1], measured from the screenshot's top-lef
 or variables in coordinate arguments. Use computer.wait to wait for the next observation, and computer.terminate
 to finish. Report success only after checking the requested outcome. Report failure only when evidence shows
 that the task is infeasible; an unfamiliar UI, a failed action, or a low remaining step budget is insufficient.
-
-<tools>
-<function>
-<name>exec_py</name>
-<description>Execute Python for desktop control.</description>
-<parameters>
-<parameter><name>code_block</name><type>string</type></parameter>
-<required>["code_block"]</required>
-</parameters>
-</function>
-<function>
-<name>computer.wait</name>
-<description>Wait for the next desktop observation. No arguments.</description>
-<parameters><required>[]</required></parameters>
-</function>
-<function>
-<name>computer.terminate</name>
-<description>Finish the task with an explicit status and optional answer.</description>
-<parameters>
-<parameter><name>status</name><type>string</type><enum>["success", "failure"]</enum></parameter>
-<parameter><name>answer</name><type>string</type></parameter>
-<required>["status"]</required>
-</parameters>
-</function>
-</tools>
 
 Give a short action description followed by exactly one tool call in this format, with nothing after it:
 <tool_call>
@@ -270,6 +284,11 @@ SUPER35_PROTOCOL = OSWorldModelProtocol(
     assistant_history_template_thinking="<think>\n{thought}\n</think>\n{action}\n{tool_call_xml}",
     assistant_history_template_non_thinking="{action}\n{tool_call_xml}",
     parser=parse_super35_response,
+    tools=SUPER35_TOOLS,
+    tool_choice="auto",
+    coordinate_types=frozenset({"relative"}),
+    preserve_response=True,
+    python_execution="exec",
     message_renderer=render_super35_messages,
     message_renderer_id="nemotron-super35-user-observations-v1",
     chat_template_kwargs_thinking={"enable_thinking": True, "truncate_history_thinking": False},

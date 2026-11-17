@@ -295,7 +295,7 @@ recovering executable code from arbitrary prose.
 
 Select `benchmarks/osworld/configs/osworld_agent_super35.yaml`, or prepare the
 benchmark with `--profile super35`. This uses the Gym-owned
-`nemotron-super35-tool-xml-v1` protocol. It accepts both raw
+`nemotron-super35-tool-xml-v2` protocol. It accepts both raw
 `<tool_call><function=...><parameter=...>` responses and native OpenAI
 `tool_calls`. Supported tools are `exec_py(code_block)`, argument-free
 `computer.wait`, and `computer.terminate(status, answer?)`. Mouse positions
@@ -308,14 +308,48 @@ thinking in chronological history. Observations are user turns. It passes
 `enable_thinking` and `truncate_history_thinking: false` through the policy
 transport. The profile enables `forward_request_chat_template_kwargs` on
 Gym's vLLM model adapter so those per-request options reach the backend.
-Tool definitions are in the system message; dotted function names therefore
-do not require a gateway to accept them in the API `tools` field.
+The protocol sends JSON-schema `tools` and `tool_choice: auto` on every
+request, including retries. The model's chat template renders these definitions;
+the system message does not duplicate a handcrafted `<tools>` block. The
+endpoint must accept the exact dotted tool names `computer.wait` and
+`computer.terminate`. A gateway that rejects those names is incompatible with
+this profile; its HTTP error is an infrastructure failure, not a model score.
 
 Use a compatible Super 3.5 VL model service, for example the public model's
 recommended vLLM version and `qwen3_coder` / `nemotron_v3` parsers. The model
-service must allow at least four images. `computer.wait` uses the runner's
+service must allow at least four images. For example, add these arguments to
+the model's version-pinned serving command:
+
+```bash
+--enable-auto-tool-choice --tool-call-parser qwen3_coder \
+--reasoning-parser nemotron_v3 --limit-mm-per-prompt '{"image": 4, "video": 1}'
+```
+
+Sending only prompt-embedded tool definitions to an auto-tool parser can lose
+the XML action when `tool_choice` defaults to `none`. Do not reuse that v1
+request shape with this serving configuration.
+
+`computer.wait` uses the runner's
 configured post-action delay. Gym still owns the horizon; malformed replies
 are bounded parser retries, not synthetic model-authored `FAIL` actions.
+Unsupported coordinate modes fail during configuration resolution and direct
+agent construction. Only `relative` is supported by this protocol.
+
+The strict local XML/JSON parser is unchanged. The v2 transport preserves
+served content, reasoning, and native tool argument strings without fenced-code
+recovery or conversion into synthetic XML. Native `tool_calls` have already
+passed through the serving parser: their acceptance grammar can differ from
+the strict XML path (for example, a server may accept an unclosed XML call).
+Freeze and record the serving parser too; retain the pre-parser completion or
+token IDs when claiming raw-generation integrity. An API envelope alone cannot
+prove what a serving parser consumed.
+
+After coordinate projection, the executor passes Python actions as the exact
+string argument to `exec(...)`. This host-owned wrapper lets compound statements
+run after DesktopEnv's semicolon-separated imports, including through a remote
+Resources Server. It does not insert characters into the parsed Python source
+or repair syntax. Trajectories retain the parsed action and the actual execution
+wrapper separately. Nano Omni and Qwen runner execution remain unchanged.
 
 This is an independently implemented Gym prompt and protocol. It does not
 load an external agent repository, change the Nano Omni defaults, or replace
@@ -327,7 +361,8 @@ not qualify a different profile automatically.
 
 `OSWorldProtocolAgent` owns the model-call/retry loop and uses a registered
 `OSWorldModelProtocol` for its system prompt, assistant-history template,
-parser, optional message renderer, and thinking-dependent template options.
+parser, optional message renderer, thinking-dependent template options, API
+tools, allowed coordinate modes, and execution wrapper.
 `NemotronV3NanoOmniAgent` remains a compatibility entrypoint with its existing
 Markdown defaults.
 

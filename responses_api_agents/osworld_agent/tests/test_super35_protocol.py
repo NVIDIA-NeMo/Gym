@@ -26,6 +26,7 @@ from responses_api_agents.osworld_agent.runner_registry import RunnerSpec, resol
 from responses_api_agents.osworld_agent.super35_protocol import (
     SUPER35_PROTOCOL,
     SUPER35_PROTOCOL_ID,
+    SUPER35_TOOLS,
     parse_super35_response,
 )
 
@@ -166,7 +167,10 @@ def test_history_retains_initial_and_recent_images_and_all_assistant_tool_turns(
         assert f"reasoning-{turn}" in content
         assert "<function=exec_py>" in content
     assert not any(message["role"] == "tool" for message in messages)
-    assert "tools" not in payloads[-1]
+    assert payloads[-1]["tools"] == list(SUPER35_TOOLS)
+    assert payloads[-1]["tool_choice"] == "auto"
+    assert payloads[-1]["_nemo_gym_preserve_response"] is True
+    assert "<tools>" not in messages[0]["content"]
     assert payloads[-1]["chat_template_kwargs"] == {"enable_thinking": True, "truncate_history_thinking": False}
 
 
@@ -262,11 +266,15 @@ def test_renderer_and_request_changes_have_distinct_wire_contracts() -> None:
     for changed in [
         replace(SUPER35_PROTOCOL, message_renderer_id="another-renderer-v1"),
         replace(SUPER35_PROTOCOL, chat_template_kwargs_thinking={"enable_thinking": False}),
+        replace(SUPER35_PROTOCOL, tools=(), tool_choice="auto"),
+        replace(SUPER35_PROTOCOL, python_execution="direct"),
+        replace(SUPER35_PROTOCOL, preserve_response=False),
     ]:
         assert changed.to_contract(thinking=True)["wire_contract_id"] != baseline
 
 
-def test_gym_transport_forwards_template_kwargs_and_normalizes_native_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("log_model_io", [False, True])
+def test_gym_transport_preserves_native_calls_and_forwards_tools(monkeypatch, tmp_path, log_model_io) -> None:
     from responses_api_agents.osworld_agent import app
 
     client = MagicMock()
@@ -286,6 +294,8 @@ def test_gym_transport_forwards_template_kwargs_and_normalizes_native_calls(monk
         choices=[SimpleNamespace(message=message, finish_reason="tool_calls")]
     )
     monkeypatch.setattr(app, "_build_policy_openai_client", lambda **_: client)
+    if log_model_io:
+        monkeypatch.setenv("OSWORLD_MODEL_IO_LOG", str(tmp_path / "model-io.jsonl"))
     caller = app._build_messages_model_fn(
         base_url="http://policy/v1", model_name="policy", api_key="test-key"
     )  # pragma: allowlist secret
@@ -294,6 +304,9 @@ def test_gym_transport_forwards_template_kwargs_and_normalizes_native_calls(monk
         {
             "_nemo_gym_return_message": True,
             "_nemo_gym_require_stop": True,
+            "_nemo_gym_preserve_response": True,
+            "tools": list(SUPER35_TOOLS),
+            "tool_choice": "auto",
             "chat_template_kwargs": {"enable_thinking": True, "truncate_history_thinking": False},
         },
     )
@@ -301,6 +314,49 @@ def test_gym_transport_forwards_template_kwargs_and_normalizes_native_calls(monk
         "chat_template_kwargs": {"enable_thinking": True, "truncate_history_thinking": False}
     }
     assert parse(response)[1] == ["pyautogui.click(960, 270)"]
+    assert response["content"] is None
+    assert response["tool_calls"][0]["function"]["arguments"] == message.tool_calls[0].function.arguments
+    assert client.chat.completions.create.call_args.kwargs["tools"] == list(SUPER35_TOOLS)
+    assert client.chat.completions.create.call_args.kwargs["tool_choice"] == "auto"
+
+
+def test_transport_does_not_repair_truncated_native_arguments_or_content() -> None:
+    from responses_api_agents.osworld_agent.app import _normalize_chat_message
+
+    arguments = '{"code_block":"pass"'
+    message = SimpleNamespace(
+        content=None,
+        tool_calls=[SimpleNamespace(function=SimpleNamespace(name="exec_py", arguments=arguments))],
+        reasoning_content="raw reasoning",
+        model_extra={},
+    )
+    response = _normalize_chat_message(message, structured=True, preserve_response=True)
+    assert response["tool_calls"][0]["function"]["arguments"] == arguments
+    with pytest.raises(json.JSONDecodeError):
+        parse(response)
+    message.tool_calls = []
+    message.content = "```python\nprint('unfinished')"
+    response = _normalize_chat_message(message, structured=True, preserve_response=True)
+    assert response["content"] == message.content
+    with pytest.raises(ValueError):
+        parse(response)
+
+
+@pytest.mark.parametrize("coordinate_type", ["absolute", "qwen25"])
+def test_unsupported_coordinates_fail_at_both_configuration_entrypoints(coordinate_type: str) -> None:
+    with pytest.raises(ValueError, match="does not support coordinate_type"):
+        agent(coordinate_type=coordinate_type)
+    spec = resolve_runner_spec("nemotron_super35_agent", agent_kwargs={"coordinate_type": coordinate_type})
+    with pytest.raises(ValueError, match="does not support coordinate_type"):
+        resolve_agent_contract(
+            runner_spec=spec,
+            max_steps=100,
+            max_trajectory_length=3,
+            explicit_history_policy=None,
+            model_protocol_id=None,
+            rollout_purpose="evaluation",
+            parity_mode="strict",
+        )
 
 
 def test_super35_profile_wires_model_agent_history_and_request_forwarding() -> None:

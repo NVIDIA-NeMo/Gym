@@ -664,6 +664,7 @@ class OSWorldProtocolAgent:
         self.max_image_history_length = self.history_policy.low_water
         self.max_live_images = self.history_policy.high_water
         self.model_protocol = resolve_model_protocol(model_protocol_id)
+        self.model_protocol.check_coordinate_type(self.coordinate_type)
         self.model_protocol_id = self.model_protocol.protocol_id
         self.max_steps = max_steps
         self.client_password = client_password
@@ -957,6 +958,12 @@ class OSWorldProtocolAgent:
             template_kwargs = self.model_protocol.chat_template_kwargs(thinking=self.thinking)
             if template_kwargs is not None:
                 payload["chat_template_kwargs"] = template_kwargs
+            tools = self.model_protocol.request_tools()
+            if tools is not None:
+                payload["tools"] = tools
+                payload["tool_choice"] = self.model_protocol.tool_choice
+            if self.model_protocol.preserve_response:
+                payload["_nemo_gym_preserve_response"] = True
             model_call_record: Dict[str, Any] = {
                 "parse_attempt": parse_attempt,
                 "prompt_messages": _jsonable(request_messages),

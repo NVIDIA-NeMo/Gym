@@ -391,13 +391,20 @@ python3 prepare.py \
 ```
 
 Start control and evaluation with the normal wrappers. The profile selects
-`nemotron_super35_agent` and `nemotron-super35-tool-xml-v1`, initial-plus-recent
+`nemotron_super35_agent` and `nemotron-super35-tool-xml-v2`, initial-plus-recent
 four-image history, 100 steps, 4096 output tokens, temperature 0.6, and top_p
 0.95. It preserves historical thinking and full assistant tool calls. See the
 [protocol and model extension guide](../../responses_api_agents/osworld_agent/README.md#super-35-vl-tool-xml)
 for tool syntax, model-server request forwarding, and profile compatibility.
 This explicit tool-XML profile does not change the existing Nano Omni
 profile or the scaffolds pinned by published Nemotron recipes.
+
+`prepare.py` preserves these profile sampling defaults when sampling flags are
+omitted. Override them explicitly for another experiment, for example
+`--max-output-tokens 100000 --temperature 0.6 --top-p 0.95`. The output budget
+includes thinking. A changed budget or protocol requires a new run and must not
+overwrite an earlier score. The endpoint must accept the protocol's API tools,
+including dotted function names; qualify this request shape before a full run.
 
 ### OpenSandbox Pool backend
 

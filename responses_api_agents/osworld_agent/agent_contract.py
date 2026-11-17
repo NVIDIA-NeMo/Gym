@@ -94,10 +94,11 @@ def resolve_agent_contract(
         protocol = resolve_model_protocol(
             model_protocol_id or runner_spec.model_protocol_id or DEFAULT_NEMOTRON_PROTOCOL_ID
         )
-        thinking = bool(_nemotron_options(agent_kwargs)["thinking"])
+        agent_options = _nemotron_options(agent_kwargs)
+        protocol.check_coordinate_type(agent_options["coordinate_type"])
+        thinking = bool(agent_options["thinking"])
         protocol_contract = protocol.to_contract(thinking=thinking)
         resolved_protocol_id: str | None = protocol.protocol_id
-        agent_options = _nemotron_options(agent_kwargs)
     else:
         if explicit_history_policy is not None:
             raise ValueError(f"runner {runner_spec.name!r} does not support an explicit history_policy")

@@ -2476,8 +2476,21 @@ def run_osworld_task(
                 if terminal_action is not None:
                     agent_terminal_action = terminal_action
                 task_logger.info("Step %d executing action: %r", step_idx + 1, action)
+                execution_action = action
+                protocol = getattr(native_agent, "model_protocol", None)
+                if (
+                    getattr(protocol, "python_execution", "direct") == "exec"
+                    and isinstance(action, str)
+                    and action not in {"WAIT", "DONE", "FAIL"}
+                ):
+                    # DesktopEnv prepends imports separated by semicolons.
+                    # Execute the unchanged action as its own Python suite so
+                    # compound statements work after that host-owned preamble.
+                    # This wrapper also survives the remote Resources Server
+                    # path; neither the parser nor the model source is edited.
+                    execution_action = f"exec({action!r})"
                 try:
-                    obs, reward, done, info = env.step(action, sleep_after_execution)
+                    obs, reward, done, info = env.step(execution_action, sleep_after_execution)
                 except Exception as exc:  # noqa: BLE001 - record bad model/controller actions.
                     if isinstance(exc, (OSWorldActionTimeoutError, TimeoutError, requests.Timeout)):
                         operation_failure_reason = "action_timeout"
@@ -2486,6 +2499,10 @@ def run_osworld_task(
                     break
                 step_reward += float(reward or 0.0)
                 step_info = info if isinstance(info, dict) else {"info": info}
+                if execution_action != action:
+                    step_info = dict(step_info)
+                    step_info["python_execution"] = "exec"
+                    step_info["execution_action"] = execution_action
                 if agent_step_info:
                     step_info = dict(step_info)
                     step_info.setdefault("agent", agent_step_info)
