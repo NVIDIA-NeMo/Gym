@@ -38,8 +38,9 @@ score, which is their sum, and the result names them as ``reward_components`` (k
 ``failure_kind``. Only a Gym-side failure (sandbox lost, transfer failed) masks the sample. A
 failed agent response whose harness classified the cause (``ng_agent_outcome``) goes through
 ``agent_outcome_policy`` before verification, as on ``single_agent_turn``: by default a
-transport or unknown cause is retried ungraded instead of scoring 0. A task that cannot be set up is a handled episode failure:
-terminal when the task itself is at fault (unknown task, changed folder, unsupported
+transport or unknown cause is retried ungraded instead of scoring 0, and an ungraded attempt's failure names the
+reported cause, unless it is ``unknown``, as its ``failure_kind``. A task that cannot be set up is a handled episode
+failure: terminal when the task itself is at fault (unknown task, changed folder, unsupported
 settings), retryable when the sandbox provider failed.
 """
 
@@ -56,7 +57,7 @@ from uuid import uuid4
 
 from aiohttp import ClientResponseError
 from fastapi import Body, FastAPI, HTTPException
-from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, ValidationError, model_validator
 
 from environment_servers.harbor.entrypoint import (
     ENTRYPOINT_FAILED_KIND,
@@ -87,9 +88,11 @@ from environment_servers.harbor.verifier import (
 from nemo_gym import RESULTS_DIR
 from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
+    AGENT_OUTCOME_METADATA_KEY,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentContinuationRequirements,
+    AgentOutcome,
     AgentOutcomePolicyConfig,
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
@@ -1355,9 +1358,15 @@ class HarborEnvironmentServer(
         """A failed response whose harness classified the cause is routed by the deployment's policy before any
         grading: a transport or unknown cause is retried ungraded, as on ``single_agent_turn``, instead of
         handing test.sh a half-finished sandbox and recording a real 0. In a multi-step task this ends the
-        episode at the turn that failed; a verify cause is graded as before."""
+        episode at the turn that failed; a verify cause is graded as before.
+
+        The failure names the cause that decided its action, so the run summary and the dropped-rollout line say
+        why the episode was not graded (``model_request_rejected``, not a bare environment failure). A model
+        request error keeps its upstream HTTP status, which classifies a 5xx as the model server's fault, not the
+        model's. An ``unknown`` or malformed cause names none."""
         action = agent_outcome_policy(agent_response, config=self.config.agent_outcome_policy)
         if action != OutcomeAction.VERIFY:
+            cause = _reported_cause(agent_response)
             raise self._failure(
                 stage="agent",
                 failure_reason=agent_response.error.message if agent_response.error else "Agent reported failure",
@@ -1365,6 +1374,8 @@ class HarborEnvironmentServer(
                 partial_response=agent_response,
                 agent_observations=handle.observations,
                 trajectory=handle.trajectory,
+                failure_kind=cause.failure_kind if cause else None,
+                http_status=cause.status_code if cause else None,
             )
 
     async def _require_turn_continuation(self) -> None:
@@ -2102,6 +2113,7 @@ class HarborEnvironmentServer(
         agent_observations: Any = None,
         trajectory: Any = None,
         failure_kind: str | None = None,
+        http_status: int | None = None,
     ) -> NgFailureEvent:
         # The harness's evidence of a failed turn (its observations and the decisions it took before the failure)
         # travels with the failure row, as it travels with a result.
@@ -2111,6 +2123,7 @@ class HarborEnvironmentServer(
             operation="episode",
             failure_reason=failure_reason[:2000],
             failure_kind=failure_kind,
+            http_status=http_status,
             terminal=terminal,
             evidence={
                 "partial_response": partial_response,
@@ -2118,6 +2131,16 @@ class HarborEnvironmentServer(
                 "trajectory": trajectory,
             },
         )
+
+
+def _reported_cause(response: NeMoGymResponse) -> AgentOutcome | None:
+    """The registered cause a failed response's harness reported (``ng_agent_outcome``), or ``None`` when it
+    reported none, an ``unknown`` one, or malformed metadata."""
+    try:
+        outcome = AgentOutcome.model_validate_json((response.metadata or {}).get(AGENT_OUTCOME_METADATA_KEY) or "")
+    except ValidationError:
+        return None
+    return outcome if failure_kinds.is_registered(outcome.failure_kind) else None
 
 
 def _opensandbox_message(exc: Exception) -> str | None:

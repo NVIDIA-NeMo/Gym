@@ -807,7 +807,9 @@ failed responses after closing the agent:
 | Other failures, including 401/403/404 or malformed metadata | No | No |
 
 Excluded attempts retain their partial response and observations in the existing
-failure flow. Retry eligibility does not force a retry; the collector's retry budget
+failure flow. On `harbor`, an excluded attempt's failure names the reported cause as its
+`failure_kind`, with the upstream status of a model request error; `unknown` and malformed
+metadata name none. Retry eligibility does not force a retry; the collector's retry budget
 still applies. Responses without this metadata keep the existing grading behavior,
 and completed or incomplete responses remain gradable. These decisions do not change
 native harness retries or model-adapter retries.

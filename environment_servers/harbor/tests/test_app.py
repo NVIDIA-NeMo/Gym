@@ -1406,16 +1406,23 @@ class TestAgentStage:
         return response
 
     @pytest.mark.parametrize(
-        ("outcome", "terminal"),
+        ("outcome", "terminal", "kind", "status"),
         [
-            ('{"failure_kind":"unknown"}', False),
-            ('{"failure_kind":"model_transport_error"}', False),
-            ('{"failure_kind":"model_request_rejected"}', True),
-            ("{", True),
+            ('{"failure_kind":"unknown"}', False, None, None),
+            ('{"failure_kind":"model_transport_error"}', False, "model_transport_error", None),
+            ('{"failure_kind":"model_request_rejected"}', True, "model_request_rejected", None),
+            ('{"failure_kind":"model_request_error","status_code":503}', False, "model_request_error", 503),
+            ("{", True, None, None),
         ],
-        ids=["unknown-retried", "transport-retried", "rejected-request-failed", "malformed-failed"],
+        ids=[
+            "unknown-retried",
+            "transport-retried",
+            "rejected-request-failed",
+            "server-error-retried",
+            "malformed-failed",
+        ],
     )
-    async def test_failed_agent_response_is_not_scored(self, tmp_path, monkeypatch, outcome, terminal):
+    async def test_failed_agent_response_is_not_scored(self, tmp_path, monkeypatch, outcome, terminal, kind, status):
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
         server.server_client.turn_response = self.failed_turn(outcome)
         server.server_client.observations = {"source": "harness", "records": [], "gaps": []}
@@ -1424,6 +1431,10 @@ class TestAgentStage:
 
         assert response.result is None
         assert response.failure.stage == "agent" and response.failure.terminal is terminal
+        # The failure names the cause that decided its action, with the upstream status a 5xx is classified by.
+        assert response.failure.failure_kind == kind
+        selected = response.failure_report.events[response.failure_report.failure_id]
+        assert (selected.failure_kind, selected.http_status) == (kind or "environment_episode_failed", status)
         assert response.failure.failure_reason == "stream disconnected before completion"
         assert response.failure.partial_response.status == "failed"
         assert response.failure.agent_observations is not None
