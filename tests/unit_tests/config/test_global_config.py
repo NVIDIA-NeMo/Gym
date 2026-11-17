@@ -54,6 +54,8 @@ from nemo_gym.config.global_config import (
     ALLOW_UNSUPPORTED_PAIRING_KEY_NAME,
     DEFAULT_HEAD_SERVER_PORT,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
+    SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE,
+    SINGLE_AGENT_TURN_SERVER_TYPES,
     USE_ABSOLUTE_IP,
     UV_CACHE_DIR_KEY_NAME,
     UV_LOCK_TIMEOUT_KEY_NAME,
@@ -3606,8 +3608,10 @@ class TestComposeUnboundAgent:
         assert OmegaConf.to_container(block["datasets"])[0]["num_repeats"] == 8
         assert "hermes_agent" not in resolved
 
-    def _session_environment_config(self, harness_type: str) -> DictConfig:
-        """The standard config with `harness_type` as the swap source and a single_agent_turn_legacy server."""
+    def _session_environment_config(
+        self, harness_type: str, server_type: str = SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE
+    ) -> DictConfig:
+        """The standard config with `harness_type` as the swap source and a `server_type` environment server."""
         config = self._config()
         config.pop(self.HARNESS_INSTANCE)
         config[harness_type] = {
@@ -3621,7 +3625,7 @@ class TestComposeUnboundAgent:
         }
         config["gpqa_mcqa_environment_server"] = {
             "environment_servers": {
-                "single_agent_turn_legacy": {
+                server_type: {
                     "entrypoint": "app.py",
                     "resources_server": {"type": "resources_servers", "name": "gpqa_mcqa_resources_server"},
                     "agent_server": {"type": "responses_api_agents", "name": "gpqa_mcqa_simple_agent"},
@@ -3738,15 +3742,16 @@ class TestComposeUnboundAgent:
 
         assert implementing == AGENT_SESSION_AGENT_TYPES
 
-    def test_langgraph_swap_keeps_unrelated_session_tool_grants(self) -> None:
-        config = self._session_environment_config("langgraph_agent")
+    @mark.parametrize("server_type", sorted(SINGLE_AGENT_TURN_SERVER_TYPES))
+    def test_langgraph_swap_keeps_unrelated_session_tool_grants(self, server_type: str) -> None:
+        config = self._session_environment_config("langgraph_agent", server_type)
         config.langgraph_agent.responses_api_agents.langgraph_agent.resources_server = None
         config["independent_agent"] = {
             "responses_api_agents": {"hermes_agent": {"entrypoint": "app.py", "resources_server": None}}
         }
         config["independent_environment"] = {
             "environment_servers": {
-                "single_agent_turn_legacy": {
+                server_type: {
                     "agent_server": {"type": "responses_api_agents", "name": "independent_agent"},
                     "resources_tool_transports": ["mcp"],
                 }
@@ -3756,7 +3761,7 @@ class TestComposeUnboundAgent:
 
         GlobalConfigDictParser().compose_unbound_agent(config, selected_agent="langgraph_agent")
 
-        environment = config.gpqa_mcqa_environment_server.environment_servers.single_agent_turn_legacy
+        environment = config.gpqa_mcqa_environment_server.environment_servers[server_type]
         assert environment.agent_server.name == "gpqa_mcqa_langgraph_agent"
         assert environment.resources_tool_transports == []
         assert OmegaConf.to_container(config.independent_environment) == independent_before

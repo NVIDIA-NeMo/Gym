@@ -280,6 +280,8 @@ HOST_RUN_SWAP_AGENT_TYPES = frozenset({"prime_agent", "simple_strands_agent"})
 # An environment server type that drives its agent through agent sessions, and keeps the agent's /run as a
 # fallback through a legacy_agent relay.
 SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE = "single_agent_turn_legacy"
+# The environment server types that seed one agent session per episode and grant it the Resources Server's tools.
+SINGLE_AGENT_TURN_SERVER_TYPES = frozenset({"single_agent_turn", SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE})
 LEGACY_AGENT_SERVER_TYPE = "legacy_agent"
 # Kept when a single_agent_turn_legacy server falls back to a legacy_agent relay; the rest only applies to sessions.
 _LEGACY_RELAY_KEPT_KEYS = (
@@ -1106,7 +1108,7 @@ Duplicate config paths:
                         reference["name"] = renames[reference["name"]]
                         if (
                             agent_type in {"langgraph_agent", "langchain_deepagents_agent"}
-                            and server_type == SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE
+                            and server_type in SINGLE_AGENT_TURN_SERVER_TYPES
                         ):
                             # These graphs only call models; the environment still owns verification,
                             # but must not grant resource tools the selected agent cannot consume.
