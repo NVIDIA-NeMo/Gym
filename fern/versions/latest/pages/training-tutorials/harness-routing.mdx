@@ -18,7 +18,7 @@ These are separate choices:
 | SAT | One taskset routes to SAT with OpenCode | Separate tasksets route to SAT with OpenCode or Pi |
 | Harbor | One taskset routes to Harbor with OpenCode | Separate tasksets route to Harbor with OpenCode or Pi |
 
-Start with your maintained researcher recipe. Keep its model, optimizer, sampling, parallelism, data mix and launch command. Change the Gym configuration and the equivalent task-row format. A generalist run can retain SWE, Terminal-Bench and document tasks while changing the harness assignment of one component. A second harness does not require a second policy.
+Start with an existing training recipe. Keep its model, optimizer, sampling, parallelism, data mix and launch command. Change the Gym configuration and the equivalent task-row format. A generalist run can retain SWE, Terminal-Bench and document tasks while changing the harness assignment of one component. A second harness does not require a second policy.
 
 ## Setup
 
@@ -84,7 +84,7 @@ python examples/training/prepare_harness_routes.py \
 
 Harbor preparation records the selected task metadata and refuses missing tasks or a different prompt/image. Image builds are disabled. Supply already available task images; changing a Python recipe does not require rebuilding the runtime image. The preparation receipt records source identity and task-to-harness assignments.
 
-The example replaces the training and validation data paths and the Gym config paths. It preserves each supplied split and converts both to compatible episode routes. For a mixed dataset, apply the same assignment and routing pattern to its Terminal-Bench component and keep the other rows and services. Do not replace a researcher's full data mix with this component when comparing runs.
+The example replaces the training and validation data paths and the Gym config paths. It preserves each supplied split and converts both to compatible episode routes. For a mixed dataset, apply the same assignment and routing pattern to its Terminal-Bench component and keep the other rows and services. Keep the full data mix when comparing runs.
 
 ### Keep each GRPO group on one harness
 
