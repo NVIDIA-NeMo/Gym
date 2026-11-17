@@ -4,15 +4,11 @@
 
 import pytest
 
+from nemo_gym.eval.recovery.evidence import select_managed_evidence
 from nemo_gym.orchestration.api import ResumeConfig, SubmitConfig
-from nemo_gym.orchestration.executors.slurm import _remote_managed_evidence
-from nemo_gym.orchestration.recovery import select_managed_evidence
-from tests.unit_tests.orchestration.test_managed_recovery_selection import (
-    collect,
-    decide,
-    prepare_managed,
-    saved_bytes,
-)
+from nemo_gym.orchestration.executors.slurm.reader import _remote_managed_evidence
+from tests.helpers.recovery_store_runs import collect_isolated, save_store_run
+from tests.unit_tests.orchestration.test_managed_recovery_selection import decide, saved_bytes
 from tests.unit_tests.rollouts.test_rollout_recovery import runner_config as runner_config
 
 
@@ -59,9 +55,9 @@ def config(ref="a" * 40):
     ],
 )
 def test_remote_projection_retains_actual_store_selection(tmp_path, case, expected):
-    prepare_managed(tmp_path, case)
+    save_store_run(tmp_path, case)
     before = saved_bytes(tmp_path)
-    raw = collect(tmp_path)
+    raw = collect_isolated(tmp_path)
     selected = select_managed_evidence(raw, tmp_path)
     # This tests the response validation boundary, not a real SSH/bootstrap operation.
     conn = ProjectionConnection("installer output\n__GYM_MANAGED:" + selected.model_dump_json())
@@ -84,8 +80,8 @@ def test_remote_projection_retains_actual_store_selection(tmp_path, case, expect
     "mutation", ["snapshot", "budget", "score", "identity", "malformed", "duplicate", "bootstrap"]
 )
 def test_remote_projection_cannot_replace_collection_evidence(tmp_path, mutation):
-    prepare_managed(tmp_path, "infra")
-    raw = collect(tmp_path)
+    save_store_run(tmp_path, "infra")
+    raw = collect_isolated(tmp_path)
     selected = select_managed_evidence(raw, tmp_path)
     if mutation == "snapshot":
         selected.source_digests = {}
@@ -116,7 +112,7 @@ def test_the_remote_reader_reports_the_admissions_a_killed_rejudge_pass_left(tmp
     from tests.unit_tests.eval.test_rejudge_saved_judge_failures import _admitted_by_a_dead_pass
 
     job, _, identity = _admitted_by_a_dead_pass(tmp_path)
-    raw = collect(job)
+    raw = collect_isolated(job)
     selected = select_managed_evidence(raw, job)
     assert selected.unresolved_rejudgments == [identity]
 
@@ -129,23 +125,23 @@ def test_the_remote_reader_reports_the_admissions_a_killed_rejudge_pass_left(tmp
 
 
 def test_unpinned_remote_runtime_is_not_installed(tmp_path):
-    prepare_managed(tmp_path, "healthy")
+    save_store_run(tmp_path, "healthy")
     conn = ProjectionConnection(AssertionError("must not connect"))
-    result = _remote_managed_evidence(conn, collect(tmp_path), tmp_path, config("main"))
+    result = _remote_managed_evidence(conn, collect_isolated(tmp_path), tmp_path, config("main"))
     assert result.managed_selection is None
     assert conn.commands is None
 
 
 def test_collector_binds_the_exact_directory_not_only_identical_contents(tmp_path):
-    prepare_managed(tmp_path, "healthy")
-    raw = collect(tmp_path)
+    save_store_run(tmp_path, "healthy")
+    raw = collect_isolated(tmp_path)
     stat = tmp_path.stat()
     assert raw.source_job_identity == (str(tmp_path.resolve()), stat.st_dev, stat.st_ino)
 
 
 def test_unbound_remote_directory_is_not_installed(tmp_path):
-    prepare_managed(tmp_path, "healthy")
-    raw = collect(tmp_path)
+    save_store_run(tmp_path, "healthy")
+    raw = collect_isolated(tmp_path)
     raw.source_job_identity = None
     conn = ProjectionConnection(AssertionError("must not connect"))
     result = _remote_managed_evidence(conn, raw, tmp_path, config())
@@ -156,10 +152,14 @@ def test_unbound_remote_directory_is_not_installed(tmp_path):
 @pytest.mark.parametrize("changed_at", ["remote_selection", "collection"])
 def test_remote_executor_refuses_changed_saved_budget(tmp_path, monkeypatch, changed_at):
     from nemo_gym.orchestration.executors import slurm
+    from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
+    from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
+    from nemo_gym.orchestration.executors.slurm import judge_job as slurm_judge_job
+    from nemo_gym.orchestration.executors.slurm import reader as slurm_reader
     from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord
 
-    prepare_managed(tmp_path, "infra")
-    raw = collect(tmp_path)
+    save_store_run(tmp_path, "infra")
+    raw = collect_isolated(tmp_path)
     selected = select_managed_evidence(raw, tmp_path)
 
     class Transport:
@@ -178,8 +178,11 @@ def test_remote_executor_refuses_changed_saved_budget(tmp_path, monkeypatch, cha
     changed.driver.benchmarks["task"].resumable = ResumeConfig(max_retries=0)
     # Reads: before collection, right after collection, after remote selection.
     reads = iter([saved, changed] if changed_at == "collection" else [saved, saved, changed])
-    monkeypatch.setattr(slurm, "get_connection", lambda _: Transport())
-    monkeypatch.setattr(slurm, "_remote_managed_evidence", lambda *_: selected)
+    monkeypatch.setattr(slurm_chain, "get_connection", lambda _: Transport())
+    monkeypatch.setattr(slurm_judge_job, "get_connection", lambda _: Transport())
+    monkeypatch.setattr(slurm_executor, "get_connection", lambda _: Transport())
+    monkeypatch.setattr(slurm_reader, "_remote_managed_evidence", lambda *_: selected)
+    monkeypatch.setattr(slurm_chain, "_remote_managed_evidence", lambda *_: selected)
     monkeypatch.setattr(slurm.SlurmExecutor, "_saved_config", staticmethod(lambda *_: next(reads)))
     record = SubmissionRecord(
         gym_job_id="synthetic",
@@ -205,11 +208,12 @@ def test_remote_executor_refuses_changed_saved_budget(tmp_path, monkeypatch, cha
 def test_large_projection_streams_outside_installer_argv(tmp_path, monkeypatch):
     import shlex
 
-    from nemo_gym.orchestration.executors import slurm
     from nemo_gym.orchestration.executors.connection import LocalConnection
+    from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
+    from nemo_gym.orchestration.executors.slurm import reader as slurm_reader
 
-    prepare_managed(tmp_path, "healthy")
-    raw = collect(tmp_path)
+    save_store_run(tmp_path, "healthy")
+    raw = collect_isolated(tmp_path)
     raw.results[0]["synthetic_projection_padding"] = "x" * (2 * 1024 * 1024)
 
     # Only replace bootstrap and Store selection here: execute the actual outer transport in a real shell.
@@ -219,7 +223,8 @@ def test_large_projection_streams_outside_installer_argv(tmp_path, monkeypatch):
         code = "import json,sys; d=json.load(sys.stdin); print('__GYM_MANAGED:'+json.dumps(d))"
         return "bash -c " + shlex.quote("python3 -c " + shlex.quote(code) + " <&3")
 
-    monkeypatch.setattr(slurm, "render_driver_entrypoint", installed_stub)
+    monkeypatch.setattr(slurm_reader, "render_driver_entrypoint", installed_stub)
+    monkeypatch.setattr(slurm_executor, "render_driver_entrypoint", installed_stub)
     result = _remote_managed_evidence(LocalConnection(), raw, tmp_path, config())
     assert result.managed_reader_error is None
     assert result.results == raw.results
@@ -229,8 +234,8 @@ def test_large_projection_streams_outside_installer_argv(tmp_path, monkeypatch):
 def test_the_remote_reader_installs_the_mlflow_client_with_the_pinned_gym(tmp_path):
     # The reader reads the exported run's status from the tracking server: without the client that read fails and
     # MLflow delivery stays unverified, while the worker that exported the run had it.
-    prepare_managed(tmp_path, "healthy")
-    raw = collect(tmp_path)
+    save_store_run(tmp_path, "healthy")
+    raw = collect_isolated(tmp_path)
     selected = select_managed_evidence(raw, tmp_path)
     conn = ProjectionConnection("__GYM_MANAGED:" + selected.model_dump_json())
 

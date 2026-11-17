@@ -18,9 +18,9 @@ Covers ``nemo_gym/`` and the code built on it (servers with their own tests, ben
 ``tests/`` is not scanned: those tests move together with the code they cover. Only files git knows about are scanned
 (tracked, or untracked and not ignored), so installed copies of Gym, such as a server's `.venv`, are left out.
 
-``KNOWN_VIOLATIONS`` lists the imports that break the rule today, as (file, imported module). Each goes away when the
-imported code moves into the package that owns it. The test fails on an import that is not listed and on a listed
-entry that no longer matches an import, so the list can only shrink.
+The import-linter contract "only the CLI entrypoint imports orchestration" in pyproject.toml checks the same rule inside
+``nemo_gym/``. This test also covers the code outside it, which the contract does not see, and the root
+``nemo_gym/__init__.py``.
 """
 
 import ast
@@ -48,24 +48,6 @@ SCANNED_ROOTS = [
     )
 ]
 ALLOWED_IMPORTERS = {CORE / "cli" / "main.py"}
-
-KNOWN_VIOLATIONS = {
-    ("nemo_gym/cli/eval.py", "nemo_gym.orchestration.recovery"),
-    ("nemo_gym/cli/utils.py", "nemo_gym.orchestration.executors.resume_script"),
-    ("nemo_gym/eval/rollout_reverification.py", "nemo_gym.orchestration.recovery"),
-    ("resources_servers/agentic_turn_simulation/tests/test_app.py", "nemo_gym.orchestration.recovery"),
-    ("resources_servers/bbq/tests/test_app.py", "nemo_gym.orchestration.recovery"),
-    ("resources_servers/deepswe/tests/test_app.py", "nemo_gym.orchestration.recovery"),
-    ("resources_servers/deepswe_external1/tests/test_app.py", "nemo_gym.orchestration.recovery"),
-    ("resources_servers/gdp_pdf/tests/test_app.py", "nemo_gym.orchestration.recovery"),
-    ("resources_servers/math_with_autograder/tests/test_app.py", "nemo_gym.orchestration.recovery"),
-    ("resources_servers/physics_judge/tests/test_app.py", "nemo_gym.orchestration.recovery"),
-    (
-        "responses_api_agents/harbor_agent_general/tests/test_skillsbench_observations.py",
-        "nemo_gym.orchestration.recovery",
-    ),
-    ("responses_api_agents/miniswe_sandboxed_agent/tests/test_server.py", "nemo_gym.orchestration.recovery"),
-}
 
 
 def _is_orchestration(module: str) -> bool:
@@ -125,19 +107,11 @@ def _imports() -> dict[tuple[str, str], list[str]]:
 
 
 def test_only_cli_entrypoint_imports_orchestration() -> None:
-    found = _imports()
-    new = [line for key, lines in sorted(found.items()) if key not in KNOWN_VIOLATIONS for line in lines]
-    assert not new, (
+    violations = [line for _, lines in sorted(_imports().items()) for line in lines]
+    assert not violations, (
         "nemo_gym.orchestration is a Gym-aware orchestrator, not a home for core functionality: deleting it "
         "should leave only the CLI wiring in nemo_gym/cli/main.py to change. Move the code being imported "
-        "into the package that owns it:\n" + "\n".join(new)
-    )
-
-
-def test_known_violations_are_still_violations() -> None:
-    stale = sorted(KNOWN_VIOLATIONS - set(_imports()))
-    assert not stale, "These no longer import orchestration; remove them from KNOWN_VIOLATIONS:\n" + "\n".join(
-        f"{path}: {module}" for path, module in stale
+        "into the package that owns it:\n" + "\n".join(violations)
     )
 
 

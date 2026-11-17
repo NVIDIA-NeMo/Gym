@@ -20,6 +20,12 @@ git -C benchmarks/terminal_bench_2_1/terminal-bench-2-1 \
 python benchmarks/terminal_bench_2_1/prepare.py
 ```
 
+`prepare()` also takes `task_revision`, a full commit of the task repository. It checks that commit out, cloning
+first if the checkout is missing, so two runs read the same tasks. Through the CLI, pass it as
+`++prepare_script_args.task_revision=<commit>` at the top level; in a YAML config it is the top-level
+`prepare_script_args: {task_revision: <commit>}`. Without it the checkout is left as it is, and a fresh
+clone reads the repository's default branch.
+
 Keep task tests and solutions on the host; do not mount the benchmark checkout
 into task containers. Resources uploads verifier assets after the agent closes
 and rejects tasks whose local `tests/test.sh` is missing. Do not enable
