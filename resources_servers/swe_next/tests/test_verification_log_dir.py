@@ -32,6 +32,28 @@ from resources_servers.swe_next.app import (
 from resources_servers.swe_next.verification import VerificationResult
 
 
+@pytest.mark.asyncio
+async def test_logs_go_to_a_temporary_folder_and_are_not_kept_by_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    log_dir = await _verify(monkeypatch, tmp_path, keep=False)
+
+    assert not log_dir.is_relative_to(Path(swe_next_app.__file__).parent)
+    assert not log_dir.exists()
+    assert not any(tmp_path.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_kept_logs_are_copied_under_the_server_results(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    log_dir = await _verify(monkeypatch, tmp_path, keep=True)
+
+    # <results_dir>/<server>/verification/<rollout>/<time>-<instance id>-attempt<n>-<random>/
+    [kept] = (tmp_path / "swe_next" / "verification").rglob("test_output.log")
+    assert kept.read_text() == "test log"
+    assert "-owner%2Frepo-1-attempt1-" in kept.parent.name
+    assert not log_dir.exists()
+
+
 _INSTANCE_ID = "owner/repo-1"
 
 
@@ -82,25 +104,3 @@ async def _verify(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, keep: bool
     await server.verify(SimpleNamespace(session={SESSION_ID_KEY: "session"}), body)
     [log_dir] = log_dirs
     return log_dir
-
-
-@pytest.mark.asyncio
-async def test_logs_go_to_a_temporary_folder_and_are_not_kept_by_default(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    log_dir = await _verify(monkeypatch, tmp_path, keep=False)
-
-    assert not log_dir.is_relative_to(Path(swe_next_app.__file__).parent)
-    assert not log_dir.exists()
-    assert not any(tmp_path.iterdir())
-
-
-@pytest.mark.asyncio
-async def test_kept_logs_are_copied_under_the_server_results(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    log_dir = await _verify(monkeypatch, tmp_path, keep=True)
-
-    # <results_dir>/<server>/verification/<rollout>/<time>-<instance id>-attempt<n>-<random>/
-    [kept] = (tmp_path / "swe_next" / "verification").rglob("test_output.log")
-    assert kept.read_text() == "test log"
-    assert "-owner%2Frepo-1-attempt1-" in kept.parent.name
-    assert not log_dir.exists()
