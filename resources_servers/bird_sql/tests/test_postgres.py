@@ -27,7 +27,8 @@ from resources_servers.bird_sql.tests.test_app import _make_verify_request
 DB_ID = "bird_pytest_db"
 ADMIN_DSN = os.environ.get("BIRD_PG_TEST_ADMIN_DSN", "")
 READER_DSN = os.environ.get(
-    "BIRD_PG_TEST_DSN", "postgresql://bird_pytest_reader:bird_pytest_reader@127.0.0.1:5432/bird"
+    "BIRD_PG_TEST_DSN",
+    "postgresql://bird_pytest_reader:bird_pytest_reader@127.0.0.1:5432/bird",  # pragma: allowlist secret
 )
 _HAS_DEPS = all(importlib.util.find_spec(m) for m in ("psycopg", "psycopg_pool", "pandas"))
 
