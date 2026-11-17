@@ -107,7 +107,7 @@ class TestConfig:
         config = AgenticTurnSimulationJudgeConfig(host="", port=0, name="", **server)
         assert (config.parse_mode, config.validate_schema, config.reward_mode) == ("strict", True, "hard")
         assert config.field_bonus is None and config.max_analysis_words is None
-        assert server["domain"] == "rlhf" and server["verified"] is False
+        assert server["domain"] == "agent" and server["verified"] is False
         agent = raw["agentic_turn_simulation_judge_simple_agent"]["responses_api_agents"]["simple_agent"]
         assert agent["resources_server"]["name"] == "agentic_turn_simulation_judge_resources_server"
         assert [d["type"] for d in agent["datasets"]] == ["example"]

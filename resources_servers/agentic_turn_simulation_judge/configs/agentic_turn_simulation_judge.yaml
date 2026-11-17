@@ -2,7 +2,7 @@ agentic_turn_simulation_judge_resources_server:
   resources_servers:
     agentic_turn_simulation_judge:
       entrypoint: app.py
-      domain: rlhf
+      domain: agent
       verified: false
       description: The policy plays the agentic_turn_simulation judge. It reads the judge's exact prompt (rubrics, tools, recorded agent turn) and writes the JSON verdict; the reward is agreement of its correctness ladder with a reference label.
       value: Train and measure agent-turn judging (did the agent do the right thing in its turn) against reference judge labels.
