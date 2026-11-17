@@ -331,7 +331,7 @@ class PrimeAgentConfig(BaseResponsesAPIAgentConfig):
         default="inherit",
         description=(
             "Egress of a sandbox Prime Agent creates. Only `inherit` (the provider's network): setup installs "
-            "dependencies from the npm registry, the release host and PyPI."
+            "dependencies from the npm registry and PyPI."
         ),
     )
 

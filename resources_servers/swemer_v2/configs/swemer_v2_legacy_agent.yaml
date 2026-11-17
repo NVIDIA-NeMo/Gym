@@ -22,6 +22,8 @@ swemer_v2_resources_server:
       apply_anti_cheating: true
 
       sandbox_provider: sandbox
+      enforce_agent_no_network: false
+      sandbox_model_server: null
       sandbox_config:
         ttl_s: 18000
         ready_timeout_s: 1200
@@ -55,6 +57,8 @@ swemer_v2_golden_patch_resources_server:
       is_verifying_golden_patch: true
 
       sandbox_provider: sandbox
+      enforce_agent_no_network: false
+      sandbox_model_server: null
       sandbox_config:
         ttl_s: 18000
         ready_timeout_s: 1200

@@ -376,11 +376,12 @@ async def test_a_400_is_rejected_only_before_the_model_answered(monkeypatch, ans
 
 
 # Droid 1.1.0's error events for a refused or reset connection, a context overflow, and rejected model requests,
-# captured from runs against a scripted model server.
+# captured from runs against a scripted model server, and for its repetition stop, seen in real model runs.
 CONTEXT_LIMIT_ERROR = (
     "The existing summary and compaction instructions do not fit the selected model input window. "
     "Choose a compaction model with a larger context window."
 )
+REPETITION_CYCLE_ERROR = "LLM output entered an exact repetition cycle"
 
 
 @pytest.mark.parametrize(
@@ -392,9 +393,11 @@ CONTEXT_LIMIT_ERROR = (
         ("503 unavailable", ("model_request_error", 503)),
         ("Connection error.", ("model_transport_error", None)),
         (CONTEXT_LIMIT_ERROR, ("model_context_limit", None)),
+        (REPETITION_CYCLE_ERROR, ("agent_invalid_output", None)),
         # Only Droid's exact messages count: a tool's own wording or a number that is not a status does not.
         ("Command timed out after 60s", ("unknown", None)),
         ("Connection error. Retrying with the fallback tool", ("unknown", None)),
+        (REPETITION_CYCLE_ERROR + "; retrying", ("unknown", None)),
         ("4000 tokens left", ("unknown", None)),
         ("Error: The request was too large for the model service to accept.", ("unknown", None)),
     ],
@@ -405,7 +408,9 @@ def test_classifier_reads_droid_error_messages(monkeypatch, message, kind):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("message", ["429 rate limited", "Connection error.", CONTEXT_LIMIT_ERROR])
+@pytest.mark.parametrize(
+    "message", ["429 rate limited", "Connection error.", CONTEXT_LIMIT_ERROR, REPETITION_CYCLE_ERROR]
+)
 async def test_terminal_error_reports_unknown_for_an_untested_release(monkeypatch, message):
     events = [*EVENTS[:4], {"type": "error", "source": "agent_loop", "message": message}]
     monkeypatch.setattr(
@@ -421,7 +426,9 @@ async def test_terminal_error_reports_unknown_for_an_untested_release(monkeypatc
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("message", ["429 rate limited", "Connection error.", CONTEXT_LIMIT_ERROR])
+@pytest.mark.parametrize(
+    "message", ["429 rate limited", "Connection error.", CONTEXT_LIMIT_ERROR, REPETITION_CYCLE_ERROR]
+)
 @pytest.mark.parametrize("source", ["tool_result", "assistant", "stderr"])
 @pytest.mark.parametrize("return_code", [0, 1])
 async def test_error_lookalikes_outside_terminal_events_do_not_classify_the_run(
@@ -462,6 +469,24 @@ async def test_error_lookalikes_outside_terminal_events_do_not_classify_the_run(
         assert session.observations.records[1].status == "failed"
     elif source == "assistant":
         assert response.output[2].content[0].text == message
+
+
+@pytest.mark.asyncio
+async def test_repetition_cycle_keeps_partial_work_verifiable(monkeypatch):
+    instance = agent(monkeypatch)
+    session = state(cleanup={"timed_out": False, "return_code": 1, "cleanup_confirmed": True})
+    events = [*EVENTS[:4], {"type": "error", "source": "agent_loop", "message": REPETITION_CYCLE_ERROR}]
+    monkeypatch.setattr(
+        adapter.DroidSandboxSession, "execute", AsyncMock(return_value=adapter.DroidArtifacts(stdout(events)))
+    )
+    response = await instance._sandbox_response(session, body())
+    assert response.status == "failed" and response.error.message == REPETITION_CYCLE_ERROR
+    assert response.output[0].name == "Execute" and response.output[1].output == EVENTS[3]["value"]
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "agent_invalid_output"}
+    assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+    invocation = session.observations.records[0]
+    assert (invocation.status, invocation.error_type) == ("failed", "agent_error")
+    assert session.observations.records[-1].outcome == "failed"
 
 
 @pytest.mark.asyncio

@@ -372,7 +372,7 @@ def test_the_configs_chosen_for_the_benchmark_leave_the_overrides(tmp_path: Path
     loaded = [f"+config_paths=[{path},{other}]"]
     if agent_type:
         loaded.append(f"+config_paths=[{asset_config_path('agent-type', agent_type)}]")
-        loaded.append("+_selected_langgraph_config=x")
+        loaded.append("+_selected_agent_config=x")
     args = argparse.Namespace(target=None, agent=None, agent_type=agent_type)
     agent, overrides, preparation = cli_eval._benchmark_agent(args, [*loaded, "+limit=3"], harbor_benchmark(path))
     assert agent.impl_name == (agent_type or "mini_swe_agent")

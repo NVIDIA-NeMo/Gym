@@ -242,6 +242,15 @@ async def test_rearm_uses_fresh_launch_files_and_close_removes_the_root(session)
         await session.begin_activation(session_dir="/session/activation-3", timeout=1)
 
 
+async def test_root_dir_stays_at_the_starting_directory_across_activations(session):
+    assert session.root_dir == "/session"
+    await session.begin_activation(session_dir="/session/activation-1", timeout=1)
+    assert (session.session_dir, session.root_dir) == ("/session/activation-1", "/session")
+    await execute(session)
+    await session.begin_activation(session_dir="/session/activation-2", timeout=1)
+    assert (session.session_dir, session.root_dir) == ("/session/activation-2", "/session")
+
+
 async def test_rearm_rejects_unconfirmed_termination(session, receipt_reader):
     receipt_reader.return_value = json.dumps(RECEIPT | {"cleanup_confirmed": False})
     with pytest.raises(NgFailureEvent, match="termination was not confirmed") as failure:

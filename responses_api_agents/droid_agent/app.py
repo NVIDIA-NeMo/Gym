@@ -48,6 +48,7 @@ from nemo_gym.agents import (
 )
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    AGENT_INVALID_OUTPUT,
     MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
@@ -94,13 +95,16 @@ fi
 """
 # Environment servers keep this many characters of a failed response's error message as the failure reason.
 _FAILURE_REASON_CHARS = 2000
-# The release whose error event messages were read from runs against a scripted model server. Another release
+# The release whose error event messages were observed in scripted probes and real model runs. Another release
 # may word them differently, so its failures are reported as unknown.
 _CLASSIFIED_DROID_VERSION = "1.1.0"
 # A rejected model request: the HTTP status, a space, then the message of the response's error body.
 _MODEL_REQUEST_STATUS = re.compile(r"^([45]\d{2}) ")
 # A refused or reset connection to the model server.
 _TRANSPORT_ERROR = "Connection error."
+# Droid's repetition stop: a model response's streamed text or thinking ended in an exact repeated cycle, and Droid's
+# resample of it repeated too (or the run had already used its three resamples). The model's output caused it.
+_REPETITION_CYCLE = "LLM output entered an exact repetition cycle"
 # Droid compacts the conversation when the model rejects its context, and stops with this when the compaction
 # request does not fit either.
 _CONTEXT_LIMIT = (
@@ -158,6 +162,8 @@ class DroidAgent(SimpleResponsesAPIAgent):
             return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
         if message == _TRANSPORT_ERROR:
             return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
+        if message == _REPETITION_CYCLE:
+            return AgentOutcome(failure_kind=AGENT_INVALID_OUTPUT)
         match = _MODEL_REQUEST_STATUS.match(message)
         if match:
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=int(match[1]))

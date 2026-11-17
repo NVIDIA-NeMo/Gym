@@ -124,9 +124,10 @@ def test_summary_points_at_every_file_by_relative_path_and_reports_what_is_missi
     )
     # What the data processor and the collector leave beside the rows and under `<stem>/preprocessed_datasets/`.
     rows_path = Path(prepared.rows_path)
-    rows_path.with_name("tasks_prepare.jsonl").write_text("")
+    rows_path.with_name("tasks_prepare.jsonl").write_text("stale source-adjacent artifact")
     rows_path.with_name("tasks_metrics.json").write_text("{}")
     _logs_dir(prepared.output_dir, "rollouts/preprocessed_datasets", "validation.jsonl", "validation_metrics.json")
+    _logs_dir(prepared.output_dir, "rollouts/preprocessed_datasets/prepared/validation", "tasks_prepare.jsonl")
     health_reports(prepared.output_dir, "rollouts.jsonl", verdicts=False)
     expected = [_selected(name, index) for index, name in enumerate("abcd")]
     path = write_run_summary(
@@ -167,7 +168,7 @@ def test_summary_points_at_every_file_by_relative_path_and_reports_what_is_missi
         "quality_summary": "quality_summary.json",
         "rollout_verdicts": None,
         "rows": "tasks.jsonl",
-        "rows_prepare": "tasks_prepare.jsonl",
+        "rows_prepare": "rollouts/preprocessed_datasets/prepared/validation/tasks_prepare.jsonl",
         "rows_metrics": "tasks_metrics.json",
         "preprocessed_datasets": "rollouts/preprocessed_datasets",
         "collector_input": "rollouts/preprocessed_datasets/validation.jsonl",
@@ -239,6 +240,7 @@ def test_summary_points_at_every_file_by_relative_path_and_reports_what_is_missi
 
 def test_summary_without_expected_rows_or_rollouts_still_describes_the_run(tmp_path, prepared):
     rollouts = tmp_path / "elsewhere" / "custom.jsonl"
+    Path(prepared.rows_path).with_name("tasks_prepare.jsonl").write_text("stale")
     summary = build_run_summary(
         rollouts,
         command="gym eval run",
@@ -249,6 +251,7 @@ def test_summary_without_expected_rows_or_rollouts_still_describes_the_run(tmp_p
         expected=None,
     )
     assert summary["files"]["rollouts"] is None and summary["tasks"] == []
+    assert summary["files"]["rows_prepare"] is None
     assert summary["counts"] == {"selected": 0, "results": 0, "masked": 0, "failed": 0, "missing": 0}
     # `task_source` is known before dispatch (the run config declares it); only the rows' echo needs rows.
     assert summary["task_source"] == "ds" and summary["rows_task_source"] is None
@@ -573,10 +576,14 @@ def test_validate_writes_the_summary_beside_the_rollouts_even_when_collection_fa
             raise RuntimeError("None of the 1 dispatched rollouts produced a result")
         logs = _logs_dir(output_dir / "verifier", "session-live", "reward.txt", "test-stdout.txt")
         write_jsonl(rollouts, [result(verifier_logs_dir=str(logs), verifier_mode="shared", task_source="x")])
-        # The data processor's files: beside the rows and in the collator's folder, named after the split, which
+        # The data processor's files in the run-owned collator folder, named after the split, which
         # M37 takes from the dataset's [gym] type (benchmark for a dataset that declares none).
-        (output_dir / "tasks_harbor_oracle_agent_prepare.jsonl").write_text("")
         _logs_dir(rollouts.with_suffix(""), "preprocessed_datasets", "benchmark.jsonl", "benchmark_metrics.json")
+        _logs_dir(
+            rollouts.with_suffix(""),
+            "preprocessed_datasets/prepared/benchmark",
+            "tasks_harbor_oracle_agent_prepare.jsonl",
+        )
 
     monkeypatch.setattr(main_module, "dispatch", collect)
     with pytest.raises(RuntimeError, match="produced a result"):
@@ -596,7 +603,9 @@ def test_validate_writes_the_summary_beside_the_rollouts_even_when_collection_fa
     assert summary["files"]["rollouts"] == "rollouts.jsonl"
     assert summary["files"]["run_config"] == "run_config_harbor_oracle_agent.yaml"
     assert summary["files"]["rows"] == "tasks_harbor_oracle_agent.jsonl"
-    assert summary["files"]["rows_prepare"] == "tasks_harbor_oracle_agent_prepare.jsonl"
+    assert summary["files"]["rows_prepare"] == (
+        "rollouts/preprocessed_datasets/prepared/benchmark/tasks_harbor_oracle_agent_prepare.jsonl"
+    )
     assert summary["files"]["rows_metrics"] is None
     assert summary["files"]["collector_input"] == "rollouts/preprocessed_datasets/benchmark.jsonl"
     assert summary["files"]["collector_input_metrics"] == "rollouts/preprocessed_datasets/benchmark_metrics.json"
