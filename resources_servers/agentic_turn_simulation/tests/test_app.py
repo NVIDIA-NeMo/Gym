@@ -610,6 +610,26 @@ class TestVerifyMasks:
         assert out.failure_kind == f"{SERVER}:time_cap"
         assert (out.failure_outcome_action, out.failure_outcome_attribution) == ("fail", "model")
 
+    async def test_one_kind_can_select_fail_while_the_other_keeps_retry(self) -> None:
+        # Only the time cap's action changes; both kinds stay attributed to the evaluation.
+        server = make_server(
+            outcome_policy={"by_stage": {"agent": {"by_failure_kind": {f"{SERVER}:time_cap": "fail"}}}}
+        )
+        capped = await server.verify(req(), _verify_body(stop_reason="time_cap", steps="12"))
+        failed = await server.verify(
+            req(), _verify_body([_output_item("p1", simulator_failure("HTTP 503: busy")), _message_item("It failed.")])
+        )
+        assert (capped.failure_kind, capped.failure_outcome_action, capped.failure_outcome_attribution) == (
+            f"{SERVER}:time_cap",
+            "fail",
+            "evaluation",
+        )
+        assert (failed.failure_kind, failed.failure_outcome_action, failed.failure_outcome_attribution) == (
+            f"{SERVER}:simulator_failed",
+            "retry",
+            "evaluation",
+        )
+
     async def test_the_wall_clock_cap_is_masked(self) -> None:
         server = make_server()
         out = await server.verify(req(), _verify_body(stop_reason="time_cap", steps="12"))

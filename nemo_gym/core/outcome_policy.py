@@ -21,6 +21,7 @@ from nemo_gym.core.failure_kinds import (
     FailureStage,
     _merge_stage_overrides,
     classify_failure,
+    is_namespaced,
 )
 
 
@@ -55,7 +56,7 @@ def is_policy_counted_zero(row: Mapping[str, object]) -> bool:
 
 
 def _require_registered_kinds[T](value: dict[str, T]) -> dict[str, T]:
-    invalid = value.keys() - FAILURE_KINDS - {"unknown"}
+    invalid = {kind for kind in value.keys() - FAILURE_KINDS - {"unknown"} if not is_namespaced(kind)}
     if invalid:
         raise ValueError(f"Unregistered failure kinds: {sorted(invalid)}")
     return value

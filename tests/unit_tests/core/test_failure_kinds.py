@@ -285,10 +285,12 @@ def test_classification_accepts_namespaced_producer_kinds_without_expanding_acti
     assert FailureClassificationConfig.model_validate_json(config.model_dump_json()) == config
     with pytest.raises(ValidationError, match="Unregistered failure kinds"):
         FailureClassificationConfig(by_failure_kind={"lexmount_browser:quota_exhausted\n": "evaluation"})
-    # Action overrides retain their existing registered-kind restriction. A boundary
-    # handles custom names through class rules instead of silently widening its API.
-    with pytest.raises(ValidationError, match="Unregistered failure kinds"):
-        OutcomePolicyConfig(default_action="fail", by_failure_kind={kind: "retry"})
+    # Action overrides accept an environment's namespaced kinds as classification does, and still reject a
+    # misspelled registered name or a malformed namespaced one.
+    assert OutcomePolicyConfig(default_action="fail", by_failure_kind={kind: "retry"}).by_failure_kind[kind] == "retry"
+    for invalid in ("agent_timout", f"{kind}\n"):
+        with pytest.raises(ValidationError, match="Unregistered failure kinds"):
+            OutcomePolicyConfig(default_action="fail", by_failure_kind={invalid: "retry"})
 
 
 def test_repeated_default_classification_avoids_rebuilding_config_and_custom_rules_do_not_leak(monkeypatch):
