@@ -60,7 +60,13 @@ The [BrowseComp adapter README](../../responses_api_agents/browsecomp_agent/READ
 ## Run another harness
 
 `opencode.yaml` runs [OpenCode](../../responses_api_agents/opencode_agent/README.md) (`opencode_agent`, OpenCode
-1.17.11) in place of `browsecomp_agent`, with the same Resources Server, judge, tasks and prompts as `config.yaml`:
+1.17.11) in place of `browsecomp_agent`, with the same Resources Server, judge, tasks and prompts as `config.yaml`.
+This is the session-based pairing. The older `configs/browsecomp_opencode.yaml` preset uses the deprecated
+`opencode_sandboxed_agent`, `opencode_search`, OpenCode's Exa web tools and a different judge; its scores measure a
+different setup.
+
+The preset assumes a served context length of at least 262,144 tokens. For another deployment, set
+`context_window` to the served context length minus `max_output_tokens` before running:
 
 ```bash
 gym eval prepare --benchmark browsecomp/opencode
@@ -68,6 +74,7 @@ gym eval run \
     --model-type vllm_model \
     --benchmark browsecomp/opencode \
     --split benchmark \
+    --concurrency 32 \
     --output results/browsecomp_opencode.jsonl \
     --model-url <vllm_base_url> \
     --model-api-key <vllm_api_key> \
@@ -87,10 +94,25 @@ gym eval run \
   each episode, from GitHub. Its permission rules deny every tool but the BrowseComp ones: its own shell and file tools
   would run in its sandbox, which holds none of the saved pages, and its web tools would skip the domain exclusions.
   With Docker the sandbox keeps the default network; with a provider that has network policies, such as OpenSandbox,
-  set `network_access: model_and_tools` on the agent.
+  set `network_access: model_and_tools` on the agent only with an image containing the pinned OpenCode runtime,
+  plugin dependencies and `rg`. Configure `sandbox_executable_path` and `sandbox_executable_sha256` as described in
+  [Offline sandbox runtimes](../../responses_api_agents/opencode_agent/README.md#offline-sandbox-runtimes-and-native-model-identity).
+  The shipped `python:3.13-slim` image needs download access and cannot install the runtime under that policy.
+- The Environment Server admits at most 32 episodes, matching the agent's `concurrency`, with a queue timeout of
+  86,400 seconds. Queuing happens before sandbox setup and the 6,000-second episode deadline. Change
+  `max_concurrent_episodes` together with the agent's `concurrency`.
 - OpenCode's own system prompt comes first, and the row's system prompt is added to it as instructions.
   `browsecomp_agent`'s context resets, progress board and step nudges do not apply: OpenCode compacts its context
-  20,000 tokens below `context_window`. The run is bounded by `timeout` (3,600 seconds, `browsecomp_agent`'s activation
-  cap), not by a step count.
+  20,000 tokens below `context_window`. The run has a 3,600-second `timeout` and no step cap. A timed-out OpenCode
+  run is judged on its last assistant text, which can be an intermediate message or compaction summary, and the
+  BrowseComp `timed_out` metric remains 0. `browsecomp_agent` instead sets that metric and scores a timeout as 0
+  without calling the judge; use the OpenCode response's incomplete/timeout signal to identify its timeouts.
+- Every call requests `max_output_tokens` (65,536 in this preset). A call that reaches it ends the whole OpenCode
+  run with `incomplete_reason=max_output_tokens`, and the judge receives the truncated output.
+- `mcp_tool_timeout_seconds: 900` sets OpenCode's MCP connection and SDK request timeout, but Bun's `fetch` still
+  caps a call at about 300 seconds. A search or browse waiting out provider rate limits can therefore fail sooner
+  than it would under `browsecomp_agent`.
+- MCP tool results reach OpenCode as JSON text such as `{"results_string":"line 1\nline 2"}`. `browsecomp_agent`
+  unwraps this envelope and passes raw multiline text to the model.
 - The harness and its system prompt differ from `browsecomp_agent`, so the two scores are not the same measurement.
 - Change a harness setting with `++browsecomp_opencode_agent.responses_api_agents.opencode_agent.<key>=<value>`.

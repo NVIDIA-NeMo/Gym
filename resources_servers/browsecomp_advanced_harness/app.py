@@ -34,6 +34,7 @@ from uuid import uuid4
 from aiohttp import ClientTimeout
 from fastapi import FastAPI, Request
 from httpx import AsyncClient
+from mcp import types
 from pocketshell import run as pocketshell_run
 from pydantic import BaseModel, Field, JsonValue, PrivateAttr, ValidationError, model_validator
 from tavily import AsyncTavilyClient
@@ -1233,11 +1234,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return [
             replace(
                 tool,
-                tool=tool.tool.model_copy(
-                    update={
-                        "description": by_name[tool.name]["description"],
-                        "inputSchema": by_name[tool.name]["parameters"],
-                    }
+                tool=types.Tool(
+                    name=tool.name,
+                    description=by_name[tool.name]["description"],
+                    inputSchema=by_name[tool.name]["parameters"],
                 ),
             )
             for tool in harvested
