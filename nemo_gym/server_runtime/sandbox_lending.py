@@ -56,8 +56,9 @@ class LentSandboxes:
     while the request that asked for it is being cancelled: a create cut in flight leaves a sandbox whose id the
     provider never returned, which nothing here could stop. A lend cancelled meanwhile lends nothing; it stops the
     sandbox it started. A start that ``start_timeout_s`` cuts before the provider returned the sandbox's id is logged
-    at ERROR with the session, the task, the provider, the image and the labels, so a reaper can find the sandbox the
-    create may have left. Once :meth:`release_all` has begun, no lend starts a sandbox.
+    at ERROR with the session, the task, the provider, the image and the labels. A provider that deletes the sandbox
+    of a create its caller gave up on, as OpenSandbox's does, stops the sandbox the create may have left; with any
+    other, a reaper can find it by those. Once :meth:`release_all` has begun, no lend starts a sandbox.
 
     With ``network_access="model_only"``, each sandbox is created with an egress rule that allows only the host of
     ``model_server``, the model server that a harness in the sandbox calls. ``model_and_tools`` also allows the hosts
@@ -176,8 +177,9 @@ class LentSandboxes:
                 LOGGER.error(
                     "The sandbox of resources session %s (task %s of taskset %s) did not start within "
                     "start_timeout_s (%s s), and the %s provider's create was cut before it returned the sandbox's "
-                    "id: a sandbox it created is not stopped here, so a reaper must find it, by image %s and "
-                    "labels %s",
+                    "id, so the stop here cannot reach a sandbox it created: a provider that deletes the sandbox of "
+                    "a create its caller gave up on (OpenSandbox) stops it, and with any other a reaper must find "
+                    "it, by image %s and labels %s",
                     resources_session_id,
                     task_id.task_id,
                     task_id.taskset,
