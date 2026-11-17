@@ -1,10 +1,26 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright 2022 The OpenAI team and The HuggingFace Team. All rights reserved.
+# SPDX-FileCopyrightText: Modifications Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """Speech scoring primitives shared by the ASR resource server.
 
 Per-sample scorers return additive edit counts so Gym can compute corpus
 metrics and per-subset breakdowns without averaging utterance error rates.
+
+Provenance. Parts of this module are adapted from the Hugging Face Open ASR
+Leaderboard (https://github.com/huggingface/open_asr_leaderboard, Apache-2.0) at commit
+8d338ca0115a18f90d74e67b29efb480210bbd96:
+
+  * ``normalize_compound_pairs``: single-pair port of ``normalizer/eval_utils.py::normalize_compound_pairs``;
+  * ``MultilingualTextNormalizer._normalize_numbers``: adapted from
+    ``normalizer/data_utils.py::MultilingualNormalizer._normalize_numbers``;
+  * ``MultilingualTextNormalizer.__call__``: follows ``BasicMultilingualTextNormalizer`` in
+    ``normalizer/normalizer.py``.
+
+Modifications: the multilingual normalizer takes the language per call, reuses the
+``whisper-normalizer`` symbol and diacritics helpers (MIT) instead of copies, and returns additive edit counts.
+The generation-loop guardrail and the CER whitespace modes are independent implementations.
+See ATTRIBUTIONS.md.
 """
 
 from __future__ import annotations
@@ -12,11 +28,12 @@ from __future__ import annotations
 import re
 import unicodedata
 from difflib import SequenceMatcher
-from typing import Any
+from typing import Any, Literal, get_args
 
 import jiwer
 from kaldialign import batch_error_rate
 from num2words import num2words
+from whisper_normalizer.basic import remove_symbols, remove_symbols_and_diacritics
 from whisper_normalizer.english import EnglishTextNormalizer
 
 from resources_servers.asr_with_pc.open_asr_normalizer import OpenASREnglishTextNormalizer
@@ -38,6 +55,11 @@ def cleanup_generation_loops(text: str) -> str:
     """
     text = _CHAR_RUN.sub(lambda m: m.group(1), text)
     return _BLOCK_RUN.sub(lambda m: m.group(1), text)
+
+
+def base_language(language: str | None) -> str:
+    """The language part of a locale code: ``de_de`` and ``de-DE`` give ``de``."""
+    return re.split(r"[_-]", language or "", maxsplit=1)[0].lower()
 
 
 def normalize_whitespace(text: str) -> str:
@@ -128,39 +150,9 @@ def evaluate_open_asr(reference: str, hypothesis: str) -> dict[str, Any]:
     return result
 
 
-_ADDITIONAL_DIACRITICS = {
-    "œ": "oe",
-    "Œ": "OE",
-    "ø": "o",
-    "Ø": "O",
-    "æ": "ae",
-    "Æ": "AE",
-    "ß": "ss",
-    "ẞ": "SS",
-    "đ": "d",
-    "Đ": "D",
-    "ð": "d",
-    "Ð": "D",
-    "þ": "th",
-    "Þ": "th",
-    "ł": "l",
-    "Ł": "L",
-}
-
-
 def _remove_symbols(text: str, *, remove_diacritics: bool) -> str:
-    def replace(character: str) -> str:
-        if remove_diacritics and character in _ADDITIONAL_DIACRITICS:
-            return _ADDITIONAL_DIACRITICS[character]
-        category = unicodedata.category(character)
-        if remove_diacritics and category == "Mn":
-            return ""
-        if category[0] in "MSP":
-            return " "
-        return character
-
-    form = "NFKD" if remove_diacritics else "NFKC"
-    return "".join(replace(character) for character in unicodedata.normalize(form, text))
+    """Replace marks, symbols and punctuation with a space, folding diacritics only on request."""
+    return remove_symbols_and_diacritics(text) if remove_diacritics else remove_symbols(text)
 
 
 class MultilingualTextNormalizer:
@@ -196,7 +188,8 @@ class MultilingualTextNormalizer:
 
 
 def normalize_multilingual_text(text: str, *, language: str, remove_diacritics: bool = False) -> str:
-    language = (language or "").split("_")[0]
+    # Locale codes use "_" or "-" (de_de, en-US); only the language part picks the normalizer.
+    language = base_language(language)
     if language in {"", "en"}:
         return normalize_whitespace(_ENGLISH_NORMALIZER((text or "").lower()))
     return MultilingualTextNormalizer(remove_diacritics=remove_diacritics)(text, language=language)
@@ -214,7 +207,8 @@ _HAN_RANGES = (
     "\U00030000-\U000323af"
 )
 _HAN_RE = re.compile(f"[{_HAN_RANGES}]")
-VALID_CER_WHITESPACE_MODES = frozenset({"keep", "all", "han_adjacent"})
+CerWhitespaceMode = Literal["keep", "all", "han_adjacent"]
+VALID_CER_WHITESPACE_MODES = frozenset(get_args(CerWhitespaceMode))
 
 
 def normalize_cer_whitespace(text: str, mode: str = "keep") -> str:
@@ -277,5 +271,6 @@ def evaluate_multilingual_asr(
     else:
         result = _wer_counts(ref, hyp, merge_compounds=merge_compounds)
     result.update(_cer_counts(ref, hyp, prefix="cer"))
-    result.update(is_correct=result["wer"] < 0.5, text=ref, pred_text=hyp)
+    # ``wer_*`` holds the row's primary error counts; ``error_unit`` says whether they count words or characters.
+    result.update(is_correct=result["wer"] < 0.5, text=ref, pred_text=hyp, error_unit="char" if use_cer else "word")
     return result

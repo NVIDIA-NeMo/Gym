@@ -138,7 +138,25 @@ def test_aggregate_reports_corpus_wer_per_category_and_profile():
     metrics = svc.compute_metrics(rows)
     # Three reference words in each TIME row and two in the DIGIT row; one inserted word overall.
     assert metrics["corpus_wer@k=1"] == pytest.approx(100 * 1 / 8)
-    assert metrics["wer::numb3rs_TIME@k=1"] == pytest.approx(100 * 1 / 6)
-    assert metrics["wer::numb3rs_DIGIT@k=1"] == 0
-    assert metrics["wer::numb3rs@k=1"] == pytest.approx(100 * 1 / 8)
+    assert metrics["wer::subset::numb3rs_TIME@k=1"] == pytest.approx(100 * 1 / 6)
+    assert metrics["wer::subset::numb3rs_DIGIT@k=1"] == 0
+    assert metrics["wer::profile::numb3rs@k=1"] == pytest.approx(100 * 1 / 8)
     assert metrics["wer_itn@k=1"] == pytest.approx(100 * 1 / 8)
+
+
+@pytest.mark.parametrize(
+    ("category", "reference", "prediction"),
+    [
+        ("CARDINAL", "twenty five people", "twenty-five people"),
+        ("CARDINAL", "a five year old", "a five-year-old"),
+        ("CARDINAL", "twenty five", "Twenty\u2013five"),
+    ],
+)
+def test_a_dash_between_words_is_a_separator(category, reference, prediction):
+    assert normalize_numb3rs_text(reference, category) == normalize_numb3rs_text(prediction, category)
+
+
+def test_dashes_that_are_not_between_words_keep_their_old_handling():
+    assert normalize_numb3rs_text("-15", "CARDINAL") == "-15"
+    assert normalize_numb3rs_text("555-0100", "TELEPHONE") == "555-0100"
+    assert normalize_numb3rs_text("well -", "CARDINAL") == "well"

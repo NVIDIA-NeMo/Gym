@@ -8,9 +8,9 @@ requires-python = ">=3.13.14"
 dependencies = [
     "nemo-gym[dev]",
     "jiwer>=3.0.0",
-    "whisper_normalizer>=0.1.0",
+    "whisper_normalizer==0.1.15",
     "kaldialign==0.12.0",
-    "num2words>=0.5.14",
+    "num2words==0.5.14",
 ]
 
 [tool.uv]

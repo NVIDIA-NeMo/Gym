@@ -8,6 +8,7 @@ the same category-dependent rules apply independently to the reference and the h
 """
 
 import re
+import unicodedata
 
 
 # Expand only conventional initialisms in categories where they are unambiguous.
@@ -37,7 +38,8 @@ def normalize_numb3rs_text(text: str, category: str) -> str:
 
     Preserve currency, percentages, signs and separators inside numbers so that
     "$1.5", "15", "1/5" and "-15" cannot become equal. Keep number words,
-    repeated zeros, optional "and", and chemical names unchanged.
+    repeated zeros, optional "and", and chemical names unchanged. A dash between two words becomes a space
+    ("twenty-five" and "twenty five" are equal); other punctuation is deleted.
     """
     text = text.lower().replace("−", "-")
     chars = []
@@ -48,6 +50,14 @@ def normalize_numb3rs_text(text: str, category: str) -> str:
             chars.append(char)
         elif char in ".,:/-" and between_digits:
             chars.append(char)
+        elif (
+            unicodedata.category(char) == "Pd"
+            and 0 < i < len(text) - 1
+            and text[i - 1].isalnum()
+            and text[i + 1].isalnum()
+        ):
+            # A dash that joins two words ("twenty-five") separates them; deleting it would fuse "twentyfive".
+            chars.append(" ")
     text = " ".join("".join(chars).split())
     for initialism in _INITIALISMS.get(category, "").split():
         text = re.sub(rf"\b{initialism}\b", " ".join(initialism), text)

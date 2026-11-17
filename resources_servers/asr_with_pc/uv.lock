@@ -837,8 +837,8 @@ requires-dist = [
     { name = "kaldialign", specifier = "==0.12.0" },
     { name = "nemo-gym", extras = ["dev"], editable = "../../" },
     { name = "nemo-gym", extras = ["telemetry"], marker = "extra == 'telemetry'", editable = "../../" },
-    { name = "num2words", specifier = ">=0.5.14" },
-    { name = "whisper-normalizer", specifier = ">=0.1.0" },
+    { name = "num2words", specifier = "==0.5.14" },
+    { name = "whisper-normalizer", specifier = "==0.1.15" },
 ]
 provides-extras = ["telemetry"]
 

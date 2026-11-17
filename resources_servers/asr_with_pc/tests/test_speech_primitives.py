@@ -9,13 +9,18 @@ from resources_servers.asr_with_pc.open_asr_normalizer import OpenASREnglishText
 
 
 class TestCleanupGenerationLoops:
-    def test_collapses_a_character_run_of_20_but_not_19(self) -> None:
+    def test_collapses_a_character_run_of_21_but_not_19(self) -> None:
         assert sm.cleanup_generation_loops("x" * 21 + " ok " + "y" * 20) == "x ok y"
         assert sm.cleanup_generation_loops("y" * 19) == "y" * 19
 
     def test_collapses_a_block_repeated_20_times_but_not_19(self) -> None:
         assert sm.cleanup_generation_loops("abc " * 20 + "end") == "abc end"
         assert sm.cleanup_generation_loops("abc " * 19 + "end") == "abc " * 19 + "end"
+
+    def test_long_blocks_are_collapsed_up_to_the_4096_character_cap(self) -> None:
+        # A 50-character block is far beyond the 20 characters a smaller cap would cover.
+        block = "".join(chr(ord("a") + index % 26) for index in range(50)) + " "
+        assert sm.cleanup_generation_loops(block * 25 + "end") == block + "end"
 
     def test_blocks_may_span_lines(self) -> None:
         assert sm.cleanup_generation_loops("line\n" * 25 + "z") == "line\nz"
@@ -71,3 +76,29 @@ class TestMultilingualNormalization:
     def test_compound_pairs_are_joined_only_when_they_match(self) -> None:
         assert sm.normalize_compound_pairs("ice cream is cold", "icecream is cold") == ("icecream is cold",) * 2
         assert sm.normalize_compound_pairs("a b", "c d") == ("a b", "c d")
+
+
+class TestCompoundHandling:
+    def test_open_asr_scores_with_compound_merging(self) -> None:
+        # The vendored normalizer does not know "foot ball"; only merge_compounds=True makes it equal "football".
+        result = sm.evaluate_open_asr("a foot ball game", "a football game")
+        assert result["wer_errors"] == 0
+
+    def test_han_adjacent_mode_does_not_also_join_latin_compounds(self) -> None:
+        # Compound normalization would join "ab cd" with "abcd"; the whitespace modes switch it off.
+        kwargs = dict(language="de", cer_whitespace_mode="han_adjacent", normalize_compound=True)
+        assert sm.evaluate_multilingual_asr("ab cd", "abcd", **kwargs)["wer_errors"] == 2
+        assert sm.evaluate_multilingual_asr("ab cd", "abcd", language="de", normalize_compound=True)["wer_errors"] == 0
+
+    def test_language_codes_use_their_language_part(self) -> None:
+        assert [sm.base_language(code) for code in ("de_de", "de-DE", "EN-us", "", None)] == ["de", "de", "en", "", ""]
+
+
+class TestMultilingualNormalizerParity:
+    def test_symbol_and_diacritic_folding_follows_whisper_normalizer(self) -> None:
+        # The helpers come from whisper-normalizer; with and without diacritic folding.
+        assert (
+            sm.normalize_multilingual_text("Fußball, Œuvre!", language="de", remove_diacritics=True)
+            == "fussball oeuvre"
+        )
+        assert sm.normalize_multilingual_text("Fußball, Œuvre!", language="de") == "fußball œuvre"

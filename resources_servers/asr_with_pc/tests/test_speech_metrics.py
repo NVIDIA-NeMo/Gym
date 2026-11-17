@@ -17,7 +17,7 @@ from resources_servers.asr_with_pc.speech_metrics import (
 
 
 def _make_server() -> ASRWithPCResourcesServer:
-    config = ASRWithPCConfig(host="0.0.0.0", port=8080, entrypoint="", name="", task_type="ASR-PC")
+    config = ASRWithPCConfig(host="0.0.0.0", port=8080, entrypoint="", name="", task_type="OpenASR")
     return ASRWithPCResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
@@ -99,8 +99,8 @@ def test_open_asr_chunks_are_scored_as_one_session() -> None:
 
     metrics = server.compute_metrics(tasks)
     assert metrics["corpus_wer@k=1"] == 0.0
-    assert metrics["wer::earnings22_aa@k=1"] == 0.0
-    assert metrics["wer::asr_leaderboard@k=1"] == 0.0
+    assert metrics["wer::subset::earnings22_aa@k=1"] == 0.0
+    assert metrics["wer::profile::asr_leaderboard@k=1"] == 0.0
 
 
 def test_han_adjacent_cer_whitespace_ignores_segmentation_spaces():

@@ -36,10 +36,11 @@ server can score whichever WER variant a benchmark needs:
     ``normalize_compound``, ``merge_compounds`` and ``cer_whitespace_mode``
     from the request.
 
-The first four are unchanged from the original server. ``OpenASR`` and
-``Multilingual-ASR`` report additive edit counts (``*_errors`` / ``*_ref_words``)
-so ``compute_metrics`` yields corpus-level rates, plus per-profile / subset /
-language breakdowns, instead of averaging utterance error rates.
+The utterance-WER task types (``ASR-PC``, ``ASR``, ``Hallucination`` and ``ASR_LEADERBOARD``) score each row
+on its own. ``OpenASR`` and ``Multilingual-ASR`` report additive edit counts
+(``*_errors`` / ``*_ref_words``) so ``compute_metrics`` yields corpus-level rates, plus per-profile / subset /
+language breakdowns, instead of averaging utterance error rates. ``ASR`` and ``ASR_LEADERBOARD`` rows carry
+edit counts too, so they pool the same way.
 
 ``task_type`` defaults to the server-level config value but may be
 overridden per row via the verify request body's ``task_type`` field.
@@ -50,14 +51,13 @@ import re
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, ClassVar, Dict, List, Literal, Optional
-from unittest.mock import MagicMock
 
 import jiwer
 import numpy as np
+from fastapi import HTTPException
 from pydantic import ConfigDict
 from whisper_normalizer.english import EnglishTextNormalizer
 
-from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.metrics import compute_aggregate_metrics, compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.server_runtime import (
@@ -71,12 +71,15 @@ from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import VerifierFixture
 from resources_servers.asr_with_pc.numb3rs_normalizer import normalize_numb3rs_text
 from resources_servers.asr_with_pc.speech_metrics import (
+    CerWhitespaceMode,
     _wer_counts,
+    base_language,
     cleanup_generation_loops,
     evaluate_multilingual_asr,
     evaluate_open_asr,
     normalize_whitespace,
 )
+from resources_servers.asr_with_pc.verifier_fixture import create_server
 
 
 # Hallucination detection: chars/min above this rate signal repetition/hallucination.
@@ -275,6 +278,9 @@ class ASRWithPCConfig(BaseResourcesServerConfig):
     # Default scoring task type; can be overridden per-row via task_type on the
     # request.
     task_type: _TASK_TYPES = "ASR-PC"
+    # Rows whose ``benchmark_profile`` is listed here are averaged the way the multilingual Open ASR leaderboard
+    # does (corpus WER per dataset, then per language, then over languages) into ``multilingual_macro_wer``.
+    multilingual_macro_profiles: List[str] = []
 
 
 class ASRWithPCVerifyRequest(BaseVerifyRequest):
@@ -288,20 +294,28 @@ class ASRWithPCVerifyRequest(BaseVerifyRequest):
     task_type: Optional[_TASK_TYPES] = None
     audio_duration: Optional[float] = None
     reference_fields: Optional[List[str]] = None
-    # ASR_LEADERBOARD: "numb3rs" scores with the category-based Numb3rs normalizer (needs a ``category`` field).
+    # ASR_LEADERBOARD: "numb3rs" scores with the category-based Numb3rs normalizer (needs a ``category``).
     normalization: Optional[Literal["numb3rs"]] = None
+    category: Optional[str] = None
     benchmark_profile: Optional[str] = None
     # OpenASR: chunks of one session share ``parent_id`` and are ordered by ``chunk_index``.
     parent_id: Optional[str] = None
     chunk_index: Optional[int] = None
-    # Multilingual-ASR. ``None`` selects the default: diacritics removed, compounds
+    # Multilingual-ASR. ``None`` selects the default: diacritics kept (as upstream), compounds
     # normalized unless the language is English, compounds not merged.
     language: Optional[str] = None
     use_cer: bool = False
     remove_diacritics: Optional[bool] = None
     normalize_compound: Optional[bool] = None
     merge_compounds: Optional[bool] = None
-    cer_whitespace_mode: str = "keep"
+    cer_whitespace_mode: CerWhitespaceMode = "keep"
+
+
+# Scoring options of a row. They configure verify() and are not results, so they stay out of the response
+# (otherwise the reward profiler would publish ``mean/use_cer``-style metrics for every benchmark).
+_SCORING_OPTION_FIELDS = frozenset(
+    {"use_cer", "remove_diacritics", "normalize_compound", "merge_compounds", "cer_whitespace_mode"}
+)
 
 
 class ASRWithPCVerifyResponse(BaseVerifyResponse):
@@ -311,7 +325,7 @@ class ASRWithPCVerifyResponse(BaseVerifyResponse):
 
     text: str = ""
     pred_text: str = ""
-    # Hypothesis after the optional loop guardrail, before any normalization.
+    # The model output as extracted from the response, before the optional loop guardrail and any normalization.
     raw_pred_text: str = ""
     # ``None`` marks an empty reference (the row is excluded from corpus rates).
     wer: Optional[float] = 0.0
@@ -327,6 +341,8 @@ class ASRWithPCVerifyResponse(BaseVerifyResponse):
     wer_insertions: Optional[int] = None
     wer_deletions: Optional[int] = None
     cer: Optional[float] = None
+    # Whether ``wer_*`` counts words or characters (``use_cer``); ``None`` for the word-scored task types.
+    error_unit: Optional[Literal["word", "char"]] = None
     # Normalized strings retained for corpus-level aggregation in compute_metrics().
     ref_pc_tok: str = ""
     hyp_pc_tok: str = ""
@@ -400,13 +416,19 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
     config: ASRWithPCConfig
 
     async def verify(self, body: ASRWithPCVerifyRequest) -> ASRWithPCVerifyResponse:
-        hypothesis = _extract_assistant_text(body.response).strip()
+        raw_hypothesis = _extract_assistant_text(body.response).strip()
+        hypothesis = raw_hypothesis
         if self.config.cleanup_generation_loops:
-            hypothesis = cleanup_generation_loops(hypothesis)
+            # The block rule is a backtracking regex: seconds of CPU on long outputs, so keep it off the event loop.
+            hypothesis = await asyncio.to_thread(cleanup_generation_loops, raw_hypothesis)
         reference = (body.expected_answer or "").strip()
 
         # Per-row override beats the server-level default.
         task_type = body.task_type or self.config.task_type
+
+        # Malformed rows are deterministic input errors: answer 422 so they are not retried as infrastructure.
+        if body.parent_id is not None and (body.chunk_index is None or body.chunk_index < 0):
+            raise HTTPException(422, "parent_id requires a non-negative chunk_index")
 
         # Extra fields ride alongside the canonical schema via
         # ``ConfigDict(extra="allow")`` and are populated only by the
@@ -421,7 +443,7 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
             scores = {**_PC_NOT_APPLICABLE, **evaluate_open_asr(reference, hypothesis)}
         elif task_type == "Multilingual-ASR":
             if not body.language:
-                raise ValueError("Multilingual-ASR rows require a language")
+                raise HTTPException(422, "Multilingual-ASR rows require a language")
             scores = {
                 **_PC_NOT_APPLICABLE,
                 **evaluate_multilingual_asr(
@@ -429,9 +451,9 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
                     hypothesis,
                     language=body.language,
                     use_cer=body.use_cer,
-                    remove_diacritics=body.remove_diacritics is not False,
+                    remove_diacritics=bool(body.remove_diacritics),
                     normalize_compound=(
-                        body.language.split("_", 1)[0] != "en"
+                        base_language(body.language) != "en"
                         if body.normalize_compound is None
                         else body.normalize_compound
                     ),
@@ -440,12 +462,16 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
                 ),
             }
         elif task_type == "ASR_LEADERBOARD":
+            if body.normalization == "numb3rs" and not body.category:
+                raise HTTPException(422, "normalization 'numb3rs' requires a category")
             request_fields = body.model_dump()
             normalize = row_normalizer(request_fields)
             scores = _asr_to_response_scores(evaluate_asr(reference, hypothesis, normalize))
             for ref_field in body.reference_fields or []:
                 if ref_field not in request_fields:
-                    raise ValueError(f"ASR_LEADERBOARD: reference_fields entry {ref_field!r} not found on request")
+                    raise HTTPException(
+                        422, f"ASR_LEADERBOARD: reference_fields entry {ref_field!r} not found on request"
+                    )
                 ref_metrics = evaluate_asr(request_fields[ref_field] or "", hypothesis, normalize)
                 suffix = _suffix_for_reference_field(ref_field)
                 extra_fields[f"wer_{suffix}"] = ref_metrics["wer"]
@@ -464,10 +490,12 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
         scores = {**_empty_score_record(), **scores, **extra_fields}
         return ASRWithPCVerifyResponse(
             **{
-                **body.model_dump(),
+                **body.model_dump(exclude=_SCORING_OPTION_FIELDS),
                 **scores,
+                # Per-row reward of a chunk row compares the chunk with the whole session reference, so it is not
+                # meaningful for chunked OpenASR rows; their metrics come from the merged session at aggregation.
                 "reward": 1.0 if scores["is_correct"] else 0.0,
-                "raw_pred_text": hypothesis,
+                "raw_pred_text": raw_hypothesis,
             }
         )
 
@@ -494,43 +522,59 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
             scores["hallucination_rate"] = float(r["hallucination_rate"])
         return scores
 
-    @staticmethod
-    def _merge_open_asr_chunks(tasks: List[List[Dict[str, Any]]]) -> List[List[Dict[str, Any]]]:
-        """Collapse chunked Open ASR rows to one parent-session task.
+    def _row_task_type(self, row: Dict[str, Any]) -> str:
+        return row.get("task_type") or self.config.task_type
+
+    def _chunk_hypothesis(self, row: Dict[str, Any]) -> str:
+        text = str(row.get("raw_pred_text") or row.get("pred_text") or "").strip()
+        return cleanup_generation_loops(text) if self.config.cleanup_generation_loops else text
+
+    def _merge_open_asr_chunks(self, tasks: List[List[Dict[str, Any]]]) -> tuple[List[List[Dict[str, Any]]], int]:
+        """Collapse chunked ``OpenASR`` rows to one parent-session task.
 
         Earnings22-AA references are session transcripts while inference runs
         on VAD chunks. Concatenating raw hypotheses in ``chunk_index`` order
-        before normalization mirrors the leaderboard protocol.
+        before normalization mirrors the leaderboard protocol. Repeats are paired by ``_ng_rollout_index``
+        (list position when a row has none). A session attempt that lacks a chunk (a masked rollout, a gap in
+        the chunk indices, or a repeated index) is left out and counted, so one lost rollout does not fail the
+        whole aggregation. A session whose last chunks are all missing cannot be detected.
+        Returns the merged tasks and the number of session attempts left out.
         """
         regular_tasks: List[List[Dict[str, Any]]] = []
         grouped: Dict[tuple[str, str], List[List[Dict[str, Any]]]] = {}
         for rollouts in tasks:
-            if not rollouts or rollouts[0].get("parent_id") is None:
+            if not rollouts or rollouts[0].get("parent_id") is None or self._row_task_type(rollouts[0]) != "OpenASR":
                 regular_tasks.append(rollouts)
                 continue
             parent_ids = {str(rollout.get("parent_id")) for rollout in rollouts}
-            chunk_indices = {int(rollout.get("chunk_index")) for rollout in rollouts}
+            chunk_indices = {rollout.get("chunk_index") for rollout in rollouts}
             subsets = {str(rollout.get("subset_for_metrics", "_all_")) for rollout in rollouts}
             if len(parent_ids) != 1 or len(chunk_indices) != 1 or len(subsets) != 1:
                 raise ValueError("Open ASR repeats for one chunk must share parent_id, chunk_index, and subset")
             grouped.setdefault((subsets.pop(), parent_ids.pop()), []).append(rollouts)
 
+        incomplete = 0
         for (subset, parent_id), chunk_tasks in sorted(grouped.items()):
-            chunk_tasks.sort(key=lambda task: int(task[0]["chunk_index"]))
-            repeat_counts = {len(task) for task in chunk_tasks}
-            if len(repeat_counts) != 1:
-                raise ValueError(f"Inconsistent repeat counts across Open ASR chunks for {parent_id}")
+            indices = [task[0].get("chunk_index") for task in chunk_tasks]
+            attempts: Dict[int, Dict[int, Dict[str, Any]]] = {}
+            for position_task in chunk_tasks:
+                for position, row in enumerate(position_task):
+                    attempt = int(row.get("_ng_rollout_index", position))
+                    attempts.setdefault(attempt, {})[row.get("chunk_index")] = row
+            if None in indices or sorted(indices) != list(range(len(indices))):
+                incomplete += len(attempts)
+                continue
             merged_rollouts: List[Dict[str, Any]] = []
-            for attempt in range(repeat_counts.pop()):
-                chunks = [task[attempt] for task in chunk_tasks]
+            for attempt in sorted(attempts):
+                by_chunk = attempts[attempt]
+                if len(by_chunk) != len(indices):
+                    incomplete += 1
+                    continue
+                chunks = [by_chunk[index] for index in sorted(indices)]
                 references = {str(chunk.get("expected_answer") or "").strip() for chunk in chunks}
                 if len(references) != 1:
                     raise ValueError(f"Inconsistent parent references across Open ASR chunks for {parent_id}")
-                hypothesis = " ".join(
-                    str(chunk.get("raw_pred_text") or chunk.get("pred_text") or "").strip()
-                    for chunk in chunks
-                    if str(chunk.get("raw_pred_text") or chunk.get("pred_text") or "").strip()
-                )
+                hypothesis = " ".join(text for text in (self._chunk_hypothesis(chunk) for chunk in chunks) if text)
                 merged = dict(chunks[0])
                 scores = evaluate_open_asr(references.pop(), hypothesis)
                 merged.update(scores)
@@ -542,8 +586,9 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
                     reward=1.0 if scores["is_correct"] else 0.0,
                 )
                 merged_rollouts.append(merged)
-            regular_tasks.append(merged_rollouts)
-        return regular_tasks
+            if merged_rollouts:
+                regular_tasks.append(merged_rollouts)
+        return regular_tasks, incomplete
 
     @staticmethod
     def _corpus_rate(rows: List[Dict[str, Any]], prefix: str) -> Optional[float]:
@@ -551,64 +596,95 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
         references = sum(int(row.get(f"{prefix}_ref_words") or 0) for row in rows)
         return None if references == 0 else 100.0 * errors / references
 
+    @staticmethod
+    def _pooled_word_rate(rows: List[Dict[str, Any]]) -> Optional[float]:
+        """Corpus WER (percent) over the word-scored rows.
+
+        Rows with edit counts pool them; rows without counts (``ASR-PC``, ``Hallucination``) get counts from
+        their normalized ``text`` / ``pred_text``, so a set that mixes task types is pooled as one corpus.
+        Character-scored rows (``use_cer``) are left out: their counts are characters, not words. A row whose
+        reference normalizes to empty has no counts and is left out too.
+        """
+        errors = references = 0
+        for row in rows:
+            if row.get("error_unit") == "char":
+                continue
+            if row.get("wer_ref_words") is not None:
+                errors += int(row.get("wer_errors") or 0)
+                references += int(row["wer_ref_words"])
+            elif row.get("text"):
+                counts = _wer_counts(row["text"], row.get("pred_text") or "empty")
+                errors += counts["wer_errors"]
+                references += counts["wer_ref_words"]
+        return None if references == 0 else 100.0 * errors / references
+
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         """Corpus-level rates (percent) at every k, plus per-profile/subset/language breakdowns.
 
-        Rows with ``*_errors`` / ``*_ref_words`` counts (the edit-count task types) contribute to
-        ``corpus_wer`` / ``cer`` by pooling edits; rows of the four original task types fall back to
-        ``jiwer.wer`` over the normalized ``text`` / ``pred_text``. ``wer_c`` / ``wer_pc`` /
-        ``per`` / ``hallucination_rate`` are means over samples, and ``wer_<suffix>`` (one per
-        ``reference_fields`` entry) is corpus-level over that reference.
+        ``corpus_wer`` pools word edits over the word-scored rows (see ``_pooled_word_rate``); ``cer`` pools the
+        character counts of the rows that report them. ``wer_c`` / ``wer_pc`` / ``per`` / ``hallucination_rate``
+        are means over samples, and ``wer_<suffix>`` (one per ``reference_fields`` entry) is corpus-level over
+        that reference. ``mean_utterance_wer`` / ``mean_utterance_cer`` average the per-utterance rates of the
+        rows that report edit counts (after chunk merging). Breakdowns are keyed by group kind:
+        ``wer::profile::<x>``, ``wer::subset::<x>`` and ``wer::language::<x>`` (likewise ``cer::``); a group's
+        rate is in the unit its rows are scored in.
         """
-        tasks = self._merge_open_asr_chunks(tasks)
+        tasks, incomplete_sessions = self._merge_open_asr_chunks(tasks)
         metrics, _, _, max_k = compute_pass_majority_metrics(
             tasks,
             score_fn=self._score_fn,
             answer_key=None,  # ASR has no extracted-answer notion
         )
+        if incomplete_sessions:
+            metrics["open_asr_incomplete_sessions"] = incomplete_sessions
         if not tasks:
             return metrics
         for k in range(1, max_k + 1):
             selected = [rollout for rollouts in tasks for rollout in rollouts[:k]]
-            wer_rows = [row for row in selected if row.get("wer_ref_words") is not None]
+            counted = [row for row in selected if row.get("wer_ref_words") is not None]
             cer_rows = [row for row in selected if row.get("cer_ref_words") is not None]
 
-            corpus_wer = self._corpus_rate(wer_rows, "wer")
+            corpus_wer = self._pooled_word_rate(selected)
             if corpus_wer is not None:
                 metrics[f"corpus_wer@k={k}"] = corpus_wer
-            else:
-                fallback_rows = [row for row in selected if row.get("text")]
-                if fallback_rows:
-                    metrics[f"corpus_wer@k={k}"] = 100.0 * jiwer.wer(
-                        [row["text"] for row in fallback_rows],
-                        [row.get("pred_text") or "" for row in fallback_rows],
-                    )
 
             cer_rate = self._corpus_rate(cer_rows, "cer")
             if cer_rate is not None:
                 metrics[f"cer@k={k}"] = cer_rate
+
+            for prefix, name, rows in (
+                ("wer", "mean_utterance_wer", [row for row in counted if row.get("error_unit") != "char"]),
+                ("cer", "mean_utterance_cer", cer_rows),
+            ):
+                rates = [float(row[prefix]) for row in rows if row.get(prefix) is not None]
+                if rates:
+                    metrics[f"{name}@k={k}"] = 100.0 * sum(rates) / len(rates)
 
             for field in ("wer_c", "wer_pc", "per", "hallucination_rate"):
                 values = [float(row[field]) for row in selected if row.get(field) is not None]
                 if values:
                     metrics[f"{field}@k={k}"] = 100.0 * sum(values) / len(values)
 
-            for group_field in ("benchmark_profile", "subset_for_metrics", "language"):
+            for kind, group_field in (
+                ("profile", "benchmark_profile"),
+                ("subset", "subset_for_metrics"),
+                ("language", "language"),
+            ):
                 group_names = sorted({str(row[group_field]) for row in selected if row.get(group_field)})
                 for group_name in group_names:
                     group_rows = [row for row in selected if str(row.get(group_field)) == group_name]
                     for prefix in ("wer", "cer"):
                         rate = self._corpus_rate(group_rows, prefix)
                         if rate is not None:
-                            metrics[f"{prefix}::{group_name}@k={k}"] = rate
+                            metrics[f"{prefix}::{kind}::{group_name}@k={k}"] = rate
 
             # The multilingual Open ASR leaderboard first averages corpus WER
-            # across datasets within each language, then averages the five
-            # language scores. This intentionally differs from pooling word
-            # errors across every row in a language or across the profile.
-            multilingual_rows = [
-                row for row in selected if row.get("benchmark_profile") == "asr-leaderboard-multilingual"
-            ]
+            # across datasets within each language, then averages the language
+            # scores. This intentionally differs from pooling word errors across
+            # every row in a language or across the profile. Which rows take part
+            # is a server config choice (``multilingual_macro_profiles``).
+            macro_profiles = set(self.config.multilingual_macro_profiles)
+            multilingual_rows = [row for row in selected if row.get("benchmark_profile") in macro_profiles]
             language_wers = []
             for language in sorted({str(row.get("language")) for row in multilingual_rows if row.get("language")}):
                 language_rows = [row for row in multilingual_rows if str(row.get("language")) == language]
@@ -624,7 +700,7 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
                         dataset_wers.append(rate)
                 if dataset_wers:
                     language_wer = sum(dataset_wers) / len(dataset_wers)
-                    metrics[f"wer::{language}@k={k}"] = language_wer
+                    metrics[f"macro_wer::language::{language}@k={k}"] = language_wer
                     language_wers.append(language_wer)
             if language_wers:
                 multilingual_macro_wer = sum(language_wers) / len(language_wers)
@@ -662,13 +738,8 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
 
         key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]"))
         key.update(highest_k_metrics(agent_metrics, "pass@{k}"))
-
-        # ``*_macro`` is the mean per-sample error rate in percentage points;
-        # Gym persists the fractional means.
-        for metric_name in ("wer", "cer"):
-            source_name = f"mean/{metric_name}"
-            if source_name in agent_metrics:
-                key[f"{metric_name}_macro"] = 100.0 * float(agent_metrics[source_name])
+        if "open_asr_incomplete_sessions" in agent_metrics:
+            key["open_asr_incomplete_sessions"] = agent_metrics["open_asr_incomplete_sessions"]
 
         # WER aggregates at the highest k: `wer` is corpus-level, `wer_c` /
         # `wer_pc` / `per` are mean-of-per-sample. Exposed under headline names.
@@ -687,6 +758,8 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
                 (f"wer_pc@k={max_k}", "wer_pc"),
                 (f"per@k={max_k}", "per"),
                 (f"cer@k={max_k}", "cer"),
+                (f"mean_utterance_wer@k={max_k}", "mean_utterance_wer"),
+                (f"mean_utterance_cer@k={max_k}", "mean_utterance_cer"),
                 (f"multilingual_macro_wer@k={max_k}", "multilingual_macro_wer"),
             ):
                 if src_key in agent_metrics:
@@ -719,15 +792,8 @@ class ASRWithPCResourcesServer(SimpleResourcesServer):
         )
 
 
-def _fixture_server() -> ASRWithPCResourcesServer:
-    return ASRWithPCResourcesServer(
-        config=ASRWithPCConfig(name="asr_with_pc", host="127.0.0.1", port=8080, entrypoint="app.py", task_type="ASR"),
-        server_client=MagicMock(spec=ServerClient),
-    )
-
-
 VERIFIER_FIXTURE = VerifierFixture(
-    server_factory=_fixture_server,
+    server_factory=create_server,
     request_model=ASRWithPCVerifyRequest,
     cases_path=Path(__file__).parent / "tests" / "verifier_cases.jsonl",
 )

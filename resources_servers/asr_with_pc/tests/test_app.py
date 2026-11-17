@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import HTTPException
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
@@ -43,8 +44,8 @@ MINIMAL_RESPONSES_CREATE_PARAMS = {
 EXAMPLE_DATA_PATH = Path(__file__).resolve().parents[1] / "data" / "example.jsonl"
 
 
-def _make_server(task_type: str = "ASR-PC") -> ASRWithPCResourcesServer:
-    config = ASRWithPCConfig(host="0.0.0.0", port=8080, entrypoint="", name="", task_type=task_type)
+def _make_server(task_type: str = "ASR-PC", **config_fields) -> ASRWithPCResourcesServer:
+    config = ASRWithPCConfig(host="0.0.0.0", port=8080, entrypoint="", name="", task_type=task_type, **config_fields)
     return ASRWithPCResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
@@ -356,7 +357,7 @@ class TestAggregateMetrics:
         assert server.compute_metrics([]) == {}
 
     def test_multilingual_headline_macros_dataset_then_language(self) -> None:
-        server = _make_server()
+        server = _make_server(multilingual_macro_profiles=["asr-leaderboard-multilingual"])
 
         def row(language: str, subset: str, errors: int, references: int) -> dict:
             return {
@@ -379,10 +380,12 @@ class TestAggregateMetrics:
         ]
         metrics = server.compute_metrics(tasks)
 
-        assert metrics["wer::mcv_de@k=1"] == pytest.approx(0.0)
-        assert metrics["wer::fleurs_de@k=1"] == pytest.approx(100.0)
-        assert metrics["wer::de@k=1"] == pytest.approx(50.0)
-        assert metrics["wer::fr@k=1"] == pytest.approx(50.0)
+        assert metrics["wer::subset::mcv_de@k=1"] == pytest.approx(0.0)
+        assert metrics["wer::subset::fleurs_de@k=1"] == pytest.approx(100.0)
+        # The dataset macro has its own key; the pooled language rate keeps its own.
+        assert metrics["macro_wer::language::de@k=1"] == pytest.approx(50.0)
+        assert metrics["macro_wer::language::fr@k=1"] == pytest.approx(50.0)
+        assert metrics["wer::language::de@k=1"] == pytest.approx(100.0 * 100 / 101)
         assert metrics["multilingual_macro_wer@k=1"] == pytest.approx(50.0)
         assert metrics["corpus_wer@k=1"] == pytest.approx(50.0)
 
@@ -398,8 +401,8 @@ class TestAggregateMetrics:
             "wer_c@k=4": 9.0,
             "wer_pc@k=4": 14.0,
             "per@k=4": 22.0,
-            "mean/wer": 0.135,
-            "mean/cer": 0.042,
+            "mean_utterance_wer@k=4": 13.5,
+            "mean_utterance_cer@k=4": 4.2,
             "mean/output_tokens": 42,
         }
         key = server.get_key_metrics(agent_metrics)
@@ -412,8 +415,9 @@ class TestAggregateMetrics:
         assert key["wer_c"] == 9.0
         assert key["wer_pc"] == 14.0
         assert key["per"] == 22.0
-        assert key["wer_macro"] == pytest.approx(13.5)
-        assert key["cer_macro"] == pytest.approx(4.2)
+        assert key["mean_utterance_wer"] == pytest.approx(13.5)
+        assert key["mean_utterance_cer"] == pytest.approx(4.2)
+        assert "wer_macro" not in key
         assert key["mean/output_tokens"] == 42
 
     def test_score_fn_no_answer_flag(self) -> None:
@@ -568,8 +572,8 @@ class TestAsrLeaderboardDispatch:
         assert "wer_alternate" in dump
         assert dump["is_correct_alternate"] is True
 
-    async def test_missing_reference_field_raises(self) -> None:
-        """A reference_fields entry that isn't on the request must raise."""
+    async def test_missing_reference_field_is_rejected_with_422(self) -> None:
+        """A reference_fields entry that isn't on the request is a deterministic input error."""
         server = _make_server(task_type="ASR_LEADERBOARD")
         body = ASRWithPCVerifyRequest(
             responses_create_params=MINIMAL_RESPONSES_CREATE_PARAMS,
@@ -577,8 +581,9 @@ class TestAsrLeaderboardDispatch:
             expected_answer="hi",
             reference_fields=["text_missing"],
         )
-        with pytest.raises(ValueError, match="reference_fields entry 'text_missing'"):
+        with pytest.raises(HTTPException, match="reference_fields entry 'text_missing'") as error:
             await server.verify(body)
+        assert error.value.status_code == 422
 
     async def test_no_reference_fields_runs_primary_only(self) -> None:
         """ASR_LEADERBOARD without reference_fields should still produce primary WER."""
@@ -718,6 +723,7 @@ async def test_cleanup_generation_loops_collapses_runaway_repetition_only_when_e
     )
     guarded = await ASRWithPCResourcesServer(config=config, server_client=MagicMock(spec=ServerClient)).verify(request)
 
+    # raw_pred_text is the extracted model output; the guardrail only changes what is scored.
     assert plain.raw_pred_text == looped
+    assert guarded.raw_pred_text == looped
     assert guarded.wer < plain.wer
-    assert guarded.raw_pred_text == "hello world. ab"

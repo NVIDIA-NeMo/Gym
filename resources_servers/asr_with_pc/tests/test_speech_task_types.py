@@ -6,6 +6,7 @@ from typing import Any, Dict
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import HTTPException
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
@@ -91,8 +92,9 @@ class TestOpenASR:
 
 class TestMultilingualASR:
     async def test_language_is_required(self) -> None:
-        with pytest.raises(ValueError, match="require a language"):
+        with pytest.raises(HTTPException, match="require a language") as error:
             await _verify("Multilingual-ASR", "hallo", "hallo")
+        assert error.value.status_code == 422
 
     async def test_cer_uses_characters(self) -> None:
         result = await _verify("Multilingual-ASR", "你好世界", "你好世", language="cmn_hans_cn", use_cer=True)
@@ -124,12 +126,13 @@ class TestMultilingualASR:
             "wer_errors"
         ] == 2
 
-    async def test_diacritics_are_removed_unless_disabled(self) -> None:
+    async def test_diacritics_are_kept_unless_removal_is_requested(self) -> None:
+        # Upstream's multilingual protocol keeps diacritics (MultilingualNormalizer(remove_diacritics=False)).
         row = dict(language="de")
-        assert (await _verify("Multilingual-ASR", "Fußball", "fussball", **row))["wer_errors"] == 0
-        assert (await _verify("Multilingual-ASR", "Fußball", "fussball", remove_diacritics=False, **row))[
+        assert (await _verify("Multilingual-ASR", "Fußball", "fussball", **row))["wer_errors"] == 1
+        assert (await _verify("Multilingual-ASR", "Fußball", "fussball", remove_diacritics=True, **row))[
             "wer_errors"
-        ] == 1
+        ] == 0
 
     async def test_merge_compounds_is_forwarded(self) -> None:
         row = dict(language="de", normalize_compound=False)
@@ -162,8 +165,12 @@ class TestVerifyRequestFields:
             expected_answer="hello world ab",
             task_type="OpenASR",
         )
-        assert (await _server(cleanup_generation_loops=True).verify(body)).raw_pred_text == "hello world ab"
-        assert (await _server().verify(body)).raw_pred_text == looped
+        guarded = await _server(cleanup_generation_loops=True).verify(body)
+        plain = await _server().verify(body)
+        # The guardrail changes what is scored, not the stored model output.
+        assert (guarded.wer, guarded.pred_text) == (0.0, "hello world ab")
+        assert guarded.raw_pred_text == plain.raw_pred_text == looped
+        assert plain.wer > 0.0
 
 
 class TestAggregation:
@@ -182,7 +189,7 @@ class TestAggregation:
         tasks = [[self._chunk(1, "morning everyone")], [self._chunk(0, "good")]]
         metrics = _server().compute_metrics(tasks)
         assert metrics["corpus_wer@k=1"] == 0.0
-        assert metrics["wer::earnings@k=1"] == 0.0
+        assert metrics["wer::subset::earnings@k=1"] == 0.0
         assert metrics["pass@1[avg-of-1]/accuracy"] == 100.0
 
     def test_chunk_repeats_are_merged_per_attempt(self) -> None:
@@ -194,12 +201,10 @@ class TestAggregation:
         assert metrics["corpus_wer@k=1"] == 0.0
         assert metrics["corpus_wer@k=2"] == pytest.approx(100.0 / 6)
 
-    def test_chunks_need_consistent_repeats_references_and_ids(self) -> None:
+    def test_chunks_need_consistent_ids_and_references(self) -> None:
         server = _server()
         with pytest.raises(ValueError, match="share parent_id"):
             server.compute_metrics([[self._chunk(0, "a"), self._chunk(1, "b")]])
-        with pytest.raises(ValueError, match="Inconsistent repeat counts"):
-            server.compute_metrics([[self._chunk(0, "a"), self._chunk(0, "a")], [self._chunk(1, "b")]])
         with pytest.raises(ValueError, match="Inconsistent parent references"):
             server.compute_metrics([[self._chunk(0, "a")], [self._chunk(1, "b", reference="other")]])
 
@@ -226,11 +231,11 @@ class TestAggregation:
         ]
         metrics = _server().compute_metrics(tasks)
         assert metrics["corpus_wer@k=1"] == pytest.approx(10.0)
-        assert metrics["wer::mixed@k=1"] == pytest.approx(10.0)
-        assert metrics["wer::a@k=1"] == pytest.approx(10.0)
+        assert metrics["wer::profile::mixed@k=1"] == pytest.approx(10.0)
+        assert metrics["wer::subset::a@k=1"] == pytest.approx(10.0)
         assert metrics["cer@k=1"] == pytest.approx(10.0)
-        assert metrics["cer::a@k=1"] == pytest.approx(10.0)
-        assert "cer::b@k=1" not in metrics
+        assert metrics["cer::subset::a@k=1"] == pytest.approx(10.0)
+        assert "cer::subset::b@k=1" not in metrics
         assert "multilingual_macro_wer@k=1" not in metrics
 
     def test_key_metrics_expose_the_headline_names(self) -> None:
@@ -238,9 +243,14 @@ class TestAggregation:
             "corpus_wer@k=2": 7.0,
             "cer@k=2": 9.0,
             "multilingual_macro_wer@k=2": 6.0,
-            "wer::de@k=2": 3.0,
-            "wer::de@k=1": 99.0,
+            "wer::language::de@k=2": 3.0,
+            "wer::language::de@k=1": 99.0,
             "bad@k=x": 1.0,
         }
         key = _server().get_key_metrics(agent_metrics)
-        assert (key["wer"], key["cer"], key["multilingual_macro_wer"], key["wer::de"]) == (7.0, 9.0, 6.0, 3.0)
+        assert (key["wer"], key["cer"], key["multilingual_macro_wer"], key["wer::language::de"]) == (
+            7.0,
+            9.0,
+            6.0,
+            3.0,
+        )

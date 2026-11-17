@@ -1,10 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The original task types score and aggregate exactly as before.
+"""The utterance-WER task types (ASR-PC, ASR, Hallucination, ASR_LEADERBOARD) keep their scores and aggregates.
 
-The expected values were produced by the server as it was before the OpenASR and Multilingual-ASR
-task types were added. They pin the response fields (including the zeroed
-PC variants of the non-PC task types) and the aggregate metrics.
+The expected per-row values (the ``test_verify_*`` cases) were produced by the server on main before the OpenASR and
+Multilingual-ASR task types were added; they pin the response fields, including the zeroed PC variants of the
+non-PC task types. The aggregate tests pin today's aggregation. Two aggregates differ from main on purpose, and
+their tests say so: a reference that normalizes to empty no longer contributes its hypothesis words to
+``corpus_wer`` (main counted them as insertions; the Open ASR leaderboard drops such rows), and Hallucination rows
+with an empty reference no longer report ``corpus_wer``.
 """
 
 import threading
