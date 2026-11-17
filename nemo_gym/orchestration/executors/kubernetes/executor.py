@@ -34,7 +34,7 @@ import yaml
 from nemo_gym import __version__
 from nemo_gym.orchestration.api import KubernetesComputeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor, UnsupportedOperationError
-from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest, job_name
+from nemo_gym.orchestration.executors.kubernetes.script import build_job_manifest, job_name
 from nemo_gym.orchestration.executors.otel import otel_active
 from nemo_gym.orchestration.jobs import (
     BenchmarkJob,
@@ -73,7 +73,7 @@ def _kubectl(compute: KubernetesComputeConfig, *args: str, input: str | None = N
 
 
 class KubernetesExecutor(BaseExecutor):
-    """Kubernetes executor. One Job per benchmark; see `kubernetes_script.py` for the pod shape."""
+    """Kubernetes executor. One Job per benchmark; see `script.py` for the pod shape."""
 
     name = "kubernetes"
 
@@ -160,7 +160,7 @@ class KubernetesExecutor(BaseExecutor):
             executor_metadata={"namespace": compute.namespace, "context": compute.context or ""},
             environment=self.submission_environment(config, required_env=[], forwarded_env=[]),
         )
-        # The manifest/config write already happened in each Job's own apply (kubernetes_script.py),
+        # The manifest/config write already happened in each Job's own apply (script.py),
         # so write_manifest is a no-op here; only persist()'s local index write matters.
         self.persist(record, config, lambda _path, _content, *, private=False: None)
         return record

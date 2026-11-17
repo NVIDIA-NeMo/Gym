@@ -184,6 +184,9 @@ MOVED_MODULES: dict[str, MovedPath] = {
     "nemo_gym.orchestration.executors.slurm_script": MovedPath(
         new="nemo_gym.orchestration.executors.slurm.script", since="0.8.0"
     ),
+    "nemo_gym.orchestration.executors.kubernetes_script": MovedPath(
+        new="nemo_gym.orchestration.executors.kubernetes.script", since="0.8.0"
+    ),
 }
 
 
@@ -807,6 +810,24 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
     # Staging's public API serves only staging's own modules, so token capture's public API serves the resolver.
     "nemo_gym.token_id_capture.staging": {
         **_names("nemo_gym.models.token_capture.terminal", "0.8.0", "TerminalAttribution resolve_terminal"),
+    },
+    "nemo_gym.orchestration.executors.kubernetes": {
+        # Split into the executors/kubernetes package by part; served by the package's __getattr__ with a warning.
+        **_names("nemo_gym.orchestration.api", "0.8.0", "KubernetesComputeConfig SubmitConfig"),
+        **_names("nemo_gym.orchestration.executors.base", "0.8.0", "BaseExecutor UnsupportedOperationError"),
+        **_names(
+            "nemo_gym.orchestration.jobs",
+            "0.8.0",
+            "BenchmarkJob SubmissionRecord new_gym_job_id utc_now utc_timestamp",
+        ),
+        **_names("nemo_gym.orchestration.executors.otel", "0.8.0", "otel_active"),
+        **_names("nemo_gym.utils.gym_commit", "0.8.0", "installed_gym_commit"),
+        **_names("nemo_gym.orchestration.executors.kubernetes.script", "0.8.0", "build_job_manifest job_name"),
+        **_names(
+            "nemo_gym.orchestration.executors.kubernetes.executor",
+            "0.8.0",
+            "_KUBECTL_TIMEOUT_SECONDS _VALID_BENCHMARK_NAME _kubectl _validate_benchmark_names",
+        ),
     },
     "nemo_gym.orchestration.executors.slurm": {
         # Split into the executors/slurm package by part; served by the package's __getattr__ with a warning.
