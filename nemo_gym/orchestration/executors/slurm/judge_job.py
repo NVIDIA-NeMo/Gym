@@ -208,7 +208,10 @@ class JudgeJobs:
                 or retries < 0
             ):
                 return _stopped(decision, "actual chain walltime or retry accounting is unknown")
-            if retries > resume.max_retries or not evidence.job_chain or evidence.chain_incomplete:
+            # A chain whose last job ended it with nothing eligible for another attempt is complete: that is how a
+            # run whose only open rows are judge failures stops. Any other marker line leaves it incomplete.
+            incomplete = evidence.chain_incomplete and not evidence.chain_ended_itself
+            if retries > resume.max_retries or not evidence.job_chain or incomplete:
                 return _stopped(decision, "recorded chain is incomplete or exceeds its original retry allowance")
             cap = _walltime_to_seconds(resume.max_walltime)
             remaining = math.floor(cap - used)
