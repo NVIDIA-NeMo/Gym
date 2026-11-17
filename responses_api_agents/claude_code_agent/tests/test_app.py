@@ -24,6 +24,7 @@ import pytest
 import yaml
 from fastapi import Request
 from fastapi.testclient import TestClient
+from omegaconf import OmegaConf
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import SKILLS_REF_KEY_NAME
@@ -48,7 +49,10 @@ from responses_api_agents.claude_code_agent.app import (
     _invocation_outcome,
     parse_stream_json,
 )
-from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
+from responses_api_agents.claude_code_agent.observability import (
+    TESTED_CLAUDE_CODE_VERSION,
+    extract_claude_code_observations,
+)
 
 
 def _write_skill_dir(root: Path, name: str = "cot_enhanced") -> Path:
@@ -1145,6 +1149,28 @@ class TestConfigYaml:
         assert inner["max_turns"] == 30
         # Restricting egress is opt-in: the shipped default leaves the provider's network alone.
         assert inner["network_access"] == "inherit"
+
+    def test_shipped_configs_pin_the_tested_claude_code_version(self) -> None:
+        # Sandbox sessions refuse to seed without an exact version, so the shipped config must carry one.
+        configs = Path(__file__).resolve().parent.parent / "configs"
+        for cfg_path in (configs / "claude_code_agent.yaml", configs / "profiles" / "benchmark.yaml"):
+            data = yaml.safe_load(cfg_path.read_text())
+            inner = data["claude_code_agent"]["responses_api_agents"]["claude_code_agent"]
+            assert inner["claude_code_version"] == TESTED_CLAUDE_CODE_VERSION, cfg_path.name
+
+    def test_config_resolves_without_an_anthropic_api_key(self) -> None:
+        cfg_path = Path(__file__).resolve().parent.parent / "configs" / "claude_code_agent.yaml"
+        config = OmegaConf.load(cfg_path)
+
+        def resolved_key(cfg) -> str:
+            resolved = OmegaConf.to_container(cfg, resolve=True)
+            return resolved["claude_code_agent"]["responses_api_agents"]["claude_code_agent"]["anthropic_api_key"]
+
+        # A run through a Gym model server or a local endpoint needs no key at all.
+        assert resolved_key(config) == ""
+        # A key set at the top level (env.yaml or the command line) still reaches the agent.
+        key = "sk-test"  # pragma: allowlist secret
+        assert resolved_key(OmegaConf.merge(config, {"anthropic_api_key": key})) == key
 
 
 class TestCaptureFriendlyTranscript:

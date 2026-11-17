@@ -38,6 +38,8 @@ if TYPE_CHECKING:
 
 
 SOURCE = "claude_code"
+# The Claude Code version the shipped configs pin and the parsing below is tested with.
+TESTED_CLAUDE_CODE_VERSION = "2.1.108"
 # Compaction format compatibility: tested with Claude Code 2.1.108.
 # This covers the request markers and persisted summary prefix/suffix below;
 # revalidate them together when changing the runtime version.
