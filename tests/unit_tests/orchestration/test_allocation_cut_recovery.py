@@ -759,6 +759,36 @@ def test_reservations_without_a_known_ending_never_read_as_failures_nobody_owns(
     assert "nobody owns them" not in reason
 
 
+def _without_named_writer(job):
+    """The coverage report as a worker older than allocation_id writes it: no allocation_id key."""
+    report_path = job / "artifacts" / "rollouts_coverage.json"
+    report = json.loads(report_path.read_text())
+    del report["allocation_id"]
+    report_path.write_text(json.dumps(report))
+
+
+def test_the_inspect_resumes_reservations_when_the_coverage_names_no_writer_and_the_chain_ended(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.submit import inspect_recovery
+
+    job, _ = _inspected_cut(tmp_path, slurm_bin, "100|TIMEOUT|7200|0\n101|FAILED|60|0\n")
+    _without_named_writer(job)
+    inspected = inspect_recovery(*_handle(job))
+    assert inspected.decision.action.value == "resubmit", inspected.decision.reason
+    assert inspected.decision.counts == {"scored": 2, "missing": 4}
+
+
+def test_reservations_stay_unknown_when_the_coverage_names_no_writer_and_a_chain_record_is_missing(
+    tmp_path, slurm_bin
+):
+    from nemo_gym.orchestration.submit import inspect_recovery
+
+    job, _ = _inspected_cut(tmp_path, slurm_bin, "100|TIMEOUT|7200|0\n")
+    _without_named_writer(job)
+    inspected = inspect_recovery(*_handle(job))
+    assert inspected.decision.action.value == "stop"
+    assert inspected.decision.counts["unknown"] == 2
+
+
 def test_an_installer_error_with_a_credential_never_leaves_the_run_host(tmp_path):
     secret = "synthetic-install-secret"
     job = tmp_path / "gym-job-x" / "gsm8k"
