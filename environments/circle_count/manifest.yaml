@@ -1,0 +1,41 @@
+name: circle_count
+version: 0.1.0
+experimental: true
+kind: environment
+integration_profile: custom-gym-verifier
+domain: other
+description: Images of coloured circles on a white background. The model counts the
+  circles of a given colour and answers in \boxed{}.
+modality: text, image
+licensing: unknown
+authors:
+- NVIDIA NeMo Gym contributors
+maintainers:
+- cmunley1
+capabilities:
+- multimodal_input_understanding
+- multimodal_input_understanding/scene_understanding
+- reasoning
+- reasoning/quantitative_reasoning
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+domains:
+- general
+requirements:
+  gpu: false
+  network: no-network
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: circle_count
+agent_server: simple_agent
+datasets:
+- name: example
+  type: example
+  jsonl_fpath: environments/circle_count/data/example.jsonl
+  num_repeats: 1
+model_server: policy_model
+lifecycle: active

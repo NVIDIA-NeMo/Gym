@@ -1,0 +1,44 @@
+name: pi_reasoning_gym
+version: 0.1.0
+experimental: true
+kind: environment
+integration_profile: external-agent-loop
+domain: knowledge
+description: Pi agent harness on a generated Reasoning Gym task (knights_knaves by
+  default), scored by Reasoning Gym's checker.
+modality: text
+licensing: Apache-2.0
+authors:
+- NVIDIA NeMo Gym contributors
+maintainers:
+- cmunley1
+capabilities:
+- reasoning
+- reasoning/deductive_reasoning
+- reasoning/quantitative_reasoning
+- reasoning/inductive_reasoning
+- planning_and_autonomy
+domains:
+- mathematics
+- general
+requirements:
+  gpu: false
+  network: no-network
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: reasoning_gym
+agent_server: pi_agent
+datasets:
+- name: example
+  type: example
+  jsonl_fpath: environments/pi_reasoning_gym/data/example.jsonl
+  num_repeats: 1
+- name: train
+  type: train
+  jsonl_fpath: environments/pi_reasoning_gym/data/train_knights_knaves.jsonl
+  num_repeats: 1
+lifecycle: active
