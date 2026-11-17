@@ -298,6 +298,23 @@ def test_http_agent_session_flow_runs_codex_in_borrowed_sandbox(setup):
     agent.server_client.post.assert_not_called()
 
 
+def test_activation_deadline_is_on_the_event_loop_clock(setup, monkeypatch):
+    """`asyncio.timeout_at` reads the event loop's clock, which uvloop on macOS runs ahead of `time.monotonic()`.
+    With the loop's clock far ahead, a deadline taken from `monotonic()` is already expired, and the activation times
+    out before Codex starts."""
+    agent, sandbox = setup
+    monkeypatch.setattr(asyncio.BaseEventLoop, "time", lambda self: time.monotonic() + 10_000)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        assert result.status_code == 200, result.text
+        assert result.json()["status"] == "completed"
+        assert sandbox.launch.called
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+
+
 @pytest.mark.parametrize("value", [None, 0, -1, True, 1.5, "3"])
 def test_sandbox_usage_details_without_measured_positive_counts_are_unknown(setup, value) -> None:
     agent, sandbox = setup

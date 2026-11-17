@@ -344,6 +344,23 @@ def test_http_sandbox_flow_runs_openclaw_in_borrowed_sandbox(setup, model_timeou
     agent.server_client.post.assert_not_called()
 
 
+def test_activation_deadline_is_on_the_event_loop_clock(setup, monkeypatch):
+    """`asyncio.timeout_at` reads the event loop's clock, which uvloop on macOS runs ahead of `time.monotonic()`.
+    With the loop's clock far ahead, a deadline taken from `monotonic()` is already expired, and the activation times
+    out before OpenClaw starts."""
+    agent, sandbox = setup
+    monkeypatch.setattr(asyncio.BaseEventLoop, "time", lambda self: monotonic() + 10_000)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        assert result.status_code == 200, result.text
+        assert result.json()["status"] == "completed"
+        assert sandbox.launch.called
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+
+
 def test_direct_run_without_resources_rejected_before_execution(setup):
     agent, sandbox = setup
     with TestClient(agent.setup_webserver()) as client:

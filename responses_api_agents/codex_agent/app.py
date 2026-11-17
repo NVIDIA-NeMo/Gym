@@ -27,7 +27,7 @@ from collections.abc import Mapping, Sequence
 from contextlib import AsyncExitStack
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
-from time import monotonic, time
+from time import time
 from typing import Any, ClassVar, Literal, Mapping, Optional
 from uuid import uuid4
 
@@ -1118,7 +1118,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     close_timeout=self.config.session_close_timeout_seconds,
                     files={"home/.codex/config.toml": toml_dumps(config)},
                     media=media,
-                    deadline=monotonic() + timeout,
+                    # On the event loop's clock, which `execute` and `asyncio.timeout_at` read; under uvloop on
+                    # macOS it differs from `monotonic()`, and a deadline taken from that is already expired.
+                    deadline=asyncio.get_running_loop().time() + timeout,
                 )
         except BaseException as exc:
             failure = exc
