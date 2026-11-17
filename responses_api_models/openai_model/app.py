@@ -16,6 +16,7 @@ import asyncio
 import logging
 import random
 from contextlib import asynccontextmanager, nullcontext
+from copy import deepcopy
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, TypeVar
 
 from aiohttp import ClientResponseError
@@ -255,9 +256,27 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
         ),
     )
 
+    request_overrides: Dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Top-level fields forced onto every upstream request, over what the caller sent "
+            "(extra_body only fills fields the caller left unset). For harnesses that cannot "
+            "set them, e.g. the Codex CLI with a placeholder model name sends no `reasoning` "
+            "or `include`."
+        ),
+    )
+
 
 class SimpleModelServer(SimpleResponsesAPIModel):
     config: SimpleModelServerConfig
+
+    def _upstream_body(self, body: BaseModel) -> Dict[str, Any]:
+        """extra_body, then the caller's fields, then request_overrides; the model is always the configured one."""
+        body_dict = (
+            self.config.extra_body | body.model_dump(exclude_unset=True) | deepcopy(self.config.request_overrides)
+        )
+        body_dict["model"] = self.config.openai_model
+        return body_dict
 
     def _should_propagate_upstream_http_error(self, error: ClientResponseError) -> bool:
         # OpenAI and subclasses such as LiteLLM retain their opt-in HTTP policy.
@@ -378,8 +397,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
         raise UpstreamRetriesExhaustedError(retry_policy.max_attempts, last_error) from last_error
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
-        body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
-        body_dict["model"] = self.config.openai_model
+        body_dict = self._upstream_body(body)
         if self.config.drop_input_reasoning_items:
             input_items = body_dict.get("input")
             if isinstance(input_items, list):
@@ -417,8 +435,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
     async def chat_completions(
         self, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
-        body_dict = self.config.extra_body | body.model_dump(exclude_unset=True)
-        body_dict["model"] = self.config.openai_model
+        body_dict = self._upstream_body(body)
 
         async def create_and_validate() -> NeMoGymChatCompletion:
             response_dict = await self._client.create_chat_completion(**body_dict)

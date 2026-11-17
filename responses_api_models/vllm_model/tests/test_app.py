@@ -8975,7 +8975,9 @@ class TestUnrepresentableRequestFields:
     BODY = {"input": "hi", "include": ["reasoning.encrypted_content"]}
 
     @staticmethod
-    def _client(monkeypatch: MonkeyPatch, *, drop: bool) -> tuple[TestClient, dict[str, Any]]:
+    def _client(
+        monkeypatch: MonkeyPatch, *, drop: bool, inline_tool_output_images: bool = False
+    ) -> tuple[TestClient, dict[str, Any]]:
         """A test client for a model server, plus the dict that records the converted chat params."""
         config = VLLMModelConfig(
             host="0.0.0.0",
@@ -8988,6 +8990,7 @@ class TestUnrepresentableRequestFields:
             return_token_id_information=False,
             uses_reasoning_parser=False,
             drop_unrepresentable_request_fields=drop,
+            inline_tool_output_images=inline_tool_output_images,
         )
         server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
         captured: dict[str, Any] = {}
@@ -9035,6 +9038,37 @@ class TestUnrepresentableRequestFields:
         assert response.headers["content-type"].startswith("text/event-stream")
         assert "event: response.completed" in response.text
         assert "include" not in captured["value"].model_dump(exclude_unset=True)
+
+    IMAGE_OUTPUT_BODY = {
+        "input": [
+            {"type": "function_call", "call_id": "c1", "name": "view_image", "arguments": '{"path":"a.png"}'},
+            {
+                "type": "function_call_output",
+                "call_id": "c1",
+                "output": [{"type": "input_image", "image_url": "data:image/png;base64,YWJj"}],
+            },
+        ]
+    }
+
+    @mark.parametrize("stream", [False, True])
+    @mark.parametrize(
+        ("drop", "inline_tool_output_images", "expected_part"),
+        [
+            (True, False, {"type": "text", "text": "[image omitted from tool output]"}),
+            (False, True, {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj", "detail": "auto"}}),
+            (True, True, {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj", "detail": "auto"}}),
+        ],
+        ids=["placeholder", "image", "image_wins_over_placeholder"],
+    )
+    def test_tool_output_image(
+        self, monkeypatch: MonkeyPatch, stream: bool, drop: bool, inline_tool_output_images: bool, expected_part: dict
+    ) -> None:
+        # `inline_tool_output_images` passes Codex's `view_image` output to the backend as an image part
+        # of the tool message; without it the image becomes the placeholder.
+        client, captured = self._client(monkeypatch, drop=drop, inline_tool_output_images=inline_tool_output_images)
+
+        assert client.post("/v1/responses", json={**self.IMAGE_OUTPUT_BODY, "stream": stream}).status_code == 200
+        assert captured["value"].messages[-1] == {"role": "tool", "tool_call_id": "c1", "content": [expected_part]}
 
 
 class TestPreserveEnvelopeIdFollowsCaptureContext:

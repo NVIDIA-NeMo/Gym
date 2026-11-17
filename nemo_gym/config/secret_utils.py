@@ -88,6 +88,47 @@ def looks_like_secret_key(key: object) -> bool:
     return any(substring in lowered_key for substring in _SECRET_KEY_SUBSTRINGS)
 
 
+# Narrower than _SECRET_KEY_SUBSTRINGS: key names whose values are credentials, for a config that clients still use
+# (the head server's copy feeds routing, assistant headers and token limits, so `header`, `key` and `tokens` stay
+# visible there). A bare `token` or a `*_token` name counts; `max_tokens` and `token_ids` do not.
+_CREDENTIAL_KEY_SUBSTRINGS = (
+    "api_key",
+    "apikey",
+    "api-key",
+    "access_key",
+    "private_key",
+    "secret",
+    "password",
+    "passwd",
+    "credential",
+    "bearer",
+    "authorization",
+    "cookie",
+)
+
+
+def looks_like_credential_key(key: object) -> bool:
+    lowered_key = str(key).lower()
+    return (
+        any(substring in lowered_key for substring in _CREDENTIAL_KEY_SUBSTRINGS)
+        or lowered_key == "token"
+        or lowered_key.endswith(("_token", "-token"))
+    )
+
+
+def mask_credentials(value: Any, under_credential_key: bool = False) -> Any:
+    """A copy of a plain container (`OmegaConf.to_container(..., resolve=False)`) with every non-empty string under a
+    credential-shaped key masked with '****', interpolations included. Other values, empty strings and '???'
+    (MISSING) are kept, so a client still sees which credentials are unset."""
+    if isinstance(value, dict):
+        return {k: mask_credentials(v, under_credential_key or looks_like_credential_key(k)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [mask_credentials(v, under_credential_key) for v in value]
+    if under_credential_key and isinstance(value, str) and value not in ("", "???"):
+        return MASKED_VALUE
+    return value
+
+
 def hide_secrets_in_overrides(tokens: List[str]) -> List[str]:
     """Mask `+key=value` / `++key=value` tokens whose key looks secret-shaped."""
     override_re = re.compile(r"^(\+{1,2})([^=]+)=(.*)$")

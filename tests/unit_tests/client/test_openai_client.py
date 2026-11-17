@@ -14,6 +14,7 @@
 # limitations under the License.
 """Tests of the OpenAI-compatible client in `nemo_gym.client.openai_client`."""
 
+import json
 import re
 from copy import deepcopy
 from types import SimpleNamespace
@@ -986,3 +987,37 @@ async def test_a_forwarded_permanent_failure_is_the_cause_of_only_the_call_it_en
     finally:
         await session.close()
         await runner.cleanup()
+
+
+def test_log_api_cost_appends_cost_headers_and_usage(tmp_path, monkeypatch) -> None:
+    from nemo_gym.client.openai_client import API_COST_LOG_ENV_VAR_NAME, log_api_cost
+
+    path = tmp_path / "cost.jsonl"
+    log_api_cost("/responses", {"model": "m"}, {}, {"usage": {}})  # unset: nothing written
+    assert not path.exists()
+    monkeypatch.setenv(API_COST_LOG_ENV_VAR_NAME, str(path))
+    headers = {
+        "X-LiteLLM-Response-Cost": "0.0123",
+        "x-litellm-response-cost-input": "0.01",
+        "Authorization": "Bearer k",
+    }
+    usage = {"input_tokens": 10, "input_tokens_details": {"cached_tokens": 8}, "output_tokens": 3}
+    log_api_cost(
+        "/responses",
+        {"model": "m", "prompt_cache_key": "conv-1", "input": "secret prompt"},
+        headers,
+        {"usage": usage, "output": ["secret answer"]},
+    )
+    log_api_cost("/chat/completions", {"model": "m"}, None, None)
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    assert lines[0]["cost"] == {"x-litellm-response-cost": "0.0123", "x-litellm-response-cost-input": "0.01"}
+    assert lines[0]["usage"] == usage and lines[0]["prompt_cache_key"] == "conv-1"
+    assert "secret" not in path.read_text() and "Bearer" not in path.read_text()
+    assert lines[1]["usage"] is None and lines[1]["cost"] == {}
+
+
+def test_log_api_cost_never_raises(tmp_path, monkeypatch) -> None:
+    from nemo_gym.client.openai_client import API_COST_LOG_ENV_VAR_NAME, log_api_cost
+
+    monkeypatch.setenv(API_COST_LOG_ENV_VAR_NAME, str(tmp_path / "missing-dir" / "cost.jsonl"))
+    log_api_cost("/responses", {"model": "m"}, {}, {"usage": {}})

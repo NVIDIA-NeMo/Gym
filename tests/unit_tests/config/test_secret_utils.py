@@ -18,6 +18,7 @@ from omegaconf import OmegaConf
 from nemo_gym.config.secret_utils import (
     MASKED_VALUE,
     hide_secrets_in_container,
+    mask_credentials,
     mask_url_passwords,
     recursively_hide_secrets,
 )
@@ -180,3 +181,59 @@ def test_public_capture_projection_fields_match_the_supported_schema():
             "arbitrary": [MASKED_VALUE],
         }
     }
+
+
+def test_mask_credentials_masks_only_credential_values() -> None:
+    config = {
+        "policy_api_key": "sk-live",
+        "hf_token": "hf-live",
+        "token": "bare-token",
+        "policy_model": {
+            "responses_api_models": {
+                "vllm_model": {
+                    "api_key": "${policy_api_key}",
+                    "extra_headers": {"Authorization": "Bearer live", "X-Trace": "abc"},
+                    "max_tokens": 131072,
+                    "assistant_header": "<assistant>",
+                    "return_token_id_information": True,
+                }
+            }
+        },
+        "env_key": "${oc.env:SEB_MODEL_API_KEY}",
+        "secret_api_key": "${oc.env:SEB_MODEL_API_KEY}",
+        "credentials": {"user": "me", "password": "pw", "nested": ["a", {"x": "b"}]},
+        "unset_api_key": "",
+        "missing_api_key": "???",
+        "cache_key": "k1",
+        "token_ids": [1, 2],
+        "max_tokens": 4096,
+        "client_secrets": ["s1", "s2"],
+    }
+
+    assert mask_credentials(config) == {
+        "policy_api_key": "****",
+        "hf_token": "****",
+        "token": "****",
+        "policy_model": {
+            "responses_api_models": {
+                "vllm_model": {
+                    "api_key": "****",
+                    "extra_headers": {"Authorization": "****", "X-Trace": "abc"},
+                    "max_tokens": 131072,
+                    "assistant_header": "<assistant>",
+                    "return_token_id_information": True,
+                }
+            }
+        },
+        "env_key": "${oc.env:SEB_MODEL_API_KEY}",
+        "secret_api_key": "****",
+        "credentials": {"user": "****", "password": "****", "nested": ["****", {"x": "****"}]},
+        "unset_api_key": "",
+        "missing_api_key": "???",
+        "cache_key": "k1",
+        "token_ids": [1, 2],
+        "max_tokens": 4096,
+        "client_secrets": ["****", "****"],
+    }
+    # A copy: the input is untouched.
+    assert config["policy_api_key"] == "sk-live"

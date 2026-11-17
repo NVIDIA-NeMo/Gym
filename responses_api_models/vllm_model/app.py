@@ -593,6 +593,9 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     uses_reasoning_parser: bool
     uses_interleaved_reasoning: bool = True
+    # Carry the endpoint's signed `thinking_blocks` (LiteLLM, Anthropic models) through the Responses reasoning
+    # item's encrypted_content and back onto the next assistant message (ChatCompletionsConverter).
+    preserve_thinking_blocks: bool = False
     # Which key(s) carry reasoning on an outgoing assistant message. "both" keeps
     # the historical behaviour: vLLM < 0.16.0 reads `reasoning_content`, >= 0.16.0
     # reads `reasoning`, and most servers ignore the one they do not know. Some
@@ -1111,6 +1114,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         return ChatCompletionsConverter(
             return_token_id_information=self.config.return_token_id_information,
             uses_reasoning_parser=self.config.uses_reasoning_parser,
+            preserve_thinking_blocks=self.config.preserve_thinking_blocks,
             custom_tool_strategy=self.config.custom_tool_strategy,
             inline_tool_output_images=self.config.inline_tool_output_images,
         )
