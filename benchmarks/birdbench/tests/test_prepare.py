@@ -113,6 +113,19 @@ class TestPrepareDialect:
             "birdbench_sqlite_dev.jsonl",
         ]
 
+    def test_agent_context_rows_carry_the_task_apart_and_go_to_their_own_file(self, prepared, tmp_path):
+        (row,) = prepared([_entry(question="How many?", evidence="many means > 2")], agent_context=True)
+        # The prompt keeps the evidence before the question; the agent context keeps them apart.
+        assert row["question"] == "many means > 2\nHow many?"
+        assert row["agent_context"] == {
+            "agent": {"values": {"question": "How many?", "evidence": "many means > 2", "database": "db1"}}
+        }
+        assert [p.name for p in (tmp_path / "data").iterdir()] == ["birdbench_sqlite_dev_agent_context.jsonl"]
+
+    def test_rows_have_no_agent_context_by_default(self, prepared):
+        (row,) = prepared([_entry()])
+        assert "agent_context" not in row
+
     def test_output_has_one_row_per_task_never_repeated(self, prepared):
         rows = prepared([_entry(question="q1"), _entry(question="q2")])
         assert [r["id"] for r in rows] == [0, 1]

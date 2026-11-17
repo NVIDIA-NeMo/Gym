@@ -229,6 +229,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
     {
         "agentic_mme_agent",
         "agentvista_agent",
+        "auto_ontology_agent",
         "browsecomp_agent",
         "claude_code_agent",
         "cline_agent",
