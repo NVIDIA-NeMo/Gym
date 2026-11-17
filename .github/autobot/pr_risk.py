@@ -29,8 +29,8 @@ never lower it. The tiers:
 Protected files are the path globs listed in ``protected_files.yaml`` next to this file, so the target branch's list
 applies; ``*`` also matches ``/``. Adding, modifying or deleting a matching path makes the change ``high``. Changed lines
 are added plus removed lines outside docs, lockfiles, JSONL data and binary files. The public surface is every file that
-defines ``nemo_gym``'s public API: each package initializer that declares ``_PUBLIC_API`` and every submodule it
-lists; any change to one makes the change ``high``. Scoring is the code that computes
+defines ``nemo_gym``'s public API: each package initializer with an export table (``_PUBLIC_API``, or the
+root's ``_LAZY_EXPORTS``) and every submodule it lists; any change to one makes the change ``high``. Scoring is the code that computes
 rewards: resources servers and the shared verification, verifiers and metrics packages, excluding their tests and data.
 
 Standard library only, so it runs on Python 3.12 or newer without the repository installed.
@@ -45,7 +45,6 @@ import re
 import sys
 from collections.abc import Iterator
 from fnmatch import fnmatch
-from functools import cache
 from pathlib import Path
 
 
@@ -65,6 +64,7 @@ PROTECTED_ENTRY = re.compile(
 )
 YAML_NON_STRINGS = frozenset({"null", "true", "false", "yes", "no", "on", "off", ".inf", ".nan"})
 MAX_LISTED = 10
+EXPORT_TABLE = re.compile(r"^(?:_PUBLIC_API|_LAZY_EXPORTS)\b[^=\n]*=\s*(\{.*?\})", re.MULTILINE | re.DOTALL)
 
 
 def walk(root: Path) -> Iterator[str]:
@@ -78,9 +78,11 @@ def walk(root: Path) -> Iterator[str]:
 
 
 def same_file(before: Path, after: Path) -> bool:
-    """Return whether two files have the same content, or two symlinks the same target."""
+    """Return whether two files have the same content and executable bit, or two symlinks the same target."""
     if before.is_symlink() or after.is_symlink():
         return before.is_symlink() and after.is_symlink() and os.readlink(before) == os.readlink(after)
+    if (before.stat().st_mode ^ after.stat().st_mode) & 0o100:
+        return False
     return filecmp.cmp(before, after, shallow=False)
 
 
@@ -133,22 +135,6 @@ def is_scoring(path: str) -> bool:
     return path.startswith(SCORING_PREFIXES) and not in_support_dir and not matches(path, DOC_PATTERNS)
 
 
-@cache
-def parse(path: Path) -> ast.Module | None:
-    """Parse a Python file once, or return ``None`` when it is absent or not valid Python."""
-    try:
-        return ast.parse(path.read_bytes())
-    except (OSError, SyntaxError, ValueError):
-        return None
-
-
-def assigns(node: ast.stmt, name: str) -> bool:
-    """Return whether a statement assigns a plain ``name``."""
-    if isinstance(node, ast.Assign):
-        return any(isinstance(target, ast.Name) and target.id == name for target in node.targets)
-    return isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == name
-
-
 def module_path(package: Path, submodule: str) -> Path:
     """Return the file that defines a dotted submodule of the package directory ``package``."""
     stem = package.joinpath(*submodule.split("."))
@@ -157,15 +143,20 @@ def module_path(package: Path, submodule: str) -> Path:
 
 
 def public_surface(tree: Path) -> set[str]:
-    """Return each ``nemo_gym`` package initializer that declares ``_PUBLIC_API`` and every submodule it lists."""
+    """Return each ``nemo_gym`` package initializer with an export table and every submodule that table lists.
+
+    An export table is a package's ``_PUBLIC_API`` dict, or the root package's ``_LAZY_EXPORTS``. Only the dict literal
+    is read, so syntax elsewhere in the initializer that this interpreter cannot parse does not hide the package.
+    """
     paths = set()
     for init in (tree / "nemo_gym").rglob("__init__.py"):
-        module = parse(init)
-        for node in module.body if module else []:
-            if assigns(node, "_PUBLIC_API") and isinstance(node.value, ast.Dict):
-                paths.add(init)
-                values = [value.value for value in node.value.values if isinstance(value, ast.Constant)]
-                paths.update(module_path(init.parent, value) for value in values if isinstance(value, str))
+        for table in EXPORT_TABLE.findall(init.read_text(errors="replace")):
+            paths.add(init)
+            try:
+                submodules = ast.literal_eval(table).values()
+            except (ValueError, SyntaxError, AttributeError):
+                continue
+            paths.update(module_path(init.parent, value) for value in submodules if isinstance(value, str))
     return {path.relative_to(tree).as_posix() for path in paths}
 
 
@@ -216,7 +207,8 @@ def grade(base: Path, head: Path, protected: tuple[str, ...] = ()) -> tuple[str,
     if not code and not hits:
         return "low", [f"no changes outside docs ({len(changed)} doc files)"]
     lines = sum(changed_line_count(base, head, path) for path in code if not matches(path, UNCOUNTED_PATTERNS))
-    surface = [f"public surface: {path}" for path in changed if path in public_surface(base) | public_surface(head)]
+    public_files = public_surface(base) | public_surface(head)
+    surface = [f"public surface: {path}" for path in changed if path in public_files]
     scoring = [path for path in code if is_scoring(path)]
     evidence = [f"{lines} changed lines in {len(code)} non-doc files", *hits[:MAX_LISTED], *surface[:MAX_LISTED]]
     evidence += [f"scoring: {path}" for path in scoring[:MAX_LISTED]]

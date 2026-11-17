@@ -148,6 +148,36 @@ def test_changing_a_module_outside_the_public_api_is_not_public_surface(tmp_path
     assert grade(tmp_path, {}, {"nemo_gym/core/helpers.py": API["nemo_gym/core/helpers.py"] + "# edit\n"})[0] == "low"
 
 
+ROOT_INIT = {
+    "nemo_gym/__init__.py": 'CACHE_DIR = "cache"\n_LAZY_EXPORTS: dict[str, str] = {\n    "helper": "core.helpers",\n}\n'
+}
+
+
+@pytest.mark.parametrize("path", ["nemo_gym/__init__.py", "nemo_gym/core/helpers.py"])
+def test_the_root_lazy_exports_are_public_surface(tmp_path: Path, path: str) -> None:
+    before = {**ROOT_INIT}
+    after = {**ROOT_INIT, path: {**API, **ROOT_INIT}[path] + "# edit\n"}
+    tier, evidence = grade(tmp_path, before, after)
+    assert tier == "high"
+    assert f"public surface: {path}" in evidence
+
+
+def test_an_initializer_the_interpreter_cannot_parse_still_lists_its_files(tmp_path: Path) -> None:
+    init = {"nemo_gym/core/__init__.py": "this is not python\n" + API["nemo_gym/core/__init__.py"]}
+    after = {**init, "nemo_gym/core/things.py": API["nemo_gym/core/things.py"] + "# edit\n"}
+    assert grade(tmp_path, init, after)[0] == "high"
+
+
+def test_an_executable_bit_change_is_a_change(tmp_path: Path) -> None:
+    script = {"resources_servers/s/score.sh": "#!/bin/sh\nexit 0\n"}
+    base = make_tree(tmp_path / "base", {**API, **script})
+    head = make_tree(tmp_path / "head", {**API, **script})
+    (base / "resources_servers/s/score.sh").chmod(0o755)
+    tier, evidence = pr_risk.grade(base, head)
+    assert tier == "mid"
+    assert evidence == ["0 changed lines in 1 non-doc files", "scoring: resources_servers/s/score.sh"]
+
+
 PROTECTED = ("pyproject.toml", "uv.lock", ".github/workflows/*", "SECURITY.md")
 
 
