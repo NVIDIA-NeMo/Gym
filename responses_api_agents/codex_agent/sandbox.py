@@ -91,14 +91,21 @@ def harness_kill_evidence(
     then the supervisor, the runner and Codex end only on their own, or because something in
     the sandbox (in practice an agent tool command, rarely the OOM killer) killed them. The
     receipt's return code is the runner's shell status: 128+N when it, or Codex under it,
-    ended by signal N.
+    ended by signal N (N up to 64). This says the harness was killed, not by whom: 137 is
+    also a memory-cgroup OOM kill and 134 Node's heap abort.
+
+    A missing receipt counts only when the launch shell itself ended by a signal or its
+    status is unknown; a launch that exited normally (0, 2, 127, ...) before the
+    supervisor ran is a launch failure, not a kill.
     """
     if cleanup_receipt_missing:
-        return f"the process supervisor exited ({launch_return_code}) without writing its cleanup receipt"
+        if launch_return_code is None or 128 < launch_return_code <= 128 + 64:
+            return f"the process supervisor exited ({launch_return_code}) without writing its cleanup receipt"
+        return None
     if cleanup is None or cleanup["timed_out"]:
         return None
     return_code = cleanup["return_code"]
-    if return_code is not None and return_code > 128:
+    if return_code is not None and 128 < return_code <= 128 + 64:
         return f"the Codex runner or Codex was killed by signal {return_code - 128}"
     return None
 

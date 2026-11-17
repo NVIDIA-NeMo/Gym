@@ -80,6 +80,10 @@ class CleanupReceipt(TypedDict):
     timed_out: bool
     # Stop signals the supervisor ignored because no stop file existed; present only when nonzero.
     foreign_signals: NotRequired[int]
+    # The supervisor ran but died without writing its receipt, and the sandbox provider proved that no sandboxed
+    # process remains (see stop_and_confirm_cleanup); present only when true. Not a clean stop: a harness ran and
+    # its outcome is lost, so ``return_code`` is None.
+    receipt_missing: NotRequired[bool]
 
 
 def exec_timeout(*, timeout: float, cleanup_timeout: float = DEFAULT_CLEANUP_TIMEOUT) -> float:
@@ -148,6 +152,8 @@ def parse_cleanup_receipt(payload: object) -> CleanupReceipt:
     foreign_signals = payload.get("foreign_signals")
     if type(foreign_signals) is int and foreign_signals > 0:
         receipt["foreign_signals"] = foreign_signals
+    if payload.get("receipt_missing") is True:
+        receipt["receipt_missing"] = True
     return receipt
 
 
@@ -217,7 +223,6 @@ async def stop_and_confirm_cleanup(
     timeout: float,
     harness: str,
     launch_finished: bool = False,
-    diagnostics: dict[str, object] | None = None,
 ) -> CleanupReceipt:
     """Fence a pending launch or require explicit supervisor acknowledgement before teardown.
 
@@ -225,31 +230,45 @@ async def stop_and_confirm_cleanup(
     supervisor, with no return code because no harness process ran.
 
     ``launch_finished`` means the provider exec of the launch command returned
-    normally: no launch is pending and the supervisor process has exited. If it
-    exited without a receipt (killed, e.g. by a harness tool or the OOM killer),
-    nothing can write one any more, and cleanup is confirmed when the provider
-    proves that no sandboxed process can still run
-    (``AsyncSandbox.exec_processes_terminated``). Otherwise the stop below runs as
-    usual: it still fences a launch that exited before claiming. A caller-supplied
-    ``diagnostics`` dict gets ``receipt_missing=True`` on that provider-confirmed path.
+    normally: no launch is pending and the launch shell has exited. If its
+    supervisor claimed the launch and then exited without a receipt (killed, e.g.
+    by a harness tool or the OOM killer), nothing can write one any more, and
+    cleanup is confirmed when the provider proves that no sandboxed process can
+    still run (``AsyncSandbox.exec_processes_terminated``). The receipt then
+    carries ``receipt_missing: True``, so no consumer mistakes it for a clean stop.
+    A launch shell that returned before claiming (no supervisor ran) goes through
+    the stop below, which fences it. A failed or unprovable check leaves the
+    outcome unknown.
     """
     receipt_path = f"{session_dir}/{CLEANUP_RECEIPT_FILE}"
-    receipt_missing = False
     try:
         receipt = json.loads(await read_text(sandbox, path=receipt_path))
+        read_failed = False
     except Exception:
-        receipt, receipt_missing = {}, True
-    if receipt_missing and launch_finished:
-        provable = getattr(sandbox, "exec_processes_terminated", None)  # AsyncSandbox; absent on test doubles
-        if provable is not None and (await provable()) is True:
-            LOG.warning(
-                "%s supervisor exited without a cleanup receipt; the sandbox provider confirms "
-                "that no sandboxed process remains",
-                harness,
-            )
-            if diagnostics is not None:
-                diagnostics["receipt_missing"] = True
-            return {"cleanup_confirmed": True, "return_code": None, "error": None, "timed_out": False}
+        receipt, read_failed = {}, True
+    if read_failed and launch_finished and await _supervisor_claimed_launch(sandbox, session_dir, workdir):
+        try:
+            proved = (await sandbox.exec_processes_terminated()) is True
+        except Exception:  # noqa: BLE001 - an unprovable sandbox leaves the outcome unknown below
+            LOG.warning("%s: the sandbox provider could not prove the sandbox empty", harness, exc_info=True)
+            proved = False
+        if proved:
+            # Nothing can write the receipt any more: a read that failed for another reason now finds it.
+            try:
+                receipt, read_failed = json.loads(await read_text(sandbox, path=receipt_path)), False
+            except Exception:
+                LOG.warning(
+                    "%s supervisor exited without a cleanup receipt; the sandbox provider confirms "
+                    "that no sandboxed process remains",
+                    harness,
+                )
+                return {
+                    "cleanup_confirmed": True,
+                    "return_code": None,
+                    "error": None,
+                    "timed_out": False,
+                    "receipt_missing": True,
+                }
     _raise_terminal_failure(receipt, harness=harness)
     if not isinstance(receipt, dict) or receipt.get("cleanup_confirmed") is not True:
         stop_path = quote(f"{session_dir}/{STOP_REQUEST_FILE}")
@@ -277,6 +296,18 @@ async def stop_and_confirm_cleanup(
             _raise_terminal_failure(receipt, harness=harness)
             raise RuntimeError(f"{harness} harness termination was not confirmed: {detail}")
     return parse_cleanup_receipt(receipt)
+
+
+async def _supervisor_claimed_launch(sandbox: AsyncSandbox, session_dir: str, workdir: str | None) -> bool:
+    """Whether the launch claim names the launch (the supervisor started), not a stop or nothing."""
+    claim = quote(f"{session_dir}/{LAUNCH_CLAIM_FILE}")
+    try:
+        result = await sandbox.exec(
+            f"readlink {claim}", cwd=control_cwd(session_dir=session_dir, workdir=workdir), timeout_s=30
+        )
+    except Exception:  # noqa: BLE001 - unknown: the stop below decides
+        return False
+    return result.return_code == 0 and not result.error_type and (result.stdout or "").strip() == "launch"
 
 
 async def remove_session_directory(

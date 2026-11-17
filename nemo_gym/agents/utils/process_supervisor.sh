@@ -20,7 +20,11 @@
 #
 # Stop signals (TERM, INT, HUP) count only once the stop file exists. Others are counted in the
 # receipt's foreign_signals and ignored: a tool command in the same sandbox that signals every process
-# matching a pattern (`pkill -f ...`, `killall bash`) must not end the episode this way.
+# matching a pattern (`pkill -f ...`, `killall bash`) must not end the supervisor, and with it the
+# receipt, this way. This keeps the supervisor alive, not the harness: the runner still relays a TERM to
+# the harness CLI, and a pattern can match the harness itself, so the receipt then records how it ended.
+# Only these stop signals are covered: USR1, USR2, ALRM or PIPE still end the supervisor without a receipt
+# (the provider proof then decides), and kill -9 cannot be trapped at all.
 #
 # The expire file, when given, moves the deadline to now: once it appears, the harness ends exactly
 # as at its time limit and the receipt records timed_out. If it appears before launch, the harness

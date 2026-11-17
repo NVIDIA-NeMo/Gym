@@ -498,7 +498,6 @@ async def test_missing_receipt_after_launch_returned_needs_provider_proof(sessio
     sandbox.exec_processes_terminated = AsyncMock(return_value=terminated)
     exec_spy = AsyncMock(wraps=sandbox.exec)
     sandbox.exec = exec_spy
-    diagnostics = {}
     if terminated:
         receipt = await stop_and_confirm_cleanup(
             sandbox,
@@ -507,11 +506,17 @@ async def test_missing_receipt_after_launch_returned_needs_provider_proof(sessio
             timeout=1,
             harness="test",
             launch_finished=True,
-            diagnostics=diagnostics,
         )
-        assert receipt == {"cleanup_confirmed": True, "error": None, "return_code": None, "timed_out": False}
-        assert diagnostics == {"receipt_missing": True}
-        exec_spy.assert_not_awaited()  # nothing to stop, and no stale pid to signal
+        assert receipt == {
+            "cleanup_confirmed": True,
+            "error": None,
+            "return_code": None,
+            "timed_out": False,
+            "receipt_missing": True,
+        }
+        # Only the claim check ran: nothing to stop, and no stale pid to signal.
+        assert [call.args[0].split()[0] for call in exec_spy.await_args_list] == ["readlink"]
+        assert parse_cleanup_receipt(receipt)["receipt_missing"] is True
     else:
         with pytest.raises(RuntimeError, match="test launch outcome is unknown"):
             await stop_and_confirm_cleanup(
@@ -521,10 +526,70 @@ async def test_missing_receipt_after_launch_returned_needs_provider_proof(sessio
                 timeout=1,
                 harness="test",
                 launch_finished=True,
-                diagnostics=diagnostics,
             )
-        assert diagnostics == {}
     assert not (session_dir / CLEANUP_RECEIPT_FILE).exists()
+
+
+async def test_provider_proof_needs_the_supervisors_launch_claim(session):
+    # A launch shell that returned before the supervisor claimed the launch ran no harness: the stop fences it.
+    sandbox, session_dir = session
+    sandbox.exec_processes_terminated = AsyncMock(return_value=True)
+    receipt = await stop_and_confirm_cleanup(
+        sandbox,
+        session_dir=str(session_dir),
+        workdir=str(session_dir.parent),
+        timeout=1,
+        harness="test",
+        launch_finished=True,
+    )
+    sandbox.exec_processes_terminated.assert_not_awaited()
+    assert "receipt_missing" not in receipt and receipt["return_code"] is None
+    assert (session_dir / LAUNCH_CLAIM_FILE).readlink() == Path("stop")
+
+
+async def test_a_failed_receipt_read_is_retried_after_the_proof(session, monkeypatch):
+    # A transient read error on a receipt that exists must not turn a timed-out run into a lost receipt.
+    from nemo_gym.agents.utils import supervisor_client
+
+    sandbox, session_dir = session
+    (session_dir / LAUNCH_CLAIM_FILE).symlink_to("launch")
+    (session_dir / CLEANUP_RECEIPT_FILE).write_text(
+        json.dumps({"cleanup_confirmed": True, "return_code": -15, "error": None, "timed_out": True})
+    )
+    sandbox.exec_processes_terminated = AsyncMock(return_value=True)
+    real_read = supervisor_client.read_text
+    failures = [OSError("transient download error")]
+
+    async def flaky_read(*args, **kwargs):
+        if failures:
+            raise failures.pop()
+        return await real_read(*args, **kwargs)
+
+    monkeypatch.setattr(supervisor_client, "read_text", flaky_read)
+    receipt = await stop_and_confirm_cleanup(
+        sandbox,
+        session_dir=str(session_dir),
+        workdir=str(session_dir.parent),
+        timeout=1,
+        harness="test",
+        launch_finished=True,
+    )
+    assert receipt["timed_out"] is True and "receipt_missing" not in receipt
+
+
+async def test_a_failing_provider_proof_leaves_the_outcome_unknown(session):
+    sandbox, session_dir = session
+    (session_dir / LAUNCH_CLAIM_FILE).symlink_to("launch")
+    sandbox.exec_processes_terminated = AsyncMock(side_effect=RuntimeError("provider gone"))
+    with pytest.raises(RuntimeError, match="test launch outcome is unknown"):
+        await stop_and_confirm_cleanup(
+            sandbox,
+            session_dir=str(session_dir),
+            workdir=str(session_dir.parent),
+            timeout=1,
+            harness="test",
+            launch_finished=True,
+        )
 
 
 async def test_provider_proof_is_consulted_only_after_the_launch_returned(session):

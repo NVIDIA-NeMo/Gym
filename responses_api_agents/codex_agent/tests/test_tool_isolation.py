@@ -4,7 +4,6 @@
 
 import json
 import tomllib
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -73,6 +72,7 @@ def test_setup_failures_name_the_fix():
 def _seed_with_tool_namespace(agent, sandbox, tmp_path, *, setup_result=None):
     bwrap = tmp_path / "bwrap"
     bwrap.write_text("#!/bin/sh\n")
+    bwrap.chmod(0o755)
     agent.config.tool_pid_namespace = True
     agent.config.tool_pid_namespace_bwrap_path = str(bwrap)
     execute = sandbox.execute
@@ -145,14 +145,23 @@ def test_seed_fails_loudly_when_the_tool_namespace_cannot_be_created(setup, tmp_
     assert not sandbox.launch.called
 
 
-def test_tool_namespace_bwrap_defaults_to_the_bwrap_provider(setup):
+def test_tool_namespace_bwrap_defaults_to_the_bwrap_provider(setup, tmp_path):
     agent, _ = setup
-    assert agent._tool_namespace_bwrap({"bwrap": {"bwrap_path": "/pinned/bwrap"}}) == Path("/pinned/bwrap")
-    agent.config.tool_pid_namespace_bwrap_path = "/other/bwrap"
-    assert agent._tool_namespace_bwrap({"bwrap": {"bwrap_path": "/pinned/bwrap"}}) == Path("/other/bwrap")
+    pinned, other = tmp_path / "pinned-bwrap", tmp_path / "other-bwrap"
+    for path in (pinned, other):
+        path.write_text("#!/bin/sh\n")
+        path.chmod(0o755)
+    assert agent._tool_namespace_bwrap({"bwrap": {"bwrap_path": str(pinned)}}) == pinned
+    agent.config.tool_pid_namespace_bwrap_path = str(other)
+    assert agent._tool_namespace_bwrap({"bwrap": {"bwrap_path": str(pinned)}}) == other
     agent.config.tool_pid_namespace_bwrap_path = None
     with pytest.raises(HTTPException, match="tool_pid_namespace"):
         agent._tool_namespace_bwrap({"docker": {}})
+    # A wrong path is a 422 at seed, not an upload error later.
+    pinned.chmod(0o644)
+    with pytest.raises(HTTPException, match="not an executable file") as refused:
+        agent._tool_namespace_bwrap({"bwrap": {"bwrap_path": str(pinned)}})
+    assert refused.value.status_code == 422
 
 
 @pytest.mark.parametrize(
@@ -178,6 +187,36 @@ def test_harness_kill_evidence(receipt_missing, return_code, expected):
     assert evidence == expected
 
 
+def test_the_agent_is_blamed_only_with_positive_evidence(setup, tmp_path):
+    agent, sandbox = setup
+    # Its tools signalled the supervisor (ignored stop signals), then the runner died by a signal.
+    sandbox.events = "\n".join(events().splitlines()[:2])
+    sandbox.result["return_code"] = 128 + 9
+    sandbox.result["foreign_signals"] = 3
+    result, gaps, _ = _activate(agent)
+    assert result.status_code == 502
+    assert "agent_killed_harness" in gaps and "harness_killed" not in gaps
+
+
+@pytest.mark.parametrize(
+    ("missing", "launch_code", "return_code", "killed"),
+    [
+        (True, None, None, True),  # the launch's own status is unknown
+        (True, 137, None, True),
+        (True, 0, None, False),  # the launch shell exited normally: a launch failure, not a kill
+        (True, 2, None, False),
+        (True, 127, None, False),
+        (False, 0, 128 + 15, True),
+        (False, 0, 255, False),  # not a signal status
+        (False, 0, 128 + 65, False),
+    ],
+)
+def test_only_signal_statuses_count_as_a_kill(missing, launch_code, return_code, killed):
+    cleanup = {"cleanup_confirmed": True, "return_code": return_code, "error": None, "timed_out": False}
+    evidence = harness_kill_evidence(cleanup=cleanup, cleanup_receipt_missing=missing, launch_return_code=launch_code)
+    assert (evidence is not None) is killed
+
+
 def test_deadline_is_never_a_harness_kill():
     cleanup = {"cleanup_confirmed": True, "return_code": 128 + 15, "error": None, "timed_out": True}
     assert harness_kill_evidence(cleanup=cleanup, cleanup_receipt_missing=False, launch_return_code=0) is None
@@ -193,7 +232,8 @@ def test_killed_harness_is_labelled_apart_from_other_failures(setup, tmp_path, i
     sandbox.events = "\n".join(events().splitlines()[:2])
     sandbox.result["return_code"] = 128 + 15
     result, gaps, _ = _activate(agent)
-    label = "harness_killed" if isolated else "agent_killed_harness"
+    # A signal status alone does not say who sent it (137 is also an OOM kill): the label stays neutral.
+    label = "harness_killed"
     assert result.status_code == 502
     assert result.json()["detail"].startswith(
         f"Codex execution failed: {label}: the Codex runner or Codex was killed by signal 15"

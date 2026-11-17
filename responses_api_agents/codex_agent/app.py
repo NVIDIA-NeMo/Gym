@@ -609,6 +609,10 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
     return user_message, system_message
 
 
+# The tool-host probe's output kept in a seed failure's message.
+_TOOL_HOST_DETAIL_CHARS = 4000
+
+
 class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: Optional[ResourcesServerRef] = None
     # When model_server is set, the Codex model provider's base_url is resolved from the Gym model
@@ -702,7 +706,8 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     # Agent-host directory where a failed sandboxed activation keeps the session's supervisor and
     # Codex logs (output.log, stderr.log, events.jsonl, ...) before the sandbox is released. None: off.
     failure_artifacts_dir: Optional[str] = None
-    # Native sandbox only: run Codex's tool commands in a nested pid namespace (bwrap) so they
+    # Task-sandbox sessions only (ignored on the local /run path): run Codex's tool commands in a nested pid
+    # namespace (bwrap) so they
     # cannot see or signal the supervisor, the runner or the Codex CLI (see tool_host.py). The
     # session fails at seed if the namespace cannot be created.
     tool_pid_namespace: bool = False
@@ -1009,7 +1014,17 @@ class CodexAgent(SimpleResponsesAPIAgent):
             raise HTTPException(
                 422, "tool_pid_namespace needs tool_pid_namespace_bwrap_path or a bwrap sandbox provider"
             )
+        if not os.path.isfile(path) or not os.access(path, os.X_OK):
+            raise HTTPException(422, f"tool_pid_namespace: bwrap {path!r} is not an executable file on the agent host")
         return Path(path)
+
+    async def _preserve_failure_artifacts(self, state: CodexSandboxSession, detail: dict[str, Any]) -> None:
+        """Keep a failed activation's logs, bounded by the close budget so a slow read never holds the failure."""
+        try:
+            async with asyncio.timeout(self.config.session_close_timeout_seconds):
+                await state.preserve_failure_artifacts(self.config.failure_artifacts_dir, detail)
+        except TimeoutError:
+            LOG.warning("Codex failure artifacts not preserved within %s s", self.config.session_close_timeout_seconds)
 
     async def _prepare_tool_host(self, sandbox: AsyncSandbox, *, directory: str, runtime: str, bwrap: Path) -> None:
         """Upload bwrap and prove that it can create the tool namespace before the episode starts."""
@@ -1019,10 +1034,17 @@ class CodexAgent(SimpleResponsesAPIAgent):
         result = await sandbox.exec(command, timeout_s=60)
         if result.return_code != 0 or result.error_type:
             detail = f"{result.stderr or ''}{result.stdout or ''}".strip()
-            raise RuntimeError(
+            if len(detail) > _TOOL_HOST_DETAIL_CHARS:
+                detail = "..." + detail[-_TOOL_HOST_DETAIL_CHARS:]
+            message = (
                 f"Cannot create the Codex tool pid namespace (tool_pid_namespace): exit={result.return_code}, "
                 f"error_type={result.error_type}; {detail}.{setup_failure_hint(detail)}"
             )
+            if "platform Codex binary not found" in detail:
+                # The runtime lacks the binary: every fresh sandbox fails the same way, so do not retry.
+                raise AgentSeedRejectedError(message)
+            # Others (a per-node namespace limit, the 60 s exec timing out) may pass on another attempt.
+            raise RuntimeError(message)
 
     def _sandbox_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str, list[MediaFile]]:
         """Validate and normalize input before consuming the session's activation."""
@@ -1268,10 +1290,15 @@ class CodexAgent(SimpleResponsesAPIAgent):
         completed = any(event.get("type") == "turn.completed" for _, event in events)
         if cleanup and not completed and not cleanup["timed_out"] and not output_limited:
             error = error or "Codex ended without turn.completed"
-        # Nobody stopped the harness, yet a harness process died: in practice a tool command
-        # signalled it (pkill -f python, kill -9 -1, ...). Label it so summaries can count it apart.
+        # Nobody stopped the harness, yet a harness process died: often a tool command signalled it
+        # (pkill -f python, kill -9 -1, ...), but also the OOM killer or a crash. Label it so summaries can
+        # count it apart; blame the agent only on positive evidence: stop signals its tools sent the supervisor.
         harness_kill = None
-        harness_kill_code = "harness_killed" if self.config.tool_pid_namespace else "agent_killed_harness"
+        harness_kill_code = (
+            "agent_killed_harness"
+            if not self.config.tool_pid_namespace and (cleanup or {}).get("foreign_signals")
+            else "harness_killed"
+        )
         if failure is None and error:
             harness_kill = harness_kill_evidence(
                 cleanup=cleanup,
@@ -1484,6 +1511,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 error = f"{error}; stderr: {stderr}"
                 # Environment Servers keep the observations, not the 502 body, in their failure records.
                 state.observations.gaps.append(ObservationGap(code="agent_startup_failed", detail=stderr))
+        # Decided before a graded failure clears ``error``: a graded harness kill keeps its logs too.
+        artifact_error = error
         graded_error = None
         if gradable:
             # The observations are stored first, so a close during the liveness probe still finds them.
@@ -1496,14 +1525,15 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     if isinstance(record, AgentInvocation) and record.invocation_id == invocation_id:
                         record.status = status
         if (
-            failure is not None or error or state.session.cleanup_receipt_missing
+            failure is not None or artifact_error or state.session.cleanup_receipt_missing
         ) and self.config.failure_artifacts_dir:
             # Before raising: close releases the sandbox and deletes these files.
-            await state.preserve_failure_artifacts(
-                self.config.failure_artifacts_dir,
+            await self._preserve_failure_artifacts(
+                state,
                 {
                     "failure": repr(failure) if failure is not None else None,
-                    "error": error or None,
+                    "error": artifact_error or None,
+                    "graded": graded_error is not None,
                     "cleanup": dict(cleanup) if cleanup is not None else None,
                     "cleanup_receipt_missing": state.session.cleanup_receipt_missing,
                     "launch_return_code": state.session.launch_return_code,

@@ -48,7 +48,7 @@ from responses_api_agents.codex_agent.app import (
     CodexAgentConfig,
     _model_endpoint_error,
 )
-from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE
+from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE, CodexSandboxSession
 
 
 def seed() -> AgentSeedSessionRequest:
@@ -165,6 +165,9 @@ class Sandbox:
             self.files[shlex.split(destination)[0]] = self.files.pop(shlex.split(source)[0])
         if "exec bash " in command and "process_supervisor.sh" in command:
             return await self.launch(command=command, **kwargs)
+        if command.startswith("readlink ") and "launch.claim" in command:
+            # stop_and_confirm_cleanup asks who won the launch claim.
+            return SimpleNamespace(error_type=None, return_code=0, stdout="launch\n", stderr="")
         if "echo absent" in command:
             # The adapter checks whether a stopped worker left a transcript.
             present = any(path.endswith("/events.jsonl") for path in self.files)
@@ -757,9 +760,13 @@ def test_failure_artifacts_are_off_by_default(setup, tmp_path, monkeypatch):
     agent, sandbox = setup
     monkeypatch.chdir(tmp_path)
     _supervisor_left_no_receipt(sandbox)
+    # The guard itself, not preserve_failure_artifacts' own error handling, must keep it from running.
+    preserve = AsyncMock()
+    monkeypatch.setattr(CodexSandboxSession, "preserve_failure_artifacts", preserve)
     with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         assert client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"}).status_code >= 500
+    preserve.assert_not_awaited()
     assert not list(tmp_path.iterdir())
 
 

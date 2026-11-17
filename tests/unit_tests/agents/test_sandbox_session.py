@@ -705,14 +705,28 @@ async def test_supervisor_without_receipt_after_normal_exit(session, receipt_rea
     # Seen in a real run: the launch exec returned, but cleanup.json never appeared.
     receipt_reader.side_effect = FileNotFoundError("cleanup.json")
     killed = SandboxExecResult(stdout="", stderr="", return_code=137)
-    session.sandbox.exec.side_effect = lambda command, **kwargs: killed if "--receipt" in command else OK
+    claimed = SandboxExecResult(stdout="launch\n", stderr="", return_code=0)
+
+    def exec_(command, **kwargs):
+        if "--receipt" in command:
+            return killed
+        return claimed if command.startswith("readlink ") else OK
+
+    session.sandbox.exec.side_effect = exec_
     session.sandbox.exec_processes_terminated = AsyncMock(return_value=provider_proves)
     if provider_proves:
         assert await execute(session) == "transcript"
-        assert session.cleanup == {"cleanup_confirmed": True, "return_code": None, "error": None, "timed_out": False}
+        # The receipt itself says the supervisor's own one is missing, so no consumer reads it as a clean stop.
+        assert session.cleanup == {
+            "cleanup_confirmed": True,
+            "return_code": None,
+            "error": None,
+            "timed_out": False,
+            "receipt_missing": True,
+        }
         assert session.cleanup_receipt_missing and session.launch_return_code == 137
-        # Nothing left to stop: only the launch itself ran.
-        assert session.sandbox.exec.await_count == 1
+        # Nothing left to stop: only the launch and the claim check ran.
+        assert session.sandbox.exec.await_count == 2
         await session.close(timeout=1)
         assert session.closed
     else:

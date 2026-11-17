@@ -95,7 +95,8 @@ def tool_host_setup_command(session_dir: str, runtime: str) -> str:
         "set -eu; "
         f"host=$(find {shlex.quote(runtime + '/codex/node_modules')} -path '*/vendor/*-unknown-linux-*/bin/codex' "
         "-type f | head -n 1); "
-        f'[ -n "$host" ] || {{ echo "native Codex binary not found under {runtime}/codex" >&2; exit 1; }}; '
+        f'[ -n "$host" ] || {{ echo {shlex.quote(f"platform Codex binary not found under {runtime}/codex")} >&2; '
+        "exit 1; }; "
         f"chmod 0755 {shlex.quote(bwrap)}; "
         f'ln -sfn "$host" {shlex.quote(tool_host)}; '
         f"{shlex.join([bwrap, *tool_namespace_args(), '--setenv', PROBE_VARIABLE, '1', '--', '/bin/sh', '-c', probe])}"

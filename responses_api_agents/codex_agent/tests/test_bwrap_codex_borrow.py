@@ -33,8 +33,7 @@ from omegaconf import OmegaConf
 from nemo_gym.agents import AgentSeedSessionRequest
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, TaskId
-from nemo_gym.sandbox.api import AsyncSandbox
-from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec, SandboxStatus
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, SandboxStatus
 from nemo_gym.sandbox.providers.bwrap import BwrapProvider
 from responses_api_agents.codex_agent.app import CodexAgent, CodexAgentConfig
 
@@ -79,7 +78,7 @@ async def test_codex_agent_borrows_a_bwrap_sandbox(providers, tmp_path: Path) ->
 
     calls: list[tuple[list[str], dict[str, str]]] = []
 
-    async def emulated_run(sandbox, argv, env, timeout):
+    async def emulated_run(sandbox, argv, env, timeout, **kwargs):
         calls.append((argv, env))
         command = argv[-1]
         if "exec bash " in command and "process_supervisor.sh" in command:
@@ -124,7 +123,10 @@ async def test_codex_agent_borrows_a_bwrap_sandbox(providers, tmp_path: Path) ->
 
     def run_agent() -> dict:
         with (
-            patch(f"{module}.ensure_codex", side_effect=AssertionError("native sessions must not install host Codex")),
+            patch(
+                f"{module}.ensure_codex",
+                side_effect=AssertionError("task-sandbox sessions must not install host Codex"),
+            ),
             patch(f"{module}.resolve_provider_config"),
             patch(f"{module}.get_global_config_dict", return_value={}),
             patch(f"{module}.create_provider", return_value=receiver),

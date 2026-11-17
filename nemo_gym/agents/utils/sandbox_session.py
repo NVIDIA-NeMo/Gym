@@ -266,6 +266,8 @@ class SandboxSession[Artifacts]:
                 if error.boundary == "sandbox" and error.failure_kind == PROVIDER_OOM_KILLED:
                     self.execution_oom = error
                 raise
+            if not result.error_type:
+                self.launch_return_code = result.return_code
             if result.error_type == "timeout":
                 raise TimeoutError(f"{self.harness} sandbox supervisor exceeded its execution deadline")
             if result.error_type:
@@ -393,7 +395,6 @@ class SandboxSession[Artifacts]:
             return
         if self.termination_error is not None:
             raise self.termination_error
-        diagnostics: dict[str, object] = {}
         try:
             async with asyncio.timeout(timeout):
                 self.cleanup = await stop_and_confirm_cleanup(
@@ -403,9 +404,8 @@ class SandboxSession[Artifacts]:
                     timeout=timeout,
                     harness=self.harness,
                     launch_finished=self._launch_returned(),
-                    diagnostics=diagnostics,
                 )
-            self.cleanup_receipt_missing = diagnostics.get("receipt_missing") is True
+            self.cleanup_receipt_missing = self.cleanup.get("receipt_missing") is True
         except TimeoutError as error:
             raise RuntimeError(f"{self.harness} launch outcome is unknown; termination deadline exceeded") from error
         except NgFailureEvent as error:
@@ -418,11 +418,7 @@ class SandboxSession[Artifacts]:
         task = self._exec_task
         if task is None or not task.done() or task.cancelled() or task.exception() is not None:
             return False
-        result = task.result()
-        if result.error_type:
-            return False
-        self.launch_return_code = result.return_code
-        return True
+        return not task.result().error_type
 
     async def _finish(self, *, timeout: float) -> None:
         """Join process finalization without releasing the sandbox connection."""

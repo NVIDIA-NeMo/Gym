@@ -217,6 +217,15 @@ Three layers keep that apart:
   processes, because they share one namespace. Seed fails if the namespace cannot be created.
   A sandboxed root needs the bwrap provider's `allow_nested_userns: true`. The generated
   config disables the orchestrator `skills` tools, so the model sees the same tools as before.
+  Validated with Codex 0.144.4 (`codex_version`); `codex exec-server` is marked experimental
+  upstream and `environments.toml` rejects unknown fields, so test a new version before
+  using the flag with it.
+  **Validated on the bwrap provider only.** There each exec already has its own pid
+  namespace and no capabilities, so the nested namespace changes little else. On another
+  provider (`tool_pid_namespace_bwrap_path` set, a bwrap that runs in the task image, and
+  unprivileged user namespaces): tools lose root's capabilities (`--cap-drop ALL`, so
+  `apt-get` or `chown` fail), cannot see or signal services the image or the seed started,
+  and every process a tool daemonizes dies when Codex exits (pid 1 with `--die-with-parent`).
 - **Process names.** The supervisor and runner are bash scripts, so their command lines
   contain neither `python` nor `python3 -`.
 - **Stop signals.** The supervisor counts a SIGTERM/SIGINT/SIGHUP as a stop only once
@@ -224,8 +233,10 @@ Three layers keep that apart:
   reported in the `harness_signals_ignored` gap.
 
 If a harness process dies anyway and nobody stopped it, the error and gaps say
-`agent_killed_harness` (`harness_killed` with `tool_pid_namespace`): the supervisor left no
-receipt, or the runner exited with 128+N (it or Codex ended by signal N). With
+`harness_killed`: the supervisor left no receipt after the launch shell was signalled, or the
+runner exited with 128+N, N up to 64 (it or Codex ended by signal N; 137 is also an OOM kill).
+The label is `agent_killed_harness` only with positive evidence that tools signalled the
+supervisor (ignored stop signals, without `tool_pid_namespace`). With
 `failure_artifacts_dir` set, `failure.json` records the evidence beside the session's logs.
 
 `responses_api_agents/codex_agent/tests/tool_namespace_check.py` checks all of this end to end against a
@@ -406,6 +417,8 @@ codex_agent:
 - `extra_config`: extra `config.toml` content deep-merged over the generated base config — add MCP servers, feature flags, `model_verbosity`, etc. Per-rollout Gym MCP entries take precedence on name collisions
 - `features`: the generated `[features]` table. The defaults turn off `multi_agent` and `code_mode`, whose tool shapes Gym's typed Responses path cannot express. A `null` entry is left out, so the CLI uses its own default, as a launch without a Gym config does; set that only when the model server relays Codex's requests unchanged. Unlike `extra_config`, it also applies to sandbox sessions
 - `sandbox_logs_dir`: sandbox sessions only. After Codex stops, copy its session rollouts (`CODEX_HOME/sessions/**/rollout-*.jsonl`, with per-call token counts and timestamps, also for a run stopped at its time limit) to `<sandbox_logs_dir>/sessions` before the session directory is removed, as Harbor does with `/logs/agent`. Default `null` (not copied)
+- `tool_pid_namespace`, `tool_pid_namespace_bwrap_path`: task-sandbox sessions only (ignored on the local `/run` path). Run Codex's tool commands in a nested bwrap pid namespace; see [Tool commands versus the harness](#tool-commands-versus-the-harness). The bwrap path defaults to the bwrap sandbox provider's `bwrap_path` and must be an executable on the agent host
+- `failure_artifacts_dir`: task-sandbox sessions only. An agent-host directory where a failed activation (or one whose supervisor left no receipt) keeps the session's supervisor and Codex logs and a `failure.json` before the sandbox is released. Default `null` (off)
 - `mcp_tool_timeout_seconds`: per-call timeout for Gym MCP tools, written as `tool_timeout_sec`; a call that runs longer returns an error to the model. At most `timeout`. `null` leaves the pinned CLI's default of 300 seconds
 
 For the full set of Codex config options see the [Codex configuration reference](https://developers.openai.com/codex/config).
