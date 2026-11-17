@@ -24,7 +24,6 @@ from fastapi.testclient import TestClient
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import PROVIDER_UNAVAILABLE, EpisodeId, FailureHeader, TaskId
-from nemo_gym.orchestration.recovery import REVERIFY_JUDGE, reverification_cause, saved_row_evidence
 from nemo_gym.sandbox import (
     AsyncSandbox,
     LocalProvider,
@@ -607,7 +606,9 @@ def test_a_verify_after_the_close_is_masked_as_lost(workdir) -> None:
 @pytest.mark.parametrize("seed", ["episode", "agent_run"])
 def test_a_judge_without_a_verdict_is_masked_and_an_identical_retry_is_graded(workdir, seed) -> None:
     """No verdict is not a measured 0: the row is masked, and the verify is not replayed but graded again. Gym judges
-    such a row again from its saved answer; while it scored 0, no re-judge picked it up."""
+    a masked judge_unparseable row again from the answer it saved, unless it went to the failures sidecar
+    (tests/unit_tests/eval/test_reverify_saved_results.py covers that selection); while it scored 0, no re-judge
+    picked it up."""
     server = _server(workdir if seed == "episode" else None)
     client = TestClient(server.setup_webserver())
     assert client.post("/seed_session", json=_seed() if seed == "episode" else _row()).status_code == 200
@@ -619,7 +620,8 @@ def test_a_judge_without_a_verdict_is_masked_and_an_identical_retry_is_graded(wo
     assert _graded(inconclusive) == (0.0, True, "judge_unparseable", False)
     assert inconclusive.json()["judge_parsed"] is False
     assert judge.await_count == 2  # judge_max_attempts
-    assert reverification_cause(saved_row_evidence(inconclusive.json())) == REVERIFY_JUDGE
+    # What that selection reads besides the kind: the answer on the row, and no failures-sidecar class.
+    assert inconclusive.json()["response"]["output"] and inconclusive.json().get("_ng_failure_class") is None
 
     _mock_judge(server, CORRECT)
     retried = client.post("/verify", json=_verify_body())
