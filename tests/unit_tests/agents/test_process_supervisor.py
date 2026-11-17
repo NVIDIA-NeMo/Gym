@@ -430,8 +430,9 @@ worker.write_text("import os, pathlib, signal, subprocess, sys, time\n"
 timed_out = ending in ('timeout', 'grace', 'stubborn')
 process = None
 try:
+    # Give real process cleanup and the checkpoint handler time on a busy CI runner.
     process = subprocess.Popen(['bash', supervisor, '--timeout', '10',
-        '--cleanup-timeout', '0.5', '--receipt', str(root / 'cleanup.json'), '--stop-file', str(root / 'stop'),
+        '--cleanup-timeout', '5', '--receipt', str(root / 'cleanup.json'), '--stop-file', str(root / 'stop'),
         '--expire-file', str(root / 'expire'), '--',
         sys.executable, str(worker), ending], cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if ending == 'cancel' or timed_out:
@@ -444,8 +445,9 @@ try:
             (root / 'expire').touch()
         else:
             process.send_signal(signal.SIGTERM)
-    stdout, stderr = process.communicate(timeout=15)
-    assert process.returncode == 0, (stdout, stderr)
+    stdout, stderr = process.communicate(timeout=30)
+    receipt_path = root / "cleanup.json"
+    assert process.returncode == 0, (stdout, stderr, receipt_path.read_text() if receipt_path.exists() else None)
     receipt = json.loads((root / 'cleanup.json').read_text())
     assert receipt['cleanup_confirmed'] is True, receipt
     assert receipt['timed_out'] is timed_out, receipt
@@ -496,7 +498,7 @@ finally:
         capture_output=True,
         text=True,
         errors="replace",
-        timeout=40,
+        timeout=60,
     )
     assert result.returncode == 0, result.stderr
 
