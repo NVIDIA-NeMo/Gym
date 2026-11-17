@@ -55,8 +55,22 @@ def is_policy_counted_zero(row: Mapping[str, object]) -> bool:
     )
 
 
+_DECLARED_ACTION_KINDS: set[str] = set()
+
+
+def declare_action_kind(kind: str) -> str:
+    """Let a boundary's action rules select its own ``<server>:<kind>``, as its classification already can.
+
+    Only the kinds a boundary declares are accepted; a misspelled name is still rejected at configuration load.
+    """
+    if not is_namespaced(kind):
+        raise ValueError(f"{kind!r} is not a namespaced <server>:<kind> failure kind")
+    _DECLARED_ACTION_KINDS.add(kind)
+    return kind
+
+
 def _require_registered_kinds[T](value: dict[str, T]) -> dict[str, T]:
-    invalid = {kind for kind in value.keys() - FAILURE_KINDS - {"unknown"} if not is_namespaced(kind)}
+    invalid = value.keys() - FAILURE_KINDS - {"unknown"} - _DECLARED_ACTION_KINDS
     if invalid:
         raise ValueError(f"Unregistered failure kinds: {sorted(invalid)}")
     return value

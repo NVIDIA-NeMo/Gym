@@ -20,10 +20,12 @@ from nemo_gym.core.failure_kinds import (
 )
 from nemo_gym.core.outcome_policy import (
     OutcomeAction,
+    OutcomePolicyConfig,
     StageOutcomePolicyConfig,
     StagePolicyConfig,
     applied_outcome_fields,
     choose_stage_outcome,
+    declare_action_kind,
     environment_fault_policy,
     require_retry_or_fail,
 )
@@ -322,3 +324,16 @@ def test_a_boundary_refuses_retry_for_a_kind_classified_as_the_model() -> None:
         StageOutcomePolicyConfig.overlay(policy, {"by_stage": {"agent": {"default_action": "fail"}}})
     )
     assert require_retry_or_fail(ungraded, "agent", ("demo:cut_off",)) is ungraded
+
+
+def test_an_action_rule_names_only_the_namespaced_kinds_a_boundary_declared() -> None:
+    kind = declare_action_kind("demo:declared_cut_off")
+
+    assert StagePolicyConfig(by_failure_kind={kind: "retry"}).by_failure_kind[kind] == "retry"
+    assert OutcomePolicyConfig(default_action="fail", by_failure_kind={kind: "retry"}).by_failure_kind[kind] == "retry"
+    # An undeclared name, a misspelled registered one and a name that is not namespaced stay rejected.
+    for name in ("demo:undeclared", "provider_oom_kild"):
+        with pytest.raises(ValidationError, match="Unregistered failure kinds"):
+            StagePolicyConfig(by_failure_kind={name: "retry"})
+    with pytest.raises(ValueError, match="not a namespaced"):
+        declare_action_kind("provider_oom_killed")

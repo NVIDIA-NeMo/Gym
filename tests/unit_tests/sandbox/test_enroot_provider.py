@@ -13,14 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import hashlib
 import io
+import json
+import secrets
 import shlex
 import shutil
+import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Any, Callable
 
 import pytest
 
+from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import (
     SandboxExecResult,
     SandboxHandle,
@@ -200,6 +207,38 @@ def test_translate_docker_uri() -> None:
     assert translate("docker.io/swebench/foo:latest") == "docker://swebench/foo:latest"
     assert translate("index.docker.io/library/ubuntu:22.04") == "docker://library/ubuntu:22.04"
     assert translate("registry-1.docker.io/swebench/foo:latest") == "docker://swebench/foo:latest"
+    digest = "sha256:" + "a" * 64
+    assert (
+        translate(f"harborframework/terminal-bench:task@{digest}")
+        == f"docker://harborframework/terminal-bench:{digest}"
+    )
+    assert translate(f"docker.io/library/ubuntu@{digest}") == f"docker://library/ubuntu:{digest}"
+    assert translate(f"localhost:5000/img:tag@{digest}") == f"docker://localhost:5000#img:{digest}"
+    # Only a sha256 digest after the last '@' is translated; Enroot's own USER@ prefix is left as on main.
+    assert translate("$oauthtoken@nvcr.io/nvidia/pytorch:24.01") == "docker://$oauthtoken@nvcr.io#nvidia/pytorch:24.01"
+    assert translate(f"user@nvcr.io/team/img:tag@{digest}") == f"docker://user@nvcr.io#team/img:{digest}"
+    # A registry port is not a tag.
+    assert translate(f"localhost:5000/img@{digest}") == f"docker://localhost:5000#img:{digest}"
+    assert (
+        translate(f"registry.example.com:5000/team/img@{digest}")
+        == f"docker://registry.example.com:5000#team/img:{digest}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ensure_image_imports_digest_reference_under_original_cache_key(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    image = "harborframework/terminal-bench:task@sha256:" + "a" * 64
+
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        Path(argv[argv.index("-o") + 1]).write_bytes(b"imported")
+        return (0, "", "")
+
+    provider, rec, _ = _make_provider(monkeypatch, responder, tmp_path)
+    target = await provider._ensure_image(image)
+    assert [call["argv"][-1] for call in rec.calls] == ["docker://harborframework/terminal-bench:sha256:" + "a" * 64]
+    assert target.name == hashlib.sha256(image.encode()).hexdigest()[:16] + ".sqsh"
 
 
 def test_resolve_image(fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -849,6 +888,154 @@ async def test_close_staging_removal_failure_is_logged(
 async def test_aclose(fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     provider, _rec, _sr = _make_provider(monkeypatch, lambda argv: (0, "", ""), tmp_path)
     assert await provider.aclose() is None
+
+
+# --------------------------------------------------------------------------- #
+# Lending a sandbox: serialize_handle() / connect()
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_connect_preserves_exec_and_borrower_disconnect(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_killpg: list[tuple[int, int]]
+) -> None:
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    provider, recorder, _ = _make_provider(monkeypatch, lambda argv: (0, "ok", ""), tmp_path)
+    handle = _make_handle(staging, env={"TASK_TOKEN": "task-secret-value"}, start_pgid=4242)
+
+    async def create(spec: SandboxSpec) -> SandboxHandle:
+        return handle
+
+    monkeypatch.setattr(provider, "create", create)
+    owner = AsyncSandbox(provider, SandboxSpec(image="test", workdir="/sandbox"))
+    await owner.start()
+    (staging / "owner.txt").write_text("owner state")
+    descriptor = json.loads(json.dumps(await owner.serialize()))
+    # The sandbox env may hold task secrets, so it stays off the wire. `enroot exec`
+    # reads the init's /proc/<pid>/environ, so the borrower passes no -e flags for it.
+    assert "env" not in descriptor
+    assert "task-secret-value" not in json.dumps(descriptor)
+    borrower_provider, borrower_recorder, _ = _make_provider(monkeypatch, lambda argv: (0, "ok", ""), tmp_path)
+    borrower = await AsyncSandbox.connect(descriptor, provider=borrower_provider)
+    assert borrower._require_handle().raw.start_pgid == 4242
+    result = await borrower.exec("printf ok")
+    assert result.return_code == 0
+    argv = borrower_recorder.calls[-1]["argv"]
+    assert not any("TASK_TOKEN" in arg for arg in argv)
+    assert str(FAKE_PID) in argv
+    assert "cd /sandbox" in argv[-1]
+    upload = tmp_path / "upload.txt"
+    upload.write_text("borrowed content")
+    await borrower.upload(upload, "/sandbox/borrowed.txt")
+    assert (staging / "borrowed.txt").read_text() == "borrowed content"
+    await borrower.disconnect()
+    # Disconnect leaves the creator's process group, rootfs and staging folder alone.
+    assert no_killpg == []
+    assert not any("remove" in call["argv"] for call in borrower_recorder.calls)
+    assert (staging / "owner.txt").read_text() == "owner state"
+    assert (await owner.exec("printf owner-alive")).return_code == 0
+    assert "owner-alive" in recorder.calls[-1]["argv"][-1]
+    assert _contains_seq(recorder.calls[-1]["argv"], ["-e", "TASK_TOKEN=task-secret-value"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value", "error", "message"),
+    [
+        ("provider", "docker", ValueError, "full serialized descriptor"),
+        ("hostname", "different-host", ValueError, "same host and UID"),
+        ("uid", -1, ValueError, "same host and UID"),
+        ("data_path", "/another/data", ValueError, "creator's data_path"),
+        ("runtime_path", "/another/runtime", ValueError, "creator's runtime_path"),
+        ("sandbox_id", "", ValueError, "non-empty sandbox_id"),
+        ("sandbox_id", "someone-elses-container", ValueError, "not a Gym container name"),
+        ("sqsh_path", None, ValueError, "non-empty sqsh_path"),
+        ("image", "", ValueError, "non-empty image"),
+        ("container_pid", 0, ValueError, "positive container_pid"),
+        ("container_pid", True, ValueError, "positive container_pid"),
+        # Relative but existing, so is_absolute() is what rejects it.
+        ("staging_dir", ".", ValueError, "staging directory"),
+        # The creator already stopped and removed it.
+        ("staging_dir", "/nonexistent/nemo-gym-staging", ValueError, "staging directory"),
+        ("mount_point", "relative", ValueError, "mount point"),
+        ("start_pgid", -1, ValueError, "positive integer"),
+    ],
+)
+async def test_connect_rejects_incompatible_descriptor(
+    fake_binary: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    field: str,
+    value: object,
+    error: type[Exception],
+    message: str,
+) -> None:
+    provider, _, _ = _make_provider(monkeypatch, lambda argv: (0, "", ""), tmp_path)
+    descriptor = await provider.serialize_handle(_make_handle(tmp_path))
+    descriptor[field] = value
+    with pytest.raises(error, match=message):
+        await provider.connect(descriptor)
+
+
+@pytest.mark.asyncio
+async def test_connect_and_serialize_refuse_stopped_or_reused_pid(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    provider, _, _ = _make_provider(monkeypatch, lambda argv: (0, "", ""), tmp_path)
+    handle = _make_handle(tmp_path)
+    descriptor = await provider.serialize_handle(handle)
+    monkeypatch.setattr(provider, "_pid_has_container_marker", lambda pid, name: False)
+    with pytest.raises(RuntimeError, match="stale or reused"):
+        await provider.connect(descriptor)
+    with pytest.raises(RuntimeError, match="no longer running"):
+        await provider.serialize_handle(handle)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("group_is_this_container", [True, False])
+async def test_borrowed_close_signals_start_group_only_while_it_is_this_container(
+    fake_binary: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    no_killpg: list[tuple[int, int]],
+    group_is_this_container: bool,
+) -> None:
+    provider, _, _ = _make_provider(monkeypatch, lambda argv: (0, "", ""), tmp_path)
+    borrowed = await provider.connect(await provider.serialize_handle(_make_handle(tmp_path, start_pgid=4242)))
+    assert borrowed.raw.proc is None
+    # After the creator stopped and reaped the group, its ID can belong to another process group.
+    monkeypatch.setattr(provider, "_pid_has_container_marker", lambda pid, name: group_is_this_container)
+    await provider.close(borrowed)
+    expected = [(4242, enroot_provider.signal.SIGTERM), (4242, enroot_provider.signal.SIGKILL)]
+    assert no_killpg == (expected if group_is_this_container else [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+async def test_connect_checks_the_real_init_marker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(enroot_provider, "_require_enroot", lambda: FAKE_BINARY)
+    provider = enroot_provider.EnrootProvider(create={"base_dir": str(tmp_path / "enroot_home")})
+    # Not uuid4: this module's autouse fixture pins it to one value.
+    name = enroot_provider.CONTAINER_NAME_PREFIX + secrets.token_hex(16)
+    # A stand-in init whose cmdline carries the container marker, as create() launches it.
+    init = subprocess.Popen(["sh", "-c", f"while true; do sleep 1; done # {name}"])
+    try:
+        # /proc/<pid>/cmdline can read empty for a moment after Popen returns.
+        deadline = time.monotonic() + 5
+        while name not in enroot_provider._read_proc_cmdline(init.pid):
+            assert time.monotonic() < deadline, "stand-in init never showed its marker"
+            time.sleep(0.01)
+        descriptor = await provider.serialize_handle(_make_handle(tmp_path, name=name, container_pid=init.pid))
+        assert (await provider.connect(descriptor)).raw.container_pid == init.pid
+        # A live process at that PID without this container's marker is refused.
+        descriptor["sandbox_id"] = enroot_provider.CONTAINER_NAME_PREFIX + secrets.token_hex(16)
+        with pytest.raises(RuntimeError, match="stale or reused"):
+            await provider.connect(descriptor)
+    finally:
+        init.kill()
+        init.wait()
+    descriptor["sandbox_id"] = name
+    with pytest.raises(RuntimeError, match="stale or reused"):
+        await provider.connect(descriptor)
 
 
 # --------------------------------------------------------------------------- #

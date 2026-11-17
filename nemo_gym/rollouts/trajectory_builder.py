@@ -409,6 +409,7 @@ def _build_trajectory_record(
         projected = TrajectoryModelCall(
             model_call_id=model_call_id,
             agent_instance=raw_call.get("agent_instance"),
+            agent_kind=raw_call.get("agent_kind"),
             clock_domain=raw_call.get("clock_domain"),
             client_session_id=raw_call.get("client_session_id"),
             client_assistant_message_id=raw_call.get("client_assistant_message_id"),

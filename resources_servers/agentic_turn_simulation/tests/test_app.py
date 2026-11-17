@@ -580,6 +580,12 @@ def test_retry_for_a_kind_classified_as_the_model_is_refused() -> None:
         make_server(outcome_policy=_decision_policy(f"{SERVER}:time_cap", "model", "retry"))
 
 
+def test_an_action_override_for_an_undeclared_kind_is_refused() -> None:
+    # Only the kinds this server declares can be selected by name; a typo after the colon fails at load.
+    with pytest.raises(ValueError, match="Unregistered failure kinds"):
+        make_server(outcome_policy={"by_stage": {"agent": {"by_failure_kind": {f"{SERVER}:time_kap": "fail"}}}})
+
+
 class TestVerifyMasks:
     @pytest.mark.parametrize("failure_class,action", DECISIONS)
     async def test_the_saved_decision_follows_the_configured_policy(self, failure_class: str, action: str) -> None:

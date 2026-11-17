@@ -24,10 +24,17 @@ def login_umask():
     os.umask(previous)
 
 
-@pytest.mark.parametrize("case", ["ok", "large", "exhausted", "unknown", "stale", "live"])
+@pytest.mark.parametrize(
+    "case", ["ok", "large", "first_allocation", "exhausted", "unknown", "incomplete", "stale", "live"]
+)
 def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case, login_umask):
+    from nemo_gym.orchestration.executors.resume_script import NO_ELIGIBLE_RETRY_REASON
+
     large = case == "large"
-    if large:
+    # A judge failure in the chain's first allocation: no infra retry ran, so .gym_infra_retries was never written,
+    # and the job ended its own chain with nothing eligible for another attempt.
+    first_allocation = case == "first_allocation"
+    if large or first_allocation:
         case = "ok"
     job = tmp_path / "run" / "judge"
     (job / "artifacts").mkdir(parents=True)
@@ -60,24 +67,37 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case, login_umas
     (job.parent / "resolved_config.yaml").write_text("fixture: true\n")
     # Real source/accounting files; the only process-level fakes are the scheduler executables.
     (job / "artifacts/rollouts.jsonl").write_text("fixture\n")
-    for n, v in {".gym_job_chain": "10\n", ".gym_infra_retries": "0\n", ".gym_accumulated_walltime": "60\n"}.items():
+    files = {".gym_job_chain": "10\n", ".gym_infra_retries": "0\n", ".gym_accumulated_walltime": "60\n"}
+    if first_allocation:
+        del files[".gym_infra_retries"]
+        files[".gym_chain_incomplete"] = NO_ELIGIBLE_RETRY_REASON + "\n"
+    elif case == "incomplete":
+        # Any other marker line, here a continuation that ended before its guard, still refuses.
+        files[".gym_chain_incomplete"] = "Continuation 10 started; follow-up not yet queued\n"
+    for n, v in files.items():
         (job / n).write_text(v)
     if large:
         with (job / "artifacts/rollouts.jsonl").open("wb") as artifact:
             artifact.truncate(64 * 1024 * 1024)
 
     def digest(path):
+        if not path.exists():
+            return None
         with path.open("rb") as artifact:
             return hashlib.file_digest(artifact, "sha256").hexdigest()
 
-    snapshot = {n: digest(job / n) for n in (".gym_job_chain", ".gym_infra_retries", ".gym_accumulated_walltime")}
+    accounting = (".gym_job_chain", ".gym_infra_retries", ".gym_accumulated_walltime", ".gym_chain_incomplete")
+    snapshot = {n: digest(job / n) for n in accounting}
     snapshot["resume_config"] = cfg.driver.benchmarks["judge"].resume_config.model_dump_json()
     evidence = CollectedEvidence(
         materialized=[],
         results=[],
         failures=[],
-        infra_retries_used=0,
+        infra_retries_used=None if first_allocation else 0,
+        infra_retries_state="absent" if first_allocation else "ok",
         job_chain=["10"],
+        chain_incomplete=".gym_chain_incomplete" in files,
+        chain_ended_itself=first_allocation,
         accounted_walltime_s=600 if case == "exhausted" else None if case == "unknown" else 60,
         accounting_snapshot=snapshot,
         source_digests={"rollouts.jsonl": digest(job / "artifacts/rollouts.jsonl")},
@@ -159,8 +179,14 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case, login_umas
             [capture] = [word for word in words if word.startswith("+model_call_capture_dir=")]
             assert "/reverification/" in capture and capture.endswith("/model-calls"), capture
             assert not [word for word in words if word.lstrip("+").startswith("limit=")], words
+            # A receipt beside the re-judge's output: the job recomputes the run's metrics and quality summary.
+            output = words[words.index("--output") + 1]
+            receipt = words[words.index("--settle-receipt") + 1]
+            assert receipt == output.rsplit("/", 1)[0] + "/receipt.json", (output, receipt)
     assert (tmp_path / "calls").exists() is (case == "ok")
-    assert (job / ".gym_infra_retries").read_text() == "0\n"
+    assert (job / ".gym_infra_retries").exists() is not first_allocation
+    if not first_allocation:
+        assert (job / ".gym_infra_retries").read_text() == "0\n"
     if case == "ok":
         assert (job / ".gym_job_chain").read_text() == "10\n11\n"
         assert float((job / ".gym_accumulated_walltime").read_text()) == 60

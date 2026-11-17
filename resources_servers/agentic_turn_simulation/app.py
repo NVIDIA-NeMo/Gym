@@ -39,6 +39,7 @@ from nemo_gym.core import (
     failure_kinds,
     require_retry_or_fail,
 )
+from nemo_gym.core.outcome_policy import declare_action_kind
 from nemo_gym.metrics import MASK_SAMPLE_FIELD
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -98,6 +99,9 @@ FAILURE_KIND_PREFIX = "agentic_turn_simulation"  # the namespace of this server'
 # outcome policy decides what recovery does with a row that holds one. Other masked outcomes carry no decision.
 TIME_CAP_KIND = f"{FAILURE_KIND_PREFIX}:time_cap"
 SIMULATOR_FAILED_KIND = f"{FAILURE_KIND_PREFIX}:simulator_failed"
+# The outcome policy's action rules may select these kinds by name.
+declare_action_kind(TIME_CAP_KIND)
+declare_action_kind(SIMULATOR_FAILED_KIND)
 # The output items of a policy turn that are scored: its reasoning is never shown to the judge.
 SCORED_ITEM_TYPES = ("message", "function_call", "function_call_output")
 # A reply cut off by its output budget is retried with the budget doubled, starting from the params' max_tokens

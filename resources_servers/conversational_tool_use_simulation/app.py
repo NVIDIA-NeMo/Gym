@@ -39,6 +39,7 @@ from nemo_gym.core import (
     environment_fault_policy,
     require_retry_or_fail,
 )
+from nemo_gym.core.outcome_policy import declare_action_kind
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
@@ -52,6 +53,7 @@ from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 # Environment-prefixed failure kinds for masked results; see nemo_gym.core.failure_kinds.
 SIMULATOR_CALL_FAILED = "conversational_tool_use:simulator_call_failed"
+declare_action_kind(SIMULATOR_CALL_FAILED)  # the outcome policy's action rules may select it by name
 USER_VERDICT_FAILED = "conversational_tool_use:user_message_failed_verification"
 TOOL_VERDICT_FAILED = "conversational_tool_use:tool_result_failed_verification"
 USER_CHECK_FAILED = "conversational_tool_use:user_message_failed_check"

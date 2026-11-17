@@ -70,6 +70,7 @@ from nemo_gym.core import (
     failure_kinds,
     require_retry_or_fail,
 )
+from nemo_gym.core.outcome_policy import declare_action_kind
 from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyResponse,
@@ -105,6 +106,7 @@ LOG = logging.getLogger(__name__)
 
 # A task whose artifacts could not be materialized before the model ran.
 ARTIFACT_UNAVAILABLE = "vcqa_agent:artifact_unavailable"
+declare_action_kind(ARTIFACT_UNAVAILABLE)  # the outcome policy's action rules may select it by name
 
 
 class VcqaAgentConfig(BaseResponsesAPIAgentConfig):
