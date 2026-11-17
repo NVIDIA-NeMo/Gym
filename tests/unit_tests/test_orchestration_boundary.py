@@ -49,23 +49,7 @@ SCANNED_ROOTS = [
 ]
 ALLOWED_IMPORTERS = {CORE / "cli" / "main.py"}
 
-KNOWN_VIOLATIONS = {
-    ("nemo_gym/cli/eval.py", "nemo_gym.orchestration.recovery"),
-    ("nemo_gym/cli/utils.py", "nemo_gym.orchestration.executors.resume_script"),
-    ("nemo_gym/eval/rollout_reverification.py", "nemo_gym.orchestration.recovery"),
-    ("resources_servers/agentic_turn_simulation/tests/test_app.py", "nemo_gym.orchestration.recovery"),
-    ("resources_servers/bbq/tests/test_app.py", "nemo_gym.orchestration.recovery"),
-    ("resources_servers/deepswe/tests/test_app.py", "nemo_gym.orchestration.recovery"),
-    ("resources_servers/deepswe_external1/tests/test_app.py", "nemo_gym.orchestration.recovery"),
-    ("resources_servers/gdp_pdf/tests/test_app.py", "nemo_gym.orchestration.recovery"),
-    ("resources_servers/math_with_autograder/tests/test_app.py", "nemo_gym.orchestration.recovery"),
-    ("resources_servers/physics_judge/tests/test_app.py", "nemo_gym.orchestration.recovery"),
-    (
-        "responses_api_agents/harbor_agent_general/tests/test_skillsbench_observations.py",
-        "nemo_gym.orchestration.recovery",
-    ),
-    ("responses_api_agents/miniswe_sandboxed_agent/tests/test_server.py", "nemo_gym.orchestration.recovery"),
-}
+KNOWN_VIOLATIONS: set[tuple[str, str]] = set()
 
 
 def _is_orchestration(module: str) -> bool:

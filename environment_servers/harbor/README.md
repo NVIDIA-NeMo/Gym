@@ -178,9 +178,9 @@ byte with a fixture held outside the agent workdir.
 `data/example.jsonl` contains their materialized rows. `data/example_rollouts.jsonl` records actual
 Qwen2.5-0.5B-Instruct commands, execution results, and verifier outputs; `data/example_metrics.json`
 records their measured scores and runtime. These are smoke examples from a single-command harness,
-not a Hermes benchmark. They used llama.cpp on CPU and Enroot sandboxes with an in-process handoff
-because Enroot cannot serialize sandbox access. Provider expiration and the distributed handoff
-were not exercised by these examples.
+not a Hermes benchmark. They used llama.cpp on CPU and Enroot sandboxes with an in-process handoff,
+recorded before the Enroot provider supported `serialize()` and `connect()`. Provider expiration and
+the distributed handoff were not exercised by these examples.
 
 To run the bundled tasks with Hermes and a configured sandbox provider and model:
 

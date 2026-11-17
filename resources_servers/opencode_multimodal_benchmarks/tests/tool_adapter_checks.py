@@ -63,7 +63,10 @@ class AdapterChecks:
         )
         instances = processor.load_and_validate_server_instance_configs(settings, parsed)
         paths = processor._collate_samples_single_type(
-            "validation", instances, task_data_validation=settings.effective_task_data_validation
+            "validation",
+            instances,
+            output_dir=tmp_path / "prepared",
+            task_data_validation=settings.effective_task_data_validation,
         )
         return [json.loads(line) for path in paths for line in path.read_text().splitlines()]
 

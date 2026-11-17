@@ -31,6 +31,7 @@ import posixpath
 import shlex
 import shutil
 import signal
+import socket
 import stat
 import tempfile
 import uuid
@@ -245,6 +246,15 @@ def _translate_docker_uri(image: str) -> str:
     non-JSON and the import fails. Dropping them lets enroot use its configured
     Hub default (e.g. ``docker://swebench/foo:tag``).
     """
+    # Enroot before 4.0 reads the text before '@' as a registry user, so an OCI
+    # digest reference fails to import. Enroot 3.1 and later accept the digest
+    # where the tag goes, as the manifest reference. A digest supersedes a tag.
+    # Only a sha256 digest after the last '@' counts; Enroot's own USER@ prefix stays.
+    repository, digest_separator, digest = image.rpartition("@")
+    if digest_separator and digest.startswith("sha256:"):
+        if repository.rfind(":") > repository.rfind("/"):
+            repository = repository.rsplit(":", 1)[0]
+        image = f"{repository}:{digest}"
     first, sep, rest = image.partition("/")
     if sep and first in DOCKER_HUB_HOSTS:
         return f"docker://{rest}"
@@ -641,8 +651,16 @@ class EnrootProvider:
                 await asyncio.sleep(probe.stable_delay_s)
 
     def _kill_start_group(self, instance: _EnrootInstance) -> None:
-        """Best-effort SIGTERM then SIGKILL of the detached start's process group."""
+        """Best-effort SIGTERM then SIGKILL of the detached start's process group.
+
+        A handle rebuilt by ``connect()`` has no ``proc`` and never reaped the
+        group, so it signals the group only while its leader still carries the
+        container marker; a process-group ID reused after the creator stopped
+        is left alone.
+        """
         if instance.start_pgid is None:
+            return
+        if instance.proc is None and not self._pid_has_container_marker(instance.start_pgid, instance.name):
             return
         for sig in (signal.SIGTERM, signal.SIGKILL):
             with contextlib.suppress(ProcessLookupError):
@@ -672,6 +690,91 @@ class EnrootProvider:
         the wrong namespace.
         """
         return name in _read_proc_cmdline(pid)
+
+    async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, object]:
+        """Share a running sandbox with another worker on the same host and UID.
+
+        The descriptor belongs to the trusted control plane. Both workers must
+        use the same Enroot data/runtime directories. The creator retains
+        ownership; a borrower releases its client with ``disconnect()``.
+        ``scope`` does not grant a separate lease for this local provider.
+
+        The sandbox environment stays out of the descriptor because it may hold
+        task secrets. ``enroot exec`` builds each command's environment from the
+        init process's ``/proc/<pid>/environ``, so a borrower still sees it.
+        """
+        instance = handle.raw
+        if instance.container_pid is None or not self._pid_has_container_marker(instance.container_pid, instance.name):
+            raise RuntimeError(f"Enroot sandbox {instance.name!r} is no longer running")
+        return {
+            "provider": self.name,
+            "sandbox_id": instance.name,
+            "hostname": socket.gethostname(),
+            "uid": os.getuid(),
+            "data_path": self._enroot_env["ENROOT_DATA_PATH"],
+            "runtime_path": self._enroot_env["ENROOT_RUNTIME_PATH"],
+            "container_pid": instance.container_pid,
+            "start_pgid": instance.start_pgid,
+            "staging_dir": str(instance.staging_dir),
+            "mount_point": instance.mount_point,
+            "sqsh_path": str(instance.sqsh_path),
+            "image": instance.image,
+        }
+
+    async def connect(self, descriptor: Mapping[str, object]) -> SandboxHandle:
+        """Rebuild a handle to a running sandbox from a :meth:`serialize_handle` descriptor.
+
+        Nothing is created or restarted. The descriptor must come from this host
+        and UID with the same Enroot data and runtime paths, and its staging
+        directory must still exist. Release the handle with
+        ``AsyncSandbox.disconnect()``; ``stop()`` would tear down the creator's
+        sandbox.
+
+        Raises:
+            ValueError: the descriptor is malformed or was made on another host,
+                UID or set of Enroot paths.
+            RuntimeError: the container init has exited or its PID was reused.
+        """
+        if descriptor.get("provider") != self.name:
+            raise ValueError("Enroot requires a full serialized descriptor, not a bare sandbox id")
+        if descriptor.get("hostname") != socket.gethostname() or descriptor.get("uid") != os.getuid():
+            raise ValueError("Enroot reconnect requires the same host and UID as the creator")
+        for key in ("data_path", "runtime_path"):
+            if descriptor.get(key) != self._enroot_env[f"ENROOT_{key.upper()}"]:
+                raise ValueError(f"Enroot reconnect requires the creator's {key}")
+        for key in ("sandbox_id", "staging_dir", "mount_point", "sqsh_path", "image"):
+            if not isinstance(descriptor.get(key), str) or not descriptor[key]:
+                raise ValueError(f"Enroot descriptor requires a non-empty {key}")
+        name = str(descriptor["sandbox_id"])
+        if not name.startswith(CONTAINER_NAME_PREFIX):
+            raise ValueError(f"Enroot descriptor sandbox_id {name!r} is not a Gym container name")
+        pid = descriptor.get("container_pid")
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            raise ValueError("Enroot descriptor requires a positive container_pid")
+        if not self._pid_has_container_marker(pid, name):
+            raise RuntimeError(f"Enroot sandbox {name!r} is no longer running (PID {pid} stale or reused)")
+        staging = Path(str(descriptor["staging_dir"]))
+        if not staging.is_absolute() or not staging.is_dir():
+            raise ValueError("Enroot staging directory is unavailable")
+        mount_point = str(descriptor["mount_point"])
+        if not mount_point.startswith("/"):
+            raise ValueError("Invalid Enroot mount point")
+        pgid = descriptor.get("start_pgid")
+        if pgid is not None and (not isinstance(pgid, int) or isinstance(pgid, bool) or pgid <= 0):
+            raise ValueError("Enroot descriptor start_pgid must be a positive integer or null")
+        return SandboxHandle(
+            sandbox_id=name,
+            provider_name=self.name,
+            raw=_EnrootInstance(
+                name=name,
+                sqsh_path=Path(str(descriptor["sqsh_path"])),
+                staging_dir=staging,
+                mount_point=mount_point,
+                image=str(descriptor["image"]),
+                container_pid=pid,
+                start_pgid=pgid,
+            ),
+        )
 
     async def exec(
         self,

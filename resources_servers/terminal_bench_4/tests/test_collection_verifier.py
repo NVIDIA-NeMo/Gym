@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import os
 import re
 import shutil
 from types import SimpleNamespace
@@ -244,6 +245,41 @@ async def test_verifier_nonzero_exit_with_official_zero_is_completed(tmp_path):
     assert diagnostics[0]["return_code"] == 4
 
 
+async def test_verifier_without_reward_still_keeps_its_logs(tmp_path):
+    cfg = TaskSettings.model_validate(
+        {"environment": {"docker_image": "a"}, "verifier": {"environment": {"docker_image": "v"}}}
+    )
+    env, main, _ = environment(tmp_path / "verifier", cfg)
+    logs = main.path("/logs/verifier")
+    main.path("/tests/test.sh").write_text(f"#!/bin/sh\necho 'worker setup failed' > {logs}/why.txt\nexit 70\n")
+    diagnostics = []
+    with pytest.raises(RewardFileNotFoundError):
+        await run_verifier(env, tmp_path / "result", diagnostics)
+    assert (tmp_path / "result/verifier/why.txt").read_text() == "worker setup failed\n"
+    assert diagnostics[0]["return_code"] == 70
+
+
+async def test_missing_reward_log_recovery_stops_at_the_verifier_deadline(tmp_path):
+    cfg = TaskSettings.model_validate(
+        {"environment": {"docker_image": "a"}, "verifier": {"environment": {"docker_image": "v"}}}
+    )
+    env, main, _ = environment(tmp_path / "verifier", cfg)
+    main.path("/tests/test.sh").write_text("#!/bin/sh\nexit 70\n")
+
+    async def stalled(source, target):
+        await asyncio.Event().wait()
+
+    main.download = stalled
+    diagnostics = []
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(RewardFileNotFoundError):
+        # The outer bound only keeps a regression from hanging the suite.
+        await asyncio.wait_for(run_verifier(env, tmp_path / "result", diagnostics, timeout_sec=0.5), 10)
+    assert asyncio.get_running_loop().time() - started < 5
+    transfer = [entry for entry in diagnostics if entry.get("operation") == "verifier_artifact_transfer"]
+    assert transfer and transfer[0]["exception_type"] == "TimeoutError"
+
+
 @pytest.mark.parametrize(
     "report,expected",
     [
@@ -434,6 +470,40 @@ async def test_transfer_fallbacks_preserve_file_bytes_and_empty_directories(tmp_
         await download_dir(box, "/app/output", tmp_path / "excluded", exclude=["*.tmp"])
     with pytest.raises(RuntimeError, match="list"):
         await download_dir(box, "/app/missing", tmp_path / "missing")
+
+
+async def test_collection_skips_only_unsafe_entries_and_keeps_the_rest(tmp_path):
+    cfg = TaskSettings.model_validate(
+        {
+            "environment": {"docker_image": "a"},
+            "verifier": {"environment": {"docker_image": "v"}},
+            "artifacts": ["/app/output"],
+        }
+    )
+    env, main, _ = environment(tmp_path / "agent", cfg)
+    output = main.path("/app/output")
+    (output / "sub").mkdir(parents=True)
+    (output / "sub/result.txt").write_text("answer")
+    (output / "inside").symlink_to("sub/result.txt")
+    (output / "solution").symlink_to("/etc/passwd")
+    (output / "escape").symlink_to("../../tests")
+    # A hard link to a refused symlink must not bring the outside link back.
+    os.link(output / "solution", output / "solution-hardlink", follow_symlinks=False)
+    os.mkfifo(output / "pipe")
+    (output / "tool").write_text("#!/bin/sh\n")
+    (output / "tool").chmod(0o6755)
+
+    records = await collect(env, tmp_path / "artifacts", [])
+
+    copied = tmp_path / "artifacts/app/output"
+    assert (copied / "sub/result.txt").read_text() == "answer"
+    assert (copied / "inside").is_symlink() and (copied / "inside").read_text() == "answer"
+    for name in ("solution", "solution-hardlink", "escape", "pipe"):
+        assert not (copied / name).exists() and not (copied / name).is_symlink()
+    assert (copied / "tool").stat().st_mode & 0o7777 == 0o755
+    record = next(record for record in records if record["source"] == "/app/output")
+    assert record["status"] == "ok"
+    assert len(record["refused"]) >= 3
 
 
 async def test_restore_file_and_best_effort_collection_errors(tmp_path):
