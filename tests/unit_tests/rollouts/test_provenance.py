@@ -170,6 +170,32 @@ def test_review_provenance_bounds_row_decoding_but_hashes_all_bytes(tmp_path: Pa
     assert record.input_sampling_rows == 100
 
 
+def test_an_explicit_null_sampling_cap_reads_differently_from_an_unset_one() -> None:
+    record = provenance.build_provenance(
+        {"policy": {"max_tokens": None, "temperature": 0.6}, "judge": {"temperature": 0.0}}
+    )
+    assert record.sampling_parameters == {
+        "policy": {"max_tokens": None, "temperature": 0.6},
+        "judge": {"temperature": 0.0},
+    }
+
+
+def test_concurrency_limits_are_recorded_by_path() -> None:
+    record = provenance.build_provenance(
+        {
+            "num_samples_in_parallel": 64,
+            "policy_model": {"responses_api_models": {"openai_model": {"max_concurrent_requests": 128}}},
+            "episodes": {"environment_servers": {"legacy_agent": {"max_concurrent_episodes": None}}},
+            "judge": {"resources_servers": {"math_with_judge": {"library_verifier_max_concurrency": True}}},
+        }
+    )
+    assert record.concurrency_limits == {
+        provenance.TOP_LEVEL_PATH: {"num_samples_in_parallel": 64},
+        "policy_model.responses_api_models.openai_model": {"max_concurrent_requests": 128},
+        "episodes.environment_servers.legacy_agent": {"max_concurrent_episodes": None},
+    }
+
+
 def test_review_provenance_excludes_boolean_sampling_values() -> None:
     record = provenance.build_provenance({"seed": True, "temperature": False, "top_p": 0.9})
     assert record.sampling_parameters == {provenance.TOP_LEVEL_PATH: {"top_p": 0.9}}
