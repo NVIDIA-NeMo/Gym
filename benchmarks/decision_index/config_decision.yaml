@@ -30,5 +30,7 @@ decision_index_decision_environment_server:
   _inherit_from: decision_index_environment_server
   environment_servers:
     single_agent_turn_legacy:
+      resources_server:
+        name: decision_index_decision_resources_server
       agent_server:
         name: decision_index_decision_agent

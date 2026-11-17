@@ -12,8 +12,8 @@ from typing import Any, ClassVar, Dict, Literal, Optional
 
 from pydantic import ConfigDict, Field
 
-from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,

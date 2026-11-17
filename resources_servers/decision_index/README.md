@@ -26,7 +26,7 @@ the engine's option probabilities, per scored question, overall (`decision_index
 Decision-mode rows without probabilities are excluded and counted (`decision_index_calibration_excluded_rows`);
 LLM-mode rows are ignored. Logic: `verifier.calibration_items` / `verifier.calibration_metrics`.
 
-The kit is installed from `requirements.txt` (`apolinario/decision-index@9eb2dbe2`, MIT). Its import name is also
+The kit is installed from `pyproject.toml` (`apolinario/decision-index@9eb2dbe2`, MIT). Its import name is also
 `decision_index`, so `verifier.load_kit()` binds it from the installed distribution.
 
 ## Tests

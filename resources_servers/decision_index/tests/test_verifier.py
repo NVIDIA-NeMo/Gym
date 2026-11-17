@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from nemo_gym.client import ServerClient
-from nemo_gym.config.config_types import AggregateMetricsRequest
+from nemo_gym.config import AggregateMetricsRequest
 
 from ..app import (
     DecisionIndexResourcesServer,

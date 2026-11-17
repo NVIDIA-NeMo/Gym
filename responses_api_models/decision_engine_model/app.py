@@ -26,7 +26,7 @@ import aiohttp
 from fastapi import HTTPException
 from pydantic import Field
 
-from nemo_gym.client.http_client import request
+from nemo_gym.client import request
 from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
