@@ -268,6 +268,103 @@ def test_private_and_body_changes_keep_the_public_surface(tmp_path: Path) -> Non
     assert not [reason for reason in evidence if reason.startswith("export")]
 
 
+ALIASED_GETTER = f"{GETTER}\n    alias = value\n\n    @value.getter\n    def value(self) -> str:\n        return ''\n"
+MOVED_ALIAS = f"{GETTER}\n    @value.getter\n    def value(self) -> str:\n        return ''\n\n    alias = value\n"
+CHAINED = "class Thing:\n    size = _cached_size = 1\n"
+TWICE = "def helper(a: int) -> int:\n    return a\n\n\ndef helper(a: str) -> str:\n    return a\n"
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        (f"class Thing:\n{ALIASED_GETTER}", f"class Thing:\n{MOVED_ALIAS}"),
+        (f"class Thing:\n{MOVED_ALIAS}", f"class Thing:\n{ALIASED_GETTER}"),
+    ],
+)
+def test_an_alias_records_its_target_where_it_is_bound(tmp_path: Path, before: str, after: str) -> None:
+    tier, evidence = grade(tmp_path, {"nemo_gym/core/things.py": before}, {"nemo_gym/core/things.py": after})
+    assert tier == "high"
+    assert "export changed: nemo_gym.core.Thing" in evidence
+
+
+@pytest.mark.parametrize(
+    ("after", "tier"),
+    [
+        (CHAINED.replace("1", "2"), "high"),
+        (CHAINED.replace("_cached_size", "_other_cache"), "low"),
+        (CHAINED + "    _private = 1\n", "low"),
+    ],
+)
+def test_public_targets_of_a_chained_assignment_are_fingerprinted_alone(tmp_path: Path, after: str, tier: str) -> None:
+    graded, evidence = grade(tmp_path, {"nemo_gym/core/things.py": CHAINED}, {"nemo_gym/core/things.py": after})
+    assert graded == tier
+    assert ("export changed: nemo_gym.core.Thing" in evidence) == (tier == "high")
+
+
+@pytest.mark.parametrize(
+    ("after", "tier"),
+    [
+        (TWICE.replace("a: str", "a: str, b: str"), "high"),
+        (TWICE.replace("-> str", "-> bytes"), "high"),
+        (TWICE.replace("    return a\n", "    return (a)\n"), "low"),
+        (TWICE.replace("a: str", "a: str, b: str") + "\n\nhelper: object\n", "high"),
+    ],
+)
+def test_the_last_definition_of_an_export_is_its_contract(tmp_path: Path, after: str, tier: str) -> None:
+    before = {"nemo_gym/core/reexports.py": TWICE}
+    graded, evidence = grade(tmp_path, before, {"nemo_gym/core/reexports.py": after})
+    assert graded == tier
+    assert ("export changed: nemo_gym.core.helper" in evidence) == (tier == "high")
+
+
+@pytest.mark.parametrize(
+    ("export", "path", "statement"),
+    [
+        ("reexports", "nemo_gym/core/reexports.py", "from .helpers import helper\n"),
+        ("sub.reexports", "nemo_gym/core/sub/reexports.py", "from ..helpers import helper\n"),
+        ("sub", "nemo_gym/core/sub/__init__.py", "from ..helpers import helper\n"),
+    ],
+)
+def test_relative_reexports_follow_their_target(tmp_path: Path, export: str, path: str, statement: str) -> None:
+    init = {
+        "nemo_gym/core/__init__.py": f'_PUBLIC_API = {{"Thing": "things", "helper": "{export}"}}\n',
+        path: statement,
+    }
+    changed = {**init, "nemo_gym/core/helpers.py": "def helper(a: str, b: str) -> str:\n    return a\n"}
+    tier, evidence = grade(tmp_path / "signature", init, changed)
+    assert (tier, "export changed: nemo_gym.core.helper" in evidence) == ("high", True)
+    body = {**init, "nemo_gym/core/helpers.py": "def helper(a: str) -> str:\n    return a.strip()\n"}
+    assert grade(tmp_path / "body", init, body)[0] == "low"
+    absolute = {**init, path: "from nemo_gym.core.helpers import helper\n"}
+    assert grade(tmp_path / "spelling", init, absolute)[0] == "low"
+
+
+REASSIGNED = API["nemo_gym/core/__init__.py"] + '_PUBLIC_API = {"Thing": "things"}\n'
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "reason"),
+    [
+        ({}, {"nemo_gym/core/__init__.py": REASSIGNED}, "export removed: nemo_gym.core.helper"),
+        ({"nemo_gym/core/__init__.py": REASSIGNED}, {}, "export added: nemo_gym.core.helper"),
+    ],
+)
+def test_only_the_last_public_api_assignment_counts(
+    tmp_path: Path, before: dict[str, str], after: dict[str, str], reason: str
+) -> None:
+    tier, evidence = grade(tmp_path, before, after)
+    assert tier == "high"
+    assert reason in evidence
+
+
+def test_an_annotation_only_public_api_keeps_the_exports(tmp_path: Path) -> None:
+    tree = make_tree(
+        tmp_path,
+        {**API, "nemo_gym/core/__init__.py": API["nemo_gym/core/__init__.py"] + "_PUBLIC_API: dict[str, str]\n"},
+    )
+    assert pr_risk.public_api(tree) == {("nemo_gym.core", "Thing"): "things", ("nemo_gym.core", "helper"): "reexports"}
+
+
 PROTECTED = ("pyproject.toml", "uv.lock", ".github/workflows/*", "SECURITY.md")
 
 

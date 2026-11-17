@@ -37,8 +37,10 @@ Standard library only, so it runs on Python 3.12 or newer without the repository
 
 import argparse
 import ast
+import copy
 import difflib
 import filecmp
+import hashlib
 import os
 import re
 import sys
@@ -149,16 +151,19 @@ def assigns(node: ast.stmt, name: str) -> bool:
 
 
 def public_api(tree: Path) -> dict[tuple[str, str], str]:
-    """Map each ``(package, name)`` that a ``nemo_gym`` package lists in ``_PUBLIC_API`` to its submodule."""
+    """Map each ``(package, name)`` that a ``nemo_gym`` package lists in ``_PUBLIC_API`` to its submodule.
+
+    Only the package's last ``_PUBLIC_API`` assignment with a value counts, as it does at import time.
+    """
     exports = {}
     for init in sorted((tree / "nemo_gym").rglob("__init__.py")):
         package = ".".join(init.parent.relative_to(tree).parts)
         module = parse(init)
-        for node in module.body if module else []:
-            if assigns(node, "_PUBLIC_API") and isinstance(node.value, ast.Dict):
-                for key, value in zip(node.value.keys, node.value.values, strict=True):
-                    if isinstance(key, ast.Constant) and isinstance(value, ast.Constant):
-                        exports[(package, key.value)] = value.value
+        assigned = [node for node in (module.body if module else []) if assigns(node, "_PUBLIC_API") and node.value]
+        if assigned and isinstance(assigned[-1].value, ast.Dict):
+            for key, value in zip(assigned[-1].value.keys, assigned[-1].value.values, strict=True):
+                if isinstance(key, ast.Constant) and isinstance(value, ast.Constant):
+                    exports[(package, key.value)] = value.value
     return exports
 
 
@@ -168,76 +173,129 @@ def module_path(tree: Path, module: str) -> Path:
     return stem / "__init__.py" if stem.is_dir() else stem.with_suffix(".py")
 
 
-def is_public_member(node: ast.stmt) -> bool:
-    """Return whether a class-body statement is part of the class's public surface, including special methods."""
-    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-        special = node.name.startswith("__") and node.name.endswith("__")
-        return not node.name.startswith("_") or special
-    targets = node.targets if isinstance(node, ast.Assign) else [getattr(node, "target", None)]
-    return isinstance(node, ast.Assign | ast.AnnAssign) and not any(
-        isinstance(target, ast.Name) and target.id.startswith("_") for target in targets
-    )
+def is_public(name: str) -> bool:
+    """Return whether a class member name is public: no leading underscore, or a special ``__name__``."""
+    return not name.startswith("_") or (name.startswith("__") and name.endswith("__"))
 
 
-def bound_names(node: ast.stmt) -> list[str]:
-    """Return the plain names a public class-body statement binds."""
-    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-        return [node.name]
-    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-    return [target.id for target in targets if isinstance(target, ast.Name)]
-
-
-def class_members(node: ast.ClassDef) -> list[str]:
-    """Fingerprint a class's public members so that moving an independent method changes nothing.
-
-    Fields keep their declaration order, which can define a positional constructor. Every member is also grouped by the
-    name it binds and the groups are sorted, while each group keeps its order, so a property's getter and setter, or a
-    later definition that replaces an earlier one, stay ordered.
-    """
-    members = [item for item in node.body if is_public_member(item)]
-    fields = [signature(item) for item in members if isinstance(item, ast.Assign | ast.AnnAssign)]
-    groups: dict[str, list[str]] = {}
-    for item in members:
-        for name in bound_names(item):
-            groups.setdefault(name, []).append(signature(item))
-    return [*fields, *(fingerprint for name in sorted(groups) for fingerprint in groups[name])]
-
-
-def signature(node: ast.stmt) -> str:
-    """Fingerprint a definition's contract: a function's signature, a class's surface or a constant's value."""
-    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-        returns = ast.dump(node.returns) if node.returns else "None"
-        header = [ast.dump(part) for part in (*node.type_params, *node.decorator_list)]
-        return "\n".join([*header, f"{type(node).__name__} {node.name}({ast.dump(node.args)}) -> {returns}"])
-    if isinstance(node, ast.ClassDef):
-        parts = (*node.type_params, *node.decorator_list, *node.bases, *node.keywords)
-        header = [ast.dump(part) for part in parts]
-        return "\n".join([f"class {node.name}", *header, *class_members(node)])
+def resolved(node: ast.AST | None, scope: dict[str, str]) -> str:
+    """Dump ``node`` with each name already bound in ``scope`` replaced by a digest of that binding's fingerprint."""
+    if node is None:
+        return "None"
+    node = copy.deepcopy(node)
+    for child in ast.walk(node):
+        if isinstance(child, ast.Name) and child.id in scope:
+            child.id = "<" + hashlib.sha256(scope[child.id].encode()).hexdigest()[:16] + ">"
     return ast.dump(node)
 
 
-def binds(node: ast.stmt, name: str) -> bool:
-    """Return whether a top-level statement binds ``name``."""
-    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.TypeAlias):
-        return getattr(node.name, "id", node.name) == name
+def absolute_module(node: ast.ImportFrom, context: tuple[str, bool]) -> str:
+    """Return the module an import names, resolving a relative import against its module's package."""
+    if not node.level:
+        return node.module or ""
+    module, is_package = context
+    package = module.split(".") if is_package else module.split(".")[:-1]
+    if node.level - 1 >= len(package):
+        return "." * node.level + (node.module or "")
+    return ".".join([*package[: len(package) - node.level + 1], *([node.module] if node.module else [])])
+
+
+def class_fingerprint(node: ast.ClassDef, scope: dict[str, str], context: tuple[str, bool]) -> str:
+    """Fingerprint a class's header, the order of its public fields and the effective binding of each public member."""
+    header = [resolved(part, scope) for part in (*node.decorator_list, *node.type_params, *node.bases, *node.keywords)]
+    members = scope_bindings(node.body, context)[0]
+    fields = dict.fromkeys(
+        target.id
+        for item in node.body
+        if isinstance(item, ast.Assign | ast.AnnAssign)
+        for target in ast.walk(item)
+        if isinstance(target, ast.Name) and isinstance(target.ctx, ast.Store) and is_public(target.id)
+    )
+    public = [f"{name}: {members[name]}" for name in sorted(members) if is_public(name)]
+    return "\n".join([f"class {node.name}", *header, f"fields {list(fields)}", *public])
+
+
+def statement_bindings(
+    node: ast.stmt, scope: dict[str, str], context: tuple[str, bool]
+) -> list[tuple[str, str, tuple[str, str] | None]]:
+    """Return each ``(name, fingerprint, internal import target)`` a direct statement of a scope binds."""
+    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+        parts = (*node.decorator_list, *node.type_params, node.args, node.returns)
+        return [
+            (node.name, f"{type(node).__name__}(" + ", ".join(resolved(part, scope) for part in parts) + ")", None)
+        ]
+    if isinstance(node, ast.ClassDef):
+        return [(node.name, class_fingerprint(node, scope, context), None)]
     if isinstance(node, ast.ImportFrom):
-        return any((alias.asname or alias.name) == name for alias in node.names)
-    return assigns(node, name)
+        module = absolute_module(node, context)
+        internal = module.startswith("nemo_gym.")
+        return [
+            (
+                alias.asname or alias.name,
+                f"from {module} import {alias.name}",
+                (module, alias.name) if internal else None,
+            )
+            for alias in node.names
+        ]
+    if isinstance(node, ast.Import):
+        return [(alias.asname or alias.name.split(".")[0], f"import {alias.name}", None) for alias in node.names]
+    if isinstance(node, ast.AnnAssign) and node.value is None:
+        name = getattr(node.target, "id", None)
+        return [] if name is None or name in scope else [(name, f"declared {resolved(node.annotation, scope)}", None)]
+    if isinstance(node, ast.Assign | ast.AnnAssign | ast.TypeAlias):
+        value = resolved(node.value, scope)
+        if isinstance(node, ast.AnnAssign):
+            value = f"{resolved(node.annotation, scope)} = {value}"
+        targets = (
+            node.targets
+            if isinstance(node, ast.Assign)
+            else [node.target if isinstance(node, ast.AnnAssign) else node.name]
+        )
+        return [
+            (name.id, value if name is target else f"{ast.dump(target)} = {value}", None)
+            for target in targets
+            for name in ast.walk(target)
+            if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Store)
+        ]
+    return []
+
+
+def scope_bindings(
+    body: list[ast.stmt], context: tuple[str, bool]
+) -> tuple[dict[str, str], dict[str, tuple[str, str]]]:
+    """Run a scope's direct statements in order and fingerprint each name's effective binding.
+
+    A later binding replaces an earlier one, and each fingerprint resolves names bound earlier in the scope, so moving
+    an independent definition changes nothing while an alias records what its target was where it was bound. An
+    annotation-only declaration binds only an unbound name. Also return the names whose effective binding imports
+    another ``nemo_gym`` module's name.
+    """
+    scope: dict[str, str] = {}
+    imports: dict[str, tuple[str, str]] = {}
+    for node in body:
+        for name, fingerprint, target in statement_bindings(node, scope, context):
+            scope[name] = fingerprint
+            if target:
+                imports[name] = target
+            else:
+                imports.pop(name, None)
+    return scope, imports
+
+
+@cache
+def module_bindings(tree: Path, module: str) -> tuple[dict[str, str], dict[str, tuple[str, str]]]:
+    """Fingerprint the effective top-level bindings of a module inside ``tree``."""
+    path = module_path(tree, module)
+    parsed = parse(path)
+    return scope_bindings(parsed.body if parsed else [], (module, path.name == "__init__.py"))
 
 
 def export_signature(tree: Path, module: str, name: str, hops: int = 3) -> str:
-    """Fingerprint ``name`` as defined in ``module``, following re-exports from other ``nemo_gym`` modules."""
-    parsed = parse(module_path(tree, module))
-    for node in parsed.body if parsed else []:
-        if not binds(node, name):
-            continue
-        if not isinstance(node, ast.ImportFrom):
-            return signature(node)
-        alias = next(alias for alias in node.names if (alias.asname or alias.name) == name)
-        if (node.module or "").startswith("nemo_gym.") and hops:
-            return export_signature(tree, node.module, alias.name, hops - 1)
-        return ast.dump(ast.ImportFrom(module=node.module, names=[alias], level=node.level))
-    return f"undefined {module}.{name}"
+    """Fingerprint the effective binding of ``name`` in ``module``, following ``nemo_gym`` re-exports a few hops."""
+    scope, imports = module_bindings(tree, module)
+    if name in imports and hops:
+        return export_signature(tree, *imports[name], hops - 1)
+    return scope.get(name, f"undefined {module}.{name}")
 
 
 def public_api_changes(base: Path, head: Path, changed: list[str]) -> list[str]:
