@@ -118,6 +118,25 @@ class TestPrepareDialect:
         assert [r["id"] for r in rows] == [0, 1]
 
 
+class TestPrepareCatalogTools:
+    def test_rows_offer_the_catalog_tools_and_no_schema(self, prepared, tmp_path):
+        rows = prepared([_entry(question="How many students?")], catalog_tools=True)
+
+        assert [tool["name"] for tool in rows[0]["responses_create_params"]["tools"]] == [
+            "retrieve",
+            "run_sql",
+            "submit",
+        ]
+        assert "sql_context" not in rows[0]
+        # The agent searches the catalog, so no schema is built for the rows.
+        assert _FakeDbHandle.instances == []
+        assert [p.name for p in (tmp_path / "data").iterdir()] == ["birdbench_sqlite_dev_catalog_tools.jsonl"]
+
+    def test_catalog_tools_run_sqlite_only(self, prepared):
+        with pytest.raises(ValueError, match="SQLite"):
+            prepared([_entry()], dialect="spark", catalog_tools=True)
+
+
 class TestBuildUberset:
     @staticmethod
     def _train(n):
@@ -193,7 +212,14 @@ class TestCli:
             "dialect": "spark",
             "split": "train",
             "train_dir": None,
+            "catalog_tools": False,
         }
+
+    def test_catalog_tools_flag_is_forwarded(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(birdbench_prepare, "prepare", lambda **kw: seen.update(kw))
+        birdbench_prepare.main(["--catalog-tools"])
+        assert seen["catalog_tools"] is True
 
     def test_defaults_are_dev_sqlite_with_evidence(self, monkeypatch):
         seen = {}

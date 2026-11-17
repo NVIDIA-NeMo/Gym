@@ -244,7 +244,7 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
                 **kwargs,
             )
 
-        extracted_sql = extract_sql_from_response(generated)
+        extracted_sql = self.answer_sql(body)
 
         if extracted_sql is None:
             # No fenced ```sql``` block at all -- nothing to execute. Scored as a hard 0
@@ -343,6 +343,10 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
             )
 
         return observe_programmatic_grading(_grade)
+
+    def answer_sql(self, body: BirdSqlVerifyRequest) -> Optional[str]:
+        """The query the rollout answers with: the last fenced ``sql`` block of its output, or None without one."""
+        return extract_sql_from_response(body.response.output_text or "")
 
     def _log_execution_failure(self, body: BirdSqlVerifyRequest, failure_reason: FailureCode) -> None:
         """Log each gold/pred SQL error or timeout as it happens, with running totals."""

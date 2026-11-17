@@ -138,3 +138,28 @@ other flags pass through to `gym eval run`.
 
 `rollouts.jsonl` has one row per rollout (prompt, response, reward, verifier fields like `extracted_sql` and
 `failure_reason`).
+
+## Catalog tools
+
+`catalog_tools.yaml` runs BIRD dev with [Auto Ontology](https://github.com/NVIDIA/auto-ontology)'s catalog tools in
+place of the schema in the prompt. The agent sees only the question and calls three tools:
+
+| Tool | What it does |
+|---|---|
+| `retrieve` | Searches the database's catalog: tables, columns, business terms, definitions and saved analyses |
+| `run_sql` | Checks a query against the catalog, then runs it read-only |
+| `submit` | Checks and runs the final query. An accepted submission ends the episode's tools |
+
+The `bird_sql` catalog Resources Server (`resources_servers/bird_sql/catalog_app.py`) serves the tools. It runs
+them in a sandbox for each episode, from a catalog image, and grades the last accepted submission with `bird_sql`'s
+rules. See `resources_servers/bird_sql/README.md`, "Catalog tools", for the image and the settings.
+
+```bash
+gym eval prepare --config benchmarks/birdbench/catalog_tools.yaml   # writes data/birdbench_sqlite_dev_catalog_tools.jsonl
+gym eval run --config benchmarks/birdbench/catalog_tools.yaml --model-type vllm_model --split benchmark \
+  --output results/catalog_tools/rollouts.jsonl ++bird_catalog_api_key=<key>
+```
+
+`bird_catalog_api_key` is the key of the embedding endpoint the catalog was built with: `retrieve` embeds each search.
+The rows offer the tools in `responses_create_params.tools`, and the prompt is `prompts/catalog_tools_sqlite.yaml`.
+The tools allow 24 calls per episode, as Auto Ontology's ReAct agent does; past that, only `submit` is served.

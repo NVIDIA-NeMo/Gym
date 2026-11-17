@@ -122,3 +122,45 @@ Per-difficulty subsets (via `compute_subset_metrics(field="difficulty")`):
 - `simple/pass@1[avg-of-k]/accuracy`
 - `moderate/pass@1[avg-of-k]/accuracy`
 - `challenging/pass@1[avg-of-k]/accuracy`
+
+## Catalog tools
+
+`catalog_app.py` is a second entrypoint: `bird_sql` plus three tools over
+[Auto Ontology](https://github.com/NVIDIA/auto-ontology)'s catalog of the BIRD databases, served as `direct_http`
+routes. `benchmarks/birdbench/catalog_tools.yaml` uses it.
+
+| Route | Auto Ontology function it calls |
+|---|---|
+| `POST /retrieve` (`query`, `kinds`) | `react.retrieve.retrieve` |
+| `POST /run_sql` (`sql`) | `react.run_sql.run_sql` |
+| `POST /submit` (`sql`, `response`, `assumptions`) | `react.loop.submit` |
+
+**One sandbox per episode.** At the seed the server starts a sandbox from `sandbox_config.image` and starts the
+catalog's Postgres in it. It also starts the episode's tool process, `catalog_tool_server.py`, which the sandbox gets
+through `SandboxSpec.files`. That process keeps one Auto Ontology `ToolContext` for the episode, so a tool call sees
+what earlier calls found. Each route call runs `catalog_tool_server.py call` in the sandbox. `verify` stops the
+sandbox, and so does closing the session or shutting the server down.
+
+**Grading.** `verify` grades the SQL of the last `submit` call that the server answered with `Accepted.`. A query in
+the answer's text is not graded. Grading reads only the rollout, so a saved rollout can be graded again without a
+sandbox.
+
+**The catalog image.** The image must have:
+
+- a Python with Auto Ontology installed (`catalog_python`);
+- a folder whose `.env` sets `CONNECTION_STRINGS` to the BIRD databases the catalog was built from, and the embedding
+  endpoint and model it used (`catalog_workdir`);
+- a command that starts the catalog's Postgres (`catalog_start_command`), with the `POSTGRES_*` settings in the
+  image's environment.
+
+The defaults match the image that
+[auto-ontology-eval](https://github.com/NVIDIA/auto-ontology-eval)'s `scripts/build_agent_image.sh` builds, which
+ingests and compiles the BIRD dev databases with Auto Ontology's own pipeline. `catalog_environment` passes settings
+that do not belong in an image, such as the embedding endpoint's key (`DEFAULT_MODELS_API_KEY`).
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `sandbox_provider`, `sandbox_config` | required | The sandbox of each episode: a provider block of the global config, and the image |
+| `max_tool_calls` | 24 | Tool calls an episode may make. Past it, only `submit` is served |
+| `setup_timeout_s`, `tool_timeout_s`, `cleanup_timeout_s` | 300, 120, 60 | Limits on the seed, each tool call, and stopping the sandbox |
+| `sandbox_ttl_s` | 7200 | How long the provider keeps a sandbox that was never stopped |

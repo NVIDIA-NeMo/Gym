@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# BIRD dev with Auto Ontology's catalog tools. The agent sees no schema: it calls retrieve, run_sql and submit on the
+# bird_sql catalog Resources Server (resources_servers/bird_sql/catalog_app.py), which runs them in a sandbox per
+# episode, from a catalog image. bird_sql grades the last accepted submission. See README.md, "Catalog tools".
+#
+#   gym eval prepare --config benchmarks/birdbench/catalog_tools.yaml
+#   gym eval run --config benchmarks/birdbench/catalog_tools.yaml --model-type vllm_model --split benchmark \
+#     --limit 200 --output results/birdbench_catalog_tools.jsonl ++bird_catalog_api_key=<key>
+
+config_paths:
+  - benchmarks/birdbench/config.yaml
+
+prepare_script_args:
+  catalog_tools: true
+
+# The image that holds Auto Ontology, the BIRD dev databases and their catalog (README.md), and the key of Auto
+# Ontology's embedding endpoint, which retrieve calls for each search.
+bird_catalog_image: auto-ontology-eval/agent:bird
+bird_catalog_api_key: ???
+
+# A local Docker sandbox. It needs no access to Gym's servers, only to the embedding endpoint.
+bird_catalog_sandbox:
+  default_metadata:
+    sandbox-api: docker-cli
+  docker:
+    create:
+      keepalive_shell: /bin/sh
+      keepalive_cmd: "while :; do sleep 2147483647; done"
+      start_timeout_s: 600
+      use_init: true
+      apply_resource_limits: true
+      publish_host: 127.0.0.1
+    exec:
+      default_timeout_s: 180
+
+birdbench_bird_sql_resources_server:
+  resources_servers:
+    bird_sql:
+      entrypoint: catalog_app.py
+      sandbox_provider: bird_catalog_sandbox
+      sandbox_config:
+        image: ${bird_catalog_image}
+      catalog_environment:
+        DEFAULT_MODELS_API_KEY: ${bird_catalog_api_key}
+
+birdbench_bird_sql_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      # Above the server's 24-call budget: past it the server serves only submit.
+      max_steps: 30
+      datasets:
+        - name: birdbench
+          type: benchmark
+          jsonl_fpath: benchmarks/birdbench/data/birdbench_sqlite_dev_catalog_tools.jsonl
+          prompt_config: benchmarks/birdbench/prompts/catalog_tools_sqlite.yaml
+          prepare_script: benchmarks/birdbench/prepare.py
+          prepare_project: benchmarks/birdbench
+          num_repeats: 1
+          taskset: birdbench

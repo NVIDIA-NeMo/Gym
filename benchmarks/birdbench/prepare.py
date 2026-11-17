@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from benchmarks.birdbench.build_db_values import DbHandle
+from resources_servers.bird_sql.catalog_tools import tool_definitions
 from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql, ensure_bird_train
 
 
@@ -57,9 +58,10 @@ VERIFIED_TRAIN_URL = "https://raw.githubusercontent.com/uiuc-kang-lab/ReViSQL/ma
 TRAIN_CORPUS_LIMIT_PER_COLUMN = 2000
 
 
-def output_fpath_for(dialect: str, split: str = "dev") -> Path:
-    """``data/birdbench_<dialect>_<split>.jsonl``."""
-    return DATA_DIR / f"birdbench_{dialect}_{split}.jsonl"
+def output_fpath_for(dialect: str, split: str = "dev", *, catalog_tools: bool = False) -> Path:
+    """``data/birdbench_<dialect>_<split>.jsonl``, or ``..._catalog_tools.jsonl`` for the catalog-tools rows."""
+    suffix = "_catalog_tools" if catalog_tools else ""
+    return DATA_DIR / f"birdbench_{dialect}_{split}{suffix}.jsonl"
 
 
 def build_uberset(train_entries: List[Dict[str, Any]], verified_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -144,6 +146,7 @@ def prepare(
     dialect: str = "sqlite",
     split: str = "dev",
     train_dir: Optional[str] = None,
+    catalog_tools: bool = False,
 ) -> Path:
     """Download BIRD dev (or read local train), produce the prepared jsonl for ``split``/``dialect``. Returns its path.
 
@@ -164,22 +167,29 @@ def prepare(
         split: ``dev`` (default; the 1534-task benchmark) or ``train`` (the uberset, see module docstring).
         train_dir: ``split="train"`` only: extracted BIRD ``train/`` directory holding ``train.json`` and
             ``train_databases/``. Default: downloaded by ``ensure_bird_train()``.
+        catalog_tools: Write rows for the ``bird_sql`` catalog server (``catalog_tools.yaml``): each offers its
+            tools (``retrieve``, ``run_sql``, ``submit``) and has no ``sql_context``, since the agent searches the
+            catalog instead. These rows go to their own file, see ``output_fpath_for``. SQLite only.
     """
     if dialect not in DIALECTS:
         raise ValueError(f"Unsupported dialect {dialect!r}; expected one of {DIALECTS}")
     if split not in SPLITS:
         raise ValueError(f"Unsupported split {split!r}; expected one of {SPLITS}")
-    output_fpath = output_fpath_for(dialect, split)
+    if catalog_tools and dialect != "sqlite":
+        raise ValueError("The catalog tools run SQLite queries; use dialect='sqlite'")
+    output_fpath = output_fpath_for(dialect, split, catalog_tools=catalog_tools)
     output_fpath.parent.mkdir(parents=True, exist_ok=True)
 
     databases_dir = databases_dir_for(split, train_dir)
     entries = load_entries(split, databases_dir)
     corpus_limit = TRAIN_CORPUS_LIMIT_PER_COLUMN if split == "train" else None
 
-    print("Building per-db schemas (types, PK/FK, descriptions, BM25 indexes)...")
     db_ids = sorted({entry["db_id"] for entry in entries})
     db_handles: Dict[str, DbHandle] = {}
-    for db_id in db_ids:
+    if not catalog_tools:
+        print("Building per-db schemas (types, PK/FK, descriptions, BM25 indexes)...")
+    # The catalog-tools rows show no schema, so they need no index.
+    for db_id in [] if catalog_tools else db_ids:
         print(f"Indexing {db_id} ...")
         db_path = databases_dir / db_id / f"{db_id}.sqlite"
         conn = sqlite3.connect(str(db_path))
@@ -208,12 +218,15 @@ def prepare(
             row = {
                 "question": question,
                 "gt_sql": entry["SQL"],
-                "sql_context": db_handles[db_id].sql_context_for_question(question),
                 # Train labels (ReViSQL's verified rows) carry no BIRD difficulty tag.
                 "difficulty": entry.get("difficulty"),
                 "db_id": db_id,
                 "id": i,
             }
+            if catalog_tools:
+                row["responses_create_params"] = {"tools": tool_definitions()}
+            else:
+                row["sql_context"] = db_handles[db_id].sql_context_for_question(question)
             f_out.write(json.dumps(row) + "\n")
             count += 1
 
@@ -230,6 +243,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     )
     parser.add_argument("--dscp", default="name_or_col_dscp", help="See prepare()'s `dscp` argument")
     parser.add_argument("--no-evidence", action="store_true", help="Do not prepend BIRD's `evidence` to the question")
+    parser.add_argument("--catalog-tools", action="store_true", help="See prepare()'s `catalog_tools` argument")
     args = parser.parse_args(argv)
     prepare(
         include_evidence=not args.no_evidence,
@@ -237,6 +251,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         dialect=args.dialect,
         split=args.split,
         train_dir=args.train_dir,
+        catalog_tools=args.catalog_tools,
     )
 
 
