@@ -1,0 +1,423 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""SaaS evaluation through the legacy_agent relay and native harness workers."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import os
+import signal
+import sys
+from pathlib import Path
+from typing import Literal
+
+from fastapi import HTTPException
+from pydantic import Field, PrivateAttr
+
+from nemo_gym.agents import AgentSessionConflictError, BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
+from nemo_gym.core import (
+    AGENT_COMMAND_NOT_ALLOWED,
+    AGENT_INVALID_OUTPUT,
+    AGENT_LIMIT,
+    AGENT_RUN_ERROR,
+    AGENT_TIMEOUT,
+    JUDGE_FAILED,
+    JUDGE_UNPARSEABLE,
+    MODEL_CONTEXT_LIMIT,
+    VERIFIER_ERROR,
+    FailureClass,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    OutcomeAction,
+    StageOutcomePolicyConfig,
+    StagePolicyConfig,
+    choose_stage_outcome,
+    maybe_rollout_id_from_run_body,
+)
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from responses_api_agents.saas_bench_agent.response import actor_response
+from responses_api_agents.saas_bench_agent.runtime import (
+    DEFAULT_BUNDLE_ROOT,
+    HARNESS_VERSIONS,
+    check_bundle_code,
+    configure_cache,
+)
+from responses_api_agents.saas_bench_agent.schemas import SaasBenchRunRequest, SaasBenchVerifyResponse
+
+
+_MODEL_ENDINGS = {
+    "malformed_tool_call": AGENT_INVALID_OUTPUT,
+    "model_protocol_error": AGENT_INVALID_OUTPUT,
+    "output_token_limit": AGENT_LIMIT,
+    "context_limit": MODEL_CONTEXT_LIMIT,
+    "timeout": AGENT_TIMEOUT,
+    "agent_error": AGENT_INVALID_OUTPUT,
+    "permission_abort": AGENT_COMMAND_NOT_ALLOWED,
+}
+
+
+def default_outcome_policy() -> StageOutcomePolicyConfig:
+    """Grade model endings from app state; retry evaluation failures."""
+    return StageOutcomePolicyConfig(
+        by_stage={
+            "verification": StagePolicyConfig(default_action=OutcomeAction.FAIL),
+            "agent": StagePolicyConfig(
+                by_failure_class={
+                    FailureClass.MODEL: OutcomeAction.VERIFY,
+                    FailureClass.EVALUATION: OutcomeAction.RETRY,
+                },
+                default_action=OutcomeAction.RETRY,
+            ),
+        }
+    )
+
+
+class SaasBenchConfig(BaseResponsesAPIAgentConfig):
+    num_workers: int = 1
+    outcome_policy: StageOutcomePolicyConfig = Field(default_factory=default_outcome_policy)
+    source_root: str = str(DEFAULT_BUNDLE_ROOT)
+    harness: Literal["opencode", "browser_use"] = "opencode"
+    cache_root: str
+    tasks_dir: str = "tasks"
+    task_selector: str = "all"
+    model_server: ModelServerRef
+    model_name: str
+    output_root: str
+    worker_python: str | None = None
+    command: str = "opencode"
+    opencode_version: Literal["1.17.11"] = "1.17.11"
+    concurrency: int = Field(default=1, ge=1)
+    slot_capacity: int = Field(default=4, ge=1, le=40)
+    slot_lock_root: str | None = None
+    hostname: str = "localhost"
+    max_steps: int = Field(default=200, ge=1)
+    context_tokens: int = 262144
+    output_tokens: int = 32768
+    viewport_width: int = 1280
+    viewport_height: int = 960
+    mcp_timeout_ms: int = Field(default=180000, ge=1000)
+    agent_timeout: int = Field(default=3600, ge=1)
+    episode_timeout: int = Field(default=7200, ge=1)
+    inconclusive_verification_retries: int = Field(default=1, ge=0, le=3)
+
+
+class SaasBenchAgent(SimpleResponsesAPIAgent):
+    """Execute episodes in separate processes so runtime globals cannot cross slots."""
+
+    ray_enabled = False
+    config: SaasBenchConfig
+    _prepared: bool = PrivateAttr(default=False)
+    _semaphore: asyncio.Semaphore = PrivateAttr()
+    _inflight: dict[str, asyncio.Task] = PrivateAttr(default_factory=dict)
+    _fingerprints: dict[str, str] = PrivateAttr(default_factory=dict)
+
+    def model_post_init(self, context) -> None:
+        super().model_post_init(context)
+        if self.config.num_workers != 1 or self.config.concurrency > self.config.slot_capacity:
+            raise ValueError("SaaS episodes require num_workers=1 and concurrency <= slot_capacity")
+        self._semaphore = asyncio.Semaphore(self.config.concurrency)
+
+    def _prepare_runtime(self) -> None:
+        if self._prepared:
+            return
+        if not (os.environ.get("LLM_BASE_URL") or os.environ.get("MINDRA_BASE_URL")):
+            raise ValueError("Set LLM_BASE_URL or MINDRA_BASE_URL to the judge endpoint before starting SaaS Bench")
+        configure_cache(self.config.cache_root)
+        if self.config.harness == "opencode" and self.config.command == "opencode":
+            from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode
+
+            ensure_opencode(self.config.opencode_version)
+        configured_source = Path(self.config.source_root)
+        if not configured_source.is_absolute():
+            configured_source = Path(__file__).resolve().parents[2] / configured_source
+        source = configured_source.resolve(strict=True)
+        self.config.source_root = str(source)
+        if not (source / "saas_bench/opencode/worker.py").is_file():
+            raise ValueError(f"Missing SaaS OpenCode implementation at {source}")
+        check_bundle_code(source)
+        # The prepared bundle joins shipped runtime code with verified task data.
+        sys.path.insert(0, str(source))
+        self._prepared = True
+
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+        raise HTTPException(400, "Use /run with prepared SaaS verifier_metadata")
+
+    async def run(self, body: SaasBenchRunRequest) -> SaasBenchVerifyResponse:
+        self._prepare_runtime()
+        return self._response(body, await self._execute(body))
+
+    async def _execute(self, body: SaasBenchRunRequest) -> dict:
+        # Capture IDs distinguish repeats and make HTTP retries idempotent.
+        rollout_id = maybe_rollout_id_from_run_body(body)
+        if not rollout_id:
+            raise HTTPException(400, "SaaS Bench requires _ng_rollout_id; enable Gym observability")
+        identity = hashlib.sha256(rollout_id.encode()).hexdigest()
+
+        requested_version = body.verifier_metadata.get("harness_version")
+        if body.verifier_metadata.get("harness", self.config.harness) != self.config.harness:
+            raise AgentSessionConflictError("Dataset harness differs; prepare the selected harness again")
+        if requested_version and requested_version != HARNESS_VERSIONS[self.config.harness]:
+            raise AgentSessionConflictError(
+                "Prepared dataset targets a different harness version; prepare it again",
+            )
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "request": body.model_dump(),
+                    "config": self.config.model_dump(),
+                    "harness_version": HARNESS_VERSIONS[self.config.harness],
+                },
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        output = Path(self.config.output_root).resolve() / identity
+        if identity in self._fingerprints and self._fingerprints[identity] != fingerprint:
+            raise AgentSessionConflictError("Rollout ID reused with different request")
+        if identity not in self._inflight:
+            self._fingerprints[identity] = fingerprint
+            self._inflight[identity] = asyncio.create_task(self._episode(body, output, fingerprint, rollout_id))
+        # Duplicate requests share completion; cancelling the owning request cleans up the episode.
+        task = self._inflight[identity]
+        try:
+            return await task
+        finally:
+            if task.done():
+                self._inflight.pop(identity, None)
+                self._fingerprints.pop(identity, None)
+
+    async def _episode(self, body, output: Path, fingerprint: str, rollout_id: str) -> dict:
+        async with self._semaphore:
+            output.mkdir(parents=True, exist_ok=True)
+            # A persisted binding prevents retries from silently changing the task.
+            binding = output / "binding.json"
+            try:
+                with binding.open("x") as stream:
+                    json.dump({"fingerprint": fingerprint, "rollout_id": rollout_id}, stream)
+            except FileExistsError:
+                if json.loads(binding.read_text())["fingerprint"] != fingerprint:
+                    raise AgentSessionConflictError("Rollout ID reused with different request")
+                result_path = output / "result.json"
+                if not result_path.exists():
+                    raise AgentSessionConflictError(
+                        "Incomplete episode requires inspection; use a new rollout ID to retry",
+                    )
+                return json.loads(result_path.read_text())
+            config = self.config.model_dump()
+            config.update(
+                output=str(output),
+                task_id=body.verifier_metadata["task_id"],
+                source_sha256=body.verifier_metadata["source_sha256"],
+                model=self.config.model_name,
+                endpoint=self.resolve_model_base_url(self.config.model_server.name, rollout_id),
+            )
+            config["harness"] = self.config.harness
+            config["harness_version"] = HARNESS_VERSIONS[self.config.harness]
+            config["slot_lock_root"] = self.config.slot_lock_root or str(
+                Path(self.config.cache_root) / "slot-locks" / __import__("socket").gethostname()
+            )
+            config_path = output / "worker.json"
+            config_path.write_text(json.dumps(config, indent=2))
+            env = dict(os.environ)
+            env["PYTHONPATH"] = (
+                str(Path(self.config.source_root).resolve()) + os.pathsep + str(Path(__file__).resolve().parents[2])
+            )
+            process = None
+            with (output / "worker.log").open("w") as log:
+                try:
+                    process = await asyncio.create_subprocess_exec(
+                        self.config.worker_python or sys.executable,
+                        "-m",
+                        "saas_bench.opencode.worker"
+                        if self.config.harness == "opencode"
+                        else "responses_api_agents.saas_bench_agent.browser_worker",
+                        str(config_path),
+                        env=env,
+                        stdout=log,
+                        stderr=log,
+                        start_new_session=True,
+                    )
+                    await asyncio.wait_for(process.wait(), timeout=self.config.episode_timeout)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    if process and process.returncode is None:
+                        os.killpg(process.pid, signal.SIGTERM)
+                        try:
+                            await asyncio.wait_for(process.wait(), timeout=45)
+                        except asyncio.TimeoutError:
+                            os.killpg(process.pid, signal.SIGKILL)
+                            await process.wait()
+                    await self._stop_recorded_apps(output, env)
+                    raise
+            result_path = output / "result.json"
+            if not result_path.is_file():
+                raise HTTPException(500, f"Worker exited without result; inspect {output}")
+            return json.loads(result_path.read_text())
+
+    async def _stop_recorded_apps(self, output: Path, env: dict[str, str]) -> None:
+        """Reap detached Enroot processes even when a worker died during app readiness."""
+        state = output / "enroot-state"
+        if not any(state.glob("*.enroot.pid")):
+            return
+        script = (
+            "import os\nfrom pathlib import Path\n"
+            "from saas_bench.enroot_slot import stop_enroot_app\n"
+            "for path in Path(os.environ['SAAS_ENROOT_STATE_DIR']).glob('*.enroot.pid'):\n"
+            "    stop_enroot_app(path.name.removesuffix('.enroot.pid'))\n"
+        )
+        with (output / "cleanup.log").open("a") as log:
+            cleanup = await asyncio.create_subprocess_exec(
+                self.config.worker_python or sys.executable,
+                "-c",
+                script,
+                env={**env, "SAAS_ENROOT_STATE_DIR": str(state)},
+                stdout=log,
+                stderr=log,
+                start_new_session=True,
+            )
+            try:
+                await asyncio.wait_for(cleanup.wait(), timeout=120)
+                if cleanup.returncode:
+                    raise RuntimeError(f"App cleanup failed; inspect {output / 'cleanup.log'}")
+            except BaseException:
+                if cleanup.returncode is None:
+                    os.killpg(cleanup.pid, signal.SIGKILL)
+                    await cleanup.wait()
+                raise
+
+    def _response(
+        self, body: SaasBenchRunRequest, result: dict, response: NeMoGymResponse | None = None
+    ) -> SaasBenchVerifyResponse:
+        from saas_bench.opencode.core import measured_score
+        from saas_bench.opencode.observability import native_trajectory
+        from saas_bench.opencode.protocol import has_model_turn
+
+        native = result.get("native_trajectory", result.get("trajectory", []))
+        model_turn = result.get("model_turn_observed") is True or has_model_turn(native)
+        masked = result.get("mask_sample", True)
+        kind = None
+        decision = None
+        # Judge/readback faults take precedence over the actor's ending: there
+        # is no usable evaluation verdict, even when the actor also failed.
+        diagnostics = result.get("verifier_diagnostics") or {}
+        judge_faults = (result.get("verify") or {}).get("judge_failures") or diagnostics.get("judge_failures") or []
+        if judge_faults:
+            kind = (
+                JUDGE_UNPARSEABLE
+                if all(f["failure_kind"] == JUDGE_UNPARSEABLE for f in judge_faults)
+                else JUDGE_FAILED
+            )
+        elif result.get("failure_kind") == "saas_bench:verifier" or diagnostics.get("unavailable"):
+            kind = VERIFIER_ERROR
+        elif (
+            result.get("failure_kind") == "saas_bench:infrastructure"
+            or result.get("failure_origin") == "evaluation"
+            or self.config.harness == "browser_use"
+            and result.get("failure_kind") == "saas_bench:model_ending"
+            and result.get("failure_origin") != "model"
+        ):
+            kind = AGENT_RUN_ERROR
+        else:
+            termination = (result.get("execution_health") or {}).get("termination")
+            kind = (
+                (AGENT_TIMEOUT if model_turn else AGENT_RUN_ERROR)
+                if result.get("timed_out") or termination == "timeout"
+                else _MODEL_ENDINGS.get(termination)
+            )
+            if kind is None and result.get("failure_kind"):
+                kind = AGENT_RUN_ERROR
+        if kind is not None:
+            stage = "verification" if kind in {VERIFIER_ERROR, JUDGE_FAILED, JUDGE_UNPARSEABLE} else "agent"
+            decision = choose_stage_outcome(
+                failure_kind=kind, http_status=None, stage=stage, config=self.config.outcome_policy
+            )
+            masked = decision.action not in {OutcomeAction.COUNT_AS_ZERO, OutcomeAction.VERIFY}
+        reward = (
+            0.0
+            if masked or decision and decision.action == OutcomeAction.COUNT_AS_ZERO
+            else measured_score(result["verify"])
+        )
+        response = response or actor_response(
+            body, result, harness=self.config.harness, model_name=self.config.model_name
+        )
+        return SaasBenchVerifyResponse.model_validate(
+            {
+                **body.model_dump(by_alias=True),
+                "response": response,
+                "reward": reward,
+                "mask_sample": masked,
+                "failure_kind": kind,
+                "failure_outcome_action": decision.action if decision else None,
+                "failure_outcome_attribution": decision.attribution if decision else None,
+                "native_failure_kind": result.get("failure_kind"),
+                "native_metrics": {} if masked else {"weighted_score": reward, "execution": 1.0},
+                "native_diagnostics": {}
+                if masked
+                else {
+                    "task_id": body.verifier_metadata["task_id"],
+                    "source_sha256": body.verifier_metadata["source_sha256"],
+                    "rollout_id": maybe_rollout_id_from_run_body(body),
+                    "verifier": result["verify"],
+                    "graded_response_id": response.id,
+                    "graded_response_sha256": hashlib.sha256(response.model_dump_json().encode()).hexdigest(),
+                },
+                "failure_reason": result.get("error") or result.get("execution_error"),
+                "execution_error": result.get("execution_error"),
+                "task_id": body.verifier_metadata["task_id"],
+                "category_id": body.verifier_metadata["category_id"],
+                "artifacts": result["artifacts"],
+                "verify_status": result.get("verify", {}).get("status", "ERROR"),
+                "trajectory": native,
+                "native_trajectory": native,
+                "harness": self.config.harness,
+                "execution_health": result.get("execution_health", {}),
+                "harness_version": result.get("harness_version"),
+                "verifier_diagnostics": result.get("verifier_diagnostics", {}),
+                "ng_trajectory": native_trajectory(
+                    native,
+                    body.verifier_metadata["task_id"],
+                    maybe_rollout_id_from_run_body(body) or "unknown",
+                    result.get("execution_health", {}),
+                )
+                if self.config.harness == "opencode"
+                else None,
+            }
+        )
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
+        rows = body.verify_responses
+        valid = [r for r in rows if not r.get("mask_sample", False)]
+        metrics = {
+            "saas_bench/num_scored": len(valid),
+            "saas_bench/num_masked": len(rows) - len(valid),
+            "saas_bench/num_verifier_errors": sum(
+                r.get("failure_kind") in {"saas_bench:verifier", VERIFIER_ERROR} for r in rows
+            ),
+        }
+        health = [r["execution_health"] for r in rows if r.get("execution_health")]
+        metrics["saas_bench/num_execution_health_unobserved"] = len(rows) - len(health)
+        if health:
+            metrics["saas_bench/tool_calls"] = sum(h["tool_calls"] for h in health)
+            metrics["saas_bench/tool_errors"] = sum(h["tool_errors"] for h in health)
+            metrics["saas_bench/execution_healthy_rate"] = sum(h["execution_healthy"] for h in health) / len(health)
+            metrics["saas_bench/malformed_terminations"] = sum(
+                h["termination"] in {"malformed_tool_call", "model_protocol_error"} for h in health
+            )
+            metrics["saas_bench/incomplete_tasks"] = sum(h.get("task_success") is False for h in health)
+        if valid:
+            metrics["saas_bench/mean_score"] = sum(r["reward"] for r in valid) / len(valid)
+            metrics["saas_bench/pass_rate"] = sum(r["verify_status"] == "PASS" for r in valid) / len(valid)
+            for domain in sorted({r["category_id"] for r in valid}):
+                subset = [r for r in valid if r["category_id"] == domain]
+                metrics[f"saas_bench/{domain}/mean_score"] = sum(r["reward"] for r in subset) / len(subset)
+        return AggregateMetrics(
+            agent_metrics=metrics,
+            key_metrics={k: v for k, v in metrics.items() if k in {"saas_bench/mean_score", "saas_bench/pass_rate"}},
+        )
+
+
+if __name__ == "__main__":
+    SaasBenchAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = SaasBenchAgent.run_webserver()

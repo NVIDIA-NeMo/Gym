@@ -19,6 +19,7 @@ from nemo_gym.agents.utils.supervisor_client import (
     SUPERVISOR_FILE,
     SUPERVISOR_SCRIPT,
     CleanupReceipt,
+    control_cwd,
     is_harness_termination_failure,
     remove_session_directory,
     stop_and_confirm_cleanup,
@@ -172,6 +173,11 @@ class SandboxSession[Artifacts]:
             self.termination_error is None
             and (not self.launch_started or bool(self.cleanup and self.cleanup["cleanup_confirmed"]))
         )
+
+    @property
+    def root_dir(self) -> str:
+        """Directory the session started in, which outlives the per-activation ``session_dir`` of ``begin_activation``."""
+        return self._session_root or self.session_dir
 
     @property
     def stop_request_path(self) -> str:
@@ -455,7 +461,9 @@ class SandboxSession[Artifacts]:
                 self._unconfirmed_expiry = False
                 marker = quote(f"{self.session_dir}/{EXPIRE_REQUEST_FILE}")
                 probe = await self.sandbox.exec(
-                    f"[ -e {marker} ] && echo present", cwd=self.workdir, timeout_s=timeout
+                    f"[ -e {marker} ] && echo present",
+                    cwd=control_cwd(session_dir=self.session_dir, workdir=self.workdir),
+                    timeout_s=timeout,
                 )
         except Exception:
             if self._expire_write is not None and not self._expire_write.done():
@@ -507,7 +515,7 @@ class SandboxSession[Artifacts]:
                         async with asyncio.timeout(timeout):
                             await remove_session_directory(
                                 self.sandbox,
-                                session_dir=self._session_root or self.session_dir,
+                                session_dir=self.root_dir,
                                 workdir=self.workdir,
                                 timeout=timeout,
                                 harness=self.harness,
@@ -529,7 +537,7 @@ class SandboxSession[Artifacts]:
                 if self.execution_oom is None:
                     await remove_session_directory(
                         self.sandbox,
-                        session_dir=self._session_root or self.session_dir,
+                        session_dir=self.root_dir,
                         workdir=self.workdir,
                         timeout=timeout,
                         harness=self.harness,
