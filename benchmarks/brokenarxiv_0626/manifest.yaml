@@ -22,6 +22,7 @@ capabilities:
 - reasoning/quantitative_reasoning
 - knowledge
 - knowledge/expert_knowledge
+- knowledge/knowledge_uncertainty
 - evaluation_and_judging
 - evaluation_and_judging/error_analysis
 domains:

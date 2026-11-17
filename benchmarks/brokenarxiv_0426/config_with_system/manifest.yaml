@@ -15,13 +15,14 @@ maintainers:
 intended_use:
 - evaluation
 capabilities:
+- safety
+- safety/epistemic_and_autonomy_safety
 - reasoning
 - reasoning/deductive_reasoning
+- reasoning/quantitative_reasoning
 - knowledge
 - knowledge/expert_knowledge
 - knowledge/knowledge_uncertainty
-- safety
-- safety/epistemic_and_autonomy_safety
 - evaluation_and_judging
 - evaluation_and_judging/error_analysis
 domains:
