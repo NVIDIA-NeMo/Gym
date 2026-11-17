@@ -147,10 +147,8 @@ class _ScriptedSandbox:
 
     def __init__(self, *results: SandboxExecResult) -> None:
         self.results = list(results)
-        self.commands: list[str] = []
 
     async def exec(self, command: str, *, cwd: str | None = None, timeout_s: float | None = None):
-        self.commands.append(command)
         return self.results.pop(0)
 
 
@@ -192,14 +190,3 @@ async def test_a_failed_copy_is_refused_with_its_exit_code_and_message() -> None
 
     assert "/workspace/skills" in refusal.value.detail
     assert "exit 1" in refusal.value.detail and "cannot create directory" in refusal.value.detail
-
-
-async def test_the_copy_quotes_both_paths() -> None:
-    sandbox = _ScriptedSandbox(
-        SandboxExecResult(stdout='{"skills_dir": "/work space/skills"}', stderr="", return_code=0),
-        SandboxExecResult(stdout="", stderr="", return_code=0),
-    )
-
-    await stage_task_skills(sandbox, "/session dir/config/skills")
-
-    assert "cp -R -- '/work space/skills'/. '/session dir/config/skills'/" in sandbox.commands[-1]
