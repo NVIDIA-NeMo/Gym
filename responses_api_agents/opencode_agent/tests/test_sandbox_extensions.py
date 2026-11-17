@@ -558,6 +558,47 @@ def test_local_config_drops_null_tools(setup):
     assert "tools" not in agent._build_opencode_config()
 
 
+async def test_compaction_and_step_cap_reach_the_sandbox_config(setup):
+    agent, sandbox = setup
+    agent.config.opencode_config = {"compaction": {"auto": False}, "agent": {"build": {"steps": 10}}}
+    agent.config.max_steps = 400
+    agent.config.system_prompt_mode = "replace"
+    response, _ = await episode(agent, sandbox, instructions="outer", temperature=1.0)
+    assert response.status == "completed"
+    _, config = launch_config(sandbox)
+    assert config["compaction"] == {"auto": False}
+    # The cap replaces a configured agent.build.steps and joins the replaced prompt and request sampling on the
+    # build agent; other agents keep their defaults.
+    assert config["agent"] == {name: {"temperature": 1.0} for name in BUILTIN_AGENTS} | {
+        "build": {"temperature": 1.0, "prompt": "outer", "steps": 400}
+    }
+
+
+async def test_step_cap_alone_configures_only_the_build_agent(setup):
+    agent, sandbox = setup
+    agent.config.max_steps = 400
+    response, _ = await episode(agent, sandbox)
+    assert response.status == "completed"
+    _, config = launch_config(sandbox)
+    assert config["agent"] == {"build": {"steps": 400}}
+    assert "compaction" not in config
+
+
+def test_local_config_adds_the_step_cap_to_configured_agent_settings(setup):
+    agent, _ = setup
+    agent.config.opencode_config = {"agent": {"build": {"prompt": "configured"}}, "compaction": {"auto": False}}
+    agent.config.max_steps = 50
+    config = agent._build_opencode_config()
+    assert config["agent"]["build"] == {"prompt": "configured", "steps": 50}
+    assert config["compaction"] == {"auto": False}
+
+
+@pytest.mark.parametrize("steps", [0, -1])
+def test_non_positive_step_cap_is_rejected_by_configuration(steps):
+    with pytest.raises(ValidationError):
+        OpenCodeAgentConfig(name="opencode", host="localhost", port=1, entrypoint="app.py", max_steps=steps)
+
+
 async def test_pinned_ripgrep_is_staged_where_opencode_looks_and_replaces_the_package_install(setup):
     agent, sandbox = setup
     agent.config.sandbox_ripgrep_path = "/mnt/cache/rg"
