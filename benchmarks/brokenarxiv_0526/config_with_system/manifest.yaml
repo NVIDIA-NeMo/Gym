@@ -4,8 +4,9 @@ experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
 domain: math
-description: Sycophancy grader for prove-the-false-statement benchmarks, using MathArena's
-  0-2 judge rubric; system-prompt variant.
+description: BrokenArXiv May 2026 with a system prompt, false statements from recent
+  arXiv papers that the model is asked to prove, judged on whether it notices with
+  MathArena's 0-2 rubric.
 modality: text
 licensing: unknown
 authors:
