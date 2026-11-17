@@ -354,7 +354,7 @@ async def test_model_request_error_is_classified_for_the_environment(monkeypatch
 
 
 # Droid 1.1.0's error events for a refused or reset connection, a context overflow, and rejected model requests,
-# captured from runs against a scripted model server.
+# captured from runs against a scripted model server; 1.12.1 writes the same messages.
 CONTEXT_LIMIT_ERROR = (
     "The existing summary and compaction instructions do not fit the selected model input window. "
     "Choose a compaction model with a larger context window."
@@ -377,8 +377,9 @@ CONTEXT_LIMIT_ERROR = (
         ("Error: The request was too large for the model service to accept.", ("unknown", None)),
     ],
 )
-def test_classifier_reads_droid_error_messages(monkeypatch, message, kind):
-    outcome = agent(monkeypatch).classify_outcome({"error": message})
+@pytest.mark.parametrize("version", ["1.1.0", "1.12.1"])
+def test_classifier_reads_droid_error_messages(monkeypatch, message, kind, version):
+    outcome = agent(monkeypatch, droid_version=version).classify_outcome({"error": message})
     assert (outcome.failure_kind, outcome.status_code) == kind
 
 
@@ -733,6 +734,48 @@ def test_sandbox_droid_cannot_run_in_is_refused_as_final(monkeypatch, probe, boo
     assert reason in check_agent_seed_rejected(instance.setup_webserver(), seed())
     download.assert_not_awaited()
     assert not instance._session_records
+
+
+@pytest.mark.skipif(not Path("/bin/sh").is_file(), reason="needs /bin/sh")
+@pytest.mark.parametrize(
+    "present,uid,apt,status,installed,message",
+    [
+        (("bash", "ps"), 0, True, 0, None, ""),
+        # Droid reports foreground Execute calls as SIGKILLed without ps, so a slim image gets procps.
+        (("bash",), 0, True, 0, "procps", ""),
+        ((), 0, True, 0, "bash procps", ""),
+        (("bash",), 1000, True, 78, None, "preinstall procps or use a root image"),
+        (("bash",), 0, False, 78, None, "preinstall procps (automatic installation requires apt-get)"),
+    ],
+)
+def test_bootstrap_installs_the_tools_droid_needs(tmp_path, present, uid, apt, status, installed, message):
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    log = tmp_path / "apt.log"
+
+    def stub(name: str, body: str) -> None:
+        path = tools / name
+        path.write_text(f"#!/bin/sh\n{body}\n")
+        path.chmod(0o755)
+
+    stub("id", f"echo {uid}")
+    for name in present:
+        stub(name, "exit 0")
+    if apt:
+        stub("apt-get", f'[ "$1" = update ] || echo "$@" >> {log}')
+    done = subprocess.run(
+        ["/bin/sh", "-c", app._SANDBOX_BOOTSTRAP],
+        env={"PATH": str(tools)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == status, done.stderr
+    assert message in done.stderr
+    if installed is None:
+        assert not log.exists()
+    else:
+        assert log.read_text().split() == ["install", "-y", "--no-install-recommends", *installed.split()]
 
 
 @pytest.mark.asyncio

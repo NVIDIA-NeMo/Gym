@@ -80,23 +80,28 @@ LOG = logging.getLogger(__name__)
 DEFAULT_DROID_VERSION = "1.1.0"
 # The bootstrap's exit status for an image Droid cannot run in, which seed refuses as final.
 _UNSERVABLE_IMAGE = 78
-# Bootstrap with POSIX sh; the runtime installer, the harness runner and the supervisor require Bash. There is no
-# apk branch: Droid has no musl build, so an Alpine image is refused either way, before bash is installed into it.
-_BASH_BOOTSTRAP = f"""if ! command -v bash >/dev/null 2>&1; then
-    [ "$(id -u)" = 0 ] || {{ echo "Droid sandbox sessions require bash: preinstall it or use a root image." >&2; exit {_UNSERVABLE_IMAGE}; }}
+# Bootstrap with POSIX sh; the runtime installer, the harness runner and the supervisor require Bash. Droid also
+# requires ps: without it, Droid reports most foreground Execute calls as killed by SIGKILL, even ones that finished.
+# Slim images (python:*-slim and other Debian slim bases) ship without procps. There is no apk branch: Droid has no
+# musl build, so an Alpine image is refused either way, before anything is installed into it.
+_SANDBOX_BOOTSTRAP = f"""missing=""
+command -v bash >/dev/null 2>&1 || missing="bash"
+command -v ps >/dev/null 2>&1 || missing="$missing procps"
+if [ -n "$missing" ]; then
+    [ "$(id -u)" = 0 ] || {{ echo "Droid sandbox sessions require bash and ps (procps): preinstall$missing or use a root image." >&2; exit {_UNSERVABLE_IMAGE}; }}
     if command -v apt-get >/dev/null 2>&1; then
-        apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash || exit 1
+        apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $missing || exit 1
     else
-        echo "Droid sandbox sessions require bash: preinstall it (automatic installation requires apt-get)." >&2
+        echo "Droid sandbox sessions require bash and ps (procps): preinstall$missing (automatic installation requires apt-get)." >&2
         exit {_UNSERVABLE_IMAGE}
     fi
 fi
 """
 # Environment servers keep this many characters of a failed response's error message as the failure reason.
 _FAILURE_REASON_CHARS = 2000
-# The release whose error event messages were read from runs against a scripted model server. Another release
-# may word them differently, so its failures are reported as unknown.
-_CLASSIFIED_DROID_VERSION = "1.1.0"
+# The releases whose error event messages were read from runs against a scripted model server (1.12.1 writes the
+# same three messages as 1.1.0). Another release may word them differently, so its failures are reported as unknown.
+_CLASSIFIED_DROID_VERSIONS = frozenset({"1.1.0", "1.12.1"})
 # A rejected model request: the HTTP status, a space, then the message of the response's error body.
 _MODEL_REQUEST_STATUS = re.compile(r"^([45]\d{2}) ")
 # A refused or reset connection to the model server.
@@ -150,8 +155,8 @@ class DroidAgent(SimpleResponsesAPIAgent):
         raise NotImplementedError("Use the single_agent_turn Environment Server")
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """Match the error event against the messages Droid 1.1.0 was seen to write; tested on that release only."""
-        if self.config.droid_version != _CLASSIFIED_DROID_VERSION:
+        """Match the error event against the messages Droid 1.1.0 and 1.12.1 were seen to write; tested on those only."""
+        if self.config.droid_version not in _CLASSIFIED_DROID_VERSIONS:
             return AgentOutcome(failure_kind="unknown")
         message = str(native_result.get("error") or "")
         if message == _CONTEXT_LIMIT:
@@ -254,7 +259,7 @@ class DroidAgent(SimpleResponsesAPIAgent):
                     await sandbox.start(spec)
                     self._check_setup(await sandbox.exec(f"mkdir -p -- {quote(workdir)}", cwd="/", timeout_s=30))
                 prepared = await sandbox.exec(
-                    _BASH_BOOTSTRAP + f"test -d {quote(workdir)} && umask 077 && mkdir -p {quote(directory)}/home",
+                    _SANDBOX_BOOTSTRAP + f"test -d {quote(workdir)} && umask 077 && mkdir -p {quote(directory)}/home",
                     cwd="/",
                     timeout_s=self.config.sandbox_install_timeout_seconds,
                 )
