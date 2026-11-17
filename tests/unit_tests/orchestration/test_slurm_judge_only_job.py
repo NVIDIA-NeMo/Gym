@@ -691,7 +691,7 @@ def test_a_job_that_appears_between_inspection_and_dispatch_is_waited_for_not_ca
     ],
 )
 def test_a_missing_or_unknown_job_acknowledgement_stays_uncertain(diagnostic) -> None:
-    from nemo_gym.orchestration.executors.judge_profile import placement_refusal
+    from nemo_gym.orchestration.executors.slurm.judge_profile import placement_refusal
 
     assert placement_refusal(diagnostic, served=False) == "other"
     assert placement_refusal(diagnostic, served=True) == "other"
