@@ -24,6 +24,7 @@ from nemo_gym.web import (
     snapshot_target_key,
 )
 from resources_servers.webarena_browser.config import WebArenaBrowserResourcesServerConfig
+from resources_servers.webarena_browser.shared_state import verify_initial_state
 from resources_servers.webarena_browser.site_auth import configured_site_urls, resolve_site_templates
 
 
@@ -150,6 +151,7 @@ class WebArenaFamilyReferenceEvaluator:
         self._task_config: dict | None = None
         self._collision_plan: dict | None = None
         self._before: dict | None = None
+        self._shared_state: dict | None = None
 
     def prepare(
         self,
@@ -164,6 +166,13 @@ class WebArenaFamilyReferenceEvaluator:
                 f"{self.benchmark.value} evaluator received benchmark {task.benchmark.value!r}"
             )
         task_config, collision_plan = _reference_task_config(task, self.config)
+        self._shared_state = verify_initial_state(
+            task,
+            browser_context.page,
+            configured_site_urls(task),
+            state_root=self.config.visualwebarena_state_root,
+            required=self.config.visualwebarena_require_clean_state,
+        )
         if _task_needs_judge(task_config, self.benchmark) and not os.environ.get("WEBARENA_JUDGE_API_KEY", "").strip():
             raise EvaluatorConfigurationError("WEBARENA_JUDGE_API_KEY is required by this WebArena-family task")
         if any(
@@ -278,6 +287,7 @@ class WebArenaFamilyReferenceEvaluator:
                 "evaluation_message": message,
                 "collision_mitigation": has_collision_mitigation(self._collision_plan),
                 "snapshot_groups": sorted(set(self._before) | set(after)),
+                **({"shared_state": self._shared_state} if self._shared_state is not None else {}),
             },
         )
 
@@ -286,6 +296,7 @@ class WebArenaFamilyReferenceEvaluator:
         self._task_config = None
         self._collision_plan = None
         self._before = None
+        self._shared_state = None
 
 
 class WebArenaTaskEvaluator:

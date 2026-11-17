@@ -19,6 +19,8 @@ visualwebarena_environment:
   resources_servers:
     webarena_browser:
       allowed_benchmarks: [visualwebarena]
+      visualwebarena_require_clean_state: true
+      visualwebarena_state_root: ${oc.env:VISUALWEBARENA_STATE_ROOT,null}
       artifact_dir: cache/visualwebarena-browser/artifacts
       task_image_root: ${visualwebarena_source_root}
       # Stop on action failure and evaluate the live site, as in the reference.
@@ -37,6 +39,8 @@ visualwebarena_benchmark_agent:
         name: visualwebarena_environment
       policy_protocol: nano_omni_toolcall
       max_steps: 100
+      # Ask for a terminal answer before exhausting the interaction budget.
+      nano_omni_stop_at_step_budget: true
       max_parse_retries: 2
       # Use model-server parser output without JSON or tool-alias repair.
       nano_omni_max_tool_calls: null

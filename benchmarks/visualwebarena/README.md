@@ -59,6 +59,7 @@ Deploy and reset the VisualWebArena site stack, export the deployment-specific
 `WA_*` URLs and approved `WEBARENA_JUDGE_*` credentials, then run:
 
 ```bash
+export VISUALWEBARENA_STATE_ROOT=/shared/visualwebarena-owned-deployment-state
 gym env prefetch --config benchmarks/visualwebarena/env.yaml
 gym env start --config benchmarks/visualwebarena/env.yaml
 ```
@@ -66,13 +67,94 @@ gym env start --config benchmarks/visualwebarena/env.yaml
 In another terminal:
 
 ```bash
-gym eval run --config benchmarks/visualwebarena/env.yaml --no-serve
+python -m benchmarks.visualwebarena.run \
+  --config benchmarks/visualwebarena/env.yaml \
+  --input benchmarks/visualwebarena/data/visualwebarena.jsonl \
+  --output-dir results/visualwebarena/clean-state-run \
+  --state-root "$VISUALWEBARENA_STATE_ROOT" \
+  --reset-url "$VWA_RESET_URL" \
+  --status-url "$VWA_RESET_STATUS_URL" \
+  --reset-token-file "$VWA_RESET_TOKEN_FILE" \
+  --ca-cert "$VWA_RESET_CA_CERT" \
+  --resource-health-url "$VWA_RESOURCE_BASE_URL/healthz"
 ```
+
+Set `VISUALWEBARENA_STATE_ROOT` before starting the servers. It must identify
+one shared directory for the owned site deployment, mounted at the same path
+on the coordinator and every resource worker. Supply the deployment's HTTPS
+reset/status endpoints, bearer-token file and CA certificate; the token is
+read at runtime and is not written into the protocol manifest. Repeat
+`--resource-health-url` for every resource worker using this site deployment.
+
+The coordinator verifies all 908 task identities against the maintained
+population before any reset. It runs 492 read-only tasks, then 408 ordinary
+mutating tasks, followed by eight protected tasks in six reset epochs:
+`346,678`; `345,751`; `336`; `335`; `340`; `92`. These are runtime row indices;
+their original source IDs include `visualwebarena-680` and
+`visualwebarena-753` for rows 678 and 751. Initialize/reset the owned deployment
+before ordinary jobs are admitted, as with the original deployment workflow.
+The coordinator resets only the protected epochs. A subset can be
+selected with `--task-ids`, while `--input` must still contain the full
+identity-checked population. The reference epoch numbers remain stable for
+subsets. The default concurrency is one; `--concurrency` requires sufficient
+isolated browser capacity.
+
+Ordinary phases hold a shared filesystem lease and retain their requested Gym
+collection concurrency. Before protected epochs, the coordinator releases its
+shared lease and waits for exclusive ownership. Every job sharing the site
+deployment must use the same state root and cooperate with that lease; it does
+not discover unrelated jobs that bypass it. Before each reset and after each
+protected phase, every declared worker must report zero active, creating and
+pending-cleanup sessions and browser leases. An ambiguous reset response
+leads to status polling rather than another reset trigger. A reset must reach
+`Ready for duty!` before tasks are dispatched. Redirected control requests,
+service errors and readiness timeouts abort the run.
+If the trigger response was lost, an observed `Reset ongoing` state must precede
+readiness; an immediate ready response could belong to the prior deployment
+state and requires operator recovery instead of task dispatch.
+
+Shared normal leases are for shards of the same initialized run. Independent
+benchmark runs or checkpoint comparisons need separate site deployments, or
+must finish and reset the prior deployment before admitting the next run.
+The lease does not provide separate site snapshots to independent runs.
+
+The coordinator attaches the audited read/write classification to task data,
+so the existing resource site pool admits simultaneous readers while writers
+wait for that site's readers/writers. These annotations do not alter prompts
+or evaluator targets. The shared lease excludes resets, not conflicting ordinary writes. Retain the
+existing site-pool writer locks and deployment isolation: `local_locks` covers
+one resource-server process, so concurrent mutating shards in different
+resource processes need isolated site replicas or a deployment-wide writer
+scheduler. Each browser must have its own display. To shard a population
+across jobs, `--stage read-only`, `--stage mutating` and `--stage protected`
+permit explicit job dependencies: all read-only shards finish before writers,
+and ordinary waves finish before protected epochs. Each stage reports only
+its actual selected denominator. Alternatively, use one coordinator to
+dispatch all phases to sufficient isolated worker capacity. Overlapping site
+reset epochs with ordinary work requires independent site deployments.
+
+The resource server independently verifies the protected task's intent,
+active run/epoch lease and actual initial address/cart or classifieds state
+before model actions. Later resets must reproduce the first observed baseline
+for that site. Receipts and baseline observations live below the private state
+root; rollout verifier metadata carries the receipt hash. Direct collection of
+these eight tasks without their coordinator context fails as infrastructure
+instead of silently grading a contaminated site.
+
+Use a fresh output directory. Native Gym phase inputs, collector logs,
+rollouts and recovery artifacts remain under it. The final merged output and
+summary are written only after every requested task has exactly one valid,
+unmasked result and protected tasks carry their initial-state receipts. Both
+raw and full-success totals/rates are recorded with the actual denominator.
+If reset readiness or worker cleanup cannot be proved after a failure, the
+state root gets a `requires-recovery-<run-id>.json` record. Reconcile all such
+records, the recorded workers and site ownership before starting a fresh run;
+an ordinary retry does not clear them or trigger another reset.
 
 Stop the foreground `gym env start` process with Ctrl-C after evaluation.
 Each headed Chromium process owns one display and therefore permits one active
-session. Scale out by launching isolated resource-server and agent processes;
-do not share a display or mutable site deployment between concurrent shards.
+session. Scale out by launching isolated resource-server and agent processes
+with the site isolation and phase barriers described above.
 Run non-state-changing tasks before state-changing tasks, including tasks
 that read across multiple sites. Reset the owned site deployment before a new
 evaluation; serialization alone does not undo changes from an earlier task or
@@ -100,3 +182,11 @@ live state before closing the browser. Model tool arguments are not repaired.
 Both task-image readers allow 32 MiB, including the maintained task image
 that exceeds the previous 25 MiB default; input images are not resized to
 work around that limit.
+
+This composition enables `nano_omni_stop_at_step_budget`: the penultimate
+observation asks the model for a terminal `N/A` answer, and the last two model
+requests disable thinking while retaining other template options. The shared
+agent's default remains disabled, and the option applies only to the Nano Omni
+protocol. This prompt/template change and the clean-state schedule define a
+new evaluation protocol; historical run records and scores retain their
+original configurations.
