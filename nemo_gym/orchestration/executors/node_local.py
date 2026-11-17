@@ -171,7 +171,7 @@ _gym_nl_on_term() {{
         echo "The job got TERM: archiving the node-local dir before Slurm kills the job."
         _gym_nl_archive
     fi
-    _gym_nl_cleanup
+    _gym_nl_cleanup{remove_marker}
     trap - EXIT
     exit 143
 }}
@@ -303,8 +303,11 @@ def render_setup(
             f"rm -f -- {succeeded} {_archive_done_marker(remote_bench_dir)}"
         )
     if not driver_node_flags:
-        # The job is ending: a USR1 then must not start the stop before the time limit.
-        blocks.append(_TERM_TRAP.format(ignored="TERM USR1" if config.stop_before_walltime_seconds else "TERM"))
+        # The job is ending: a USR1 then must not start the stop before the time limit, and no export runs after a
+        # TERM, so its marker would only be left in the job dir.
+        remove_marker = f"\n    rm -f -- {_archive_done_marker(remote_bench_dir)}" if exports else ""
+        ignored = "TERM USR1" if config.stop_before_walltime_seconds else "TERM"
+        blocks.append(_TERM_TRAP.format(ignored=ignored, remove_marker=remove_marker))
     if config.stop_before_walltime_seconds:
         blocks.append(
             _STOP_TEMPLATE.format(
