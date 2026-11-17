@@ -2,7 +2,7 @@
 
 This agent runs [Auto Ontology](https://github.com/NVIDIA/auto-ontology)'s ReAct text-to-SQL agent in Gym: its
 own loop, prompts and tools, on the policy model. `benchmarks/birdbench/auto_ontology_agent.yaml` pairs it with BIRD
-dev.
+dev. It also takes part in BIRD-Interact's c-Interact, which the `bird_interact` Environment Server runs (see below).
 
 ## How an episode runs
 
@@ -23,6 +23,33 @@ Environment Server (single_agent_turn)
   does for a SQL answer, with Auto Ontology's reasoning client pointed at the policy's Model Server.
 - **One sandbox per episode**, from the image `benchmarks/birdbench/auto_ontology/build_image.sh` builds. That image
   holds the Auto Ontology version Gym pins, the databases and their catalog. The agent's process imports only Gym.
+
+## BIRD-Interact's c-Interact
+
+In c-Interact (`c_interact.py`) the `bird_interact` Environment Server opens up to four turns: phase 1, the follow-up
+question as phase 2, and a debug turn after each phase that failed. The session is a multi-turn one:
+
+```
+Environment Server (bird_interact, c_interact)
+  seed     -> agent: no task; a direct HTTP grant of ask_user and submit_sql; start the sandbox and its catalog
+  turn N   -> agent: run Auto Ontology's run_episode in the sandbox, in the turn's own directory
+                sandbox -> the policy's Model Server (each model call)
+                sandbox -> the catalog and the release's databases (retrieve, run_sql, submit)
+                sandbox -> the Environment Server's ask_user (each question to the simulated user)
+                sandbox -> the Environment Server's submit_sql (the query Auto Ontology accepts)
+              <- the submitted query and the server's reply
+  close    -> agent: stop the sandbox; return each turn's input, answer and duration
+```
+
+- **The task** comes in the ADK's texts. The first request's system message names the database, the visible
+  knowledge and how many questions the agent may ask; each turn's user message is the request, the debug message or
+  the follow-up question. The agent reads them and refuses a request that does not hold them.
+- **Each turn is one Auto Ontology episode**, with Auto Ontology's prompts and tools, `ask_user` added through the hook
+  that Auto Ontology's `run_episode` has for extra tools, and a section on asking in its system prompt. The evidence
+  carries the visible knowledge, the user's earlier answers and the earlier queries, with the server's reply to the
+  last. A turn that ends without an accepted query submits nothing.
+- **The sandbox calls the Environment Server's tools**, so the grant's URL must be reachable from the sandbox, as the
+  Model Server's must.
 
 ## The sandbox's network
 
@@ -56,3 +83,6 @@ taken. On a remote sandbox provider, give the Model Server an address the sandbo
   fails the episode. An episode that ends with no query for another reason, such as its tool budget, is graded.
 - **Request controls:** Auto Ontology's loop sets its own sampling, limits and instructions. An activation that sets
   another field, such as `temperature`, `max_output_tokens`, `tool_choice` or `instructions`, is refused with a 422.
+- **BIRD-Interact:** c-Interact only; a-Interact's tools would stand in for Auto Ontology's own. Auto Ontology runs
+  read-only queries, so it cannot solve a management task. The c-Interact trajectory holds each turn's input and
+  answer; the model calls are in the Model Server's capture.
