@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Gym pairing config; use with the existing NeMo RL recipe and launcher.
+# Prepared Harbor rows already carry task_id.taskset; keep them materialized.
 config_paths:
 - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
 - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
@@ -25,7 +26,6 @@ terminal-bench-pi-agent:
       datasets:
       - name: terminal-bench-pi
         type: train
-        taskset: terminal-bench-pi
         jsonl_fpath: results/training/harbor/pi.jsonl
         num_repeats: 1
         license: MIT
@@ -44,7 +44,6 @@ harbor_terminal_5fbench_5f2_5f1_agent:
       datasets:
       - name: terminal-bench-opencode
         type: train
-        taskset: terminal_bench_2_1
         jsonl_fpath: results/harbor/terminal_bench_2_1/tasks_opencode_agent.jsonl
         num_repeats: 1
         license: MIT
