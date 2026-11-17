@@ -12,7 +12,7 @@ Auto Ontology's tools over that catalog, as ``direct_http`` routes:
 
 Each episode gets its own sandbox from a catalog image, which holds Auto Ontology, the BIRD databases and their
 catalog (the image contract is in README.md). At the seed the server starts the sandbox, the catalog's Postgres and
-the episode's tool process (``catalog_tool_server.py``). Each tool call runs in that process, which keeps one Auto
+the episode's tool process (``catalog_tool_runner.py``). Each tool call runs in that process, which keeps one Auto
 Ontology ``ToolContext`` for the episode. Verification stops the sandbox.
 
 ``verify`` grades the SQL of the last accepted ``submit`` call in the rollout's output, with ``bird_sql``'s rules.
@@ -54,10 +54,10 @@ from resources_servers.bird_sql.app import (
 from resources_servers.bird_sql.catalog_tools import ACCEPTED, RetrieveArguments, RunSqlArguments, SubmitArguments
 
 
-TOOL_SERVER_SOURCE = Path(__file__).with_name("catalog_tool_server.py")
+TOOL_RUNNER_SOURCE = Path(__file__).with_name("catalog_tool_runner.py")
 # Where the sandbox gets the tool process and the episode's settings, through SandboxSpec.files.
 SANDBOX_DIR = "/tmp/nemo-gym-bird-catalog"
-SANDBOX_TOOL_SERVER = f"{SANDBOX_DIR}/catalog_tool_server.py"
+SANDBOX_TOOL_RUNNER = f"{SANDBOX_DIR}/catalog_tool_runner.py"
 SANDBOX_EPISODE = f"{SANDBOX_DIR}/episode.json"
 SANDBOX_SOCKET = f"{SANDBOX_DIR}/tools.sock"
 SANDBOX_TOOL_LOG = f"{SANDBOX_DIR}/tools.log"
@@ -144,7 +144,7 @@ class BirdSqlCatalogResourcesServer(BirdSqlResourcesServer):
         )
         sandbox_config.setdefault("ttl_s", config.sandbox_ttl_s)
         files = {
-            SANDBOX_TOOL_SERVER: TOOL_SERVER_SOURCE.read_text(),
+            SANDBOX_TOOL_RUNNER: TOOL_RUNNER_SOURCE.read_text(),
             SANDBOX_EPISODE: json.dumps(
                 {"database": body.db_id, "question": body.question, "max_tool_calls": config.max_tool_calls}
             ),
@@ -177,16 +177,16 @@ class BirdSqlCatalogResourcesServer(BirdSqlResourcesServer):
     async def _start_tools(self, sandbox: AsyncSandbox) -> None:
         """Start the episode's tool process in the background, and wait until it answers."""
         config = self.config
-        python, server = shlex.quote(config.catalog_python), shlex.quote(SANDBOX_TOOL_SERVER)
+        python, runner = shlex.quote(config.catalog_python), shlex.quote(SANDBOX_TOOL_RUNNER)
         env_file = shlex.quote(f"{config.catalog_workdir}/.env")
         serve = (
-            f"setsid nohup {python} {server} serve {shlex.quote(SANDBOX_SOCKET)} {shlex.quote(SANDBOX_EPISODE)} "
+            f"setsid nohup {python} {runner} serve {shlex.quote(SANDBOX_SOCKET)} {shlex.quote(SANDBOX_EPISODE)} "
             f"{env_file} > {shlex.quote(SANDBOX_TOOL_LOG)} 2>&1 < /dev/null &"
         )
         started = await sandbox.exec(serve, cwd=config.catalog_workdir, env=config.catalog_environment, timeout_s=30)
         if started.error_type is not None or started.return_code != 0:
             raise RuntimeError(f"The catalog tools did not start: {started.error_type or started.return_code}")
-        wait = f"{python} {server} wait {shlex.quote(SANDBOX_SOCKET)} {config.setup_timeout_s:g}"
+        wait = f"{python} {runner} wait {shlex.quote(SANDBOX_SOCKET)} {config.setup_timeout_s:g}"
         ready = await sandbox.exec(wait, timeout_s=config.setup_timeout_s + 30)
         if ready.error_type is not None or ready.return_code != 0:
             log = await sandbox.exec(f"tail -c 4000 {shlex.quote(SANDBOX_TOOL_LOG)}", timeout_s=30)
@@ -213,7 +213,7 @@ class BirdSqlCatalogResourcesServer(BirdSqlResourcesServer):
             if episode is None or episode.sandbox is None:
                 raise ResourcesSessionLostError("No seeded BIRD catalog session for this tool call")
             payload = json.dumps({"tool": tool, "args": arguments})
-            command = shlex.join([self.config.catalog_python, SANDBOX_TOOL_SERVER, "call", SANDBOX_SOCKET, payload])
+            command = shlex.join([self.config.catalog_python, SANDBOX_TOOL_RUNNER, "call", SANDBOX_SOCKET, payload])
             result = await episode.sandbox.exec(command, timeout_s=self.config.tool_timeout_s)
         if result.error_type is not None or result.return_code != 0:
             detail = result.error_type or f"exit {result.return_code}: {(result.stderr or '')[-500:]}"

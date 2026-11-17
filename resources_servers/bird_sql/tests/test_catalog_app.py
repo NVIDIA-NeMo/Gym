@@ -25,13 +25,13 @@ from resources_servers.bird_sql import catalog_app
 from resources_servers.bird_sql.app import BirdSqlVerifyRequest, FailureCode
 from resources_servers.bird_sql.catalog_app import (
     SANDBOX_EPISODE,
-    SANDBOX_TOOL_SERVER,
+    SANDBOX_TOOL_RUNNER,
     BirdSqlCatalogResourcesServer,
     BirdSqlCatalogResourcesServerConfig,
     BirdSqlCatalogSeedRequest,
     _Episode,
 )
-from resources_servers.bird_sql.catalog_tool_server import Episode, request, serve, wait
+from resources_servers.bird_sql.catalog_tool_runner import Episode, request, serve, wait
 from resources_servers.bird_sql.catalog_tools import ACCEPTED, tool_definitions
 
 
@@ -174,7 +174,7 @@ async def test_the_seed_starts_the_catalog_and_the_tools_and_release_stops_the_s
         "question": "Which x are above 1?",
         "max_tool_calls": 24,
     }
-    assert "def serve(" in spec.files[SANDBOX_TOOL_SERVER]
+    assert "def serve(" in spec.files[SANDBOX_TOOL_RUNNER]
     start, serve_tools, wait_tools = sandbox.exec.await_args_list
     assert start.args == ("/opt/auto-ontology-eval/start-catalog",)
     assert " serve " in serve_tools.args[0] and serve_tools.args[0].endswith("&")

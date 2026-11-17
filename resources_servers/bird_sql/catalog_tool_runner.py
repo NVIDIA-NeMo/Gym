@@ -6,9 +6,9 @@ The ``bird_sql`` catalog Resources Server (``catalog_app.py``) uploads this file
 the sandbox image's Python, the one that has Auto Ontology (https://github.com/NVIDIA/auto-ontology) and its catalog
 of the BIRD databases. It imports nothing from NeMo Gym.
 
-    python catalog_tool_server.py serve SOCKET EPISODE_JSON [ENV_FILE]
-    python catalog_tool_server.py wait SOCKET TIMEOUT_S
-    python catalog_tool_server.py call SOCKET REQUEST_JSON
+    python catalog_tool_runner.py serve SOCKET EPISODE_JSON [ENV_FILE]
+    python catalog_tool_runner.py wait SOCKET TIMEOUT_S
+    python catalog_tool_runner.py call SOCKET REQUEST_JSON
 
 ``serve`` holds the episode: one Auto Ontology ``ToolContext`` for the task's database, which keeps what earlier calls
 found, and the episode's tool budget. EPISODE_JSON is a file with the task's ``database`` and ``question`` and the

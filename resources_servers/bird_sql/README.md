@@ -136,9 +136,9 @@ routes. `benchmarks/birdbench/catalog_tools.yaml` uses it.
 | `POST /submit` (`sql`, `response`, `assumptions`) | `react.loop.submit` |
 
 **One sandbox per episode.** At the seed the server starts a sandbox from `sandbox_config.image` and starts the
-catalog's Postgres in it. It also starts the episode's tool process, `catalog_tool_server.py`, which the sandbox gets
+catalog's Postgres in it. It also starts the episode's tool process, `catalog_tool_runner.py`, which the sandbox gets
 through `SandboxSpec.files`. That process keeps one Auto Ontology `ToolContext` for the episode, so a tool call sees
-what earlier calls found. Each route call runs `catalog_tool_server.py call` in the sandbox. `verify` stops the
+what earlier calls found. Each route call runs `catalog_tool_runner.py call` in the sandbox. `verify` stops the
 sandbox, and so does closing the session or shutting the server down.
 
 **Grading.** `verify` grades the SQL of the last `submit` call that the server answered with `Accepted.`. A query in
