@@ -27,6 +27,9 @@ Server migration. They stay to reproduce existing results, such as the
 [Nemotron 3.5 Super](../nemotron_3.5_super/README.md) recipes. The two OpenCode adapters use different defaults, so
 treat their scores as separate measurements.
 
+Pro also has `codex.yaml` and `claude_code.yaml` recipes. They run `codex_agent` and `claude_code_agent` through
+`single_agent_turn` the same way, borrowing the Resources-owned task sandbox.
+
 ## Example usage
 
 ```bash
