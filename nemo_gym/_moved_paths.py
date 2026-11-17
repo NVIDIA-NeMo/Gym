@@ -797,6 +797,10 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
     "nemo_gym.token_id_capture.staging": {
         **_names("nemo_gym.models.token_capture.terminal", "0.8.0", "TerminalAttribution resolve_terminal"),
     },
+    # Staging capture imported the extras digest before record builds moved into the staged record.
+    "nemo_gym.token_id_capture.staging.capture": {
+        **_names("nemo_gym.models.token_capture.staging.digest", "0.8.0", "compute_extras_digest"),
+    },
     "nemo_gym.mcp_auto_exposure": {
         # Renamed when Environment Servers started to build MCP results with it.
         "_to_result": MovedPath(new="nemo_gym.server_runtime.mcp_auto_exposure:to_call_tool_result", since="0.8.0"),

@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.models.token_capture.staging.digest import (
     build_staging_delta,
     compute_chain_hash,
@@ -479,3 +480,6 @@ def install_capture(
     )
     install(capture)
     return capture
+
+
+__getattr__ = moved_names_getattr(__name__)
