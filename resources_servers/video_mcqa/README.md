@@ -299,8 +299,8 @@ of the policy model server's host.
 
 ### Letter prompts
 
-`prepare_single_turn(..., prompt=...)` and `prepare.py --prompt` choose how a
-single-turn question asks for its answer. `boxed` (the default) is the prompt
+`prepare_single_turn(..., prompt=...)`, `prepare_agentic(..., prompt=...)` and
+`prepare.py --prompt` choose how a question asks for its answer. `boxed` (the default) is the prompt
 described above. The other styles ask for the bare letter in a benchmark's
 evaluation wording, after the video, so read their answers with
 `llm_extraction_v1`:
@@ -311,7 +311,8 @@ evaluation wording, after the video, so read their answers with
 | `videomme_v2` | The question, the `A. ...` options, `Respond with only the letter (A, B, ..., or H) of the correct option.` naming the question's letters, `Answer: ` | The letter instruction of the [official script](https://github.com/MME-Benchmarks/Video-MME-v2/blob/28fc3bcfbd4d162594c8e4bad866b694d9b035aa/evaluation/test_video_mme_v2.py), in the form NVIDIA's evaluations use: without its frame sentence, `Question:` and `Select the best answer ...`, and with `Answer: ` |
 | `lvbench` | The question, the `(A) ...` options, `Answer with the option's letter from the given choices directly.` | LVBench publishes no prompt; this is the common multiple-choice instruction of LLaVA-style evaluations (lmms-eval's default for Video-MME) |
 
-The lines are joined with newlines. Agentic rows keep the boxed prompt.
+The lines are joined with newlines. An agentic row puts one line before them
+that names the video in the sandbox, `Video: /testbed/videos/<file>`.
 
 ## Example data
 

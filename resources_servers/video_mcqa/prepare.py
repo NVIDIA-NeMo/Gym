@@ -76,8 +76,8 @@ def prepare_dataset(
         raise ValueError("sandbox_root must be an absolute sandbox directory")
     if benchmark not in SOURCES or setting not in ("single_turn", "agentic"):
         raise ValueError("Unknown benchmark or setting")
-    if prompt not in ("boxed", benchmark) or (prompt != "boxed" and setting != "single_turn"):
-        raise ValueError("Single-turn rows take the boxed prompt or their own benchmark's; agentic rows the boxed one")
+    if prompt not in ("boxed", benchmark):
+        raise ValueError("Rows take the boxed prompt or their own benchmark's")
     loader = load_videomme_v1 if benchmark == "videomme_v1" else load_lvbench
     annotations = loader(records, dataset_revision=dataset_revision, media=media)
     rows = []
@@ -96,7 +96,7 @@ def prepare_dataset(
             if not binding.source or not path.parts or path.is_absolute() or ".." in path.parts or "\\" in str(path):
                 raise ValueError("Agentic media needs source and a safe sandbox-relative path")
             prepared = prepare_agentic(
-                question, expected_answer=annotation.expected_answer, video_path=str(root / path)
+                question, expected_answer=annotation.expected_answer, video_path=str(root / path), prompt=prompt
             )
             row = cast(dict[str, object], dict(prepared))
             row["video_binding"] = {"source": binding.source, "sandbox_path": str(path), "sha256": binding.sha256}

@@ -215,11 +215,24 @@ def prepare_single_turn(
     }
 
 
-def prepare_agentic(question: VideoQuestion, *, expected_answer: str, video_path: str) -> PreparedTask:
-    """Expose the bound sandbox path without source URLs, gold, or tool hints."""
+def prepare_agentic(
+    question: VideoQuestion, *, expected_answer: str, video_path: str, prompt: PromptStyle = "boxed"
+) -> PreparedTask:
+    """Expose the bound sandbox path without source URLs, gold, or tool hints.
+
+    A letter prompt is the benchmark's own single-turn text after a first line that names the video,
+    ``Video: <video_path>``; its answers need an answer policy that reads a bare letter.
+    """
     _text(video_path, "video_path")
     if any(character in video_path for character in "\r\n"):
         raise ValueError("video_path must be a single-line sandbox path")
+    if prompt not in get_args(PromptStyle):
+        raise ValueError(f"Unknown prompt style {prompt!r}")
+    text = (
+        _question_text(question, video_path=video_path)
+        if prompt == "boxed"
+        else f"Video: {video_path}\n{_letter_question_text(question, prompt)}"
+    )
     metadata = VerifierMetadata.from_question(question, expected_answer=expected_answer)
     return {
         "task_id": question.task_id,
@@ -229,7 +242,7 @@ def prepare_agentic(question: VideoQuestion, *, expected_answer: str, video_path
                 {
                     "role": "user",
                     "content": [
-                        {"type": "input_text", "text": _question_text(question, video_path=video_path)},
+                        {"type": "input_text", "text": text},
                     ],
                 }
             ]
