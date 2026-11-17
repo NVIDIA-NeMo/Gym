@@ -29,8 +29,9 @@ Counts include execution errors and count each scenario once, rather than counti
 cascading evidence failures separately. Only the
 reporting job receives `checks: write`; probe jobs keep read-only permissions.
 Download the `harness-conformance-*` artifacts for test/setup logs and probe evidence.
-The reporter only uses artifacts from the current run attempt; rerun all jobs to
-refresh results for all selected harnesses.
+The reporter matches each selected job to its actual execution, retaining uploads
+from successful jobs that a partial retry did not rerun. A rerun that produces no
+evidence remains unavailable; an older upload cannot replace it.
 
 After publishing the result, **Harness conformance (non-blocking) / Publish check**
 also fails if P0 fails or any probe job fails or is cancelled, making the result
@@ -77,7 +78,7 @@ Run predetermined model replies and failures through real Gym harnesses, collect
 their rollouts, and apply the scenario and evidence checks:
 
 ```bash
-python scripts/run_harness_conformance.py \
+python -m scripts.run_harness_conformance \
     --harness codex --harness pi --harness opencode --harness hermes \
     --output results/conformance
 ```
@@ -125,8 +126,8 @@ remote sandbox deployment.
 ## Scenarios
 
 ```bash
-python scripts/run_harness_conformance.py --list-scenarios
-python scripts/run_harness_conformance.py --harness codex \
+python -m scripts.run_harness_conformance --list-scenarios
+python -m scripts.run_harness_conformance --harness codex \
     --scenario tool_failure --timeout 60 --output results/codex-tool-failure
 ```
 
@@ -212,13 +213,16 @@ tool's schema consumable by `provider.Probe._finish`. Keep expectations and witn
 of the task input and preserve the normal Gym collection path.
 
 Registration also means adding the harness name to hard-coded tuples. `episode._config`
-passes the probe's `--timeout` as the agent's `timeout` only to the harnesses in its
-`("opencode", "pi")` tuple; add a harness whose adapter has a `timeout` field, so that
-the harness uses the probe timeout instead of the adapter's default. `ci.install_runtime`
-installs the adapter's `requirements.txt` and then returns early only for the harnesses
-in its `("hermes", "stirrup", "simple")` tuple: Hermes comes from those requirements,
-Stirrup installs in the task sandbox during session setup, and Simple Agent is built in.
-For any other harness it installs a
+passes the probe's `--timeout` as the agent's `timeout` to OpenCode, Pi, CrewAI and
+OpenClaw, and to Codex outside agent sessions; add a new harness whose adapter has a
+`timeout` field to that list, so that it uses the probe timeout instead of the adapter's
+default.
+`ci.install_runtime` syncs the adapter's locked project (`pyproject.toml` and `uv.lock`)
+and then returns early only for the harnesses in its
+`("hermes", "stirrup", "simple", "openclaw", "crewai")` tuple: Hermes comes from that
+project, Stirrup, OpenClaw and CrewAI install in the task sandbox during session setup,
+and Simple Agent is built in. CrewAI's sandbox runtime takes longer to build than one probe
+episode lasts, so the install step builds it first, into a throwaway local sandbox. For any other harness it installs a
 pinned npm package through `responses_api_agents/<harness>_agent/setup_<harness>.py`,
 so add a harness that installs its runtime in the task sandbox to that tuple. A
 data-driven registry entry could carry these per-harness settings and remove the

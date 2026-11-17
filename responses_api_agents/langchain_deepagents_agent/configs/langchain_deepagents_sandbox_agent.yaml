@@ -1,0 +1,27 @@
+use_absolute_ip: true
+absolute_ip_server_types:
+  - responses_api_models
+
+# DeepAgents in a task sandbox: the one the resources server lends the session, or one the agent starts from
+# sandbox_provider. It runs only in agent sessions, so an Environment Server composes it with a benchmark.
+# langchain_deepagents_agent.yaml runs the in-process graph with Tavily search instead.
+langchain_deepagents_sandbox_agent:
+  responses_api_agents:
+    langchain_deepagents_agent:
+      entrypoint: app.py
+      tool_profile: builtin
+      resources_server: null
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # nvidia/nemotron-3-ultra-550b-a55b's actual enforced limit (OpenRouter's `top_provider.context_length`,
+      # not the larger nominal `context_length: 262144` — top_provider is what the routed provider actually
+      # enforces). Update this if policy_model_name changes to point at a different model.
+      max_input_tokens: 202800
+      system_prompt: null
+      shell_timeout_seconds: 120
+      concurrency: 32
+      sandbox_provider: null
+      sandbox_config: {}
+      sandbox_install_timeout_seconds: 900
+      sandbox_runner_timeout_seconds: 12600

@@ -665,7 +665,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
                     usage={
                         "input_tokens": n_input_tokens or 0,
                         "input_tokens_details": {
-                            "cached_tokens": n_cache_tokens or 0,
+                            "cached_tokens": n_cache_tokens,
                             "cache_write_tokens": 0,
                         },
                         "output_tokens": n_output_tokens or 0,

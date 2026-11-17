@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 import sys
 from pathlib import Path
 
 import pytest
+from omegaconf import OmegaConf
 
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig, ConfigError
@@ -22,6 +24,7 @@ from nemo_gym.environment.in_process import (
     serve_benchmark,
 )
 from nemo_gym.eval.eval_plan import PlanBenchmark, PlanGym, build_eval_plan
+from nemo_gym.rollouts import rollout_collection
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
 from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.server_runtime.supervisor.server_supervisor import ServerSpinupTimeoutError, ServerStartFailedError
@@ -504,14 +507,97 @@ class TestTaskRunner:
 
         assert result.reward == 1.0
 
-    def test_refuses_a_materialized_task_row(self) -> None:
-        materialized = {
-            "task_id": {"taskset": "bench", "task_id": "a"},
+    @staticmethod
+    def _typed_row(task_id: str) -> dict:
+        return {
+            "task_id": {"taskset": "bench", "task_id": task_id},
             "task_input": {"responses_create_params": {"input": []}, "task_data": {}},
         }
 
-        with pytest.raises(ConfigError, match="materialized"):
-            TaskRunner([materialized], registry_server=HEAD)
+    @staticmethod
+    def _registry_config(monkeypatch: pytest.MonkeyPatch, config: dict) -> list:
+        reads: list = []
+
+        def setup_server_client(head_server_config=None):
+            reads.append(head_server_config)
+            return type("Client", (), {"global_config_dict": OmegaConf.create(config)})()
+
+        monkeypatch.setattr(rollout_collection, "setup_server_client_utils", setup_server_client)
+        return reads
+
+    async def test_runs_a_materialized_task_on_the_environment_server_its_taskset_routes_to(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner = TaskRunner([self._typed_row("a")], registry_server=HEAD)
+        runs = _FakeRuns()
+        self._serve(monkeypatch, runs)
+        self._registry_config(monkeypatch, {"environment_server_routes": {"bench": "bench_env"}})
+
+        result = await runner.run_task("a", rollout_id="trial-1")
+
+        assert result.reward == 1.0
+        (sent,) = runs.sent[0]
+        assert sent["task_id"] == {"taskset": "bench", "task_id": "a"}
+        assert sent["_ng_environment_server"] == "bench_env"
+        assert sent["_ng_rollout_id"] == "trial-1"
+
+    async def test_selects_flat_and_materialized_tasks_by_id_and_shares_one_registry_read(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner = TaskRunner([_row("flat"), self._typed_row("typed")], registry_server=HEAD)
+        runs = _FakeRuns()
+        self._serve(monkeypatch, runs)
+        reads = self._registry_config(monkeypatch, {"environment_server_routes": {"bench": "bench_env"}})
+
+        await runner.run_task("flat")
+        assert reads == []
+        await runner.run_task("typed")
+        await runner.run_task("typed")
+        runner._helper.setup_server_client(HEAD)  # what `run_outcomes` calls when it dispatches
+
+        assert runner.task_ids() == ["flat", "typed"]
+        assert "_ng_environment_server" not in runs.sent[0][0]
+        assert [sent[0].get("_ng_environment_server") for sent in runs.sent[1:]] == ["bench_env", "bench_env"]
+        assert reads == [HEAD]
+
+    async def test_a_materialized_task_keeps_its_dataset_label_and_gains_no_agent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runner = TaskRunner([{**self._typed_row("a"), "task_source": "bench"}], registry_server=HEAD)
+        runs = _FakeRuns()
+        self._serve(monkeypatch, runs)
+        self._registry_config(monkeypatch, {"environment_server_routes": {"bench": "bench_env"}})
+
+        await runner.run_task("a")
+
+        (sent,) = runs.sent[0]
+        assert sent["task_source"] == "bench"
+        assert sent["_ng_environment_server"] == "bench_env"
+        assert "agent_ref" not in sent
+
+    async def test_a_route_given_as_an_interpolation_is_resolved(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        runner = TaskRunner([self._typed_row("a")], registry_server=HEAD)
+        runs = _FakeRuns()
+        self._serve(monkeypatch, runs)
+        self._registry_config(
+            monkeypatch,
+            {
+                "environment_server_name": "bench_env",
+                "environment_server_routes": {"bench": "${environment_server_name}"},
+            },
+        )
+
+        await runner.run_task("a")
+
+        assert runs.sent[0][0]["_ng_environment_server"] == "bench_env"
+
+    async def test_a_materialized_task_without_a_route_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        runner = TaskRunner([self._typed_row("a")], registry_server=HEAD)
+        self._serve(monkeypatch, _FakeRuns())
+        self._registry_config(monkeypatch, {})
+
+        with pytest.raises(ValueError, match="No environment server route is configured for taskset 'bench'"):
+            await runner.run_task("a")
 
     async def test_unknown_task_is_a_config_error(self) -> None:
         with pytest.raises(ConfigError, match="No input rows for task ids"):
@@ -811,3 +897,24 @@ class TestServeBenchmark:
             pass
 
         assert _FakeRunHelper.started_with.skip_exporters
+
+
+class TestReadJsonlRows:
+    def test_a_row_with_unicode_line_separators_is_read_whole(self, tmp_path: Path) -> None:
+        from nemo_gym.environment.benchmark_preparation import read_jsonl_rows
+
+        text = "a b\u0085c\x0bd\x0ce"
+        path = tmp_path / "rows.jsonl"
+        path.write_text(
+            "".join(json.dumps({"q": text, "n": n}, ensure_ascii=False) + "\n" for n in range(2)), encoding="utf-8"
+        )
+
+        assert read_jsonl_rows(path) == [{"q": text, "n": 0}, {"q": text, "n": 1}]
+
+    def test_blank_lines_are_skipped(self, tmp_path: Path) -> None:
+        from nemo_gym.environment.benchmark_preparation import read_jsonl_rows
+
+        path = tmp_path / "rows.jsonl"
+        path.write_text('{"a": 1}\n\n{"a": 2}\n   \n', encoding="utf-8")
+
+        assert read_jsonl_rows(path) == [{"a": 1}, {"a": 2}]

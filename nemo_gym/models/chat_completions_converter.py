@@ -1422,6 +1422,9 @@ class ChatCompletionsConverter(BaseModel):
         provider_metadata = (
             {"native_finish_reason": str(native_finish_reason)} if native_finish_reason is not None else {}
         )
+        native_stop_reason = getattr(choice, "stop_reason", None)
+        if native_stop_reason is not None:
+            provider_metadata["native_stop_reason"] = native_stop_reason
 
         # Chat Completion -> Response
         return NeMoGymResponse(
