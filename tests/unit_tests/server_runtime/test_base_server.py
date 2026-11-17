@@ -171,7 +171,7 @@ class TestServerUtils:
                 },
                 "max_tokens": 4096,
                 "openai_default_headers": {"x-litellm-key": "sk-litellm-sentinel"},
-                "mlflow_tracking_uri": "https://user:pw-sentinel@mlflow.example/api",
+                "mlflow_tracking_uri": "https://user:pw-sentinel@mlflow.example/api",  # pragma: allowlist secret
             }
         )
         monkeypatch.setattr(

@@ -209,7 +209,7 @@ def test_mask_credentials_masks_only_credential_values() -> None:
         "max_tokens": 4096,
         "client_secrets": ["s1", "s2"],
         "openai_default_headers": {"x-litellm-key": "sk-litellm", "x-trace-id": "t1"},
-        "mlflow_tracking_uri": "https://user:pw@mlflow.example/api",
+        "mlflow_tracking_uri": "https://user:pw@mlflow.example/api",  # pragma: allowlist secret
         "docs_url": "https://example.com/path",
     }
 
