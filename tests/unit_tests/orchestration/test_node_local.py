@@ -647,7 +647,10 @@ def test_a_term_that_lands_while_the_archive_runs_does_not_cut_it_short(tmp_path
     # Slurm's TERM reaches the whole job, the archive's tar included, while the archive after the driver step runs.
     started = tmp_path / "tar-started"
     slow_tar = f'case "$*" in *-czf*) : > {started}; sleep 3 ;; esac; exec /usr/bin/tar "$@"'
-    process = _start_job(tmp_path, driver=_WRITE_EVIDENCE, fakes={"tar": slow_tar})
+    # The fake tar sleeps 3 s: a bound well past that keeps a loaded runner from timing the archive out.
+    process = _start_job(
+        tmp_path, driver=_WRITE_EVIDENCE, fakes={"tar": slow_tar}, node_local={"archive_timeout_seconds": 30}
+    )
     try:
         _wait_for(started)
         os.killpg(process.pid, signal.SIGTERM)
