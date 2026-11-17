@@ -414,14 +414,39 @@ class TestAsyncRequestTempDir:
             await asyncio.sleep(0.01)
         assert _request_folders(tmp_path) == []
 
+    async def test_folders_are_made_and_removed_while_the_default_executor_is_busy(
+        self, set_global_config, tmp_path: Path
+    ) -> None:
+        set_global_config({"temp_dir": str(tmp_path)})
+        loop = asyncio.get_running_loop()
+        default = ThreadPoolExecutor(max_workers=1)
+        loop.set_default_executor(default)
+        gate = threading.Event()
+        # Holds the default executor's only thread, as slow sandbox calls and DNS lookups can.
+        busy = loop.run_in_executor(None, gate.wait, 10)
+        try:
 
-def _cleanup_left_after_a_repeated_cancellation(cancel_kind: str) -> list[Path]:
+            async def work() -> Path:
+                async with async_request_temp_dir("workspace") as path:
+                    (path / "out.txt").write_text("x")
+                return path
+
+            path = await asyncio.wait_for(work(), 2)
+        finally:
+            gate.set()
+            await busy
+            default.shutdown(wait=True)
+
+        assert not path.exists()
+
+
+def _cleanup_left_after_a_repeated_cancellation(cancel_kind: str, monkeypatch: pytest.MonkeyPatch) -> list[Path]:
     """Cancel again while cleanup waits behind a busy worker thread, as under load, and return what is left."""
 
     async def main() -> list[Path]:
         loop = asyncio.get_running_loop()
         executor = ThreadPoolExecutor(max_workers=1)
-        loop.set_default_executor(executor)
+        monkeypatch.setattr(runtime_files, "_temp_dir_executor", executor)
         created: list[Path] = []
         entered = asyncio.Event()
         scopes: list[anyio.CancelScope] = []
@@ -437,7 +462,7 @@ def _cleanup_left_after_a_repeated_cancellation(cancel_kind: str) -> list[Path]:
         task = asyncio.create_task(work())
         await entered.wait()
         gate = threading.Event()
-        busy = loop.run_in_executor(None, gate.wait)
+        busy = loop.run_in_executor(executor, gate.wait)
         if cancel_kind == "anyio":
             # anyio delivers the cancellation again at every await in the scope, as the disconnect middleware does.
             scopes[0].cancel()
@@ -451,7 +476,7 @@ def _cleanup_left_after_a_repeated_cancellation(cancel_kind: str) -> list[Path]:
             pass
         gate.set()
         await busy
-        await loop.run_in_executor(None, lambda: None)
+        await loop.run_in_executor(executor, lambda: None)
         executor.shutdown(wait=True)
         return [path for path in created if path.exists()]
 
@@ -460,11 +485,11 @@ def _cleanup_left_after_a_repeated_cancellation(cancel_kind: str) -> list[Path]:
 
 @pytest.mark.parametrize("cancel_kind", ["anyio", "task"])
 def test_cleanup_survives_a_repeated_cancellation_while_queued(
-    set_global_config, tmp_path: Path, cancel_kind: str
+    set_global_config, tmp_path: Path, cancel_kind: str, monkeypatch
 ) -> None:
     set_global_config({"temp_dir": str(tmp_path / "temp")})
 
-    assert _cleanup_left_after_a_repeated_cancellation(cancel_kind) == []
+    assert _cleanup_left_after_a_repeated_cancellation(cancel_kind, monkeypatch) == []
     assert _request_folders(tmp_path / "temp") == []
 
 
@@ -635,10 +660,11 @@ _CHILD = textwrap.dedent(
         sys.exit(0)
     # Hold the lock, as another thread of the parent might at a fork, then fork and exit the child normally.
     rf._first_use_lock.acquire()
-    parent_executor = rf._save_executor
+    parent_executors = (rf._save_executor, rf._temp_dir_executor)
     pid = os.fork()
     if pid == 0:
-        ok = rf._first_use_lock.acquire(blocking=False) and rf._save_executor is not parent_executor
+        ok = rf._first_use_lock.acquire(blocking=False)
+        ok = ok and rf._save_executor is not parent_executors[0] and rf._temp_dir_executor is not parent_executors[1]
         ok = ok and not rf._checked_temp_parents and not rf._process_dirs and rf._default_temp_dir is None
         rf._first_use_lock.release()
         child = rf.session_temp_dir("child", temp_dir=temp_dir)
