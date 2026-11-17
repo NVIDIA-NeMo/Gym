@@ -170,6 +170,8 @@ class TestServerUtils:
                     }
                 },
                 "max_tokens": 4096,
+                "openai_default_headers": {"x-litellm-key": "sk-litellm-sentinel"},
+                "mlflow_tracking_uri": "https://user:pw-sentinel@mlflow.example/api",
             }
         )
         monkeypatch.setattr(
@@ -190,6 +192,8 @@ class TestServerUtils:
         assert served.policy_model.responses_api_models.vllm_model.api_key == "****"
         assert served.policy_model.responses_api_models.vllm_model.port == 1234
         assert served.max_tokens == 4096
+        assert served.openai_default_headers["x-litellm-key"] == "****"
+        assert served.mlflow_tracking_uri == "https://user:****@mlflow.example/api"
         # The supervisor's own config (and so NEMO_GYM_CONFIG_DICT for the servers it launches) is untouched.
         assert global_config_dict.policy_api_key == "sk-live-sentinel"
 

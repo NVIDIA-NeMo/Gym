@@ -259,12 +259,22 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
     request_overrides: Dict[str, Any] = Field(
         default_factory=dict,
         description=(
-            "Top-level fields forced onto every upstream request, over what the caller sent "
-            "(extra_body only fills fields the caller left unset). For harnesses that cannot "
-            "set them, e.g. the Codex CLI with a placeholder model name sends no `reasoning` "
+            "Top-level fields forced onto every upstream /v1/responses and /v1/chat/completions request, over "
+            "what the caller sent (extra_body only fills fields the caller left unset). A value replaces the "
+            "caller's top-level field whole (`reasoning: {effort: high}` drops a caller's `reasoning.summary`). "
+            "Not applied to /v1/embeddings. `model`, `input`, `messages` and `stream` are refused. For harnesses "
+            "that cannot set these fields, e.g. the Codex CLI with a placeholder model name sends no `reasoning` "
             "or `include`."
         ),
     )
+
+    @model_validator(mode="after")
+    def _validate_request_overrides(self) -> "SimpleModelServerConfig":
+        # The model is always the configured one, and the payload and streaming mode are the caller's.
+        refused = sorted({"model", "input", "messages", "stream"} & set(self.request_overrides))
+        if refused:
+            raise ValueError(f"request_overrides cannot set {refused}")
+        return self
 
 
 class SimpleModelServer(SimpleResponsesAPIModel):

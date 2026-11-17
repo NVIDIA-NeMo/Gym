@@ -199,8 +199,8 @@ def test_mask_credentials_masks_only_credential_values() -> None:
                 }
             }
         },
-        "env_key": "${oc.env:SEB_MODEL_API_KEY}",
-        "secret_api_key": "${oc.env:SEB_MODEL_API_KEY}",
+        "env_key": "${oc.env:EXAMPLE_MODEL_API_KEY}",
+        "secret_api_key": "${oc.env:EXAMPLE_MODEL_API_KEY}",
         "credentials": {"user": "me", "password": "pw", "nested": ["a", {"x": "b"}]},
         "unset_api_key": "",
         "missing_api_key": "???",
@@ -208,6 +208,9 @@ def test_mask_credentials_masks_only_credential_values() -> None:
         "token_ids": [1, 2],
         "max_tokens": 4096,
         "client_secrets": ["s1", "s2"],
+        "openai_default_headers": {"x-litellm-key": "sk-litellm", "x-trace-id": "t1"},
+        "mlflow_tracking_uri": "https://user:pw@mlflow.example/api",
+        "docs_url": "https://example.com/path",
     }
 
     assert mask_credentials(config) == {
@@ -225,7 +228,7 @@ def test_mask_credentials_masks_only_credential_values() -> None:
                 }
             }
         },
-        "env_key": "${oc.env:SEB_MODEL_API_KEY}",
+        "env_key": "${oc.env:EXAMPLE_MODEL_API_KEY}",
         "secret_api_key": "****",
         "credentials": {"user": "****", "password": "****", "nested": ["****", {"x": "****"}]},
         "unset_api_key": "",
@@ -234,6 +237,11 @@ def test_mask_credentials_masks_only_credential_values() -> None:
         "token_ids": [1, 2],
         "max_tokens": 4096,
         "client_secrets": ["****", "****"],
+        # A `*-key` header is a credential (LiteLLM's own key header); other headers stay.
+        "openai_default_headers": {"x-litellm-key": "****", "x-trace-id": "t1"},
+        # A password inside a URL is masked wherever the URL sits; the rest of the URL stays.
+        "mlflow_tracking_uri": "https://user:****@mlflow.example/api",
+        "docs_url": "https://example.com/path",
     }
     # A copy: the input is untouched.
     assert config["policy_api_key"] == "sk-live"

@@ -670,6 +670,11 @@ CODEX_TURN = {
 
 
 class TestRequestOverrides:
+    @pytest.mark.parametrize("field", ["model", "input", "messages", "stream"])
+    def test_request_overrides_refuse_the_model_payload_and_streaming(self, field: str) -> None:
+        with pytest.raises(ValueError, match=f"request_overrides cannot set \\['{field}'\\]"):
+            _make_server(request_overrides={field: "x", "store": False})
+
     async def test_request_overrides_win_over_caller_and_extra_body(self) -> None:
         server = _make_server(
             extra_body={"store": True, "temperature": 0.5},

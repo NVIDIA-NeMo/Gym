@@ -116,16 +116,35 @@ def looks_like_credential_key(key: object) -> bool:
     )
 
 
-def mask_credentials(value: Any, under_credential_key: bool = False) -> Any:
+def _looks_like_header_credential(key: object) -> bool:
+    """Inside a headers mapping, a `*-key` / `*_key` header (e.g. LiteLLM's `x-litellm-key`) carries a credential."""
+    lowered_key = str(key).lower()
+    return lowered_key == "key" or lowered_key.endswith(("-key", "_key"))
+
+
+def mask_credentials(value: Any, under_credential_key: bool = False, in_headers: bool = False) -> Any:
     """A copy of a plain container (`OmegaConf.to_container(..., resolve=False)`) with every non-empty string under a
-    credential-shaped key masked with '****', interpolations included. Other values, empty strings and '???'
-    (MISSING) are kept, so a client still sees which credentials are unset."""
+    credential-shaped key masked with '****', interpolations included. Inside a mapping whose key names headers
+    (`*headers`), a `*-key` / `*_key` header counts as credential-shaped too. Every other string has the password in
+    any URL user info masked (`mask_url_passwords`). Other values, empty strings and '???' (MISSING) are kept, so a
+    client still sees which credentials are unset."""
     if isinstance(value, dict):
-        return {k: mask_credentials(v, under_credential_key or looks_like_credential_key(k)) for k, v in value.items()}
+        return {
+            k: mask_credentials(
+                v,
+                under_credential_key
+                or looks_like_credential_key(k)
+                or (in_headers and _looks_like_header_credential(k)),
+                in_headers=str(k).lower().endswith("headers"),
+            )
+            for k, v in value.items()
+        }
     if isinstance(value, list):
-        return [mask_credentials(v, under_credential_key) for v in value]
+        return [mask_credentials(v, under_credential_key, in_headers) for v in value]
     if under_credential_key and isinstance(value, str) and value not in ("", "???"):
         return MASKED_VALUE
+    if isinstance(value, str):
+        return mask_url_passwords(value)
     return value
 
 

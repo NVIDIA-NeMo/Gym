@@ -1021,3 +1021,22 @@ def test_log_api_cost_never_raises(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setenv(API_COST_LOG_ENV_VAR_NAME, str(tmp_path / "missing-dir" / "cost.jsonl"))
     log_api_cost("/responses", {"model": "m"}, {}, {"usage": {}})
+
+
+async def test_alog_api_cost_writes_in_a_worker_thread_only_when_enabled(tmp_path, monkeypatch) -> None:
+    import threading
+
+    from nemo_gym.client import openai_client
+    from nemo_gym.client.openai_client import API_COST_LOG_ENV_VAR_NAME, alog_api_cost
+
+    threads = []
+    real = openai_client.log_api_cost
+    monkeypatch.setattr(
+        openai_client, "log_api_cost", lambda *args: threads.append(threading.current_thread()) or real(*args)
+    )
+    await alog_api_cost("/responses", {"model": "m"}, {}, {"usage": {}})
+    assert threads == []  # off: no thread hop at all
+    monkeypatch.setenv(API_COST_LOG_ENV_VAR_NAME, str(tmp_path / "cost.jsonl"))
+    await alog_api_cost("/responses", {"model": "m"}, {}, {"usage": {}})
+    assert len(threads) == 1 and threads[0] is not threading.main_thread()
+    assert json.loads((tmp_path / "cost.jsonl").read_text())["model"] == "m"

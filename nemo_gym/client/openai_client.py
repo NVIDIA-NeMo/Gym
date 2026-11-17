@@ -429,6 +429,14 @@ def log_api_cost(endpoint: str, request: Dict[str, Any], headers: Any, body: Any
         logging.getLogger(__name__).warning("could not write %s", path, exc_info=True)
 
 
+async def alog_api_cost(endpoint: str, request: Dict[str, Any], headers: Any, body: Any) -> None:
+    """``log_api_cost`` off the event loop: nothing when the log is off, else the append runs in a worker thread so
+    a slow (e.g. shared) filesystem never stalls other requests."""
+    if not os.environ.get(API_COST_LOG_ENV_VAR_NAME):
+        return
+    await asyncio.to_thread(log_api_cost, endpoint, request, headers, body)
+
+
 class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     """This is just a stub class that wraps around aiohttp"""
 
@@ -894,7 +902,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
         await self._raise_for_status(response, request_kwargs)
         body = await self._read_response_json(response)
-        log_api_cost("/chat/completions", kwargs, getattr(response, "headers", None), body)
+        await alog_api_cost("/chat/completions", kwargs, getattr(response, "headers", None), body)
         return body
 
     async def create_completion(self, **kwargs):
@@ -916,7 +924,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
         await self._raise_for_status(response, request_kwargs)
         body = await self._read_response_json(response)
-        log_api_cost("/responses", kwargs, getattr(response, "headers", None), body)
+        await alog_api_cost("/responses", kwargs, getattr(response, "headers", None), body)
         return body
 
     async def create_tokenize(self, **kwargs):
