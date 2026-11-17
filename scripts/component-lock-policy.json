@@ -24,6 +24,11 @@
       "pillow==12.3.0"
     ]
   },
+  "resources_servers/ether0": {
+    "exclude-dependencies": [
+      "pyonmttok"
+    ]
+  },
   "resources_servers/gdpval": {
     "include-dependencies": [
       "cryptography"
