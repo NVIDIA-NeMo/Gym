@@ -640,3 +640,24 @@ class TestLiteLLMModelServer:
             assert response.json() == {"error": {"code": "context_length_exceeded"}}
         operation = server._client.create_response if api == "responses" else server._client.create_chat_completion
         operation.assert_awaited_once()
+
+
+class TestVersionCheckConfiguration:
+    async def test_version_check_can_be_skipped(self) -> None:
+        server = _make_server(check_proxy_version=False)
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(return_value=deepcopy(NATIVE_RESPONSE))
+        health = AsyncMock(side_effect=AssertionError("no health call"))
+        with patch("responses_api_models.litellm_model.app.request", new=health):
+            with TestClient(server.setup_webserver()) as client:
+                assert client.post("/v1/responses", json={"input": "hi"}).status_code == 200
+        health.assert_not_awaited()
+
+    async def test_version_check_runs_by_default(self) -> None:
+        server = _make_server()
+        assert server.config.check_proxy_version is True
+        mock_resp = _mock_health_response({"litellm_version": "1.82.7"})
+        with patch("responses_api_models.litellm_model.app.request", return_value=mock_resp):
+            with pytest.raises(RuntimeError, match="compromised"):
+                with TestClient(server.setup_webserver()):
+                    pass
