@@ -8,7 +8,10 @@
 """Upstream VIALS prompt, verdict parsing, and answer extraction.
 
 Extracted without semantic changes from vials/judge.py and vials/data.py at
-002a0d25031f02a760da5d14f2c29bbd26eb06e4. See UPSTREAM_LICENSE. Network calls are implemented by the Harbor verifier in grade.py.
+002a0d25031f02a760da5d14f2c29bbd26eb06e4 (MIT). Sources:
+https://github.com/Handshake-AI-Research/VIALS/blob/002a0d25031f02a760da5d14f2c29bbd26eb06e4/vials/judge.py
+https://github.com/Handshake-AI-Research/VIALS/blob/002a0d25031f02a760da5d14f2c29bbd26eb06e4/vials/data.py
+See UPSTREAM_LICENSE. Network calls are implemented by the Harbor verifier in grade.py.
 """
 
 import logging

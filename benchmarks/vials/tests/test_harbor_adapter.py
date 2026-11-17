@@ -52,9 +52,9 @@ def export(tmp_path: Path, rows: list[dict] | None = None, **kwargs: object) -> 
 
 def test_direct_hf_export_keeps_panels_bounds_and_reference_private(tmp_path: Path) -> None:
     index = export(tmp_path)
-    entries = [json.loads(line) for line in index.read_text().splitlines()]
+    entries = [{"task_name": path.name} for path in index.glob("vials-*")]
     assert [r["task_name"] for r in entries] == ["vials-single", "vials-multi"]
-    task = index.parent / "vials-multi"
+    task = index / "vials-multi"
     payload = json.loads((task / "tests/verifier_input.json").read_text())
     assert payload["question"] == "How many cells in A & B? ${literal}"
     assert payload["expected_answer"] == "REFERENCE_ONLY_SENTINEL"
@@ -76,28 +76,53 @@ def test_direct_hf_export_keeps_panels_bounds_and_reference_private(tmp_path: Pa
             assert b"REFERENCE_ONLY_SENTINEL" not in path.read_bytes()
     config = tomllib.loads((task / "task.toml").read_text())
     assert config["verifier"]["environment_mode"] == "separate"
-    assert config["environment"]["network_mode"] == "no-network"
+    assert config["environment"]["network_mode"] == "public"
     assert config["verifier"]["env"]["VIALS_JUDGE_API_KEY"] == "${VIALS_JUDGE_API_KEY}"
     assert config["artifacts"] == ["/task/answer.txt"]
     assert not list(task.rglob("*.pyc"))
     assert (task / "tests/test.sh").stat().st_mode & 0o111
     assert sorted(p.name for p in tmp_path.iterdir()) == ["harbor"]
-    assert "REFERENCE_ONLY_SENTINEL" not in (index.parent / "example.jsonl").read_text()
+    assert (index / "dataset.toml").is_file()
+    assert "REFERENCE_ONLY_SENTINEL" in (task / "solution/solve.sh").read_text()
+    assert not (index / "gym.jsonl").exists()
 
 
-def test_native_harbor_parses_export(tmp_path: Path) -> None:
-    native = pytest.importorskip("harbor.models.task.task")
-    index = export(tmp_path)
-    for row in map(json.loads, index.read_text().splitlines()):
-        task = native.Task(index.parent / row["task_name"])
-        assert task.name == f"vials/{row['task_name']}"
-        assert task.config.agent.user == "agent"
-        assert task.config.verifier.environment_mode.value == "separate"
+def test_native_gym_loads_export_and_materializes_task_routes(tmp_path: Path) -> None:
+    from nemo_gym.data.tasks.harbor import context_digest, load_task
+    from nemo_gym.data.tasks.harbor.materialize import materialize_task, run_config
+    from nemo_gym.data.tasks.harbor.records import write_json_record
+
+    folder = export(tmp_path)
+    builds = {}
+    for task in folder.glob("vials-*"):
+        for directory, service in [("environment", "main"), ("tests", "verifier")]:
+            builds[context_digest(task / directory)] = {"services": {service: {"image": "example/unit-test:local"}}}
+    write_json_record(folder / "built-images.json", builds)
+    tasks = [load_task(path) for path in folder.glob("vials-*")]
+    assert len(tasks) == 2
+    for task in tasks:
+        row = materialize_task(task, "vials")
+        assert row.task_id.taskset == "vials"
+        assert task.config.verifier.environment_mode == "separate"
+        assert (task.path / "solution/solve.sh").is_file()
+    config = run_config(
+        folder=folder,
+        tasks=tasks,
+        rows_path=tmp_path / "rows.jsonl",
+        taskset="vials",
+        agent_instance_name="direct_vision_agent",
+        agent_impl="direct_vision_agent",
+    )
+    assert config["environment_routing_mode"] == "taskset"
+    assert (
+        config["harbor_vials_environment"]["environment_servers"]["harbor"]["agent_server"]["name"]
+        == "harbor_vials_agent"
+    )
 
 
 def test_overwrite_and_subset_are_explicit(tmp_path: Path) -> None:
     index = export(tmp_path)
-    marker = index.parent / "vials-single/marker"
+    marker = index / "vials-single/marker"
     marker.touch()
     with pytest.raises(FileExistsError):
         export(tmp_path)
@@ -113,7 +138,7 @@ def test_overwrite_and_subset_are_explicit(tmp_path: Path) -> None:
 )
 def test_invalid_rows_fail_before_replacing_existing_tasks(tmp_path: Path, change: str) -> None:
     index = export(tmp_path)
-    marker = index.parent / "vials-single/marker"
+    marker = index / "vials-single/marker"
     marker.touch()
     rows = source_rows()
     if change == "id":
@@ -169,5 +194,5 @@ def test_cli_loads_hf_directly_with_limit(tmp_path: Path) -> None:
         ),
     ):
         runpy.run_path(str(TEMPLATE_DIR.parent / "adapter.py"), run_name="__main__")
-    assert len((tmp_path / "harbor/gym.jsonl").read_text().splitlines()) == 1
+    assert len(list((tmp_path / "harbor").glob("vials-*"))) == 1
     assert (tmp_path / "harbor/vials-single/tests/images/image.png").read_bytes() == b"first"

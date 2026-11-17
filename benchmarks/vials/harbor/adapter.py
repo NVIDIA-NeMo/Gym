@@ -4,7 +4,9 @@
 """Download the pinned VIALS dataset directly into Harbor task folders.
 
 Image handling adapts the MIT-licensed upstream vials/download.py at
-002a0d25031f02a760da5d14f2c29bbd26eb06e4. See ../UPSTREAM_LICENSE.
+002a0d25031f02a760da5d14f2c29bbd26eb06e4. Source:
+https://github.com/Handshake-AI-Research/VIALS/blob/002a0d25031f02a760da5d14f2c29bbd26eb06e4/vials/download.py
+See ../UPSTREAM_LICENSE.
 """
 
 import argparse
@@ -14,14 +16,15 @@ import math
 import re
 import shutil
 from pathlib import Path
+from shlex import quote
 from string import Template
 
-from nemo_gym.prompt import load_prompt_config
+from nemo_gym.data.prompt import load_prompt_config
 
 
 BENCHMARK_DIR = Path(__file__).resolve().parents[1]
 TEMPLATE_DIR = Path(__file__).parent / "task-template"
-DEFAULT_OUTPUT_DIR = BENCHMARK_DIR / "data" / "harbor"
+DEFAULT_OUTPUT_DIR = BENCHMARK_DIR / "data" / "vials"
 HF_REPO = "handshake-ai-research/VIALS"
 HF_REVISION = "9657bf84c6f6e470e1c31123afe3f9152c3655bd"
 HF_CONFIG = "tasks"
@@ -85,7 +88,7 @@ def _write_task(row: dict, destination: Path, *, docker_image: str) -> None:
         "user": prompts.user.format(question=html.unescape(row["question"])),
         "images": names,
     }
-    (input_dir / "vials_input.json").write_text(json.dumps(public_input) + "\n")
+    (input_dir / "input.json").write_text(json.dumps(public_input) + "\n")
     (destination / "instruction.md").write_text(
         Template((TEMPLATE_DIR / "instruction.md").read_text()).substitute(
             image_paths=", ".join(f"/task/{name}" for name in names), question=html.unescape(row["question"])
@@ -111,6 +114,13 @@ def _write_task(row: dict, destination: Path, *, docker_image: str) -> None:
     (destination / "tests" / "verifier_input.json").write_text(json.dumps(payload, allow_nan=False) + "\n")
     shutil.copy2(BENCHMARK_DIR / "UPSTREAM_LICENSE", destination / "tests" / "UPSTREAM_LICENSE")
     (destination / "tests" / "test.sh").chmod(0o755)
+    solution = destination / "solution"
+    solution.mkdir()
+    answer = "ANSWER: " + html.unescape(row["answer"]) + "\n"
+    (solution / "solve.sh").write_text(
+        "#!/bin/bash\nset -euo pipefail\nprintf %s " + quote(answer) + " > /task/answer.txt\n"
+    )
+    (solution / "solve.sh").chmod(0o755)
 
 
 def prepare(
@@ -120,11 +130,7 @@ def prepare(
     limit: int | None = None,
     overwrite: bool = False,
 ) -> Path:
-    """Write Harbor tasks directly from Hugging Face and a bridge compatibility index.
-
-    No intermediate evaluation dataset is written. ``gym.jsonl`` contains only
-    task names and empty inputs required by Gym's current shared Harbor bridge.
-    """
+    """Write native task folders and dataset metadata directly from Hugging Face."""
     from datasets import Image, load_dataset
 
     if limit is not None and limit < 1:
@@ -150,36 +156,18 @@ def prepare(
         if destination.exists() and not overwrite:
             raise FileExistsError(f"Harbor task output already exists: {destination}; use overwrite=True")
     output_dir.mkdir(parents=True, exist_ok=True)
-    index = []
     for row in rows:
         destination = output_dir / _task_id(row["id"])
         if destination.exists():
             shutil.rmtree(destination)
         _write_task(row, destination, docker_image=docker_image)
-        index.append({"task_name": destination.name, "responses_create_params": {"input": []}})
-    path = output_dir / "gym.jsonl"
-    path.write_text("".join(json.dumps(row) + "\n" for row in index))
-    chosen = []
-    for predicate in (
-        lambda row: len(row["images"]) == 1,
-        lambda row: len(row["images"]) > 1,
-        lambda row: any(
-            _numeric_bound(row["metadata"].get(key)) is not None
-            for key in ("answer_lower_bound", "answer_upper_bound")
-        ),
-    ):
-        for row in rows:
-            name = _task_id(row["id"])
-            if name not in chosen and predicate(row):
-                chosen.append(name)
-                break
-    chosen += [entry["task_name"] for entry in index if entry["task_name"] not in chosen][: max(0, 5 - len(chosen))]
-    (output_dir / "example.jsonl").write_text(
-        "".join(json.dumps({"task_name": name, "responses_create_params": {"input": []}}) + "\n" for name in chosen)
+    (output_dir / "dataset.toml").write_text(
+        '[gym]\ntype = "benchmark"\nlicense = "Creative Commons Attribution 4.0 International"\n'
+        'domain = "other"\nverified = false\nallowed_agents = ["direct_vision_agent"]\n\n[gym.defaults]\nnum_repeats = 1\n'
     )
     shutil.copy2(BENCHMARK_DIR / "attributions.csv", output_dir / "attributions.csv")
-    print(f"Prepared {len(index)} VIALS Harbor tasks: {output_dir}")
-    return path
+    print(f"Prepared {len(rows)} VIALS Harbor tasks: {output_dir}")
+    return output_dir
 
 
 if __name__ == "__main__":

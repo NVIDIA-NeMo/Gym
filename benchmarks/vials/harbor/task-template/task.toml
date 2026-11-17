@@ -7,11 +7,11 @@ artifacts = ["/task/answer.txt"]
 name = ${task_name}
 
 [agent]
-timeout_sec = 600
+timeout_sec = 14400
 user = "agent"
 
 [verifier]
-timeout_sec = 300
+timeout_sec = 600
 user = "root"
 environment_mode = "separate"
 
@@ -30,4 +30,4 @@ workdir = "/task"
 cpus = 2
 memory_mb = 4096
 storage_mb = 2048
-network_mode = "no-network"
+network_mode = "public"

@@ -1,4 +1,2 @@
+/vials/
 /harbor/
-
-# Small Harbor smoke index; task folders are generated.
-!/harbor_example.jsonl
