@@ -541,6 +541,8 @@ async def save_dir(
     is the server's ``output_dir`` or ``<results_dir>/<server_name>``. The rollout comes from the request, and is
     ``no-rollout`` outside one.
     Copies run on a few threads of their own, so a burst of them never holds up the server's other work.
+    A copy has no time limit. A caller that must not wait longer, such as a request with a time budget, wraps the
+    call in ``asyncio.wait_for``: it returns on time, and the copy finishes on its thread.
 
     It never fails the request: a failed copy is logged, its partial folder removed, and it returns ``None``.
     An entry it cannot read is skipped and logged, and the rest is kept.
