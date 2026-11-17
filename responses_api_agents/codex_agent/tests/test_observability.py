@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.models.token_capture import ParentResolutionStatus, TokenEntry, resolve_terminal, stamp_lineage
-from nemo_gym.trajectory import AgentInvocation, ToolCallObservation
+from nemo_gym.trajectory import AgentInvocation, ToolCallObservation, transcript_to_atif
 from responses_api_agents.codex_agent.app import parse_exec_jsonl
 from responses_api_agents.codex_agent.observability import (
     CodexOutputUnavailable,
@@ -564,6 +564,17 @@ def test_a_call_without_its_result_stays_open() -> None:
         (_session(_call("c1", "t", {}), _result("c1", [{"type": "input_file"}])), "unsupported content item"),
         (_session(_call("c1", "t", {}), _result("c1", 7)), "neither text nor content items"),
         (_session({"type": "function_call", "call_id": "c1", "name": "t"}), "lacks its call_id, name or arguments"),
+        (_session(_call("c1", "", {}), _result("c1", "x")), "lacks its call_id, name or arguments"),
+        (_session(_call("c1", "  ", {})), "lacks its call_id, name or arguments"),
+        (_session(_call(" ", "t", {})), "lacks its call_id, name or arguments"),
+        (
+            _session({"type": "custom_tool_call", "call_id": "c1", "name": "", "input": "text"}),
+            "lacks its call_id, name or input",
+        ),
+        (_session({"type": "message", "role": "assistant", "content": 5}), "unexpected shape: TypeError"),
+        (_session({"type": "reasoning", "summary": 5}), "unexpected shape: TypeError"),
+        (_session({"type": "reasoning", "summary": [], "content": 5}), "unexpected shape: TypeError"),
+        (json.dumps({"type": ["response_item"], "payload": {}}), "unexpected shape: TypeError"),
         (
             _session({"type": "message", "role": "assistant", "content": [{"type": "input_image"}]}),
             "unsupported content part",
@@ -574,6 +585,90 @@ def test_a_call_without_its_result_stays_open() -> None:
 def test_output_is_unavailable_where_the_record_would_misstate_or_break_the_run(transcript, reason) -> None:
     with pytest.raises(CodexOutputUnavailable, match=reason):
         parse_codex_output(transcript)
+
+
+def test_a_record_nested_too_deeply_to_decode_is_unavailable() -> None:
+    """The decoder raises RecursionError, not ValueError, for a valid record nested past the recursion limit."""
+    with pytest.raises(CodexOutputUnavailable, match="not JSON"):
+        parse_codex_output("[" * 100_000 + "]" * 100_000)
+
+
+@pytest.mark.parametrize("search_id", [None, "", "  ", ["ws-1"], 7])
+def test_a_web_search_without_a_usable_id_is_given_one_the_export_accepts(search_id) -> None:
+    transcript = _session({"type": "web_search_call", "id": search_id, "action": {"type": "search"}})
+    call, result = parse_codex_output(transcript)
+    assert call.call_id == result.call_id == "ws_0"
+    transcript_to_atif(
+        "task",
+        [item.model_dump(mode="json") for item in (call, result)],
+        session_id="s",
+        agent_name="codex_agent",
+        agent_version="test",
+    )
+
+
+def _paths(node: object, prefix: tuple = ()):
+    """Every path to a value inside nested dicts and lists, the node itself first."""
+    yield prefix
+    for key, child in node.items() if isinstance(node, dict) else enumerate(node) if isinstance(node, list) else ():
+        yield from _paths(child, (*prefix, key))
+
+
+def _replaced(node: object, path: tuple, value: object) -> object:
+    if not path:
+        return value
+    copy = dict(node) if isinstance(node, dict) else list(node)
+    copy[path[0]] = _replaced(node[path[0]], path[1:], value)
+    return copy
+
+
+def test_a_record_of_any_shape_is_either_unavailable_or_output_the_export_accepts() -> None:
+    """Replace each value of each record, in a session that holds every kind of item the mapping reads, with a value
+    of another shape. The agent catches only CodexOutputUnavailable, so nothing else may escape; and output that is
+    returned is what the Harbor Environment Server exports, so it must convert, or the server masks the turn."""
+    records = [
+        json.loads(line)
+        for line in _session(
+            _user("task"),
+            {
+                "type": "reasoning",
+                "id": "rs-1",
+                "summary": [{"type": "summary_text", "text": "plan"}],
+                "content": [{"type": "text", "text": "think"}],
+            },
+            _call("c1", "exec_command", {"cmd": "ls"}, id="fc-1", namespace="ns"),
+            _result("c1", "a"),
+            {"type": "custom_tool_call", "id": "ctc-1", "call_id": "c2", "name": "apply_patch", "input": "patch"},
+            _result("c2", [{"type": "input_text", "text": "ok"}], "custom_tool_call_output"),
+            {"type": "web_search_call", "id": "ws-1", "action": {"type": "search"}},
+            {
+                "type": "message",
+                "role": "assistant",
+                "id": "msg-1",
+                "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "Done."}],
+            },
+        ).split("\n")
+    ]
+    unavailable = exported = 0
+    for index, record in enumerate(records):
+        for path in _paths(record):
+            for value in ([], {}, 5, None, "", " ", ["a"], [[]], {"a": 1}):
+                mutated = [*records[:index], _replaced(record, path, value), *records[index + 1 :]]
+                try:
+                    output = parse_codex_output("\n".join(json.dumps(r) for r in mutated))
+                except CodexOutputUnavailable:
+                    unavailable += 1
+                    continue
+                transcript_to_atif(
+                    "task",
+                    [item.model_dump(mode="json") for item in output],
+                    session_id="s",
+                    agent_name="codex_agent",
+                    agent_version="test",
+                )
+                exported += 1
+    assert unavailable > 100 and exported > 100
 
 
 def test_output_joins_the_models_captured_call_where_the_cli_display_cannot() -> None:

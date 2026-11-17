@@ -3623,8 +3623,16 @@ def test_session_output_holds_the_models_calls_not_the_cli_display(setup):
             "the result of call orphan matches no open call",
         ),
         (native_transcript([{"type": "ghost_snapshot"}]), "unsupported session item 'ghost_snapshot'"),
+        (
+            native_transcript([{"type": "function_call", "call_id": "c1", "name": "", "arguments": "{}"}]),
+            "a function_call record lacks its call_id, name or arguments",
+        ),
+        (
+            native_transcript([{"type": "message", "role": "assistant", "content": 5}]),
+            "a session record has an unexpected shape: TypeError: 'int' object is not iterable",
+        ),
     ],
-    ids=["missing", "orphan-result", "unsupported-item"],
+    ids=["missing", "orphan-result", "unsupported-item", "blank-tool-name", "malformed-record"],
 )
 def test_session_output_without_a_usable_session_record_keeps_the_cli_events_and_says_so(setup, record, reason):
     agent, sandbox = setup

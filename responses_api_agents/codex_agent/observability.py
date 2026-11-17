@@ -324,7 +324,9 @@ def _session_output_items(payload: dict[str, Any], position: int) -> list[dict[s
         return [reasoning]
     if kind in ("function_call", "custom_tool_call"):
         field = "arguments" if kind == "function_call" else "input"
-        if not all(isinstance(payload.get(key), str) for key in ("call_id", "name", field)):
+        # The export that reads this output rejects a blank call_id or name, and masks the whole turn for it.
+        identity_given = all(isinstance(payload.get(key), str) and payload[key].strip() for key in ("call_id", "name"))
+        if not identity_given or not isinstance(payload.get(field), str):
             raise CodexOutputUnavailable(f"a {kind} record lacks its call_id, name or {field}")
         call = {"type": kind, "call_id": payload["call_id"], "name": payload["name"], field: payload[field]}
         call.update({key: payload[key] for key in ("id", "namespace") if isinstance(payload.get(key), str)})
@@ -343,7 +345,9 @@ def _session_output_items(payload: dict[str, Any], position: int) -> list[dict[s
         return [result]
     if kind == "web_search_call":
         # Codex runs this search on the model's side and reports no result, so it is a call with an empty result.
-        call_id = payload.get("id") or f"ws_{position}"
+        call_id = payload.get("id")
+        if not isinstance(call_id, str) or not call_id.strip():
+            call_id = f"ws_{position}"
         return [
             {
                 "type": "function_call",
@@ -356,21 +360,8 @@ def _session_output_items(payload: dict[str, Any], position: int) -> list[dict[s
     raise CodexOutputUnavailable(f"unsupported session item {kind!r}")
 
 
-def parse_codex_output(transcript: str | None) -> list[NeMoGymResponseOutputItem]:
-    """The model's own output from a Codex session record, in the order the model produced it.
-
-    ``codex exec --json`` reports each tool as the command Codex executed: a shell-wrapped command string, without
-    the model's other arguments, with results merged and ordered by completion and display IDs for call IDs. The
-    session record holds what the model called: each call's name, namespace, arguments and ``call_id`` exactly, in
-    model order, and each result under its call's ID. This turns that record into Responses output items, so
-    ``response.output`` and the trajectory exported from it show the model's calls.
-
-    Reasoning is kept as text only, and a content-item result as its text with ``[image]`` for each image.
-    A web search, which Codex runs on the model's side and reports without a result, becomes a ``web_search`` call
-    with an empty result. Raises :class:`CodexOutputUnavailable` when the record is missing, holds no model output,
-    cannot be read, holds a session other than the first or an item type with no mapping, or has a result with no
-    open call or a call ID used twice: output built from it would misstate the run, or fail the export that reads it.
-    """
+def _session_items(transcript: str | None) -> list[dict[str, Any]]:
+    """The Responses output items of a Codex session record, with each result matched to its open call."""
     if transcript is None:
         raise CodexOutputUnavailable("the Codex session record is unavailable")
     items: list[dict[str, Any]] = []
@@ -379,7 +370,7 @@ def parse_codex_output(transcript: str | None) -> list[NeMoGymResponseOutputItem
     for line in _jsonl_lines(transcript):
         try:
             record = json.loads(line)
-        except ValueError as exc:
+        except (ValueError, RecursionError) as exc:
             raise CodexOutputUnavailable("a session record is not JSON") from exc
         if not isinstance(record, dict):
             raise CodexOutputUnavailable("a session record is not an object")
@@ -407,12 +398,35 @@ def parse_codex_output(transcript: str | None) -> list[NeMoGymResponseOutputItem
             items.append(item)
     if not items:
         raise CodexOutputUnavailable("the Codex session record holds no model output")
+    return items
+
+
+def parse_codex_output(transcript: str | None) -> list[NeMoGymResponseOutputItem]:
+    """The model's own output from a Codex session record, in the order the model produced it.
+
+    ``codex exec --json`` reports each tool as the command Codex executed: a shell-wrapped command string, without
+    the model's other arguments, with results merged and ordered by completion and display IDs for call IDs. The
+    session record holds what the model called: each call's name, namespace, arguments and ``call_id`` exactly, in
+    model order, and each result under its call's ID. This turns that record into Responses output items, so
+    ``response.output`` and the trajectory exported from it show the model's calls.
+
+    Reasoning is kept as text only, and a content-item result as its text with ``[image]`` for each image.
+    A web search, which Codex runs on the model's side and reports without a result, becomes a ``web_search`` call
+    with an empty result. Raises :class:`CodexOutputUnavailable`, and nothing else, when the record is missing, holds
+    no model output, cannot be read or has a shape this does not expect, holds a session other than the first or an
+    item type with no mapping, or has a call with a blank ID or name, a result with no open call or a call ID used
+    twice: output built from it would misstate the run, or fail the export that reads it. A call ID is not reused
+    even after its result, because the observations key each tool by it.
+    """
     try:
-        return [_OUTPUT_ITEM.validate_python(item) for item in items]
+        return [_OUTPUT_ITEM.validate_python(item) for item in _session_items(transcript)]
     except ValidationError as exc:
         raise CodexOutputUnavailable(
             f"a session item is not a Responses output item: {exc.errors()[0]['loc']}"
         ) from exc
+    except (TypeError, RecursionError) as exc:
+        # A record whose JSON has a shape the mapping did not expect, such as a list where Codex writes text.
+        raise CodexOutputUnavailable(f"a session record has an unexpected shape: {type(exc).__name__}: {exc}") from exc
 
 
 def associate_codex_compaction_calls(

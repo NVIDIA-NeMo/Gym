@@ -243,9 +243,10 @@ and the assistant messages and reasoning text between them. The Harbor Environme
 read, including Codex's `Chunk ID` / `Process exited with code` envelope; an image result is written as `[image]`, and
 encrypted reasoning is left in the observations. An MCP call keeps its bare tool name, and a free-form `apply_patch` call is a
 `custom_tool_call`. `response.output` falls back to the CLI events when the record cannot stand in for them: it is missing
-or unreadable, holds a second session or an item type with no mapping, or has a result without an open call or a call ID
-used twice. The observations then carry a `tool_calls_in_executed_form` gap naming the reason, when that output has tool
-calls. Local `/run` execution still builds its output from the CLI events.
+or unreadable (including a line whose values have a shape Codex does not write), holds a second session or an item type
+with no mapping, has a call with a blank ID or name (the export of the trajectory rejects one), or has a result without
+an open call or a call ID used twice. The observations then carry a `tool_calls_in_executed_form` gap naming the reason,
+when that output has tool calls. Local `/run` execution still builds its output from the CLI events.
 
 Native session transcripts supply tool-call IDs and outcomes. Codex disables its native HTTP 429 retries, so `sandbox_launcher.mjs` runs it behind a loopback forwarder on the runtime's Node that retries a 429 twice, honoring `Retry-After` up to 30 seconds. The forwarder retains request statuses and invocation correlation across retries; native cumulative usage supplements CLI totals when a failed turn omits them. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
 Compare CLI totals with captured model calls; do not interpret unavailable usage as zero.
