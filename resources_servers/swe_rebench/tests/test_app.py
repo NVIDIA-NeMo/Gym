@@ -270,9 +270,14 @@ class TestRunVerification:
             (-1, False, None, False, False),  # OpenSandbox signal death without a known cause.
             (-1, True, None, True, True),  # The complete test section remains gradeable.
             (-9, True, None, True, True),
-            (124, False, None, True, True),  # A positive code alone does not establish interruption.
-            (137, False, None, True, True),
+            (124, False, None, True, True),  # Preserve the non-signal exit-code policy.
+            (128, False, None, True, True),
+            (129, False, None, False, False),  # Shells encode signal exits as 128 + signal.
+            (137, False, None, False, False),  # Docker reports SIGKILL as 137.
+            (143, False, None, False, False),
+            (137, True, None, True, True),
             (-1, False, "timeout", True, False),  # Preserve the explicit timeout policy.
+            (137, False, "timeout", True, False),
             (-1, False, "sandbox", False, False),
         ],
     )
@@ -307,12 +312,13 @@ class TestRunVerification:
             ({"a": "ERROR"}, False),  # Do not infer an explicit FAILED status from another parser label.
         ],
     )
+    @pytest.mark.parametrize("return_code", [-1, 137])
     async def test_interrupted_output_retains_only_conclusive_required_failures(
-        self, statuses: dict[str, str], completed: bool
+        self, statuses: dict[str, str], completed: bool, return_code: int
     ) -> None:
         output = f"{TEST_OUTPUT_BEGIN}\n" + "\n".join(f"{name}: {status}" for name, status in statuses.items())
         result = await run_verification(
-            sandbox=_FakeSandbox(output, return_code=-1),
+            sandbox=_FakeSandbox(output, return_code=return_code),
             inputs=_inputs(fail_to_pass=["a"], pass_to_pass=["b"]),
             parser=lambda log: dict(line.rsplit(": ", 1) for line in log.splitlines() if ": " in line),
         )

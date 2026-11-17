@@ -315,7 +315,7 @@ async def run_verification(
             error=f"repo directory {repo_directory(inputs.repo)} not present in the image",
         )
 
-    interrupted = result.return_code < 0 and TEST_OUTPUT_END not in output
+    interrupted = (result.return_code < 0 or result.return_code > 128) and TEST_OUTPUT_END not in output
     # Without the end marker the test section would run to the end of the combined log, which also holds
     # every line the script wrote to stderr, install output included. A completed run never parses stderr
     # either, since it follows the end marker, so an interrupted run parses stdout only.
