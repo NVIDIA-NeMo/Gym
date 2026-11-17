@@ -245,7 +245,7 @@ def test_the_host_keeps_the_placement_and_the_reader_payload_carries_none_of_it(
 
 def test_the_gate_task_reports_where_the_readers_ran_only_with_a_reader_step() -> None:
     plain = CollectedEvidence.model_validate_json(
-        (Path(__file__).parent / "fixtures/cpu-grading-mcqa-healthy.json").read_text()
+        (Path(__file__).parents[1] / "eval/recovery/fixtures/cpu-grading-mcqa-healthy.json").read_text()
     )
     placed = plain.model_copy(
         update={"collector_host": "cpu:7", "reader_host": "login", "reader_fallback_reason": "squeue failed"}

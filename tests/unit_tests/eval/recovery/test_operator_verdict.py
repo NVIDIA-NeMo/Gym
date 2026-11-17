@@ -25,7 +25,7 @@ from nemo_gym.eval.recovery.decision import (
 )
 from nemo_gym.eval.recovery.evidence import CollectedEvidence
 from nemo_gym.eval.recovery.gate import operator_verdict, operator_verdict_line, with_operator_verdict
-from tests.unit_tests.orchestration.test_evaluation_health import _gate, _run
+from tests.unit_tests.eval.recovery.test_evaluation_health import _gate, _run
 
 
 def _ready(collected):
@@ -638,7 +638,7 @@ def test_an_accepted_run_whose_mlflow_delivery_is_pending_names_the_export():
 def _failing_auxiliary_chains(failing_rollouts, ignored_checks=()):
     """The quality the real health producer and collector report for 32 rollouts, ``failing_rollouts`` of which also
     end on a failed call of each of two auxiliary models (two failed model chains per affected rollout)."""
-    from tests.unit_tests.orchestration.test_recovery_health_binding import collect, setup
+    from tests.unit_tests.eval.recovery.test_recovery_health_binding import collect, setup
 
     def decorate(index, item):
         if index >= failing_rollouts:

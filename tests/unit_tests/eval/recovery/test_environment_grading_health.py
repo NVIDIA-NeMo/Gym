@@ -26,9 +26,9 @@ from nemo_gym.trajectory.trajectory_record import grading_result_binding
 from nemo_gym.verification.judge import call_judge, record_parsed_judge_verdict
 from tests.helpers.single_agent_turn import _agent_response, _Client, _environment_server, _request, _Response
 from tests.unit_tests.eval.recovery.test_grading_artifacts import _ungraded
+from tests.unit_tests.eval.recovery.test_recovery_health_binding import row as raw_trial
 from tests.unit_tests.eval.recovery.test_verifier_recorded_trial_coverage import _in_process, _judge_row
 from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect_with_score
-from tests.unit_tests.orchestration.test_recovery_health_binding import row as raw_trial
 from tests.unit_tests.rollouts.test_model_calls import _capture_exchange
 from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, install_fake_server_client
 

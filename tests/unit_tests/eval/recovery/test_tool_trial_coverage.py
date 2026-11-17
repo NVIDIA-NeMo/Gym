@@ -279,7 +279,7 @@ def test_unjoined_runtime_operations_beside_supported_items_are_reported(locatio
 )
 def test_malformed_recovery_counters_do_not_become_zero(counters):
     c = CollectedEvidence.model_validate_json(
-        (Path(__file__).parents[1] / "fixtures/cpu-mcqa-trial-operations.json").read_text()
+        (Path(__file__).parents[2] / "fixtures/cpu-mcqa-trial-operations.json").read_text()
     )
     c.quality["observed_upstream_recovery"] = counters
     decision, (passed, _) = health(c)
@@ -346,7 +346,7 @@ def test_actual_mcqa_calculation_keeps_ordinary_scores(case, reward):
 
 def test_historical_mcqa_without_grading_observation_is_unknown_not_rescored():
     c = CollectedEvidence.model_validate_json(
-        (Path(__file__).parents[1] / "fixtures/cpu-mcqa-trial-operations.json").read_text()
+        (Path(__file__).parents[2] / "fixtures/cpu-mcqa-trial-operations.json").read_text()
     )
     before = [r.get("reward") for r in c.results]
     decision, (passed, _) = health(c)

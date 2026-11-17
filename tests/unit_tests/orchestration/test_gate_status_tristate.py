@@ -23,7 +23,7 @@ from nemo_gym.cli.main import _eval_resubmit
 from nemo_gym.eval.recovery.evidence import CollectedEvidence
 from nemo_gym.eval.recovery.gate import gate_task_summary
 from nemo_gym.orchestration import submit
-from tests.unit_tests.orchestration.test_evaluation_health import _gate, _run
+from tests.unit_tests.eval.recovery.test_evaluation_health import _gate, _run
 
 
 def _accountable(collected: CollectedEvidence) -> CollectedEvidence:

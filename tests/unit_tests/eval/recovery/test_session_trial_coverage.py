@@ -15,7 +15,7 @@ from nemo_gym.eval.recovery.gate import (
     trial_verdict,
 )
 from nemo_gym.eval.recovery.planner import decide_from_collected
-from tests.unit_tests.orchestration.test_tool_trial_coverage import recorded_run
+from tests.unit_tests.eval.recovery.test_tool_trial_coverage import recorded_run
 
 
 def session_fixture(case="healthy"):

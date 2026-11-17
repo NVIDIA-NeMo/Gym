@@ -28,12 +28,12 @@ from nemo_gym.eval.recovery.gate import (
 from nemo_gym.eval.recovery.trials import (
     fault_report,
 )
+from tests.unit_tests.eval.recovery.test_evaluation_health import _gate, _run
 from tests.unit_tests.orchestration.test_eval_resubmit_decision import (  # noqa: F401
     complete_job,
     fake_executor,
     run_cli,
 )
-from tests.unit_tests.orchestration.test_evaluation_health import _gate, _run
 
 
 def test_the_gate_uses_the_shared_classifier():
@@ -141,7 +141,7 @@ def test_ungraded_harness_failure_is_evaluation_side_not_model_invalid_output():
 
 def _policy_zero(*, kind="provider_oom_killed"):
     """A policy-owned explicit zero, requiring no downstream reconstruction of failure evidence."""
-    from tests.unit_tests.orchestration.test_evaluation_health import _empty
+    from tests.unit_tests.eval.recovery.test_evaluation_health import _empty
 
     collected = _run(1)
     row = collected.results[0]

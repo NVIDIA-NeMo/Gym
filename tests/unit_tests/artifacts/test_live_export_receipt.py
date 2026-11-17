@@ -1105,7 +1105,7 @@ def test_health_export_projects_validated_collector_facts_without_changing_score
     from nemo_gym.cli.eval import _prepare_run_health_metrics
     from nemo_gym.eval.recovery import evidence
     from tests.unit_tests.eval.recovery.test_llm_judge_trial_coverage import _recovered_fixture
-    from tests.unit_tests.orchestration.test_tool_trial_coverage import fixture
+    from tests.unit_tests.eval.recovery.test_tool_trial_coverage import fixture
 
     artifacts, exporter, client = live
     if case in {"recovered", "invalid"}:
@@ -1309,7 +1309,7 @@ def test_the_exported_trial_rate_uses_the_gates_denominator_and_reports_omission
     from nemo_gym.eval.recovery import evidence
     from nemo_gym.eval.recovery.gate import trial_health
     from nemo_gym.eval.recovery.planner import decide_from_collected
-    from tests.unit_tests.orchestration.test_evaluation_health import _run
+    from tests.unit_tests.eval.recovery.test_evaluation_health import _run
 
     artifacts, _, _ = live
     collected = _run(49, settled={"model_transport_error": 1} if case == "settled_zero" else None)
