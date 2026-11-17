@@ -16,6 +16,7 @@ import sys
 import time
 import traceback
 
+
 _CHAT_KWARGS = dict(
     cache_enabled=False,
     vision_enabled=False,
@@ -138,7 +139,11 @@ def main(request_path: str, result_path: str) -> None:
             _write_atomic(result_path, result | {"partial": True})
         except Exception:  # noqa: BLE001
             pass
-    print("OpenHands run finished" if result["finished"] else f"OpenHands run ended: {result['error'] or result.get('execution_status')}")
+    print(
+        "OpenHands run finished"
+        if result["finished"]
+        else f"OpenHands run ended: {result['error'] or result.get('execution_status')}"
+    )
 
 
 if __name__ == "__main__":

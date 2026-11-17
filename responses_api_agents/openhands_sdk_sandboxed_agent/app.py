@@ -29,7 +29,6 @@ from nemo_gym.base_responses_api_agent import (
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
-    NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -194,7 +193,11 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
 
     def _install_command(self) -> str:
         venv = quote(self.config.venv_dir)
-        links = f"--find-links {quote(self.config.install_find_links)} --no-index " if self.config.install_find_links else ""
+        links = (
+            f"--find-links {quote(self.config.install_find_links)} --no-index "
+            if self.config.install_find_links
+            else ""
+        )
         packages = " ".join(quote(p) for p in self.config.install_packages)
         # Needs python>=3.12 and tmux (the SDK's terminal tool runs commands through tmux).
         return (
@@ -244,7 +247,9 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
 
         runner_params = {
             "model": body.model or "dummy_model",
-            "base_url": self.resolve_model_base_url(cfg.model_server.name, getattr(request.state, "_ng_rollout_id", None)),
+            "base_url": self.resolve_model_base_url(
+                cfg.model_server.name, getattr(request.state, "_ng_rollout_id", None)
+            ),
             "workdir": "/workspace",
             "prompt": prompt,
             "max_iterations": cfg.max_iterations,
@@ -252,14 +257,18 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
             "num_retries": cfg.num_retries,
             "temperature": body.temperature if body.temperature is not None else cfg.temperature,
             "top_p": body.top_p if body.top_p is not None else cfg.top_p,
-            "max_output_tokens": body.max_output_tokens if body.max_output_tokens is not None else cfg.max_output_tokens,
+            "max_output_tokens": body.max_output_tokens
+            if body.max_output_tokens is not None
+            else cfg.max_output_tokens,
             "reasoning_effort": cfg.reasoning_effort,
             "litellm_extra_body": cfg.litellm_extra_body,
         }
         local_request.write_text(json.dumps(runner_params))
 
         remote_dir = f"/tmp/nemo-gym-openhands-run-{run_id}"
-        remote_request, remote_result, remote_runner = (f"{remote_dir}/{n}" for n in ("request.json", "result.json", "runner.py"))
+        remote_request, remote_result, remote_runner = (
+            f"{remote_dir}/{n}" for n in ("request.json", "result.json", "runner.py")
+        )
 
         stdout = stderr = ""
         run_error_type: Optional[str] = None
@@ -285,13 +294,17 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
             stdout += f"[install rc={install.return_code}]\n{install.stdout or ''}"
             stderr += install.stderr or ""
             if install.return_code != 0 or "OPENHANDS_INSTALLED" not in (install.stdout or ""):
-                raise RuntimeError(f"OpenHands SDK install failed (rc={install.return_code}): {(install.stderr or '')[-1500:]}")
+                raise RuntimeError(
+                    f"OpenHands SDK install failed (rc={install.return_code}): {(install.stderr or '')[-1500:]}"
+                )
 
             await sandbox.upload(local_request, remote_request)
             await sandbox.upload(RUNNER_V2_PATH if cfg.background_exec else RUNNER_PATH, remote_runner)
             started = monotonic()
             # cwd=/workspace so the SDK's terminal starts where start.md was written.
-            python_bin = f"{cfg.venv_dir}/{cfg.bundle_python_relpath}" if cfg.bundle_path else f"{cfg.venv_dir}/bin/python"
+            python_bin = (
+                f"{cfg.venv_dir}/{cfg.bundle_python_relpath}" if cfg.bundle_path else f"{cfg.venv_dir}/bin/python"
+            )
             path_prefix = f"PATH={quote(cfg.venv_dir)}/bin:$PATH " if cfg.bundle_path else ""
             run_cmd = f"{path_prefix}OPENHANDS_SUPPRESS_BANNER=1 {quote(python_bin)} -I {remote_runner} {remote_request} {remote_result}"
             if not cfg.background_exec:
@@ -328,7 +341,11 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
                         consecutive_errors += 1
                         text = f"{type(exc).__name__}: {exc}"
                         # A stopped/OOM-killed sandbox will never answer again - don't wait it out.
-                        if "SANDBOX::ENDED" in text or "OOMKilled" in text or consecutive_errors >= cfg.max_consecutive_poll_errors:
+                        if (
+                            "SANDBOX::ENDED" in text
+                            or "OOMKilled" in text
+                            or consecutive_errors >= cfg.max_consecutive_poll_errors
+                        ):
                             poll_error = text
                             break
                     if monotonic() > deadline:
@@ -374,13 +391,19 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
             metrics = sdk_result.get("metrics") or {}
             usage = NeMoGymResponseUsage(
                 input_tokens=metrics.get("prompt_tokens", 0),
-                input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=metrics.get("cache_read_tokens", 0)),
+                input_tokens_details=NeMoGymResponseInputTokensDetails(
+                    cached_tokens=metrics.get("cache_read_tokens", 0)
+                ),
                 output_tokens=metrics.get("completion_tokens", 0),
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=metrics.get("reasoning_tokens", 0)),
+                output_tokens_details=NeMoGymResponseOutputTokensDetails(
+                    reasoning_tokens=metrics.get("reasoning_tokens", 0)
+                ),
                 total_tokens=metrics.get("prompt_tokens", 0) + metrics.get("completion_tokens", 0),
             )
-            stdout += f"\n[openhands] execution_status={sdk_result.get('execution_status')} error={sdk_result.get('error')} " \
+            stdout += (
+                f"\n[openhands] execution_status={sdk_result.get('execution_status')} error={sdk_result.get('error')} "
                 f"llm_calls={metrics.get('n_llm_calls')} install_s={install_s:.0f} run_s={run_s:.0f}\n"
+            )
             if sdk_result.get("traceback"):
                 stderr += sdk_result["traceback"]
 
@@ -426,7 +449,9 @@ class OpenHandsSDKSandboxedAgent(SimpleResponsesAPIAgent):
         cookies = cookies | seed_session_response.cookies
 
         seed_session_result = await seed_session_response.json()
-        sandbox = await self._connect_sandbox(seed_session_result["sandbox_handle"], seed_session_result.get("workdir"))
+        sandbox = await self._connect_sandbox(
+            seed_session_result["sandbox_handle"], seed_session_result.get("workdir")
+        )
         self._sandbox_id_to_sandbox[session_key] = sandbox
 
         cookies["sandbox_id"] = session_key

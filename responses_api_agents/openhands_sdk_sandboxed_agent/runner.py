@@ -21,16 +21,15 @@ def main(request_path: str, result_path: str) -> None:
     result = {"finished": False, "error": None, "messages": [], "metrics": None}
     started = time.time()
     try:
+        # Gym's model server validates chat messages strictly (NeMoGymChatCompletionToolMessageParam
+        # forbids extra fields), but the SDK adds `name` to tool-result messages. The chat template
+        # doesn't use it, so drop it on the wire.
+        import openhands.sdk.llm.llm as _llm_module
         from openhands.sdk import LLM, Agent, Conversation, Tool
         from openhands.sdk.event import LLMConvertibleEvent
         from openhands.tools.file_editor import FileEditorTool
         from openhands.tools.task_tracker import TaskTrackerTool
         from openhands.tools.terminal import TerminalTool
-
-        # Gym's model server validates chat messages strictly (NeMoGymChatCompletionToolMessageParam
-        # forbids extra fields), but the SDK adds `name` to tool-result messages. The chat template
-        # doesn't use it, so drop it on the wire.
-        import openhands.sdk.llm.llm as _llm_module
 
         _orig_completion = _llm_module.litellm_completion
 
@@ -105,7 +104,11 @@ def main(request_path: str, result_path: str) -> None:
     result["duration_s"] = time.time() - started
     with open(result_path, "w") as f:
         json.dump(result, f, default=str)
-    print("OpenHands run finished" if result["finished"] else f"OpenHands run ended: {result['error'] or result.get('execution_status')}")
+    print(
+        "OpenHands run finished"
+        if result["finished"]
+        else f"OpenHands run ended: {result['error'] or result.get('execution_status')}"
+    )
 
 
 if __name__ == "__main__":
