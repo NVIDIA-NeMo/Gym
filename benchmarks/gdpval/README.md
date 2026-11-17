@@ -595,6 +595,35 @@ gym eval run \
   submitting is judged as an empty submission, and so is a run that reaches `max_iterations` (250 here).
 - Change a harness setting with `++gdpval_openhands_agent.responses_api_agents.openhands_agent.<key>=<value>`.
 
+`benchmarks/gdpval/hermes.yaml` runs [Hermes](../../responses_api_agents/hermes_agent/README.md) the same way:
+
+```bash
+export PERSIST_DELIVERABLES_DIR=$PWD/output/gdpval_hermes/deliverables
+gym eval prepare --benchmark gdpval/hermes
+gym eval run \
+    --model-type vllm_model \
+    --benchmark gdpval/hermes \
+    --split benchmark \
+    --output results/gdpval_hermes.jsonl \
+    --model-url <vllm_base_url> \
+    --model-api-key <vllm_api_key> \
+    --model <served_model_name>
+```
+
+- The rows, the task tools and the deliverables directory work as for Pi, and these are not AA v2 scores either.
+  Hermes gets `terminal`, `file` and `code_execution` plus the task tools, which it names
+  `mcp_gdpval_resources_server_<tool>`.
+- `finish` does not end a Hermes run: Hermes continues until the model replies without a tool call or reaches
+  `max_turns` (250), and a later `finish` or `abandon_task_finish` replaces the recorded call. The files are
+  collected when the run ends.
+- The agent server builds the Hermes runtime on its own host and uploads it, so the task sandbox needs no egress for
+  the install. It needs x86_64 or aarch64 Linux with `bash` and `tar`.
+- Hermes rejects `top_p` and `max_output_tokens` in the request, so `gym eval run` may set `--temperature` only.
+  Change a harness setting with `++gdpval_hermes_agent.responses_api_agents.hermes_agent.<key>=<value>`.
+
+Claude Code has no GDPVal config: `claude_code_agent` runs its own native tools in a sandbox session and rejects the
+required MCP tool grant that carries `finish`, so it cannot submit a GDPVal deliverable yet.
+
 ## Multi-judge panel
 
 By default every GDPVal deliverable is graded by a **panel** of frontier LLM
