@@ -30,6 +30,47 @@ Do not delegate or compact the conversation.
 HARNESSES = ("opencode", "pi", "hermes", "codex", "claude_code", "openclaw", "nooa")
 
 
+def prepare_row(row: dict) -> dict:
+    """Convert one materialized image task without changing the caller's sampling fields."""
+    row = deepcopy(row)
+    metadata = TaskData.model_validate(row["verifier_metadata"])
+    params = NeMoGymResponseCreateParamsNonStreaming.model_validate(row["responses_create_params"])
+    system, content = [], []
+    for message in params.input:
+        role = getattr(message, "role", None)
+        if role not in ("system", "developer", "user"):
+            raise ValueError("Prepared CAD rows require system/developer/user messages")
+        parts = (
+            [{"type": "input_text", "text": message.content}]
+            if isinstance(message.content, str)
+            else [
+                part.model_dump(exclude_none=True) if hasattr(part, "model_dump") else dict(part)
+                for part in message.content
+            ]
+        )
+        for part in parts:
+            if part["type"] == "input_text":
+                text = re.sub(r"Output ONLY[^\n]*(?:\n-[^\n]*)*", "", part["text"]).strip()
+                if role == "user":
+                    content.append({"type": "input_text", "text": text})
+                elif text:
+                    system.append(text)
+            elif role == "user" and part["type"] == "input_image":
+                content.append(part)
+            else:
+                raise ValueError("CAD tasks support user images and text only")
+    if not any(part["type"] == "input_image" for part in content):
+        raise ValueError("Prepared CAD tasks require target images")
+    views = view_prompt(metadata.view_mode, engineering_annotations=metadata.engineering_annotations)
+    row["responses_create_params"]["input"] = [
+        {"role": "system", "content": "\n".join([INSTRUCTIONS, views.partition("Output ONLY")[0], *system])},
+        {"role": "user", "content": content},
+    ]
+    row["target_images"] = [part["image_url"] for part in content if part["type"] == "input_image"]
+    row["task_source"] = "deepcad_opencode"
+    return row
+
+
 def prepare(source: Path, output: Path, *, file_input: bool = False, harness: str = "opencode") -> int:
     """Validate prepared image rows, add workspace instructions, and route to the CAD resources instance."""
     if harness not in HARNESSES:
@@ -43,71 +84,52 @@ def prepare(source: Path, output: Path, *, file_input: bool = False, harness: st
     with source.open() as src, output.open("x") as dst:
         for line in src:
             row = deepcopy(json.loads(line))
-            metadata = TaskData.model_validate(row["verifier_metadata"])
-            params = NeMoGymResponseCreateParamsNonStreaming.model_validate(row["responses_create_params"])
-            seed_params = deepcopy(row["responses_create_params"])
-            task_data = row.setdefault("task_data", {})
-            if "responses_create_params" in task_data and task_data["responses_create_params"] != seed_params:
-                raise ValueError("Conflicting resource seed responses_create_params")
-            task_data["responses_create_params"] = seed_params
+            params = row["responses_create_params"]
             sampling = ModelCallSampling.model_validate(row.get(MODEL_SAMPLING_KEY_NAME) or {}).model_dump(
                 exclude_none=True
             )
             for name in ("max_output_tokens", "temperature", "top_p"):
-                value = row["responses_create_params"].pop(name, None)
+                value = params.get(name)
                 if value is not None:
                     if name in sampling and sampling[name] != value:
                         raise ValueError(f"Conflicting model sampling field: {name}")
                     sampling[name] = value
             row[MODEL_SAMPLING_KEY_NAME] = ModelCallSampling.model_validate(sampling).model_dump(exclude_none=True)
-            system, content = [], []
-            for message in params.input:
-                role = getattr(message, "role", None)
-                if role not in ("system", "developer", "user"):
-                    raise ValueError("Prepared CAD rows require system/developer/user messages")
-                parts = (
-                    [{"type": "input_text", "text": message.content}]
-                    if isinstance(message.content, str)
-                    else [
-                        part.model_dump(exclude_none=True) if hasattr(part, "model_dump") else dict(part)
-                        for part in message.content
+            if "deepcad_lazy" in row:
+                if file_input:
+                    raise ValueError("Materialize lazy CAD rows before using --file-input")
+                from resources_servers.deepcad.dataset.lazy_inputs import LazyRenderConfig
+
+                metadata = TaskData.model_validate(row["verifier_metadata"])
+                config = LazyRenderConfig.model_validate(row["deepcad_lazy"]["config"])
+                record = row["deepcad_lazy"]["record"]
+                if (
+                    record["task_id"] != metadata.task_id
+                    or Path(record["reference_step"]).name != metadata.reference_step
+                    or not record["source_sha256"]
+                ):
+                    raise ValueError("Lazy CAD record does not match its task metadata")
+                config.harness = "opencode"
+                row["deepcad_lazy"]["config"] = config.model_dump()
+                row["task_source"] = "deepcad_opencode"
+            else:
+                row = prepare_row(row)
+                params = row["responses_create_params"]
+                for name in ("max_output_tokens", "temperature", "top_p"):
+                    params.pop(name, None)
+                if file_input:
+                    # The resource seeds explicit target_images; the native client sees workspace paths.
+                    instruction, content = params["input"][0]["content"], params["input"][1]["content"]
+                    texts = [part["text"] for part in content if part["type"] == "input_text"]
+                    paths = [f"/workspace/target-{index}.png" for index in range(len(row["target_images"]))]
+                    params["input"] = [
+                        {
+                            "role": "user",
+                            "content": "\n\n".join([instruction, *texts, "Target image files:\n" + "\n".join(paths)]),
+                        }
                     ]
-                )
-                for part in parts:
-                    if part["type"] == "input_text":
-                        text = re.sub(r"Output ONLY[^\n]*(?:\n-[^\n]*)*", "", part["text"]).strip()
-                        if role == "user":
-                            content.append({"type": "input_text", "text": text})
-                        elif text:
-                            system.append(text)
-                    elif role == "user" and part["type"] == "input_image":
-                        content.append(part)
-                    else:
-                        raise ValueError("CAD tasks support user images and text only")
-            if not any(part["type"] == "input_image" for part in content):
-                raise ValueError("Prepared CAD tasks require target images")
-            views = view_prompt(metadata.view_mode, engineering_annotations=metadata.engineering_annotations)
-            row["responses_create_params"]["input"] = [
-                {"role": "system", "content": "\n".join([INSTRUCTIONS, views.partition("Output ONLY")[0], *system])},
-                {"role": "user", "content": content},
-            ]
-            if file_input:
-                # The resource seeds unchanged images; native clients inspect files.
-                texts = [part["text"] for part in content if part["type"] == "input_text"]
-                paths = [
-                    f"/workspace/target-{index}.png"
-                    for index in range(sum(part["type"] == "input_image" for part in content))
-                ]
-                instruction = row["responses_create_params"]["input"][0]["content"]
-                row["responses_create_params"]["input"] = [
-                    {
-                        "role": "user",
-                        "content": "\n\n".join([instruction, *texts, "Target image files:\n" + "\n".join(paths)]),
-                    }
-                ]
-            row["task_source"] = "deepcad_opencode"
-            row["agent_ref"] = {"name": "deepcad_opencode_agent" if harness == "opencode" else f"{harness}_agent"}
-            row["_ng_environment_server"] = f"deepcad_{harness}_environment_server"
+                row["agent_ref"] = {"name": "deepcad_opencode_agent" if harness == "opencode" else f"{harness}_agent"}
+                row["_ng_environment_server"] = f"deepcad_{harness}_environment_server"
             dst.write(json.dumps(row) + "\n")
             count += 1
     return count

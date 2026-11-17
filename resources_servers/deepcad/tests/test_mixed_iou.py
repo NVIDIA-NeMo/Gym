@@ -146,7 +146,7 @@ def test_masking_and_normalization_failures(tmp_path):
         patch.object(scorer, "prepare", side_effect=ValueError("normalization")),
     ):
         result = scorer.score_paths(ref, ref, 16, cfg)
-    assert result["mask_sample"] and result["failure_kind"] == "deepcad:infrastructure"
+    assert not result.get("mask_sample", False) and result["failure_kind"] == "deepcad:geometry"
 
 
 @pytest.mark.asyncio
@@ -212,3 +212,29 @@ async def test_verify_applies_bonus_once_and_stable_failure_schema():
     assert failed.reward == 0 and not failed.mask_sample
     assert failed.reward_components.keys() == result.reward_components.keys()
     assert failed.raw_metrics.keys() == result.raw_metrics.keys()
+
+
+def test_pairwise_failure_remains_masked(tmp_path):
+    path = write_step(tmp_path / "box.step", cq.Workplane("XY").box(1, 1, 1).val())
+    cfg = MixedIoUConfig(octree_depth=3, boundary_band_width=1 / 16)
+    prepared = scorer.prepare(scorer.load_solid(path), 16, cfg)
+    with (
+        patch.object(scorer, "reference_data", return_value=(*prepared, False)),
+        patch.object(scorer, "prepare", return_value=prepared),
+        patch.object(scorer, "brep_iou", side_effect=RuntimeError("pairwise failed")),
+    ):
+        result = scorer.score_paths(path, path, 16, cfg)
+    assert result["mask_sample"] and result["failure_kind"] == "verifier_error"
+
+
+@pytest.mark.parametrize("offset", [0.5, 3.0])
+def test_fused_prediction_preparation_preserves_mixed_metrics_without_host_fuse(offset):
+    first = cq.Workplane("XY").box(2, 2, 2).val()
+    shape = first.fuse(first.translate((offset, 0, 0)))
+    cfg = MixedIoUConfig(octree_depth=3, boundary_band_width=1 / 16)
+    expected, grid, band = scorer.prepare(shape, 16, cfg)
+    with patch.object(cq.Shape, "fuse", side_effect=AssertionError("prediction fused on host")):
+        actual, actual_grid, actual_band = scorer.prepare(shape, 16, cfg, fuse_solids=False)
+    assert scorer.brep_iou(actual, expected)["reward"] == pytest.approx(1, abs=1e-6)
+    assert scorer.mask_iou(actual_grid, grid) == 1
+    assert scorer.mask_iou(actual_band, band) == 1

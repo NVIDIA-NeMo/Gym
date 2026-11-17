@@ -9,6 +9,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class TaskData(BaseModel):
     model_config = ConfigDict(extra="allow")
+    target_images: list[str] | None = Field(
+        default=None, description="Target images for a coding-harness workspace seed"
+    )
     reference_operations: list[str] = Field(
         default_factory=list, json_schema_extra={"legacy_location": "verifier_metadata"}
     )

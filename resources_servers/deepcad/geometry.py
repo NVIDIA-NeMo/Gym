@@ -12,6 +12,8 @@ import cadquery as cq
 import numpy as np
 import trimesh
 
+from nemo_gym.core import VERIFIER_ERROR
+
 
 def load_solid(path: Path) -> cq.Shape:
     """Read a STEP file and reject invalid, empty, or non-solid geometry."""
@@ -44,14 +46,16 @@ def normalized_mesh(shape: cq.Shape) -> trimesh.Trimesh:
     return trimesh.Trimesh(vertices=(points - center) / longest + 0.5, faces=faces, process=False)
 
 
-def normalized_solid(shape: cq.Shape) -> cq.Shape:
-    """Apply the current mesh bbox transform, then take the union of all bodies."""
+def normalized_solid(shape: cq.Shape, *, fuse_solids: bool = True) -> cq.Shape:
+    """Normalize the bbox; skip fusion only for a union already produced by the sandbox."""
     _, _, center, longest = tessellation_bounds(shape)
     transformed = shape.scale(1 / longest).translate(tuple(0.5 - center / longest))
     solids = transformed.Solids()
     if not solids:
         raise ValueError("No normalized solid bodies")
-    union = solids[0].fuse(*solids[1:]) if len(solids) > 1 else solids[0]
+    union = transformed
+    if fuse_solids:
+        union = solids[0].fuse(*solids[1:]) if len(solids) > 1 else solids[0]
     if not union.isValid() or not np.isfinite(union.Volume()) or union.Volume() <= 0:
         raise ValueError("Invalid normalized solid union")
     return union
@@ -85,14 +89,14 @@ def brep_iou(prediction: cq.Shape, reference: cq.Shape) -> dict:
     }
 
 
-def checked_normalized_solid(shape: cq.Shape) -> cq.Shape:
+def checked_normalized_solid(shape: cq.Shape, *, fuse_solids: bool = True) -> cq.Shape:
     """Reject kernel failures using independently transformed self-intersections.
 
     Intersecting a shape with itself uses an OCC identity fast path and can hide
     failures. Normalize the source twice, producing independent CAD boundaries.
     """
-    normalized = normalized_solid(shape)
-    check = brep_iou(normalized, normalized_solid(shape))
+    normalized = normalized_solid(shape, fuse_solids=fuse_solids)
+    check = brep_iou(normalized, normalized_solid(shape, fuse_solids=fuse_solids))
     if check["reward"] < 1 - 1e-6:
         raise ValueError("B-rep independent self-intersection failed")
     return normalized
@@ -184,12 +188,21 @@ def main() -> None:
         print(json.dumps(dict(reward=0.0, failure_kind="deepcad:geometry", failure_reason=str(exc))))
         return
     try:
+        prepared = (
+            checked_normalized_solid(prediction, fuse_solids=not options.get("prediction_fused", False))
+            if backend == "brep"
+            else normalized_voxels(prediction, resolution=resolution)
+        )
+    except Exception as exc:
+        print(json.dumps(dict(reward=0.0, failure_kind="deepcad:geometry", failure_reason=str(exc))))
+        return
+    try:
         if options.get("alignment", "rescale") != "rescale":
             raise ValueError("Only fixed-orientation rescale alignment is supported")
         if backend == "brep":
-            result = brep_iou(checked_normalized_solid(prediction), target)
+            result = brep_iou(prepared, target)
         elif backend == "voxel":
-            result = voxel_iou(normalized_voxels(prediction, resolution=resolution), target, resolution=resolution)
+            result = voxel_iou(prepared, target, resolution=resolution)
         else:
             raise ValueError(f"Unknown IoU backend: {backend}")
         result.update(
@@ -201,7 +214,13 @@ def main() -> None:
         result["reward"] = sum(result["reward_components"].values())
         result["scoring_time_s"] = time.monotonic() - started
     except Exception as exc:
-        result = dict(reward=0.0, mask_sample=True, failure_kind="deepcad:infrastructure", failure_reason=str(exc))
+        result = dict(
+            reward=0.0,
+            mask_sample=True,
+            evaluation_completed=False,
+            failure_kind=VERIFIER_ERROR,
+            failure_reason=str(exc),
+        )
     print(json.dumps(result))
 
 

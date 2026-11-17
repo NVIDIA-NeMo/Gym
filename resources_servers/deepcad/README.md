@@ -58,8 +58,17 @@ names, and can miss dynamic calls. It does not prove execution or contribution
 to the final geometry. The bonus remains disabled by default; scores with it
 enabled are not directly comparable to the previous runtime-trace version.
 
-Invalid generated code or geometry earns zero. Missing/invalid references,
-scorer failures, and sandbox infrastructure failures set `mask_sample: true`.
+A fresh isolated Python process fuses the exported STEP within the remaining
+generated-program execution budget. It seals the result in a controller-owned
+directory before download, and the scorer preserves that union during normalization.
+This protection requires separate model and controller users, as supplied by the
+Docker image; a provider that maps both to one UID does not enforce the same boundary. Invalid generated code or
+geometry, including prediction normalization failures, earns zero. Missing/invalid references,
+inconclusive pairwise scorer failures, and sandbox infrastructure failures set
+`mask_sample: true`. Provider and scorer exceptions retry the same source in a
+fresh sandbox up to `inconclusive_verification_retries` times (default 2).
+Exhausted retries report `evaluation_completed: false` and a registered
+`provider_unavailable` or `verifier_error` failure kind. Model failures do not retry.
 The historical `voxel_iou` reward-component key denotes volume IoU from the
 selected backend. Raw scores remain available independently of reward weights.
 
@@ -90,9 +99,17 @@ gym eval run --no-serve --agent deepcad_simple_agent \
   --output resources_servers/deepcad/data/example_rollouts.jsonl --limit 5
 ```
 
-The committed records use the Mixed76 checkpoint through the single-turn
-Environment Server on HSG, with Enroot and CadQuery 2.8.0. The Enroot deployment
-sets `bypass_entrypoint: false`. Docker and OpenCode require separate live checks.
+The committed records are real single-turn responses from the Mixed76 step-76
+checkpoint. These five CI fixtures omit optional training-token arrays; the full
+validation captures retain token IDs and log probabilities. A Linux ARM64 smoke
+ran all five tasks twice through the Environment Server with Enroot and
+CadQuery 2.8.0 (`bypass_entrypoint: false`): mean B-rep IoU 0.933333, no masks or
+failures. The sphere scored 0.666667 on both runs; the other tasks scored 1.0.
+All ten records retained their prompts and three decodable target PNGs.
+Reference-as-answer baselines scored 1.0 on every task; a valid, severely
+mismatched thin plate scored between 0 and 1.91e-9.
+See [OpenCode validation](OPENCODE.md#validation) for multi-turn results and the
+remaining deployment validation gaps.
 
 `dataset/prepare_gym.py` prepares images and task rows from DeepCAD construction
 histories. `dataset/augment_inputs.py` supplies deterministic axis/diagonal view
@@ -107,3 +124,73 @@ python -m pytest resources_servers/deepcad/tests -q
 Image-rendering tests require a functioning VTK/OpenGL runtime. The seven-agent
 file-input recipe and runtime prerequisites are documented in
 [`CAD workspaces with native agents`](OPENCODE.md).
+
+## Lazy inputs and source/operation sampling
+
+CAD owns its rendering and sampling policy in Gym. Training frameworks only call
+configured dataset hooks:
+
+```yaml
+data:
+  shuffle: false
+  gym_dataset_hooks:
+    module: resources_servers.deepcad.dataset.training
+    config:
+      source_operation_sampling:
+        sources: [zero-to-cad, cadevolve, op-cad, histcad]
+        uniform_sources: [histcad]
+        operation_fraction: 0.5
+        tau: 1000
+        seed: 42
+```
+
+The order is raw metadata selection, unique selected-row materialization, image
+processing, then GRPO repetition. Indexing never renders or calls a processed
+dataset item. The sampler has no PyTorch dependency; it implements the iterator
+and checkpoint methods accepted by `StatefulDataLoader`.
+
+Each prompt independently samples a source uniformly, so source counts can vary
+within a batch. Within a source, a draw mixes uniform
+rows with operation buckets weighted by `log(1 + bucket_size / tau)`. Duplicate
+operation names count once. Sources in `uniform_sources` use uniform rows. Draws
+use replacement. Epoch size must be a positive multiple of the positive batch
+size. Do not combine this policy with
+shuffling, static source balancing, or multiple dataloaders. A seed, batch index,
+and epoch determine each batch; checkpoint fingerprints reject changed metadata
+or settings and preserve resume across prefetching. Checkpoints from the previous
+quota-based sampler require a fresh dataloader state.
+
+`dataset/lazy_inputs.py` supports metadata-only `deepcad_lazy` manifests. Only
+sampled rows invoke bounded renderer subprocesses. Per-key locks and atomic cache
+writes share a cold render across repeated prompts and concurrent callers. A warm
+cache needs no renderer. Cache keys include source identity and rendering settings;
+use node-local `cache_root` and keep the reference catalog local when possible.
+Rendering a batch must succeed before any input row is changed. Each caller keeps
+its routing, sampling settings, and rollout identifiers.
+
+Corpus reference programs require an explicit `reference_sandbox_image` and use
+`reference_sandbox_provider` (default: network-disabled Docker). Source and STEP
+checksums are checked before use. Reference operation hints use static source
+analysis, consistently with the operation bonus. Invalid or quarantined references
+can use bounded deterministic replacements from the pinned catalog; replacements
+must retain the selected source and reference operation coverage. A first renderer
+crash, timeout, or reference-process kill propagates as an outage. Quarantine needs
+two matching failures from fresh renderer attempts; success clears the pending
+observation. SIGKILL/exit 137 is a possible memory-limit kill, not proof of OOM.
+Repeated failures are an operational heuristic; after repairing a shared runtime,
+remove the affected cache's `.failure.json` and confirmed rejection/timeout markers
+to retry the original references. Legacy single-failure markers are ignored.
+Provider errors and unclassified OCC/export errors still stop the batch. Investigate
+the logged asset first; if it is deterministically bad, exclude it from the input
+manifest and replacement catalog, then restart with fresh dataloader state (the
+sampler rejects changed manifests when restoring an old state).
+
+`prepare_opencode.py` accepts validated lazy rows without rendering. It marks the
+harness in their configuration; materialization then adds the workspace prompt and
+explicit `target_images` used by the resources seed. Standalone consumers can load
+the same hooks with `from nemo_gym.data import load_dataset_hooks`. These hooks
+require the corresponding generic adapter in the CAD NeMo-RL branch; older
+`data.source_operation_sampling` configurations must move under the block above.
+
+Optional API-cheatsheet and orientation-overlay features remain on the full Gym
+branch. This PR accepts their legacy lazy-config flags only when disabled.

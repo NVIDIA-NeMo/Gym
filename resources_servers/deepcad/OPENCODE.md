@@ -31,7 +31,10 @@ The stateful Resources Server requires one worker.
 ## Prepare and route inputs
 
 Input JSONL must contain valid `verifier_metadata`, task text, and inline target
-images from `dataset/prepare_gym.py`. Materialize lazy corpus rows first.
+images from `dataset/prepare_gym.py`. Materialize lazy corpus rows before using
+`--file-input`. The standalone inline OpenCode path still accepts validated
+`deepcad_lazy` rows without rendering and defers workspace prompting to the CAD
+dataset hook. Lazy file-input conversion fails with a materialization instruction.
 
 ```bash
 python -m resources_servers.deepcad.prepare_opencode INPUT.jsonl opencode.jsonl \
@@ -42,8 +45,8 @@ python -m resources_servers.deepcad.prepare_opencode INPUT.jsonl pi.jsonl \
 
 Use `--file-input` for the shared seven-agent recipe; non-OpenCode selections
 require it. Preparation retains the
-original inline request under `task_data.responses_create_params` for resource
-seeding, while the outer activation contains task instructions and target-file
+original images in explicit `target_images` for resource seeding, while the
+outer activation contains task instructions and target-file
 paths as user text. The resource decodes targets to RGB PNG files in input order
 (`/workspace/target-0.png`, etc.). This is file-based image access, not a claim of
 byte-identical inline delivery to every native model client. Without the flag,
@@ -55,7 +58,9 @@ outputs for each harness and concatenate those rows to collect a mixed run; do
 not replace their routing with a single global `--agent` override.
 
 Preparation moves existing `temperature`, `top_p`, and `max_output_tokens` values
-to `_ng_model_sampling`, rejecting conflicts with an existing marker. It does
+to `_ng_model_sampling`, rejecting conflicts with an existing marker. Lazy rows
+retain their raw fields and receive the same validated marker, which survives
+materialization and supplies the required model-sampling route. Preparation does
 not invent sampling values. For a 32,768-token per-call comparison, supply that
 explicit cap in the original request or marker before preparation. A smaller
 source cap stays smaller. Do not reintroduce unsupported activation parameters
@@ -98,18 +103,21 @@ Do not reuse another run's counters or give each worker an independent directory
 
 ```bash
 export CAD_BUDGET_DIR="$(mktemp -d "${CAD_RUN_ROOT:?set a shared run directory}/cad-budget.XXXXXXXX")"
-gym env resolve --config resources_servers/deepcad/configs/multiharness.yaml \
-  --config deployment.yaml
-gym env validate --config resources_servers/deepcad/configs/multiharness.yaml \
-  --config deployment.yaml \
+gym env resolve --config deployment.yaml \
+  --config resources_servers/deepcad/configs/multiharness.yaml
+gym env validate --config deployment.yaml \
+  --config resources_servers/deepcad/configs/multiharness.yaml \
   --server-types resources_servers,responses_api_agents,responses_api_models,environment_servers
-gym env start --config resources_servers/deepcad/configs/multiharness.yaml \
-  --config deployment.yaml
+gym env start --config deployment.yaml \
+  --config resources_servers/deepcad/configs/multiharness.yaml
 # In another terminal, with the same CAD_BUDGET_DIR and configuration:
 gym eval run --no-serve \
-  --config resources_servers/deepcad/configs/multiharness.yaml --config deployment.yaml \
+  --config deployment.yaml --config resources_servers/deepcad/configs/multiharness.yaml \
   --input mixed.jsonl --output rollouts.jsonl
 ```
+
+Load the deployment model configuration first, followed by the CAD recipe, so
+CAD token-capture settings override model-adapter defaults.
 
 `deployment.yaml` supplies the actual model endpoint/credentials, private
 `reference_root`, and provider/image bindings. The defaults use Docker bridge for
@@ -117,6 +125,16 @@ workspaces and network-disabled Docker for verification. Docker cannot enforce
 `model_only`; use a provider with network-policy support for that mode. Inspect
 resolved addresses: allowing a model host permits other ports on that host, and
 host-network sandboxes are not isolated by loopback pins.
+
+For native Linux ARM64, build both images with `--platform linux/arm64` and
+set these two fields under
+`deepcad_opencode_agent.responses_api_agents.opencode_agent` in the deployment
+configuration (the plugin archive includes an architecture-specific dependency):
+
+```yaml
+sandbox_executable_sha256: e51b4a9c0e8dfa90c3387f0aa41e7c362d56b1939eec102ae76c1aac0d911186
+sandbox_plugin_dependencies_sha256: 12ce5f79b27aa8886b64082c1f5d23ab4bc7410e193b7d98146f5df1a61f243a
+```
 
 ## Limits and validation boundary
 
@@ -147,3 +165,55 @@ sessions, file authority, and cleanup; they do not establish a fresh image build
 or seven real-model rollouts. Earlier internal CAD quality/training experiments
 used different runtime/protocol configurations and do not validate this public
 file-input recipe. No new cross-harness quality or training parity is claimed.
+
+## Validation
+
+The following results validate the upstream standalone OpenCode recipe from #5950,
+not this seven-harness file-input recipe or its ten-admission stopping rule.
+
+Automated tests cover resource sessions, final-file authority, retained source,
+cleanup/retries, prompt/image preservation, and stock-harness input/config compatibility.
+
+A Linux ARM64 smoke on 2026-11-16 used stock OpenCode 1.17.11, the Mixed76 step-76
+vision checkpoint, a 131,072-token context setting, Apptainer workspaces, and Enroot
+grading. All five synthetic tasks ran twice, with explicit instructions to render
+a wrong draft, inspect the preview, edit, and render again; the smoke allowed 20 steps.
+
+- All ten episodes collected `model.py` and graded without masking or failure.
+  Mean B-rep IoU was 1.0 to floating-point tolerance.
+- All ten saved rollouts retained their prompts and three decodable target PNGs.
+  Each episode rendered twice and read at least one preview (14 preview reads total).
+  Recorded model requests contained the actual additional preview PNGs, not only
+  text acknowledging a read. These are controlled smoke results, not evidence of
+  spontaneous feedback use or benchmark quality.
+- Raw OpenCode `/run` responses did not carry token arrays. Gym's normal observation
+  enrichment and token finalizer produced 72 token-bearing model calls across all
+  ten episodes, with no token masks, unresolved parents, or dropped generated tokens.
+  All 62 captured parent/child prefixes matched exactly, and token/log-probability
+  arrays had equal lengths and finite log probabilities.
+- Cleanup left no harness processes, listening service ports, Apptainer instances,
+  or verifier sandboxes. Single-turn and reference/known-bad baseline results are
+  recorded in the [component README](README.md#inputs-and-tests).
+
+The initial standalone configuration masked six of ten token reconstructions and
+scored the sphere at 0.666667. Preserving prior reasoning in the chat template fixed
+all ten reconstructions in the repeat. The diagnostic configuration used:
+
+```yaml
+observability_enabled: true
+model_call_capture_dir: /tmp/cad-model-calls
+token_id_capture: {enabled: true, all_agents: true, dir: /tmp/cad-tokens}
+policy_model:
+  responses_api_models:
+    vllm_model:
+      return_token_id_information: true
+      request_prompt_and_generation_token_ids: true
+      supply_prefix_token_ids: false  # Standalone diagnostic only; native training keeps prefix supply.
+      extra_body:
+        chat_template_kwargs: {enable_thinking: true, truncate_history_thinking: false}
+```
+
+The standalone backend lacks `required_prefix_token_ids`, so this smoke disabled
+prefix supply and checked the actual generation-time prefixes instead. Native
+training retains exact-prefix supply. This does not validate distributed tensor/media
+handoff, a full 128k-window workload, or the default Docker image and its isolation.

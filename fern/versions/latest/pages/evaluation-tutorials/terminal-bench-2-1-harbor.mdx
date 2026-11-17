@@ -93,6 +93,9 @@ gym eval run terminal_bench_2_1 --only-tasks 'fix-git,regex-log' \
   same way, and `--limit N` runs the first N tasks.
 - `<model>` is the model name the endpoint serves, `<url>` its base URL, and `<key>` its API key. For a vLLM
   endpoint, use `--model-type vllm_model`.
+- The benchmark presets run this same target with their own harness and settings, eight rollouts per task:
+  `gym eval run --benchmark terminal_bench_2_1/terminus_2 --sandbox opensandbox ...` (or `terminal_bench_2_1/opencode`)
+  takes the same task selection flags and writes to the same results folder.
 
 The command prepares the selected tasks, starts the Model Server, the Terminus 2 Agent Server and one `harbor`
 Environment Server, and runs one episode per task. The Environment Server starts the task's image as a sandbox,
