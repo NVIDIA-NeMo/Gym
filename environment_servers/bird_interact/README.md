@@ -123,11 +123,18 @@ it runs (an error or a timeout is the debug message's `<error>`); then the submi
 its comments, `DISTINCT` words and `ROUND(...)` calls removed. The results are compared: floats and decimals to two
 places (decimals half-up), dates and timestamps as `YYYY-MM-DD`, JSON values and arrays as sorted JSON; rows in order
 when `conditions.order` is set and as sets otherwise. Each query keeps the rows of its last statement, at most 10,000
-when it starts with `SELECT` or `WITH`, and each statement times out after `sql_timeout_seconds` (default 60).
+when it starts with `SELECT` or `WITH`, and each query times out after `sql_timeout_seconds` (default 60), however
+many statements it holds. If the solution fails after the submission ran, it runs again on the episode's database: a
+submission that broke the state the solution needs is wrong, as in the ADK, and only a solution that fails there too
+is bad task data, which fails the episode.
 
-Nothing that grading runs stays in the database: SQLite runs it on a scratch copy, PostgreSQL in a transaction that it
-rolls back. When phase 1 passes and phase 2 follows, its SQL is applied, so phase 2 sees what it changed, as the ADK's
-phase-1 snapshot does.
+Nothing that grading or an exploratory query runs stays in the database. SQLite runs it on a scratch copy and refuses
+`ATTACH`, which could open the episode's file. PostgreSQL runs it on a copy of the episode's database, as the ADK
+resets its task database before each submission: exploratory queries on a working copy, and each submission on a
+fresh copy, after which the working copy starts again from the episode's database. A `COMMIT` in the agent's SQL
+therefore changes only a copy. When phase 1 passes and phase 2 follows, its SQL is applied to the episode's database,
+so phase 2 sees what it changed, as the ADK's phase-1 snapshot does; if applying it fails, the command fails and runs
+again on a fresh sandbox.
 
 The ADK's rules, kept for parity, include its edge cases: a comment at the very end, with no line break after it,
 stays; `COUNT(DISTINCT x)` keeps its `DISTINCT`; an array of decimals or dates fails the comparison, because it cannot
@@ -147,7 +154,9 @@ such a task at seed.
   `pred_query_result` (the rows the submission returned).
 - The test cases run in order. The first that raises anything fails the phase. As in the ADK, the code's globals
   are those six names and its locals its own, so a function in it does not see the code's top-level imports.
-- A sandbox command has time for the submission and two queries for each test case, each `sql_timeout_seconds`.
+- A sandbox command has time for the submission, two queries for each test case and the application of a passing
+  phase 1, each `sql_timeout_seconds`. A submission that passes the test cases but cannot be applied to the episode's
+  database fails, with its error.
 
 In Lite and Full, only the management tasks have such a phase; every query task's follow-up is a query.
 
@@ -205,8 +214,8 @@ after the ground truth is merged into the rows. Lite and Full use PostgreSQL.
 
 With `database_engine: postgresql`, a task's database is `<db>_template` in the PostgreSQL server of the sandbox
 image, and each episode starts its own sandbox from that image. `setup` starts the server and applies
-`preprocess_sql`; after that, each query runs in a transaction that is rolled back, except phase 1's passing SQL, so a
-write in one query or episode never reaches another. Each query is sent whole, as the ADK sends it, so it can hold
+`preprocess_sql`; after that, the agent's SQL runs on copies of the database (see [Grading](#grading)), and only
+phase 1's passing SQL is applied to it, so a write in one query or episode never reaches another. Each query is sent whole, as the ADK sends it, so it can hold
 several statements and dollar-quoted bodies. The image holds the release's databases already restored, so an episode
 starts PostgreSQL instead of restoring dumps.
 

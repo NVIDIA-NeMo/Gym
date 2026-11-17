@@ -46,6 +46,7 @@ from environment_servers.bird_interact.app import (
     SandboxCommandError,
 )
 from environment_servers.bird_interact.grading import (
+    WORK_DATABASE,
     Grade,
     PostgresDatabase,
     QueryResult,
@@ -349,6 +350,26 @@ class TestGrading:
     def test_a_semicolon_inside_a_string_does_not_split_a_sqlite_statement(self) -> None:
         assert split_statements("SELECT 'a;b'; SELECT 2") == ["SELECT 'a;b';", "SELECT 2;"]
 
+    def test_agent_sql_cannot_attach_the_episode_file(self, tmp_path: Path) -> None:
+        database = _bookshop(tmp_path)
+        script = f"ATTACH DATABASE '{database.path}' AS original; DELETE FROM original.authors; SELECT 1"
+
+        (attached,) = database.run([script], timeout_seconds=5)
+
+        assert "not authorized" in attached.error
+        assert grade(database, CORRECT_1, [CORRECT_1], ordered=False, timeout_seconds=5).passed
+
+    def test_a_submission_that_breaks_the_solution_s_state_is_wrong_not_bad_ground_truth(self, tmp_path: Path) -> None:
+        # As in the ADK, the solution runs on the state the submission left; here it finds no authors table.
+        database = _bookshop(tmp_path)
+
+        outcome = grade(
+            database, "DROP TABLE IF EXISTS authors; SELECT 1", [CORRECT_1], ordered=False, timeout_seconds=5
+        )
+
+        assert (outcome.passed, outcome.execution_error) == (False, None)
+        assert grade(database, CORRECT_1, [CORRECT_1], ordered=False, timeout_seconds=5).passed
+
     def test_unordered_results_compare_as_sets_and_ordered_results_by_position(self, tmp_path: Path) -> None:
         database = _bookshop(tmp_path)
         reversed_sql = CORRECT_1.replace("DESC", "ASC")
@@ -502,11 +523,28 @@ class TestPostgresGrading:
         )
         assert outcome.passed is passed
 
+    def test_a_numeric_too_large_to_round_is_a_failed_comparison(self) -> None:
+        huge = (Decimal("1E+30"),)
+        outcome = grade(_TypedRows([huge], [huge]), "SELECT x", ["SELECT x"], ordered=False, timeout_seconds=5)
+        assert outcome.passed is False
+
+    def test_a_passing_phase_1_that_cannot_be_applied_fails_the_command(self) -> None:
+        class ApplicationFails(_TypedRows):
+            def run(self, scripts: list[str], *, timeout_seconds: float, commit: bool = False) -> list[QueryResult]:
+                if commit:
+                    return [QueryResult(rows=None, error="database is locked")]
+                return super().run(scripts, timeout_seconds=timeout_seconds)
+
+        database = ApplicationFails([(1,)], [(1,)])
+        with pytest.raises(RuntimeError, match="database is locked"):
+            grade(database, "SELECT x", ["SELECT x"], ordered=False, timeout_seconds=5, apply_if_passed=True)
+
     def test_the_runner_routes_a_postgresql_request_to_the_image_server(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         started: list[bool] = []
         ran: list[tuple[str, list[str], bool]] = []
+        copies: list[tuple[str, str, bool]] = []
 
         def run(
             self: PostgresDatabase, scripts: list[str], *, timeout_seconds: float, commit: bool = False
@@ -516,8 +554,12 @@ class TestPostgresGrading:
             row = (Decimal("2.50"), datetime.date(2024, 1, 2), "x", memoryview(b"\x01"))
             return [QueryResult(rows=[row]) for _ in scripts]
 
+        def administer(self: PostgresDatabase, name: str, *, create: bool) -> None:
+            copies.append((self.name, name, create))
+
         monkeypatch.setattr("environment_servers.bird_interact.grading.start_postgres", lambda: started.append(True))
         monkeypatch.setattr(PostgresDatabase, "run", run)
+        monkeypatch.setattr(PostgresDatabase, "_administer", administer)
 
         def command(name: str, request: dict) -> dict:
             request_path = tmp_path / f"{name}.json"
@@ -528,14 +570,36 @@ class TestPostgresGrading:
         setup = {"preprocess_sql": ["UPDATE books SET price = 1"], "applied_sql": [], "timeout_seconds": 5}
         assert command("setup", setup) == {}
         executed = command("execute", {"sql": "SELECT 1", "timeout_seconds": 5})
+        graded = command(
+            "grade",
+            {
+                "predicted_sql": "SELECT 1",
+                "solution_sql": ["SELECT 1"],
+                "ordered": False,
+                "test_cases": [],
+                "timeout_seconds": 5,
+                "apply_if_passed": True,
+            },
+        )
 
         assert started == [True]
-        # The task's setup is committed; an exploratory query is rolled back.
+        # The task's setup is committed to the episode's database. Agent SQL runs only on copies of it: an exploratory
+        # query on the working copy, a submission on a fresh copy; only a passing phase 1 is applied to the database.
         assert ran == [
             ("bookshop_template", ["UPDATE books SET price = 1"], True),
-            ("bookshop_template", ["SELECT 1"], False),
+            ("bird_interact_work", ["SELECT 1"], False),
+            ("bird_interact_grade", ["SELECT 1", "SELECT 1", "SELECT 1"], False),
+            ("bookshop_template", ["SELECT 1"], True),
+        ]
+        # Setup and each grade leave a fresh working copy; the grade's copy is dropped.
+        assert copies == [
+            ("bookshop_template", "bird_interact_work", True),
+            ("bookshop_template", "bird_interact_grade", True),
+            ("bookshop_template", "bird_interact_grade", False),
+            ("bookshop_template", "bird_interact_work", True),
         ]
         assert executed["preview"] == ["(2.5, '2024-01-02', 'x', b'\\x01')"]
+        assert graded["passed"] is True
 
     def test_the_runner_grades_by_test_cases_when_the_request_has_them(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
@@ -555,6 +619,10 @@ class TestPostgresGrading:
             return Grade(passed=False, execution_error="relation missing")
 
         monkeypatch.setattr("environment_servers.bird_interact.grading.grade_by_test_cases", by_test_cases)
+        refreshed: list[str] = []
+        monkeypatch.setattr(
+            PostgresDatabase, "_administer", lambda self, name, *, create: refreshed.append(name) if create else None
+        )
         request = {
             "predicted_sql": "DELETE FROM sales",
             "solution_sql": ["DELETE FROM sales WHERE amount > 1"],
@@ -578,6 +646,8 @@ class TestPostgresGrading:
         assert graded == [
             ("shop_template", "DELETE FROM sales", request["solution_sql"], request["test_cases"], True),
         ]
+        # Exploration starts again from the episode's database.
+        assert refreshed == ["bird_interact_work"]
         with pytest.raises(SystemExit, match="PostgreSQL only"):
             command("sqlite", str(tmp_path / "episode.sqlite"))
 
@@ -631,6 +701,30 @@ class TestPostgresDatabase:
         (slow,) = database.run(["SELECT pg_sleep(5)"], timeout_seconds=0.2)
         (broken,) = database.run(["SELECT nope FROM sales"], timeout_seconds=5)
         assert slow.timed_out and "nope" in broken.error
+
+    def test_a_script_has_one_deadline_whatever_its_statements(self, database: PostgresDatabase) -> None:
+        (sleeps,) = database.run(["SELECT pg_sleep(0.15); " * 8 + "SELECT 1"], timeout_seconds=0.5)
+        (committed,) = database.run(["SELECT 1; COMMIT; SELECT pg_sleep(5)"], timeout_seconds=0.5)
+        assert sleeps.timed_out and committed.timed_out
+
+    def test_a_commit_in_agent_sql_changes_only_a_copy(
+        self, database: PostgresDatabase, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        def command(name: str, request: dict) -> dict:
+            request_path = tmp_path / f"{name}.json"
+            request_path.write_text(json.dumps(request | {"engine": "postgresql", "database": database.name}))
+            main([name, str(request_path)])
+            return json.loads(capsys.readouterr().out)
+
+        # The working copy that setup makes.
+        database.refresh(WORK_DATABASE)
+        write = "UPDATE sales SET amount = 0; COMMIT; SELECT amount, sold FROM sales"
+        command("execute", {"sql": write, "timeout_seconds": 5})
+        submission = {"predicted_sql": write, "solution_sql": ["SELECT 1"], "ordered": False, "test_cases": []}
+        command("grade", submission | {"timeout_seconds": 5, "apply_if_passed": False})
+
+        (amounts,) = database.run(["SELECT amount FROM sales ORDER BY sold"], timeout_seconds=5)
+        assert amounts.rows == [(Decimal("1.005"),), (Decimal("2.5"),)]
 
     def test_a_dollar_quoted_body_runs_as_one_query(self, database: PostgresDatabase) -> None:
         (result,) = database.run(["DO $$ BEGIN PERFORM 1; PERFORM 2; END $$; SELECT 3"], timeout_seconds=5)
@@ -937,6 +1031,47 @@ class TestCInteract:
         ]
         assert (response.result.reward, response.result.stop_reason, len(client.agent_inputs)) == (1.0, "solved", 1)
 
+    async def test_the_dialect_changes_the_adk_texts_but_not_the_task(self) -> None:
+        server, client = _server(turns=[_submit(CORRECT_1)])
+        question = "Which authors are tagged 'PostgreSQL'?"
+
+        await _run(server, amb_user_query=question)
+
+        system, user = (item["content"] for item in client.agent_inputs[0]["input"])
+        assert "great SQLite writing ability" in system and "PostgreSQL" not in system
+        assert question in user and "final SQLite query" in user
+
+    @pytest.mark.parametrize(
+        ("tool", "stall", "kind"),
+        [("ask_user", "_user_model", USER_SIMULATOR_FAILED), ("submit_sql", "_run_command", SANDBOX_FAILED)],
+    )
+    async def test_a_tool_call_cut_off_by_its_deadline_masks_the_sample(
+        self, tool: str, stall: str, kind: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        statuses: list[int] = []
+
+        async def turn(tools: _Tools) -> str:
+            arguments = {"question": "?"} if tool == "ask_user" else {"sql": CORRECT_1}
+            statuses.append((await tools.call(tool, **arguments)).status_code)
+            return "Waiting."
+
+        server, client = _server(turns=[turn], tool_call_timeout_seconds=0.2)
+        original = getattr(server, stall)
+
+        async def stalled(*args: Any, **kwargs: Any) -> Any:
+            # The sandbox's setup runs before any tool call, with no tool deadline; only the tool's own work stalls.
+            if args[1:2] == ("setup",):
+                return await original(*args, **kwargs)
+            await asyncio.sleep(30)
+
+        monkeypatch.setattr(server, stall, stalled)
+
+        response = await _run(server)
+
+        assert statuses == [504] and response.failure is None
+        assert (response.result.mask_sample, response.result.stop_reason) == (True, kind)
+        assert len(client.agent_inputs) == 1
+
     async def test_a_simulator_failure_masks_the_sample_and_ends_the_turns(self) -> None:
         statuses: list[int] = []
 
@@ -1195,12 +1330,15 @@ class TestAgentSession:
         assert [call.name for call in response.failure.tool_calls] == ["submit_sql"]
         assert response.failure.agent_observations.source == "test" and client.closes == 1
 
-    async def test_a_broken_solution_fails_the_episode_for_good_and_keeps_the_turns(self) -> None:
+    @pytest.mark.parametrize(("mode", "tool"), [("c_interact", "submit_sql"), ("a_interact", "submit")])
+    async def test_a_broken_solution_fails_the_episode_for_good_and_keeps_the_turns(
+        self, mode: str, tool: str
+    ) -> None:
         async def submit(tools: _Tools) -> str:
-            assert (await tools.call("submit_sql", sql=CORRECT_1)).status_code == 500
+            assert (await tools.call(tool, sql=CORRECT_1)).status_code == 500
             return "Submitted."
 
-        server, _ = _server(turns=[submit])
+        server, _ = _server(mode, turns=[submit])
 
         response = await _run(server, sol_sql=["SELECT missing_column FROM sales"])
 
@@ -1319,8 +1457,14 @@ class TestPostgreSQL:
         # Phase 1 is a management phase, and its follow-up a query.
         assert (phase_1["test_cases"], phase_1["apply_if_passed"]) == ([test_case], True)
         assert phase_2["test_cases"] == []
-        # One test case has time for one query more than the default test case's two.
-        assert phase_1_limit - phase_2_limit == pytest.approx(server.config.sql_timeout_seconds)
+        # Each script the grader may run has its SQL timeout. Phase 1: the submission, two queries for the test case
+        # and the application. Phase 2: the submission twice, and the solution, which may run again on clean state.
+        timeout, follow_up_scripts = (
+            server.config.sql_timeout_seconds,
+            len(TASKS["bookshop_3"]["follow_up"]["sol_sql"]),
+        )
+        assert phase_1_limit == pytest.approx(4 * timeout + 60)
+        assert phase_2_limit == pytest.approx((2 + 2 * follow_up_scripts) * timeout + 60)
 
 
 class TestDatabaseSandbox:
