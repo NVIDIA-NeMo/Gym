@@ -12,7 +12,11 @@ from omegaconf import DictConfig, OmegaConf
 
 from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServerConfig
-from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config.global_config import (
+    ROLLOUT_STOP_AGENT_TYPES,
+    GlobalConfigDictParser,
+    GlobalConfigDictParserConfig,
+)
 from nemo_gym.rollouts.rollout_collection import _environment_server_for_agent, _environment_servers_by_agent
 
 
@@ -95,6 +99,9 @@ def check_harness(resolved: dict, harness: str) -> None:
     assert binding["agent_server"] == {"type": "responses_api_agents", "name": agent}
     assert binding["resources_server"] == {"type": "resources_servers", "name": resources_server_of(harness)}
     assert binding["resources_tool_transports"] == transports
+    # A harness whose run the environment server stops at its task's end is one whose run can be stopped in flight.
+    if binding.get("end_on_task_state"):
+        assert agent_type in ROLLOUT_STOP_AGENT_TYPES and binding.get("max_episode_steps") is None
     SingleAgentTurnLegacyEnvironmentServerConfig.model_validate(binding | {"name": f"{harness} environment"})
     assert list(resolved[agent]["responses_api_agents"]) == [agent_type]
     settings = resolved[agent]["responses_api_agents"][agent_type]
@@ -115,6 +122,16 @@ def test_each_harness_config_names_its_instances_after_its_harness(harness: str)
     assert sorted(started) == sorted(["policy_model", *instances])
     check_no_shared_server(started, resolved)
     assert not GENERIC & set(resolved) and "oe" not in resolved
+
+
+def test_pis_run_ends_once_its_task_has_ended_on_every_exposure() -> None:
+    """Pi's environment server stops the run at the task's end (end_on_task_state, no step loop), so Pi takes no
+    finish tool, which a cli or api_search row's tools would not offer."""
+    _, _, resolved = resolve(harness_config("pi"), DOCKER)
+
+    binding = resolved["officeenv_sandbox_pi_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
+    assert binding["end_on_task_state"] is True and binding.get("max_episode_steps") is None
+    assert resolved["officeenv_sandbox_pi_agent"]["responses_api_agents"]["pi_agent"]["finish_tool_names"] == []
 
 
 def test_the_harness_configs_compose_in_one_run_without_overriding_each_other() -> None:
