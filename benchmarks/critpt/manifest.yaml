@@ -14,6 +14,20 @@ maintainers:
 - AdamRajfer
 intended_use:
 - evaluation
+capabilities:
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+- knowledge
+- knowledge/expert_knowledge
+- coding
+- coding/code_generation
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+- instruction_and_format_following/structured_output
+domains:
+- physics
+- mathematics
 primary_metric: mean/accuracy
 requirements:
   gpu: false

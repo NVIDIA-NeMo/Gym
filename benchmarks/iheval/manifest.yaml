@@ -14,6 +14,25 @@ maintainers:
 - pachmu
 intended_use:
 - evaluation
+capabilities:
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+- instruction_and_format_following/hierarchy_following
+- instruction_and_format_following/structured_output
+- safety
+- safety/privacy_and_data_safety
+- safety/security_safety
+- multilingual_and_multicultural
+- multilingual_and_multicultural/translation
+- knowledge
+- knowledge/procedural_knowledge
+- tool_and_computer_use
+- tool_and_computer_use/tool_calling
+- tool_and_computer_use/web_search
+- reasoning
+domains:
+- language_linguistics
+- general
 primary_metric: result_score
 requirements:
   gpu: false

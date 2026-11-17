@@ -15,6 +15,18 @@ maintainers:
 - kbhardwaj-nvidia
 intended_use:
 - evaluation
+capabilities:
+- tool_and_computer_use
+- tool_and_computer_use/mcp_tool_use
+- tool_and_computer_use/multi_step_tool_use
+- tool_and_computer_use/tool_calling
+- planning_and_autonomy
+- planning_and_autonomy/task_planning
+- planning_and_autonomy/long_horizon_execution
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+domains:
+- business_management
 primary_metric: pass@1[avg-of-3]/success
 requirements:
   gpu: false

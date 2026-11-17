@@ -15,6 +15,17 @@ maintainers:
 - rimashahbazyan
 intended_use:
 - evaluation
+capabilities:
+- knowledge
+- knowledge/expert_knowledge
+- knowledge/factual_knowledge
+- reasoning
+- reasoning/deductive_reasoning
+- reasoning/quantitative_reasoning
+domains:
+- mathematics
+- physics
+- computer_science
 primary_metric: mean/reward
 requirements:
   gpu: false

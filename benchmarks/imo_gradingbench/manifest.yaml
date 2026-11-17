@@ -15,6 +15,17 @@ maintainers:
 - gwarmstrong
 intended_use:
 - evaluation
+capabilities:
+- evaluation_and_judging
+- evaluation_and_judging/rubric_judging
+- evaluation_and_judging/error_analysis
+- reasoning
+- reasoning/deductive_reasoning
+- reasoning/quantitative_reasoning
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+domains:
+- mathematics
 primary_metric: unknown
 requirements:
   gpu: false

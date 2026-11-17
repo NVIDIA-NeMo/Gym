@@ -14,6 +14,18 @@ maintainers:
 - ekellbuch
 intended_use:
 - evaluation
+capabilities:
+- tool_and_computer_use
+- tool_and_computer_use/terminal_and_cli_use
+- tool_and_computer_use/env_feedback_interpretation
+- tool_and_computer_use/multi_step_tool_use
+- coding
+- coding/code_generation
+- coding/systems_coding
+- planning_and_autonomy
+- planning_and_autonomy/long_horizon_execution
+domains:
+- computer_science
 primary_metric: mean/reward
 requirements:
   gpu: false

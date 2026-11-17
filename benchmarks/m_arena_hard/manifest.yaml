@@ -14,6 +14,21 @@ maintainers:
 - gwarmstrong
 intended_use:
 - evaluation
+capabilities:
+- writing_and_editing
+- writing_and_editing/general_qa
+- writing_and_editing/informational_writing
+- multilingual_and_multicultural
+- multilingual_and_multicultural/requested_language_response
+- multilingual_and_multicultural/language_consistency
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+- coding
+- coding/code_generation
+domains:
+- general
+- language_linguistics
+- computer_science
 primary_metric: arena_elo/score
 requirements:
   gpu: false

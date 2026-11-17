@@ -13,6 +13,8 @@ maintainers:
 - cmunley1
 intended_use:
 - evaluation
+capabilities: unknown
+domains: unknown
 primary_metric: collab_intel/score
 requirements:
   gpu: false

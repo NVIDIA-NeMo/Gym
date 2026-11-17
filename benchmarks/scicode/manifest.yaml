@@ -14,6 +14,20 @@ maintainers:
 - fsiino-nvidia
 intended_use:
 - evaluation
+capabilities:
+- coding
+- coding/scientific_coding
+- coding/code_generation
+- coding/debugging_and_testing
+- reasoning
+- reasoning/quantitative_reasoning
+- knowledge
+- knowledge/expert_knowledge
+domains:
+- physics
+- mathematics
+- biology
+- hardware_semiconductors
 primary_metric: subtask_accuracy
 requirements:
   gpu: false

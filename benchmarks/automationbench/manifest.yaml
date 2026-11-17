@@ -15,6 +15,27 @@ maintainers:
 - d-molinari
 intended_use:
 - evaluation
+capabilities:
+- tool_and_computer_use
+- tool_and_computer_use/tool_calling
+- tool_and_computer_use/multi_step_tool_use
+- tool_and_computer_use/env_feedback_interpretation
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+- retrieval_and_grounding
+- retrieval_and_grounding/evidence_synthesis
+- data_analysis
+- data_analysis/tabular_data_analysis
+- writing_and_editing
+- writing_and_editing/summarization
+- writing_and_editing/informational_writing
+- reasoning
+- reasoning/quantitative_reasoning
+domains:
+- business_management
+- general
+- marketing_advertising
+- accounting_audit
 primary_metric: pass@1[avg-of-1]/aa_headline
 requirements:
   gpu: false

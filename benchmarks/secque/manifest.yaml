@@ -13,6 +13,19 @@ maintainers:
 - ushnish-de
 intended_use:
 - evaluation
+capabilities:
+- knowledge
+- knowledge/expert_knowledge
+- reasoning
+- reasoning/quantitative_reasoning
+- retrieval_and_grounding
+- retrieval_and_grounding/evidence_synthesis
+- retrieval_and_grounding/long_context_learning
+- writing_and_editing
+- writing_and_editing/general_qa
+domains:
+- finance
+- accounting_audit
 primary_metric: mean/reward
 requirements:
   gpu: false

@@ -15,6 +15,21 @@ maintainers:
 - AdamRajfer
 intended_use:
 - evaluation
+capabilities:
+- planning_and_autonomy
+- planning_and_autonomy/task_planning
+- planning_and_autonomy/long_horizon_execution
+- tool_and_computer_use
+- tool_and_computer_use/terminal_and_cli_use
+- tool_and_computer_use/file_operations
+- retrieval_and_grounding
+- retrieval_and_grounding/multi_source_synthesis
+- multimodal_generation_and_editing
+- multimodal_generation_and_editing/artifact_composition
+- writing_and_editing
+- writing_and_editing/informational_writing
+domains:
+- business_management
 primary_metric: unknown
 requirements:
   gpu: false

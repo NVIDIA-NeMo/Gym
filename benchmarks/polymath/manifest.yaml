@@ -14,6 +14,19 @@ maintainers:
 - gwarmstrong
 intended_use:
 - evaluation
+capabilities:
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+- planning_and_autonomy
+- planning_and_autonomy/strategy_and_search
+- knowledge
+- knowledge/procedural_knowledge
+- multilingual_and_multicultural
+- multilingual_and_multicultural/language_consistency
+domains:
+- mathematics
+- language_linguistics
 primary_metric: pass@1[avg-of-1]/symbolic_accuracy_weighted
 requirements:
   gpu: false

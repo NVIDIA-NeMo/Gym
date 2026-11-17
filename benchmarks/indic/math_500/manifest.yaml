@@ -14,6 +14,17 @@ maintainers:
 - anushaknvidia
 intended_use:
 - evaluation
+capabilities:
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+- knowledge
+- knowledge/procedural_knowledge
+- multimodal_input_understanding
+- multimodal_input_understanding/messy_text_understanding
+domains:
+- mathematics
+- language_linguistics
 primary_metric: pass@1[avg-of-1]/symbolic_accuracy
 requirements:
   gpu: false

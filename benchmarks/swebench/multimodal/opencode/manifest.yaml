@@ -15,6 +15,18 @@ maintainers:
 - trintamaki
 intended_use:
 - evaluation
+capabilities:
+- coding
+- coding/repository_coding
+- coding/debugging_and_testing
+- coding/code_editing
+- multimodal_input_understanding
+- multimodal_input_understanding/cross_modal_understanding
+- multimodal_input_understanding/scene_understanding
+- tool_and_computer_use
+- tool_and_computer_use/terminal_and_cli_use
+domains:
+- computer_science
 primary_metric: mean/reward
 requirements:
   gpu: false

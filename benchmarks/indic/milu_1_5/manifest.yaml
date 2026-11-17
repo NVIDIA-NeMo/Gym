@@ -13,6 +13,19 @@ maintainers:
 - anushaknvidia
 intended_use:
 - evaluation
+capabilities:
+- knowledge
+- knowledge/factual_knowledge
+- knowledge/expert_knowledge
+- knowledge/cultural_knowledge
+- multilingual_and_multicultural
+- multilingual_and_multicultural/cultural_adaptation
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+domains:
+- general
+- language_linguistics
+- humanities
 primary_metric: unknown
 requirements:
   gpu: false

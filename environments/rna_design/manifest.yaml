@@ -15,6 +15,20 @@ maintainers:
 - cmunley1
 intended_use:
 - training
+capabilities:
+- tool_and_computer_use
+- tool_and_computer_use/multi_step_tool_use
+- tool_and_computer_use/env_feedback_interpretation
+- planning_and_autonomy
+- planning_and_autonomy/strategy_and_search
+- planning_and_autonomy/optimization
+- knowledge
+- knowledge/expert_knowledge
+- reasoning
+- reasoning/spatial_temporal_reasoning
+domains:
+- biology
+- chemistry
 requirements:
   gpu: true
   network: public

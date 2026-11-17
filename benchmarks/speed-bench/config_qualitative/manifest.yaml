@@ -16,6 +16,9 @@ maintainers:
 - YoavMiron
 intended_use:
 - evaluation
+capabilities: []
+domains:
+- other
 primary_metric: unknown
 requirements:
   gpu: false

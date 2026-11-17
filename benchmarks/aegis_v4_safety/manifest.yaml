@@ -13,6 +13,13 @@ maintainers:
 - muskank7
 intended_use:
 - evaluation
+capabilities:
+- safety
+- safety/content_safety
+- safety/security_safety
+- safety/high_risk_domain_safety
+domains:
+- general
 primary_metric: aegis/response_unsafe_rate_resolved
 requirements:
   gpu: false

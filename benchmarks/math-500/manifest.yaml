@@ -13,6 +13,16 @@ maintainers:
 - wedu-nvidia
 intended_use:
 - evaluation
+capabilities:
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+- knowledge
+- knowledge/procedural_knowledge
+- planning_and_autonomy
+- planning_and_autonomy/strategy_and_search
+domains:
+- mathematics
 primary_metric: pass@1[avg-of-1]/symbolic_accuracy
 requirements:
   gpu: false

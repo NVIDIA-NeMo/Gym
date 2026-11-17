@@ -13,6 +13,19 @@ maintainers:
 - jveronvialard
 intended_use:
 - evaluation
+capabilities:
+- evaluation_and_judging
+- evaluation_and_judging/preference_judging
+- evaluation_and_judging/error_analysis
+- evaluation_and_judging/safety_and_robustness_evaluation
+- reasoning
+- reasoning/quantitative_reasoning
+- coding
+- coding/code_understanding
+domains:
+- general
+- mathematics
+- computer_science
 primary_metric: avg
 requirements:
   gpu: false

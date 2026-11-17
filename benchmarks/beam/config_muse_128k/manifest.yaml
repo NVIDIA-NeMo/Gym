@@ -14,6 +14,23 @@ maintainers:
 - hsiehjackson
 intended_use:
 - evaluation
+capabilities:
+- retrieval_and_grounding
+- retrieval_and_grounding/long_context_learning
+- memory_and_state
+- memory_and_state/memory_retrieval
+- memory_and_state/memory_update_and_forgetting
+- memory_and_state/memory_application
+- reasoning
+- reasoning/spatial_temporal_reasoning
+- knowledge
+- knowledge/knowledge_uncertainty
+- writing_and_editing
+- writing_and_editing/summarization
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+domains:
+- general
 primary_metric: pass@1[avg-of-4]/overall
 requirements:
   gpu: false

@@ -15,6 +15,18 @@ maintainers:
 - bxyu-nvidia
 intended_use:
 - evaluation
+capabilities:
+- coding
+- coding/repository_coding
+- coding/debugging_and_testing
+- coding/code_editing
+- tool_and_computer_use
+- tool_and_computer_use/terminal_and_cli_use
+- tool_and_computer_use/multi_step_tool_use
+- planning_and_autonomy
+- planning_and_autonomy/long_horizon_execution
+domains:
+- computer_science
 primary_metric: mean/reward
 requirements:
   gpu: false

@@ -14,6 +14,8 @@ maintainers:
 - ffrujeri
 intended_use:
 - evaluation
+capabilities: unknown
+domains: unknown
 primary_metric: mean/reward
 requirements:
   gpu: false

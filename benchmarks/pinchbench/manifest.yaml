@@ -14,6 +14,35 @@ maintainers:
 - laszkiewiczp
 intended_use:
 - evaluation
+capabilities:
+- tool_and_computer_use
+- tool_and_computer_use/file_operations
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+- instruction_and_format_following/instruction_following
+- writing_and_editing
+- writing_and_editing/informational_writing
+- writing_and_editing/summarization
+- data_analysis
+- data_analysis/tabular_data_analysis
+- data_analysis/data_transformation
+- data_analysis/exploratory_analysis
+- data_analysis/statistical_analysis
+- retrieval_and_grounding
+- retrieval_and_grounding/evidence_synthesis
+- retrieval_and_grounding/long_context_learning
+- reasoning
+- reasoning/quantitative_reasoning
+- knowledge
+- knowledge/expert_knowledge
+- coding
+domains:
+- computer_science
+- general
+- cybersecurity
+- data_science
+- finance
+- marketing_advertising
 primary_metric: mean/reward
 requirements:
   gpu: false

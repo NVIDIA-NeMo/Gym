@@ -13,6 +13,19 @@ maintainers:
 - trias702
 intended_use:
 - evaluation
+capabilities:
+- evaluation_and_judging
+- evaluation_and_judging/preference_judging
+- evaluation_and_judging/error_analysis
+- evaluation_and_judging/consistency_checking
+- evaluation_and_judging/safety_and_robustness_evaluation
+- knowledge
+- knowledge/factual_knowledge
+- reasoning
+- reasoning/quantitative_reasoning
+domains:
+- artificial_intelligence
+- general
 primary_metric: metrics/overall
 requirements:
   gpu: false

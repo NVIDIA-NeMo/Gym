@@ -16,6 +16,8 @@ maintainers:
 - lafrancef
 intended_use:
 - evaluation
+capabilities: unknown
+domains: unknown
 primary_metric: unknown
 requirements:
   gpu: false

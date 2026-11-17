@@ -15,6 +15,8 @@ maintainers:
 - bpritam14
 intended_use:
 - evaluation
+capabilities: unknown
+domains: unknown
 primary_metric: agentvista/mean_score
 requirements:
   gpu: false

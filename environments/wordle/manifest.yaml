@@ -15,6 +15,19 @@ maintainers:
 - cmunley1
 intended_use:
 - training
+capabilities:
+- reasoning
+- reasoning/deductive_reasoning
+- planning_and_autonomy
+- planning_and_autonomy/strategy_and_search
+- tool_and_computer_use
+- tool_and_computer_use/multi_step_tool_use
+- tool_and_computer_use/env_feedback_interpretation
+- knowledge
+- knowledge/factual_knowledge
+domains:
+- sports_recreation
+- language_linguistics
 requirements:
   gpu: false
   network: no-network

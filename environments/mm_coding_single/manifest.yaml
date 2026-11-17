@@ -13,6 +13,8 @@ maintainers:
 - yfw
 intended_use:
 - training
+capabilities: unknown
+domains: unknown
 requirements:
   gpu: false
   network: allowlist

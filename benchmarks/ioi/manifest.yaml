@@ -13,6 +13,20 @@ maintainers:
 - gwarmstrong
 intended_use:
 - evaluation
+capabilities:
+- coding
+- coding/code_generation
+- knowledge
+- knowledge/procedural_knowledge
+- reasoning
+- reasoning/deductive_reasoning
+- reasoning/quantitative_reasoning
+- planning_and_autonomy
+- planning_and_autonomy/strategy_and_search
+- planning_and_autonomy/optimization
+domains:
+- computer_science
+- mathematics
 primary_metric: total_score
 requirements:
   gpu: false

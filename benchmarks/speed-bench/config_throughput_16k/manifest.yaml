@@ -19,6 +19,9 @@ maintainers:
 - YoavMiron
 intended_use:
 - evaluation
+capabilities: []
+domains:
+- artificial_intelligence
 primary_metric: unknown
 requirements:
   gpu: false

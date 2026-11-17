@@ -15,6 +15,8 @@ maintainers:
 - jin-nvidia
 intended_use:
 - evaluation
+capabilities: unknown
+domains: unknown
 primary_metric: overall_score
 requirements:
   gpu: false

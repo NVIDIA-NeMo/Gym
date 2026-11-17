@@ -14,6 +14,19 @@ maintainers:
 - pachmu
 intended_use:
 - evaluation
+capabilities:
+- tool_and_computer_use
+- tool_and_computer_use/tool_calling
+- tool_and_computer_use/multi_step_tool_use
+- tool_and_computer_use/env_feedback_interpretation
+- human_ai_interaction
+- human_ai_interaction/clarification_and_assumption_management
+- context_management
+- context_management/constraint_preservation
+- safety
+- safety/agentic_action_safety
+domains:
+- general
 primary_metric: mean/reward
 requirements:
   gpu: false
