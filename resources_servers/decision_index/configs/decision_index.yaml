@@ -5,7 +5,7 @@ decision_index_resources_server:
   resources_servers:
     decision_index:
       entrypoint: app.py
-      domain: other
+      domain: decision
       verified: false
       description: Decision Index 0.3 public suite, typed decisions with option probabilities
       value: Measure decision engines and LLMs on 43 decision benchmarks with the official chance-corrected index

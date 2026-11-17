@@ -5,7 +5,7 @@ version: 0.1.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
-domain: other
+domain: decision
 description: Decision Index 0.3 public suite, LLM mode. 140,178 typed decision requests (choice and yes/no
   questions with explicit options) over 43 benchmarks in five areas; the policy answers each request with a JSON
   object, and the run is scored with the Decision Index kit's chance-corrected, coverage-adjusted public index.

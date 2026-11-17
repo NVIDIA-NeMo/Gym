@@ -5,7 +5,7 @@ version: 0.1.0
 experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
-domain: other
+domain: decision
 description: Decision Index 0.3 public suite, decision-model mode. The policy is a typed decision engine
   (/v1/systemone or /v1/decisions) that returns a probability for every option of every question; the run is
   scored with the Decision Index kit's chance-corrected, coverage-adjusted public index.
