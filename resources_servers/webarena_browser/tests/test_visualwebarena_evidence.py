@@ -114,6 +114,11 @@ async def _evaluate(entrypoint, target, page, plan, before, after, monkeypatch):
 async def test_planned_program_html_delta_is_authoritative(
     monkeypatch, no_navigation_delay, entrypoint, before_value, after_value, expected
 ):
+    from resources_servers.webarena_browser.tests.test_visualwebarena_semantic_freshness import (
+        _freshness_judge_response,
+    )
+
+    monkeypatch.setattr(classic, "_judge_chat", _freshness_judge_response)
     target = {"url": URL, "locator": "document.body.innerText", "required_contents": {"must_include": ["saved"]}}
     plan = build_collision_plan(_config_for(target), program_html_collision_keys={f"url:{target['url']}"})
     assert len(plan["snapshot_adapters"]["program_html"]["targets"]) == 1

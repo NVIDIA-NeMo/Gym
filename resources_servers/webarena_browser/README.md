@@ -18,6 +18,19 @@ mutation. The evaluator source is pinned to reference revision
 `3b775dc538931ead0cb6b4922349da9c6d493dab`; see
 `reference_evaluation/PROVENANCE.md`.
 
+For collision-planned VisualWebArena `program_html` targets, semantic freshness
+is checked against the complete before and after observations. Retained context
+such as negation remains part of each changed claim; an old matching phrase
+cannot validate a new negative confirmation. Additional matching copies and
+paraphrases can qualify, while merely moving existing content cannot.
+
+The complete final observation must still satisfy every configured predicate.
+When the baseline already passes, a new literal `must_include` occurrence can
+establish freshness directly; otherwise the semantic check uses the configured
+WebArena judge with both observations. This can add one judge request per
+changed target record, with both observations included without truncation.
+Judge transport or response errors leave verification inconclusive.
+
 One process supports one active session on one X display. Distributed Gym
 workers scale through isolated resource-server processes or containers, not
 threads sharing a display. Mutable WebArena deployments additionally require

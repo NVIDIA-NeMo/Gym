@@ -145,6 +145,10 @@ async def test_numeric_constraints_grade_the_observed_value(monkeypatch, entrypo
 )
 @pytest.mark.asyncio
 async def test_semantic_freshness_cannot_replace_observed_text(monkeypatch, entrypoint, before, after, expected):
+    from resources_servers.webarena_browser.tests.test_visualwebarena_semantic_freshness import (
+        _freshness_judge_response,
+    )
+
     monkeypatch.setenv("WEBARENA_JUDGE_API_KEY", "test-only")
 
     def judge(**kwargs):
@@ -152,6 +156,7 @@ async def test_semantic_freshness_cannot_replace_observed_text(monkeypatch, entr
         return float("not" not in words and any(word in words for word in ("saved", "persisted")))
 
     monkeypatch.setattr(vwa, "_llm_fuzzy_match", judge)
+    monkeypatch.setattr(vwa, "_judge_chat", _freshness_judge_response)
     target = {
         "url": "https://example.test/semantic",
         "locator": "document.body.innerText",

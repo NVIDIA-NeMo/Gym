@@ -7,6 +7,7 @@ from nemo_gym.web import WebTask, adapt_visualwebarena_records
 from resources_servers.webarena_browser.reference_evaluation import eval_snapshots as snapshots
 from resources_servers.webarena_browser.reference_evaluation import visualwebarena_evaluation as vwa
 from resources_servers.webarena_browser.tests.test_visualwebarena_exact_evidence import ENTRYPOINTS, _score
+from resources_servers.webarena_browser.tests.test_visualwebarena_semantic_freshness import _freshness_judge_response
 
 
 @pytest.mark.parametrize("entrypoint", ENTRYPOINTS)
@@ -68,5 +69,6 @@ async def test_semantic_truth_keeps_complete_observed_context(monkeypatch, entry
     monkeypatch.setenv("WEBARENA_JUDGE_API_KEY", "test-only")
     monkeypatch.setattr(vwa, "_llm_fuzzy_match", judge)
     monkeypatch.setattr(vwa, "_llm_must_include", judge)
+    monkeypatch.setattr(vwa, "_judge_chat", _freshness_judge_response)
     assert await _score(entrypoint, task, before, after, monkeypatch, capture) == expected
     assert after in predictions

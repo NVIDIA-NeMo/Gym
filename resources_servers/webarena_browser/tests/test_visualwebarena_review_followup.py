@@ -124,11 +124,16 @@ async def test_planned_exclusions_apply_to_the_whole_final_target(monkeypatch, e
 )
 @pytest.mark.asyncio
 async def test_added_semantic_matches_remain_scoreable(monkeypatch, entrypoint, kind, before, after, expected):
+    from resources_servers.webarena_browser.tests.test_visualwebarena_semantic_freshness import (
+        _freshness_judge_response,
+    )
+
     def semantic_judge(**kwargs):
         return float(any(word in kwargs["pred"].split() for word in ("saved", "persisted")))
 
     monkeypatch.setattr(vwa, "_llm_must_include", semantic_judge)
     monkeypatch.setattr(vwa, "_llm_fuzzy_match", semantic_judge)
+    monkeypatch.setattr(vwa, "_judge_chat", _freshness_judge_response)
     target = {
         "url": "http://example.test/semantic",
         "locator": "document.body.innerText",
