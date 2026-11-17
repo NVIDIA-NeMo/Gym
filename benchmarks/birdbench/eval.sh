@@ -170,7 +170,7 @@ if [[ "${DIALECT}" != "sqlite" || "${SPLIT}" != "dev" ]]; then
         "+prepare_script_args.split=${SPLIT}"
         "+birdbench_bird_sql_resources_server.resources_servers.bird_sql.dialect=${DIALECT}"
         "+birdbench_bird_sql_resources_server.resources_servers.bird_sql.split=${SPLIT}"
-        "++birdbench_bird_sql_simple_agent.responses_api_agents.simple_agent.datasets=[{name:${DATASET_NAME},type:benchmark,jsonl_fpath:${PREPARED_JSONL},prompt_config:${PROMPT_CONFIG},prepare_script:benchmarks/birdbench/prepare.py,prepare_project:benchmarks/birdbench,num_repeats:1}]"
+        "++birdbench_bird_sql_simple_agent.responses_api_agents.simple_agent.datasets=[{name:${DATASET_NAME},type:benchmark,jsonl_fpath:${PREPARED_JSONL},prompt_config:${PROMPT_CONFIG},prepare_script:benchmarks/birdbench/prepare.py,prepare_project:benchmarks/birdbench,num_repeats:1,taskset:birdbench}]"
     )
     if [[ "${DIALECT}" == "postgres" ]]; then
         DIALECT_ARGS+=("+birdbench_bird_sql_resources_server.resources_servers.bird_sql.postgres_dsn='${BIRD_PG_DSN}'")
