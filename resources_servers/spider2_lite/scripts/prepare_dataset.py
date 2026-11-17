@@ -330,10 +330,12 @@ def _main(args: argparse.Namespace):
 
 
 def clone_spider2_repo(parent_dir: str):
-    if (Path(parent_dir) / "Spider2").exists():
+    parent = Path(parent_dir)
+    if (parent / "Spider2").exists():
         print("Skipping git clone as the repository is already cloned!")
         return
 
+    parent.mkdir(parents=True, exist_ok=True)
     run(
         ["git", "clone", "https://github.com/xlang-ai/Spider2.git"],
         cwd=parent_dir,

@@ -514,6 +514,22 @@ class TestSpider2LiteServerBigQuery:
 
 
 class TestPrepareDatasetBigQuery:
+    def test_clone_spider2_repo_creates_missing_cache_dir(self, tmp_path):
+        from unittest.mock import patch
+
+        from resources_servers.spider2_lite.scripts.prepare_dataset import clone_spider2_repo
+
+        cache = tmp_path / "missing" / ".spider2_lite"
+        with patch("resources_servers.spider2_lite.scripts.prepare_dataset.run") as mock_run:
+            clone_spider2_repo(cache)
+
+        assert cache.is_dir()
+        mock_run.assert_called_once_with(
+            ["git", "clone", "https://github.com/xlang-ai/Spider2.git"],
+            cwd=cache,
+            check=True,
+        )
+
     def test_build_row_bigquery_marks_engine(self):
         from resources_servers.spider2_lite.scripts.prepare_dataset import (
             SYSTEM_PROMPT_BIGQUERY,
