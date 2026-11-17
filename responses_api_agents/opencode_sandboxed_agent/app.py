@@ -81,10 +81,10 @@ from nemo_gym.core import (
     NgFailureEvent,
     SandboxFailureDetails,
     agent_route_failure,
+    async_request_temp_dir,
     observe_failure,
 )
 from nemo_gym.core.failure_kinds import PROVIDER_COMMAND_OUTCOME_UNKNOWN
-from nemo_gym.core.runtime_files import async_request_temp_dir
 from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.sandbox import (
     AsyncSandbox,

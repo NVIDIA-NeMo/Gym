@@ -1302,6 +1302,30 @@ def test_verify_bounds_an_attempt_that_never_returns(monkeypatch: MonkeyPatch) -
     assert "Verification failed" in response.json()["error"]
 
 
+def test_an_attempt_that_times_out_still_keeps_its_logs(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    """The logs of a timed-out attempt are the ones most worth keeping."""
+    monkeypatch.setattr(runtime_files, "maybe_get_global_config_dict", lambda: {RESULTS_DIR_KEY_NAME: str(tmp_path)})
+    server = make_server(
+        golden=True,
+        keep_verification_logs=True,
+        verification_attempt_timeout=0.05,
+        inconclusive_verification_retries=0,
+    )
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=SimpleNamespace(stop=AsyncMock())))
+
+    async def _hang(*, log_dir: Path, **kwargs: object) -> None:
+        (log_dir / "test_output.log").write_text("partial log")
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr("resources_servers.swebench_pro.app.run_verification", _hang)
+
+    response = TestClient(server.setup_webserver()).post("/verify", json=request_body())
+
+    assert response.json()["evaluation_completed"] is False
+    [kept] = (tmp_path / server.config.name / "verification").rglob("test_output.log")
+    assert kept.read_text() == "partial log"
+
+
 def test_verify_stops_retrying_once_the_rollout_budget_is_spent(monkeypatch: MonkeyPatch) -> None:
     """The retry sequence is bounded in aggregate, not just per attempt."""
     clock = {"t": 1000.0}

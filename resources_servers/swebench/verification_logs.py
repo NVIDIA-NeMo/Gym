@@ -23,7 +23,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TypeVar
 
-from nemo_gym.core.runtime_files import async_request_temp_dir, save_dir
+from nemo_gym.core import async_request_temp_dir, save_dir
 
 
 T = TypeVar("T")
