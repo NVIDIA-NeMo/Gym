@@ -26,7 +26,7 @@ never lower it. The tiers:
 - ``mid``: 101 to 400 changed lines, or a scoring change, with no public-surface impact.
 - ``high``: any protected file or public-surface change, or more than 400 changed lines.
 
-Protected files are the path globs listed in ``protected_files.json`` next to this file, so the target branch's list
+Protected files are the path globs listed in ``protected_files.yaml`` next to this file, so the target branch's list
 applies; ``*`` also matches ``/``. Adding, modifying or deleting a matching path makes the change ``high``. Changed lines
 are added plus removed lines outside docs, lockfiles, JSONL data and binary files. The public surface is each name a
 ``nemo_gym`` package exports through ``_PUBLIC_API`` and that name's signature. Scoring is the code that computes
@@ -39,7 +39,6 @@ import argparse
 import ast
 import difflib
 import filecmp
-import json
 import os
 import sys
 from collections.abc import Iterator
@@ -55,7 +54,7 @@ DOC_PATTERNS = ("*.md", "*.mdx", "*.rst", "docs/*", "fern/*", "LICENSE", "*.png"
 UNCOUNTED_PATTERNS = ("*.lock", "*.jsonl")
 SCORING_PREFIXES = ("resources_servers/", "nemo_gym/verification/", "nemo_gym/verifiers/", "nemo_gym/metrics/")
 NON_SCORING_DIRS = frozenset({"tests", "data"})
-PROTECTED_FILES = Path(__file__).with_name("protected_files.json")
+PROTECTED_FILES = Path(__file__).with_name("protected_files.yaml")
 MAX_LISTED = 10
 
 
@@ -211,12 +210,24 @@ def public_api_changes(base: Path, head: Path, changed: list[str]) -> list[str]:
 
 
 def protected_patterns(path: Path = PROTECTED_FILES) -> tuple[str, ...]:
-    """Return the protected path globs from ``path``, or none when the file is absent."""
+    """Return the protected path globs from ``path``, or none when the file is absent.
+
+    The file is a flat YAML list of plain or quoted strings with ``#`` comments, parsed here so that no YAML
+    library is needed.
+    """
     if not path.is_file():
         return ()
-    patterns = json.loads(path.read_text())
-    if not isinstance(patterns, list) or not all(isinstance(pattern, str) and pattern for pattern in patterns):
-        raise ValueError(f"{path} must be a JSON list of path globs")
+    patterns = []
+    for number, line in enumerate(path.read_text().splitlines(), start=1):
+        entry = "" if line.lstrip().startswith("#") else line.split(" #", 1)[0].strip()
+        if not entry:
+            continue
+        value = entry.removeprefix("- ").strip() if entry.startswith("- ") else ""
+        if len(value) > 1 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        if not value:
+            raise ValueError(f"{path}:{number}: expected a YAML list entry '- <glob>'")
+        patterns.append(value)
     return tuple(patterns)
 
 

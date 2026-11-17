@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -183,19 +184,21 @@ def test_protected_globs_match_the_whole_path(tmp_path: Path) -> None:
 
 
 def test_protected_patterns_load_from_the_companion_file(tmp_path: Path) -> None:
-    assert pr_risk.protected_patterns(tmp_path / "missing.json") == ()
-    companion = tmp_path / "protected_files.json"
-    companion.write_text('["a.toml", "b/*"]')
-    assert pr_risk.protected_patterns(companion) == ("a.toml", "b/*")
-    for invalid in ('{"files": []}', '["a", 1]', '[""]'):
+    assert pr_risk.protected_patterns(tmp_path / "missing.yaml") == ()
+    companion = tmp_path / "protected_files.yaml"
+    companion.write_text("# header\n- a.toml  # inline\n\n- 'b/*'\n- \"*.lock\"\n")
+    assert pr_risk.protected_patterns(companion) == ("a.toml", "b/*", "*.lock")
+    assert yaml.safe_load(companion.read_text()) == list(pr_risk.protected_patterns(companion))
+    for invalid in ("files:\n  - a\n", "-a\n", "- ''\n"):
         companion.write_text(invalid)
-        with pytest.raises(ValueError, match="JSON list of path globs"):
+        with pytest.raises(ValueError, match="expected a YAML list entry"):
             pr_risk.protected_patterns(companion)
 
 
 def test_repository_protects_packaging_files() -> None:
-    assert pr_risk.PROTECTED_FILES == SCRIPT.with_name("protected_files.json")
+    assert pr_risk.PROTECTED_FILES == SCRIPT.with_name("protected_files.yaml")
     assert {"pyproject.toml", "uv.lock"} <= set(pr_risk.protected_patterns())
+    assert yaml.safe_load(pr_risk.PROTECTED_FILES.read_text()) == list(pr_risk.protected_patterns())
 
 
 def test_cli_prints_only_the_tier_on_stdout_and_ignores_the_worktree_git_file(tmp_path: Path) -> None:
