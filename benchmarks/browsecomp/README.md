@@ -68,11 +68,13 @@ and grades the final answer with an LLM judge:
 | `configs/browsecomp_opencode_legacy_agent.yaml` | `opencode_sandboxed_search_agent`, the deprecated `opencode_sandboxed_agent` | A `legacy_agent` relay calls the agent's own `/run`, which seeds the Resources Server, runs OpenCode in the sandbox it gets back, and calls `/verify` |
 
 `configs/browsecomp_opencode.yaml` was the relay preset until the session preset took its name. A launcher, overlay or
-training config that composes it for the relay must now name `configs/browsecomp_opencode_legacy_agent.yaml`. Under the
-old name it gets the session preset, which does not compose without the OpenCode pins and the judge (see
-[Run the session preset](#run-the-session-preset)) and declares no `opencode_sandboxed_search_agent`, so a relay launch
-fails instead of running the other harness. A relay run started under the old name resumes under the new one: the
-preset's settings are unchanged, and the identity a run saves for its resume holds no config file path.
+training config that composes it for the relay must now name `configs/browsecomp_opencode_legacy_agent.yaml`, and a
+command that selects it with `--benchmark browsecomp/configs/browsecomp_opencode` must use
+`--benchmark browsecomp/configs/browsecomp_opencode_legacy_agent`. Under the old name it gets the session preset, which
+does not compose without the OpenCode pins and the judge (see [Run the session preset](#run-the-session-preset)) and
+declares no `opencode_sandboxed_search_agent`, so a relay launch fails instead of running the other harness. A relay
+run started under the old name resumes under the new one: the preset's settings are unchanged, and the identity a run
+saves for its resume holds no config file path.
 
 The session preset repeats the relay preset's settings where `opencode_agent` has them: OpenCode 1.17.11 with its
 stock system prompt and thinking on; the same questions and user turn (`prepare_opencode.py` writes them without the
