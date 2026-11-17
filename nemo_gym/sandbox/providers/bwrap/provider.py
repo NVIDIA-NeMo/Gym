@@ -445,9 +445,14 @@ class BwrapProvider:
             if not os.path.exists(mount.src):
                 raise FileNotFoundError(f"bwrap mount source {mount.src!r} does not exist")
             self._check_target(mount.dst, label="mount dst")
+            self._check_mount_dst(mount.dst, workdir=self._config.workdir)
         self._semaphore = (
             asyncio.Semaphore(self._config.exec_concurrency) if self._config.exec_concurrency is not None else None
         )
+        # sandbox_id -> execs of this instance from entry until their bwrap process is registered or they return
+        # without one: queued on exec_concurrency, or between the closing check and the spawn. close() waits for
+        # them, and exec_processes_terminated() is False while there are any.
+        self._pending_execs: dict[str, int] = {}
         # sandbox_id -> {pid: process} for bwrap processes this instance started.
         self._processes: dict[str, dict[int, asyncio.subprocess.Process]] = {}
         # Sandboxes with an exec whose namespace init could not be recorded (see _record_init).
@@ -467,6 +472,38 @@ class BwrapProvider:
                     f"bwrap {label} {target!r} is inside the read-only bind {bound!r}; "
                     f"use a top-level path such as /codex-runtime"
                 )
+
+    def _sandbox_writable_dirs(self, workdir: str) -> tuple[str, ...]:
+        return ("/tmp", posixpath.normpath(self._config.home_path), posixpath.normpath(workdir))
+
+    def _check_mount_dst(self, target: str, *, workdir: str) -> None:
+        """Refuse an extra mount at, above or inside the sandbox's own /tmp, home or workdir.
+
+        Inside one: bwrap creates the mount point in a directory that sandboxed code can write, and follows
+        symlinks while doing so, so an earlier exec could make it create entries on the host. At or above one:
+        the mount shadows that directory, and transfers to it would land where the sandbox cannot see them.
+        """
+        normalized = posixpath.normpath(target)
+        for own in self._sandbox_writable_dirs(workdir):
+            if (
+                normalized == own
+                or normalized.startswith(own.rstrip("/") + "/")
+                or own.startswith(normalized.rstrip("/") + "/")
+            ):
+                raise ValueError(
+                    f"bwrap mount dst {target!r} overlaps the sandbox's own {own!r}; "
+                    "use a top-level path such as /codex-runtime"
+                )
+
+    def _binds_workspace_host_path(self, inst: _BwrapSandbox) -> bool:
+        """Whether the workspace is also bound at its host path. Not when that path lies inside the sandbox's own
+        /tmp, home or workdir: bwrap would create its mount point in sandbox-writable space (see _check_mount_dst)."""
+        host = str(inst.workspace)
+        if host == inst.workdir:
+            return False
+        return not any(
+            host == own or host.startswith(own.rstrip("/") + "/") for own in self._sandbox_writable_dirs(inst.workdir)
+        )
 
     @property
     def config(self) -> BwrapConfig:
@@ -522,7 +559,7 @@ class BwrapProvider:
         argv += ["--bind", str(inst.tmp), "/tmp"]
         argv += ["--bind", str(inst.home), config.home_path]
         argv += ["--bind", str(inst.workspace), inst.workdir]
-        if str(inst.workspace) != inst.workdir:
+        if self._binds_workspace_host_path(inst):
             argv += ["--bind", str(inst.workspace), str(inst.workspace)]
         for mount in [*config.mounts, *inst.mounts]:
             argv += ["--ro-bind" if mount.ro else "--bind", mount.src, mount.dst]
@@ -543,8 +580,12 @@ class BwrapProvider:
         with contextlib.suppress(OSError):
             (inst.run_dir / str(process.pid)).write_text(_process_start_time(process.pid) or "")
 
-    async def _watch_info(self, inst: _BwrapSandbox, outer_pid: int, info_fd: int) -> None:
-        """Read bwrap's --info-fd pipe without a thread, then record the namespace init."""
+    async def _watch_info(self, inst: _BwrapSandbox, outer_pid: int, info_fd: int) -> bool:
+        """Read bwrap's --info-fd pipe without a thread, then record the namespace init.
+
+        True when bwrap reported a namespace init (``child-pid``), i.e. its own setup got as far as starting the
+        sandboxed command. The command cannot write to this pipe, so a False is bwrap's own failure.
+        """
         loop = asyncio.get_running_loop()
         reader = asyncio.StreamReader()
         stream = os.fdopen(info_fd, "rb", buffering=0)
@@ -554,11 +595,11 @@ class BwrapProvider:
             stream.close()
             raise
         try:
-            await self._record_init(inst, outer_pid, reader)
+            return await self._record_init(inst, outer_pid, reader)
         finally:
             transport.close()
 
-    async def _record_init(self, inst: _BwrapSandbox, outer_pid: int, info: asyncio.StreamReader) -> None:
+    async def _record_init(self, inst: _BwrapSandbox, outer_pid: int, info: asyncio.StreamReader) -> bool:
         """Record the host pid of the exec's namespace init from bwrap's --info-fd JSON.
 
         bwrap returns as soon as the command (pid 2) exits; its init (pid 1) is killed by
@@ -580,18 +621,19 @@ class BwrapProvider:
         child = payload.get("child-pid") if isinstance(payload, dict) else None
         if data.strip() and not (isinstance(child, int) and not isinstance(child, bool) and child > 0):
             LOGGER.warning("bwrap --info-fd output has no child-pid: %r", data[:200])
-            return
+            return False
         if child is None:
-            return
+            return False
         start_time = _process_start_time(child)
         if start_time is None and _HAVE_PROC:
-            return  # already gone (or a zombie): its namespace is empty
+            return True  # already gone (or a zombie): its namespace is empty
         try:
             (inst.run_dir / f"{outer_pid}{INIT_RECORD_SUFFIX}").write_text(f"{child} {start_time or ''}")
         except OSError:
             # Without the record this instance can no longer prove the namespace gone.
             LOGGER.warning("cannot record bwrap namespace init %s of sandbox %s", child, inst.sandbox_id)
             self._untracked_inits.add(inst.sandbox_id)
+        return True
 
     def _unregister(self, inst: _BwrapSandbox, process: asyncio.subprocess.Process) -> None:
         processes = self._processes.get(inst.sandbox_id)
@@ -703,6 +745,8 @@ class BwrapProvider:
             self._check_target(workdir, label="workdir")
             for mount in mounts:
                 self._check_target(mount.dst, label="mount dst")
+            for mount in [*self._config.mounts, *mounts]:
+                self._check_mount_dst(mount.dst, workdir=workdir)
         except (TypeError, ValueError) as error:
             raise BwrapCreateError(f"invalid bwrap sandbox spec: {error}") from error
         unknown_options = set(spec.provider_options) - {"mounts"}
@@ -770,21 +814,51 @@ class BwrapProvider:
         inst: _BwrapSandbox = handle.raw
         if cwd is not None:
             cwd = _validate_sandbox_dir(cwd, label="cwd") if cwd != "/" else "/"
-        if not inst.root.is_dir() or (inst.root / CLOSING_MARKER).exists():
-            return SandboxExecResult(
-                stdout=None,
-                stderr=f"bwrap sandbox {inst.sandbox_id} has been stopped",
-                return_code=SANDBOX_RUNTIME_RETURN_CODE,
-                error_type="sandbox",
-            )
+        if self._stopped(inst):
+            return self._stopped_result(inst)
         argv = self.bwrap_argv(inst, command, cwd=cwd)
         process_env = self._environment(inst, env)
         timeout = timeout_s if timeout_s is not None else self._config.default_timeout_s
-        async with self._semaphore if self._semaphore is not None else contextlib.nullcontext():
-            return await self._run(inst, argv, process_env, timeout)
+        pending = [True]  # cleared by _run once the bwrap process is registered
+        self._pending_execs[inst.sandbox_id] = self._pending_execs.get(inst.sandbox_id, 0) + 1
+        try:
+            async with self._semaphore if self._semaphore is not None else contextlib.nullcontext():
+                # A stop may have run while this exec waited for its slot: never start after it.
+                if self._stopped(inst):
+                    return self._stopped_result(inst)
+                return await self._run(inst, argv, process_env, timeout, pending=pending)
+        finally:
+            if pending:
+                self._release_pending(inst)
+
+    @staticmethod
+    def _stopped(inst: _BwrapSandbox) -> bool:
+        return not inst.root.is_dir() or (inst.root / CLOSING_MARKER).exists()
+
+    @staticmethod
+    def _stopped_result(inst: _BwrapSandbox) -> SandboxExecResult:
+        return SandboxExecResult(
+            stdout=None,
+            stderr=f"bwrap sandbox {inst.sandbox_id} has been stopped",
+            return_code=SANDBOX_RUNTIME_RETURN_CODE,
+            error_type="sandbox",
+        )
+
+    def _release_pending(self, inst: _BwrapSandbox) -> None:
+        count = self._pending_execs.get(inst.sandbox_id, 0) - 1
+        if count > 0:
+            self._pending_execs[inst.sandbox_id] = count
+        else:
+            self._pending_execs.pop(inst.sandbox_id, None)
 
     async def _run(
-        self, inst: _BwrapSandbox, argv: list[str], env: dict[str, str], timeout: float | None
+        self,
+        inst: _BwrapSandbox,
+        argv: list[str],
+        env: dict[str, str],
+        timeout: float | None,
+        *,
+        pending: list[bool] | None = None,
     ) -> SandboxExecResult:
         # bwrap writes {"child-pid": <host pid of the namespace init>, ...} to --info-fd.
         info_read, info_write = os.pipe()
@@ -801,8 +875,10 @@ class BwrapProvider:
                 env=env,
                 pass_fds=(info_write,),
             )
-        except OSError as error:
+        except BaseException as error:
             os.close(info_read)
+            if not isinstance(error, OSError):
+                raise
             return SandboxExecResult(
                 stdout=None,
                 stderr=f"cannot start bwrap: {error}",
@@ -812,6 +888,9 @@ class BwrapProvider:
         finally:
             os.close(info_write)
         self._register(inst, process)
+        if pending:
+            pending.clear()
+            self._release_pending(inst)
         info_task = asyncio.create_task(self._watch_info(inst, process.pid, info_read))
         try:
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
@@ -837,8 +916,13 @@ class BwrapProvider:
                 self._unregister(inst, process)
         stderr_text = stderr.decode(errors="replace")
         return_code = process.returncode if process.returncode is not None else SANDBOX_RUNTIME_RETURN_CODE
-        if return_code != 0 and stderr_text.startswith("bwrap: "):
-            # bwrap's own setup failure (bad bind, no user namespaces, ...), not the command's.
+        command_started = (
+            info_task.done() and not info_task.cancelled() and info_task.exception() is None and info_task.result()
+        )
+        if return_code != 0 and not command_started:
+            # bwrap's own setup failure (bad bind, no user namespaces, ...), not the command's: bwrap never reported
+            # a namespace init on --info-fd, a channel the command cannot write. Text the command prints, such as
+            # a "bwrap: ..." line on stderr, never decides this.
             return SandboxExecResult(
                 stdout=stdout.decode(errors="replace"),
                 stderr=stderr_text,
@@ -864,6 +948,12 @@ class BwrapProvider:
             with contextlib.suppress(OSError):
                 (inst.root / CLOSING_MARKER).touch()
             await self._kill_recorded(inst)
+            # Execs of this instance that passed their closing check but have not registered a process yet: they
+            # re-check after their slot and register right after spawning, so wait them out (bounded), then kill.
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + self._config.kill_timeout_s
+            while self._pending_execs.get(inst.sandbox_id) and loop.time() < deadline:
+                await asyncio.sleep(0.02)
             # A second pass catches an exec that started while the marker was being written.
             await self._kill_recorded(inst)
             try:
@@ -889,7 +979,8 @@ class BwrapProvider:
         an unreadable record or an init this instance failed to record, is False.
         """
         inst: _BwrapSandbox = handle.raw
-        if inst.sandbox_id in self._untracked_inits:
+        if inst.sandbox_id in self._untracked_inits or self._pending_execs.get(inst.sandbox_id):
+            # An exec of this instance is queued or about to spawn: a process may yet run.
             return False
         if any(process.returncode is None for process in self._processes.get(inst.sandbox_id, {}).values()):
             return False
@@ -990,10 +1081,11 @@ class BwrapProvider:
         """(sandbox prefix, host directory, writable), most specific prefix first."""
         table = [
             (inst.workdir, inst.workspace, True),
-            (str(inst.workspace), inst.workspace, True),
             ("/tmp", inst.tmp, True),
             (self._config.home_path, inst.home, True),
         ]
+        if self._binds_workspace_host_path(inst):
+            table.append((str(inst.workspace), inst.workspace, True))
         table += [(posixpath.normpath(m.dst), Path(m.src), not m.ro) for m in [*self._config.mounts, *inst.mounts]]
         return sorted(table, key=lambda entry: len(entry[0]), reverse=True)
 
@@ -1107,6 +1199,10 @@ class BwrapProvider:
             return False
         finally:
             os.close(parent)
+        return True
+
+    def uploads_independent_of_execs(self) -> bool:
+        # Uploads are host-side copies in a worker thread; only commands take the exec semaphore.
         return True
 
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:

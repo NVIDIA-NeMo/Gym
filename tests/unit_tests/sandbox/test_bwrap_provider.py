@@ -23,6 +23,7 @@ import os
 import socket
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -161,12 +162,17 @@ async def test_argv_network_none(system) -> None:
         (str(sys_dir / "ld.so.cache"), str(sys_dir / "ld.so.cache")),
         (str(sys_dir / "ld.so.conf"), str(sys_dir / "ld.so.conf")),
     ]
-    assert bind_pairs(argv, "--bind") == [
-        (str(inst.tmp), "/tmp"),
-        (str(inst.home), "/home/sandbox"),
-        (str(inst.workspace), "/workspace"),
-        (str(inst.workspace), str(inst.workspace)),
-    ]
+    # The workspace's host-path bind exists only outside sandbox-writable space (tmp_path is under /tmp on Linux).
+    alias = [(str(inst.workspace), str(inst.workspace))] if provider._binds_workspace_host_path(inst) else []
+    assert (
+        bind_pairs(argv, "--bind")
+        == [
+            (str(inst.tmp), "/tmp"),
+            (str(inst.home), "/home/sandbox"),
+            (str(inst.workspace), "/workspace"),
+        ]
+        + alias
+    )
     assert ["--proc", "/proc"] == argv[argv.index("--proc") : argv.index("--proc") + 2]
     assert ["--dev", "/dev"] == argv[argv.index("--dev") : argv.index("--dev") + 2]
     # The root is remounted read-only after the last bind, before the command.
@@ -264,6 +270,51 @@ async def test_mounts_from_config_and_provider_options(system) -> None:
             await start(provider, provider_options=options)
 
 
+async def test_bwraps_own_setup_failure_is_a_sandbox_error(system, tmp_path) -> None:
+    # A bwrap that fails before starting the command never reports a child-pid on --info-fd.
+    failing = tmp_path / "failing-bwrap"
+    failing.write_text('#!/bin/sh\necho "bwrap: Can\'t mount proc on /newroot/proc" >&2\nexit 1\n')
+    failing.chmod(0o755)
+    provider = make_provider(system, bwrap_path=str(failing))
+    sandbox = await start(provider)
+    result = await sandbox.exec("true")
+    assert result.error_type == "sandbox" and result.return_code == 125 and "Can't mount proc" in result.stderr
+    await sandbox.stop()
+
+
+async def test_mount_targets_overlapping_the_sandboxs_own_dirs_are_refused(system) -> None:
+    # Inside /tmp, home or the workdir, bwrap would create the mount point in sandbox-writable space (and follow
+    # a symlink planted there); at or above one, the mount would shadow it.
+    for dst in ("/tmp/codex-runtime", "/tmp", "/home", "/home/sandbox/x", "/workspace/lib"):
+        with pytest.raises(ValueError, match="overlaps the sandbox's own"):
+            make_provider(system, mounts=[{"src": str(system["venv"]), "dst": dst}])
+    provider = make_provider(system)
+    for dst, workdir in (("/tmp/x", None), ("/task/sub", "/task"), ("/app", "/app")):
+        with pytest.raises(BwrapCreateError, match="overlaps the sandbox's own"):
+            await start(provider, workdir=workdir, provider_options={"mounts": [f"{system['venv']}:{dst}"]})
+    # A config mount is checked against each sandbox's own workdir too.
+    provider = make_provider(system, mounts=[{"src": str(system["venv"]), "dst": "/task/runtime"}])
+    with pytest.raises(BwrapCreateError, match="overlaps the sandbox's own"):
+        await start(provider, workdir="/task")
+
+
+async def test_workspace_host_path_is_bound_only_outside_sandbox_writable_dirs(system) -> None:
+    provider = make_provider(system)
+    sandbox = await start(provider, workdir="/workspace")
+    inst = sandbox._handle.raw
+    host = str(inst.workspace)
+    argv = provider.bwrap_argv(inst, "true")
+    # tmp_path is under /tmp on Linux (no alias) and elsewhere on macOS (alias).
+    expected = not host.startswith("/tmp/")
+    assert provider._binds_workspace_host_path(inst) is expected
+    assert ((host, host) in bind_pairs(argv, "--bind")) is expected
+    # The default base_dir is under the host's /tmp: there the alias would need a mount point in sandbox space.
+    for inside in ("/tmp/nemo-gym-bwrap-0/sb/workspace", "/home/sandbox/w/workspace", "/workspace/w/workspace"):
+        stand_in = SimpleNamespace(workspace=Path(inside), workdir="/workspace")
+        assert provider._binds_workspace_host_path(stand_in) is False
+    await sandbox.stop()
+
+
 # ----------------------------------------------------------------------------- env
 
 
@@ -315,11 +366,32 @@ async def test_exec_runs_and_classifies_failures(system) -> None:
     timed_out = await sandbox.exec("sleep 30", timeout_s=0.3)
     assert timed_out.error_type == "timeout" and timed_out.return_code == 125
     assert not provider._processes and not list(sandbox._handle.raw.run_dir.iterdir())
-    bwrap_failure = await sandbox.exec('echo "bwrap: Can\'t mount proc on /newroot/proc" >&2; exit 1')
-    assert bwrap_failure.error_type == "sandbox" and bwrap_failure.return_code == 125
+    # A command that prints bwrap-like text fails as itself: bwrap had reported its namespace init.
+    spoofed = await sandbox.exec('echo "bwrap: Can\'t mount proc on /newroot/proc" >&2; exit 3')
+    assert spoofed.error_type is None and spoofed.return_code == 3
     await sandbox.stop()
     stopped = await provider.exec(sandbox._handle, "true")
     assert stopped.error_type == "sandbox" and "stopped" in stopped.stderr
+
+
+async def test_an_exec_queued_for_a_slot_never_starts_after_stop(system, tmp_path) -> None:
+    provider = make_provider(system, exec_concurrency=1)
+    sandbox = await start(provider)
+    handle = sandbox._handle
+    ran = tmp_path / "queued-exec-ran"
+    holder = asyncio.create_task(provider.exec(handle, "sleep 30"))
+    while not provider._processes.get(handle.sandbox_id):
+        await asyncio.sleep(0.01)
+    queued = asyncio.create_task(provider.exec(handle, f"touch {ran}"))
+    await asyncio.sleep(0.05)
+    # Queued: a process may still run, so the provider cannot prove the sandbox empty.
+    assert await provider.exec_processes_terminated(handle) is False
+    await provider.close(handle)
+    result = await asyncio.wait_for(queued, 10)
+    assert result.error_type == "sandbox" and "stopped" in result.stderr
+    assert not ran.exists()
+    assert (await holder).return_code != 0
+    assert not provider._pending_execs
 
 
 async def test_exec_concurrency_is_bounded(system) -> None:
@@ -454,7 +526,11 @@ async def test_transfer_path_mapping(system, tmp_path) -> None:
     for target, host in (
         ("/workspace/a/b.sh", inst.workspace / "a" / "b.sh"),
         ("rel/c.txt", inst.workspace / "rel" / "c.txt"),
-        (f"{inst.workspace}/d.txt", inst.workspace / "d.txt"),
+        *(
+            [(f"{inst.workspace}/d.txt", inst.workspace / "d.txt")]
+            if provider._binds_workspace_host_path(inst)
+            else []
+        ),
         ("/tmp/nemo-gym-codex-sessions/x/input.json", inst.tmp / "nemo-gym-codex-sessions" / "x" / "input.json"),
         ("/home/sandbox/.codex/config.toml", inst.home / ".codex" / "config.toml"),
         ("//workspace//./e.txt", inst.workspace / "e.txt"),

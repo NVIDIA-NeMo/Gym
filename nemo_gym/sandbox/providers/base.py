@@ -436,9 +436,10 @@ class SupportsSandboxExecScopedProcesses(Protocol):
     """Optional: processes cannot outlive the exec that started them, and the provider can prove it.
 
     ``exec_processes_terminated`` returns True only when no process started by any
-    exec of the sandbox can still run (every exec has returned and its process tree
-    is gone). A process supervisor that died without writing its receipt can then be
-    confirmed cleaned up from the provider side.
+    exec of the sandbox can still run: every exec has returned, none is queued or
+    starting, and every process tree an exec started is gone. A caller that lost
+    track of a command it started can then confirm from the provider side that
+    nothing of it is left.
     """
 
     async def exec_processes_terminated(self, handle: SandboxHandle) -> bool: ...

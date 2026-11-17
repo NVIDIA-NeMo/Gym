@@ -30,7 +30,7 @@ A full annotated config is in [`configs/bwrap.yaml`](configs/bwrap.yaml).
         --ro-bind <system paths>... [--ro-bind <network: host paths>...]
         --proc /proc --dev /dev
         --bind <tmp> /tmp --bind <home> <home_path>
-        --bind <workspace> <workdir> --bind <workspace> <workspace host path>
+        --bind <workspace> <workdir> [--bind <workspace> <workspace host path>]
         [--ro-bind|--bind <mount src> <mount dst>]...
         --remount-ro /
         --chdir <cwd or workdir> [extra_args...] -- <shell> -c <command>
@@ -55,13 +55,28 @@ A full annotated config is in [`configs/bwrap.yaml`](configs/bwrap.yaml).
 - **Processes do not outlive their exec.** When the command exits, bwrap's pid-1 exits
   and the kernel kills everything left in that pid namespace. On a timeout or a
   cancellation, the provider SIGKILLs the bwrap process group. `--die-with-parent`
-  then tears down the namespace. The exec returns `error_type="timeout"` with
-  return code 125. When bwrap itself fails (its stderr starts with `bwrap: `), the
-  exec returns `error_type="sandbox"` with return code 125.
+  then tears down the namespace. A timeout returns `error_type="timeout"` with
+  return code 125; a cancellation re-raises `CancelledError`. When bwrap itself
+  fails before starting the command (it never reported a namespace init on
+  `--info-fd`, a pipe the command cannot write), the exec returns
+  `error_type="sandbox"` with return code 125. Whatever the command prints, a
+  `bwrap: ` line included, never makes its own failure a sandbox error.
+- **The workspace's host path.** The workspace is also bound at its own host path,
+  so host paths a caller hands to sandboxed code resolve inside, unless that path
+  lies under the sandbox's `/tmp`, home or workdir (the default `base_dir` is under
+  the host's `/tmp`). bwrap would create that mount point in sandbox-writable space.
+- **Stop and execs in flight.** An exec waiting for an `exec_concurrency` slot
+  re-checks the closing marker after it gets one, and `close` waits (bounded by
+  `kill_timeout_s`) for this instance's execs that are about to spawn, so no exec
+  starts after `close` returns.
+- **Process proof.** `exec_processes_terminated()` (`AsyncSandbox.exec_processes_terminated()`,
+  protocol `SupportsSandboxExecScopedProcesses`) is True only when no exec of the
+  sandbox is queued, starting or running, and no recorded bwrap process or
+  namespace init of any provider instance is alive.
 - **Files.** `upload_file`, `download_file` and `exists` are plain host-side file
   operations, so no process is started. Sandbox paths are mapped to host
   directories by longest prefix:
-  - `workdir` and the workspace's host path → `workspace/`;
+  - `workdir` and, when it is bound, the workspace's host path → `workspace/`;
   - `/tmp` → `tmp/`;
   - `home_path` → `home/`;
   - extra mounts → their `src`. Read-only mounts are download-only.
@@ -110,7 +125,7 @@ handle, not a lease: either side can stop the sandbox. A borrower should
 | `shell` | `/bin/bash` | Runs `-c <command>`. |
 | `ro_binds` | `/usr /bin /lib`, plus optional `/sbin /lib64 /opt /venv /etc/ld.so.cache /etc/ld.so.conf /etc/ld.so.conf.d /etc/alternatives` | System binds. Each entry is a string (required) or `{path, optional}`; globs are allowed. A missing required path fails provider construction. |
 | `network_host_ro_binds` | `/etc/resolv.conf /etc/hosts /etc/nsswitch.conf /etc/ssl /etc/ca-certificates /etc/passwd /etc/group`, plus optional `/etc/pki` | Used only with `network: host`. A smaller set broke HTTPS on a Slurm + pyxis cluster (curl rc 77). |
-| `mounts` | `[]` | `{src, dst, ro: true}` or `"src:dst[:ro\|rw]"`. `SandboxSpec.provider_options["mounts"]` adds per-sandbox mounts. A `dst` inside a read-only system bind is refused, because bwrap cannot create the mount point there: use top-level targets or targets under `/tmp`. |
+| `mounts` | `[]` | `{src, dst, ro: true}` or `"src:dst[:ro\|rw]"`. `SandboxSpec.provider_options["mounts"]` adds per-sandbox mounts. A `dst` inside a read-only system bind is refused, because bwrap cannot create the mount point there. A `dst` at, above or inside the sandbox's `/tmp`, home or workdir is refused too: bwrap would create its mount point in sandbox-writable space, or the mount would shadow that directory. Use top-level targets such as `/codex-runtime`. |
 | `env`, `env_passthrough`, `hide_gpus` | see above | Sandbox environment. |
 | `remount_root_ro` | `true` | Adds `--remount-ro /`. |
 | `default_files` | `{}` | `{sandbox path: text}` written into every new sandbox. |
@@ -158,19 +173,3 @@ process's own filesystem.
     outside.
   - A unix socket bound into a net-unshared sandbox works. It is a possible future
     channel for a submit-only `network: none` mode.
-- **Codex inside a borrowed sandbox.** Codex needs `network: host` to reach the Gym
-  model server, and the task's own tools may need it to reach an evaluation service. `install_codex_runtime.sh`
-  installs into `/tmp/nemo-gym-codex-node-22.19.0-<version>`, which is the sandbox's
-  private `/tmp`. To avoid a per-episode download, pre-install the runtime once,
-  mount its `node/` and `codex/` read-only, and mark it ready:
-
-  ```yaml
-  mounts:
-    - {src: /path/to/codex-runtime/node,  dst: /tmp/nemo-gym-codex-node-22.19.0-0.144.4/node}
-    - {src: /path/to/codex-runtime/codex, dst: /tmp/nemo-gym-codex-node-22.19.0-0.144.4/codex}
-  default_files:
-    /tmp/nemo-gym-codex-node-22.19.0-0.144.4/ready: ""
-  ```
-
-  The installer then only takes its lock (inside the writable `/tmp`) and verifies
-  `codex --version`.
