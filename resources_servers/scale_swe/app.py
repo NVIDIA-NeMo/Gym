@@ -71,6 +71,7 @@ from nemo_gym.server_runtime import (
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
     ResourcesSessionFences,
     SimpleResourcesServer,
 )
@@ -86,6 +87,7 @@ from resources_servers.scale_swe.verification import (
     run_verification,
     verification_files,
 )
+from resources_servers.swebench.agent_network import AgentNetworkConfig
 from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
 from resources_servers.swebench.patch_capture import (
     CaptureCommandError,
@@ -102,7 +104,7 @@ LOG = logging.getLogger(__name__)
 _COMMIT_ID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 
 
-class ScaleSWEResourcesServerConfig(BaseResourcesServerConfig):
+class ScaleSWEResourcesServerConfig(BaseResourcesServerConfig, AgentNetworkConfig):
     is_verifying_golden_patch: bool = False
     # "worktree" (diff of the working tree) or "committed" (committed work only); see swebench/patch_capture.py.
     patch_capture_mode: PatchCaptureMode = "worktree"
@@ -219,6 +221,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
+        self.config.check_agent_network_provider(get_global_config_dict())
         self._session_id_to_sandbox: dict[str, AsyncSandbox] = {}
         self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
         self._session_id_to_base_commit: dict[str, str] = {}
@@ -289,7 +292,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
         )
 
     async def _create_sandbox(
-        self, body: ScaleSWEInstanceRequest, files: dict[str, str] | None = None
+        self, body: ScaleSWEInstanceRequest, files: dict[str, str] | None = None, *, for_agent: bool = False
     ) -> AsyncSandbox:
         global_config_dict = get_global_config_dict()
         provider_config = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
@@ -320,7 +323,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
                 "instance_id": body.instance_id[:63],
             },
             resources=sandbox_resources,
-            provider_options=self.config.sandbox_config.get("provider_options", {}),
+            provider_options=self.config.sandbox_provider_options(provider_config, for_agent=for_agent),
         )
         sandbox = AsyncSandbox(provider_config)
         await sandbox.start(spec)
@@ -539,7 +542,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
             session = self._resources_sessions.setdefault(session_id, _ResourcesSession())
             if close_episode_id is not None:
                 if session.episode_id not in (None, close_episode_id):
-                    raise HTTPException(409, "episode_id does not match the resources session")
+                    raise ResourcesSessionConflictError("episode_id does not match the resources session")
                 session.episode_id = close_episode_id
                 session.closing = True
             async with session.lock:
@@ -584,7 +587,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
         session_id = body.resources_session_id
         async with self._locked_session(session_id) as session:
             if session.closing or session_id in self._fences:
-                raise HTTPException(409, "Resources session is already closed")
+                raise ResourcesSessionConflictError("Resources session is already closed")
             if self._shutting_down:
                 raise HTTPException(503, "Scale-SWE server is shutting down")
             if session.request is None and session.episode_id in (None, body.episode_id):
@@ -616,16 +619,16 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
                     ),
                 )
             elif session.request != body:
-                raise HTTPException(409, "resources_session_id is already bound to a different request")
+                raise ResourcesSessionConflictError("resources_session_id is already bound to a different request")
             elif session.verification_request is not None:
-                raise HTTPException(409, "Resources session was already verified")
+                raise ResourcesSessionConflictError("Resources session was already verified")
             request.session[SESSION_ID_KEY] = session_id
             return session.response
 
     def _raise_if_closing(self, session: _ResourcesSession) -> None:
         """Refuse to lend a sandbox that a close, or the server's shutdown, has claimed during setup."""
         if session.closing:
-            raise HTTPException(409, "Resources session closed during setup")
+            raise ResourcesSessionConflictError("Resources session closed during setup")
         if self._shutting_down:
             raise HTTPException(503, "Scale-SWE server is shutting down")
 
@@ -636,7 +639,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
         self._session_id_to_pristine_untracked.pop(session_id, None)
         self._session_id_to_base_commit.pop(session_id, None)
 
-        sandbox = await self._create_sandbox(body)
+        sandbox = await self._create_sandbox(body, for_agent=True)
         if own_before_setup:
             # An episode session owns its sandbox from the start, so the failed seed's cleanup or a close
             # can stop it when the setup below fails.
@@ -675,7 +678,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
         session_id = body.resources_session_id
         if session_id in self._fences:
             if self._fences.get(session_id) != body.episode_id:
-                raise HTTPException(409, "episode_id does not match the closed resources session")
+                raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
             return ResourcesCloseSessionResponse(resources_session_id=session_id)
         async with self._locked_session(session_id, close_episode_id=body.episode_id) as session:
             await self._release_session(session_id, session)
@@ -691,18 +694,18 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
         if session_id in self._resources_sessions:
             return await self._verify_resources_session(session_id, body)
         if session_id in self._fences:
-            raise HTTPException(409, "Resources session is closed")
+            raise ResourcesSessionConflictError("Resources session is closed")
         return await self._verify(session_id, body, resources_session=False)
 
     async def _verify_resources_session(self, session_id: str, body: ScaleSWEVerifyRequest) -> ScaleSWEVerifyResponse:
         async with self._locked_session(session_id) as session:
             try:
                 if session.closing or session.request is None:
-                    raise HTTPException(409, "Resources session is not available for verification")
+                    raise ResourcesSessionConflictError("Resources session is not available for verification")
                 instance_fields = set(ScaleSWEInstanceRequest.model_fields)
                 seeded = ScaleSWEInstanceRequest.model_validate(session.request.task_data)
                 if body.model_dump(include=instance_fields) != seeded.model_dump(include=instance_fields):
-                    raise HTTPException(409, "Verification task does not match the seeded task")
+                    raise ResourcesSessionConflictError("Verification task does not match the seeded task")
                 if session.verification_request is None:
                     # Recorded first: an attempt that ends without a verdict has already used the agent's sandbox.
                     session.verification_request = body.model_copy(deep=True)
@@ -712,7 +715,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
                         return response
                     session.verification_response = response
                 elif session.verification_request != body:
-                    raise HTTPException(409, "Verification request does not match the first request")
+                    raise ResourcesSessionConflictError("Verification request does not match the first request")
                 elif session.verification_response is None:
                     raise HTTPException(503, "Previous verification did not complete; retry the episode")
                 return session.verification_response.model_copy(deep=True)
