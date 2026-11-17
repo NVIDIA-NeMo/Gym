@@ -300,8 +300,8 @@ BASH_OFF_MARKERS = [
 def test_the_staged_plugins_print_every_line_verify_requires(
     arm: dict[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """verify refuses a run whose plugin log lacks a required line, so a line no plugin prints would refuse every run.
-    The preset requires only lines that every arm prints; only the bash-off arm prints its bash=off and patched-grep
+    """verify scores 0 a run whose plugin log lacks a required line, so a line no plugin prints would score every run
+    0. The preset requires only lines that every arm prints; only the bash-off arm prints its bash=off and patched-grep
     lines."""
     for name, value in arm.items():
         monkeypatch.setenv(name, value)
@@ -347,7 +347,7 @@ def test_verify_requires_a_line_from_the_search_guard_and_from_the_turn_budget()
 
 def test_the_readme_gives_the_bash_off_arm_the_lines_its_plugins_print() -> None:
     """The README's overlay for the bash-off arm restates the whole list. A line in it that the plugins do not print
-    would refuse every row of that arm."""
+    would score every row of that arm 0."""
     text = README.read_text().split("restates the whole list", 1)[1]
     overlay = OmegaConf.create(textwrap.dedent(text.split("```yaml\n", 1)[1].split("```", 1)[0]))
 

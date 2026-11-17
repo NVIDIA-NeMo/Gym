@@ -41,8 +41,11 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.verification import JudgeError
 from resources_servers.opencode_search.app import (
+    _PLUGIN_LOG_MAX_BYTES,
     _PLUGIN_LOG_ROW_CHARS,
-    PLUGINS_NOT_LOADED,
+    PLUGIN_LOG_INCOMPLETE,
+    PLUGIN_LOG_MISSING,
+    PLUGIN_LOG_UNSAFE,
     SearchResourcesServer,
     SearchResourcesServerConfig,
     SearchSeedSessionRequest,
@@ -249,14 +252,28 @@ def _record_execs(monkeypatch: pytest.MonkeyPatch, stopped: list[AsyncSandbox]) 
 
 
 def _plugin_log_read(log_text: str, *, cut_after: Optional[int] = None) -> str:
-    """What the plugin log read prints for a log holding log_text, line breaks aside: the log's size in bytes, then
-    the log in base64. With cut_after, the base64 stops at the last whole group within that many bytes, as a provider
-    that cut the output short could return it."""
-    data = log_text.encode()
-    encoded = base64.b64encode(data).decode()
+    """What the plugin log read prints for a regular file holding log_text, line breaks aside: "file:", the log in
+    base64 and the end of the output. With cut_after, the base64 stops at the last whole group within that many bytes
+    and the end is missing, as a provider that cut the output short could return it."""
+    encoded = base64.b64encode(log_text.encode()).decode()
     if cut_after is not None:
-        encoded = encoded[: cut_after // 3 * 4]
-    return f"{len(data)}:{encoded}"
+        return f"file:{encoded[: cut_after // 3 * 4]}"
+    return f"file:{encoded}:end"
+
+
+def _scored_0_for_its_plugin_log(verified: Any, kind: str) -> dict[str, Any]:
+    """The row of a verify that scored its episode 0 for its plugin log, with kind, after checking what every such row
+    holds: an unmasked 0 the outcome policy counts as the model's, no grade, no ending, and the reason."""
+    assert verified.status_code == 200, verified.text
+    row = verified.json()
+    assert _graded(verified) == (0.0, False, kind, False)
+    assert (row["failure_outcome_action"], row["failure_outcome_attribution"]) == ("count_as_zero", "model")
+    assert (row["judge_parsed"], row["judge_attempts"], row["extracted_final_answer"]) == (False, 0, "")
+    # A log that fails the check never masks the row with an ending.
+    assert (row["opencode_plugins_loaded"], row["opencode_terminal_reason"]) == (False, "")
+    assert row["failure_reason"].startswith("Scored 0 without a judge call: the plugin log ")
+    assert len(row["failure_reason"]) <= 2000
+    return row
 
 
 def _failure_kinds(reply: Any) -> list[str]:
@@ -748,8 +765,8 @@ def test_the_ending_is_read_from_the_turn_budget_plugins_lines(lines, reason) ->
             "",
             None,
         ),
-        # The read checks the bytes it returns against the file's size in bytes, so a log longer in bytes than in
-        # characters is read whole, its ending with it.
+        # The read returns the file's bytes, so a log longer in bytes than in characters is read whole, its ending with
+        # it.
         (MULTIBYTE_SEARCH + TURN_CAP, "max_iteration", "agent_limit"),
     ],
     ids=["max_iteration", "context_window", "recovered", "multibyte_search"],
@@ -779,69 +796,210 @@ def test_an_episode_takes_its_ending_from_the_plugin_log_before_its_sandbox_stop
 
 
 @pytest.mark.parametrize(
-    ("log_text", "markers", "missing"),
+    ("log_text", "markers", "kind", "what"),
     [
-        (None, [], ["[nemo-gym-plugin] loaded sentinel"]),
-        # An empty log is refused like a missing one; the detail tells them apart.
-        ("", [], ["[nemo-gym-plugin] loaded sentinel"]),
+        # The model's tools can delete the file; so does a receipts plugin that never loaded.
+        (None, [], PLUGIN_LOG_MISSING, "is absent"),
+        # An empty log, as from a harness that truncated it, lacks the sentinel's line.
+        ("", [], PLUGIN_LOG_INCOMPLETE, "lacks ['[nemo-gym-plugin] loaded sentinel']"),
         # The receipts plugin's own load line does not stand in for the sentinel.
-        ("[nemo-gym-plugin] loaded receipts version=1\n", [], ["[nemo-gym-plugin] loaded sentinel"]),
+        (
+            "[nemo-gym-plugin] loaded receipts version=1\n",
+            [],
+            PLUGIN_LOG_INCOMPLETE,
+            "lacks ['[nemo-gym-plugin] loaded sentinel']",
+        ),
         (
             SENTINEL + "[nemo-gym-plugin] tool_surface task=off bash=on\n",
             ["tool_surface task=off bash=off", "loaded sentinel"],
-            ["tool_surface task=off bash=off"],
+            PLUGIN_LOG_INCOMPLETE,
+            "lacks ['tool_surface task=off bash=off']",
         ),
         # Longer in bytes than in characters: log_bytes counts bytes.
-        (MULTIBYTE_SEARCH, [], ["[nemo-gym-plugin] loaded sentinel"]),
+        (MULTIBYTE_SEARCH, [], PLUGIN_LOG_INCOMPLETE, "lacks ['[nemo-gym-plugin] loaded sentinel']"),
+        # Bytes that are not text, as from a file the model overwrote: decoded with replacement characters.
+        ("\udcff\udcfe" + SENTINEL[2:], [], PLUGIN_LOG_INCOMPLETE, "lacks ['[nemo-gym-plugin] loaded sentinel']"),
     ],
-    ids=["no_log", "empty_log", "receipts_only", "required_marker", "multibyte_log"],
+    ids=["no_log", "empty_log", "receipts_only", "required_marker", "multibyte_log", "garbled_log"],
 )
-def test_an_episode_whose_plugins_did_not_load_is_refused_terminally(
-    workdir, tmp_path, started, stopped, log_text, markers, missing
+def test_an_episode_whose_plugin_log_is_missing_or_lacks_a_line_scores_0_without_a_judge_call(
+    workdir, tmp_path, started, stopped, log_text, markers, kind, what
 ) -> None:
+    """The model's tools can reach the plugin log, so a run whose log is missing or lacks a line it must hold is scored
+    0 as the model's rather than refused: a refused run would be neither scored nor penalized."""
     log = tmp_path / "plugins.log"
     server, client = _plugin_log_server(workdir, log, required_plugin_markers=markers)
     if log_text is not None:
-        log.write_text(log_text, encoding="utf-8")
+        log.write_bytes(log_text.encode("utf-8", errors="surrogateescape"))
     judge = _mock_judge(server, CORRECT)
 
-    refused = client.post("/verify", json=_verify_body())
+    verified = client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY)
 
-    # 422, which an Environment Server does not retry: the log was read, and it says the run lacked its plugins.
-    assert refused.status_code == 422, refused.text
-    detail = refused.json()["detail"]
-    assert f"lacks {missing!r}" in detail
-    # Whether the file existed, its size in bytes, and its two ends with line breaks escaped: here the whole log.
-    text = log_text or ""
-    assert f"exists={log_text is not None} log_bytes={len(text.encode())} head={text!r} tail={text!r}" in detail
+    row = _scored_0_for_its_plugin_log(verified, kind)
+    # What it found, the bytes it read, and both ends of what it read, with line breaks escaped: here the whole log.
+    data = b"" if log_text is None else log_text.encode("utf-8", errors="surrogateescape")
+    text = data.decode("utf-8", errors="replace")
+    assert f"{log} {what}; log_bytes={len(data)} head={text!r} tail={text!r}" in row["failure_reason"]
+    assert row["opencode_plugin_log"] == text
     assert judge.await_count == 0 and stopped == [started[0][0]]
-    # The log it read is kept, so a retry is refused the same way.
-    assert client.post("/verify", json=_verify_body()).json()["detail"] == detail
+    # The row is kept with the log it read, so a retry replays it.
+    assert client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY).json() == row
 
 
-def test_a_refusal_shows_the_two_ends_of_a_long_plugin_log_within_what_the_environment_server_keeps(
-    workdir, tmp_path
-) -> None:
-    """An Environment Server keeps the first 2,000 characters of a refused reply, after its status line, as the row's
-    failure_reason: the detail ends within them, with the end of the log."""
+def test_the_reason_shows_the_two_ends_of_a_long_plugin_log_and_no_ending_masks_the_row(workdir, tmp_path) -> None:
+    """The failure_reason gives the first and last characters of a long log in at most 2,000 characters. A log that
+    fails the check gives no ending: the turn cap it reports leaves the row unmasked."""
     log = tmp_path / "plugins.log"
     server, client = _plugin_log_server(workdir, log, required_plugin_markers=["tool_surface task=off bash=off"])
     calls = "".join(f"[nemo-gym-plugin] [exa-mcp] tool=web_search_exa ms={call} bytes=1\n" for call in range(1000))
     log.write_text(SENTINEL + calls + TURN_CAP)
     _mock_judge(server, CORRECT)
 
-    refused = client.post("/verify", json=_verify_body())
+    verified = client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY)
 
-    assert refused.status_code == 422, refused.text
-    detail = refused.json()["detail"]
+    reason = _scored_0_for_its_plugin_log(verified, PLUGIN_LOG_INCOMPLETE)["failure_reason"]
     # The head starts at the log's first line and the tail ends at its last, line breaks escaped.
-    assert f"head={SENTINEL!r}"[:-1] in detail and detail.endswith(f"{TURN_CAP!r}"[1:])
-    # With room for the status line before it.
-    assert len(refused.text) <= 1800
+    assert f"head={SENTINEL!r}"[:-1] in reason and reason.endswith(f"{TURN_CAP!r}"[1:])
+
+
+@pytest.mark.parametrize(
+    ("make", "what"),
+    [
+        # Even a link to a log that would pass: the receipts plugin appends through it, wherever it points.
+        (lambda log, other: (other.write_text(SENTINEL), log.symlink_to(other)), "is a symbolic link"),
+        (lambda log, other: log.symlink_to(other), "is a symbolic link"),
+        (lambda log, other: log.mkdir(), "is not a regular file"),
+        # Never opened: a FIFO without a writer would hold the read until its timeout.
+        (lambda log, other: os.mkfifo(log), "is not a regular file"),
+    ],
+    ids=["symlink", "dangling_symlink", "directory", "fifo"],
+)
+def test_a_plugin_log_the_read_does_not_open_scores_0_without_a_judge_call(
+    workdir, tmp_path, started, stopped, make, what
+) -> None:
+    """The model's tools can put anything at the plugin log's path. The read opens only a regular file that is not a
+    symbolic link, and the episode scores 0 for anything else."""
+    log = tmp_path / "plugins.log"
+    server, client = _plugin_log_server(workdir, log)
+    make(log, tmp_path / "other.log")
+    judge = _mock_judge(server, CORRECT)
+
+    verified = client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY)
+
+    row = _scored_0_for_its_plugin_log(verified, PLUGIN_LOG_UNSAFE)
+    assert f"{log} {what}; log_bytes=0 head='' tail=''" in row["failure_reason"]
+    assert row["opencode_plugin_log"] == ""
+    assert judge.await_count == 0 and stopped == [started[0][0]]
+
+
+def test_a_plugin_log_the_read_cannot_read_scores_0_without_a_judge_call(workdir, tmp_path, monkeypatch) -> None:
+    """A file without read permission, as after a chmod by the model's tools. Faked, since a test run as root reads
+    every file."""
+    log = tmp_path / "plugins.log"
+    server, client = _plugin_log_server(workdir, log)
+    read = SandboxExecResult(stdout="unreadable:end", stderr="", return_code=0)
+    monkeypatch.setattr(AsyncSandbox, "exec", AsyncMock(return_value=read))
+    judge = _mock_judge(server, CORRECT)
+
+    verified = client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY)
+
+    row = _scored_0_for_its_plugin_log(verified, PLUGIN_LOG_UNSAFE)
+    assert f"{log} cannot be read; log_bytes=0" in row["failure_reason"]
+    assert judge.await_count == 0
+
+
+@pytest.mark.parametrize(
+    ("extra", "graded"),
+    [("", (1.0, True, "agent_limit", True)), ("\n", (0.0, False, PLUGIN_LOG_UNSAFE, False))],
+    ids=["at_the_cap", "one_byte_over_the_cap"],
+)
+def test_a_plugin_log_over_the_byte_cap_scores_0_and_one_at_the_cap_is_graded(
+    workdir, tmp_path, monkeypatch, extra, graded
+) -> None:
+    """The read reads at most one byte past _PLUGIN_LOG_MAX_BYTES, lowered here to the length of a log that passes, so
+    a longer file is told apart without its size being measured, and one at the cap is read whole."""
+    cap = len(SENTINEL + TURN_CAP)
+    monkeypatch.setattr("resources_servers.opencode_search.app._PLUGIN_LOG_MAX_BYTES", cap)
+    log = tmp_path / "plugins.log"
+    server, client = _plugin_log_server(workdir, log)
+    log.write_text(SENTINEL + TURN_CAP + extra)
+    judge = _mock_judge(server, CORRECT)
+
+    verified = client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY)
+
+    assert _graded(verified) == graded
+    if extra:
+        row = _scored_0_for_its_plugin_log(verified, PLUGIN_LOG_UNSAFE)
+        assert f"{log} holds more than {cap} bytes; log_bytes={cap + 1} " in row["failure_reason"]
+        assert row["opencode_plugin_log"] == SENTINEL + TURN_CAP + extra
+    assert judge.await_count == (0 if extra else 1)
+
+
+def test_a_plugin_log_far_over_the_byte_cap_is_read_only_up_to_it(workdir, tmp_path) -> None:
+    """A file the model filled, here a sparse one 16 times the cap, costs one read of the cap and one byte."""
+    log = tmp_path / "plugins.log"
+    server, client = _plugin_log_server(workdir, log)
+    with log.open("wb") as handle:
+        handle.write(SENTINEL.encode())
+        handle.truncate(16 * _PLUGIN_LOG_MAX_BYTES)
+    _mock_judge(server, CORRECT)
+
+    verified = client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY)
+
+    row = _scored_0_for_its_plugin_log(verified, PLUGIN_LOG_UNSAFE)
+    cap = _PLUGIN_LOG_MAX_BYTES
+    assert f"holds more than {cap} bytes; log_bytes={cap + 1} " in row["failure_reason"]
+    assert len(row["opencode_plugin_log"]) <= _PLUGIN_LOG_ROW_CHARS
+
+
+@pytest.mark.parametrize("limit", [2, 0], ids=["two", "off"])
+def test_episodes_scored_0_for_their_plugin_log_trip_the_plugin_log_breaker(workdir, tmp_path, limit) -> None:
+    """A plugin bundle that does not load would score every episode 0 as the model's: verify answers 500 once
+    plugin_log_max_consecutive_failures episodes in a row were scored 0 for their plugin log. An identical retry is not
+    counted again, and a log that passes starts the count again. 0 turns the breaker off."""
+    log = tmp_path / "plugins.log"
+    server = _server(workdir, plugin_log_path=str(log), plugin_log_max_consecutive_failures=limit)
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    _mock_judge(server, CORRECT)
+
+    def episode(session_id: str, log_text: Optional[str]) -> Any:
+        client.cookies.clear()
+        assert client.post("/seed_session", json=_seed(session_id)).status_code == 200
+        log.unlink(missing_ok=True)
+        if log_text is not None:
+            log.write_text(log_text)
+        return client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY)
+
+    first = episode("first", None)
+    assert _graded(first) == (0.0, False, PLUGIN_LOG_MISSING, False)
+    assert client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY).json() == first.json()
+    assert _graded(episode("passes", SENTINEL)) == (1.0, False, None, True)
+    assert _graded(episode("second", "")) == (0.0, False, PLUGIN_LOG_INCOMPLETE, False)
+    tripped = episode("third", "")
+
+    if limit:
+        assert tripped.status_code == 500, tripped.text
+    else:
+        assert _graded(tripped) == (0.0, False, PLUGIN_LOG_INCOMPLETE, False)
+
+
+def test_an_episode_scored_0_for_its_plugin_log_still_copies_its_exports(workdir, tmp_path) -> None:
+    """The copy is evidence about the run, which a 0 for its plugin log makes more worth keeping, and its row reports
+    it."""
+    log = tmp_path / "plugins.log"
+    server, client, copied_to = _export_copy_server(workdir, tmp_path, plugin_log_path=str(log))
+    judge = _mock_judge(server, CORRECT)
+
+    verified = client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY)
+
+    row = _scored_0_for_its_plugin_log(verified, PLUGIN_LOG_MISSING)
+    assert row["opencode_export_copy"]["status"] == "copied" and judge.await_count == 0
+    assert {path.name: path.read_bytes() for path in copied_to.iterdir()} == EXPORTS
 
 
 # A read of SENTINEL + TURN_CAP cut short at the end of a base64 group, as a provider that caps a command's output
-# could return it: it decodes cleanly, to a log that keeps the sentinel and loses the turn cap and its mask.
+# could return it: it would decode cleanly, to a log that keeps the sentinel and loses the turn cap and its mask, but
+# it lacks the end of the output.
 CUT_SHORT = SandboxExecResult(
     stdout=_plugin_log_read(SENTINEL + TURN_CAP, cut_after=len(SENTINEL)), stderr=None, return_code=0
 )
@@ -851,16 +1009,21 @@ CUT_SHORT = SandboxExecResult(
     "failure",
     [
         SandboxExecResult(stdout=None, stderr="timed out", return_code=125, error_type="timeout"),
-        SandboxExecResult(stdout="", stderr="base64: permission denied", return_code=1),
+        SandboxExecResult(stdout="", stderr="base64: not found", return_code=1),
         RuntimeError("the provider is unavailable"),
         CUT_SHORT,
+        # What the read found, cut short before the end: not taken for a log that is absent.
+        SandboxExecResult(stdout="absent", stderr=None, return_code=0),
+        SandboxExecResult(stdout="sideways:end", stderr=None, return_code=0),
+        SandboxExecResult(stdout="file:not*base64:end", stderr=None, return_code=0),
     ],
-    ids=["error_type", "exit_code", "raised", "cut_short"],
+    ids=["error_type", "exit_code", "raised", "cut_short", "status_cut_short", "unknown_status", "invalid_base64"],
 )
 def test_a_plugin_log_that_cannot_be_read_fails_the_verify_for_a_retry(
     workdir, tmp_path, started, stopped, monkeypatch, failure
 ) -> None:
-    """A read that fails gives no verdict: the 500 is retryable, so the episode runs again; nothing is graded."""
+    """A read that fails says nothing about the run: the 500 is retryable, so the episode runs again; nothing is
+    graded or scored 0."""
     log = tmp_path / "plugins.log"
     server, client = _plugin_log_server(workdir, log)
     log.write_text(SENTINEL + TURN_CAP)
@@ -877,31 +1040,31 @@ def test_a_plugin_log_that_cannot_be_read_fails_the_verify_for_a_retry(
 
 
 @pytest.mark.parametrize(
-    ("read", "status", "kind"),
+    ("read", "status", "kinds"),
     [
-        # No plugin wrote a log.
-        (None, 422, PLUGINS_NOT_LOADED),
+        # No plugin wrote a log: a scored row, whose kind is on the row, not a failed verify.
+        (None, 200, []),
         (
             SandboxExecResult(stdout=None, stderr="timed out", return_code=125, error_type="timeout"),
             500,
-            "provider_io_timeout",
+            ["provider_io_timeout"],
         ),
         (
-            SandboxExecResult(stdout="", stderr="base64: permission denied", return_code=1),
+            SandboxExecResult(stdout="", stderr="base64: not found", return_code=1),
             500,
-            "provider_request_failed",
+            ["provider_request_failed"],
         ),
-        (CUT_SHORT, 500, "provider_request_failed"),
+        (CUT_SHORT, 500, ["provider_request_failed"]),
         # A provider's own failure keeps its kind.
-        (sandbox_failure(operation="exec", failure_kind=PROVIDER_UNAVAILABLE), 500, PROVIDER_UNAVAILABLE),
+        (sandbox_failure(operation="exec", failure_kind=PROVIDER_UNAVAILABLE), 500, [PROVIDER_UNAVAILABLE]),
     ],
-    ids=["plugins_not_loaded", "error_type", "exit_code", "cut_short", "provider_failure"],
+    ids=["no_log", "error_type", "exit_code", "cut_short", "provider_failure"],
 )
-def test_a_plugin_log_that_is_refused_or_cannot_be_read_names_its_failure_kind(
-    workdir, tmp_path, monkeypatch, read, status, kind
+def test_a_plugin_log_that_cannot_be_read_names_its_failure_kind(
+    workdir, tmp_path, monkeypatch, read, status, kinds
 ) -> None:
     """An Environment Server records an episode whose verify did not grade by the kinds the reply's failure report
-    names."""
+    names. A missing log is no such failure: the episode is scored 0, and its row names the kind."""
     server = _server(workdir, plugin_log_path=str(tmp_path / "plugins.log"))
     app = server.setup_webserver()
     # As a running server has it: the middleware that reports each reply's failures in its failure header.
@@ -916,13 +1079,15 @@ def test_a_plugin_log_that_is_refused_or_cannot_be_read_names_its_failure_kind(
     verified = client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY)
 
     assert verified.status_code == status, verified.text
-    assert _failure_kinds(verified) == [kind]
+    assert _failure_kinds(verified) == kinds
+    if status == 200:
+        _scored_0_for_its_plugin_log(verified, PLUGIN_LOG_MISSING)
 
 
 def test_a_plugin_log_returned_as_messages_joined_by_newlines_keeps_its_lines(workdir, tmp_path, monkeypatch) -> None:
     """A provider may return a command's output as messages joined by newlines. A message boundary inside a plugin line
-    must not split it: the sentinel would read as missing, and the turn cap would go unmasked. Nor one inside the size
-    the read prints, which would make the log read as cut short."""
+    must not split it: the sentinel would read as missing, and the turn cap would go unmasked. Nor one inside the status
+    or the end the read prints, which would make the read fail."""
     log = tmp_path / "plugins.log"
     server, client = _plugin_log_server(workdir, log)
     log.write_text(SENTINEL + TURN_CAP)
@@ -970,7 +1135,8 @@ def test_a_plugin_log_too_long_for_the_row_is_read_whole_and_carried_by_its_two_
 @pytest.mark.parametrize(
     ("headers", "graded", "judge_calls"),
     [
-        # An Environment Server's verify: graded from its body, it would skip the plugin gate and the turn cap's mask.
+        # An Environment Server's verify: graded from its body, it would skip the plugin log check and the turn cap's
+        # mask.
         (EPISODE_VERIFY, (0.0, True, "session_lost", False), 0),
         # The relay agent's verify, or gym eval reverify: graded from its body, as without plugin_log_path.
         ({}, (1.0, False, None, True), 1),
@@ -1007,7 +1173,7 @@ def test_a_verify_for_a_sandbox_this_server_no_longer_holds(workdir, tmp_path, h
     ],
     ids=["episode_without_plugin_log_path", "agent_run"],
 )
-def test_without_a_plugin_log_to_read_nothing_is_read_or_refused(
+def test_without_a_plugin_log_to_read_the_answer_alone_is_graded(
     workdir, stopped, monkeypatch, seed, settings, reason, graded
 ) -> None:
     """A harness that brings no OpenCode plugins is graded as before."""
@@ -1648,21 +1814,21 @@ def test_the_judge_gets_the_grading_prompt_alone_at_temperature_zero(workdir) ->
     assert [(message.role, message.content) for message in params.input] == [("user", prompt)]
 
 
-def test_an_empty_plugin_log_is_refused_as_one_without_the_sentinel(workdir, tmp_path, started, stopped) -> None:
-    """A log that exists but holds nothing reads as "", which lacks the sentinel's line: the run is refused,
-    terminally, as when no log was written."""
+def test_an_empty_plugin_log_scores_0_as_one_without_the_sentinel(workdir, tmp_path, started, stopped) -> None:
+    """A log that exists but holds nothing reads as "", which lacks the sentinel's line: the episode scores 0 without
+    a judge call, with the kind of a log read whole that lacks a line, not that of a missing one."""
     log = tmp_path / "plugins.log"
     server, client = _plugin_log_server(workdir, log)
     log.write_text("")
     judge = _mock_judge(server, CORRECT)
 
-    refused = client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY)
+    verified = client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY)
 
-    assert refused.status_code == 422, refused.text
-    assert "[nemo-gym-plugin] loaded sentinel" in refused.json()["detail"]
+    row = _scored_0_for_its_plugin_log(verified, PLUGIN_LOG_INCOMPLETE)
+    assert "lacks ['[nemo-gym-plugin] loaded sentinel']; log_bytes=0" in row["failure_reason"]
     assert judge.await_count == 0 and stopped == [started[0][0]]
-    # The empty log it read is kept, so a retry is refused the same way.
-    assert client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY).status_code == 422
+    # The row is kept with the empty log it read, so a retry replays it.
+    assert client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY).json() == row
 
 
 # The line nemo_gym_turn_budget.js reports for an overflow of the context window that compaction did not recover from.
@@ -1721,6 +1887,8 @@ def test_a_failed_response_the_outcome_policy_verifies_is_graded_with_its_receip
         failure_kind="session_lost",
         failure_reason="a reason from the request",
         evaluation_completed=False,
+        failure_outcome_action="count_as_zero",
+        failure_outcome_attribution="evaluation",
     )
 
     verified = client.post("/verify", json=body, headers=EPISODE_VERIFY)
@@ -1728,6 +1896,8 @@ def test_a_failed_response_the_outcome_policy_verifies_is_graded_with_its_receip
     assert verified.status_code == 200, verified.text
     assert _graded(verified) == (1.0 if answer else 0.0, True, kind, True)
     assert verified.json()["failure_reason"] != "a reason from the request"
+    # No outcome was applied to this row, so it names none.
+    assert {"failure_outcome_action", "failure_outcome_attribution"}.isdisjoint(verified.json())
     assert verified.json()["failure_report"] == failure_report
     assert judge.await_count == (1 if answer else 0)
 
@@ -1754,6 +1924,27 @@ def test_an_incomplete_response_is_masked_only_by_the_plugin_log(workdir, tmp_pa
 
     assert verified.status_code == 200, verified.text
     assert _graded(verified) == graded
+
+
+def test_the_outcome_a_row_names_is_the_one_verify_applied_whatever_the_request_names(workdir, tmp_path) -> None:
+    """verify merges the grade over the request, so a request field named like an applied outcome reaches no row: a
+    row scored 0 for its plugin log names its own outcome, and a lost session's row and a graded row name none."""
+    log = tmp_path / "plugins.log"
+    server, client = _plugin_log_server(workdir, log)
+    _mock_judge(server, CORRECT)
+    requested = {"failure_outcome_action": "fail", "failure_outcome_attribution": "evaluation"}
+
+    scored_0 = client.post("/verify", json=_verify_body(**requested), headers=EPISODE_VERIFY)
+    assert client.post("/close_session", json=_close()).status_code == 200
+    lost = client.post("/verify", json=_verify_body(**requested), headers=EPISODE_VERIFY)
+    # A verify without a session: gym eval reverify's, graded from its body.
+    client.cookies.clear()
+    graded = client.post("/verify", json=_verify_body(**requested))
+
+    _scored_0_for_its_plugin_log(scored_0, PLUGIN_LOG_MISSING)
+    assert _graded(lost) == (0.0, True, "session_lost", False) and _graded(graded) == (1.0, False, None, True)
+    for reply in (lost, graded):
+        assert {"failure_outcome_action", "failure_outcome_attribution"}.isdisjoint(reply.json())
 
 
 def test_a_row_masked_without_a_grade_names_its_failure_and_gives_a_reason(workdir) -> None:

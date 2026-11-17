@@ -25,8 +25,8 @@ if (logPath) {
         // Synchronous, as the plugins write their lines: a copy still pending when OpenCode exits would be lost.
         appendFileSync(logPath, text);
       } catch {
-        // A line that cannot be copied is missing from the log, and the owner refuses a run whose log lacks a line
-        // it requires, so a failed copy is never mistaken for a run that reported nothing.
+        // A line that cannot be copied is missing from the log, and the owner scores 0, without grading it, a run
+        // whose log lacks a line it requires, so a failed copy never passes for a run that had its plugins.
       }
     }
     return write(chunk, ...rest);

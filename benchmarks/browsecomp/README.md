@@ -118,8 +118,9 @@ whatever export the run left, unless its `/run` fails:
 | OpenCode leaves no usable export, for example after a crash | The agent's `/run` answers 500: a failure row | The agent answers 5xx: a non-terminal failure row |
 | The export holds an assistant part type the relay agent does not convert (any but text, reasoning, tool, step-start, step-finish and patch), such as `retry` | The agent's `/run` answers 500: a failure row | Graded without that part |
 | The seed cannot create the working directory in the sandbox | Not applicable: the agent's sandbox keeps the image's working directory | The Resources Server's seed answers 422 when `mkdir` exits non-zero, which every episode would repeat: a terminal failure row. A `mkdir` that does not complete answers 500: a non-terminal failure row |
-| The plugins did not load as configured | The agent's `/run` answers 500 when the sentinel's line is missing: a failure row | `/verify` answers 422 when the plugin log, even a missing or empty one, lacks the sentinel's line or a required line: a terminal failure row |
-| `/verify` cannot read the plugin log | Not applicable: the agent reads its run output | `/verify` answers 500 when the read fails, times out or comes back cut short: a non-terminal failure row |
+| The plugins did not load as configured | The agent's `/run` answers 500 when the sentinel's line is missing: a failure row | Scored 0 without a judge call, as below |
+| The plugin log is missing, unsafe to read or lacks a line it must hold, as when the run's tools deleted, replaced, filled or edited it | Not applicable: the agent reads its run output | Scored 0 without a judge call, unmasked and counted as the model's (`failure_outcome_action: count_as_zero`): `opencode_search:plugin_log_missing` when it is absent; `opencode_search:plugin_log_unsafe` for a link, a file that is not regular or cannot be read, or one over 4 MiB; `opencode_search:plugin_log_incomplete` when it lacks the sentinel's line or a required line. After `plugin_log_max_consecutive_failures` (25) such episodes in a row, `/verify` answers 500 for each later one until a log passes: a non-terminal failure row |
+| `/verify` cannot read the plugin log | Not applicable: the agent reads its run output | `/verify` answers 500 when the read fails, times out or comes back cut short or malformed: a non-terminal failure row |
 | The run budget runs out | Graded, not masked | The same |
 | The episode outlives `default_episode_timeout_seconds` | No episode deadline | A non-terminal failure row ("Episode timed out") |
 | The judge gives no verdict in any attempt | Masked, `judge_unparseable` (a run that ended on its budget keeps that kind) | The same |
@@ -130,8 +131,9 @@ A relay cell that reads "Graded" assumes an export the relay agent can convert. 
 a failures-sidecar row (`agent_run_error`, which a resume retries) only with `++route_failures_to_sidecar=true`;
 without it, the first one ends the run. A session-preset failure is a failure row either way. Run both presets with
 `++route_failures_to_sidecar=true` and compare the failure rows by `failure_kind`. When the Resources Server names a
-kind for a `/verify` that failed, such as `opencode_search:plugins_not_loaded`, the session row carries it in its
-`_ng_failure_events`, as the cause of the failed episode.
+kind for a `/verify` that failed, such as `provider_io_timeout` for a plugin-log read that timed out, the session row
+carries it in its `_ng_failure_events`, as the cause of the failed episode. A row scored 0 for its plugin log is no
+failure row: it carries its kind in `failure_kind` and the reason in `failure_reason`.
 
 ### Time limits
 
@@ -171,7 +173,7 @@ observations and the plugin log instead:
 | `opencode_failed`, `opencode_exit_code`, `opencode_error_type` | No such fields: `response.status` says how the run ended, and a run the outcome policy does not grade is a failure row. The agent's invocation and sandbox observation in `ng_agent_observations` give the run's status, error type and exit code |
 | `opencode_export_found`, `opencode_finished` | None: a run that leaves no assistant result fails before `/verify` |
 | `opencode_results_fpath` (OpenCode's export, saved on the host), `opencode_run_stdout`, `opencode_run_stderr` | `opencode_plugin_log`, the plugins' lines. OpenCode's exports reach the host only with the Resources Server's `episode_export_copy_dir` set: `opencode_export_copy` then names the host directory that holds them (see [Compare the two presets](#compare-the-two-presets)) |
-| `opencode_plugins_loaded`, `opencode_terminal_reason` | The same fields, read from the plugin log |
+| `opencode_plugins_loaded`, `opencode_terminal_reason` | The same fields, read from the plugin log: false and empty on a row scored 0 for its plugin log |
 | `opencode_attachment_count` | None: the rows hold no images |
 | `ng_trajectory` and `ng_agent_observations`, only when the agent correlates rollouts, for example with `++observability_enabled=true` | Both, from the agent's close |
 | `response.output`: the assistant items, and the user messages OpenCode adds during the run, such as the one that continues it after a compaction | The assistant items only |
@@ -291,9 +293,9 @@ gym eval run --no-serve <the same --config and ++ arguments> \
   `/verify` copies the files before it stops the sandbox, to
   `<episode_export_copy_dir>/<capture key>/<task id>/attempt-<attempt>/`, and records the outcome in the row's
   `opencode_export_copy`. A copy that fails, runs past 300 seconds or exceeds `episode_export_max_bytes` (256 MiB) is
-  recorded there and never changes the grade. A `/verify` refused for its plugin log (422), or one that answers 500
-  once `judge_max_consecutive_failures` trips, still copies the files there, but its failure row has no
-  `opencode_export_copy`; one whose plugin log cannot be read copies nothing.
+  recorded there and never changes the grade. A row scored 0 for its plugin log records its copy too. A `/verify` that
+  answers 500 once `judge_max_consecutive_failures` or `plugin_log_max_consecutive_failures` trips still copies the
+  files there, but its failure row has no `opencode_export_copy`; one whose plugin log cannot be read copies nothing.
 - `++observability_enabled=true` with a `++model_call_capture_dir` records each model call in the rollouts, as the
   harness conformance checker needs. It also adds a plugin to OpenCode, so use it in a run of its own.
 
