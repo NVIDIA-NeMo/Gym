@@ -117,6 +117,11 @@ _WATCHDOG_INTERVAL = 120.0
 _DEFAULT_PROXY_REQUEST_TIMEOUT = 120.0
 _DEFAULT_STARTUP_PROBE_TIMEOUT = 15.0
 _QUICK_HEALTH_CHECK_TIMEOUT = 2.0
+# Forward-proxy variables, which Singularity passes into the container even under
+# --containall. Dropped for network="none" (see _spawn()).
+_PROXY_ENV_VARS = tuple(f"{p}_proxy" for p in ("http", "https", "ftp", "all", "no")) + tuple(
+    f"{p.upper()}_PROXY" for p in ("http", "https", "ftp", "all", "no")
+)
 _HOP_BY_HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -330,8 +335,10 @@ def _build_singularity_command(
     # shared interpreter cache -- uv-built venvs are NOT self-contained, bin/python3 is a
     # symlink chain ending at an absolute path outside the venv dir (confirmed directly this
     # session: bind-mounting only the venv fails with "stat: no such file or directory").
-    cmd += ["--bind", f"{venv_path}:{venv_path}"]
-    cmd += ["--bind", f"{uv_python_cache_dir}:{uv_python_cache_dir}"]
+    # Read-only: model-generated code must not be able to pip install into (or otherwise
+    # modify) the shared venv, nor the uv interpreters that other host venvs are based on.
+    cmd += ["--bind", f"{venv_path}:{venv_path}:ro"]
+    cmd += ["--bind", f"{uv_python_cache_dir}:{uv_python_cache_dir}:ro"]
     cmd += [sif_path]
     cmd += [
         os.path.join(venv_path, "bin", "python3"),
@@ -378,6 +385,13 @@ def _spawn(
     # squidward's proxy) -- it would block that env's own legitimate calls too.
     if network == "none":
         env["SINGULARITYENV_NEMO_SKILLS_SANDBOX_BLOCK_NETWORK"] = "1"
+        # Singularity forwards proxy variables even under --containall, and compute
+        # nodes reach the internet only through that proxy. The in-process socket patch
+        # above does not cover subprocesses (`!pip install`, curl): without the proxy
+        # variables they have no route out.
+        for var in _PROXY_ENV_VARS:
+            for name in (var, f"SINGULARITYENV_{var}", f"APPTAINERENV_{var}"):
+                env.pop(name, None)
     # Upstream default is 0 (disabled) -- reap idle forked sessions so a rollout that dies
     # mid-tool-call without calling DELETE /sessions/<id> doesn't leak its kernel for the rest
     # of the job (see the aggregate-concurrency note in the module docstring).

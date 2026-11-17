@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import os
 import re
 import sys
 from asyncio import Semaphore
@@ -183,6 +184,29 @@ def runner_ray_remote(runner: Callable, params: dict[str, Any]) -> Any:
     return runner(**params)
 
 
+_PROXY_ENV_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy")
+
+
+def _container_proxy_env() -> dict[str, str]:
+    """[CUSTOM] This server's forward-proxy variables, for the task container only.
+
+    Training exports the proxy into the Gym servers' environment (nemo_rl
+    maybe_enable_proxy), but the Ray workers that run the trials inherit the raylet's
+    environment, which has none: without this, harbor containers have no internet in
+    training (verifier `pip install` of test requirements fails), while they do in a
+    rollout run whose Ray workers inherit the proxy.
+
+    SINGULARITYENV_ makes Singularity set the variables inside the container only. The
+    Ray worker itself must not get HTTP(S)_PROXY: its httpx client would send the policy
+    calls (cluster IPs, which httpx does not match against NO_PROXY CIDR entries) through
+    the proxy, which rejects ports other than 80/443.
+
+    Returns:
+        SINGULARITYENV_<var> for each proxy variable set here; empty without a proxy.
+    """
+    return {f"SINGULARITYENV_{var}": os.environ[var] for var in _PROXY_ENV_VARS if os.environ.get(var)}
+
+
 class HarborAgent(SimpleResponsesAPIAgent):
     config: HarborAgentConfig
     sem: Semaphore = None
@@ -195,6 +219,11 @@ class HarborAgent(SimpleResponsesAPIAgent):
         app = FastAPI()
         app.post("/v1/responses")(self.responses)
         app.post("/run")(self.run)
+        # [CUSTOM] Register the inherited route, as
+        # SimpleResponsesAPIAgent.setup_webserver does: ng_collect_rollouts
+        # posts every agent's results to /aggregate_metrics after collecting,
+        # and fails on a 404. Reporting only: rollouts are unaffected.
+        app.post("/aggregate_metrics")(self.aggregate_metrics)
         return app
 
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
@@ -235,7 +264,10 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 params = dict(
                     job_config_dict=job_config_dict,
                 )
-                future = runner_ray_remote.remote(_run_harbor_job_sync, params)
+                # options() replaces the decorator's runtime_env: keep py_executable.
+                future = runner_ray_remote.options(
+                    runtime_env={"py_executable": sys.executable, "env_vars": _container_proxy_env()},
+                ).remote(_run_harbor_job_sync, params)
                 trial_dir_path = await asyncio.to_thread(ray.get, future)
                 trial_dir = Path(trial_dir_path)
 
@@ -394,7 +426,8 @@ class HarborAgent(SimpleResponsesAPIAgent):
         """Build a Harbor JobConfig dict for a single task."""
         from harbor.models.job.config import JobConfig, LocalDatasetConfig, OrchestratorConfig, RegistryDatasetConfig
         from harbor.models.registry import RemoteRegistryInfo
-        from harbor.models.trial.config import AgentConfig, EnvironmentConfig, VerifierConfig
+        from harbor.models.task.paths import TaskPaths
+        from harbor.models.trial.config import AgentConfig, EnvironmentConfig, TaskConfig, VerifierConfig
 
         agent_kwargs: dict[str, Any] = {"api_base": api_base}
         if responses_create_params:
@@ -468,6 +501,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
             quiet=True,
         )
 
+        task_configs: list[TaskConfig] = []
         if has_registry:
             dataset_config = RegistryDatasetConfig(
                 registry=RemoteRegistryInfo(),
@@ -476,10 +510,20 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 task_names=[task_name],
             )
         else:
-            dataset_config = LocalDatasetConfig(
-                path=Path(dataset_source.local_dataset_path),
-                task_names=[task_name],
-            )
+            # [CUSTOM] Load the one task by path. A
+            # LocalDatasetConfig lists the whole category directory (tens of
+            # thousands of entries, four existence checks each) on every
+            # rollout to keep one task: heavy on Lustre metadata. Same task
+            # and source name as LocalDatasetConfig.get_task_configs builds.
+            # An invalid task keeps the dataset path, so harbor still raises
+            # its own error inside the job (reward 0), not here (HTTP 500).
+            local_path = Path(dataset_source.local_dataset_path)
+            task_path = local_path / task_name
+            if TaskPaths(task_path).is_valid():
+                dataset_config = None
+                task_configs = [TaskConfig(path=task_path, source=local_path.expanduser().resolve().name)]
+            else:
+                dataset_config = LocalDatasetConfig(path=local_path, task_names=[task_name])
 
         job_config = JobConfig(
             job_name=job_name,
@@ -491,7 +535,8 @@ class HarborAgent(SimpleResponsesAPIAgent):
             environment=environment_config,
             verifier=verifier_config,
             agents=[agent_config],
-            datasets=[dataset_config],
+            datasets=[dataset_config] if dataset_config is not None else [],
+            tasks=task_configs,
         )
 
         return job_config.model_dump(mode="json")

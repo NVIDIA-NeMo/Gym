@@ -19,10 +19,10 @@ set -e
 
 # Deliver task-specific evidence files into the workdir. Replaces the per-task
 # `COPY files/ /app/` the shared category image deliberately doesn't bake in.
-# $HARBOR_STAGING/env_files is the bind-mounted environment/files/ directory (set by
+# $HARBOR_STAGING (HARBOR_STAGING="/staging/env_files") is the bind-mounted environment/files/ directory (set by
 # bootstrap.sh); exclude this setup.sh itself so it doesn't end up copied into the workdir too.
-if [ -d "$HARBOR_STAGING/env_files" ]; then
-  find "$HARBOR_STAGING/env_files" -mindepth 1 -maxdepth 1 ! -name setup.sh \\
+if [ -d "$HARBOR_STAGING" ]; then
+  find "$HARBOR_STAGING" -mindepth 1 -maxdepth 1 ! -name setup.sh \\
     -exec cp -r {} "$WORKDIR/" \\;
 fi
 

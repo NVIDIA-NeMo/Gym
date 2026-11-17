@@ -297,8 +297,17 @@ class SingularityEnvironment(BaseEnvironment):
             'export TMUX_TMPDIR="${WORKDIR}/.tmux-sockets"\n'
             'mkdir -p "$TMUX_TMPDIR"\n'
             "\n"
-            "# Run task-specific setup from staging (files are NOT auto-copied to /app;\n"
-            "# setup.sh should copy what it needs via: cp $HARBOR_STAGING/file /app/)\n"
+            "# [CUSTOM] Deliver the task's environment files into the workdir, as the Dockerfile's\n"
+            "# `COPY files/ /app/` would: the shared category images do not bake them in.\n"
+            "# The copy lives in the container's writable tmpfs, so the model works on its own\n"
+            "# copy and never edits the task store bind-mounted at $HARBOR_STAGING.\n"
+            "# Entry by entry: `cp -a src/. dst/` would also try to set the workdir's own\n"
+            "# timestamps, which fails on a root-owned image dir.\n"
+            'if [ -d "$HARBOR_STAGING" ]; then\n'
+            '    find "$HARBOR_STAGING" -mindepth 1 -maxdepth 1 -exec cp -a {} "$WORKDIR"/ \\;\n'
+            "fi\n"
+            "\n"
+            "# Run task-specific setup from staging (the files above are already in the workdir)\n"
             'if [ -f "$HARBOR_STAGING/setup.sh" ]; then\n'
             '    echo "[harbor] Running task setup.sh..." >&2\n'
             '    bash "$HARBOR_STAGING/setup.sh"\n'
@@ -348,7 +357,7 @@ class SingularityEnvironment(BaseEnvironment):
                 f"{self.trial_paths.agent_dir}:{EnvironmentPaths.agent_dir}",
             ]
             if env_files_dir.exists():
-                bind_mounts.extend(["-B", f"{env_files_dir}:/staging/env_files"])
+                bind_mounts.extend(["-B", f"{env_files_dir}:/staging/env_files:ro"])
             # --no-mount: default home,tmp,bind-paths so host $HOME is not mounted
             # (avoid altering host .bashrc/.bash_profile). Override via
             # harbor_environment_kwargs singularity_no_mount (use "" to allow all mounts).
@@ -397,10 +406,14 @@ class SingularityEnvironment(BaseEnvironment):
             # The small window here is unavoidable, but SO_REUSEADDR helps
             reserved_socket.close()
 
+            # [CUSTOM] New session: the container must not share the host process group. Otherwise
+            # task code calling killpg() on its own group (e.g. a test script whose child
+            # was started without setsid) SIGKILLs ng_run and every Gym server with it.
             self._server_process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                start_new_session=True,
             )
 
             # Start background task to stream server output
