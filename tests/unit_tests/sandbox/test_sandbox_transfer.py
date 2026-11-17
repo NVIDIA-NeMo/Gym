@@ -1049,6 +1049,59 @@ async def test_the_archive_deadline_grows_with_what_the_tree_holds(tmp_path):
     assert [timeout for command, timeout in plain.execs if "tar -czf" in command] == [600]
 
 
+@pytest.mark.parametrize("suffix", ["", "/"])
+async def test_scaled_deadline_follows_only_the_directory_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, suffix: str
+) -> None:
+    source = tmp_path / "artifacts"
+    source.mkdir()
+    payload = b"x" * 8192
+    (source / "data.bin").write_bytes(payload)
+    external = tmp_path / "external.bin"
+    external.write_bytes(b"y" * 65536)
+    (source / "nested-link").symlink_to(external)
+    linked = tmp_path / "linked"
+    linked.symlink_to(source, target_is_directory=True)
+    monkeypatch.setattr("nemo_gym.sandbox.transfer.GIB", 1024)
+
+    timeouts = []
+    for index, path in enumerate((str(source), f"{linked}{suffix}")):
+        sandbox = RecordingSandbox()
+        target = tmp_path / f"host-{index}"
+        assert await download_path(sandbox, path, target, links="keep", seconds_per_gib=2) == "dir"
+        assert (target / "data.bin").read_bytes() == payload
+        assert (target / "nested-link").is_symlink()
+        assert (target / "nested-link").readlink() == external
+        (timeout,) = [timeout for command, timeout in sandbox.execs if "tar -czf" in command]
+        timeouts.append(timeout)
+
+    size = await remote_size_bytes(LocalSandbox(), str(source))
+    assert len(payload) <= size < external.stat().st_size
+    assert timeouts == [600 + size / 1024 * 2] * 2
+
+
+async def test_scaled_deadline_keeps_a_single_file_symlink_and_skips_missing_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "data.bin"
+    source.write_bytes(b"x" * 8192)
+    linked = tmp_path / "linked.bin"
+    linked.symlink_to(source)
+    target = tmp_path / "host" / "renamed.bin"
+    sandbox = RecordingSandbox()
+    monkeypatch.setattr("nemo_gym.sandbox.transfer.GIB", 1024)
+
+    assert await download_path(sandbox, str(linked), target, links="keep", seconds_per_gib=2) == "file"
+    assert target.is_symlink() and target.readlink() == source
+    size = await remote_size_bytes(LocalSandbox(), str(linked))
+    assert size < source.stat().st_size
+    assert [timeout for command, timeout in sandbox.execs if "tar -czf" in command] == [600 + size / 1024 * 2]
+
+    missing = RecordingSandbox()
+    assert await download_path(missing, str(tmp_path / "missing"), tmp_path / "unused", seconds_per_gib=2) is None
+    assert not any(command.startswith("du ") or "tar -czf" in command for command, _ in missing.execs)
+
+
 async def test_the_restore_deadline_grows_with_the_archive(tmp_path, monkeypatch):
     source = tmp_path / "payload"
     source.mkdir()
@@ -1097,3 +1150,50 @@ async def test_interrupted_part_upload_removes_all_attempted_parts(tmp_path, fai
     assert len(sandbox.uploaded) == 2
     assert all(not os.path.exists(path) for path in sandbox.uploaded)
     assert any(command.startswith("rm -f -- ") for command, _ in sandbox.execs)
+
+
+@pytest.mark.parametrize("failure_type", [RuntimeError, asyncio.CancelledError])
+@pytest.mark.parametrize("cleanup_failure", ["command", "provider", "timeout"])
+async def test_failed_part_cleanup_warns_without_replacing_the_original_failure(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, failure_type: type[BaseException], cleanup_failure: str
+) -> None:
+    source = tmp_path / "payload"
+    source.mkdir()
+    (source / "data.bin").write_bytes(os.urandom(3 * 4096))
+    failure = failure_type("upload interrupted")
+
+    class FailedCleanup(RecordingSandbox):
+        async def upload(self, local: Path, remote: str) -> None:
+            # Record the attempted part without creating files that deliberately failed cleanup would leak.
+            self.uploaded.append(remote)
+            if len(self.uploaded) == 2:
+                raise failure
+
+        async def exec(self, command: str, **kwargs: object) -> SandboxExecResult:
+            self.execs.append((command, kwargs.get("timeout_s")))
+            assert command.startswith("rm -f -- ")
+            if cleanup_failure == "timeout":
+                raise TimeoutError("cleanup timed out")
+            return SandboxExecResult(
+                stdout="",
+                stderr="rm: Permission denied" if cleanup_failure == "command" else "provider unavailable",
+                return_code=1,
+                error_type="unavailable" if cleanup_failure == "provider" else None,
+            )
+
+    sandbox = FailedCleanup()
+    with pytest.raises(failure_type, match="upload interrupted") as caught:
+        await upload_dir(sandbox, source, str(tmp_path / "restored"), upload_part_bytes=4096)
+
+    assert caught.value is failure
+    assert len(sandbox.uploaded) == 2
+    [(cleanup_command, cleanup_timeout)] = sandbox.execs
+    assert cleanup_timeout == 30
+    assert all(part in cleanup_command for part in sandbox.uploaded)
+    assert "Failed to remove interrupted upload parts" in caplog.text
+    diagnostic = {
+        "command": "rm: Permission denied",
+        "provider": "provider unavailable",
+        "timeout": "cleanup timed out",
+    }[cleanup_failure]
+    assert diagnostic in caplog.text

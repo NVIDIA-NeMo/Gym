@@ -316,7 +316,11 @@ async def _upload_in_parts(
         try:
             with anyio.CancelScope(shield=True):
                 async with asyncio.timeout(30):
-                    await exec_as_root(sandbox, f"rm -f -- {quoted} {parts}", timeout_s=30)
+                    result = await exec_as_root(sandbox, f"rm -f -- {quoted} {parts}", timeout_s=30)
+                    if result.return_code:
+                        raise SandboxTransferError(
+                            f"Failed to remove interrupted upload parts: {result.stderr or result.stdout}"
+                        )
         except (Exception, asyncio.CancelledError):
             LOGGER.warning("Failed to remove interrupted upload parts", exc_info=True)
         raise
@@ -448,7 +452,9 @@ async def download_path(
     """
     kind = await remote_kind(sandbox, source)
     if kind is not None and seconds_per_gib:
-        timeout_s += await remote_size_bytes(sandbox, source) / GIB * seconds_per_gib
+        # Match tar -C: follow a directory root link, while preserving file and nested links.
+        size_source = f"{source}/" if kind == "dir" and not source.endswith("/") else source
+        timeout_s += await remote_size_bytes(sandbox, size_source) / GIB * seconds_per_gib
     if kind == "dir":
         await download_dir(
             sandbox, source, target, timeout_s=timeout_s, links=links, exclude=exclude, archive_copy=archive_copy
