@@ -93,7 +93,8 @@ collector's shared capture merge and normalization. Manual enrichment accepts a 
 record; `run_examples` also handles materialized episode replies without changing their shape.
 Raw `run_examples` behavior stays unchanged.
 
-V2 names the capture namespace `capture_key`. Each tool execution has a stable `span_id`, its
+V2 names the capture namespace `capture_key`. It is the same value that schema 1.0 and the model-call capture
+attachment call `rollout_id`, and that the training-token ledger calls `capture_key`. Each tool execution has a stable `span_id`, its
 native request ID, optional agent instance and requesting model-call ID, and `timings` with
 explicit boundary, producer, clock domain, endpoints and duration method. OpenCode reads its
 persisted tool parts as lifecycle measurements. Repeated native IDs remain separate attempts;
