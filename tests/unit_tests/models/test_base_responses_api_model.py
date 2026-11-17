@@ -1725,7 +1725,7 @@ def test_unobserved_dialect_under_capture_prefix_marks_incomplete(tmp_path):
 
 def test_unobserved_dialect_marking_failure_still_forwards(tmp_path):
     class _BrokenSink:
-        async def mark_incomplete(self, rollout_id, model_call_id=""):
+        async def mark_incomplete(self, rollout_id, model_call_id="", *, identity=None):
             raise RuntimeError("sink down")
 
     forwarded, sent = _run_capture_middleware_on(
@@ -1734,6 +1734,25 @@ def test_unobserved_dialect_marking_failure_still_forwards(tmp_path):
 
     assert forwarded == ["/v1/completions"]
     assert sent[0]["status"] == 200
+
+
+def test_an_unobserved_dialect_marks_the_rollout_under_the_calling_agent_instance(tmp_path):
+    from nemo_gym.models.token_capture.store import TokenCaptureStore
+
+    token_store = TokenCaptureStore(tmp_path)
+    forwarded, _sent = _run_capture_middleware_on(
+        "/ng-rollout/hole-0/ng-agent-instance/judge.1/training-token-capture/v1/completions", token_store=token_store
+    )
+
+    assert forwarded == ["/v1/completions"]
+    # ``_run_capture_middleware_on`` names the model server ``srv``; the mark has no call id.
+    [mark] = token_store.incomplete_path_for("hole-0").read_text().splitlines()
+    assert json.loads(mark) == {
+        "model_call_id": "",
+        "agent_instance": "judge.1",
+        "agent_kind": "judge",
+        "model_ref": {"type": "responses_api_models", "name": "srv"},
+    }
 
 
 def test_observed_dialect_under_capture_prefix_is_not_marked_incomplete(tmp_path):
