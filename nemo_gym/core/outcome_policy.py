@@ -5,7 +5,7 @@
 
 from collections.abc import Mapping
 from enum import StrEnum
-from typing import TYPE_CHECKING, Annotated, ClassVar
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
@@ -278,3 +278,54 @@ def choose_stage_outcome(
         ),
         attribution=classification,
     )
+
+
+def environment_fault_policy(stage: FailureStage, failure_kinds: tuple[str, ...]) -> StageOutcomePolicyConfig:
+    """A boundary's defaults for faults of the environment itself that it names (its own ``<server>:<kind>`` kinds).
+
+    The kinds are classified as the evaluation's, and the stage's default action is ``retry``. Both are
+    configuration: a deployment can classify a kind differently or select ``fail`` as the stage's default.
+    """
+    return StageOutcomePolicyConfig(
+        classification={
+            "by_stage": {stage: {"by_failure_kind": dict.fromkeys(failure_kinds, FailureClass.EVALUATION)}}
+        },
+        by_stage={stage: {"default_action": OutcomeAction.RETRY}},
+    )
+
+
+def require_retry_or_fail(
+    policy: StageOutcomePolicyConfig, stage: FailureStage, failure_kinds: tuple[str, ...]
+) -> StageOutcomePolicyConfig:
+    """Reject a configuration whose decision for one of the boundary's kinds is not one it can perform.
+
+    These boundaries mask the row and either let the harness run it again (``retry``) or leave it ungraded
+    (``fail``). ``count_as_zero`` would save a masked row that is not a counted zero, so it is refused at load.
+    Recovery never reruns a row attributed to the model, so ``retry`` for a kind classified as ``model`` would
+    leave the masked row final under a decision that says otherwise: that pairing is refused too.
+    """
+    for kind in failure_kinds:
+        decision = choose_stage_outcome(failure_kind=kind, http_status=None, stage=stage, config=policy)
+        if decision.action not in (OutcomeAction.RETRY, OutcomeAction.FAIL):
+            raise ValueError(f"{kind} supports only retry or fail at the {stage} stage, not {decision.action}")
+        if decision.action == OutcomeAction.RETRY and decision.attribution == FailureClass.MODEL:
+            raise ValueError(
+                f"{kind} cannot be retried at the {stage} stage while it is classified as {decision.attribution}"
+            )
+    return policy
+
+
+def applied_outcome_fields(
+    *, failure_kind: str, stage: FailureStage, config: StageOutcomePolicyConfig
+) -> dict[str, Any]:
+    """The decision the shared policy takes for an observed failure, as the fields a row saves it in.
+
+    The action, its attribution and the originating stage are saved together; the observed failure kind stays the
+    caller's own field, independent of the action.
+    """
+    decision = choose_stage_outcome(failure_kind=failure_kind, http_status=None, stage=stage, config=config)
+    return {
+        "failure_outcome_action": decision.action,
+        "failure_outcome_attribution": decision.attribution,
+        "_ng_failure_stage": stage,
+    }
