@@ -421,6 +421,20 @@ class TestRunTimeout:
         assert result.reward == 0.5
         assert "_ng_agent_timed_out" not in verify_body["response"]
 
+    @pytest.mark.parametrize(
+        ("details", "expected_cached", "expected_reasoning"),
+        [({"cached_input_tokens": 4, "reasoning_output_tokens": 2}, 4, 2), ({}, None, None)],
+    )
+    def test_response_usage_keeps_unreported_details_unknown(
+        self, details, expected_cached, expected_reasoning
+    ) -> None:
+        stdout = _event("turn.completed", usage={"input_tokens": 7, "output_tokens": 3, **details})
+        _, verify_body = self._run(stdout)
+
+        usage = verify_body["response"]["usage"]
+        assert usage["input_tokens_details"]["cached_tokens"] == expected_cached
+        assert usage["output_tokens_details"]["reasoning_tokens"] == expected_reasoning
+
     def test_observations_reach_rollout_without_stdout_events(self) -> None:
         observations = AgentObservationBundle(source="codex")
         result, verify_body = self._run("", observations=observations)
@@ -790,12 +804,13 @@ class TestParseExecJsonl:
         assert items == []
         assert usage["input_tokens"] == 0
         assert usage["output_tokens"] == 0
-        assert usage["cached_input_tokens"] == usage["reasoning_tokens"] == 0
+        assert usage["cached_input_tokens"] is usage["reasoning_tokens"] is None
 
     @pytest.mark.parametrize("details", [{}, {"cached_input_tokens": 0, "reasoning_output_tokens": 0}])
-    def test_legacy_optional_usage_defaults_are_unchanged(self, details) -> None:
+    def test_unmeasured_usage_details_are_unknown(self, details) -> None:
+        # Codex writes zero for a cache or reasoning counter the backend did not report.
         _, usage = parse_exec_jsonl(_event("turn.completed", usage={"input_tokens": 7, "output_tokens": 3, **details}))
-        assert usage["cached_input_tokens"] == usage["reasoning_tokens"] == 0
+        assert usage["cached_input_tokens"] is usage["reasoning_tokens"] is None
         assert usage["input_tokens"] == 7 and usage["output_tokens"] == 3
 
     def test_agent_message(self) -> None:

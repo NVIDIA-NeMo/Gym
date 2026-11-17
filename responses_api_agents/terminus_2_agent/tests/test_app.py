@@ -281,6 +281,8 @@ class TestResponses:
         assert response.temperature == 0.7
         assert [item.type for item in response.output] == ["message", "function_call", "function_call_output"]
         assert response.usage.total_tokens == 14
+        # final_metrics reported no cache reads, so they stay unknown rather than zero.
+        assert response.usage.input_tokens_details.cached_tokens is None
         assert response.usage.output_tokens_details.reasoning_tokens is None
         assert '"finished_naturally": true' in response.metadata["terminus_2"]
         called_instruction = agent._run_terminus.await_args.args[1]
@@ -301,7 +303,10 @@ class TestResponses:
         self, accounting: dict, usage: int | None, cached: int | None
     ) -> None:
         agent = _make_agent()
-        trajectory = {"steps": [], "final_metrics": {"total_prompt_tokens": 10, "total_completion_tokens": 4}}
+        trajectory = {
+            "steps": [],
+            "final_metrics": {"total_prompt_tokens": 10, "total_completion_tokens": 4, "total_cached_tokens": 0},
+        }
         agent._run_terminus = AsyncMock(return_value=(trajectory, AgentContext(), {}, False, True, None, accounting))
         body = NeMoGymResponseCreateParamsNonStreaming(model="model", input="task")
 

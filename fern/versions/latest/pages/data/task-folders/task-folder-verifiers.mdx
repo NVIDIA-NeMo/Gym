@@ -32,12 +32,15 @@ is masked, as `verifier_error` when `bash` or `timeout` is missing and as `provi
 ## Reward files
 
 `test.sh` writes its result to `/logs/verifier/reward.txt` or `/logs/verifier/reward.json`. The exit code of
-`test.sh` does not affect the score.
+`test.sh` never changes the result of a valid reward file; without one, every exit is a measured 0 except exit 75
+from a separately run verifier, which is masked (below).
 
 - `reward.txt` holds one number, which is the reward.
-- `reward.json` holds a non-empty JSON object of numbers; booleans count as numbers. A `reward` key is the score,
-  and the other keys are metrics, kept per row in `verifier_rewards` but not in aggregate metrics. Without a
-  `reward` key, every key is a component: the score is their sum, and the result names them in `reward_components`.
+- `reward.json` holds a non-empty JSON object. A numeric `reward` key is the score, and the other keys are metrics:
+  the numeric ones are kept per row in `verifier_rewards` (not in aggregate metrics), and a nested object or a
+  string beside the score, such as a `details` block, is left out rather than failing the file. Without a `reward`
+  key, every key is a component and must be a number (booleans count): the score is their sum, and the result names
+  them in `reward_components`.
 - `reward.json` wins whenever it exists, even when it is malformed.
 
 Two tasks of one dataset may write different keys. Gym pads no missing key and renames none.
@@ -48,9 +51,25 @@ Two tasks of one dataset may write different keys. Gym pads no missing key and r
 | An empty or malformed file, a value that is not a finite number, or components with no finite sum | 0 | `harbor:invalid_reward` |
 | `test.sh` runs past `timeout_sec` (times the dataset's `timeout_multiplier`) without writing a reward | 0 | `harbor:verifier_timeout` |
 
-These rows count in the score, and a reward written before a timeout still stands. Other failures, such as a lost
-sandbox or a reward that could not be copied out, set `mask_sample`: the rollout stays in `rollouts.jsonl` but is
-left out of the score.
+These rows count in the score, and a valid reward written before a timeout still stands. The first two rows have
+one exception: a separately run `test.sh` that exits 75 without a valid reward is masked, see below. Other
+failures, such as a lost sandbox or a reward that could not be copied out, set `mask_sample`: the rollout stays in
+`rollouts.jsonl` but is left out of the score.
+
+A verifier that cannot grade, because a judge service or an asset download it depends on is unavailable, exits
+75 (`EX_TEMPFAIL`) without writing a reward, after printing why to its output. Such a rollout is masked with
+`harbor:verifier_unavailable` instead of scoring 0, with the tail of `test-stdout.txt` as the reason. Three rules
+bound the signal: a verifier timeout still wins (a measured 0, since the timer stops `test.sh` before any code); a
+valid written reward wins over the code (a malformed file beside it is the verifier's own and leaves the run
+masked); and the code is honored only for a turn verified separately (`artifacts` plus
+`separate_verifier_for_artifacts`, or `environment_mode = "separate"`). In shared mode `test.sh` runs in the agent's
+sandbox, where the agent can make it exit 75, so the server ignores the code there and the turn is a measured 0 as
+on any other exit, with the ignored code named in `failure_reason`. Separate mode is necessary, not sufficient: the
+code is for infrastructure the agent cannot influence, so nothing derived from the agent's artifact (its size, its
+duration, its content) may decide it; a request a judge service refuses for the artifact's size is that item's
+error, not an outage. The server does not re-run a masked verification, and `gym eval resubmit --recover` keeps the
+row masked (the kind is not a recoverable infrastructure kind) and stops with "the run is not complete"; a fresh
+run measures it once the service is back.
 
 ## Python verifiers
 

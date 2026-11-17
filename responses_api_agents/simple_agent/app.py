@@ -93,6 +93,8 @@ from nemo_gym.rollouts.health.timeouts import TimeoutEvent
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     SESSION_OWNER_HEADER,
+    TOOL_CALL_ID_HEADER,
+    TOOL_ERROR_HEADER,
     Activation,
     ActivationOutOfOrderError,
     BaseRunRequest,
@@ -604,7 +606,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     forwarded = FailureHeader.decode(error.headers)
                     if forwarded is not None:
                         report = report.merged(forwarded)
-                    reported_kind = MODEL_POLICY_RESPONSE_TIMEOUT if failure is not None else MODEL_REQUEST_ERROR
+                    reported_kind = failure.failure_kind if failure is not None else MODEL_REQUEST_ERROR
                     # Return the cause and partial work; the Environment Server owns grading and retry policy.
                     content = getattr(error, "response_content", b"")
                     detail = content.decode(errors="replace") if isinstance(content, bytes) else str(content)
@@ -746,7 +748,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                             url=f"{_tools_base_url(tool_access, resources_prefix)}/{output_function_call.name}",
                             json=parsed_arguments,
                             cookies=resources_server_cookies,
-                            headers=dict(tool_access.headers),
+                            # The call's ID lets the server join its record to this trajectory and recognize the
+                            # client's resend of a call whose connection dropped.
+                            headers=dict(tool_access.headers) | {TOOL_CALL_ID_HEADER: output_function_call.call_id},
                             _internal=True,
                         )
                     else:
@@ -774,8 +778,11 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     resources_server_cookies.update(_cookies(api_response))
                     if collect_trajectory:
                         completed = 200 <= api_response.status < 400
-                        tool_status = "completed" if completed else "failed"
-                        error_type = None if completed else f"http_{api_response.status}"
+                        error_result = api_response.headers.get(TOOL_ERROR_HEADER) == "true"
+                        tool_status = "completed" if completed and not error_result else "failed"
+                        error_type = (
+                            f"http_{api_response.status}" if not completed else "tool_error" if error_result else None
+                        )
 
                 if collect_trajectory:
                     tool_records.append(
