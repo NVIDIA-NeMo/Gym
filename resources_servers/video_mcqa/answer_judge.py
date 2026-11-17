@@ -13,7 +13,6 @@ from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
-    NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_runtime import BaseVerifyResponse, observe_llm_judge_grading
 from nemo_gym.verification import JudgeError, call_judge, record_parsed_judge_verdict
@@ -25,7 +24,6 @@ from resources_servers.video_mcqa.scoring import (
     grade_answer,
     llm_extraction_prompt,
     parse_llm_choice,
-    prompt_text,
 )
 from resources_servers.video_mcqa.task import Setting, VerifierMetadata
 
@@ -54,7 +52,6 @@ class AnswerJudgeConfig(BaseModel):
 async def grade_final_answer(
     server_client: ServerClient,
     config: AnswerJudgeConfig,
-    request: NeMoGymResponseCreateParamsNonStreaming,
     final_text: str | None,
     metadata: VerifierMetadata,
     *,
@@ -65,11 +62,12 @@ async def grade_final_answer(
 ) -> VerifyResponseT:
     """The verify response ``respond`` builds from ``grade_answer``'s score of the final answer.
 
-    Under llm_extraction_v1 the judge first reads which option a nonempty final answer chooses. It gets the text of
-    ``request`` (never its media) and the final answer, not the gold label. The grading, response included, runs in
-    ``observe_llm_judge_grading``, so Gym binds the graded response and reward to the judge's reply. A judge call
-    that fails, or a reply that names no option, raises: Gym's judge failsafe masks the row and keeps it, answer
-    included, in the failures file, and recovery judges it again. It is never scored as a wrong answer.
+    Under llm_extraction_v1 the judge first reads which option a nonempty final answer chooses. It gets the question
+    from ``metadata`` (its text and options) and the final answer, not the gold label. The grading, response
+    included, runs in ``observe_llm_judge_grading``, so Gym binds the graded response and reward to the judge's
+    reply. A judge call that fails, or a reply that names no option, raises: Gym's judge failsafe masks the row and
+    keeps it, answer included, in the failures file, and recovery judges it again. It is never scored as a wrong
+    answer.
     """
     answer = final_answer_text(final_text)
     if answer_policy != "llm_extraction_v1" or failure is not None or not answer:
@@ -80,9 +78,7 @@ async def grade_final_answer(
         raise ValueError("A cohort with answer_policy llm_extraction_v1 needs judge_model_server")
     judge_name = config.judge_model_server.name
     params = config.judge_chat_completion_create_params.model_copy(deep=True)
-    params.messages = [
-        {"role": "user", "content": llm_extraction_prompt(prompt_text(request.model_dump()["input"]), answer)}
-    ]
+    params.messages = [{"role": "user", "content": llm_extraction_prompt(metadata, answer)}]
 
     async def grade() -> VerifyResponseT:
         reply = await call_judge(

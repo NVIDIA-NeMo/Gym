@@ -229,15 +229,15 @@ def aggregate_scores(
     )
 
 
-# llm_extraction_v1. The judge model sees the text of the prompt the model received (question, options and answer
-# instructions; never the video) and the final answer, and reports only the option that answer gives. The wording is
-# the one NVIDIA's Video-MME-v2 evaluations use, so both read answers alike.
+# llm_extraction_v1. The judge model sees the question from the row (its text and options; never the video or the
+# model's request) and the final answer, and reports only the option that answer gives. Its instructions are the ones
+# NVIDIA's Video-MME-v2 evaluations give their judge.
 LLM_EXTRACTION_PROMPT = """You check one model answer to a multiple-choice question about a video. You do not see the video.
 
-The prompt the model received (the video is left out):
-<prompt>
-{prompt}
-</prompt>
+The question the model answered:
+<question>
+{question}
+</question>
 
 The model's final answer:
 <final_answer>
@@ -251,27 +251,12 @@ Reply with one JSON object only: {{"choice": "<letter or none>"}}"""
 _JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 
 
-def prompt_text(request_input: object) -> str:
-    """The text parts of a request's input messages, in order; media parts are left out."""
-    if isinstance(request_input, str):
-        return request_input
-    parts = []
-    for message in request_input if isinstance(request_input, list) else []:
-        content = message.get("content") if isinstance(message, dict) else None
-        if isinstance(content, str):
-            parts.append(content)
-        else:
-            parts.extend(
-                part.get("text", "")
-                for part in content or []
-                if isinstance(part, dict) and part.get("type") in ("input_text", "text")
-            )
-    return "\n".join(parts)
-
-
-def llm_extraction_prompt(prompt: str, final_answer: str) -> str:
-    """The judge's request for ``final_answer`` to the question in ``prompt``."""
-    return LLM_EXTRACTION_PROMPT.format(prompt=prompt, answer=final_answer)
+def llm_extraction_prompt(metadata: VerifierMetadata, final_answer: str) -> str:
+    """The judge's request for ``final_answer``: the row's question, then its options as ``A. ...`` lines."""
+    question = "\n".join(
+        (metadata.question, *(f"{label}. {option}" for label, option in zip(LABELS, metadata.options)))
+    )
+    return LLM_EXTRACTION_PROMPT.format(question=question, answer=final_answer)
 
 
 def parse_llm_choice(reply: str | None, *, option_count: int) -> str:

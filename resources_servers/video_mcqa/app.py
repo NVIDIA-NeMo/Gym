@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared fixed-cohort verifier for VideoMME-v1 and LVBench accuracy.
+"""Shared fixed-cohort verifier for video multiple-choice accuracy: VideoMME-v1, LVBench or a question set.
 
-Run directly (configs/video_mcqa_single_turn.yaml), it scores the benchmark its cohort names. In the agentic setting
-it can also lend each episode a sandbox that holds the video (sandbox.py).
+Run directly (configs/video_mcqa_single_turn.yaml), it scores the benchmark or question set its cohort names. In the
+agentic setting it can also lend each episode a sandbox that holds the video (sandbox.py).
 """
 
 from collections import Counter
@@ -20,6 +20,7 @@ from nemo_gym.server_runtime import BaseVerifyRequest, BaseVerifyResponse, Rever
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.video_mcqa.answer_judge import AnswerJudgeConfig, grade_final_answer
 from resources_servers.video_mcqa.dataset import SOURCES, Benchmark, validate_subsets
+from resources_servers.video_mcqa.question_set import QuestionSetCohort, load_question_set
 from resources_servers.video_mcqa.sandbox import VideoSandboxServer, VideoSandboxServerConfig
 from resources_servers.video_mcqa.scoring import (
     AnswerPolicy,
@@ -67,6 +68,11 @@ class VideoMCQAResourcesServerConfig(VideoSandboxServerConfig, AnswerJudgeConfig
 
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     cohort_manifest: Path
+    # The reward of an attempt that produced output but no final answer (outcome no_answer: reasoning only, an
+    # unfinished reasoning block, an empty message), for example a penalty in training. A response without any output
+    # stays 0: Gym's agents verify a failed run (execution_failure_reward_zero) as an empty response and require
+    # exactly 0. None scores such attempts 0. Accuracy counts them as no_answer either way.
+    empty_answer_reward: float | None = Field(default=None, le=0, allow_inf_nan=False)
 
 
 class VideoMCQAVerifyRequest(BaseVerifyRequest):
@@ -129,12 +135,17 @@ class VideoMCQAResourcesServer(VideoSandboxServer):
     config: VideoMCQAResourcesServerConfig
     benchmark: ClassVar[Benchmark | None] = None
     checkpoint_verify: ClassVar[Literal["replay"]] = "replay"
-    _cohort: AccuracyCohort = PrivateAttr()
+    _cohort: AccuracyCohort | QuestionSetCohort = PrivateAttr()
 
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
-        self._cohort = AccuracyCohort.model_validate_json(self.config.cohort_manifest.read_text(encoding="utf-8"))
-        if self.benchmark is not None and self._cohort.benchmark != self.benchmark:
+        manifest = self.config.cohort_manifest
+        self._cohort = load_question_set(manifest) or AccuracyCohort.model_validate_json(
+            manifest.read_text(encoding="utf-8")
+        )
+        if self.benchmark is not None and (
+            isinstance(self._cohort, QuestionSetCohort) or self._cohort.benchmark != self.benchmark
+        ):
             raise ValueError("Cohort belongs to a different benchmark resources server")
         self.config.check_answer_judge(self._cohort.answer_policy)
 
@@ -147,8 +158,10 @@ class VideoMCQAResourcesServer(VideoSandboxServer):
             or setting != cohort.setting
         ):
             raise ValueError("Result benchmark, task, revision, source or setting differs from the frozen cohort")
-        if metadata.option_count != 4 or metadata.level is not None or metadata.group_id is not None:
-            raise ValueError("VideoMME-v1/LVBench require four choices and no v2 group or level")
+        if metadata.level is not None or metadata.group_id is not None:
+            raise ValueError("VideoMME-v1/LVBench and question sets have no v2 group or level")
+        if isinstance(cohort, AccuracyCohort) and metadata.option_count != 4:
+            raise ValueError("VideoMME-v1/LVBench require four choices")
 
     async def verify(self, body: VideoMCQAVerifyRequest) -> VideoMCQAVerifyResponse:
         """Score final answers only; masked infrastructure failures remain inconclusive."""
@@ -157,7 +170,6 @@ class VideoMCQAResourcesServer(VideoSandboxServer):
         return await grade_final_answer(
             self.server_client,
             self.config,
-            body.responses_create_params,
             final_assistant_text(body.response),
             body.verifier_metadata,
             setting=body.setting,
@@ -169,6 +181,11 @@ class VideoMCQAResourcesServer(VideoSandboxServer):
     def _verify_response(
         self, body: VideoMCQAVerifyRequest, score: QuestionScore, failure: Failure | None, reason: str | None
     ) -> VideoMCQAVerifyResponse:
+        reward = score.reward if score.reward is not None else 0.0
+        if score.outcome == "no_answer" and self.config.empty_answer_reward is not None and body.response.output:
+            reward = self.config.empty_answer_reward
+        cohort = self._cohort
+        scope = cohort.question_set if isinstance(cohort, QuestionSetCohort) else cohort.benchmark
         payload = body.model_dump(
             exclude={
                 "reward",
@@ -183,9 +200,9 @@ class VideoMCQAResourcesServer(VideoSandboxServer):
         )
         return VideoMCQAVerifyResponse(
             **payload,
-            reward=score.reward if score.reward is not None else 0.0,
+            reward=reward,
             mask_sample=not score.evaluation_completed,
-            failure_kind=f"{self._cohort.benchmark}:{failure}" if failure else None,
+            failure_kind=f"{scope}:{failure}" if failure else None,
             failure_reason=reason,
             answer_policy=score.answer_policy,
             outcome=score.outcome,
@@ -224,7 +241,10 @@ class VideoMCQAResourcesServer(VideoSandboxServer):
                     answer_policy=result["answer_policy"],
                     outcome=result["outcome"],
                     predicted_answer=result["predicted_answer"],
-                    reward=result["reward"],
+                    # A reward set by empty_answer_reward; the attempt's accuracy is still 0.
+                    reward=0.0
+                    if result["outcome"] == "no_answer" and result["reward"] == self.config.empty_answer_reward
+                    else result["reward"],
                     evaluation_completed=result["evaluation_completed"],
                 )
             )
@@ -238,14 +258,19 @@ class VideoMCQAResourcesServer(VideoSandboxServer):
         multi-label questions count once overall and once in each assigned
         capability, exactly as its official scorer does on complete predictions.
         No VideoMME-v2 nonlinear metric is produced by either of these servers.
+        A question set reports overall accuracy under its own name.
         """
         cohort = self._cohort
         repeats = self._attempts(body)
-        metric = "Video_MME" if cohort.benchmark == "videomme_v1" else "LVBench"
+        if isinstance(cohort, QuestionSetCohort):
+            metric, task_subsets = cohort.question_set, {}
+        else:
+            metric = "Video_MME" if cohort.benchmark == "videomme_v1" else "LVBench"
+            task_subsets = cohort.task_subsets
         if cohort.setting == "agentic":
             metric += "_agentic"
         subsets: dict[str, tuple[str, ...]] = {metric: cohort.task_ids}
-        for task_id, memberships in cohort.task_subsets.items():
+        for task_id, memberships in task_subsets.items():
             for axis, labels in memberships.items():
                 for label in labels:
                     prefix = f"{metric}/{axis}/{quote(label, safe='')}"

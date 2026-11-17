@@ -249,6 +249,8 @@ async def test_foreign_or_v2_metadata_is_rejected(tmp_path, field, value) -> Non
     row["verifier_metadata"][field] = value
     if field == "task_id":
         row["task_id"] = value
+    if field == "option_count":
+        row["verifier_metadata"]["options"] = row["verifier_metadata"]["options"][:value]
     with pytest.raises(ValueError):
         await server.verify(request(row))
 
