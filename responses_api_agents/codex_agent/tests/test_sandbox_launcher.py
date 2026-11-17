@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Exercise the Node launcher's 429 forwarder and native-session snapshot against real HTTP servers."""
+"""Exercise the Node launcher's model retry forwarder and native-session snapshot against real HTTP servers."""
 
 import base64
 import json
@@ -26,15 +26,15 @@ pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="Node is re
 # Imports the launcher without running it: its first argument is a URL, not the launcher's path.
 _PROXY_DRIVER = """
 const [launcher, baseUrl, attempts, timeoutMs] = process.argv.slice(1);
-const { rateLimitProxy } = await import(launcher);
-const server = await rateLimitProxy(baseUrl, "invocation", attempts, { timeoutMs: Number(timeoutMs) });
+const { modelRetryProxy } = await import(launcher);
+const server = await modelRetryProxy(baseUrl, "invocation", attempts, { timeoutMs: Number(timeoutMs) });
 console.log(`http://127.0.0.1:${server.address().port}`);
 process.stdin.on("end", () => process.exit(0)).resume();
 """
 
 
 @contextmanager
-def rate_limit_proxy(base_url, attempts_path, *, timeout):
+def model_retry_proxy(base_url, attempts_path, *, timeout):
     process = subprocess.Popen(
         ["node", "--input-type=module", "-e", _PROXY_DRIVER, LAUNCHER.as_uri(), base_url, str(attempts_path)]
         + [str(timeout * 1000)],
@@ -62,8 +62,11 @@ def upstream_server(handler):
         thread.join()
 
 
-@pytest.mark.parametrize("statuses", [[429, 429, 200], [429, 429, 429], [400], [500]])
-def test_forwarder_retries_only_429_and_retains_every_attempt(tmp_path, statuses):
+@pytest.mark.parametrize(
+    "statuses",
+    [[429, 429, 200], [429, 429, 429], [408, 425, 200], [500, 503, 503], [400], [401], [404], [409], [422]],
+)
+def test_forwarder_retries_only_statuses_that_may_clear_and_retains_every_attempt(tmp_path, statuses):
     requests = []
 
     class Upstream(BaseHTTPRequestHandler):
@@ -81,7 +84,10 @@ def test_forwarder_retries_only_429_and_retains_every_attempt(tmp_path, statuses
             self.wfile.write(b"data: first\n\ndata: last\n\n")
 
     attempts_path = tmp_path / "attempts.jsonl"
-    with upstream_server(Upstream) as upstream, rate_limit_proxy(f"{upstream}/v1", attempts_path, timeout=10) as proxy:
+    with (
+        upstream_server(Upstream) as upstream,
+        model_retry_proxy(f"{upstream}/v1", attempts_path, timeout=10) as proxy,
+    ):
         try:
             response = urlopen(
                 Request(f"{proxy}/responses", data=b'{"input":"task"}', headers={"x-session-id": "native-session"})
@@ -145,7 +151,7 @@ def test_forwarder_retains_only_completed_compaction_identity_without_changing_s
             "x-codex-turn-metadata": json.dumps({"request_kind": "turn" if damage == "policy" else "compaction"})
         }
     attempts_path = tmp_path / "attempts.jsonl"
-    with upstream_server(Upstream) as upstream, rate_limit_proxy(upstream, attempts_path, timeout=10) as proxy:
+    with upstream_server(Upstream) as upstream, model_retry_proxy(upstream, attempts_path, timeout=10) as proxy:
         with urlopen(Request(f"{proxy}/responses", data=json.dumps(payload).encode())) as forwarded:
             assert forwarded.read() == padding + wire
     [attempt] = [json.loads(line) for line in attempts_path.read_text().splitlines()]
@@ -204,7 +210,7 @@ def test_compaction_request_rejects_missing_or_malformed_metadata(body):
         (None, [1, 2]),
         ("0", [0, 0]),
         (" 2.5 ", [2.5, 2.5]),
-        ("45", [30, 30]),
+        ("45", [10, 10]),
         ("-3", [0, 0]),
         ("1e400", [1, 2]),
         ("nan", [1, 2]),
@@ -229,19 +235,105 @@ def test_retry_after_is_bounded_and_invalid_values_back_off(retry_after, delays)
     assert json.loads(computed.stdout) == delays
 
 
-def test_connection_error_answers_502_and_records_the_error(tmp_path):
+def test_refused_connection_is_retried_twice_then_answers_502(tmp_path):
     with socket.socket() as unused:
         unused.bind(("127.0.0.1", 0))
         port = unused.getsockname()[1]
     attempts = tmp_path / "attempts.jsonl"
     attempts.write_text('{"status":429}\n')
-    with rate_limit_proxy(f"http://127.0.0.1:{port}", attempts, timeout=1) as proxy:
+    with model_retry_proxy(f"http://127.0.0.1:{port}", attempts, timeout=1) as proxy:
         with pytest.raises(HTTPError) as reported:
             urlopen(Request(f"{proxy}/responses", data=b"{}"))
     assert reported.value.code == 502
     records = [json.loads(line) for line in attempts.read_text().splitlines()]
-    assert records[-1]["status"] is None
-    assert "ECONNREFUSED" in records[-1]["error"]
+    assert len(records) == 4  # the pre-existing line and three attempts
+    assert all(record["status"] is None and "ECONNREFUSED" in record["error"] for record in records[1:])
+
+
+@pytest.mark.parametrize("failure", ["drop", "stall", "malformed"])
+def test_transport_failures_are_retried_only_when_they_may_clear(tmp_path, failure):
+    requests = []
+    release = Event()
+
+    class Upstream(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            requests.append(self.rfile.read(int(self.headers["Content-Length"])))
+            if failure == "stall":
+                release.wait(10)
+            elif failure == "malformed":
+                self.wfile.write(b"not an HTTP response\r\n\r\n")
+            self.close_connection = True
+
+    attempts = tmp_path / "attempts.jsonl"
+    with upstream_server(Upstream) as upstream:
+        try:
+            with model_retry_proxy(upstream, attempts, timeout=0.1) as proxy:
+                with pytest.raises(HTTPError) as reported:
+                    urlopen(Request(f"{proxy}/responses", data=b"{}"), timeout=10)
+                assert reported.value.code == 502
+        finally:
+            release.set()
+    records = [json.loads(line) for line in attempts.read_text().splitlines()]
+    assert len(records) == len(requests) == (3 if failure == "drop" else 1)
+    assert all(record["status"] is None for record in records)
+    if failure == "stall":
+        assert records[0]["error"] == "timed out after 0.1 seconds"
+
+
+def test_retry_after_controls_the_actual_wait(tmp_path):
+    timestamps = []
+
+    class Upstream(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            timestamps.append(time.monotonic())
+            self.send_response(503 if len(timestamps) == 1 else 200)
+            self.send_header("Retry-After", "1.5")
+            self.end_headers()
+            self.wfile.write(b"done")
+
+    with (
+        upstream_server(Upstream) as upstream,
+        model_retry_proxy(upstream, tmp_path / "attempts.jsonl", timeout=10) as proxy,
+        urlopen(Request(f"{proxy}/responses", data=b"{}"), timeout=10) as response,
+    ):
+        assert response.status == 200
+        assert response.read() == b"done"
+    assert len(timestamps) == 2
+    assert timestamps[1] - timestamps[0] >= 1.5
+
+
+def test_caller_disconnect_stops_resends(tmp_path):
+    requests = []
+    received = Event()
+
+    class Upstream(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            requests.append(self.rfile.read(int(self.headers["Content-Length"])))
+            self.send_response(503)
+            self.send_header("Retry-After", "1.5")
+            self.end_headers()
+            received.set()
+
+    with (
+        upstream_server(Upstream) as upstream,
+        model_retry_proxy(upstream, tmp_path / "attempts.jsonl", timeout=10) as proxy,
+    ):
+        port = int(proxy.rsplit(":", 1)[1])
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as caller:
+            caller.sendall(b"POST /responses HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\n{}")
+            assert received.wait(5)
+        time.sleep(1.7)
+        assert requests == [b"{}"]
 
 
 def test_launcher_starts_codex_behind_the_forwarder(tmp_path):
@@ -324,7 +416,7 @@ def test_broken_429_body_is_recorded_and_retried(tmp_path, fault):
     attempts_path = tmp_path / "attempts.jsonl"
     with upstream_server(Upstream) as upstream:
         try:
-            with rate_limit_proxy(upstream, attempts_path, timeout=0.3) as proxy:
+            with model_retry_proxy(upstream, attempts_path, timeout=0.3) as proxy:
                 with urlopen(Request(f"{proxy}/responses", data=b"{}"), timeout=10) as response:
                     assert (response.status, response.read()) == (200, b"done")
         finally:
@@ -366,7 +458,7 @@ def test_body_failure_retains_http_status_and_transport_error(tmp_path, fault):
     attempts_path = tmp_path / "attempts.jsonl"
     with upstream_server(Upstream) as upstream:
         try:
-            with rate_limit_proxy(upstream, attempts_path, timeout=0.1) as proxy:
+            with model_retry_proxy(upstream, attempts_path, timeout=0.1) as proxy:
                 with urlopen(Request(f"{proxy}/responses", data=b"{}"), timeout=5) as response:
                     assert response.status == 200
                     body = response.read()
@@ -406,7 +498,7 @@ def test_codex_hanging_up_before_the_response_cancels_the_upstream_stream(tmp_pa
                 upstream_closed.set()
 
     attempts_path = tmp_path / "attempts.jsonl"
-    with upstream_server(Upstream) as upstream, rate_limit_proxy(upstream, attempts_path, timeout=10) as proxy:
+    with upstream_server(Upstream) as upstream, model_retry_proxy(upstream, attempts_path, timeout=10) as proxy:
         with socket.create_connection(("127.0.0.1", int(proxy.rsplit(":", 1)[1]))) as codex:
             codex.sendall(b"POST /responses HTTP/1.1\r\nHost: proxy\r\nContent-Length: 2\r\n\r\n{}")
             assert received.wait(5)

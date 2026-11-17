@@ -137,7 +137,7 @@ async def test_the_codex_relay_observes_the_report_a_keepalive_stream_ends_with(
     from aiohttp import ClientSession, web
 
     from nemo_gym.core.failure_transport import RequestFailureLog
-    from responses_api_agents.codex_agent.transport import rate_limit_proxy
+    from responses_api_agents.codex_agent.transport import model_retry_proxy
 
     produced = _client(_LateResponses, fail=fail, stream_keepalive_s=_KEEPALIVE_S).post(
         "/v1/responses", json={"stream": True, "input": [{"role": "user", "content": "hi"}]}
@@ -165,7 +165,7 @@ async def test_the_codex_relay_observes_the_report_a_keepalive_stream_ends_with(
     port = site._server.sockets[0].getsockname()[1]
     try:
         with RequestFailureLog.capture() as log:
-            async with rate_limit_proxy(f"http://127.0.0.1:{port}/v1", "invocation") as proxy:
+            async with model_retry_proxy(f"http://127.0.0.1:{port}/v1", "invocation") as proxy:
                 async with ClientSession() as session:
                     async with session.post(f"{proxy}/responses", data=b"{}") as relayed:
                         assert await relayed.read() == body  # the relay changes no byte

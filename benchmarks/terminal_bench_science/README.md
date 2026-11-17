@@ -422,9 +422,15 @@ as for mini-SWE. Defaults:
   set `++tbsci_codex_model=...`. The model server still substitutes its own model upstream.
 - No reasoning effort, unless `++tbsci_reasoning_effort=...` and
   `++tbsci_model_server_forwards_reasoning_effort=true` are both set.
-- The CLI's own provider settings: a 300-second stream idle timeout
-  (`++tbsci_stream_idle_timeout_ms`) and Codex's default request and stream retries
-  (`++tbsci_codex_request_max_retries`, `++tbsci_codex_stream_max_retries`).
+- A 300-second stream idle timeout (`++tbsci_stream_idle_timeout_ms`). Gym's model retry
+  forwarder owns retries: `null` for `++tbsci_codex_request_max_retries` and
+  `++tbsci_codex_stream_max_retries` means 0/0 in sandbox sessions, including `codex` and
+  `codex_deepseek_flash`. The first output cap ends the turn as graded `incomplete` instead
+  of resampling, which can change scores. `++tbsci_codex_stream_max_retries=5` restores
+  Codex's turn resends, including rejected 4xx requests and output-cap resampling.
+  With the DeepSeek preset's `stream_keepalive_s`, an infrastructure failure may arrive
+  inside an HTTP 200 stream; the default outcome policy then retries the whole episode,
+  potentially repeating hours of work. See [Codex retry behavior](../../responses_api_agents/codex_agent/README.md#requests-results-and-lifecycle).
 - A Codex run that fails or dies while its sandbox still runs is graded as a nonzero agent exit,
   as Harbor grades it (`++tbsci_verify_after_agent_error=false` retries it instead); a lost
   sandbox or a model-endpoint outage is still retried. A provider failure Codex reports itself
@@ -449,10 +455,11 @@ gym eval prepare --benchmark terminal_bench_science/codex \
 
 ### Codex with DeepSeek V4.1 Flash
 
-`codex_deepseek_flash.yaml` is the run config for the leaderboard's DeepSeek V4.1 Flash / Codex /
+`codex_deepseek_flash.yaml` is based on the leaderboard's DeepSeek V4.1 Flash / Codex /
 effort max row with a self-hosted model: Codex `0.154.0` with no model catalog, effort `max` and
 the full 8-hour budget. Sampling and output limits belong to the chat-completions server; Codex
-sends none.
+sends none. Gym's forwarder now owns retries with Codex at 0/0, so output-cap resampling and
+in-stream failure recovery differ from Codex's defaults; earlier scores do not validate this retry policy.
 
 Gym's `vllm_model` is the policy model server (#5155, with #4880's custom-tool bridge). Codex sends
 its Responses requests to it, and it turns them into chat completions for a server that serves the

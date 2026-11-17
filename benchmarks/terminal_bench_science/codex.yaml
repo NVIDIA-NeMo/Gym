@@ -66,7 +66,8 @@ terminal_bench_science_codex_agent:
       inherit_sandbox_environment: true
       # The CLI's own default for its built-in OpenAI provider.
       stream_idle_timeout_ms: ${oc.select:tbsci_stream_idle_timeout_ms,300000}
-      # Resends before a stream starts and reconnects after one drops; null leaves Codex's defaults.
+      # Gym's model retry forwarder owns resends; null means Codex retries are 0/0 in sandbox sessions.
+      # stream_max_retries=5 also restores rejected-4xx resends and output-cap resampling.
       request_max_retries: ${oc.select:tbsci_codex_request_max_retries,null}
       stream_max_retries: ${oc.select:tbsci_codex_stream_max_retries,null}
       # Closing an 8-hour session stops its process tree and copies its event log.
