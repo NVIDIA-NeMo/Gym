@@ -1080,6 +1080,13 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         # Renamed when Environment Servers started to build MCP results with it.
         "_to_result": MovedPath(new="nemo_gym.server_runtime.mcp_auto_exposure:to_call_tool_result", since="0.8.0"),
     },
+    # The run's model_call_sampling block is config, so its model and parser moved from core/ to config/.
+    "nemo_gym.core.model_call_sampling": {
+        **_names("nemo_gym.config.global_config", "0.8.0", "ModelCallSamplingConfig model_call_sampling_config"),
+    },
+    "nemo_gym.core": {
+        **_names("nemo_gym.config.global_config", "0.8.0", "model_call_sampling_config"),
+    },
 }
 
 # Names renamed with the token capture package (token_id_capture -> token_capture), at each old module path that
