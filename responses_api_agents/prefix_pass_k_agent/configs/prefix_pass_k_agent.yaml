@@ -24,6 +24,7 @@ prefix_pass_k_agent:
       datasets: []
 
       sandbox_provider: sandbox
+      outcome_policy: {}
 
       # Turns the candidate may take after the handover. The reference arms use
       # 3: the decisive turn plus room to recover from one format error.

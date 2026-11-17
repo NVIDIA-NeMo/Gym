@@ -479,6 +479,47 @@ class TestConfigs:
         tavily = get_first_server_config_dict(_resolve(f"{variant}.yaml"), "tavily")
         assert tavily["exclude_domains_file_path"] == "benchmarks/hle_diamond/search_exclusions.json"
 
+    def test_hle_tools_preset_wires_exactly_the_upstream_tool_server(self):
+        """opencode_hle_tools: opencode.yaml's opencode_agent session with one tool server, the hle_web_tools
+        instance over MCP, and no Tavily resource; the search preset's session knobs (egress, address exposure,
+        MCP timeout) are the same, and only the tool server and the note differ."""
+        benchmark = BenchmarkConfig.from_config_path(HLE_DIAMOND_DIR / "opencode_hle_tools.yaml", strict=False)
+        assert (benchmark.name, benchmark.agent_name, benchmark.num_repeats) == (
+            "hle_diamond_text",
+            "hle_diamond_opencode_agent",
+            1,
+        )
+
+        resolved = _resolve("opencode_hle_tools.yaml")
+        assert list(resolved["hle_diamond_opencode_agent"]["responses_api_agents"]) == ["opencode_agent"]
+        env_server = resolved["hle_diamond_equivalence_llm_judge_environment_server"]["environment_servers"]
+        assert list(env_server) == ["single_agent_turn_legacy"]
+        assert env_server["single_agent_turn_legacy"]["agent_server"]["name"] == "hle_diamond_opencode_agent"
+        agent = get_first_server_config_dict(resolved, "hle_diamond_opencode_agent")
+        assert agent["tool_servers"] == [{"type": "resources_servers", "name": "hle_tools"}]
+        assert agent["network_access"] == "model_and_tools"
+        # The sandbox reaches the tool server by address, so the Resources servers leave loopback too.
+        assert list(resolved["absolute_ip_server_types"]) == ["responses_api_models", "resources_servers"]
+        assert agent["mcp_tool_timeout_seconds"] == 300  # web_fetch of a long page or PDF
+        note = agent["system_prompt"]
+        assert "web_search" in note and "web_fetch" in note and "disabled" in note and "Tavily" not in note
+        assert "sandbox_config" not in agent or "files" not in agent["sandbox_config"]  # the note is the prompt
+        # The effort travels on the model server's extra_body (TestReasoningEffort), not on an OpenCode option.
+        assert "provider" not in agent["opencode_config"]
+        assert list(resolved["hle_tools"]["resources_servers"]) == ["hle_web_tools"]
+        tools = get_first_server_config_dict(resolved, "hle_tools")
+        assert tools["expose_tools_over_mcp"] is True
+        assert "blocklist_file_path" not in tools  # the server's pinned upstream copy, not a per-preset list
+        assert "tavily" not in resolved
+
+        # Everything but the tool server and the note is opencode_search.yaml's.
+        search = OmegaConf.to_container(
+            get_first_server_config_dict(_resolve("opencode_search.yaml"), "hle_diamond_opencode_agent")
+        )
+        agent_dict = OmegaConf.to_container(agent)
+        differing = {key for key in set(agent_dict) | set(search) if agent_dict.get(key) != search.get(key)}
+        assert differing - {"port"} == {"tool_servers", "system_prompt"}
+
     @pytest.mark.parametrize(
         ("config_file", "with_search"),
         [("opencode_full.yaml", False), ("opencode_search_full.yaml", True)],
@@ -543,6 +584,7 @@ class TestConfigs:
             "opencode_search_legacy_agent.yaml",
             "pi_legacy_agent.yaml",
             "pi_search_legacy_agent.yaml",
+            "opencode_hle_tools.yaml",
         ],
     )
     def test_every_preset_shares_the_hle_judge_prompt_labels_and_partition_slices(self, config_file):
@@ -619,6 +661,7 @@ class TestReasoningEffort:
         [
             ("opencode.yaml", "hle_diamond_opencode_agent"),
             ("opencode_search.yaml", "hle_diamond_opencode_agent"),
+            ("opencode_hle_tools.yaml", "hle_diamond_opencode_agent"),
             ("opencode_reference.yaml", REFERENCE_AGENT),
             ("pi.yaml", "hle_diamond_pi_agent"),
             ("pi_search.yaml", "hle_diamond_pi_agent"),
@@ -640,6 +683,7 @@ class TestReasoningEffort:
         [
             ("opencode.yaml", "hle_diamond_opencode_agent"),
             ("opencode_search.yaml", "hle_diamond_opencode_agent"),
+            ("opencode_hle_tools.yaml", "hle_diamond_opencode_agent"),
             ("opencode_reference.yaml", REFERENCE_AGENT),
         ],
     )
@@ -659,6 +703,7 @@ SESSION_PRESETS = [
     # config file, agent, harness
     ("opencode.yaml", "hle_diamond_opencode_agent", "opencode_agent"),
     ("opencode_search.yaml", "hle_diamond_opencode_agent", "opencode_agent"),
+    ("opencode_hle_tools.yaml", "hle_diamond_opencode_agent", "opencode_agent"),
     ("opencode_reference.yaml", REFERENCE_AGENT, "opencode_agent"),
     ("pi.yaml", "hle_diamond_pi_agent", "pi_agent"),
     ("pi_search.yaml", "hle_diamond_pi_agent", "pi_agent"),
@@ -803,6 +848,7 @@ class TestLocalDockerOverride:
         [
             ("opencode.yaml", "hle_diamond_opencode_agent", "hle_diamond_pi_agent"),
             ("opencode_search.yaml", "hle_diamond_opencode_agent", "hle_diamond_pi_agent"),
+            ("opencode_hle_tools.yaml", "hle_diamond_opencode_agent", "hle_diamond_pi_agent"),
             ("opencode_full.yaml", FULL_AGENT, "hle_diamond_opencode_agent"),
             ("opencode_search_full.yaml", FULL_AGENT, "hle_diamond_opencode_agent"),
             ("pi.yaml", "hle_diamond_pi_agent", "hle_diamond_opencode_agent"),
@@ -838,6 +884,12 @@ class TestLocalDockerOverride:
         # The rest of the inherited sandbox_config and the OpenCode config survive the override.
         assert opencode["sandbox_config"]["ttl_s"] == preset["sandbox_config"]["ttl_s"]
         assert opencode["opencode_config"] == preset["opencode_config"]
+
+        hle_tools, preset = agents("opencode_hle_tools.yaml", "hle_diamond_opencode_agent")
+        # The same note serves this preset, so it names no backend; the tool grant and MCP timeout survive.
+        assert hle_tools["system_prompt"] == opencode["system_prompt"] and "Tavily" not in hle_tools["system_prompt"]
+        assert hle_tools["tool_servers"] == preset["tool_servers"]
+        assert hle_tools["mcp_tool_timeout_seconds"] == preset["mcp_tool_timeout_seconds"]
 
         full, preset = agents("opencode_search_full.yaml", FULL_AGENT)
         note = full["sandbox_config"]["files"]["/tmp/nemo-gym-environment.txt"]

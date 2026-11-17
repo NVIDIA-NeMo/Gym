@@ -184,10 +184,10 @@ async def prepare_git_for_commits(sandbox: Any, workdir: str, log_prefix: str = 
 
 
 class CaptureCommandError(RuntimeError):
-    """A capture command exited non-zero in the agent's sandbox.
+    """A capture command failed or its execution was unavailable in the agent's sandbox.
 
     ``error_type`` is the exec result's: ``None`` when git itself failed on the repository the agent left, and set
-    (such as "timeout" or "sandbox") when the provider reported no exit status.
+    (such as "timeout" or "sandbox") when execution failed at the provider boundary, even if an exit code is present.
     """
 
     def __init__(self, message: str, *, return_code: int | None, error_type: str | None) -> None:
@@ -218,7 +218,8 @@ async def capture_model_patch(
 ) -> PatchCapture:
     """Capture the agent's patch from its sandbox per ``mode``. ``drop_sections(patch, paths)``
     strips files that were already untracked before the agent started. Raises ``CaptureCommandError``
-    (a ``RuntimeError``) when git fails; an agent that left nothing yields an empty patch."""
+    (a ``RuntimeError``) when git fails or provider execution is unavailable; an agent that left nothing yields an
+    empty patch."""
     if mode not in PATCH_CAPTURE_MODES:
         raise ValueError(f"unknown patch_capture_mode {mode!r}; expected one of {PATCH_CAPTURE_MODES}")
     started = time()

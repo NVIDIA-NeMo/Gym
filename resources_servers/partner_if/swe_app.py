@@ -26,6 +26,7 @@ from nemo_gym.server_runtime import (
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
     ResourcesSessionFences,
     ReverifyMode,
 )
@@ -185,13 +186,13 @@ class SWEIFResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, ScaleSW
         actor_contract(contract)
         async with self._session_lock(session_id):
             if session_id in self._adapter_fences:
-                raise HTTPException(409, "Session is closed")
+                raise ResourcesSessionConflictError("Session is closed")
             seeded = self._seeds.get(session_id)
             if seeded is None:
                 seeded = body, await self._start_instance(session_id, instance)
                 self._seeds[session_id] = seeded
             elif seeded[0] != body:
-                raise HTTPException(409, "Session ID belongs to another episode/task")
+                raise ResourcesSessionConflictError("Session ID belongs to another episode/task")
         request.session[SESSION_ID_KEY] = session_id
         return ResourcesSeedSessionResponse(resources_session_id=session_id, sandbox_access=seeded[1])
 
@@ -236,10 +237,10 @@ class SWEIFResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, ScaleSW
         async with self._session_lock(session_id):
             fenced_episode = self._adapter_fences.get(session_id)
             if fenced_episode is not None and fenced_episode != body.episode_id:
-                raise HTTPException(409, "Session belongs to another episode")
+                raise ResourcesSessionConflictError("Session belongs to another episode")
             seeded = self._seeds.get(session_id)
             if seeded is not None and seeded[0].episode_id != body.episode_id:
-                raise HTTPException(409, "Session belongs to another episode")
+                raise ResourcesSessionConflictError("Session belongs to another episode")
             if (sandbox := self._session_id_to_sandbox.get(session_id)) is not None:
                 # A sandbox that fails to stop raises and stays, so a retried close stops it again.
                 await sandbox.stop()

@@ -426,7 +426,7 @@ def test_kubernetes_unknown_type_rejected():
 
 def test_kubernetes_pvc_name_is_required():
     # The driver container's own volumeMounts always references the output volume
-    # (kubernetes_script.py's build_job_manifest); without a pvc_name that volume is never
+    # (kubernetes/script.py's build_job_manifest); without a pvc_name that volume is never
     # declared, and the pod is rejected outright by the API server. Fail at config-validation
     # time with a clear message instead.
     with pytest.raises(ValidationError, match="pvc_name"):

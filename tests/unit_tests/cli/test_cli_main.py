@@ -1879,7 +1879,7 @@ class TestAgentSelector:
             ),
             # The documented example: a `???`-bound harness is composed onto the benchmark's agent.
             (
-                ["eval", "run", "--benchmark", "terminal_bench_2_1/opencode"],
+                ["eval", "run", "--benchmark", "terminal_bench_2_1/opencode_legacy_agent"],
                 "terminus_2_sandboxed_agent",
                 [],
                 ("terminal_bench_2_1_terminus_2_sandboxed_agent", "terminus_2_sandboxed_agent"),

@@ -156,8 +156,9 @@ async def test_verifier_keeps_project_src_separate_from_hidden_harness(tmp_path:
     )
     runner = TestbenchRunner(config)
 
-    async def service(workspace_archive, name, compose, harness_files, *, repository_workspace=False):
+    async def service(workspace_archive, name, compose, harness_files, *, repository_workspace=False, hand_off=True):
         assert repository_workspace
+        assert hand_off is False
         with tarfile.open(workspace_archive, "r:gz") as stream:
             assert stream.extractfile("src/core.v").read() == b"repaired RTL"
             assert stream.extractfile(".cvdp_harness/src/test.py").read() == b"hidden test"

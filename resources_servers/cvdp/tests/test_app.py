@@ -13,8 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import json
+import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -47,6 +50,7 @@ from resources_servers.cvdp.testbench_runner import (
     _parse_compose_service,
     _resolve_service_image,
     _service_build_key,
+    _snapshot_only_raced,
 )
 from resources_servers.cvdp.testbench_runner import (
     TestbenchRunner as CVDPTestbenchRunner,
@@ -1099,6 +1103,120 @@ class TestRunServiceProvider:
         assert len(fake.closed) == 1
 
     @pytest.mark.asyncio
+    async def test_snapshot_command_merges_tar_diagnostics_into_stdout(self, tmp_path):
+        fake = _FakeProvider(SandboxExecResult(stdout="hi\n", stderr="", return_code=0))
+        await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        snapshot = next(item for item in fake.execs if "tar -czf" in item["command"] and "-xzf" not in item["command"])
+        assert snapshot["command"].endswith(" . 2>&1")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("stderr", [None, "", "exit status 1", "CommandExecError: 1"])
+    @pytest.mark.parametrize(
+        "raced",
+        [
+            "tar: ./rundir/sim_build/dump.fst: file changed as we read it\n",
+            "tar: ./rundir/sim_build/dump.vcd: file changed as we read it\n",
+            "tar: ./rundir/sim_build/dump.fst: File removed before we read it\n",
+        ],
+    )
+    async def test_snapshot_that_only_raced_a_waveform_write_keeps_the_verdict(self, tmp_path, caplog, raced, stderr):
+        # OpenSandbox background execution puts both streams in stdout and leaves at most a status summary in stderr.
+        # Its foreground execution appends ``CommandExecError: <code>`` instead.
+        fake = _FakeProvider(
+            SandboxExecResult(stdout="hi\n", stderr="", return_code=0),
+            snapshot_result=SandboxExecResult(stdout=raced, stderr=stderr, return_code=1),
+        )
+        with caplog.at_level("WARNING", logger="resources_servers.cvdp.testbench_runner"):
+            exit_code, output = await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        assert exit_code == 0
+        assert output.startswith("hi\n")
+        assert raced.strip() in output
+        assert fake.downloads[0][0] == "/sandbox/cvdp-workspace-out.tar.gz"
+        warning = next(record for record in caplog.records if "workspace snapshot" in record.getMessage())
+        assert "'direct'" in warning.getMessage()
+        assert raced.strip() in warning.getMessage()
+
+    @pytest.mark.asyncio
+    async def test_a_service_that_timed_out_keeps_its_diagnostics_without_snapshotting(self, tmp_path):
+        raced = "tar: ./rundir/sim_build/dump.fst: file changed as we read it\n"
+        fake = _FakeProvider(
+            SandboxExecResult(stdout=None, stderr="timed out", return_code=125, error_type="timeout"),
+            snapshot_result=SandboxExecResult(stdout=raced, stderr=None, return_code=1),
+        )
+        exit_code, output = await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        assert exit_code == -1
+        assert output.startswith("sandbox exec timed out after 30s")
+        assert "timed out" in output
+        assert fake.downloads == []
+        assert len(fake.execs) == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "stdout, stderr, return_code",
+        [
+            (
+                "tar: ./rundir/sim_build/a.fst: file changed as we read it\ntar: b: Cannot open: Permission denied\n",
+                None,
+                1,
+            ),
+            (
+                "tar: ./rundir/sim_build/a.fst: file changed as we read it\n",
+                "tar: b: Cannot open: Permission denied",
+                1,
+            ),
+            (
+                "tar: ./rundir/sim_build/a.fst: file changed as we read it\n",
+                "exit status 1\ntar: b: Cannot open: Permission denied",
+                1,
+            ),
+            ("tar: ./rundir/sim_build/a.fst: file changed as we read it\n", "exit status 2", 1),
+            ("tar: ./rundir/sim_build/a.fst: file changed as we read it\n", "CommandExecError: 2", 1),
+            ("tar: ./rundir/sim_build/a.fst: file changed as we read it\n", None, 2),
+            ("", "exit status 1", 1),
+            ("", None, 1),
+            ("tar: write error: No space left on device\n", "exit status 1", 1),
+            # Real GNU tar 1.35 output for a file or a directory that changed while it was archived. Neither is a
+            # waveform, so the archive may miss data the next service reads.
+            ("tar: ./rundir/results.txt: file changed as we read it\n", None, 1),
+            ("tar: ./rtl/design.sv: file changed as we read it\n", None, 1),
+            ("tar: ./rundir: file changed as we read it\n", None, 1),
+            ("tar: ./rundir/sim_build: file changed as we read it\n", None, 1),
+            ("tar: .: file changed as we read it\n", None, 1),
+            ("tar: ./rundir/sim_build/dump.fst.txt: file changed as we read it\n", None, 1),
+            ("tar: ./rundir/results.txt: File removed before we read it\n", None, 1),
+        ],
+    )
+    async def test_snapshot_with_a_race_and_a_real_error_still_fails(self, tmp_path, stdout, stderr, return_code):
+        fake = _FakeProvider(
+            SandboxExecResult(stdout="hi\n", stderr="", return_code=0),
+            snapshot_result=SandboxExecResult(stdout=stdout, stderr=stderr, return_code=return_code),
+        )
+        with pytest.raises(CVDPInfrastructureError, match="workspace snapshot failed") as caught:
+            await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        assert caught.value.failure_kind == "verifier_error"
+        assert fake.downloads == []
+
+    @pytest.mark.asyncio
+    async def test_last_service_takes_no_snapshot(self, tmp_path):
+        fake = _FakeProvider(
+            SandboxExecResult(stdout="hi\n", stderr="", return_code=0),
+            snapshot_result=SandboxExecResult(stdout="", stderr="disk full", return_code=1),
+        )
+        (tmp_path / "rtl").mkdir(exist_ok=True)
+        archive = tmp_path.parent / f"{tmp_path.name}.tar.gz"
+        _pack_workspace(tmp_path, archive)
+        try:
+            self.server._harness._sandbox_provider = fake
+            exit_code, output = await self.server._harness._run_service(
+                archive, "direct", _COMPOSE_WITH_CMD, {}, hand_off=False
+            )
+        finally:
+            archive.unlink(missing_ok=True)
+        assert (exit_code, output) == (0, "hi\n")
+        assert not any("tar -czf" in item["command"] and "-xzf" not in item["command"] for item in fake.execs)
+        assert fake.downloads == []
+
+    @pytest.mark.asyncio
     async def test_tmp_bind_path_added(self, tmp_path):
         self.server.config.container_tmp_bind_path = "/container/tmp"
         fake = _FakeProvider(SandboxExecResult(stdout="", stderr="", return_code=0))
@@ -1310,6 +1428,40 @@ class TestApptainerHarness:
             )
 
 
+class TestSnapshotInfrastructureFailures:
+    setup_method = TestRunServiceProvider.setup_method
+    _run = TestRunServiceProvider._run
+
+    @pytest.mark.asyncio
+    async def test_waveform_warning_does_not_hide_provider_error(self, tmp_path):
+        fake = _FakeProvider(
+            SandboxExecResult(stdout="passed", stderr="", return_code=0),
+            snapshot_result=SandboxExecResult(
+                stdout="tar: ./rundir/sim_build/dump.fst: file changed as we read it\n",
+                stderr="",
+                return_code=1,
+                error_type="transport",
+            ),
+        )
+        with pytest.raises(CVDPInfrastructureError, match="workspace snapshot failed"):
+            await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        assert fake.downloads == []
+
+    @pytest.mark.asyncio
+    async def test_accepted_snapshot_note_survives_client_release_failure(self, tmp_path):
+        raced = "tar: ./rundir/sim_build/dump.fst: file changed as we read it\n"
+        fake = _FakeProvider(
+            SandboxExecResult(stdout="passed", stderr="", return_code=0),
+            snapshot_result=SandboxExecResult(stdout=raced, stderr="", return_code=1),
+        )
+        fake.aclose = AsyncMock(side_effect=RuntimeError("client release failed"))
+        code, output = await self._run(tmp_path, fake, _COMPOSE_WITH_CMD)
+        assert code == 0
+        assert output.startswith("passed")
+        assert raced.strip() in output
+        assert len(fake.downloads) == len(fake.closed) == 1
+
+
 class TestDefinitiveFailure:
     setup_method = TestRunServiceProvider.setup_method
     _run = TestRunServiceProvider._run
@@ -1400,7 +1552,8 @@ async def test_successful_services_transfer_updated_workspace(tmp_path):
         task_id="workspace-transfer",
     )
     assert code == 0 and [service["exit_code"] for service in services] == [0, 0]
-    assert len(fake.uploads) == len(fake.downloads) == len(fake.closed) == 2
+    assert len(fake.uploads) == len(fake.closed) == 2
+    assert len(fake.downloads) == 1
 
 
 def test_task_owner_and_verifier_metadata_schemas_match():
@@ -1414,3 +1567,118 @@ def test_task_owner_and_verifier_metadata_schemas_match():
         assert field.is_required() == other.is_required(), name
         if not field.is_required():
             assert field.get_default(call_default_factory=True) == other.get_default(call_default_factory=True), name
+
+
+class _ShellProvider:
+    """Runs each service as real shell commands in a fresh local directory, so the real tar does the handoff."""
+
+    name = "shell"
+
+    def __init__(self, workspace: Path, transfer: Path):
+        self.workspace = workspace
+        self.transfer = transfer
+        self.commands = []
+
+    async def create(self, spec):
+        for path in (self.workspace, self.transfer):
+            shutil.rmtree(path, ignore_errors=True)
+        self.transfer.mkdir(parents=True)
+        return _FakeHandle()
+
+    async def exec(self, handle, command, *, cwd=None, env=None, timeout_s=None, user=None):
+        self.commands.append(command)
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            cwd=cwd,
+            env={**os.environ, **(env or {})},
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        out, err = await proc.communicate()
+        return SandboxExecResult(
+            stdout=out.decode(errors="replace"), stderr=err.decode(errors="replace"), return_code=proc.returncode
+        )
+
+    async def upload_file(self, handle, source_path, target_path):
+        shutil.copyfile(source_path, target_path)
+
+    async def download_file(self, handle, source_path, target_path):
+        shutil.copyfile(source_path, target_path)
+
+    async def close(self, handle):
+        pass
+
+    async def aclose(self):
+        pass
+
+
+_COMPOSE_TWO_SERVICES = """
+services:
+  build:
+    image: ghcr.io/hdl/sim/osvb
+    command: /bin/sh -c "mkdir -p sim_build && echo handoff > state.txt && echo wave > sim_build/dump.fst"
+  check:
+    image: ghcr.io/hdl/sim/osvb
+    command: /bin/sh -c "grep -q handoff state.txt && test -f sim_build/dump.fst"
+"""
+
+
+@pytest.mark.skipif(shutil.which("tar") is None, reason="tar is not installed")
+class TestServiceHandoffWithRealTar:
+    @pytest.mark.asyncio
+    async def test_second_service_sees_the_files_the_first_one_wrote(self, tmp_path):
+        server = _make_server()
+        server.config.container_workspace = str(tmp_path / "sandbox_code")
+        server.config.container_transfer_dir = str(tmp_path / "sandbox_transfer")
+        provider = _ShellProvider(tmp_path / "sandbox_code", tmp_path / "sandbox_transfer")
+        server._harness._sandbox_provider = provider
+
+        exit_code, stderr, results = await server._harness.run(
+            rtl_files={},
+            harness_files={"docker-compose.yml": _COMPOSE_TWO_SERVICES},
+            task_id="handoff",
+        )
+
+        assert [(r["service"], r["exit_code"]) for r in results] == [("build", 0), ("check", 0)], stderr
+        assert exit_code == 0
+        snapshots = [c for c in provider.commands if "tar -czf" in c and "-xzf" not in c]
+        assert len(snapshots) == 1  # after "build" only; the last service hands nothing on
+
+
+@pytest.mark.skipif(shutil.which("tar") is None, reason="tar is not installed")
+class TestSnapshotRaceWithRealTar:
+    """Mutate files while the real tar archives them, then classify what tar printed."""
+
+    @staticmethod
+    def _snapshot(workspace: Path, archive: Path, grown: Path) -> SandboxExecResult:
+        proc = subprocess.run(
+            [
+                "tar",
+                "-czf",
+                str(archive),
+                "--numeric-owner",
+                "-C",
+                str(workspace),
+                ".",
+                "--checkpoint=1",
+                f"--checkpoint-action=exec=echo more >> {grown}",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        return SandboxExecResult(stdout=proc.stdout + proc.stderr, stderr=None, return_code=proc.returncode)
+
+    @pytest.mark.parametrize(
+        "name, accepted",
+        [("rundir/sim_build/dump.fst", True), ("rundir/results.txt", False), ("rtl/design.sv", False)],
+    )
+    def test_only_a_waveform_that_grew_is_accepted(self, tmp_path, name, accepted):
+        workspace = tmp_path / "ws"
+        grown = workspace / name
+        grown.parent.mkdir(parents=True)
+        grown.write_bytes(os.urandom(3_000_000))
+        snapshot = self._snapshot(workspace, tmp_path / "out.tgz", grown)
+        if "file changed as we read it" not in snapshot.stdout:
+            pytest.skip("this tar does not report the change")
+        assert snapshot.return_code == 1
+        assert _snapshot_only_raced(snapshot) is accepted

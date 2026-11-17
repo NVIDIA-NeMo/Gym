@@ -18,6 +18,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import posixpath
 import re
@@ -49,6 +50,9 @@ from resources_servers.cvdp.repository_workspace import (
 
 if TYPE_CHECKING:
     from resources_servers.cvdp.app import CVDPResourcesServerConfig
+
+
+logger = logging.getLogger(__name__)
 
 
 class CVDPInfrastructureError(SandboxVerificationError):
@@ -221,6 +225,35 @@ def _compose_workspace_links(compose_volumes: List[Any], workspace: str = "/code
         if uploaded_source != target:
             links.append((uploaded_source, target))
     return links
+
+
+# GNU tar reports a file that grew or vanished while it was archived with exit status 1. The archive is still
+# written, but that file (or, for a directory, its new entries) may be incomplete. The only files the next service
+# does not read are the simulator's waveform dumps, so only those are tolerated; a directory, RTL or any input
+# file is a snapshot failure.
+_TAR_RACE_LINE = re.compile(
+    r"^tar: (?:\./)?(?:[^:]+/)?sim_build/[^/:]+\.(?:fst|vcd): (?:file changed as we read it|File removed before we read it)$"
+)
+
+
+def _snapshot_only_raced(snapshot: Any) -> bool:
+    """Whether a failed workspace snapshot only lost a race with a waveform file that was still being written.
+
+    A simulator can keep writing a waveform (``sim_build/*.fst`` or ``*.vcd``) while the snapshot reads it. GNU tar
+    then exits 1 with ``file changed as we read it`` (or ``File removed before we read it``) and still writes the
+    archive. The waveform is not an input of the next service, so the archive is usable. The snapshot command merges
+    tar's diagnostics into ``stdout`` (``2>&1``), so the check does not depend on how a provider lays out its streams.
+    ``stderr`` is then only the provider's own status summary and is accepted only as empty, ``exit status 1`` or
+    OpenSandbox's foreground form ``CommandExecError: 1``. Any other message, any other exit code and any other
+    diagnostic stays a snapshot failure.
+    """
+    if snapshot.return_code != 1:
+        return False
+    stderr = (snapshot.stderr or "").strip()
+    if stderr and stderr not in (f"exit status {snapshot.return_code}", f"CommandExecError: {snapshot.return_code}"):
+        return False
+    lines = [line.strip() for line in (snapshot.stdout or "").splitlines() if line.strip()]
+    return bool(lines) and all(_TAR_RACE_LINE.match(line) for line in lines)
 
 
 def _pack_workspace(workdir: Path, archive: Path) -> None:
@@ -472,13 +505,14 @@ class TestbenchRunner:
 
             service_results: List[Dict] = []
             try:
-                for service in services:
+                for index, service in enumerate(services):
                     service_kwargs = {"repository_workspace": True} if repository_workspace_sha256 else {}
                     exit_code, output = await self._run_service(
                         archive_path,
                         service,
                         compose_content,
                         harness_files,
+                        hand_off=index < len(services) - 1,
                         **service_kwargs,
                     )
                     service_results.append({"service": service, "exit_code": exit_code, "stderr": output})
@@ -525,8 +559,13 @@ class TestbenchRunner:
         harness_files: Optional[Dict[str, Optional[str]]] = None,
         *,
         repository_workspace: bool = False,
+        hand_off: bool = True,
     ) -> Tuple[int, str]:
-        """Run one Compose service in a sandbox."""
+        """Run one Compose service in a sandbox.
+
+        With ``hand_off`` the workspace is archived after the service and replaces ``workspace_archive`` for the next
+        service. The last service sets it to ``False``: nothing reads its archive, so no snapshot is taken.
+        """
         svc = _parse_compose_service(compose_content, service)
         compose_data = yaml.safe_load(compose_content) or {}
         image, build_key = _resolve_service_image(
@@ -688,23 +727,39 @@ class TestbenchRunner:
                     outcome = (result.return_code, (result.stderr or "") + (result.stdout or ""))
                     return outcome
 
-                # Exclude transfer archives and private runtime files from project output.
-                transfer_relative = posixpath.relpath(transfer_dir, workspace)
-                snapshot_exclude = " --exclude=./.apptainer-workdir"
-                if transfer_relative != ".." and not transfer_relative.startswith("../"):
-                    snapshot_exclude += f" --exclude={shlex.quote('./' + transfer_relative)}"
-                snapshot = await sandbox.exec(
-                    f"tar -czf {shlex.quote(output_archive)}{snapshot_exclude} -C {shlex.quote(workspace)} .",
-                    timeout_s=self.config.container_timeout,
-                )
-                if not snapshot.error_type and snapshot.return_code == 0:
+                snapshot_note = ""
+                if hand_off:
+                    # Exclude transfer archives and private runtime files from project output.
+                    transfer_relative = posixpath.relpath(transfer_dir, workspace)
+                    snapshot_exclude = " --exclude=./.apptainer-workdir"
+                    if transfer_relative != ".." and not transfer_relative.startswith("../"):
+                        snapshot_exclude += f" --exclude={shlex.quote('./' + transfer_relative)}"
+                    snapshot = await sandbox.exec(
+                        f"tar -czf {shlex.quote(output_archive)}{snapshot_exclude} -C {shlex.quote(workspace)} . 2>&1",
+                        timeout_s=self.config.container_timeout,
+                    )
+                    if not snapshot.error_type and snapshot.return_code == 0:
+                        pass
+                    elif not snapshot.error_type and _snapshot_only_raced(snapshot):
+                        diagnostics = (snapshot.stdout or "").strip()
+                        logger.warning(
+                            "CVDP workspace snapshot after service '%s' exited %s but only waveform files changed during "
+                            "archiving; handing the archive to the next service. tar diagnostics: %s",
+                            service,
+                            snapshot.return_code,
+                            diagnostics,
+                        )
+                        snapshot_note = (
+                            f"\n[workspace snapshot after service '{service}' exited {snapshot.return_code}: "
+                            f"{diagnostics}]"
+                        )
+                    else:
+                        combined = (snapshot.stderr or "") + (snapshot.stdout or "")
+                        raise CVDPInfrastructureError(f"workspace snapshot failed for service '{service}': {combined}")
                     next_archive = workspace_archive.with_name(f"{workspace_archive.name}.next")
                     await sandbox.download(output_archive, next_archive)
                     next_archive.replace(workspace_archive)
-                else:
-                    combined = (snapshot.stderr or "") + (snapshot.stdout or "")
-                    raise CVDPInfrastructureError(f"workspace snapshot failed for service '{service}': {combined}")
-                outcome = (result.return_code, (result.stderr or "") + (result.stdout or ""))
+                outcome = (result.return_code, (result.stderr or "") + (result.stdout or "") + snapshot_note)
         except CVDPInfrastructureError:
             raise
         except SandboxCreateError as exc:
@@ -729,5 +784,5 @@ class TestbenchRunner:
                 return outcome
             raise CVDPInfrastructureError(f"sandbox operation failed for service '{service}': {exc}") from exc
 
-        combined = (result.stderr or "") + (result.stdout or "")
+        combined = (result.stderr or "") + (result.stdout or "") + snapshot_note
         return result.return_code, combined
