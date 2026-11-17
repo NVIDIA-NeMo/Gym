@@ -113,12 +113,12 @@ RUN case "${TARGETARCH}" in \
         amd64) \
             uv_arch="x86_64"; \
 # pragma: allowlist nextline secret
-            uv_sha256="2b428396f12572d4429cf210ca234dd599a33b3af0958a4d5ed569d63e3f344f"; \
+            uv_sha256="5acfd9177cfecf0bf87578f059728215ccc884388988f55f7a65041b57387d91"; \
             ;; \
         arm64) \
             uv_arch="aarch64"; \
 # pragma: allowlist nextline secret
-            uv_sha256="1ae72b4718729e2ccc4f1ae2c6d1e531ca8467800e0546e9130b3886023a60ab"; \
+            uv_sha256="74f2f5c6024d397481db228db8fc25eed420db192243f88438c118e7e013e585"; \
             ;; \
         *) \
             echo "Unsupported TARGETARCH for uv: ${TARGETARCH}" >&2; \
