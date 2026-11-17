@@ -23,6 +23,7 @@ import signal
 import subprocess
 import tarfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import ClassVar
 
@@ -243,6 +244,7 @@ def _start_job(
     env: dict[str, str] | None = None,
     services: dict | None = None,
     otel: dict | None = None,
+    script_edit: Callable[[str], str] | None = None,
 ) -> subprocess.Popen:
     """Start the rendered job.sh in its own process group.
 
@@ -276,7 +278,8 @@ def _start_job(
     for name, body in all_fakes.items():
         (tmp_path / "bin" / name).write_text(f"#!/bin/bash\n{body}\n")
         (tmp_path / "bin" / name).chmod(0o755)
-    (bench / "job.sh").write_text(_script(config, bench))
+    script = _script(config, bench)
+    (bench / "job.sh").write_text(script_edit(script) if script_edit else script)
     with (tmp_path / "job.out").open("w") as out:
         return subprocess.Popen(
             ["bash", "job.sh"],
@@ -803,6 +806,44 @@ _NO_SCRAPE_GRACE = f'[ "$1" != {FINAL_SCRAPE_GRACE_SECONDS} ] || exit 0; exec /b
 def _steps(tmp_path: Path) -> list[str]:
     log = tmp_path / "srun-steps.log"
     return log.read_text().splitlines() if log.exists() else []
+
+
+@pytest.mark.parametrize("off_batch", [False, True], ids=["batch_node", "off_batch_node"])
+def test_a_usr1_between_the_collector_launch_and_its_pid_still_stops_the_collector(tmp_path, off_batch):
+    # The signal lands after the collector's step is launched and before its PID is recorded: it is held until then.
+    bench = tmp_path / "run" / "b"
+    (bench / "otel").mkdir(parents=True)
+    otel = {"enabled": True, "gym_telemetry": False, "remote_export": False, "binary": str(_fake_collector(tmp_path))}
+    started = shlex.quote(str(tmp_path / "collector-dir"))
+
+    def signal_before_the_pid(script: str) -> str:
+        assert script.count("\nOTEL_COLLECTOR_PID=$!") == 1
+        inject = f"until [ -e {started} ]; do /bin/sleep 0.1; done; kill -USR1 $$\n"
+        return script.replace("\nOTEL_COLLECTOR_PID=$!", f"\n{inject}OTEL_COLLECTOR_PID=$!")
+
+    driver = f": > {shlex.quote(str(tmp_path / 'driver-ran'))}; sleep 600 & wait"
+    process = _start_job(
+        tmp_path,
+        driver=driver,
+        otel=otel,
+        off_batch=off_batch,
+        fakes={"sleep": _NO_SCRAPE_GRACE},
+        script_edit=signal_before_the_pid,
+    )
+    try:
+        _wait_for_text(tmp_path / "job.out", "Waiting for the time limit")
+        # Before the time limit: only the stop can have flushed the collector and appended its files.
+        _wait_for_text(bench / "otel" / "traces.jsonl", "flushed")
+        assert process.poll() is None
+        os.killpg(process.pid, signal.SIGTERM)
+        _finish(process, timeout=30)
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
+
+    assert "the driver has not started: it does not start" in (tmp_path / "job.out").read_text()
+    assert not (tmp_path / "driver-ran").exists()
+    assert (bench / "otel" / "traces.jsonl").read_text() == "start\nflushed\n"
 
 
 @pytest.mark.parametrize("off_batch", [False, True], ids=["batch_node", "off_batch_node"])

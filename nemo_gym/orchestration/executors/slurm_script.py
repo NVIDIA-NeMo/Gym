@@ -777,6 +777,7 @@ def _render_collector_service(
     driver_node: int | None = None,
     account: str | None = None,
     node_local_base_dir: str | None = None,
+    launch_guard: tuple[str, str] | None = None,
 ) -> str:
     """The collector's srun step. Started before the model services so the scrape covers their
     startup.
@@ -797,7 +798,7 @@ def _render_collector_service(
         if obs.container is not None
         else {}
     )
-    return _render_service_command(
+    service = _render_service_command(
         COLLECTOR_SERVICE_NAME,
         obs.container,
         command,
@@ -815,6 +816,11 @@ def _render_collector_service(
         account=account,
         **container_kwargs,
     )
+    if launch_guard is None:
+        return service
+    # A stop between the launch and the PID capture would miss the collector: it waits until the PID is known.
+    before, after = launch_guard
+    return f"{before}\n{service}\n{after}"
 
 
 def _render_collector_health_check(config: SubmitConfig, driver_node: int | None = None) -> str:
@@ -1204,6 +1210,7 @@ def build_sbatch_script(
                     driver_node=driver_node,
                     account=compute.account,
                     node_local_base_dir=node_local.base_dir if node_local is not None else None,
+                    launch_guard=node_local_script.LAUNCH_GUARD if stops_early else None,
                 )
             ]
             if observed
