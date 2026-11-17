@@ -402,8 +402,9 @@ Each rollout result is stamped with a `skills_ref` for provenance and grouping d
 A Harbor task that declares `skills_dir` is taken in a task sandbox, and the seed response declares
 `supports_task_skills`. At seed the adapter reads `skills_dir` from `/tmp/.nemo-gym/task.json` inside the sandbox and
 copies that folder to the session's `CODEX_HOME/skills`, where Codex discovers skills, so the model finds them through
-Codex's own skill mechanism. A `skills_dir` that is not an absolute path or is not a folder in the sandbox fails the
-seed with a terminal message. The MCP servers of such a task stay with grants: set `task_mcp_grants: required` on the
+Codex's own skill mechanism. The server makes a relative `skills_dir` absolute; a `skills_dir` only a shell resolves
+(starting with `~` or containing `$`) or one that is not a folder in the sandbox fails the seed with a terminal
+message. The MCP servers of such a task stay with grants: set `task_mcp_grants: required` on the
 `harbor` Environment Server to give Codex the task's `streamable-http` servers, and the task is judged for its skills
 and its servers separately.
 

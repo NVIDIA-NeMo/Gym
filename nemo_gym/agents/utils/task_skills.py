@@ -43,8 +43,10 @@ async def stage_task_skills(sandbox: AsyncSandbox, destination: str) -> str | No
     declares none, so a task without skills (or a sandbox the Environment Server did not seed) is left untouched.
 
     An unusable task is refused with :class:`AgentSeedRejectedError`: a ``task.json`` that is not a JSON object, a
-    ``skills_dir`` that is not an absolute path (the server writes one a shell would resolve as written, such as
-    ``~/skills``, which cannot be copied from safely), or a folder that is not in the sandbox or cannot be copied.
+    ``skills_dir`` that is not an absolute path (the server makes a relative one absolute from the working directory,
+    so only one a shell resolves reaches here, such as ``~/skills`` or ``$HOME/skills``, which cannot be copied from
+    safely), or a folder that is not in the sandbox or cannot be copied. A declared folder that is empty is copied
+    all the same, so the task counts as one that declares skills.
     A read or copy that did not report an exit code (a timeout or a provider failure) raises ``RuntimeError``,
     which a seed answers as a retryable failure.
     """
