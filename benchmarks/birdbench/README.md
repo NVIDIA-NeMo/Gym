@@ -159,3 +159,20 @@ Ontology's Alembic migrations, then for each database ingests the schema, writes
 semantic layer. `<models.env>` holds the model keys (`DEFAULT_MODELS_API_KEY`, and `*_MODEL` settings where they differ
 from Auto Ontology's defaults); it reaches the build as a BuildKit secret, never a layer. The build fails when a model
 call failed after Auto Ontology's retries or a database has no vectors, since Auto Ontology logs both and goes on.
+
+### The Auto Ontology agent
+
+`auto_ontology_agent.yaml` runs BIRD dev with `responses_api_agents/auto_ontology_agent` in place of `simple_agent`:
+each episode gets a sandbox from the catalog image, and Auto Ontology's `run_episode` runs there on the policy's Model
+Server, with Auto Ontology's own prompts and tools (`retrieve`, `run_sql`, `submit`). The agent answers with the
+submitted query in a fenced `sql` block, which `bird_sql` grades as it grades `simple_agent`'s. Each row gives the
+agent the task in its agent context, with no schema:
+
+```bash
+gym eval prepare --config benchmarks/birdbench/auto_ontology_agent.yaml   # data/birdbench_sqlite_dev_auto_ontology_agent.jsonl
+gym eval run --config benchmarks/birdbench/auto_ontology_agent.yaml --model-type vllm_model --split benchmark \
+  --output results/auto_ontology_agent/rollouts.jsonl ++auto_ontology_api_key=<key>
+```
+
+`auto_ontology_api_key` is the key of the embedding endpoint the catalog was built with: retrieval embeds each
+search. See the agent's README for its sandbox and network.
