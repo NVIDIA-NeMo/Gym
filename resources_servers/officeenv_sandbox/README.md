@@ -113,8 +113,10 @@ stop failed after its seed failed is stopped again at its session's close.
 A sandbox's start (the provider's create, the files the seed delivers and the sandbox's setup)
 may take `sandbox_config.start_timeout_s`, 1800 s by default; a start cut at that limit fails its
 seed. A create cut before the provider returned the sandbox's id leaves a sandbox the server
-cannot stop: the cut is logged at ERROR with the session, task, provider, image and labels, for a
-reaper, and the sandbox otherwise runs until its TTL (`sandbox_config.ttl_s`). Raise the limit
+cannot stop: the cut is logged at ERROR with the session, task, provider, image and labels.
+OpenSandbox's provider deletes the sandbox of a create its caller gave up on; with another
+provider the log is for a reaper, and the sandbox otherwise runs until its TTL
+(`sandbox_config.ttl_s`). Raise the limit
 above the time the provider's creates can take, so it cuts only a create that hangs: on a busy
 OpenSandbox cell, where a create holds its request while the cell places the sandbox and then
 waits for it to be ready (`sandbox.opensandbox.create`), creates have taken up to 2,430 s.
