@@ -18,9 +18,10 @@ cannot be normalized, such as an array of decimals or dates, as in the ADK.
 A management phase (PostgreSQL only) is graded by its own test cases: Python code from the ground truth that inspects
 the database after the submission ran (``grade_by_test_cases``).
 
-Nothing that grading or an exploratory query runs stays in the database: SQLite runs it on a scratch copy, PostgreSQL
-in a transaction that it rolls back, or on a copy of the database that it drops. Only ``setup`` and a passing phase 1
-write the database: as in the ADK, phase 1's SQL is applied once it passes, so phase 2 sees what it changed.
+Nothing that grading or an exploratory query runs stays in the database: SQLite runs it on a scratch copy, and refuses
+ATTACH, which could reach the episode's file; PostgreSQL runs it on a copy of the database (``WORK_DATABASE``,
+``GRADE_DATABASE``). Only ``setup`` and a passing phase 1 write the database: as in the ADK, phase 1's SQL is applied
+once it passes, so phase 2 sees what it changed.
 
 The Environment Server uploads this file to the episode's sandbox and runs ``python3 grading.py <command> <request>``
 (see ``main``), so it imports only the standard library, and ``psycopg2`` for PostgreSQL, which the image provides.
@@ -35,10 +36,11 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -57,6 +59,11 @@ MAX_PREVIEW_ROWS = 20
 # The copy of the episode's database that a management phase is graded on. The sandbox is the episode's own, so one
 # name serves; it is short, because PostgreSQL truncates a name longer than 63 bytes.
 TEST_CASE_DATABASE = "bird_interact_test_cases"
+# PostgreSQL: agent SQL never runs on the episode's database itself, which only setup and an applied phase 1 change.
+# Exploratory queries run on a working copy, and each submission is graded on a fresh copy, as the ADK resets its task
+# database before each submission. A COMMIT in agent SQL can then change only a copy.
+WORK_DATABASE = "bird_interact_work"
+GRADE_DATABASE = "bird_interact_grade"
 
 
 @dataclass(frozen=True)
@@ -213,10 +220,16 @@ class SQLiteDatabase:
             return _run_sqlite(copy, scripts, timeout_seconds=timeout_seconds)
 
 
+def _deny_attach(action: int, *_: object) -> int:
+    return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_ATTACH else sqlite3.SQLITE_OK
+
+
 def _run_sqlite(database: Path, scripts: Sequence[str], *, timeout_seconds: float) -> list[QueryResult]:
     # Each script has its own deadline, which the handler enforces by interrupting the running statement.
     deadline = [0.0]
     connection = sqlite3.connect(database)
+    # Agent SQL runs on a scratch copy; ATTACH could open the episode's own file and change it.
+    connection.set_authorizer(_deny_attach)
     connection.set_progress_handler(lambda: int(time.monotonic() > deadline[0]), 10_000)
     results: list[QueryResult] = []
     try:
@@ -254,6 +267,7 @@ class PostgresDatabase:
     def create(self, request: dict[str, Any]) -> None:
         start_postgres()
         _apply_setup(self, request)
+        self.refresh(WORK_DATABASE)
 
     def run(self, scripts: Sequence[str], *, timeout_seconds: float, commit: bool = False) -> list[QueryResult]:
         import psycopg2
@@ -262,9 +276,11 @@ class PostgresDatabase:
         results: list[QueryResult] = []
         try:
             with connection.cursor() as cursor:
-                # Bounds each statement of the transaction.
-                cursor.execute("SET LOCAL statement_timeout = %s", (max(1, int(timeout_seconds * 1000)),))
                 for script in scripts:
+                    # One deadline for the whole script, whatever its statements and transaction control: the
+                    # client cancels the query when it passes.
+                    timer = threading.Timer(timeout_seconds, connection.cancel)
+                    timer.start()
                     try:
                         cursor.execute(script)
                         results.append(QueryResult(rows=_fetch_rows(cursor, script)))
@@ -275,6 +291,8 @@ class PostgresDatabase:
                     except psycopg2.Error as error:
                         results.append(QueryResult(rows=None, error=str(error)))
                         break
+                    finally:
+                        timer.cancel()
         finally:
             if commit and all(result.ok for result in results):
                 connection.commit()
@@ -283,27 +301,36 @@ class PostgresDatabase:
             connection.close()
         return results
 
+    def refresh(self, name: str) -> "PostgresDatabase":
+        """Make ``name`` a fresh copy of this database, replacing any earlier one, and return it."""
+        self._administer(name, create=True)
+        return PostgresDatabase(name)
+
     @contextlib.contextmanager
     def copy(self, name: str) -> Iterator["PostgresDatabase"]:
         """A copy of this database, named ``name``, that the caller may change. It is dropped on exit."""
+        try:
+            yield self.refresh(name)
+        finally:
+            self._administer(name, create=False)
+
+    def _administer(self, name: str, *, create: bool) -> None:
         import psycopg2
         from psycopg2 import sql
 
-        drop = sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name))
-        create = sql.SQL("CREATE DATABASE {} TEMPLATE {}").format(sql.Identifier(name), sql.Identifier(self.name))
         connection = psycopg2.connect(dbname="postgres")
         # CREATE DATABASE and DROP DATABASE cannot run in a transaction.
         connection.autocommit = True
         try:
             with connection.cursor() as cursor:
-                # A copy that a crashed command left.
-                cursor.execute(drop)
-                cursor.execute(create)
-            try:
-                yield PostgresDatabase(name)
-            finally:
-                with connection.cursor() as cursor:
-                    cursor.execute(drop)
+                # Also drops a copy that a crashed command left.
+                cursor.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
+                if create:
+                    cursor.execute(
+                        sql.SQL("CREATE DATABASE {} TEMPLATE {}").format(
+                            sql.Identifier(name), sql.Identifier(self.name)
+                        )
+                    )
         finally:
             connection.close()
 
@@ -478,11 +505,14 @@ def grade(
     ordered: bool,
     timeout_seconds: float,
     apply_if_passed: bool = False,
+    baseline: Database | None = None,
 ) -> Grade:
     """Grade ``predicted_sql`` against the solution's scripts by BIRD-Interact's default test case.
 
-    With ``apply_if_passed``, a passing submission is then applied to ``database``.
+    ``baseline`` is the episode's database when ``database`` is a copy of it (PostgreSQL); a passing submission is
+    applied to it with ``apply_if_passed``.
     """
+    baseline = baseline or database
     solution = [script for script in map(normalize_sql, solution_sql) if script.strip()]
     results = database.run([predicted_sql, normalize_sql(predicted_sql), *solution], timeout_seconds=timeout_seconds)
     submitted = results[0]
@@ -491,7 +521,12 @@ def grade(
     if len(results) < 2 or not results[1].ok:
         return Grade(passed=False)
     if not results[-1].ok:
-        raise SolutionFailedError(f"The ground-truth SQL failed: {results[-1].error}")
+        # The solution runs on the state the submission left, as in the ADK, which grades a submission that breaks it
+        # as wrong. Only a solution that also fails on the episode's own state is bad task data.
+        alone = baseline.run(solution, timeout_seconds=timeout_seconds)[-1]
+        if not alone.ok:
+            raise SolutionFailedError(f"The ground-truth SQL failed: {alone.error}")
+        return Grade(passed=False)
     predicted_rows = results[1].rows
     solution_rows = results[-1].rows if solution else None
     if not predicted_rows or not solution_rows:
@@ -499,11 +534,16 @@ def grade(
     try:
         predicted_rows, solution_rows = _normalize_rows(predicted_rows), _normalize_rows(solution_rows)
         passed = predicted_rows == solution_rows if ordered else set(predicted_rows) == set(solution_rows)
-    except TypeError:
-        # A value that JSON or a set cannot hold; the ADK's comparison fails on it too.
+    except (TypeError, InvalidOperation):
+        # A value that JSON or a set cannot hold, or a decimal too large to round to two places; the ADK's comparison
+        # fails on both too.
         passed = False
     if passed and apply_if_passed:
-        database.run([predicted_sql], timeout_seconds=timeout_seconds, commit=True)
+        (applied,) = baseline.run([predicted_sql], timeout_seconds=timeout_seconds, commit=True)
+        if not applied.ok:
+            # The same SQL just ran on the same state, so the sandbox failed, not the submission: the command fails,
+            # and the server retries it on a fresh sandbox.
+            raise RuntimeError(f"Applying the passing phase 1 SQL failed: {applied.error}")
     return Grade(passed=passed)
 
 
@@ -537,7 +577,10 @@ def grade_by_test_cases(
         finally:
             helpers.close()
     if passed and apply_if_passed:
-        database.run([predicted_sql], timeout_seconds=timeout_seconds, commit=True)
+        (applied,) = database.run([predicted_sql], timeout_seconds=timeout_seconds, commit=True)
+        if not applied.ok:
+            # The test cases ran on a copy under another name; SQL that fails on the episode's database itself fails.
+            return Grade(passed=False, execution_error=applied.error, timed_out=applied.timed_out)
     return Grade(passed=passed)
 
 
@@ -561,7 +604,8 @@ def main(argv: list[str]) -> None:
         database.create(request)
         result: dict[str, object] = {}
     elif command == "execute":
-        (query,) = database.run([request["sql"]], timeout_seconds=request["timeout_seconds"])
+        target = PostgresDatabase(WORK_DATABASE) if isinstance(database, PostgresDatabase) else database
+        (query,) = target.run([request["sql"]], timeout_seconds=request["timeout_seconds"])
         rows = query.rows or []
         result = {
             "error": query.error,
@@ -582,14 +626,21 @@ def main(argv: list[str]) -> None:
                     apply_if_passed=request.get("apply_if_passed", False),
                 )
             else:
-                outcome = grade(
-                    database,
-                    request["predicted_sql"],
-                    request["solution_sql"],
-                    ordered=request["ordered"],
-                    timeout_seconds=request["timeout_seconds"],
-                    apply_if_passed=request.get("apply_if_passed", False),
-                )
+                with contextlib.ExitStack() as stack:
+                    scratch = (
+                        stack.enter_context(database.copy(GRADE_DATABASE))
+                        if isinstance(database, PostgresDatabase)
+                        else database
+                    )
+                    outcome = grade(
+                        scratch,
+                        request["predicted_sql"],
+                        request["solution_sql"],
+                        ordered=request["ordered"],
+                        timeout_seconds=request["timeout_seconds"],
+                        apply_if_passed=request.get("apply_if_passed", False),
+                        baseline=database,
+                    )
             result = {
                 "passed": outcome.passed,
                 "execution_error": outcome.execution_error,
@@ -597,6 +648,9 @@ def main(argv: list[str]) -> None:
             }
         except SolutionFailedError as error:
             result = {"solution_error": str(error)}
+        if isinstance(database, PostgresDatabase):
+            # Exploration starts again from the episode's database, as the ADK's does after each submission.
+            database.refresh(WORK_DATABASE)
     else:
         raise SystemExit(f"Unknown command {command!r}; expected setup, execute or grade")
     print(json.dumps(result))
