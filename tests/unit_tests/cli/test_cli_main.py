@@ -1723,6 +1723,20 @@ class TestAgentSelector:
             == 1
         )
 
+    def test_langgraph_flavor_on_birdbench_takes_no_resources_tool_grant(self, monkeypatch: MonkeyPatch) -> None:
+        """BIRD dev runs on single_agent_turn, which grants simple_agent bird_sql's tools; a model-only graph gets none."""
+        argv = ("eval", "run", "--benchmark", "birdbench", "--model-type", "openai_model")
+        original = self._resolve(monkeypatch, *argv).birdbench_bird_sql_environment_server.environment_servers
+        assert original.single_agent_turn.agent_server.name == "birdbench_bird_sql_simple_agent"
+        assert list(original.single_agent_turn.resources_tool_transports) == ["direct_http"]
+
+        resolved = self._resolve(monkeypatch, *argv, "--agent-type", "langgraph_agent/orchestrator_agent")
+
+        environment = resolved.birdbench_bird_sql_environment_server.environment_servers
+        assert list(environment) == ["single_agent_turn"]
+        assert environment.single_agent_turn.agent_server.name == "birdbench_bird_sql_langgraph_agent"
+        assert list(environment.single_agent_turn.resources_tool_transports) == []
+
     def test_langgraph_selection_preserves_composed_name_overrides(self, monkeypatch: MonkeyPatch) -> None:
         resolved = self._resolve_langgraph_selection(
             monkeypatch,
