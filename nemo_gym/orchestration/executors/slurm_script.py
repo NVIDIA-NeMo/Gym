@@ -1370,13 +1370,18 @@ def build_sbatch_script(
             )
             for name, settings in exports.items()
         ]
+        # The CPU job runs exports only; it must never rerun evaluation.
+        # render_driver_entrypoint ignores export_tail when command is set.
+        export_commands = "\n".join(
+            f"python3 -m nemo_gym.orchestration.export_step {shlex.quote(name)} {' '.join(args)} || true"
+            for name, args in export_steps
+        )
         export_entrypoint = render_driver_entrypoint(
             repo=gi.repo if gi else None,
             ref=gi.ref if gi else None,
             prepare_cmd=None,
-            command="true",
+            command=export_commands,
             extras=export_install_extras(list(exports)),
-            export_tail=render_export_tail(remote_bench_dir, export_steps),
         )
         export_srun = (
             f"srun --no-container-mount-home{driver_mounts_flag} "
