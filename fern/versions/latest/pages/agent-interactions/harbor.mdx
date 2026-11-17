@@ -82,7 +82,8 @@ is seeded (`_ng_failure_stage: agent`).
 
 Other harnesses that meet both conditions above, such as `claude_code_agent`, also work. A dataset can limit its
 harnesses with `allowed_agents` in its `dataset.toml`; `--allow-unsupported-pairing` waives the check. A task that
-declares its own MCP servers needs a harness that can take them; see
+declares its own MCP servers needs a harness that takes required MCP tool grants or reads the task's tool context,
+which `terminus_2_sandboxed_agent` does not; see
 [A task with its own MCP tool](/main/data/task-folders/task-folder-patterns#a-task-with-its-own-mcp-tool).
 
 ### A benchmark config that names a target
@@ -185,7 +186,6 @@ Pass the file with `--config <file>`, or set one key with
 | `queue_timeout_seconds` | none | How long an episode may wait for a slot. |
 | `separate_verifier_for_artifacts` | `false` | Verify tasks that declare `artifacts` in a fresh sandbox. See [Shared and separate verification](/main/data/task-folders/task-folder-verifiers#shared-and-separate-verification). |
 | `secrets` | `{}` | Secrets by variable name. They fill `${NAME}` in `[verifier].env` and `[steps.verifier].env` only. |
-| `task_mcp_grants` | `off` | Grant the `streamable-http` MCP servers of the task and the `compose_overlay` to the agent: `optional` or `required`. With `required`, an agent that cannot connect fails. A harness that cannot start task tools can then take a task whose MCP servers are all granted, if the task has no `skills_dir`. Ungranted entries reach the harness only in `/tmp/.nemo-gym/task.json`. |
 | `turn_sessions` | `fresh` | Multi-step tasks: `fresh` opens a session per step, `continue` keeps one. See [Continue one harness session](/main/data/task-folders/multi-step-tasks#continue-one-harness-session). |
 | `compose_variables` | `{}` | Values for `${NAME}` that a task's Compose file leaves unset. See [Template variables](/main/data/task-folders/compose-tasks#template-variables). |
 | `compose_overlay` | none | Compose files, MCP servers and a prompt template for every task. See [Job-level Compose overlay](/main/data/task-folders/compose-tasks#job-level-compose-overlay). |

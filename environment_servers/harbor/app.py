@@ -386,10 +386,6 @@ class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
     # Verify tasks that declare `artifacts` in a fresh sandbox even when `task.toml` keeps Harbor's shared
     # mode: the agent cannot tamper with the grader. Tasks without artifacts keep their declared mode.
     separate_verifier_for_artifacts: bool = False
-    # Grant the task's `[[environment.mcp_servers]]` URL entries to the agent as MCP tool accesses. "off" keeps
-    # them in /tmp/.nemo-gym/task.json only; "required" makes an agent that cannot connect fail its seed or its
-    # first turn, so a harness without supports_task_tool_context can take a task whose MCP servers are all granted.
-    task_mcp_grants: Literal["off", "optional", "required"] = "off"
     # How a multi-step task's turns reach the harness. "fresh": one agent session per step (Harbor's default,
     # `resume_trajectory = false`). "continue": one continuation session for the episode, each step an activation
     # of it, so the agent keeps its conversation across steps (Harbor's `--resume-trajectory`); refused before any
@@ -1225,23 +1221,11 @@ class HarborEnvironmentServer(
             unreached = self._unreached_task_tools(task, mcp_servers, tool_accesses)
             if unreached and not agent_session.supports_task_tool_context:
                 # The task's tools would never reach this harness, and the run would score a silent zero.
-                # Advice only when following it would clear the refusal: every unreached entry is a grantable
-                # streamable-http server and grants are not already required.
-                grantable = "skills_dir" not in unreached and all(
-                    server.transport == "streamable-http" and bool(server.url)
-                    for server in mcp_servers
-                    if f"MCP server {server.name!r}" in unreached
-                )
-                hint = (
-                    ", or grant its streamable-http MCP servers with task_mcp_grants: required"
-                    if grantable and self.config.task_mcp_grants != "required"
-                    else ""
-                )
                 raise HTTPException(
                     422,
                     f"Task {task.task_id!r} declares MCP servers or a skills directory, which the agent "
                     f"{self.config.agent_server.name!r} does not support ({', '.join(unreached)}); run it with a "
-                    f"harness that declares supports_task_tool_context in its seed response{hint}",
+                    "harness that declares supports_task_tool_context in its seed response",
                 )
         except HTTPException as error:
             # The configured harness cannot take this task; a retry would be refused the same way.
@@ -1691,20 +1675,22 @@ class HarborEnvironmentServer(
         """The task's tool declarations a harness reaches only through ``/tmp/.nemo-gym/task.json``.
 
         ``mcp_servers`` is the list the grants were built from, so both sides of the check see the same servers.
-        An MCP server granted as required reaches any harness that accepted the grant: by the tool-access contract
-        a harness that cannot establish a required server fails its seed or its first turn (Hermes and Pi connect
-        at the first activation) rather than running without it. Optional grants may be skipped, and a skills
-        directory has no grant at all, so those stay unreached.
+        An MCP server is granted as required, so it reaches any harness that accepted the grant: by the tool-access
+        contract a harness that cannot establish a required server fails its seed or its first turn (Hermes and Pi
+        connect at the first activation) rather than running without it. An entry that cannot be granted (see
+        :meth:`_task_tool_accesses`) and a skills directory, which has no grant at all, stay unreached.
         """
-        granted = {access.name for access in tool_accesses if isinstance(access, MCPToolAccess) and access.required}
+        granted = {access.name for access in tool_accesses}
         unreached = [f"MCP server {server.name!r}" for server in mcp_servers if server.name not in granted]
         if task.config.environment.skills_dir:
             unreached.append("skills_dir")
         return unreached
 
     def _task_tool_accesses(self, task: HarborTask, mcp_servers: list[HarborMCPServer]) -> list[ToolAccess]:
-        """``mcp_servers`` (the task's, the job-level overlay's merged in by name) as agent tool grants, when
-        ``task_mcp_grants`` asks for them: one grant list, as Harbor hands its agent one ``mcp_servers`` list.
+        """``mcp_servers`` (the task's, the job-level overlay's merged in by name) as required agent tool grants:
+        one grant list, as Harbor hands its agent one ``mcp_servers`` list. A harness that cannot connect to a
+        granted server fails its seed or its first turn, and one that cannot take required grants refuses the seed,
+        so a task's tools never go missing without a failure.
 
         Only URL entries reached over streamable HTTP can be granted; a Compose sidecar's URL names its
         service host, which resolves inside the task's sandbox group, where the harness runs. An entry that cannot
@@ -1713,8 +1699,6 @@ class HarborEnvironmentServer(
         choice, the memory team's Redis stack being ``sse`` by design, which would otherwise print one line per turn
         of every episode of the run).
         """
-        if self.config.task_mcp_grants == "off":
-            return []
         overlay = self.config.compose_overlay
         job_entries = {server.name for server in overlay.mcp_servers} if overlay is not None else set()
         accesses: list[ToolAccess] = []
@@ -1736,7 +1720,7 @@ class HarborEnvironmentServer(
             accesses.append(
                 MCPToolAccess(
                     name=server.name,
-                    required=self.config.task_mcp_grants == "required",
+                    required=True,
                     connection=MCPStreamableHTTPConnection(url=server.url),
                 )
             )

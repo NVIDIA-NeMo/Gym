@@ -1680,25 +1680,42 @@ url = "http://legacy:9000/sse"
 """
 
 
-@pytest.mark.parametrize("grants", ["off", "optional", "required"])
-async def test_task_mcp_servers_are_granted_on_request(tmp_path, monkeypatch, grants):
-    server, task, _, _ = make_server(tmp_path, monkeypatch, toml=TASK_TOML + MCP_TOML, task_mcp_grants=grants)
+GRANTED_USER_SERVER = {
+    "kind": "mcp",
+    "name": "user-server",
+    "required": True,
+    "connection": {"transport": "streamable_http", "url": "http://user-server:8000/mcp", "headers": {}},
+}
+
+
+async def test_task_mcp_servers_are_granted_as_required(tmp_path, monkeypatch):
+    server, task, _, _ = make_server(tmp_path, monkeypatch, toml=TASK_TOML + MCP_TOML)
 
     await server.run_request(request_for(task))
 
     (seed,) = server.server_client.seed_bodies()
-    if grants == "off":
-        assert seed["tool_accesses"] == []
-    else:
-        # Only the streamable-http entry can be granted; the URL is the sidecar's own host, as declared.
-        assert seed["tool_accesses"] == [
-            {
-                "kind": "mcp",
-                "name": "user-server",
-                "required": grants == "required",
-                "connection": {"transport": "streamable_http", "url": "http://user-server:8000/mcp", "headers": {}},
-            }
-        ]
+    # Only the streamable-http entry can be granted; the URL is the sidecar's own host, as declared.
+    assert seed["tool_accesses"] == [GRANTED_USER_SERVER]
+
+
+async def test_every_turns_session_is_seeded_with_the_task_mcp_grant(tmp_path, monkeypatch):
+    """One agent session per step: each step's seed carries the grant, since a session that was not handed the
+    server would run that step without its tools."""
+    server, task, sandbox, _ = multi_turn_server(
+        tmp_path,
+        monkeypatch,
+        THREE_STEPS,
+        {"plan": "Agree on a plan.", "build": "Build it.", "check": "Hand off."},
+        head='multi_step_reward_strategy = "final"\n',
+        base=TASK_TOML + MCP_TOML,
+    )
+    rewards_per_turn(server, sandbox, ["1", "1", "1"])
+
+    response = await server.run_request(request_for(task))
+
+    assert response.failure is None, response.failure
+    seeds = server.server_client.seed_bodies()
+    assert [seed["tool_accesses"] for seed in seeds] == [[GRANTED_USER_SERVER]] * 3
 
 
 def turn(

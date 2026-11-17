@@ -15,9 +15,6 @@ builds:
 harbor_environment_server:
   environment_servers:
     harbor:
-      # The agent must reach the sidecar's ask_user tool; an agent that cannot fails its seed instead of
-      # running without the user.
-      task_mcp_grants: required
       # Atlas refactoring tasks budget about 26,000 s of agent and verifier time across their turns.
       default_episode_timeout_seconds: 32400
       # The simulated user's model: a Gym model server, reached from inside the sandbox under the episode's

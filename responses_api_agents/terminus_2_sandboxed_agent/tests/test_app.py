@@ -12,7 +12,13 @@ import pytest
 from fastapi import HTTPException
 
 import nemo_gym.client.http_client
-from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentCloseSessionRequest, AgentOutcome, AgentSeedSessionRequest
+from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AgentCloseSessionRequest,
+    AgentOutcome,
+    AgentSeedRejectedError,
+    AgentSeedSessionRequest,
+)
 from nemo_gym.client import GlobalAIOHTTPAsyncClientConfig, ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
@@ -699,12 +705,21 @@ def _native_config() -> Terminus2AgentConfig:
     )
 
 
-def _seed_body(*, session="ag-1", rollout="r1", with_sandbox=True) -> dict:
+def _mcp_grant(name: str, *, required: bool) -> dict:
+    return {
+        "kind": "mcp",
+        "name": name,
+        "required": required,
+        "connection": {"transport": "streamable_http", "url": f"http://{name}:8000/mcp"},
+    }
+
+
+def _seed_body(*, session="ag-1", rollout="r1", with_sandbox=True, tool_accesses=()) -> dict:
     body = {
         "agent_session_id": session,
         "episode_id": {"rollout_id": rollout, "attempt": 0},
         "task_id": {"taskset": "tb", "task_id": "path-tracing"},
-        "tool_accesses": [],
+        "tool_accesses": list(tool_accesses),
     }
     if with_sandbox:
         body["sandbox_access"] = {
@@ -899,6 +914,48 @@ class TestNativeSessions:
     def test_seed_requires_sandbox_access(self, monkeypatch):
         _, client, _, _ = self._client(monkeypatch)
         assert client.post("/v1/agent_sessions", json=_seed_body(with_sandbox=False)).status_code == 422
+
+    def test_seed_refuses_a_required_tool_grant_it_cannot_use(self, monkeypatch):
+        """Terminus 2 drives only its terminal. The Harbor environment server grants a task's MCP servers as
+        required, so a seed that took them would run the task without its tools: it is refused, terminally, before
+        the sandbox is touched."""
+        agent, client, _, connect = self._client(monkeypatch)
+        grants = [_mcp_grant("web", required=False), _mcp_grant("user-server", required=True)]
+
+        response = client.post("/v1/agent_sessions", json=_seed_body(tool_accesses=grants))
+
+        assert response.status_code == 422
+        assert response.json()["detail"] == (
+            "Terminus 2 runs only its terminal; required tool grants it cannot use: user-server"
+        )
+        connect.assert_not_awaited()
+        assert "ag-1" not in agent._session_records
+
+    async def test_the_refusal_is_an_agent_seed_rejection_naming_every_required_grant(self, monkeypatch):
+        agent, _, _, connect = self._client(monkeypatch)
+        grants = [_mcp_grant("b-server", required=True), _mcp_grant("a-server", required=True)]
+
+        with pytest.raises(AgentSeedRejectedError) as refused:
+            await agent._seed_agent_session_state(
+                AgentSeedSessionRequest.model_validate(_seed_body(tool_accesses=grants))
+            )
+
+        assert refused.value.status_code == 422
+        assert refused.value.detail == (
+            "Terminus 2 runs only its terminal; required tool grants it cannot use: a-server, b-server"
+        )
+        connect.assert_not_awaited()
+
+    def test_seed_skips_an_optional_tool_grant(self, monkeypatch):
+        """Only a grant the environment requires is refused; an optional one may be left unused."""
+        _, client, _, connect = self._client(monkeypatch)
+
+        response = client.post(
+            "/v1/agent_sessions", json=_seed_body(tool_accesses=[_mcp_grant("web", required=False)])
+        )
+
+        assert response.status_code == 200, response.text
+        connect.assert_awaited_once()
 
     def test_responses_uses_the_session_sandbox(self, monkeypatch):
         from unittest.mock import AsyncMock
