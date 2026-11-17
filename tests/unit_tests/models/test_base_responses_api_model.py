@@ -480,6 +480,83 @@ def test_stream_error_events_are_terminal():
     assert _consume_terminal_sse_event(bytearray(b"data:[DONE]\n\n"), "chat") == "complete"
 
 
+@pytest.mark.parametrize(
+    "event_type,terminal",
+    [
+        ("response.completed", "complete"),
+        ("response.incomplete", "incomplete"),
+        ("response.failed", "error"),
+        ("error", "error"),
+        ("response.output_item.done", None),
+    ],
+)
+def test_data_only_responses_events_are_terminal(event_type, terminal):
+    """OpenAI-compatible gateways may omit `event:` lines, sending only `data:` payloads and `[DONE]`."""
+    from nemo_gym.models.model_call_capture import _consume_terminal_sse_event
+
+    stream = f'data: {{"type":"{event_type}","response":{{}}}}\n\ndata: [DONE]\n\n'.encode()
+    assert _consume_terminal_sse_event(bytearray(stream), "responses") == terminal
+
+
+@pytest.mark.parametrize(
+    "event_type,terminal",
+    [
+        ("response.completed", "complete"),
+        ("response.incomplete", "incomplete"),
+        ("response.failed", "error"),
+        ("response.output_item.done", None),
+    ],
+)
+def test_data_only_responses_event_split_over_several_data_lines_is_read_whole(event_type, terminal):
+    """SSE lets one event's payload span several `data:` lines, which the reader joins with newlines."""
+    from nemo_gym.models.model_call_capture import _consume_terminal_sse_event
+
+    stream = f'data: {{"type":"{event_type}",\ndata: "response":{{}}}}\n\n'.encode()
+    assert _consume_terminal_sse_event(bytearray(stream), "responses") == terminal
+
+
+@pytest.mark.parametrize("stream", [b"data: not json\n\n", b'data: ["response.completed"]\n\n', b"data:\n\n"])
+def test_malformed_data_only_responses_events_are_not_terminal(stream):
+    from nemo_gym.models.model_call_capture import _consume_terminal_sse_event
+
+    assert _consume_terminal_sse_event(bytearray(stream), "responses") is None
+
+
+MULTILINE_COMPLETED_EVENT = (
+    b'data: {"type":"response.completed",\n'
+    b'data: "response":{"id":"r","object":"response","status":"completed","output":[]}}\n\n'
+)
+
+
+@pytest.mark.parametrize(
+    "chunks",
+    [
+        [MULTILINE_COMPLETED_EVENT],
+        # Split inside the first data line and between the two data lines.
+        [MULTILINE_COMPLETED_EVENT[:20], MULTILINE_COMPLETED_EVENT[20:37], MULTILINE_COMPLETED_EVENT[37:]],
+    ],
+)
+def test_data_only_multiline_completed_stream_is_recorded_as_success(tmp_path, chunks):
+    from fastapi.responses import StreamingResponse
+
+    app = FastAPI()
+
+    @app.post("/v1/responses")
+    async def _responses() -> StreamingResponse:
+        return StreamingResponse(iter(chunks), media_type="text/event-stream")
+
+    _install_capture(app, tmp_path)
+
+    response = TestClient(app).post("/ng-rollout/r-multiline/v1/responses", json={"input": "x", "stream": True})
+
+    assert response.status_code == 200
+    assert response.content == MULTILINE_COMPLETED_EVENT
+    [call] = read_model_call_records(CaptureStore(tmp_path), "r-multiline")
+    assert call.error_category is None
+    [exchange] = CaptureStore(tmp_path).read("r-multiline")
+    assert exchange["response"]["id"] == "r" and exchange["response"]["status"] == "completed"
+
+
 def test_http_200_stream_error_is_not_recorded_as_success(tmp_path):
     from fastapi.responses import StreamingResponse
 
