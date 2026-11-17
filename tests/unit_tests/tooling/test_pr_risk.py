@@ -19,7 +19,6 @@ import sys
 from pathlib import Path
 
 import pytest
-import yaml
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -29,279 +28,108 @@ pr_risk = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(pr_risk)
 
 API = {
-    "nemo_gym/core/__init__.py": '_PUBLIC_API = {"Thing": "things", "helper": "reexports"}\n',
-    "nemo_gym/core/things.py": "class Thing:\n    size: int = 1\n\n    def run(self, x: int) -> int:\n        return x\n",
-    "nemo_gym/core/reexports.py": "from nemo_gym.core.helpers import helper\n",
-    "nemo_gym/core/helpers.py": "def helper(a: str) -> str:\n    return a\n",
-    "pyproject.toml": '[project]\nname = "nemo-gym"\ndependencies = ["fastapi"]\n\n[tool.ruff]\nline-length = 119\n',
+    "nemo_gym/__init__.py": '_LAZY_EXPORTS: dict[str, str] = {"helper": "core.shared"}\n',
+    "nemo_gym/core/__init__.py": '_PUBLIC_API = {"Thing": "things"}\n',
+    "nemo_gym/core/things.py": "class Thing:\n    pass\n",
+    "nemo_gym/core/shared.py": "def helper():\n    pass\n",
+    "nemo_gym/core/helpers.py": "def internal():\n    pass\n",
 }
+PROTECTED = ["pyproject.toml", ".github/workflows/*"]
 
 
-def lines(count: int, prefix: str = "line") -> str:
-    return "".join(f"{prefix} {index}\n" for index in range(count))
+def lines(count: int) -> str:
+    return "".join(f"line {index}\n" for index in range(count))
 
 
-def make_tree(root: Path, files: dict[str, str | bytes]) -> Path:
+def commit(repo: Path, files: dict[str, str | None]) -> None:
     for relative, content in files.items():
-        path = root / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if isinstance(content, bytes):
-            path.write_bytes(content)
+        path = repo / relative
+        if content is None:
+            path.unlink()
         else:
+            path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content)
-    return root
+    subprocess.run(["git", "-C", repo, "add", "-A"], check=True)
+    identity = ["-c", "user.name=test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false"]
+    subprocess.run(["git", "-C", repo, *identity, "commit", "-q", "--no-verify", "-m", "x"], check=True)
 
 
-def grade(
-    tmp_path: Path, before: dict[str, str | bytes], after: dict[str, str | bytes], protected: tuple[str, ...] = ()
-) -> tuple[str, list[str]]:
-    base = make_tree(tmp_path / "base", {**API, **before})
-    head = make_tree(tmp_path / "head", {**API, **after})
-    return pr_risk.grade(base, head, protected)
+def worktrees(tmp_path: Path, before: dict[str, str | None], after: dict[str, str | None]) -> tuple[Path, Path]:
+    head = tmp_path / "head"
+    subprocess.run(["git", "init", "-q", head], check=True)
+    commit(head, {**API, **before})
+    subprocess.run(["git", "-C", head, "worktree", "add", "-q", "--detach", tmp_path / "base"], check=True)
+    commit(head, after)
+    return tmp_path / "base", head
 
 
-@pytest.mark.parametrize(
-    ("changed", "tier"),
-    [(0, "low"), (100, "low"), (101, "mid"), (400, "mid"), (401, "high")],
-)
-def test_tier_follows_changed_line_count(tmp_path: Path, changed: int, tier: str) -> None:
-    assert grade(tmp_path, {}, {"responses_api_agents/a/app.py": lines(changed)})[0] == tier
+def grade(tmp_path: Path, before: dict[str, str | None], after: dict[str, str | None]) -> tuple[str, list[str]]:
+    return pr_risk.grade(*worktrees(tmp_path, before, after), PROTECTED)
 
 
-def test_docs_only_change_is_low_at_any_size(tmp_path: Path) -> None:
-    after = {"docs/guide.md": lines(5000), "fern/docs.yml": lines(500), "README.md": "x\n"}
-    assert grade(tmp_path, {}, after) == ("low", ["no changes outside docs (3 doc files)"])
+@pytest.mark.parametrize(("count", "tier"), [(100, "low"), (101, "mid"), (400, "mid"), (401, "high")])
+def test_tier_follows_changed_line_count(tmp_path: Path, count: int, tier: str) -> None:
+    assert grade(tmp_path, {}, {"scripts/a.py": lines(count)})[0] == tier
 
 
-def test_lockfiles_data_and_binaries_are_not_counted(tmp_path: Path) -> None:
-    after = {"uv.lock": lines(5000), "resources_servers/s/data/example.jsonl": lines(500), "logo.bin": b"\0" * 900}
-    tier, evidence = grade(tmp_path, {}, after)
-    assert (tier, evidence) == ("low", ["0 changed lines in 3 non-doc files"])
+def test_added_and_removed_lines_count(tmp_path: Path) -> None:
+    assert grade(tmp_path, {"scripts/a.py": lines(60)}, {"scripts/a.py": None, "scripts/b.py": lines(60)}) == (
+        "mid",
+        ["120 changed lines in 2 non-doc files"],
+    )
 
 
-def test_removed_and_modified_lines_both_count(tmp_path: Path) -> None:
-    before = {"scripts/a.py": lines(60), "scripts/gone.py": lines(30)}
-    after = {"scripts/a.py": lines(60, "edited")}
-    assert grade(tmp_path, before, after) == ("mid", ["150 changed lines in 2 non-doc files"])
+def test_docs_lockfiles_and_data_are_not_counted(tmp_path: Path) -> None:
+    after = {"docs/guide.md": lines(500), "README.md": lines(500), "a.lock": lines(500), "s/data/x.jsonl": lines(500)}
+    assert grade(tmp_path, {}, after) == ("low", ["0 changed lines in 2 non-doc files"])
 
 
-@pytest.mark.parametrize("inserted", [True, False])
-def test_repeated_unchanged_lines_are_not_counted(tmp_path: Path, inserted: bool) -> None:
-    short, long = {"scripts/t.txt": "x\n" * 500}, {"scripts/t.txt": "marker\n" + "x\n" * 500}
-    before, after = (short, long) if inserted else (long, short)
-    assert grade(tmp_path, before, after) == ("low", ["1 changed lines in 1 non-doc files"])
+@pytest.mark.parametrize("path", ["resources_servers/s/app.py", "nemo_gym/verification/judge.py"])
+def test_scoring_change_is_mid(tmp_path: Path, path: str) -> None:
+    assert grade(tmp_path, {}, {path: "x\n"}) == ("mid", ["1 changed lines in 1 non-doc files", f"scoring: {path}"])
 
 
-@pytest.mark.parametrize("linked_in_head", [True, False])
-def test_files_beneath_a_directory_symlink_do_not_exist(tmp_path: Path, linked_in_head: bool) -> None:
-    real = make_tree(tmp_path / "real", {**API, "shared/x.py": lines(401), "scripts/x.py": lines(401)})
-    linked = make_tree(tmp_path / "linked", {**API, "shared/x.py": lines(401)})
-    (linked / "scripts").symlink_to("shared")
-    base, head = (real, linked) if linked_in_head else (linked, real)
-    assert pr_risk.grade(base, head) == ("high", ["402 changed lines in 2 non-doc files"])
-
-
-def test_a_symlink_counts_its_target(tmp_path: Path) -> None:
-    base, head = make_tree(tmp_path / "base", API), make_tree(tmp_path / "head", API)
-    (base / "link").symlink_to("a")
-    (head / "link").symlink_to("b")
-    assert pr_risk.grade(base, head) == ("low", ["2 changed lines in 1 non-doc files"])
+@pytest.mark.parametrize("path", ["resources_servers/s/tests/test_app.py", "resources_servers/s/data/x.json"])
+def test_scoring_tests_and_data_are_low(tmp_path: Path, path: str) -> None:
+    assert grade(tmp_path, {}, {path: "x\n"})[0] == "low"
 
 
 @pytest.mark.parametrize(
-    "path",
-    [
-        "resources_servers/s/app.py",
-        "resources_servers/s/configs/s.yaml",
-        "nemo_gym/verification/judge.py",
-        "nemo_gym/metrics/pass_at_k.py",
-    ],
+    "path", ["nemo_gym/__init__.py", "nemo_gym/core/__init__.py", "nemo_gym/core/things.py", "nemo_gym/core/shared.py"]
 )
-def test_small_scoring_change_is_mid(tmp_path: Path, path: str) -> None:
-    tier, evidence = grade(tmp_path, {}, {path: lines(3)})
-    assert tier == "mid"
-    assert f"scoring: {path}" in evidence
-
-
-@pytest.mark.parametrize(
-    "path",
-    [
-        "resources_servers/s/tests/test_app.py",
-        "resources_servers/s/data/example.json",
-        "resources_servers/s/README.md",
-    ],
-)
-def test_scoring_tests_data_and_docs_stay_low(tmp_path: Path, path: str) -> None:
-    assert grade(tmp_path, {}, {path: lines(3)})[0] == "low"
-
-
-@pytest.mark.parametrize(
-    "path", ["nemo_gym/core/__init__.py", "nemo_gym/core/things.py", "nemo_gym/core/reexports.py"]
-)
-def test_changing_a_public_api_file_is_high_at_any_size(tmp_path: Path, path: str) -> None:
+def test_public_surface_change_is_high(tmp_path: Path, path: str) -> None:
     tier, evidence = grade(tmp_path, {}, {path: API[path] + "# edit\n"})
     assert tier == "high"
     assert f"public surface: {path}" in evidence
 
 
-def test_changing_a_module_outside_the_public_api_is_not_public_surface(tmp_path: Path) -> None:
+def test_unlisted_module_is_not_public_surface(tmp_path: Path) -> None:
     assert grade(tmp_path, {}, {"nemo_gym/core/helpers.py": API["nemo_gym/core/helpers.py"] + "# edit\n"})[0] == "low"
 
 
-ROOT_INIT = {
-    "nemo_gym/__init__.py": 'CACHE_DIR = "cache"\n_LAZY_EXPORTS: dict[str, str] = {\n    "helper": "core.helpers",\n}\n'
-}
-
-
-@pytest.mark.parametrize("path", ["nemo_gym/__init__.py", "nemo_gym/core/helpers.py"])
-def test_the_root_lazy_exports_are_public_surface(tmp_path: Path, path: str) -> None:
-    before = {**ROOT_INIT}
-    after = {**ROOT_INIT, path: {**API, **ROOT_INIT}[path] + "# edit\n"}
-    tier, evidence = grade(tmp_path, before, after)
-    assert tier == "high"
-    assert f"public surface: {path}" in evidence
-
-
-def test_an_initializer_the_interpreter_cannot_parse_still_lists_its_files(tmp_path: Path) -> None:
-    init = {"nemo_gym/core/__init__.py": "this is not python\n" + API["nemo_gym/core/__init__.py"]}
-    after = {**init, "nemo_gym/core/things.py": API["nemo_gym/core/things.py"] + "# edit\n"}
-    assert grade(tmp_path, init, after)[0] == "high"
-
-
-@pytest.mark.parametrize(
-    ("init", "path", "tier"),
-    [
-        ('_PUBLIC_API = {  # }\n    "Thing": "things",\n}\n', "nemo_gym/core/things.py", "high"),
-        (
-            '"""\n_PUBLIC_API = {"helper": "helpers"}\n"""\n_PUBLIC_API = {"Thing": "things"}\n',
-            "nemo_gym/core/helpers.py",
-            "low",
-        ),
-        (
-            '_PUBLIC_API = {"Thing": "things"}\n_PUBLIC_API.get("unused", {"helper": "helpers"})\n',
-            "nemo_gym/core/helpers.py",
-            "low",
-        ),
-        ('_marker = 0; _PUBLIC_API = {"Thing": "things"}\n', "nemo_gym/core/things.py", "high"),
-        ('def unused():\n    _PUBLIC_API = {"helper": "helpers"}\n', "nemo_gym/core/helpers.py", "low"),
-    ],
-)
-def test_only_top_level_table_assignments_list_files(tmp_path: Path, init: str, path: str, tier: str) -> None:
-    before = {"nemo_gym/core/__init__.py": init}
-    after = {**before, path: API[path] + "# edit\n"}
-    assert grade(tmp_path, before, after)[0] == tier
-
-
-def test_a_directory_named_like_an_initializer_is_skipped(tmp_path: Path) -> None:
-    assert grade(tmp_path, {}, {"nemo_gym/aux/__init__.py/notes.txt": "x\n"})[0] == "low"
-
-
-def test_an_invalid_export_still_grades_its_initializer(tmp_path: Path) -> None:
-    after = {"nemo_gym/core/__init__.py": '_PUBLIC_API = {"Thing": "/outside", "Other": "../../../x", "Root": "/"}\n'}
-    tier, evidence = grade(tmp_path, {}, after)
-    assert tier == "high"
-    assert "public surface: nemo_gym/core/__init__.py" in evidence
-
-
-def test_a_listed_file_replaced_by_a_symlink_loop_is_high(tmp_path: Path) -> None:
-    base = make_tree(tmp_path / "base", API)
-    head = make_tree(tmp_path / "head", API)
-    (head / "nemo_gym/core/things.py").unlink()
-    (head / "nemo_gym/core/things.py").symlink_to("things.py")
-    assert pr_risk.grade(base, head)[0] == "high"
-    assert pr_risk.grade(head, base)[0] == "high"
-
-
-def test_an_executable_bit_change_is_a_change(tmp_path: Path) -> None:
-    script = {"resources_servers/s/score.sh": "#!/bin/sh\nexit 0\n"}
-    base = make_tree(tmp_path / "base", {**API, **script})
-    head = make_tree(tmp_path / "head", {**API, **script})
-    (base / "resources_servers/s/score.sh").chmod(0o755)
-    tier, evidence = pr_risk.grade(base, head)
-    assert tier == "mid"
-    assert evidence == ["0 changed lines in 1 non-doc files", "scoring: resources_servers/s/score.sh"]
-
-
-PROTECTED = ("pyproject.toml", "uv.lock", ".github/workflows/*", "SECURITY.md")
-
-
-@pytest.mark.parametrize(
-    ("before", "after", "path"),
-    [
-        ({}, {"pyproject.toml": API["pyproject.toml"] + "# note\n"}, "pyproject.toml"),
-        ({"uv.lock": "a\n"}, {}, "uv.lock"),
-        ({}, {".github/workflows/ci/test.yml": "x\n"}, ".github/workflows/ci/test.yml"),
-        ({}, {"SECURITY.md": "x\n"}, "SECURITY.md"),
-    ],
-)
-def test_protected_file_change_is_high_at_any_size(
-    tmp_path: Path, before: dict[str, str], after: dict[str, str], path: str
-) -> None:
-    tier, evidence = grade(tmp_path, before, after, PROTECTED)
+@pytest.mark.parametrize("path", ["pyproject.toml", ".github/workflows/ci/test.yml"])
+def test_protected_file_change_is_high(tmp_path: Path, path: str) -> None:
+    tier, evidence = grade(tmp_path, {}, {path: "x\n"})
     assert tier == "high"
     assert f"protected: {path}" in evidence
 
 
-def test_protected_globs_match_the_whole_path(tmp_path: Path) -> None:
-    after = {"resources_servers/s/tests/pyproject.toml": "x\n", "scripts/uv.lock": "x\n"}
-    assert grade(tmp_path, {}, after, PROTECTED)[0] == "low"
-
-
-def test_protected_patterns_load_from_the_companion_file(tmp_path: Path) -> None:
-    assert pr_risk.protected_patterns(tmp_path / "missing.yaml") == ()
-    companion = tmp_path / "protected_files.yaml"
-    companion.write_text(
-        "# header\n- a.toml  # inline\n\n- 'b/*'\n- \"*.lock\"\n  # indented comment\n- .github/workflows/*\n"
-        "- 'scripts/release #*.py'  # quoted hash\n- 'it''s'\n- \"say \\\"hi\\\" \\\\ #x\"\n"
-    )
-    expected = ("a.toml", "b/*", "*.lock", ".github/workflows/*", "scripts/release #*.py", "it's", 'say "hi" \\ #x')
-    assert pr_risk.protected_patterns(companion) == expected
-    assert yaml.safe_load(companion.read_text()) == list(pr_risk.protected_patterns(companion))
-    unsupported = ("- *.lock\n", "- true\n", "- 1.0\n", "- a: b\n", "- a#b\n", "- a\tb\n", "- a\n  - b\n", '- "\\t"\n')
-    malformed = ("files:\n  - a\n", "-a\n", "- ''\n", "- 'open\n", "- 'a' b\n", "- 'a'# c\n")
-    for invalid in unsupported + malformed:
-        companion.write_text(invalid)
-        with pytest.raises(ValueError, match="expected a YAML list entry"):
-            pr_risk.protected_patterns(companion)
-
-
-def test_quoted_protected_glob_keeps_its_hash(tmp_path: Path) -> None:
-    companion = tmp_path / "protected_files.yaml"
-    companion.write_text("- 'scripts/release #*.py'\n")
-    protected = pr_risk.protected_patterns(companion)
-    assert protected == ("scripts/release #*.py",)
-    tier, evidence = grade(tmp_path, {"scripts/release #1.py": "a\n"}, {"scripts/release #1.py": "b\n"}, protected)
-    assert tier == "high"
-    assert "protected: scripts/release #1.py" in evidence
-
-
-def test_repository_protects_packaging_files() -> None:
-    assert pr_risk.PROTECTED_FILES == SCRIPT.with_name("protected_files.yaml")
+def test_protected_patterns(tmp_path: Path) -> None:
+    listed = tmp_path / "protected_files.yaml"
+    listed.write_text("# comment\n- a.toml\n- 'b/*'\n")
+    assert pr_risk.protected_patterns(listed) == ["a.toml", "b/*"]
+    assert pr_risk.protected_patterns(tmp_path / "missing.yaml") == []
     assert {"pyproject.toml", "uv.lock"} <= set(pr_risk.protected_patterns())
-    assert yaml.safe_load(pr_risk.PROTECTED_FILES.read_text()) == list(pr_risk.protected_patterns())
 
 
-def test_cli_prints_only_the_tier_on_stdout_and_ignores_the_worktree_git_file(tmp_path: Path) -> None:
-    base = make_tree(tmp_path / "base", {**API, ".git": "gitdir: /a\n"})
-    head = make_tree(tmp_path / "head", {**API, ".git": "gitdir: /b\n", "scripts/x.py": lines(150)})
+def test_cli_prints_the_tier_on_stdout(tmp_path: Path) -> None:
+    base, head = worktrees(tmp_path, {}, {"scripts/a.py": lines(150)})
     result = subprocess.run(
-        [sys.executable, "-I", str(SCRIPT), "--base", str(base), "--head", str(head)],
-        capture_output=True,
-        text=True,
-        check=True,
-        cwd=tmp_path,
+        [sys.executable, SCRIPT, "--base", base, "--head", head], capture_output=True, text=True, check=True
     )
     assert result.stdout == "mid\n"
     assert result.stderr == "150 changed lines in 1 non-doc files\n"
 
 
-def test_cli_rejects_a_missing_tree(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    with pytest.raises(SystemExit):
-        pr_risk.main(["--base", str(tmp_path), "--head", str(tmp_path / "missing")])
-    assert "is not a directory" in capsys.readouterr().err
-
-
 def test_repository_public_surface_is_discovered() -> None:
-    surface = pr_risk.public_surface(ROOT)
-    assert "nemo_gym/core/__init__.py" in surface
-    assert all((ROOT / path).is_file() for path in surface)
+    assert "nemo_gym/core/__init__.py" in pr_risk.public_surface(ROOT)

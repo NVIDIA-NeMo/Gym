@@ -1,6 +1,4 @@
 # Paths whose change grades a pull request high, whatever its size. pr_risk.py reads this list from the
 # pull request's target branch. Each entry is a glob over the whole repository path; `*` also matches `/`.
-# Quote an entry unless it starts with a letter, `_`, `/` or `.` and has no `:` or `#`. Keep the file a flat
-# list: pr_risk.py parses it without a YAML library and rejects any line it would read differently from YAML.
 - pyproject.toml
 - uv.lock
