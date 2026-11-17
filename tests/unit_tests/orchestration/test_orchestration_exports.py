@@ -26,7 +26,7 @@ from pydantic import ValidationError
 
 from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint, render_export_tail
-from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
+from nemo_gym.orchestration.executors.slurm.script import build_sbatch_script
 from nemo_gym.orchestration.exports import effective_exports, export_install_extras, export_run_settings
 
 

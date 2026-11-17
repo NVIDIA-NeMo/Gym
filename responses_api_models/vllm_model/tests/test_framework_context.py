@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 import nemo_gym.client.server_client
 import nemo_gym.models.base_responses_api_model
 import nemo_gym.server_runtime.base_server
+import responses_api_models.vllm_model.app
 from nemo_gym.client import NeMoGymAsyncOpenAI, ServerClient
 from nemo_gym.core import SSE_KEEPALIVE, NeMoGymResponseCreateParamsNonStreaming, current_rollout_id
 from nemo_gym.models import (
@@ -1159,18 +1160,18 @@ async def test_cancelled_chat_keepalive_retains_uncertain_capture(monkeypatch, t
     failure_written = threading.Event()
     record_failure = harness.ledger._record_failure
 
-    def persist_failure(*args):
-        record_failure(*args)
+    def persist_failure(*args, **kwargs):
+        record_failure(*args, **kwargs)
         failure_written.set()
 
     monkeypatch.setattr(harness.ledger, "_record_failure", persist_failure)
     if delay_failure_write:
         record_failure_async = harness.ledger.record_failure
 
-        async def delayed_failure(*args):
+        async def delayed_failure(*args, **kwargs):
             # Exercise cancellation before the ledger submits work to its executor.
             await asyncio.sleep(0.01)
-            await record_failure_async(*args)
+            await record_failure_async(*args, **kwargs)
 
         monkeypatch.setattr(harness.ledger, "record_failure", delayed_failure)
     worker = NeMoGymAsyncOpenAI.create_chat_completion
@@ -1567,3 +1568,64 @@ def test_retired_capture_refuses_dispatch_and_measurement(monkeypatch, tmp_path,
     assert response.status_code == 409, response.text
     assert "retired" in response.json()["detail"]
     assert len(harness.worker_calls) == 1
+
+
+def test_an_acknowledged_context_refusal_is_recorded_under_the_calling_agent_instance(monkeypatch, tmp_path):
+    harness = make_capture_harness(monkeypatch, tmp_path)
+
+    async def refuse(client, **body):
+        admission = CaptureAdmission.model_validate(body[NG_CAPTURE_FIELD])
+        error = ClientResponseError(
+            MagicMock(real_url="http://worker.test"),
+            (),
+            status=400,
+            headers={CAPTURE_REFUSAL_HEADER: admission.model_call_id},
+        )
+        error.response_content = b'{"error":{"message":"maximum context length is 32768 tokens","code":400}}'
+        raise error
+
+    monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", refuse)
+    response = harness.client.post(
+        "/ng-rollout/attempt/ng-agent-instance/judge.2/training-token-capture/v1/responses", json={"input": HISTORY}
+    )
+    assert_clean(response, status=400)
+
+    [refusal] = [row for row in harness.ledger.export_rows("attempt") if row.get("refused_before_generation")]
+    assert (refusal["agent_instance"], refusal["agent_kind"]) == ("judge.2", "judge")
+    assert refusal["model_ref"] == {"type": "responses_api_models", "name": "policy"}
+
+
+def test_measurement_resolves_under_the_identity_of_the_calling_agent_instance(monkeypatch, tmp_path):
+    """The measurement context carries the identity a generation call of the same agent instance would."""
+    harness = make_capture_harness(monkeypatch, tmp_path)
+    first = assert_clean(
+        harness.client.post(
+            "/ng-rollout/attempt/ng-agent-instance/judge.2/training-token-capture/v1/responses",
+            json={"input": HISTORY},
+        )
+    )
+    before = harness.ledger.export_rows("attempt")
+    contexts = []
+    set_token_sink = responses_api_models.vllm_model.app.set_token_sink
+
+    def remember(context):
+        contexts.append(context)
+        return set_token_sink(context)
+
+    async def tokenize(client, **body):
+        return {"prompt_token_count": 19, "ng_context_measured": True}
+
+    monkeypatch.setattr(responses_api_models.vllm_model.app, "set_token_sink", remember)
+    monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_tokenize", tokenize)
+    body = {"input": HISTORY + first["output"] + [{"role": "user", "content": "next"}]}
+    for path in (
+        "/ng-rollout/attempt/ng-agent-instance/judge.2/training-token-capture/context/measure",
+        "/ng-rollout/attempt/training-token-capture/context/measure",
+    ):
+        response = harness.client.post(path, json=body)
+        assert response.status_code == 200, response.text
+
+    named, unnamed = contexts
+    assert (named.agent_instance, named.agent_kind, named.model_ref.name) == ("judge.2", "judge", "policy")
+    assert (unnamed.agent_instance, unnamed.agent_kind, unnamed.model_ref.name) == (None, None, "policy")
+    assert harness.ledger.export_rows("attempt") == before

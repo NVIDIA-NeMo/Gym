@@ -1413,6 +1413,24 @@ class TestRolloutCollection:
             "response_status": "completed",
         }
 
+    def test_trajectory_model_call_carries_the_captured_agent_instance_and_kind(self) -> None:
+        row = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}
+        result = {
+            "ng_model_call_capture": {
+                "calls": [
+                    {"model_call_id": "named", "agent_instance": "judge.1", "agent_kind": "judge"},
+                    {"model_call_id": "unnamed"},
+                ]
+            }
+        }
+
+        trajectory = _build_trajectory_record(row, result)
+
+        assert [(call.model_call_id, call.agent_instance, call.agent_kind) for call in trajectory.model_calls] == [
+            ("named", "judge.1", "judge"),
+            ("unnamed", None, None),
+        ]
+
     def test_trajectory_keeps_each_captured_calls_total_duration(self) -> None:
         # A saved row keeps every captured call's start, end and total duration, a failed call's too, so a reader can
         # tell how long the model server took inside the agent's window.
@@ -3108,8 +3126,10 @@ class TestRolloutCollection:
 
         # Read the actual persisted rows as the recovery/health gate does. A policy zero remains measured and
         # settled despite evaluation_completed=False; a policy FAIL remains terminal and outside the score.
-        from nemo_gym.orchestration.recovery import decide_from_collected, metric_coverage, trial_faults
-        from tests.unit_tests.orchestration.test_evaluation_health import _run
+        from nemo_gym.eval.recovery.gate import metric_coverage
+        from nemo_gym.eval.recovery.planner import decide_from_collected
+        from nemo_gym.eval.recovery.trials import trial_faults
+        from tests.helpers.recovery_health import _run
 
         collected = _run(2).model_copy(update={"results": persisted, "failures": failures})
         decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
