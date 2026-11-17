@@ -17,7 +17,7 @@
 
 Everything known at submit time (services, layouts, the allocation nodes each one runs on) is
 rendered into the script. The two facts only the running job knows are filled in there: each node's
-hostname, and the GPUs `nvidia-smi` lists in a job step on that node (index and UUID). The step runs
+hostname, and the GPUs `nvidia-smi` lists in a job step on that node (index, UUID and model). The step runs
 before the services start; a node whose GPUs cannot be listed is declared with the reason and no GPU
 rows. The shape is `nemo_gym.rollouts.service_declaration.ServiceDeclaration`.
 """
@@ -159,13 +159,14 @@ _TIER_ROLES: dict[str, PoolRole] = {"kv_producer": "prefill", "kv_consumer": "de
 # A failing nvidia-smi prints a marker line with its exit status instead of failing the task, so one node's failure
 # never ends the other nodes' listings, whatever the cluster's KillOnBadExit.
 _LIST_GPUS = (
-    "out=$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader); s=$?; "
+    "out=$(nvidia-smi --query-gpu=index,uuid,name --format=csv,noheader); s=$?; "
     'if [ "$s" -ne 0 ]; then echo "$SLURMD_NODENAME, nvidia-smi-exit, $s"; '
     'else printf "%s\\n" "$out" | sed "s/^/$SLURMD_NODENAME, /"; fi'
 )
 
-# Only lines that look like `<host>, <index>, GPU-<uuid>` become rows, so stray output never turns
-# into a GPU. ENVIRON carries the services JSON without awk's escape processing.
+# Only lines that look like `<host>, <index>, GPU-<uuid>[, <name>]` become rows, so stray output never turns
+# into a GPU, and a model name is kept only when it holds plain characters, so it never breaks the JSON.
+# ENVIRON carries the services JSON without awk's escape processing.
 _NODE_FUNCTION = r"""_gym_decl_nodes=()
 _gym_decl_rows=()
 _gym_decl_node() {
@@ -173,7 +174,8 @@ _gym_decl_node() {
     local host="$2" rows smi_status reason
     rows=$(printf '%s\n' "$_gym_decl_gpus" | GYM_DECL_SERVICES="$4" awk -F' *, *' -v host="$host" -v node="$1" '
         $1 == host && $2 ~ /^[0-9]+$/ && $3 ~ /^GPU-[0-9A-Za-z-]+$/ {
-            printf "%s{\"gpu_uuid\":\"%s\",\"node_index\":%d,\"gpu_index\":%d,\"services\":%s}", sep, $3, node, $2, ENVIRON["GYM_DECL_SERVICES"]
+            name = ($4 ~ /^[0-9A-Za-z][0-9A-Za-z ._()-]*$/) ? sprintf(",\"gpu_name\":\"%s\"", $4) : ""
+            printf "%s{\"gpu_uuid\":\"%s\",\"node_index\":%d,\"gpu_index\":%d%s,\"services\":%s}", sep, $3, node, $2, name, ENVIRON["GYM_DECL_SERVICES"]
             sep = ","
         }')
     if [ -n "$rows" ]; then
