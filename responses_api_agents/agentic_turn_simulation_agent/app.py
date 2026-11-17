@@ -363,8 +363,16 @@ class AgenticTurnSimulationAgent(SimpleAgent):
         self, state: SimpleAgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming, **kwargs: Any
     ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
         reply = await super()._create_session_episode(state, body, **kwargs)
-        if isinstance(state, _TurnSessionState) and reply[1] is not None:
-            state.trajectory = reply[1]
+        trajectory = reply[1]
+        if isinstance(state, _TurnSessionState) and trajectory is not None:
+            # simple_agent's turn knows no task; the seed names it, as `/run` stamps it from the row.
+            task_id = state.request.task_id.task_id
+            state.trajectory = trajectory.model_copy(
+                update={
+                    "task_id": task_id,
+                    "turns": [turn.model_copy(update={"task_id": task_id}) for turn in trajectory.turns],
+                }
+            )
         return reply
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:

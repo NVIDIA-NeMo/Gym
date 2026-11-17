@@ -1031,7 +1031,7 @@ class TestAgentSessions:
         seed = AgentSeedSessionRequest(
             agent_session_id="agent-session",
             episode_id=EpisodeId(rollout_id="0-0", attempt=0),
-            task_id=TaskId(taskset="agent_arena", task_id="0"),
+            task_id=TaskId(taskset="agent_arena", task_id="row-7"),
             tool_accesses=[_grant()],
         )
         assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
@@ -1049,10 +1049,11 @@ class TestAgentSessions:
             ),
         )
         assert close.status_code == 200 and close.json()["agent_session_id"] == "agent-session"
-        # The close carries the turn's trajectory, with each call's output.
-        assert [(c["tool_call_id"], c["output"]) for c in close.json()["trajectory"]["tool_calls"]] == [
-            ("c1", "result of c1")
-        ]
+        # The close carries the turn's trajectory, under the seeded task, with each call's output.
+        trajectory = close.json()["trajectory"]
+        assert (trajectory["task_id"], trajectory["rollout_id"]) == ("row-7", "0-0")
+        assert {turn["task_id"] for turn in trajectory["turns"]} == {"row-7"}
+        assert [(c["tool_call_id"], c["output"]) for c in trajectory["tool_calls"]] == [("c1", "result of c1")]
 
     def test_a_cline_session_closes_with_each_calls_output(self) -> None:
         # A Cline result is in a user message, not a function_call_output item, so only the agent's own trajectory
