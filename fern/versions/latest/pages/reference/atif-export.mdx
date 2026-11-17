@@ -50,3 +50,24 @@ under the ATIF root's `extra.nemo_gym` namespace rather than overloading the age
 
 The initial strict converter does not emit partial files or conversion warnings. Unsupported or lossy inputs fail validation.
 A future best-effort mode would need an explicit `partial` status and structured warnings rather than reusing `complete`.
+
+## Transcripts exported for task-folder verifiers
+
+The Harbor Environment Server writes the agent's transcript to `/logs/agent/trajectory.json` before each verification. It
+does not use the strict `ng_trajectory` conversion above: it converts the episode's Responses transcript (the task's input
+and the harness's `response.output`) under the profile `ng-transcript-to-atif-v1`, and keeps what a verifier needs when a
+model's own output departs from the strict profile.
+
+- Consecutive function calls form one step. A result joins the step of its call by `call_id`, in the order the results
+  arrived, so a parallel pair that finishes out of order keeps both calls in the model's order.
+- A call without a result (the harness stopped while the tool ran) stays open and is listed in
+  `extra.nemo_gym.conversion.open_tool_calls`.
+- A custom (free-form) tool call, such as Codex's `apply_patch`, keeps its name and carries its text as the one argument,
+  `input`; `extra.nemo_gym.item_type` is `custom_tool_call`.
+- A call with a namespace, such as an MCP tool, is named by its bare tool name. The namespace is in
+  `extra.nemo_gym.namespace`.
+- Shapes a model causes, such as reasoning with no answer, encrypted reasoning, or arguments that are not a JSON object,
+  export with `extra.nemo_gym.conversion.status` set to `partial` and the departures listed under `reasons`.
+
+What the trajectory shows of the tools depends on the harness's `response.output`. The `codex_agent` builds it from Codex's
+session record, so each call appears as the model sent it; see the agent's README.

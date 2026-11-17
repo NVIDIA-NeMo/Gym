@@ -1940,10 +1940,70 @@ def test_transcript_to_atif_maps_developer_to_system_and_keeps_pending_calls_ope
     assert trajectory.extra["nemo_gym"]["conversion"]["open_tool_calls"] == ["call_9"]
 
 
+def _custom_call(call_id: str, name: str, text: str) -> dict[str, Any]:
+    return {"type": "custom_tool_call", "call_id": call_id, "name": name, "input": text}
+
+
+def _custom_output(call_id: str, output: str) -> dict[str, Any]:
+    return {"type": "custom_tool_call_output", "call_id": call_id, "output": output}
+
+
+def test_transcript_to_atif_exports_a_free_form_tool_call_with_its_input_as_the_argument() -> None:
+    """Codex's apply_patch takes the patch as text, not a JSON object; the grader reads it from `input`."""
+    patch = "*** Begin Patch\n*** Add File: notes.txt\n+hello\n*** End Patch"
+    trajectory = _transcript(
+        "Write notes",
+        [
+            _custom_call("patch-1", "apply_patch", patch),
+            _function_call("call-2", "exec_command", {"cmd": "cat notes.txt"}),
+            _custom_output("patch-1", "Success. Updated the following files:\nA notes.txt\n"),
+            _function_output("call-2", "hello"),
+        ],
+    )
+    step = trajectory.steps[-1]
+    assert [(c.tool_call_id, c.function_name, c.arguments) for c in step.tool_calls] == [
+        ("patch-1", "apply_patch", {"input": patch}),
+        ("call-2", "exec_command", {"cmd": "cat notes.txt"}),
+    ]
+    assert step.tool_calls[0].extra == {"nemo_gym": {"item_type": "custom_tool_call"}}
+    assert [(r.source_call_id, r.content) for r in step.observation.results] == [
+        ("patch-1", "Success. Updated the following files:\nA notes.txt\n"),
+        ("call-2", "hello"),
+    ]
+    assert trajectory.extra["nemo_gym"]["conversion"] == {
+        "profile": "ng-transcript-to-atif-v1",
+        "status": "complete",
+        "open_tool_calls": [],
+    }
+    assert AtifTrajectoryV1_7.model_validate_json(encode_atif_trajectory(trajectory)) == trajectory
+
+
+def test_transcript_to_atif_names_a_namespaced_call_by_its_tool_and_keeps_the_namespace() -> None:
+    trajectory = _transcript(
+        "Search",
+        [
+            {**_function_call("mcp-1", "search_docs", {"query": "pdf"}), "namespace": "mcp__gym_docs__"},
+            _function_output("mcp-1", "hit"),
+            _function_call("call-2", "exec_command", {"cmd": "ls"}),
+            _function_output("call-2", ""),
+        ],
+    )
+    mcp, plain = [call for step in trajectory.steps for call in step.tool_calls or []]
+    assert (mcp.function_name, mcp.extra["nemo_gym"]["namespace"]) == ("search_docs", "mcp__gym_docs__")
+    assert "namespace" not in plain.extra["nemo_gym"]
+
+
+def test_transcript_to_atif_keeps_a_free_form_call_without_its_result_open() -> None:
+    trajectory = _transcript("go", [_custom_call("patch-1", "apply_patch", "*** Begin Patch")])
+    assert trajectory.extra["nemo_gym"]["conversion"]["open_tool_calls"] == ["patch-1"]
+
+
 @pytest.mark.parametrize(
     ("output_items", "message"),
     [
         ([_function_output("call_404", "x")], "matches no pending call"),
+        ([_custom_output("patch_404", "x")], "matches no pending call"),
+        ([_custom_call("p1", "apply_patch", ""), _custom_call("p1", "apply_patch", "")], "duplicate function call ID"),
         ([_assistant_message("m", "a"), {"role": "system", "content": "later"}], "later system or developer"),
         ([_reasoning("rs", "thinking"), {"role": "system", "content": "later"}], "later system or developer"),
         ([{"role": "assistant", "content": "copied"}], "copied assistant context"),

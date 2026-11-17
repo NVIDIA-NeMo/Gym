@@ -232,6 +232,21 @@ when the sandbox starts it below zero), so a memory-cgroup OOM kill picks agent 
 than the sandbox's exec daemon or the supervisor. Docker's equivalent daemon runs outside the
 container's memory cgroup. The runner records the change in the supervisor's `output.log`.
 
+Sessions build `response.output` from Codex's session record, so it shows the model's own tool calls. `codex exec
+--json` reports each tool as the command Codex executed: `/bin/bash -lc '<cmd>'` with the shell's own quoting, without the
+model's other arguments (`workdir`, `yield_time_ms`), `write_stdin` polls merged into the first command's result, calls
+listed by completion rather than by when the model made them, and display IDs (`item_0`) for call IDs. The record holds
+each `function_call` and `custom_tool_call` as the model sent it, with its `name`, `namespace`, arguments (for
+`exec_command`, the `cmd` and `workdir` as written) and `call_id`, in the model's order, with each result under its call's ID,
+and the assistant messages and reasoning text between them. The Harbor Environment Server exports exactly this to
+`/logs/agent/trajectory.json` for a task folder's verifier, as Harbor's own Codex agent does. Results are the text the model
+read, including Codex's `Chunk ID` / `Process exited with code` envelope; an image result is written as `[image]`, and
+encrypted reasoning is left in the observations. An MCP call keeps its bare tool name, and a free-form `apply_patch` call is a
+`custom_tool_call`. `response.output` falls back to the CLI events when the record cannot stand in for them: it is missing
+or unreadable, holds a second session or an item type with no mapping, or has a result without an open call or a call ID
+used twice. The observations then carry a `tool_calls_in_executed_form` gap naming the reason, when that output has tool
+calls. Local `/run` execution still builds its output from the CLI events.
+
 Native session transcripts supply tool-call IDs and outcomes. Codex disables its native HTTP 429 retries, so `sandbox_launcher.mjs` runs it behind a loopback forwarder on the runtime's Node that retries a 429 twice, honoring `Retry-After` up to 30 seconds. The forwarder retains request statuses and invocation correlation across retries; native cumulative usage supplements CLI totals when a failed turn omits them. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
 Compare CLI totals with captured model calls; do not interpret unavailable usage as zero.
 Known model-metadata/compaction warnings remain visible as gaps after clean completion or a gradable model/wall-time limit.
