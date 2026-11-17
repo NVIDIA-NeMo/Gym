@@ -91,6 +91,21 @@ def test_every_module_is_in_a_layer() -> None:
     )
 
 
+def test_every_package_is_a_source_of_the_orchestration_contract() -> None:
+    """`forbidden_modules` cannot also be a source, so the contract lists each top-level module except orchestration."""
+    contracts = tomllib.loads((REPO / "pyproject.toml").read_text())["tool"]["importlinter"]["contracts"]
+    [contract] = [c for c in contracts if c["name"] == "only the CLI entrypoint imports orchestration"]
+    sources = {module.removeprefix("nemo_gym.") for module in contract["source_modules"]}
+    unchecked = sorted(_top_level_names() - sources - {"__init__", "orchestration"})
+    assert not unchecked, (
+        f"{unchecked} are not sources of the import-linter contract 'only the CLI entrypoint imports orchestration' "
+        "in pyproject.toml, so nothing stops them importing nemo_gym.orchestration. Add each to its source_modules."
+    )
+    assert not sources - _top_level_names(), (
+        "a source_modules entry of that contract names a module that does not exist"
+    )
+
+
 def test_every_module_kept_outside_the_layers_exists() -> None:
     assert not set(OUTSIDE_THE_LAYERS) - _top_level_names()
 
