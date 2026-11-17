@@ -16,6 +16,7 @@
 import io
 import shlex
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
@@ -274,8 +275,14 @@ def test_constructor_pins_enroot_env(fake_binary: str, tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 # create
 # --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("bypass_entrypoint", [True, False])
 async def test_create_builds_argv_and_runs_probe(
-    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    fake_binary: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    no_killpg: list,
+    bypass_entrypoint: bool,
 ) -> None:
     staging = tmp_path / "staging"
     monkeypatch.setattr(enroot_provider.tempfile, "mkdtemp", lambda prefix: str(staging.mkdir() or staging))
@@ -288,7 +295,11 @@ async def test_create_builds_argv_and_runs_probe(
         return (0, "", "")  # create rootfs
 
     provider, rec, start_rec = _make_provider(
-        monkeypatch, responder, tmp_path, exec={"default_mounts": ["/data:/data"]}
+        monkeypatch,
+        responder,
+        tmp_path,
+        exec={"default_mounts": ["/data:/data"]},
+        create={"bypass_entrypoint": bypass_entrypoint},
     )
 
     # Bypass image import; return a canned squashfs path and capture the container name.
@@ -332,7 +343,42 @@ async def test_create_builds_argv_and_runs_probe(
     assert _contains_seq(start_argv, ["-e", "NVIDIA_VISIBLE_DEVICES=0"])
     expected_init = f"{enroot_provider.DEFAULT_INIT_COMMAND}  # {handle.sandbox_id}"
     assert start_argv[-4:] == [handle.sandbox_id, "sh", "-c", expected_init]
-    assert _contains_seq(start_argv, ["--rc", "/dev/null"])
+    if bypass_entrypoint:
+        rc_path = Path(start_argv[start_argv.index("--rc") + 1])
+        assert rc_path.is_file(), "Enroot requires a regular RC file"
+        result = subprocess.run(
+            ["/bin/sh", str(rc_path), "/bin/sh", "-c", 'printf "%s" "$1"; exit 7', "sh", "argument with spaces"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.stdout == "argument with spaces"
+        assert result.returncode == 7
+    else:
+        assert "--rc" not in start_argv
+    await provider.close(handle)
+    assert not staging.exists()
+
+
+async def test_create_start_launch_failure_cleans_up(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = tmp_path / "staging"
+    monkeypatch.setattr(enroot_provider.tempfile, "mkdtemp", lambda prefix: str(staging.mkdir() or staging))
+    provider, rec, _sr = _make_provider(monkeypatch, lambda argv: (0, "", ""), tmp_path)
+
+    async def fake_ensure(image: str) -> Path:
+        return tmp_path / "img.sqsh"
+
+    async def failed_start(argv: list[str]):
+        raise OSError("cannot launch enroot")
+
+    monkeypatch.setattr(provider, "_ensure_image", fake_ensure)
+    monkeypatch.setattr(provider, "_start_detached", failed_start)
+    with pytest.raises(OSError, match="cannot launch enroot"):
+        await provider.create(SandboxSpec(image="ubuntu:22.04"))
+    assert not staging.exists()
+    assert any("remove" in call["argv"] for call in rec.calls)
 
 
 # The generated container name is random; the create test above needs the `list`
@@ -400,6 +446,7 @@ async def test_create_start_timeout_cleans_up(
     provider, _rec, _sr = _make_provider(
         monkeypatch, responder, tmp_path, create={"start_timeout_s": 0.05, "start_poll_s": 0.01}
     )
+    monkeypatch.setattr(enroot_provider, "_find_container_init_pid", lambda *_args: None)
 
     async def fake_ensure(image: str) -> Path:
         return tmp_path / "img.sqsh"

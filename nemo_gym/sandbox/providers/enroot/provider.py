@@ -488,14 +488,11 @@ class EnrootProvider:
         start_env = {**_resource_gpu_env(resources), **spec.env}
         for key, value in start_env.items():
             argv += ["-e", f"{key}={value}"]
-        # Clear the Docker ENTRYPOINT so images with a non-shell entrypoint
-        # (e.g. ENTRYPOINT ["python"]) don't wrap the init and exit immediately.
-        # Enroot bakes the ENTRYPOINT into /etc/rc inside the rootfs during
-        # `enroot create`; the only way to bypass it at start time is --rc,
-        # which replaces /etc/rc entirely. We pass an empty script so the init
-        # command (argv after the container name) runs directly.
-        if self._create_config.bypass_entrypoint:
-            argv += ["--rc", "/dev/null"]
+        # Bypass /etc/rc (including Docker ENTRYPOINT) with a passthrough script.
+        # Enroot requires a regular RC file and rejects character devices such as /dev/null.
+        rc_path = staging_dir / ".enroot-rc.sh" if self._create_config.bypass_entrypoint else None
+        if rc_path is not None:
+            argv += ["--rc", str(rc_path)]
         argv += list(self._create_config.extra_start_args)
         # Tag the init with the (unique) container name so the nested-in-pyxis PID
         # fallback can find THIS container's init process in /proc unambiguously. The
@@ -503,7 +500,6 @@ class EnrootProvider:
         init_command = f"{self._create_config.init_command}  # {name}"
         argv += [name, "sh", "-c", init_command]
 
-        proc, out_f, err_f = await self._start_detached(argv)
         instance = _EnrootInstance(
             name=name,
             sqsh_path=sqsh_path,
@@ -511,12 +507,16 @@ class EnrootProvider:
             mount_point=mount_point,
             image=spec.image,
             env=dict(spec.env),
-            start_pgid=proc.pid,
-            proc=proc,
         )
         handle = SandboxHandle(sandbox_id=name, provider_name=self.name, raw=instance)
 
+        out_f = err_f = None
         try:
+            if rc_path is not None:
+                rc_path.write_text('exec "$@"\n', encoding="utf-8")
+            proc, out_f, err_f = await self._start_detached(argv)
+            instance.proc = proc
+            instance.start_pgid = proc.pid
             instance.container_pid = await self._await_container_pid(instance, err_f)
             await self._verify_created_handle(handle)
         except Exception:
