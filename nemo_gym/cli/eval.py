@@ -276,7 +276,7 @@ class PlanBenchmarkConfig(PrepareBenchmarkConfig):
     Examples:
 
     ```bash
-    gym eval plan --benchmark terminal_bench_2_1/terminus_2 --out plan.json
+    gym eval plan --benchmark terminal_bench_2_1/terminus_2_legacy_agent --out plan.json
     gym eval plan --schema
     ```
     """
