@@ -92,8 +92,13 @@ with no MCP tools. Each episode also:
    Episodes without a sandbox are unchanged. A model that pulls a workbook through the tool reads
    its bytes as base64 on every later request, and one that copies file content by hand gets it
    wrong: in earlier pilots, models did both;
-4. ends when Pi's run ends: `finish_tool_names: [user_complete_task]`, its timeout, or the model
-   stopping. `/verify` first closes the episode's tools and file API and stops its sandbox, then
+4. ends once its task has ended: the environment server (`end_on_task_state`) watches the episode's
+   task state, stops Pi's run when a call completes the task (`POST /rollouts/{rollout_id}/stop`, as
+   completed), and this server answers that call only after the run has stopped, so no model call
+   follows it, on every exposure. Otherwise the run ends at Pi's timeout or when the model stops.
+   A harness whose type cannot stop a run in flight (not in `ROLLOUT_STOP_AGENT_TYPES`: today
+   mini-SWE, OpenCode, OpenClaw and Terminus 2) runs until it stops by itself
+   (`close_tools_on_task_end` refuses its later calls). `/verify` first closes the episode's tools and file API and stops its sandbox, then
    grades the world as for any row: a process the harness left running in the background can act
    until verification starts, but not while the world is graded. A failed stop is logged and
    grading goes on; `/close_session` stops the sandbox then.
@@ -262,9 +267,8 @@ mini-SWE, OpenCode, OpenClaw and Terminus 2 run the same way with their configs 
 `officeenv_sandbox_openclaw_agent` or `officeenv_sandbox_terminus_2_agent`. Pi runs these rows
 with `configs/officeenv_sandbox.yaml` and
 `++officeenv_sandbox_pi_environment_server.environment_servers.single_agent_turn_legacy.resources_tool_transports=[]`,
-and `api_search` rows with its MCP transport as it is; on both, no MCP tool ends the task, so Pi
-takes `++officeenv_sandbox_pi_agent.responses_api_agents.pi_agent.finish_tool_names=[]` and ends
-when the model stops. Any of Gym's harnesses that borrow an episode's sandbox and run a shell can
+or as it is (a `cli` episode's seed grants no MCP tools), and `api_search` rows with its MCP transport as
+it is; on every exposure the environment server ends Pi's run once the task has ended. Any of Gym's harnesses that borrow an episode's sandbox and run a shell can
 be paired the same way (an agent that inherits the harness's instance, an environment server that
 binds it to the episodes, no MCP transports, named as in Instance names); what each needs in the
 sandbox image (its own runtime, when sandboxes have no internet) is the harness's.

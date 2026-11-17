@@ -68,9 +68,9 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from secrets import token_urlsafe
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 
@@ -88,10 +88,12 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionLostError,
+    ResourcesTaskStateRelease,
     ReverifyMode,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.officeenv.app import (
+    MAX_TASK_STATE_WAIT_SECONDS,
     OfficeEnvLengthPenaltyVerifyResponse,
     OfficeEnvResourcesServer,
     OfficeEnvResourcesServerConfig,
@@ -885,9 +887,18 @@ class OfficeEnvSandboxResourcesServer(OfficeEnvResourcesServer):
         self._require_gym_caller(request)
         return await super().get_reverify_mode()
 
-    async def task_state(self, request: Request) -> OfficeEnvTaskState:
+    async def task_state(
+        self,
+        request: Request,
+        watch: bool = False,
+        wait_s: Annotated[float, Query(ge=0, le=MAX_TASK_STATE_WAIT_SECONDS)] = 0.0,
+    ) -> OfficeEnvTaskState:
         self._require_gym_caller(request)
-        return await super().task_state(request)
+        return await super().task_state(request, watch, wait_s)
+
+    async def release_task_end(self, request: Request) -> ResourcesTaskStateRelease:
+        self._require_gym_caller(request)
+        return await super().release_task_end(request)
 
     async def seed_session(
         self,
@@ -1245,23 +1256,30 @@ class OfficeEnvSandboxResourcesServer(OfficeEnvResourcesServer):
         ``workspace_writes``) written there after it (``_save_downloads``). Verification stops the sandbox under the
         same lock: a call under way when verification begins finishes first, and one that comes later is refused. A
         call that raises writes nothing. The task state the call leaves is published once the whole call is over, and
-        with ``close_tools_on_task_end`` a call after a published end is refused, as on the OfficeEnv server."""
-        async with self._locks.setdefault(session_id, asyncio.Lock()):
-            try:
-                self._require_open(episode)
-                self._refuse_after_task_end(session_id)
-                reads = await self._read_workspace(session_id, episode, tool_name, body)
-                self._require_open(episode)  # verification may have begun while the call's files were read
-                self._keep_in_trace(session_id, episode, reads.values())
-                if run is not None:
-                    reply = run(reads)
-                elif reads:
-                    reply = self.service.call(session_id, tool_name, body, workspace_reads=reads)
-                else:
-                    reply = self.service.call(session_id, tool_name, body)
-                await self._save_downloads(session_id, episode, reply.workspace_writes)
-            finally:
-                self._publish_task_state(session_id)
+        with ``close_tools_on_task_end`` a call after a published end is refused, as on the OfficeEnv server. The call
+        that ends a watched session's task is answered once the watching environment server releases it, after the
+        episode's lock is let go (``_hold_task_end``)."""
+        ended = False
+        try:
+            async with self._locks.setdefault(session_id, asyncio.Lock()):
+                try:
+                    self._require_open(episode)
+                    self._refuse_after_task_end(session_id)
+                    reads = await self._read_workspace(session_id, episode, tool_name, body)
+                    self._require_open(episode)  # verification may have begun while the call's files were read
+                    self._keep_in_trace(session_id, episode, reads.values())
+                    if run is not None:
+                        reply = run(reads)
+                    elif reads:
+                        reply = self.service.call(session_id, tool_name, body, workspace_reads=reads)
+                    else:
+                        reply = self.service.call(session_id, tool_name, body)
+                    await self._save_downloads(session_id, episode, reply.workspace_writes)
+                finally:
+                    ended = self._publish_task_state(session_id)
+        finally:
+            if ended:
+                await self._hold_task_end(session_id)
         return reply
 
     async def _read_workspace(
@@ -1386,18 +1404,20 @@ class OfficeEnvSandboxResourcesServer(OfficeEnvResourcesServer):
         if grading or (self.config.close_tools_on_task_end and self._task_ends.get(session_id, False)):
             raise HTTPException(status_code=409, detail="The task has ended: its files are closed")
 
-    def _file_answer(self, session_id: str, call: Callable[[], Any]) -> Any:
+    async def _file_answer(self, session_id: str, call: Callable[[], Any]) -> Any:
         """What a file API call (OfficeEnv's file call, the agent's own action) answers, or the app's error with its
         HTTP status and body: a file it does not have, a name its folder holds, an app it has no file API for, a fault
         the task injects. A file call runs the app's op through the same pipeline as a tool call (its injections among
         it), so it may end the task too: the task state it leaves is published once it is over, whatever it answers,
-        as a tool call's is (``/task_state``, and ``close_tools_on_task_end`` for the calls after it)."""
+        as a tool call's is (``/task_state``, and ``close_tools_on_task_end`` for the calls after it), and a call that
+        ends a watched session's task is held as a tool call is (``_hold_task_end``)."""
         try:
             return call()
         except FileCallError as exc:
             raise HTTPException(status_code=exc.status, detail=exc.body) from None
         finally:
-            self._publish_task_state(session_id)
+            if self._publish_task_state(session_id):
+                await self._hold_task_end(session_id)
 
     def _keep_in_trace(
         self, session_id: str, episode: _SandboxEpisode | None, values: Iterable[bytes | Unreadable]
@@ -1511,7 +1531,9 @@ class OfficeEnvSandboxResourcesServer(OfficeEnvResourcesServer):
         UTF-8 text and application/octet-stream for any other bytes."""
         session_id = self._file_session(request)
         self._refuse_once_closed(session_id)
-        downloaded = self._file_answer(session_id, lambda: self.service.file_download(session_id, app_name, file_id))
+        downloaded = await self._file_answer(
+            session_id, lambda: self.service.file_download(session_id, app_name, file_id)
+        )
         return Response(content=downloaded.data, media_type=downloaded.mime_type or media_type_of(downloaded.data))
 
     async def upload_file(
@@ -1522,7 +1544,7 @@ class OfficeEnvSandboxResourcesServer(OfficeEnvResourcesServer):
         data = await self._content_args(request)
         self._refuse_once_closed(session_id)  # verification may have begun while the body streamed in
         self._keep_in_trace(session_id, self._episodes.get(session_id), [data])
-        created = self._file_answer(
+        created = await self._file_answer(
             session_id,
             lambda: self.service.file_create(session_id, app, name, data, parent=parent, mime_type=mime_type),
         )
@@ -1536,7 +1558,7 @@ class OfficeEnvSandboxResourcesServer(OfficeEnvResourcesServer):
         data = await self._content_args(request)
         self._refuse_once_closed(session_id)  # verification may have begun while the body streamed in
         self._keep_in_trace(session_id, self._episodes.get(session_id), [data])
-        replaced = self._file_answer(
+        replaced = await self._file_answer(
             session_id, lambda: self.service.file_replace(session_id, app_name, file_id, data, mime_type=mime_type)
         )
         return JSONResponse(replaced)

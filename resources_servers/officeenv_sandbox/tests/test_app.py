@@ -623,6 +623,58 @@ def test_with_tools_closed_at_task_end_the_file_api_closes_too(sandboxes, close_
         assert verified.json()["reward"] == 1.0, verified.text
 
 
+def _in_thread(call) -> tuple[threading.Thread, list]:
+    """Run ``call`` in a thread of its own (a request the server holds): its result lands in the returned list."""
+    results: list = []
+    thread = threading.Thread(target=lambda: results.append(call()), daemon=True)
+    thread.start()
+    return thread, results
+
+
+@pytest.mark.parametrize("way", ["tool", "file"])
+def test_the_call_that_ends_a_watched_episodes_task_waits_for_the_release(sandboxes, monkeypatch, way: str) -> None:
+    """With an environment server watching the episode (GET /task_state?watch=true: it stops the run once the task
+    ends), the call that ends the task, a tool call or a file API call, is answered only after that server releases
+    it. A read waiting for the end answers meanwhile, and the episode's lock is free while the call waits."""
+    server = make_server(task_end_hold_seconds=20)
+    with mcp_client(server) as client:
+        seeded = client.post("/seed_session", json=seed_body())
+        watched = client.get("/task_state", params={"watch": "true"}, cookies=seeded.cookies)
+        assert watched.json() == {"task_ended": False}
+        if way == "tool":
+
+            def call():
+                return client.post("/user_complete_task", json={"answer": "done"}, cookies=seeded.cookies)
+
+        else:
+            auth = file_auth(server)
+            file_create = server.service.file_create
+
+            def ending_the_task(session_id: str, *args, **kwargs):
+                server.service.call(session_id, "user_complete_task", json.dumps({"answer": "done"}))
+                return file_create(session_id, *args, **kwargs)
+
+            monkeypatch.setattr(server.service, "file_create", ending_the_task)
+
+            def call():
+                return client.post(
+                    "/v1/files", params={"app": "gdrive", "name": "notes.csv"}, content=b"a,b\n", headers=auth
+                )
+
+        held, answers = _in_thread(call)
+        waited = client.get("/task_state", params={"watch": "true", "wait_s": "5"}, cookies=seeded.cookies)
+        assert waited.json() == {"task_ended": True}
+        held.join(0.3)
+        assert held.is_alive() and answers == []
+        # The episode's lock is let go first: another of its calls runs while the one that ended the task waits.
+        assert client.post("/gdrive_list_files", json={}, cookies=seeded.cookies).status_code == 200
+        assert held.is_alive()
+
+        assert client.post("/task_state/release", cookies=seeded.cookies).json() == {"released": True}
+        held.join(5)
+        assert answers[0].status_code == 200, answers[0].text
+
+
 FILE_CALLS = {  # each file API call, as a sandbox makes it
     "download": lambda client, auth: client.get("/v1/files/gdrive/F_LEDGER", headers=auth),
     "create": lambda client, auth: client.post(
@@ -2449,10 +2501,13 @@ def test_in_sandbox_mode_callers_from_another_host_reach_only_mcp_and_the_file_a
             ("/close_session", close_body()),
             ("/verify", VERIFY_BODY),
             ("/gdrive_list_files", {}),
+            ("/task_state/release", None),
         ]:
             refused = remote.post(path, json=body, cookies=seeded.cookies)
             assert refused.status_code == 404 and refused.json() == {"detail": "Not Found"}, (path, refused.text)
         assert remote.get("/officeenv/apps").status_code == 404
+        for query in ({}, {"watch": "true", "wait_s": "1"}):
+            assert remote.get("/task_state", params=query, cookies=seeded.cookies).status_code == 404
         for docs in ("/openapi.json", "/docs", "/redoc"):  # they would show a sandbox every route
             for answer in (local.get(docs), remote.get(docs)):  # 405: the tool route takes POST /<name>
                 assert answer.status_code in (404, 405) and "paths" not in answer.text, (docs, answer.text)

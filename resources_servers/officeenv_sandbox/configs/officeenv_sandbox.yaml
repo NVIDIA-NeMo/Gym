@@ -12,11 +12,9 @@
 #     ++policy_model.responses_api_models.inference_provider.host=<host address>
 #
 # Rows: data/sandbox_pilot.jsonl (sandbox/prepare_rows.py), whose prompts name the tools as Pi lists
-# them (company_<tool>). Rows in another exposure (prepare_rows.py --exposure cli|api_search) grant no
-# user_complete_task tool, so they run with
-# ++officeenv_sandbox_pi_agent.responses_api_agents.pi_agent.finish_tool_names=[], and commands' rows (cli) with no
-# MCP tools at all:
-# ++officeenv_sandbox_pi_environment_server.environment_servers.single_agent_turn_legacy.resources_tool_transports=[].
+# them (company_<tool>). Rows in another exposure (prepare_rows.py --exposure cli|api_search) run as they are: a `cli`
+# episode's seed grants Pi no MCP tools, and Pi needs no finish tool on any exposure, since the Environment Server ends
+# its run once the task has ended (end_on_task_state).
 config_paths:
   - resources_servers/officeenv_sandbox/configs/officeenv_sandbox_episodes.yaml
   - responses_api_agents/pi_agent/configs/pi_agent.yaml
@@ -42,7 +40,9 @@ officeenv_sandbox_pi_agent:
   _inherit_from: pi_agent
   responses_api_agents:
     pi_agent:
-      finish_tool_names: [user_complete_task]
+      # No finish tool: the Environment Server ends the run once the task has ended, on every exposure
+      # (end_on_task_state below), while a finish tool that a row's tools do not offer fails Pi's setup.
+      finish_tool_names: []
       # the server whose rows these are, so they are checked against its task data schema
       resources_server:
         type: resources_servers
@@ -64,6 +64,10 @@ officeenv_sandbox_pi_environment_server:
       agent_server:
         name: officeenv_sandbox_pi_agent
       resources_tool_transports: [mcp]
+      # Stop Pi's run once its task has ended (complete_task, on any exposure), before any further model call: the
+      # server watches the episode's task state, stops the run (POST /rollouts/{rollout_id}/stop), and the call that
+      # ended the task is answered only after that.
+      end_on_task_state: true
       # The seed lends an episode its sandbox, whose TTL runs from then, and Pi runs at most `concurrency` episodes at
       # once: an episode admitted beyond them waits for Pi while its sandbox's TTL runs, and fails when the sandbox
       # expires ("Sandbox not found"). So the server admits no more episodes than Pi runs, and follows a raised
