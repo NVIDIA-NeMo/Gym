@@ -13,6 +13,16 @@ maintainers:
 - gwarmstrong
 intended_use:
 - evaluation
+capabilities:
+- coding
+- coding/code_understanding
+- coding/repository_coding
+- retrieval_and_grounding
+- retrieval_and_grounding/long_context_learning
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+domains:
+- computer_science
 primary_metric: pass@1[avg-of-1]/accuracy
 requirements:
   gpu: false

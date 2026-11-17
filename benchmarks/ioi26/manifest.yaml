@@ -13,6 +13,19 @@ maintainers:
 - SeanNaren
 intended_use:
 - evaluation
+capabilities:
+- coding
+- coding/code_generation
+- planning_and_autonomy
+- planning_and_autonomy/strategy_and_search
+- knowledge
+- knowledge/procedural_knowledge
+- reasoning
+- reasoning/deductive_reasoning
+- reasoning/quantitative_reasoning
+domains:
+- computer_science
+- mathematics
 primary_metric: total_score
 requirements:
   gpu: false

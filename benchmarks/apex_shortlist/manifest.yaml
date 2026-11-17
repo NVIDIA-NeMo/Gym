@@ -13,6 +13,20 @@ maintainers:
 - gwarmstrong
 intended_use:
 - evaluation
+capabilities:
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+- reasoning/spatial_temporal_reasoning
+- knowledge
+- knowledge/expert_knowledge
+- knowledge/procedural_knowledge
+- planning_and_autonomy
+- planning_and_autonomy/strategy_and_search
+domains:
+- mathematics
 primary_metric: pass@1[avg-of-1]/symbolic_accuracy
 requirements:
   gpu: false

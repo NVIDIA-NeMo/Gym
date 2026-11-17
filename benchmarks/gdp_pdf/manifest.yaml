@@ -15,6 +15,32 @@ maintainers:
 - trintamaki
 intended_use:
 - evaluation
+capabilities:
+- retrieval_and_grounding
+- retrieval_and_grounding/evidence_synthesis
+- retrieval_and_grounding/long_context_learning
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+- instruction_and_format_following/structured_output
+- multimodal_input_understanding
+- multimodal_input_understanding/structured_visual_artifact_understanding
+- knowledge
+- knowledge/expert_knowledge
+- data_analysis
+- data_analysis/tabular_data_analysis
+- writing_and_editing
+domains:
+- engineering
+- medicine
+- insurance
+- real_estate
+- law
+- finance
+- manufacturing
+- business_management
 primary_metric: unknown
 requirements:
   gpu: false

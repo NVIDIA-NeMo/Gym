@@ -14,6 +14,20 @@ maintainers:
 - ushnish-de
 intended_use:
 - evaluation
+capabilities:
+- tool_and_computer_use
+- tool_and_computer_use/multi_step_tool_use
+- tool_and_computer_use/web_search
+- retrieval_and_grounding
+- retrieval_and_grounding/open_retrieval
+- retrieval_and_grounding/multi_source_synthesis
+- knowledge
+- knowledge/expert_knowledge
+- reasoning
+- reasoning/quantitative_reasoning
+domains:
+- finance
+- accounting_audit
 primary_metric: mean/rubric_partial_credit
 requirements:
   gpu: false

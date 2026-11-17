@@ -16,6 +16,18 @@ maintainers:
 - gwarmstrong
 intended_use:
 - evaluation
+capabilities:
+- coding
+- coding/scientific_coding
+- tool_and_computer_use
+- tool_and_computer_use/terminal_and_cli_use
+- tool_and_computer_use/env_feedback_interpretation
+- planning_and_autonomy
+- planning_and_autonomy/long_horizon_execution
+- knowledge
+- knowledge/expert_knowledge
+domains:
+- computer_science
 primary_metric: mean/reward
 requirements:
   gpu: false

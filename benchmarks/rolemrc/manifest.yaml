@@ -14,6 +14,18 @@ maintainers:
 - pachmu
 intended_use:
 - evaluation
+capabilities:
+- human_ai_interaction
+- human_ai_interaction/roleplay_and_persona
+- retrieval_and_grounding
+- retrieval_and_grounding/evidence_synthesis
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+- instruction_and_format_following/hierarchy_following
+- context_management
+- context_management/constraint_preservation
+domains:
+- media_entertainment
 primary_metric: unknown
 requirements:
   gpu: false

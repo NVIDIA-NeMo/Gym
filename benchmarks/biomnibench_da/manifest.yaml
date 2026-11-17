@@ -13,6 +13,23 @@ maintainers:
 - activatedgeek
 intended_use:
 - evaluation
+capabilities:
+- data_analysis
+- data_analysis/statistical_analysis
+- data_analysis/exploratory_analysis
+- data_analysis/tabular_data_analysis
+- coding
+- coding/scientific_coding
+- knowledge
+- knowledge/expert_knowledge
+- tool_and_computer_use
+- tool_and_computer_use/terminal_and_cli_use
+- planning_and_autonomy
+- planning_and_autonomy/long_horizon_execution
+domains:
+- biology
+- data_science
+- medicine
 primary_metric: mean/reward
 requirements:
   gpu: false

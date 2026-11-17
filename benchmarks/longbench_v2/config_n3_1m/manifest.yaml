@@ -14,6 +14,22 @@ maintainers:
 - gwarmstrong
 intended_use:
 - evaluation
+capabilities:
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+- retrieval_and_grounding
+- retrieval_and_grounding/long_context_learning
+- retrieval_and_grounding/evidence_synthesis
+- reasoning
+- reasoning/deductive_reasoning
+- reasoning/quantitative_reasoning
+domains:
+- general
+- artificial_intelligence
+- humanities
+- computer_science
+- law
+- language_linguistics
 primary_metric: pass@1[avg-of-1]/accuracy
 requirements:
   gpu: false

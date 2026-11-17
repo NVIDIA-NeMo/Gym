@@ -13,6 +13,21 @@ maintainers:
 - activatedgeek
 intended_use:
 - evaluation
+capabilities:
+- coding
+- coding/scientific_coding
+- data_analysis
+- data_analysis/statistical_analysis
+- data_analysis/tabular_data_analysis
+- knowledge
+- knowledge/expert_knowledge
+- tool_and_computer_use
+- tool_and_computer_use/terminal_and_cli_use
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+domains:
+- biology
+- statistics
 primary_metric: mean/reward
 requirements:
   gpu: false

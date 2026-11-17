@@ -14,6 +14,14 @@ maintainers:
 - gwarmstrong
 intended_use:
 - evaluation
+capabilities:
+- coding
+- coding/code_generation
+- coding/code_editing
+- knowledge
+- knowledge/procedural_knowledge
+domains:
+- computer_science
 primary_metric: pass@1[avg-of-1]/passing_plus_tests
 requirements:
   gpu: false

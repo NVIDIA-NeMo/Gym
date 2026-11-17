@@ -14,6 +14,38 @@ maintainers:
 - abukharin-nv
 intended_use:
 - evaluation
+capabilities:
+- tool_and_computer_use
+- tool_and_computer_use/file_operations
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+- instruction_and_format_following/instruction_following
+- reasoning
+- reasoning/quantitative_reasoning
+- coding
+- coding/scientific_coding
+- coding/debugging_and_testing
+- coding/repository_coding
+- coding/code_generation
+- data_analysis
+- data_analysis/tabular_data_analysis
+- data_analysis/data_transformation
+- knowledge
+- knowledge/expert_knowledge
+- retrieval_and_grounding
+- retrieval_and_grounding/evidence_synthesis
+- planning_and_autonomy
+- planning_and_autonomy/optimization
+- multimodal_input_understanding
+- multimodal_input_understanding/structured_visual_artifact_understanding
+domains:
+- computer_science
+- engineering
+- artificial_intelligence
+- earth_environmental_science
+- general
+- cybersecurity
+- finance
 primary_metric: mean/reward
 requirements:
   gpu: false

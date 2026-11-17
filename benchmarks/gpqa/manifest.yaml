@@ -13,6 +13,20 @@ maintainers:
 - gwarmstrong
 intended_use:
 - evaluation
+capabilities:
+- knowledge
+- knowledge/expert_knowledge
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+- reasoning/spatial_temporal_reasoning
+- reasoning/causal_reasoning
+- planning_and_autonomy
+domains:
+- chemistry
+- physics
+- astronomy_space
+- biology
 primary_metric: pass@1[avg-of-8]/accuracy
 requirements:
   gpu: false

@@ -13,6 +13,13 @@ maintainers:
 - gwarmstrong
 intended_use:
 - evaluation
+capabilities:
+- multimodal_input_understanding
+- multimodal_input_understanding/speech_and_audio_understanding
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+domains:
+- language_linguistics
 primary_metric: wer
 requirements:
   gpu: false

@@ -14,6 +14,19 @@ maintainers:
 - gnalbandyan
 intended_use:
 - evaluation
+capabilities:
+- knowledge
+- knowledge/expert_knowledge
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+- multimodal_input_understanding
+- multimodal_input_understanding/structured_visual_artifact_understanding
+- multimodal_input_understanding/cross_modal_understanding
+domains:
+- mathematics
+- physics
+- computer_science
 primary_metric: mean/reward
 requirements:
   gpu: false

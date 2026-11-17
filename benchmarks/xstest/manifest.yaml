@@ -14,6 +14,11 @@ maintainers:
 - dcfarris
 intended_use:
 - evaluation
+capabilities:
+- safety
+- safety/content_safety
+domains:
+- general
 primary_metric: mean/reward
 requirements:
   gpu: true

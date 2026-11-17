@@ -13,6 +13,21 @@ maintainers:
 - jveronvialard
 intended_use:
 - evaluation
+capabilities:
+- evaluation_and_judging
+- evaluation_and_judging/preference_judging
+- evaluation_and_judging/error_analysis
+- reasoning
+- reasoning/deductive_reasoning
+- reasoning/quantitative_reasoning
+- knowledge
+- knowledge/expert_knowledge
+- coding
+- coding/code_understanding
+domains:
+- general
+- mathematics
+- computer_science
 primary_metric: metrics/overall
 requirements:
   gpu: false

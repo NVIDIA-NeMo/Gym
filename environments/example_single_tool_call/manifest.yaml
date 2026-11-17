@@ -15,6 +15,11 @@ maintainers:
 - ananthsub
 intended_use:
 - training
+capabilities:
+- tool_and_computer_use
+- tool_and_computer_use/tool_calling
+domains:
+- general
 requirements:
   gpu: false
   network: no-network

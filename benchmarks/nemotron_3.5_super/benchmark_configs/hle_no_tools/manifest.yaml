@@ -17,6 +17,19 @@ maintainers:
 - sdevare-nv
 intended_use:
 - evaluation
+capabilities:
+- knowledge
+- knowledge/expert_knowledge
+- reasoning
+- reasoning/deductive_reasoning
+- reasoning/quantitative_reasoning
+- knowledge/knowledge_uncertainty
+domains:
+- mathematics
+- physics
+- computer_science
+- biology
+- humanities
 primary_metric: mean/reward
 requirements:
   gpu: false

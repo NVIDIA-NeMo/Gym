@@ -14,6 +14,15 @@ maintainers:
 - anushaknvidia
 intended_use:
 - evaluation
+capabilities:
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+- instruction_and_format_following/structured_output
+- multilingual_and_multicultural
+- multilingual_and_multicultural/language_consistency
+- multilingual_and_multicultural/requested_language_response
+domains:
+- language_linguistics
 primary_metric: unknown
 requirements:
   gpu: false

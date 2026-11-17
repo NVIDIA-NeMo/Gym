@@ -13,6 +13,19 @@ maintainers:
 - ushnish-de
 intended_use:
 - evaluation
+capabilities:
+- retrieval_and_grounding
+- retrieval_and_grounding/evidence_synthesis
+- retrieval_and_grounding/open_retrieval
+- reasoning
+- reasoning/quantitative_reasoning
+- knowledge
+- knowledge/expert_knowledge
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+domains:
+- finance
+- accounting_audit
 primary_metric: mean/reward
 requirements:
   gpu: false

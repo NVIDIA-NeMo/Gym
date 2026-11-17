@@ -15,6 +15,21 @@ maintainers:
 - jkyi-nvidia
 intended_use:
 - evaluation
+capabilities:
+- tool_and_computer_use
+- tool_and_computer_use/multi_step_tool_use
+- tool_and_computer_use/tool_calling
+- retrieval_and_grounding
+- retrieval_and_grounding/open_retrieval
+- retrieval_and_grounding/evidence_synthesis
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+- human_ai_interaction
+- human_ai_interaction/clarification_and_assumption_management
+- planning_and_autonomy
+- planning_and_autonomy/long_horizon_execution
+domains:
+- finance
 primary_metric: mean/reward
 requirements:
   gpu: false

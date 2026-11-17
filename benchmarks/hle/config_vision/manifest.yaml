@@ -14,6 +14,22 @@ maintainers:
 - fsiino-nvidia
 intended_use:
 - evaluation
+capabilities:
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/deductive_reasoning
+- reasoning/spatial_temporal_reasoning
+- knowledge
+- knowledge/expert_knowledge
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+- planning_and_autonomy
+domains:
+- mathematics
+- physics
+- computer_science
+- biology
+- chemistry
 primary_metric: mean/reward
 requirements:
   gpu: false

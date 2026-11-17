@@ -18,6 +18,18 @@ maintainers:
 - katherineh123
 intended_use:
 - evaluation
+capabilities:
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+- instruction_and_format_following/hierarchy_following
+- tool_and_computer_use
+- tool_and_computer_use/multi_step_tool_use
+- tool_and_computer_use/web_search
+- coding
+- coding/repository_coding
+domains:
+- computer_science
+- general
 primary_metric: pass@1[avg-of-3]/all_if_pass
 requirements:
   gpu: false

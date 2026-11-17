@@ -13,6 +13,12 @@ maintainers:
 - jveronvialard
 intended_use:
 - evaluation
+capabilities:
+- evaluation_and_judging
+- evaluation_and_judging/preference_judging
+- evaluation_and_judging/rubric_judging
+domains:
+- general
 primary_metric: overall/accuracy
 requirements:
   gpu: false

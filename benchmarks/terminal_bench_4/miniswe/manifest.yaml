@@ -14,6 +14,47 @@ maintainers:
 - lafrancef
 intended_use:
 - evaluation
+capabilities:
+- tool_and_computer_use
+- tool_and_computer_use/terminal_and_cli_use
+- tool_and_computer_use/file_operations
+- tool_and_computer_use/multi_step_tool_use
+- tool_and_computer_use/env_feedback_interpretation
+- tool_and_computer_use/tool_calling
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+- instruction_and_format_following/structured_output
+- coding
+- coding/debugging_and_testing
+- coding/repository_coding
+- coding/code_generation
+- coding/ml_engineering
+- coding/code_editing
+- coding/systems_coding
+- planning_and_autonomy
+- planning_and_autonomy/self_verification
+- planning_and_autonomy/long_horizon_execution
+- planning_and_autonomy/optimization
+- reasoning
+- reasoning/quantitative_reasoning
+- reasoning/spatial_temporal_reasoning
+- reasoning/deductive_reasoning
+- knowledge
+- knowledge/expert_knowledge
+- data_analysis
+- data_analysis/data_transformation
+- data_analysis/tabular_data_analysis
+- retrieval_and_grounding
+- retrieval_and_grounding/evidence_synthesis
+- multimodal_input_understanding
+- multimodal_input_understanding/structured_visual_artifact_understanding
+- multimodal_generation_and_editing
+domains:
+- computer_science
+- artificial_intelligence
+- cybersecurity
+- engineering
+- chemistry
 primary_metric: mean/reward
 requirements:
   gpu: true

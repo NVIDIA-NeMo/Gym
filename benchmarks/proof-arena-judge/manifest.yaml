@@ -14,6 +14,17 @@ maintainers:
 - wedu-nvidia
 intended_use:
 - evaluation
+capabilities:
+- evaluation_and_judging
+- evaluation_and_judging/rubric_judging
+- evaluation_and_judging/error_analysis
+- reasoning
+- reasoning/deductive_reasoning
+- reasoning/quantitative_reasoning
+- knowledge
+- knowledge/expert_knowledge
+domains:
+- mathematics
 primary_metric: unknown
 requirements:
   gpu: false
