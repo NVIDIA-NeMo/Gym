@@ -315,7 +315,7 @@ class SWEGymResourcesServer(SandboxSessionResourcesServer):
         # Own the sandbox before preparing it, so a failed seed can still stop it.
         self._session_id_to_sandbox[session_id] = sandbox
         if self.config.agent_image_manifests is not None:
-            probe = await sandbox.exec("python -c " + quote(OFFLINE_NETWORK_PROBE), timeout_s=30)
+            probe = await sandbox.exec("python3 -I -c " + quote(OFFLINE_NETWORK_PROBE), timeout_s=30)
             if (
                 probe.return_code != 0
                 or probe.error_type is not None

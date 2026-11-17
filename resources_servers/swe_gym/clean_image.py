@@ -22,7 +22,7 @@ import zlib
 from pathlib import Path, PurePosixPath
 
 
-SCANNER_VERSION = 1
+SCANNER_VERSION = 2
 MAX_FILE_BYTES = 256 * 1024 * 1024
 BAD_PARTS = {
     ".git",
@@ -74,7 +74,7 @@ def check_path(name: str) -> None:
         raise ValueError(f"forbidden artifact path: {name}")
 
 
-def reference_needles(paths: list[Path]) -> list[bytes]:
+def reference_needles(paths: list[Path], *, repo: Path, base_commit: str) -> list[bytes]:
     """Require distinctive added lines from each trusted reference/hidden-test input."""
     needles = set()
     for path in paths:
@@ -94,6 +94,21 @@ def reference_needles(paths: list[Path]) -> list[bytes]:
         needles.update(selected)
     if not needles:
         raise ValueError("reference and hidden-test material are required")
+    # Existing base lines are public task context, including code moved by the reference.
+    # Compare complete stripped lines, not substrings, so a novel longer answer still trips the scan.
+    seen = set()
+    for entry in git(repo, "ls-tree", "-rz", "--full-tree", base_commit).split(b"\0"):
+        if not entry:
+            continue
+        metadata, _ = entry.split(b"\t", 1)
+        _, kind, oid = metadata.split()
+        if kind != b"blob" or oid in seen:
+            continue
+        seen.add(oid)
+        if int(git(repo, "cat-file", "-s", oid.decode())) > MAX_FILE_BYTES:
+            raise ValueError("source file exceeds scanner limit")
+        data = git(repo, "cat-file", "blob", oid.decode())
+        needles.difference_update(line.strip() for line in data.splitlines())
     return sorted(needles)
 
 
@@ -185,8 +200,23 @@ def reconstruct(repo: Path, base_commit: str, target: Path, needles: list[bytes]
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(data)
         dest.chmod(0o755 if mode == b"100755" else 0o644)
-    git(target, "init", "--quiet", "--initial-branch=main", "--template=")
+    git(
+        target,
+        "init",
+        "--quiet",
+        "--initial-branch=main",
+        "--template=",
+        "--object-format=" + ("sha256" if len(resolved) == 64 else "sha1"),
+    )
+    # info/attributes overrides repository attributes for both staging and later agent diffs.
+    # Keep it in the reconstructed repo so CRLF and encoded files remain byte-exact.
+    (target / ".git/info").mkdir(exist_ok=True)
+    (target / ".git/info/attributes").write_text("* -text -filter -ident -working-tree-encoding\n")
+    git(target, "config", "core.autocrlf", "false")
+    git(target, "config", "core.fileMode", "true")
     git(target, "add", "--all", "--force")
+    if git(target, "write-tree").strip() != git(repo, "rev-parse", resolved + "^{tree}").strip():
+        raise ValueError("reconstructed tree differs from the task base")
     git(target, "-c", "commit.gpgsign=false", "commit", "--quiet", "--allow-empty", "-m", "base")
     # Remove local timing/log/index artifacts; HEAD/main plus the new reachable objects suffice.
     shutil.rmtree(target / ".git/logs", ignore_errors=True)
@@ -213,7 +243,7 @@ def build_rootfs(
         raise ValueError("output already exists")
     if sha256_file(runtime) != runtime_sha256:
         raise ValueError("runtime digest mismatch")
-    needles = reference_needles(references)
+    needles = reference_needles(references, repo=repo, base_commit=base_commit)
     with tempfile.TemporaryDirectory() as scratch:
         clean = Path(scratch) / "repo"
         source, agent_base = reconstruct(repo, base_commit, clean, needles)
@@ -281,6 +311,7 @@ def build_rootfs(
         "agent_base_commit": agent_base,
         "runtime_sha256": runtime_sha256,
         "rootfs_sha256": sha256_file(output),
+        "reference_needles": len(needles),
         "reference_sha256": [sha256_file(path) for path in references],
         "checks": ["base-export", "fresh-git", "artifact-paths", "reference-fragments", "mtime-zero", "flat-rootfs"],
     }
@@ -293,7 +324,9 @@ def main() -> None:
     for name in ("runtime-sha256", "base-commit", "task-id"):
         parser.add_argument("--" + name, required=True)
     parser.add_argument(
-        "--import-docker", action="store_true", help="import the flattened tar and bind its immutable local image ID"
+        "--import-docker",
+        action="store_true",
+        help="import the tar and bind its immutable image ID; this manifest is valid only on this Docker daemon",
     )
     parser.add_argument(
         "--reference",

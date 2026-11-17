@@ -27,6 +27,10 @@ def admit_agent_image(
 
     Docker's isolated network namespace blocks direct IP and upstream DNS. No arbitrary run/exec flags,
     mounts or network-enabled providers are accepted. The agent harness must run outside the sandbox.
+
+    Manifests are per Docker daemon: importing the same rootfs elsewhere can yield a
+    different image ID because Docker records import time. Import and bind a manifest
+    on each deployment daemon. rootfs_sha256 identifies the portable artifact.
     """
     if set(provider_config) != {"docker"}:
         raise ValueError("Audited agent images currently require the offline Docker provider")

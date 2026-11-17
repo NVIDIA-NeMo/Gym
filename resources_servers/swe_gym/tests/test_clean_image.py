@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from resources_servers.swe_gym.clean_image import build_rootfs, git, sha256_file
+from resources_servers.swe_gym.clean_image import SCANNER_VERSION, build_rootfs, git, sha256_file
 from resources_servers.swe_gym.image_admission import OFFLINE_NETWORK_PROBE, admit_agent_image
 
 
@@ -320,7 +320,7 @@ async def test_server_selects_audited_agent_image_and_leaves_verifier_image(admi
     spec = sandbox.start.call_args.args[0]
     assert spec.image == "sha256:" + "a" * 64
     assert not spec.files and not spec.provider_options
-    assert spec.metadata["image-scanner"] == "1"
+    assert spec.metadata["image-scanner"] == str(SCANNER_VERSION)
     assert server._session_id_to_clean_base["agent"] == admit_agent_image(**admission).agent_base_commit
     # The companion verifier defense owns this path; no new image policy or files are imposed here.
     await app.SWEGymResourcesServer._create_sandbox(server, body, files={"hidden": "server only"})
@@ -375,7 +375,7 @@ async def test_server_refuses_policy_access_after_failed_probe(monkeypatch, prob
         identity.assert_awaited_once()
     scrub.assert_not_awaited()
     assert server._session_id_to_sandbox["agent"] is sandbox  # retained for existing failed-seed cleanup
-    assert "python -c" in sandbox.exec.call_args.args[0]
+    assert "python3 -I -c" in sandbox.exec.call_args.args[0]
 
 
 @pytest.mark.asyncio
@@ -395,3 +395,47 @@ async def test_patch_capture_uses_reconstructed_commit(monkeypatch):
     )
     await app.SWEGymResourcesServer._extract_model_patch(server, "agent", "/testbed", "source-base")
     assert capture.call_args.args[2] == "fresh-base"
+
+
+def test_reference_lines_already_in_base_are_not_leaks(task, tmp_path):
+    kwargs, _, _ = task
+    common = b"from package.module import existing_long_public_import_name"
+    (kwargs["repo"] / "common.py").write_bytes(common + b"\n")
+    git(kwargs["repo"], "add", "common.py")
+    git(kwargs["repo"], "-c", "commit.gpgsign=false", "commit", "-qm", "public import")
+    kwargs["base_commit"] = git(kwargs["repo"], "rev-parse", "HEAD").decode().strip()
+    reference = kwargs["references"][0]
+    reference.write_bytes(reference.read_bytes() + b"+" + common + b"\n")
+    runtime_tar(kwargs["runtime"], {"usr/share/public": common})
+    kwargs["runtime_sha256"] = sha256_file(kwargs["runtime"])
+    manifest = build_rootfs(**kwargs)
+    assert manifest["reference_needles"] == 2
+    # A novel answer line is still rejected, even when it extends a public line.
+    kwargs["output"].unlink()
+    reference.write_bytes(reference.read_bytes() + b"+" + common + b"_private_solution\n")
+    runtime_tar(kwargs["runtime"], {"usr/share/leak": common + b"_private_solution"})
+    kwargs["runtime_sha256"] = sha256_file(kwargs["runtime"])
+    with pytest.raises(ValueError, match="fragment"):
+        build_rootfs(**kwargs)
+
+
+def test_reconstruction_preserves_crlf_and_attribute_controlled_blobs(task, tmp_path):
+    kwargs, _, _ = task
+    source = kwargs["repo"]
+    (source / "crlf.py").write_bytes(b"line_one\r\nline_two\r\n")
+    git(source, "add", "crlf.py")
+    git(source, "-c", "commit.gpgsign=false", "commit", "-qm", "CRLF base blob")
+    (source / ".gitattributes").write_text("*.py text=auto\n")
+    git(source, "add", ".gitattributes")
+    git(source, "-c", "commit.gpgsign=false", "commit", "-qm", "attributes without renormalization")
+    kwargs["base_commit"] = git(source, "rev-parse", "HEAD").decode().strip()
+    build_rootfs(**kwargs)
+    extracted = tmp_path / "extracted"
+    with tarfile.open(kwargs["output"]) as archive:
+        archive.extractall(extracted, filter="data")
+    repo = extracted / "testbed"
+    assert (repo / "crlf.py").read_bytes() == b"line_one\r\nline_two\r\n"
+    assert git(repo, "rev-parse", "HEAD^{tree}") == git(source, "rev-parse", kwargs["base_commit"] + "^{tree}")
+    assert git(repo, "diff", "HEAD") == b""
+    git(repo, "add", "--all")
+    assert git(repo, "diff", "--cached") == b""
