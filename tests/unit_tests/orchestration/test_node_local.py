@@ -643,6 +643,31 @@ def test_a_term_to_the_job_archives_the_dir_first(tmp_path):
     assert _archive(tmp_path) == {"ev/1.json": "row1\n"}
 
 
+@pytest.mark.parametrize("succeeded", [False, True], ids=["while_the_driver_runs", "while_the_exports_run"])
+def test_a_term_with_exports_leaves_no_archive_done_marker(tmp_path, succeeded):
+    # No export runs after a TERM (a time limit, say): the marker the archive creates must not stay in the job dir.
+    bench = tmp_path / "run" / "b"
+    driver = (
+        f"trap '' TERM; {_WRITE_EVIDENCE}; "
+        + (': > "$GYM_EVAL_SUCCEEDED_MARKER"; ' if succeeded else "")
+        + ': > "$NEMO_GYM_NODE_LOCAL_DIR/../written"; sleep 600 & wait'
+    )
+    process = _start_job(tmp_path, driver=driver, exports=True)
+    try:
+        _wait_for(tmp_path / "host" / "written")
+        if succeeded:
+            _wait_for(bench / "node-local" / "11.0.tar.gz")
+        os.killpg(process.pid, signal.SIGTERM)
+        returncode = _finish(process, timeout=30)
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
+
+    assert returncode == 143
+    assert _archive(tmp_path) == {"ev/1.json": "row1\n"}
+    assert not list(bench.glob(".gym_node_local_archive_done.*"))
+
+
 def test_a_term_that_lands_while_the_archive_runs_does_not_cut_it_short(tmp_path):
     # Slurm's TERM reaches the whole job, the archive's tar included, while the archive after the driver step runs.
     started = tmp_path / "tar-started"

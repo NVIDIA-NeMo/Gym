@@ -160,16 +160,16 @@ trap _gym_nl_cleanup EXIT"""
 
 # Only where the batch shell runs on the driver's node: a step can no longer start once the job is ending.
 _TERM_TRAP = """\
-_gym_nl_on_term() {
+_gym_nl_on_term() {{
     trap '' TERM
     if [[ -z "$_gym_nl_done" ]]; then
         echo "The job got TERM: archiving the node-local dir before Slurm kills the job."
         _gym_nl_archive
     fi
-    _gym_nl_cleanup
+    _gym_nl_cleanup{remove_marker}
     trap - EXIT
     exit 143
-}
+}}
 trap _gym_nl_on_term TERM"""
 
 # Watch-loop line: archive once the evaluation succeeded. It also keeps the driver in the background, so a TERM to
@@ -239,7 +239,9 @@ def render_setup(
             f"rm -f -- {succeeded} {_archive_done_marker(remote_bench_dir)}"
         )
     if not driver_node_flags:
-        blocks.append(_TERM_TRAP)
+        # No export runs after a TERM, so its marker would only be left in the job dir.
+        remove_marker = f"\n    rm -f -- {_archive_done_marker(remote_bench_dir)}" if exports else ""
+        blocks.append(_TERM_TRAP.format(remove_marker=remove_marker))
     return "\n".join(blocks)
 
 
