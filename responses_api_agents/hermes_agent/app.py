@@ -802,7 +802,12 @@ class HermesAgent(SimpleResponsesAPIAgent):
             n_input=len(params["history"]) + 1,
             retain_provider_failure=True,
         )
-        response = self.report_outcome(response, result)
+        # A failed run gets an assistant message padded with its error, so read the transcript, not the output.
+        answered = any(
+            isinstance(message, dict) and message.get("role") == "assistant"
+            for message in (result.get("messages") or [])[len(params["history"]) + 1 :]
+        )
+        response = self.report_outcome(response, result, model_answered=answered)
         if self.classify_outcome(result).failure_kind == MODEL_CONTEXT_LIMIT:
             response = response.model_copy(update={"status": "incomplete", "error": None})
         # Verifiers see Gym's MCP naming; the model's own names stay in the captured model calls.

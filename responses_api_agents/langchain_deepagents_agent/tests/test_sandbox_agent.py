@@ -24,6 +24,7 @@ from nemo_gym.agents import (
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
     SandboxPythonRuntime,
+    agent_outcome_policy,
     check_agent_seed_rejected,
 )
 from nemo_gym.client import ServerClient
@@ -456,6 +457,42 @@ async def test_explicit_context_rejection_is_incomplete_in_the_response(lent_san
     assert response.status == "incomplete"
     assert response.error is None
     assert response.metadata["stop_reason"] == "context_limit"
+
+
+@pytest.mark.parametrize(
+    ("usages", "outcome", "action"),
+    [
+        # No model call returned, so the endpoint refused the run's own request: not graded, not retried.
+        ([], {"failure_kind": "model_request_rejected"}, "fail"),
+        ([USAGE], {"failure_kind": "model_request_error", "status_code": 400}, "verify"),
+    ],
+)
+async def test_a_refused_model_request_is_rejected_only_before_any_model_reply(monkeypatch, usages, outcome, action):
+    from responses_api_agents.langchain_deepagents_agent.sandbox import DeepAgentsSandboxSession
+
+    report = {
+        "status": "failed",
+        "stop_reason": None,
+        "messages": [],
+        "model_calls": len(usages) + 1,
+        "usages": usages,
+        "model_error": "Model Server HTTP 400: max_tokens is too large",
+        "model_error_status": 400,
+        "model_context_limit": False,
+    }
+    session = SimpleNamespace(
+        workdir="/app",
+        stop_request_path="/tmp/stop.request",
+        expired=False,
+        cleanup={"timed_out": False},
+    )
+    state = DeepAgentsSandboxSession(request=_seed(sandbox_access=_access()), session=session)
+    monkeypatch.setattr(DeepAgentsAgent, "resolve_model_base_url", lambda *args, **kwargs: "http://model:8000/v1")
+    monkeypatch.setattr(DeepAgentsSandboxSession, "execute", AsyncMock(return_value=report))
+    response = await _agent()._run_in_sandbox(NeMoGymResponseCreateParamsNonStreaming(input="task"), state)
+    assert response.status == "failed"
+    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == outcome
+    assert agent_outcome_policy(response) == action
 
 
 @pytest.mark.parametrize("with_original_event", [False, True])

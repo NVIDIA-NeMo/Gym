@@ -528,7 +528,7 @@ class DroidAgent(SimpleResponsesAPIAgent):
             # report_outcome describes failed responses only; the stop still tells the environment its cause.
             outcome = AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT).model_dump_json(exclude_none=True)
             return response.model_copy(update={"metadata": {**response.metadata, AGENT_OUTCOME_METADATA_KEY: outcome}})
-        return self.report_outcome(response, {"error": run.error})
+        return self.report_outcome(response, {"error": run.error}, model_answered=bool(run.items))
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()

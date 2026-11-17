@@ -289,6 +289,11 @@ def _run(payload: dict[str, Any], sandbox: dict[str, Any] | None = None) -> dict
                 if not retry_feedback:
                     break
                 user_prompt = retry_feedback
+        except BaseException as error:
+            # Strands adds an assistant message only for a model call that returned. The server reads this to tell
+            # a request refused before any answer from one refused after model work.
+            error.model_answered = any(message.get("role") == "assistant" for message in agent.messages)
+            raise
         finally:
             env.collect_submission(agent=agent, result=result)
             metrics_collector.dump(agent)
@@ -320,7 +325,12 @@ def main() -> None:
         while cause is not None and status_code is None:
             status_code = getattr(cause, "status_code", None)
             cause = cause.__cause__ or cause.__context__
-        failure = {"error": str(error), "status_code": status_code, "traceback": traceback.format_exc()}
+        failure = {
+            "error": str(error),
+            "status_code": status_code,
+            "model_answered": getattr(error, "model_answered", None),
+            "traceback": traceback.format_exc(),
+        }
         args.result.write_text(json.dumps(failure, default=str))
         raise
     args.result.write_text(json.dumps(result, default=str))

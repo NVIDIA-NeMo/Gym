@@ -206,12 +206,18 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             if is_transient_infrastructure_error(error):
                 raise HTTPException(503, "NOOA dependency request failed") from error
             raise
+        # A model call is recorded only when it returned; tools a CodeAct prefill emitted are no answer.
+        answered = any(
+            isinstance(record, AgentInvocation) and record.model_calls
+            for record in state.result.episode.observations.records
+        )
         return self.report_outcome(
             finalize_run_result(state.result)[0],
             {
                 "termination_reason": state.result.termination_reason,
                 "model_status_code": state.result.model_status_code,
             },
+            model_answered=answered,
         )
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:

@@ -1371,7 +1371,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             # owns verify/retry/fail policy for the preserved model response.
             # An idle watchdog abort is a model failure; the supervisor's whole-run
             # deadline and unrelated aborts must not be classified as transport errors.
-            return self.report_outcome(response, terminal_result)
+            answered = any(message.get("stopReason") not in ("error", "aborted") for message in assistants)
+            return self.report_outcome(response, terminal_result, model_answered=answered)
         return response
 
     def model_post_init(self, __context: Any) -> None:

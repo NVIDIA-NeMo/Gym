@@ -1444,7 +1444,13 @@ class CodexAgent(SimpleResponsesAPIAgent):
         if graded_error:
             # Unclassified, so the Environment Server's outcome policy verifies it, as the setting asks.
             return response
-        return self.report_outcome(response, terminal)
+        # The sandbox forwarder records each upstream attempt, and a 200 is an answered call. Without that record, a
+        # run with no parsed item may still have had an answer, so whether it did stays unknown.
+        if output or any(attempt["status"] == 200 for attempt in state.model_attempts or []):
+            answered = True
+        else:
+            answered = None if state.model_attempts is None else False
+        return self.report_outcome(response, terminal, model_answered=answered)
 
     async def _startup_stderr_tail(self, state: CodexSandboxSession) -> str:
         """The end of Codex's stderr, with the session's MCP grant headers redacted; empty if unreadable.

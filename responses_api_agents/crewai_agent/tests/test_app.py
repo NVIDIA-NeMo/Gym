@@ -25,6 +25,7 @@ from nemo_gym.agents import (
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     SandboxPythonRuntime,
+    agent_outcome_policy,
 )
 from nemo_gym.agents.utils.supervisor_client import EXPIRE_REQUEST_FILE
 from nemo_gym.client import ServerClient
@@ -495,19 +496,26 @@ async def test_a_rollout_stop_ends_the_run_as_a_marked_timeout(lent_sandbox, run
 
 
 @linux_only
-async def test_a_rejected_model_request_fails_the_activation_with_its_status(lent_sandbox, runtime, monkeypatch):
+@pytest.mark.parametrize("answered_first", [False, True])
+async def test_a_rejected_model_request_fails_the_activation_with_its_status(
+    lent_sandbox, runtime, monkeypatch, answered_first
+):
     _, access = lent_sandbox
-    model = _model(monkeypatch, 400)
+    answers = [completion(None, ("shell", {"command": "true"}), id="chatcmpl-1")] if answered_first else []
+    model = _model(monkeypatch, *answers, 400)
     try:
         response, close = await _episode(_agent(), access)
     finally:
         model.close()
 
     assert response.status == "failed"
-    assert json.loads(response.metadata["ng_agent_outcome"]) == {
-        "failure_kind": "model_request_error",
-        "status_code": 400,
-    }
+    # Before any answer the endpoint refused the run's own request (not graded); after one, the 400 is graded.
+    expected = (
+        ({"failure_kind": "model_request_error", "status_code": 400}, "verify")
+        if answered_first
+        else ({"failure_kind": "model_request_rejected"}, "fail")
+    )
+    assert (json.loads(response.metadata["ng_agent_outcome"]), agent_outcome_policy(response)) == expected
     [invocation] = _records(close, "agent_invocation")
     [record] = _records(close, "sandbox")
     assert invocation.status == "failed"
@@ -545,10 +553,12 @@ async def test_retry_exhaustion_keeps_actual_status_and_deterministic_rejections
     finally:
         model.close()
     assert response.status == "failed" and len(model.requests) == attempts
-    assert json.loads(response.metadata["ng_agent_outcome"]) == {
-        "failure_kind": "model_request_error",
-        "status_code": status,
-    }
+    # A 400 before any answer is the endpoint refusing the run's own request.
+    assert json.loads(response.metadata["ng_agent_outcome"]) == (
+        {"failure_kind": "model_request_rejected"}
+        if status == 400
+        else {"failure_kind": "model_request_error", "status_code": status}
+    )
 
 
 @linux_only

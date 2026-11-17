@@ -23,12 +23,14 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
     AgentSeedSessionRequest,
+    agent_outcome_policy,
     check_agent_seed_rejected,
 )
 from nemo_gym.client import ServerClient
 from nemo_gym.core import (
     EpisodeId,
     FailureHeader,
+    NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NgFailureEvent,
     RequestFailureLog,
@@ -665,9 +667,28 @@ def test_reported_provider_error_is_a_classified_failed_response(setup):
     assert body["usage"]["total_tokens"] == 13
     record = closed.json()["agent_observations"]["records"][-1]
     assert (record["outcome"], record["error_type"], record["exit_code"]) == ("failed", "copilot_error", 1)
+    # The model answered before the endpoint refused a later request, so the run is graded.
     outcome = json.loads(body["metadata"][AGENT_OUTCOME_METADATA_KEY])
     assert outcome == {"failure_kind": "model_request_error", "status_code": 400}
+    assert agent_outcome_policy(NeMoGymResponse.model_validate(body)) == "verify"
     assert closed.json()["agent_observations"]["records"][0]["status"] == "failed"
+
+
+def test_provider_error_before_any_answer_is_a_rejected_request(setup):
+    agent, sandbox = setup
+    sandbox.events = [
+        {"type": "session.error", "data": {"errorType": "query", "message": "400 rejected", "statusCode": 400}},
+        {"type": "result", "sessionId": "copilot-run-1", "exitCode": 1},
+    ]
+    sandbox.otel = otel(chat_span("rejected", usage=None, status=2))
+    sandbox.result["return_code"] = 1
+    result, _ = run_session(agent)
+    assert result.status_code == 200, result.text
+    body = result.json()
+    assert body["status"] == "failed" and body["output"] == []
+    # No model call answered, so the endpoint refused the run's own request: not graded, not retried.
+    assert json.loads(body["metadata"][AGENT_OUTCOME_METADATA_KEY]) == {"failure_kind": "model_request_rejected"}
+    assert agent_outcome_policy(NeMoGymResponse.model_validate(body)) == "fail"
 
 
 def test_unexplained_nonzero_exit_is_an_execution_error(setup):

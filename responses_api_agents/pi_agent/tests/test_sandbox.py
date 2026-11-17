@@ -37,6 +37,7 @@ from nemo_gym.agents import (
     AgentCloseSessionRequest,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    agent_outcome_policy,
     is_harness_termination_failure,
     parse_cleanup_receipt,
     raises_agent_failure,
@@ -2577,6 +2578,14 @@ async def test_terminal_model_error_reports_partial_output_and_usage(
     assert response.usage.input_tokens == (9 if prior_turn else 0) + (5 if partial_output else 0)
     assert response.usage.output_tokens == (3 if prior_turn else 0) + (2 if partial_output else 0)
     assert response.usage.total_tokens == (12 if prior_turn else 0) + (7 if partial_output else 0)
+    if error_message.startswith("400 "):
+        # Partial text of the failed message is not an answer; an earlier turn that ended without error is one.
+        expected = (
+            ({"failure_kind": "model_request_error", "status_code": 400}, "verify")
+            if prior_turn
+            else ({"failure_kind": "model_request_rejected"}, "fail")
+        )
+        assert (json.loads(response.metadata["ng_agent_outcome"]), agent_outcome_policy(response)) == expected
     close = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     root = close.agent_observations.records[0]
     assert root.status == "failed"
@@ -3127,15 +3136,16 @@ def test_task_timeout_does_not_allow_other_metadata_or_consume_activation(
 
 
 @pytest.mark.parametrize(
-    "message,status",
+    "message,outcome",
     [
-        ("400 bad request", 400),
-        ("HTTP 503: unavailable", 503),
-        ("500 status code (no body)", 500),
-        ("401 unauthorized", 401),
+        # The model never answered, so the endpoint refused the run's own request.
+        ("400 bad request", {"failure_kind": "model_request_rejected"}),
+        ("HTTP 503: unavailable", {"failure_kind": "model_request_error", "status_code": 503}),
+        ("500 status code (no body)", {"failure_kind": "model_request_error", "status_code": 500}),
+        ("401 unauthorized", {"failure_kind": "model_request_error", "status_code": 401}),
     ],
 )
-def test_native_model_error_is_reported_with_classification(setup, message, status):
+def test_native_model_error_is_reported_with_classification(setup, message, outcome):
     agent, sandbox = setup
     native = {"role": "assistant", "stopReason": "error", "errorMessage": message, "content": []}
     response, observations = sandbox_event_response(
@@ -3148,10 +3158,7 @@ def test_native_model_error_is_reported_with_classification(setup, message, stat
     )
     assert response["status"] == "failed"
     assert response["error"]["message"] == message
-    assert json.loads(response["metadata"]["ng_agent_outcome"]) == {
-        "failure_kind": "model_request_error",
-        "status_code": status,
-    }
+    assert json.loads(response["metadata"]["ng_agent_outcome"]) == outcome
     assert observations["records"][0]["status"] == "failed"
 
 

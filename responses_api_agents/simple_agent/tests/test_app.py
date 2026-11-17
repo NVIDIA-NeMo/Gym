@@ -42,6 +42,7 @@ from nemo_gym.agents import (
     AgentCloseSessionRequest,
     AgentOutcome,
     AgentSeedSessionRequest,
+    agent_outcome_policy,
     check_agent_seed_rejected,
     raises_agent_failure,
 )
@@ -3631,9 +3632,15 @@ async def test_terminal_model_http_error_returns_cause_and_zero_usage(
     assert client.post.await_count == attempts
     assert response.status == "failed"
     assert "controlled model failure" in response.error.message
-    assert AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == AgentOutcome(
-        failure_kind="model_request_error", status_code=status
+    # The first model call was refused, so a 400 is the endpoint rejecting the run's own request: not graded.
+    expected = (
+        AgentOutcome(failure_kind="model_request_rejected")
+        if status == 400
+        else AgentOutcome(failure_kind="model_request_error", status_code=status)
     )
+    assert AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == expected
+    if status == 400:
+        assert agent_outcome_policy(response) == "fail"
     assert response.output == [] and response.usage.total_tokens == 0
     assert trajectory.turns == [] and trajectory.tool_calls == []
     invocation = trajectory.invocations[0]
@@ -3699,6 +3706,46 @@ async def test_exhausted_model_retries_preserve_partial_work_without_repeating_t
         assert response.usage.total_tokens == 28
     else:
         assert response.usage is None
+
+
+async def test_a_400_after_a_model_answer_stays_a_graded_request_error(monkeypatch: MonkeyPatch) -> None:
+    server, client = _make_agent(True)
+    tool_response = {
+        "id": "tool-response",
+        "created_at": 1,
+        "model": "model",
+        "object": "response",
+        "parallel_tool_calls": False,
+        "tool_choice": "auto",
+        "tools": [],
+        "output": [
+            {
+                "type": "function_call",
+                "id": "tool-1",
+                "call_id": "tool-1",
+                "name": "bash",
+                "arguments": '{"command":"printf done"}',
+            }
+        ],
+    }
+    client.post = AsyncMock(side_effect=[_mock_response(tool_response), _model_http_error(400)])
+    monkeypatch.setattr(
+        "responses_api_agents.simple_agent.app.http_request", AsyncMock(return_value=_mock_response(content="done"))
+    )
+
+    response, _, _, _ = await server._create_episode(
+        NeMoGymResponseCreateParamsNonStreaming(input="hello"),
+        model_url_path="/ng-rollout/rollout/v1/responses",
+        in_session=True,
+        tool_access=DirectHTTPToolAccess(name="resources", base_url="http://resources", required=True),
+        collect_trajectory=True,
+    )
+
+    assert response.status == "failed"
+    assert AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == AgentOutcome(
+        failure_kind="model_request_error", status_code=400
+    )
+    assert agent_outcome_policy(response) == "verify"
 
 
 def _body_failure_report(http_status: int) -> FailureReport:

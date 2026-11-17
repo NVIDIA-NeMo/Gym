@@ -112,6 +112,8 @@ from nemo_gym.config import (
 )
 from nemo_gym.core import (
     EPISODE_FAILED,
+    MODEL_REQUEST_ERROR,
+    MODEL_REQUEST_REJECTED,
     BaseEpisodeRequest,
     BaseEpisodeResponse,
     FailureBoundary,
@@ -1136,12 +1138,14 @@ class HarborEnvironmentServer(
         progress: "_TurnProgress",
         *,
         agent_timeout_sec: float,
+        earlier_turns: bool = False,
     ) -> tuple[NeMoGymResponse, AgentObservationBundle | None, TrajectoryRecord | None]:
         """One agent turn in its own session on the episode's sandbox: seed, one activation, close.
 
         The session is closed before this returns, so the harness has let go of the sandbox and its
         observations are in hand. A failed seed or activation raises the staged episode failure.
         ``progress`` is kept current with what the turn has produced, for the task deadline's failure.
+        ``earlier_turns`` says an earlier step of this episode was graded (see :meth:`_route_failed_response`).
         """
         handle = await self._open_agent_session(
             request, access, cleanup, task, progress, agent_timeout_sec=agent_timeout_sec, continuation=False
@@ -1150,7 +1154,7 @@ class HarborEnvironmentServer(
         # Verification needs this close first: the harness must have let go of the sandbox, and its
         # observations travel with the result.
         await self._close_agent_session(handle, task, progress, partial_response=agent_response)
-        self._route_failed_response(agent_response, handle)
+        self._route_failed_response(agent_response, handle, earlier_turns=earlier_turns)
         return agent_response, handle.observations, handle.trajectory
 
     async def _open_agent_session(
@@ -1354,7 +1358,9 @@ class HarborEnvironmentServer(
                 f"kept over the close's: {error.failure_reason}"
             )
 
-    def _route_failed_response(self, agent_response: NeMoGymResponse, handle: _AgentSessionHandle) -> None:
+    def _route_failed_response(
+        self, agent_response: NeMoGymResponse, handle: _AgentSessionHandle, *, earlier_turns: bool = False
+    ) -> None:
         """A failed response whose harness classified the cause is routed by the deployment's policy before any
         grading: a transport or unknown cause is retried ungraded, as on ``single_agent_turn``, instead of
         handing test.sh a half-finished sandbox and recording a real 0. In a multi-step task this ends the
@@ -1363,10 +1369,20 @@ class HarborEnvironmentServer(
         The failure names the cause that decided its action, so the run summary and the dropped-rollout line say
         why the episode was not graded (``model_request_rejected``, not a bare environment failure). A model
         request error keeps its upstream HTTP status, which classifies a 5xx as the model server's fault, not the
-        model's. An ``unknown`` or malformed cause names none."""
-        action = agent_outcome_policy(agent_response, config=self.config.agent_outcome_policy)
+        model's. An ``unknown`` or malformed cause names none.
+
+        ``earlier_turns`` says an earlier step of this episode was graded. A harness reports a request rejected
+        (``model_request_rejected``) when the endpoint refused it before the session's model answered, but a step's
+        fresh session cannot see the answers of the steps before it, so such a step is routed as the HTTP 400 it
+        was, which is graded by default, as before the harness told the two apart."""
+        routed = agent_response
+        cause = _reported_cause(agent_response)
+        if earlier_turns and cause is not None and cause.failure_kind == MODEL_REQUEST_REJECTED:
+            cause = AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=400)
+            metadata = {**(agent_response.metadata or {}), AGENT_OUTCOME_METADATA_KEY: cause.model_dump_json()}
+            routed = agent_response.model_copy(update={"metadata": metadata})
+        action = agent_outcome_policy(routed, config=self.config.agent_outcome_policy)
         if action != OutcomeAction.VERIFY:
-            cause = _reported_cause(agent_response)
             raise self._failure(
                 stage="agent",
                 failure_reason=agent_response.error.message if agent_response.error else "Agent reported failure",
@@ -1527,13 +1543,13 @@ class HarborEnvironmentServer(
                     request, handle, turn_input.responses_create_params, progress, activation=index
                 )
                 try:
-                    self._route_failed_response(response, handle)
+                    self._route_failed_response(response, handle, earlier_turns=index > 1)
                 except NgFailureEvent as error:
                     if not is_handled_episode_failure(error):
                         raise
                     # The evidence of a continued session arrives with its close.
                     await self._close_agent_session(handle, task, progress, partial_response=response)
-                    self._route_failed_response(response, handle)
+                    self._route_failed_response(response, handle, earlier_turns=index > 1)
                 if index == len(task.turns):
                     # No activation follows the last step: the harness lets go of the sandbox before that step's
                     # verifier, as a fresh session does before every step's, and before a last step that verifies
@@ -1551,6 +1567,7 @@ class HarborEnvironmentServer(
                     task,
                     progress,
                     agent_timeout_sec=task.config.step_agent_timeout_sec(turn.config),
+                    earlier_turns=bool(results),
                 )
             progress.stage = "verification"
             try:

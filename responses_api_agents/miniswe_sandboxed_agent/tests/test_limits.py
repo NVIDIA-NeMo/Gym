@@ -123,6 +123,7 @@ async def test_length_limit_recovery_and_terminal_classification(
     [
         (400, "This model's maximum context length is 262144 tokens", True),
         (400, "max_tokens is too large: input length and max_tokens exceed the context", True),
+        (400, "max_tokens is too large: 131072. This model supports at most 32768 completion tokens", False),
         (400, "context_length_exceeded", True),
         (400, "max_tokens must be positive", False),
         (400, "Invalid tool schema", False),

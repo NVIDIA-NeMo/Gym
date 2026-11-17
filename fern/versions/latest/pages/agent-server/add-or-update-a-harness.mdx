@@ -779,11 +779,25 @@ A reward of `1` or an HTTP `200` response alone does not prove that an episode w
 #### Report a cause; let the environment decide
 
 `SimpleResponsesAPIAgent` provides `classify_outcome(native_result) -> AgentOutcome`
-and `report_outcome(response, native_result)`. The default classifier returns
+and `report_outcome(response, native_result, *, model_answered=None)`. The default classifier returns
 `unknown`; override it using native evidence when available. Call `report_outcome`
 before returning a failed response; inheritance alone does not attach metadata.
 Keep text parsing in the classifier and document the tested runtime version.
 Pi, Codex, OpenCode and Hermes override it in their agent-session paths.
+
+A harness whose `classify_outcome` can return `model_request_error` with status 400 must
+pass `model_answered`: whether any model call of this agent session returned a response
+before the run ended, counting every attempt, compaction and helper call, and the earlier
+activations of a continued session. Take it from the harness's own record of answered
+calls (response IDs, per-call usage, or assistant messages that did not fail), not from
+the response's `output`: harnesses pad a failed output, echo their input into it, or drop
+it. With `model_answered=False`, `report_outcome` reports a 400 as `model_request_rejected`,
+because the endpoint refused the run's own request before the model answered, unless the
+error message names the context window (`context_length_exceeded`, "context length",
+"context window", "context size", "maximum model length" or "prompt is too long"): a
+prompt over the window is the model's own limit and stays graded. With `True` or `None`
+(unknown), the 400 stays `model_request_error`. A harness that writes the outcome itself
+applies the same rule with `reject_unanswered_request`.
 
 `AgentOutcome.failure_kind` accepts names registered in `nemo_gym/core/failure_kinds.py`
 or `unknown`; unregistered names are rejected. The shared names describe causes,
@@ -801,9 +815,9 @@ failed responses after closing the agent:
 
 | Reported cause | Verify | Eligible for episode retry |
 | --- | --- | --- |
-| `agent_invalid_output`, `agent_limit`, or model request rejection 400/413/422 | Yes | No |
+| `agent_invalid_output`, `agent_limit`, or model request errors 400/413/422 (a 400 after the model answered, or one that names the context window) | Yes | No |
 | Model request errors 408/425/429/5xx, `model_transport_error`, or `unknown` | No | Yes |
-| `model_request_rejected` (the endpoint refused the request as invalid, such as an output limit above the model's cap; OpenCode reports a non-overflow 400 this way) | No | No |
+| `model_request_rejected` (a 400 before the session's model answered, such as an output limit above the model's cap) | No | No |
 | Other failures, including 401/403/404 or malformed metadata | No | No |
 
 Excluded attempts retain their partial response and observations in the existing
@@ -832,6 +846,10 @@ For example, `by_failure_kind: {model_request_error: fail}` applies only when no
 status rule matches; it does not override the default 400/408/413/422/425/429/5xx rules.
 Use `by_status_code: {503: fail}` to change 503 handling. Adding
 `by_status_code: {404: retry}` keeps the other default status rules, including 429 and 5xx.
+`model_request_rejected` carries no HTTP status, so a `by_status_code: {400: ...}` rule does
+not reach it; `by_failure_kind: {model_request_rejected: verify}` grades it again. In a
+multi-step `harbor` task, a step after a graded step routes a rejected request as the 400 it
+was, since the step's fresh session cannot see the earlier steps' answers.
 
 It applies to `single_agent_turn`, its legacy-response wrapper and `harbor`, not other
 Environment Server implementations or agents' own legacy `/run` methods.

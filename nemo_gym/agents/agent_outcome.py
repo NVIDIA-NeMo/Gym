@@ -81,6 +81,39 @@ class AgentOutcome(BaseModel):
         return self
 
 
+# Words a model endpoint's refusal uses when the prompt does not fit the context window: OpenAI's error code (also what
+# vllm_model propagates), "maximum context length" (OpenAI, vLLM), "context window" (Codex's wording), "context size"
+# (llama.cpp), vLLM's "maximum model length" for a decoder prompt, and Anthropic's "prompt is too long".
+_CONTEXT_WINDOW_PHRASES = (
+    "context_length_exceeded",
+    "context length",
+    "context window",
+    "context size",
+    "maximum model length",
+    "prompt is too long",
+)
+
+
+def reject_unanswered_request(
+    outcome: AgentOutcome, *, model_answered: bool | None, error_message: str
+) -> AgentOutcome:
+    """``model_request_rejected`` for an HTTP 400 that ended a run before its model answered, else ``outcome``.
+
+    Before any answer the endpoint refused the run's own request, such as an output limit above the model's cap: the
+    run's configuration is at fault, so the attempt is not graded. A 400 after an answer can come from what the model
+    wrote and stays graded, and so does a refusal whose message names the context window, the model's own limit.
+    ``model_answered=None`` (unknown) keeps ``outcome``.
+    """
+    if (
+        model_answered is False
+        and outcome.failure_kind == MODEL_REQUEST_ERROR
+        and outcome.status_code == 400
+        and not any(phrase in error_message.lower() for phrase in _CONTEXT_WINDOW_PHRASES)
+    ):
+        return AgentOutcome(failure_kind=MODEL_REQUEST_REJECTED)
+    return outcome
+
+
 class AgentOutcomePolicyConfig(OutcomePolicyConfig):
     """Existing Environment Server defaults for classified failed agent responses."""
 

@@ -26,7 +26,12 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from pydantic import ValidationError
 
-from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedSessionRequest, check_agent_seed_rejected
+from nemo_gym.agents import (
+    AgentCloseSessionRequest,
+    AgentSeedSessionRequest,
+    agent_outcome_policy,
+    check_agent_seed_rejected,
+)
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
@@ -939,7 +944,8 @@ async def test_in_process_session_applies_instructions_and_sampling_to_every_mod
     ("error_code", "status", "outcome"),
     [
         ("context_length_exceeded", "incomplete", None),
-        ("invalid_request_error", "failed", {"failure_kind": "model_request_error", "status_code": 400}),
+        # The run's first model call was refused, so the endpoint rejected the run's own request.
+        ("invalid_request_error", "failed", {"failure_kind": "model_request_rejected"}),
     ],
 )
 async def test_in_process_session_types_a_final_model_refusal(error_code, status, outcome):
@@ -960,6 +966,32 @@ async def test_in_process_session_types_a_final_model_refusal(error_code, status
         assert metadata["stop_reason"] == "context_limit" and result.error is None
     else:
         assert "Model Server HTTP 400" in result.error.message
+        assert agent_outcome_policy(result) == "fail"
+    await agent.close_agent_session(request, _close_body())
+
+
+@pytest.mark.asyncio
+async def test_in_process_refusal_after_a_model_answer_stays_a_graded_request_error():
+    refusal = _model_refusal(400, {"error": {"code": "invalid_request_error", "message": "bad"}})
+    agent = _make_agent()
+    agent.server_client.post = AsyncMock(
+        side_effect=[
+            _model_response(AIMessage(content="", tool_calls=[{"name": "ls", "args": {}, "id": "call_1"}])),
+            refusal,
+        ]
+    )
+    request = _request()
+    await agent.seed_agent_session(request, _seed_body())
+
+    result = await agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="go"))
+
+    # ainvoke() keeps no partial graph state, so the reply has no output although the model answered first.
+    assert (result.status, result.output) == ("failed", [])
+    assert orjson.loads(result.metadata["ng_agent_outcome"]) == {
+        "failure_kind": "model_request_error",
+        "status_code": 400,
+    }
+    assert agent_outcome_policy(result) == "verify"
     await agent.close_agent_session(request, _close_body())
 
 

@@ -58,6 +58,7 @@ from responses_api_agents.openhands_agent.conversion import (
     RunOutcome,
     classify_error,
     error_chain,
+    model_replied,
     observation_records,
     output_items,
     parse_events,
@@ -468,7 +469,8 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
         response = self.report_rollout_stop(response, state.session)
         # Only a failed response gets an outcome. After the deadline that is one without a model reply, whose
         # cause is unknown, so no error the runner may have recorded classifies it.
-        return self.report_outcome(response, {} if timed_out else result or {})
+        native = {} if timed_out else result or {}
+        return self.report_outcome(response, native, model_answered=model_replied(events, result))
 
     def _observations(
         self,

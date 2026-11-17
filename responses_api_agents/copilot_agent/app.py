@@ -1076,7 +1076,9 @@ class CopilotAgent(SimpleResponsesAPIAgent):
         if execution_error:
             raise RuntimeError(f"Copilot agent failed: {execution_error}")
         if reported_error:
-            return self.report_outcome(response, transcript.error)
+            # Copilot names each answered model call, a sub-agent's too, by its apiCallId.
+            answered = bool(transcript.response_ids or transcript.output)
+            return self.report_outcome(response, transcript.error, model_answered=answered)
         return response
 
     async def responses(

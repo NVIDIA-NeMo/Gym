@@ -23,7 +23,13 @@ from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, OutcomeAct
 from nemo_gym.cli.env import validate_server_configs
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import AGENT_INVALID_OUTPUT, MODEL_REQUEST_ERROR, EpisodeId, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import (
+    AGENT_INVALID_OUTPUT,
+    MODEL_REQUEST_ERROR,
+    MODEL_REQUEST_REJECTED,
+    EpisodeId,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
 from nemo_gym.server_runtime import DirectHTTPToolAccess
 from responses_api_agents.stirrup_agent.app import StirrupAgentWrapper, StirrupAgentWrapperConfig, _observations
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent, NeMoUserMessage
@@ -311,12 +317,35 @@ class TestApp:
         assert response.status == "failed"
         assert (response.error.code, response.error.message) == ("server_error", "rejected")
         assert response.metadata["stop_reason"] == "model_error"
-        assert AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == AgentOutcome(
-            failure_kind=MODEL_REQUEST_ERROR, status_code=status
+        # No model call returned, so a 400 is the endpoint refusing the run's own request: not graded.
+        expected = (
+            AgentOutcome(failure_kind=MODEL_REQUEST_REJECTED)
+            if status == 400
+            else AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
         )
+        assert AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == expected
+        assert agent_outcome_policy(response) == (OutcomeAction.FAIL if status == 400 else OutcomeAction.VERIFY)
         assert (response.usage.input_tokens, response.usage.output_tokens, response.usage.total_tokens) == (0, 0, 0)
         assert response.usage.input_tokens_details.cached_tokens is None
         assert response.usage.output_tokens_details.reasoning_tokens is None
+
+    @pytest.mark.asyncio
+    async def test_a_400_after_a_model_response_stays_a_graded_request_error(self) -> None:
+        report = _report(
+            stop_reason="model_error",
+            model_error="rejected",
+            model_error_status=400,
+            observations={"status": "failed", "model_response_ids": ["chatcmpl-1"]},
+        )
+
+        response, _, _ = await _run_episode(
+            _make_config(), NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy"), report
+        )
+
+        assert AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == AgentOutcome(
+            failure_kind=MODEL_REQUEST_ERROR, status_code=400
+        )
+        assert agent_outcome_policy(response) == OutcomeAction.VERIFY
 
     @pytest.mark.asyncio
     async def test_a_run_ended_by_unusable_compaction_summaries_is_the_models_invalid_output(self) -> None:

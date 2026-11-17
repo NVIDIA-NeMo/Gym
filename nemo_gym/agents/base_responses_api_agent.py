@@ -49,7 +49,12 @@ from nemo_gym.agents.agent_activation_types import (
     AgentContinuationCapabilities,
     AgentContinuationRequirements,
 )
-from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, policy_timeout_failure
+from nemo_gym.agents.agent_outcome import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AgentOutcome,
+    policy_timeout_failure,
+    reject_unanswered_request,
+)
 from nemo_gym.agents.utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
 from nemo_gym.agents.utils.sandbox_session import ExpiryUnsupportedError, SandboxSession
 from nemo_gym.client.server_client import apply_rollout_prefix, rollout_path_prefix
@@ -1635,11 +1640,25 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         """Override to classify native failures; the environment decides grading and retry eligibility."""
         return AgentOutcome(failure_kind="unknown")
 
-    def report_outcome(self, response: NeMoGymResponse, native_result: Mapping[str, Any]) -> NeMoGymResponse:
-        """Attach validated evidence through the existing string-valued response metadata."""
+    def report_outcome(
+        self, response: NeMoGymResponse, native_result: Mapping[str, Any], *, model_answered: bool | None = None
+    ) -> NeMoGymResponse:
+        """Attach validated evidence through the existing string-valued response metadata.
+
+        ``model_answered`` says whether any model call of this agent session returned before the run ended. A harness
+        whose ``classify_outcome`` can report an HTTP 400 passes it, so that a 400 before any answer is reported as
+        ``model_request_rejected`` (see ``reject_unanswered_request``); ``None`` keeps the classified outcome.
+        """
         if response.status != "failed":
             return response
-        outcome = AgentOutcome.model_validate(self.classify_outcome(native_result))
+        # ``model_copy(update=...)`` keeps an ``error`` given as a dict unvalidated.
+        error = response.error
+        message = error.get("message") if isinstance(error, Mapping) else getattr(error, "message", None)
+        outcome = reject_unanswered_request(
+            AgentOutcome.model_validate(self.classify_outcome(native_result)),
+            model_answered=model_answered,
+            error_message=message or "",
+        )
         return response.model_copy(
             update={
                 "metadata": {

@@ -288,7 +288,10 @@ async def test_activation_replay_survives_disconnected_waiter(agent, state):
         *[
             (
                 f"{prefix}{status} controlled model failure",
-                {"failure_kind": "model_request_error", "status_code": status},
+                # The run has no messages, so the model never answered: a 400 is a rejected request.
+                {"failure_kind": "model_request_rejected"}
+                if status == 400
+                else {"failure_kind": "model_request_error", "status_code": status},
                 status in {429, 500},
             )
             for status in (400, 401, 422, 429, 500)
@@ -326,6 +329,8 @@ def test_provider_failure_is_reported_and_replays_without_rerunning(agent, state
             policy = agent_outcome_policy(NeMoGymResponse.model_validate(response.json()))
             assert (policy == OutcomeAction.RETRY) is retryable
             assert (policy == OutcomeAction.VERIFY) is (outcome.get("status_code") in {400, 422})
+            if outcome["failure_kind"] == "model_request_rejected":
+                assert policy == OutcomeAction.FAIL
         state.upload_json.assert_awaited_once()
         assert state.session.cleanup is not None and state.session.cleanup["cleanup_confirmed"] is True
         close = client.post(
@@ -334,6 +339,38 @@ def test_provider_failure_is_reported_and_replays_without_rerunning(agent, state
         )
         assert close.status_code == 200
     state.session.sandbox.disconnect.assert_awaited_once()
+
+
+def test_a_400_after_the_model_answered_stays_a_graded_request_error(agent, state):
+    agent._initialize_agent_session_state = AsyncMock(return_value=state)
+    state.upload_json = AsyncMock()
+    # The transcript holds the prompt and the model's earlier answer before the endpoint refused a later request.
+    messages = [{"role": "user", "content": "task"}, {"role": "assistant", "content": "Looking at the repository."}]
+    mock_json_download(
+        state.session.sandbox,
+        side_effect=[
+            {"cleanup_confirmed": True, "error": None},
+            {
+                "result": {"failed": True, "error": "HTTP 400 controlled model failure", "messages": messages},
+                "runtime": {"hostname": "sandbox", "pid": 123},
+            },
+        ],
+    )
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/v1/agent_sessions", json=state.request.model_dump(mode="json")).status_code == 200
+        response = client.post(
+            f"/ng-rollout/{state.request.episode_id.capture_key}/v1/responses", json={"input": "task"}
+        )
+        assert response.status_code == 200
+        assert json.loads(response.json()["metadata"]["ng_agent_outcome"]) == {
+            "failure_kind": "model_request_error",
+            "status_code": 400,
+        }
+        assert agent_outcome_policy(NeMoGymResponse.model_validate(response.json())) == OutcomeAction.VERIFY
+        client.post(
+            "/v1/agent_sessions/close",
+            json={"agent_session_id": "session", "episode_id": state.request.episode_id.model_dump()},
+        )
 
 
 @pytest.mark.parametrize("runner_started", [False, True], ids=["not-launched", "cleanup-confirmed"])

@@ -475,7 +475,8 @@ class GooseAgent(SimpleResponsesAPIAgent):
         )
         if status == "failed":
             LOG.warning("Goose run failed (%s, exit %s); stderr tail: %s", stop, return_code, artifacts.stderr[-2048:])
-            return self.report_outcome(response, {"failure_kind": failure_kind, "status_code": status_code})
+            outcome = {"failure_kind": failure_kind, "status_code": status_code}
+            return self.report_outcome(response, outcome, model_answered=bool(output))
         return self.report_rollout_stop(response, state.session)
 
     async def responses(

@@ -33,6 +33,7 @@ if TYPE_CHECKING:
         confirmed_policy_response_timeout,
         failure_outcome_policy,
         queued_policy_response_timeout,
+        reject_unanswered_request,
     )
     from nemo_gym.agents.agent_tools import (
         restricted_network_policy,
@@ -143,6 +144,7 @@ _PUBLIC_API = {
     "check_agent_seed_rejected": "testing.agent_session_conformance",
     "confirmed_policy_response_timeout": "agent_outcome",
     "queued_policy_response_timeout": "agent_outcome",
+    "reject_unanswered_request": "agent_outcome",
     "exec_timeout": "utils.supervisor_client",
     "failure_outcome_policy": "agent_outcome",
     "harness_termination_failure": "utils.supervisor_client",

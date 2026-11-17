@@ -40,6 +40,7 @@ from nemo_gym.agents import (
     SandboxSession,
     SimpleResponsesAPIAgent,
     assert_model_url_reachable_from_sandbox,
+    reject_unanswered_request,
 )
 from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
 from nemo_gym.client import NeMoGymAsyncOpenAI, get_response_json, raise_for_status
@@ -281,6 +282,8 @@ class BrowsecompAgentSessionState(AgentSessionState):
 
     tool_access: DirectHTTPToolAccess | None
     resources_cookies: dict[str, str]
+    # Set once a model call of this activation returns, the empty-answer retries' included.
+    model_answered: bool = False
 
 
 def _cookie_values(cookies: Any) -> dict[str, str]:
@@ -590,7 +593,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     request, response, body, session=state, started_at=started_at
                 )
             except aiohttp.ClientResponseError as error:
-                return self._model_request_failure(body, error)
+                return self._model_request_failure(body, error, model_answered=state.model_answered)
             answer = re.sub(r"<think>.*?</think>", "", self._last_message_text(model_response), flags=re.DOTALL)
             if answer.strip() or getattr(model_response, "timed_out", False) or attempt == attempts - 1:
                 return model_response
@@ -601,18 +604,29 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             )
 
     def _model_request_failure(
-        self, body: NeMoGymResponseCreateParamsNonStreaming, error: aiohttp.ClientResponseError
+        self,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        error: aiohttp.ClientResponseError,
+        *,
+        model_answered: bool,
     ) -> NeMoGymResponse:
         """A failed response for a model call that answered with an HTTP error.
 
         run() scored a 4xx 0 and set a 5xx aside as an infrastructure failure. The Environment Server's default
         outcome policy verifies 400, 413 and 422, retries 408, 425, 429 and 5xx, and fails the episode on the rest.
-        The output is empty, as run() scored no partial answer.
+        A 400 before any model call of the session answered is a rejected request, which it fails. The output is
+        empty, as run() scored no partial answer.
         """
         content = getattr(error, "response_content", b"")
         detail = content.decode(errors="replace") if isinstance(content, bytes) else str(content)
         # The rollout row carries this message, so an upstream error page stays bounded.
         detail = detail[:_ERROR_DETAIL_CHARS]
+        message = f"Model HTTP {error.status}: {detail or error.message}"
+        outcome = reject_unanswered_request(
+            AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=error.status),
+            model_answered=model_answered,
+            error_message=message,
+        )
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=time.time(),
@@ -620,15 +634,13 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             object="response",
             output=[],
             status="failed",
-            error={"code": "server_error", "message": f"Model HTTP {error.status}: {detail or error.message}"},
+            error={"code": "server_error", "message": message},
             tools=body.tools,
             tool_choice=body.tool_choice,
             parallel_tool_calls=body.parallel_tool_calls,
             metadata={
                 **(body.metadata or {}),
-                AGENT_OUTCOME_METADATA_KEY: AgentOutcome(
-                    failure_kind=MODEL_REQUEST_ERROR, status_code=error.status
-                ).model_dump_json(),
+                AGENT_OUTCOME_METADATA_KEY: outcome.model_dump_json(),
             },
         )
 
@@ -844,6 +856,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 raise RuntimeError(
                     f"Received an invalid response from model server: {json.dumps(model_response_json)}"
                 ) from e
+            if session is not None:
+                session.model_answered = True
 
             # --- Check context reset threshold (post-call fallback; used when
             # save_model_call_using_vllm_tokenize_endpoint is off) ---

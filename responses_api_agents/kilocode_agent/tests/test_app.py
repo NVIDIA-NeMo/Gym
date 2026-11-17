@@ -27,6 +27,7 @@ import yaml
 from omegaconf import OmegaConf
 from starlette.requests import Request
 
+from nemo_gym.agents import agent_outcome_policy
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
@@ -510,15 +511,22 @@ class TestLocalRunOutcome:
         stdout = _events({"type": "error", "error": {"name": "APIError"}})
         self._assert_failed(self._respond(tmp_path, _fake_kilo(tmp_path, stdout=stdout)), "execution error")
 
-    def test_model_http_error_preserves_status(self, tmp_path) -> None:
+    @pytest.mark.parametrize(
+        "answered,outcome,action",
+        [
+            # Before any answer the endpoint refused the run's own request, so the attempt is not graded.
+            (False, {"failure_kind": "model_request_rejected"}, "fail"),
+            (True, {"failure_kind": "model_request_error", "status_code": 400}, "verify"),
+        ],
+    )
+    def test_model_http_error_preserves_status(self, tmp_path, answered, outcome, action) -> None:
         error = {"name": "APIError", "data": {"message": "controlled model failure", "statusCode": 400}}
-        stdout = _events({"type": "error", "error": error})
+        answer = [_text_event("Looking."), self.STEP] if answered else []
+        stdout = _events(*answer, {"type": "error", "error": error})
         response = self._respond(tmp_path, _fake_kilo(tmp_path, stdout=stdout, exit_code=1))
         self._assert_failed(response, "controlled model failure")
-        assert json.loads(response.metadata["ng_agent_outcome"]) == {
-            "failure_kind": "model_request_error",
-            "status_code": 400,
-        }
+        assert json.loads(response.metadata["ng_agent_outcome"]) == outcome
+        assert agent_outcome_policy(response) == action
 
     def test_rollout_calls_carry_observations_with_the_run_outcome(self, tmp_path) -> None:
         stdout = _events({"type": "error", "error": {"name": "APIError"}})

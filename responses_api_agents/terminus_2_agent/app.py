@@ -804,7 +804,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 },
             }
         )
-        response = self.report_outcome(response, output)
+        response = self.report_outcome(response, output, model_answered=bool(output.get("response_ids")))
         return self.report_rollout_stop(response, state.session)
 
     async def responses(
