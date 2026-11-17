@@ -115,7 +115,8 @@ Beyond the families, the protocol's own refusals:
   configured, by the checkpoint controller retiring the attempt that seeded the session
   (`retire_session_state` releases every session of that attempt, whether an episode seed or an agent-run
   seed created it, and does not fence the ID). A session an Agent seeds
-  with its run body, which is how the OpenCode preset seeds, is otherwise never closed, so held sessions add up over
+  with its run body (no shipped preset seeds this way; `opencode_hle_tools` runs as an agent session whose
+  Environment Server seeds and closes episode sessions) is otherwise never closed, so held sessions add up over
   the server's life, and a rollout's question is forgotten once 10,000 later sessions are seeded on the same
   server while that rollout is still running, however few rollouts are open at once. For a harness that
   closes its sessions, the cap must exceed the peak number of sessions open at once. A forgotten session
@@ -233,10 +234,11 @@ grades the rollout with its own `resources_server` (for HLE-Diamond, the equival
 ## Use in a preset
 
 `benchmarks/hle_diamond/opencode_hle_tools.yaml` runs the OpenCode harness with this server as its only
-tool server, on the deprecated `opencode_sandboxed_agent` behind the `legacy_agent` relay (it extends
-`opencode_legacy_agent.yaml`; moving it to an `opencode_agent` session is a follow-up). Live runs of that
-preset need `TAVILY_API_KEY` in the environment of the process that starts the servers; see that
-benchmark's README.
+tool server: an `opencode_agent` session (it extends `opencode_search.yaml`'s base, `opencode.yaml`)
+whose Environment Server seeds this server for every episode with the task row and grants `web_search`
+and `web_fetch` to the agent over MCP from the agent's `tool_servers`; the sandbox reaches the server
+by address under `network_access: model_and_tools`. Live runs of that preset need `TAVILY_API_KEY` in
+the environment of the process that starts the servers; see that benchmark's README.
 
 ## Example data
 

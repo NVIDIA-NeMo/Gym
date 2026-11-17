@@ -24,7 +24,7 @@ of the `test` split and downloads it at run time. Nothing from the dataset is co
 | `hle_diamond/opencode_search`, `hle_diamond/pi_search` | 728 | `prompts/opencode.yaml` | sandboxed code tools plus Tavily search (agent sessions) |
 | `hle_diamond/opencode_reference` | 728 | `prompts/opencode.yaml` | `opencode_search` on the reference sandbox image (upstream's Python 3.11.16 environment) under upstream's egress policy; needs the OpenSandbox provider (see Reference preset) |
 | `hle_diamond/opencode_full`, `hle_diamond/opencode_search_full` | 1000 (272 with an image) | `prompts/opencode.yaml`, baked at prepare time by `prepare_opencode_legacy.py` | deprecated: the OpenCode presets over the full set, images attached through `opencode run -f`, on `opencode_sandboxed_agent`; needs a vision-capable policy model |
-| `hle_diamond/opencode_hle_tools` | 728 | `prompts/opencode.yaml` | deprecated: sandboxed code tools plus upstream's `web_search` and `web_fetch` behind its blocklist (`resources_servers/hle_web_tools`, Tavily backend; see Upstream web tools), on `opencode_sandboxed_agent` |
+| `hle_diamond/opencode_hle_tools` | 728 | `prompts/opencode.yaml` | sandboxed code tools plus upstream's `web_search` and `web_fetch` behind its blocklist (`resources_servers/hle_web_tools`, Tavily backend; see Upstream web tools) (agent sessions) |
 | `hle_diamond/opencode_legacy_agent`, `hle_diamond/opencode_search_legacy_agent`, `hle_diamond/pi_legacy_agent`, `hle_diamond/pi_search_legacy_agent`, `hle_diamond/opencode_reference_legacy_agent` | 728 | `prompts/opencode.yaml` | deprecated: the text presets above as they ran before agent sessions, on `opencode_sandboxed_agent` / `pi_sandboxed_agent` |
 
 Two composable overrides live next to the presets and are not benchmarks (no dataset, not listed by
@@ -38,10 +38,10 @@ HLE-Diamond's published numbers are over all 1000 questions, images included, so
 the default and the text subset is the variant. A `hle_diamond/text` run covers 728/1000 questions
 (347 reasoning, 381 knowledge) and is not comparable with the published table; report that coverage.
 
-**Text and full sandboxed presets.** `opencode`, `opencode_search`, `pi` and `pi_search` run the 728
-text rows, as `benchmarks/hle`'s presets do, so with-tools numbers from them cover 728/1000 questions.
-They run `opencode_agent` and `pi_agent` in agent sessions (Sandboxed agents (with tools) > Agent
-sessions) with the shared settings of `benchmarks/hle`'s presets. `opencode_full` and
+**Text and full sandboxed presets.** `opencode`, `opencode_search`, `opencode_hle_tools`, `pi` and
+`pi_search` run the 728 text rows, as `benchmarks/hle`'s presets do, so with-tools numbers from them
+cover 728/1000 questions. They run `opencode_agent` and `pi_agent` in agent sessions (Sandboxed agents
+(with tools) > Agent sessions) with the shared settings of `benchmarks/hle`'s presets. `opencode_full` and
 `opencode_search_full` run all 1000 on the deprecated `opencode_sandboxed_agent`: that
 adapter uploads each `input_image` data URI of the user turn into the sandbox and attaches it with
 `opencode run -f`, so the image reaches the model call as an `image_url` part (Sandboxed agents (with
@@ -60,10 +60,7 @@ before agent sessions, kept under the agent names of the presets that replace th
 are configured differently, so do not compare their scores as one measurement (Agent sessions lists
 what changed). `opencode_full` and `opencode_search_full` keep their names and run the same deprecated
 `opencode_sandboxed_agent` behind the relay, because no session preset covers the image questions yet;
-they go away with the relay too. `opencode_hle_tools` (Sandboxed agents (with tools) > Upstream web
-tools) also keeps its name and runs `opencode_sandboxed_agent` behind the relay: it extends
-`opencode_legacy_agent.yaml`, so its text rows come from the deprecated harness, and moving it to an
-`opencode_agent` session is a follow-up change.
+they go away with the relay too.
 
 Dropped at prepare time: `rationale`, `author_name`, `canary`, `image_preview`, `rationale_image`.
 The `image` data URI appears only inside the materialized `input_image` block of the default set and
@@ -157,8 +154,8 @@ and Pi build their own model calls inside the sandbox (a model-call capture of t
 showed no `reasoning_effort`, so the gateway default, medium, applied). How each preset requests
 high effort:
 
-- The agent-session presets (`opencode`, `opencode_search`, `opencode_reference`, `pi`, `pi_search`):
-  through the model server, not the preset. Neither session agent can put an effort on its harness's
+- The agent-session presets (`opencode`, `opencode_search`, `opencode_hle_tools`, `opencode_reference`,
+  `pi`, `pi_search`): through the model server, not the preset. Neither session agent can put an effort on its harness's
   calls (a session's `opencode_config` takes no model options, and `pi_agent`'s generated provider
   declares no `reasoning_effort` support, so Pi's `--thinking` level never leaves the sandbox), and
   both refuse a request `reasoning` field with 422, so `++responses_create_params.reasoning.effort` must
@@ -171,16 +168,14 @@ high effort:
   documented commands do): with the default judge, which is the policy model, the judge calls would
   run at high effort too.
 - `opencode_full.yaml` (inherited by `opencode_search_full.yaml`), on
-  `opencode_sandboxed_agent`, and the text `*_legacy_agent` presets and `opencode_hle_tools.yaml` on the
-  same agent:
+  `opencode_sandboxed_agent`, and the text `*_legacy_agent` presets on the same agent:
   `opencode_config.provider.nemo_gym.models.dummy_model.options.reasoningEffort: high`, which
   OpenCode 1.17.11 maps to `reasoning_effort: high` in its chat-completions body (verified in a
   capture). Override per run with
   `++<agent>.responses_api_agents.opencode_sandboxed_agent.opencode_config.provider.nemo_gym.models.dummy_model.options.reasoningEffort=<level>`,
   where `<agent>` is the preset's agent instance: `hle_diamond_opencode_full_agent` on the full
   presets, `hle_diamond_opencode_reference_agent` on `opencode_reference_legacy_agent.yaml`, and
-  `hle_diamond_opencode_agent` on `opencode_legacy_agent.yaml`, `opencode_search_legacy_agent.yaml` and
-  `opencode_hle_tools.yaml`.
+  `hle_diamond_opencode_agent` on `opencode_legacy_agent.yaml` and `opencode_search_legacy_agent.yaml`.
   Under any other name the override adds an agent block that nothing uses, and the effort stays
   `high`.
 - `pi_legacy_agent.yaml` (inherited by `pi_search_legacy_agent.yaml`), on the deprecated
@@ -304,8 +299,8 @@ Model-free checks that have been run (commands below, from the repository root):
   image count / duplicated id, `--limit` truncation after the text filter and above the corpus size,
   the `prepare_text.py` script form, no download on invalid arguments); the shipped prompt files
   rendering exactly the upstream `SYSTEM_PROMPT` and `prepare.py` baking exactly it; config
-  discovery and composition, the judge prompt path, manifests, the reasoning-effort knobs of all
-  four sandboxed presets and of `opencode_hle_tools`, `sandbox_docker_local.yaml` resolving to
+  discovery and composition, the judge prompt path, manifests, the reasoning-effort knobs of the
+  relay presets and the absence of one on the session presets, `sandbox_docker_local.yaml` resolving to
   exactly the Docker provider with inherited networking while the unused harness's block stays inert;
   the run commands of this README
   parsed from the file and composed through the CLI's own flag translation (the judge and Docker
@@ -416,8 +411,8 @@ multipleChoice):
   answering "None" on them is right, so an `Answer: None` control over the whole set has a floor of
   about 11/1000, and the two false positives of the 100-row control were two of these rows. The
   carried `answer_type` and `uuid` let you separate them.
-- On the relay presets (`*_legacy_agent`, `opencode_hle_tools`, `opencode_full`,
-  `opencode_search_full`), which go through the `legacy_agent` relay, the aggregate carries
+- On the relay presets (`*_legacy_agent`, `opencode_full`, `opencode_search_full`), which go
+  through the `legacy_agent` relay, the aggregate carries
   neither the partition slices nor `judgement_parsing_issue_rate`: the sandboxed adapter's inherited
   `aggregate_metrics` never calls the judge resources server's `compute_metrics`. The rollouts carry
   `partition` and `judge_evaluations`, so compute both post hoc (Reading sandboxed results). The
@@ -451,7 +446,7 @@ multipleChoice):
   session's fresh config directory at every start unless the bundle is staged
   (`sandbox_plugin_dependencies_path`, opencode_agent README, Owner extensions); offline, the start
   stalls about 70 s before that install fails. Neither science image ships the bundle yet, so expect
-  that delay on every row of `opencode`, `opencode_search` and `opencode_reference`.
+  that delay on every row of `opencode`, `opencode_search`, `opencode_hle_tools` and `opencode_reference`.
 - OpenCode's permissions on the session presets are opencode_agent's `permissions/default.yaml`:
   everything is allowed except listed bash commands (process killing, `rm -rf` of system paths, raw
   disk writes, git network commands and others). The sandboxed presets allowed every command and
@@ -675,7 +670,7 @@ gym eval run --benchmark hle_diamond/opencode --split benchmark --model-type lit
   `entrypoint: [sleep, infinity]`, so container lifetime relies on the agent's cleanup. Check
   `docker ps -a --filter label=nemo-gym.sandbox` after every run.
 - The first run builds per-server `uv` virtual environments and needs PyPI access from the host.
-- The search presets additionally need `TAVILY_API_KEY`.
+- The search presets and `opencode_hle_tools` additionally need `TAVILY_API_KEY`.
 - `hle_diamond/opencode_reference` is refused by this override until the run is acknowledged as
   egress-unrestricted: without `HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS=egress-not-restricted` the
   agent's `network_access` resolves to a refusal string and the agent server stops at start with
@@ -705,12 +700,12 @@ gym eval run --benchmark hle_diamond/opencode --split benchmark --model-type lit
 
 ### Reading sandboxed results
 
-- Agent-session rows (`opencode`, `opencode_search`, `pi`, `pi_search`, `opencode_reference`) carry the
-  agent's own `response.status` (`completed`, or `incomplete` at a limit), its observations in
+- Agent-session rows (`opencode`, `opencode_search`, `opencode_hle_tools`, `pi`, `pi_search`,
+  `opencode_reference`) carry the agent's own `response.status` (`completed`, or `incomplete` at a limit), its observations in
   `ng_agent_observations`, and `failure_kind` / `failure_reason` on an episode the Environment Server
   could not grade. Their aggregate carries the partition slices and `judgement_parsing_issue_rate`.
   The rest of this list describes the sandboxed-agent rows of the relay presets (`*_legacy_agent`,
-  `opencode_hle_tools`, `opencode_full`, `opencode_search_full`).
+  `opencode_full`, `opencode_search_full`).
 - `response.status` is `null` on sandboxed rows (the adapter synthesises the response) unless the
   output limit was hit, when the adapter sets `incomplete` with
   `incomplete_details.reason = max_output_tokens`. Read success or failure from
@@ -836,7 +831,7 @@ every number:
 `hle_diamond/opencode` and `hle_diamond/pi` give the model sandboxed Python tools without search;
 `hle_diamond/opencode_search` and `hle_diamond/pi_search` add Tavily search and page tools;
 `hle_diamond/opencode_hle_tools` adds upstream's own two web tools behind its blocklist (Upstream web
-tools below), on the deprecated relay agent. These five run the 728 text rows with the verbatim HLE
+tools below). These five run the 728 text rows with the verbatim HLE
 instructions in a single user message and one repeat; keep collection repeats at one. The published
 with-tools column was produced under upstream's
 `docs/evaluation-with-tools.md` protocol, from which these presets depart in concrete ways, so they
@@ -864,16 +859,16 @@ support a **comparison, not a reproduction**, of that column:
   endpoint with an image-size limit can still reject one (GPT-6 Astra rejects the 14950x2780 PNG of
   `66f1b940f8bb4425f74e4299`, which then scores 0, see Image questions through OpenCode). The
   deprecated Pi adapter accepts text parts only.
-- Reasoning effort: requested through the model server's `extra_body` on the session presets and
-  through OpenCode's own option on the full presets and `opencode_hle_tools` (see Prompting >
-  Reasoning effort).
+- Reasoning effort: requested through the model server's `extra_body` on the session presets
+  (`opencode_hle_tools` included) and through OpenCode's own option on the full presets (see
+  Prompting > Reasoning effort).
 
 State these departures next to every number collected with these presets.
 
 ### Agent sessions
 
-The text presets (`opencode`, `opencode_search`, `pi`, `pi_search`, `opencode_reference`) run
-`opencode_agent` or `pi_agent` through the benchmark's own Environment Server,
+The text presets (`opencode`, `opencode_search`, `opencode_hle_tools`, `pi`, `pi_search`,
+`opencode_reference`) run `opencode_agent` or `pi_agent` through the benchmark's own Environment Server,
 `hle_diamond_equivalence_llm_judge_environment_server` (`single_agent_turn_legacy`), instead of the
 deprecated sandboxed agents behind a `legacy_agent` relay. Each episode seeds the judge resources
 server, opens an agent session, runs one activation with the prepared prompt, closes the session and
@@ -894,9 +889,10 @@ equal to `hle`'s apart from those two keys:
   `/usr/local/bin/opencode` at the digest its Dockerfile checks (`sandbox_executable_path`,
   `sandbox_executable_sha256`) and Pi the image's `/opt/node` and `/opt/pi` (`sandbox_runtime_dir: /opt`,
   `pi_version: 0.85.1`).
-- Search: the agent's `tool_servers` lists the Tavily server; the Environment Server seeds a Tavily
-  session for every episode and grants its MCP tools to the agent. The judge serves no tools, so it
-  grants none of its own.
+- Search: the agent's `tool_servers` lists the Tavily server (`opencode_hle_tools`: the `hle_tools`
+  instance of `hle_web_tools`); the Environment Server seeds a session on that server for every
+  episode and grants its MCP tools to the agent. The judge serves no tools, so it grants none of its
+  own.
 - Environment note: the session agents carry it as `system_prompt`, which OpenCode reads as its
   instructions file and Pi appends to its system prompt.
 - Token limits: OpenCode asks for at most 32,768 output tokens per call within a 229,376-token
@@ -908,8 +904,7 @@ equal to `hle`'s apart from those two keys:
 What changes against the sandboxed presets is listed under Known limitations (OpenCode's output
 budget, step cap, compaction setting, permissions and offline plugin install, failed runs, when a
 session's sandbox is created, and web fetch and subagents). The `*_legacy_agent` presets,
-`opencode_hle_tools`, `opencode_full` and `opencode_search_full` still run the sandboxed agents, so their
-text-question scores
+`opencode_full` and `opencode_search_full` still run the sandboxed agents, so their text-question scores
 come from a different harness than `opencode` and are not comparable with it.
 
 **First run of the search presets.** A 10-row `hle_diamond/opencode_search` pilot on 2026-10-16
@@ -943,9 +938,9 @@ that the remaining ones can be measured one at a time:
 
 What stays, and belongs next to every number: the OpenCode harness and its system prompt, the Tavily
 search and page tools in place of exactly `web_search` and `web_fetch` (the note names neither; the
-`hle_web_tools` server that provides exactly those two tools is its own preset, `opencode_hle_tools`
-on the science image and the deprecated relay agent (Upstream web tools), and running it on this
-preset's image, session agent and egress policy is a follow-up change), the weaker leakage policy
+`hle_web_tools` server that provides exactly those two tools is its own preset, `opencode_hle_tools`,
+an `opencode_agent` session on the science image under the same egress policy (Upstream web tools),
+and running it on this preset's image is a follow-up change), the weaker leakage policy
 (Search exclusions), 728/1000 text rows, and the judge alias. The preset restates the dataset block
 because Gym's `_inherit_from` is a single-step rename (a chained `_inherit_from` leaves the agent
 without an entrypoint), which is also why it appears in `gym list benchmarks`; a test holds its agent
@@ -1050,8 +1045,7 @@ at tag `v1.17.11` (`packages/opencode/src/cli/cmd/run.ts`, `session/prompt.ts`, 
 
 ### Upstream web tools (`opencode_hle_tools`)
 
-`hle_diamond/opencode_hle_tools` replaces the Tavily search and page tools of
-`opencode_search_legacy_agent` with
+`hle_diamond/opencode_hle_tools` is `opencode_search` with the Tavily search and page tools replaced by
 [`resources_servers/hle_web_tools`](../../resources_servers/hle_web_tools/README.md), a tool server
 that implements section 3 of upstream's `docs/evaluation-with-tools.md` (commit
 `22ed3074b1e7b134bcbc09028d0ba320839b0655`) and is the only tool server of the preset:
@@ -1071,21 +1065,34 @@ that implements section 3 of upstream's `docs/evaluation-with-tools.md` (commit
   line per blocked call naming the family and rule. This closes the four unenforced and one
   approximated families of the `opencode_search` preset (Search exclusions below), which stays as the
   Tavily-native comparison.
-- The environment note tells the model that external information is available only through
-  `web_search` and `web_fetch`.
+- The environment note (the agent's `system_prompt`) tells the model that external information is
+  available only through `web_search` and `web_fetch`.
 
-**Deprecated relay.** The preset extends `opencode_legacy_agent.yaml`, so it runs
-`opencode_sandboxed_agent` behind the `legacy_agent` relay like the `*_legacy_agent` presets
-(Deprecated relay presets under Scope) and goes away with the relay unless it is moved to an
-`opencode_agent` session, where the Environment Server would grant the server's MCP tools from the
-agent's `tool_servers` (a follow-up change; the two harnesses are configured differently, so do not
-compare its scores with the session presets' as one measurement). What follows from the relay: its
-rows carry the relay adapter's fields and its aggregate carries no partition slices (Reading sandboxed
-results, Known limitations); its effort travels on OpenCode's own option (Prompting > Reasoning
-effort); its environment note is the sandbox file `/tmp/nemo-gym-environment.txt`; and
-`sandbox_docker_local.yaml` refuses to compose with it (an almost-server error, because the override's
-block for `hle_diamond_opencode_agent` now targets the `opencode_agent` session), so it runs on
-OpenSandbox with `network_access: model_and_tools`.
+**Agent session.** The preset extends `opencode.yaml`, so it is an `opencode_agent` session like
+`opencode_search` (Agent sessions): the Environment Server seeds the `hle_tools` server for every
+episode with the row (`/seed_session` reads the question from `task_data`) and grants its MCP tools
+from the agent's `tool_servers`; the sandbox runs under `network_access: model_and_tools` and reaches
+the tool server by address (`absolute_ip_server_types` adds the Resources servers); `web_fetch` of a
+long page or PDF gets `mcp_tool_timeout_seconds: 300`; the effort travels on the model server's
+`extra_body` (Prompting > Reasoning effort); and the rows and aggregate are the session presets' (Reading
+sandboxed results). Run it as `opencode_search`, with `TAVILY_API_KEY` exported in the shell that
+starts the servers:
+
+```bash
+export TAVILY_API_KEY=...   # the hle_tools server's search and extraction backend
+gym eval run --benchmark hle_diamond/opencode_hle_tools --split benchmark --model-type litellm_model \
+    '+config_paths=[benchmarks/hle_diamond/judge_openai.yaml]' \
+    --num-repeats 1 \
+    ++policy_model_name=<gateway model id> \
+    ++policy_model.responses_api_models.litellm_model.extra_body.reasoning_effort=high \
+    ++observability_enabled=true ++model_call_capture_dir=/abs/path/model-calls \
+    --output results/hle_diamond_opencode_hle_tools.jsonl
+```
+
+A reproduction-grade run needs the OpenSandbox provider, which enforces the egress policy. For a
+workstation smoke, `sandbox_docker_local.yaml` composes with this preset as with `opencode_search`
+(Quickstart > Sandboxed presets on a local Docker host: the same raw `+config_paths` token, egress
+unrestricted, label the result).
 
 Three residual differences from upstream's wrapper remain, and a with-tools number from this preset
 should state all three:
@@ -1110,20 +1117,20 @@ should state all three:
 Everything else that departs from upstream in this section (harness, sandbox image and Python version,
 text rows only, effort transmission, and on the Docker provider the open egress) still applies.
 
-Pilot evidence (2026-10-26, 5 text rows, GPT-6 Astra, judge o3-mini, local Docker with host
-networking and `++use_absolute_ip=false`, egress unrestricted; comparison infrastructure only): exit 0,
-5/5 rows scored (3 correct), 4/5 rows made tool calls, among them two `web_search` calls that returned
-20 and 16 results with no Tavily error. All 14 captured OpenCode requests carried
-`reasoning_effort: high` and offered exactly `hle_tools_web_search` and `hle_tools_web_fetch` as MCP
-tools next to OpenCode's native file and shell tools. A manual `web_search` through the server's MCP
-endpoint, in a session seeded with a real question and quoting ten consecutive words of it, was
-refused with the span message and logged as
-`family=question_span rule='8 consecutive words of the question' where=query subject='8 words'`; a
-manual `web_fetch` of a Hugging Face dataset page was refused as a blocked site. That pilot ran through
-the Docker recipe of the Quickstart before the text presets moved to agent sessions; the override no
-longer composes with this preset (above), so run it on OpenSandbox with
-`--benchmark hle_diamond/opencode_hle_tools`, `judge_openai.yaml` composed, and `TAVILY_API_KEY`
-exported in the shell that starts the servers.
+**Pilot evidence, relay harness only.** The one pilot of this preset (2026-10-26, 5 text rows, GPT-6
+Astra, judge o3-mini, local Docker with host networking and `++use_absolute_ip=false`, egress
+unrestricted; comparison infrastructure only) ran the preset as it then was, `opencode_sandboxed_agent`
+behind the `legacy_agent` relay: exit 0, 5/5 rows scored (3 correct), 4/5 rows made tool calls, among
+them two `web_search` calls that returned 20 and 16 results with no Tavily error; all 14 captured
+OpenCode requests carried `reasoning_effort: high` (OpenCode's own option on that harness) and offered
+exactly `hle_tools_web_search` and `hle_tools_web_fetch` as MCP tools next to OpenCode's native file
+and shell tools. A manual `web_search` through the server's MCP endpoint, in a session seeded with a
+real question and quoting ten consecutive words of it, was refused with the span message and logged
+as `family=question_span rule='8 consecutive words of the question' where=query subject='8 words'`; a
+manual `web_fetch` of a Hugging Face dataset page was refused as a blocked site. The server-side
+checks hold on the session harness (the server's tests cover the episode seed and the MCP grant), but
+the two harnesses are configured differently (Agent sessions), so that pilot's 3/5 says nothing about
+this preset: no with-tools number is quoted for it until a pilot is rerun on the session harness.
 
 ### Search exclusions
 
