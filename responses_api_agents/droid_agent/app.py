@@ -37,6 +37,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -541,19 +542,19 @@ class DroidAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         session_id = self._agent_session_id_from_request(request)
         if session_id is None:
-            raise HTTPException(409, "Droid runs only in an agent session seeded by an Environment Server")
+            raise AgentSessionConflictError("Droid runs only in an agent session seeded by an Environment Server")
         state = self._require_agent_session(session_id)
         assert isinstance(state, DroidSandboxSession)
         if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
-            raise HTTPException(409, "Droid activation does not match the seeded session and rollout")
+            raise AgentSessionConflictError("Droid activation does not match the seeded session and rollout")
         if state.session.closing:
-            raise HTTPException(409, "Droid session is closing")
+            raise AgentSessionConflictError("Droid session is closing")
         self._validate_request(body)
         if state.task is None:
             state.activation_request = body.model_copy(deep=True)
             state.task = asyncio.create_task(self._sandbox_response(state, state.activation_request))
         elif body != state.activation_request:
-            raise HTTPException(409, "Droid sandbox sessions support one activation; retry the same request")
+            raise AgentSessionConflictError("Droid sandbox sessions support one activation; retry the same request")
         return (await asyncio.shield(state.task)).model_copy(deep=True)
 
 

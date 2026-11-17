@@ -89,7 +89,8 @@ def test_permission_profile_is_not_a_standalone_agent_variant(monkeypatch: pytes
         ("swebench/multilingual/opencode_legacy_agent", "swebench_multilingual"),
         ("swebench/multimodal/opencode", "swebench_multimodal"),
         ("swebench/pro/opencode_legacy_agent", "swebench_pro"),
-        ("terminal_bench_2_1/opencode", "terminal_bench_2_1"),
+        # terminal_bench_2_1/opencode runs on the Harbor environment server; its relay recipe keeps the bindings.
+        ("terminal_bench_2_1/opencode_legacy_agent", "terminal_bench_2_1"),
     ],
 )
 def test_existing_benchmarks_keep_legacy_bindings(recipe: str, prefix: str, monkeypatch: pytest.MonkeyPatch) -> None:

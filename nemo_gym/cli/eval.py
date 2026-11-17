@@ -276,7 +276,7 @@ class PlanBenchmarkConfig(PrepareBenchmarkConfig):
     Examples:
 
     ```bash
-    gym eval plan --benchmark terminal_bench_2_1/terminus_2 --out plan.json
+    gym eval plan --benchmark terminal_bench_2_1/terminus_2_legacy_agent --out plan.json
     gym eval plan --schema
     ```
     """
@@ -2266,6 +2266,28 @@ def compare_suite() -> None:
     written = write_suite_reports(result, output, config.report_format)
     print(render_suite_summary(result))
     for path in written:
+        print(f"Wrote: {path}")
+
+
+@exit_cleanly_on_config_error
+def plan_repeats() -> None:
+    """Plan fixed benchmark, model, or suite repeats from direct standard-deviation inputs."""
+    from nemo_gym.eval.comparison.planning.report import (
+        render_repeat_planning_summary,
+        write_repeat_planning_reports,
+    )
+    from nemo_gym.eval.comparison.planning.runner import build_repeat_planning_result, invoked_command
+    from nemo_gym.eval.comparison.planning.schema import RepeatPlanningCLIConfig
+
+    config_dict = get_global_config_dict()
+    if not config_dict.get("repeat_plan_fpath") and not (config_dict.get("help") or config_dict.get("h")):
+        raise ConfigError("gym eval plan-repeats requires --plan PATH.")
+    config = RepeatPlanningCLIConfig.model_validate(config_dict)
+    result = build_repeat_planning_result(config, invoked_command())
+    output_dir = Path(config.output_dirpath) if config.output_dirpath else result.plan_fpath.parent
+    report_paths = write_repeat_planning_reports(result, output_dir, config.report_format)
+    print(render_repeat_planning_summary(result))
+    for path in report_paths:
         print(f"Wrote: {path}")
 
 
