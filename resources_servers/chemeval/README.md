@@ -132,6 +132,6 @@ gym dataset collate --config resources_servers/chemeval/configs/chemeval.yaml \
 Tests use synthetic examples and cover the deterministic grading families, both
 judge scales, preparation, error handling, and task-macro aggregation. They use
 the bundled scorer; chemistry-dependent cases require the dependencies declared
-in `requirements.txt`. The complete prepared input is
+in `pyproject.toml`. The complete prepared input is
 `benchmarks/chemeval/data/test.jsonl`. `verified: false` remains until baselining
 and maintainer review; smoke tests alone do not certify benchmark fidelity.

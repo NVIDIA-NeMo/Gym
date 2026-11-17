@@ -52,7 +52,7 @@ KEEP_OLD_PATHS = (
     "tests/unit_tests/fixtures/import_surface.json",
     # Checks the old CLI paths that `moved_attr_getter` shims serve; rewriting them would test the new paths.
     "test_cli_compat.py",
-    "tests/unit_tests/test_migrate_imports.py",
+    "tests/unit_tests/tooling/test_migrate_imports.py",
     "tests/unit_tests/test_moved_paths.py",
 )
 # Frozen docs for released versions describe the paths those releases shipped with.

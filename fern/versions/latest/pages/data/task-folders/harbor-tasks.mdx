@@ -1,0 +1,284 @@
+---
+title: "Author Task Folders"
+description: "Write a task folder, check it with the oracle, run an agent on it, and pull or publish Harbor datasets."
+position: 2
+---
+
+A task folder holds everything one task needs: the instruction, the software environment, the verifier and a reference
+solution. NeMo Gym reads task folders in the Harbor task format and runs them on the `harbor` Environment Server, which
+starts a sandbox from the folder, runs the agent session in it, then runs the task's own verifier, in that sandbox or
+in a fresh one. No Resources Server takes part.
+
+```text
+my-dataset/
+├── dataset.toml          # optional: the dataset's name and Gym's [gym] settings
+└── hello/                # one task folder; the folder name is the task ID
+    ├── task.toml         # image, resources and time limits
+    ├── instruction.md    # what the agent is asked to do
+    ├── environment/      # a Dockerfile, or empty when task.toml names an image
+    ├── tests/test.sh     # the verifier: writes the reward
+    └── solution/solve.sh # the reference solution the oracle runs
+```
+
+A folder of task folders is a dataset. This page takes you from an empty folder to a validated task and an agent
+run. [Task Folder Format](/main/data/task-folders/task-folder-format) lists every file and setting.
+
+## Coming from Harbor
+
+Task folders written for [Harbor](https://github.com/harbor-framework/harbor) run in NeMo Gym as they are:
+
+- Run a local task folder with `gym eval run <folder>`, or pull a hub dataset by its `harbor:` reference. See
+  [Bring in existing tasks](#bring-in-existing-tasks).
+- Choose the agent with `--agent` and the sandbox with `--sandbox`.
+- Results are NeMo Gym rollouts, the same output as every other NeMo Gym environment.
+
+Keep the dataset in git: `harbor add`, `harbor remove` and `harbor sync` rewrite `dataset.toml` without NeMo Gym's
+`[gym]` table. [Compatibility with Harbor](/main/data/task-folders/task-folder-format#compatibility-with-harbor)
+lists the task settings NeMo Gym supports.
+
+## Before you start
+
+- A Gym checkout with the sandbox extra (`uv sync --extra sandbox`). Run every command from its root.
+- Docker running on the machine, for the `docker` sandbox provider (see [Docker Provider](/main/infrastructure/sandbox/docker)).
+  On a cluster, use [OpenSandbox](/main/infrastructure/sandbox/opensandbox) and pass `--sandbox opensandbox` instead.
+- For the agent run, a model endpoint that serves the OpenAI API and that the machine running `gym` can reach.
+  Sandboxes must reach that machine, because some harnesses call Gym's Model Server from inside them.
+
+## Scaffold a dataset
+
+```bash
+gym dataset init my-dataset
+```
+
+The command writes `my-dataset/` with a `dataset.toml` and one task, `hello`, which asks the agent to create
+`hello.txt`. The next commands it prints leave out `--sandbox` and the run's `--model-api-key`, so use the ones
+on this page.
+
+| Option | What it does |
+| --- | --- |
+| `NAME` | `org/name`, or a bare name written as `local/<name>`, since Harbor requires an org. The folder is the name without the org and must not exist yet. |
+| `--root DIR` | Where to create the folder. Default: the current directory. |
+| `--image IMAGE` | The task's prebuilt image. Default: `python:3.12-slim`. |
+| `--parameterized` | Write a template that renders one task per JSONL row. See [Parameterized tasks](/main/data/task-folders/task-folder-patterns#parameterized-tasks). |
+
+## Write a task
+
+Each task is one folder in the dataset. `gym dataset init my-dataset` created your first task called
+`hello` in `my-dataset`.
+
+The snippets below are the scaffold's `hello` files.
+
+### instruction.md
+
+The prompt the agent receives, in Markdown. Say exactly what to produce and where, because the verifier checks the
+result inside the sandbox:
+
+```markdown
+Create a file called `hello.txt` in the working directory containing the single line `hello`.
+```
+
+### task.toml
+
+The task's settings:
+
+```toml
+schema_version = "1.4"
+
+[task]
+name = "local/hello"
+
+[environment]
+docker_image = "python:3.12-slim"
+cpus = 1
+memory_mb = 2048
+storage_mb = 10240
+
+[agent]
+timeout_sec = 600.0
+
+[verifier]
+timeout_sec = 120.0
+```
+
+`[environment]` sets the image and the sandbox's resources, and `[agent]` and `[verifier]` set each phase's time
+limit in seconds. `timeout_multiplier` and `resource_multiplier` under `[gym.defaults]` in `dataset.toml` scale
+every task's time limits and its cpus, memory and storage. Gym takes the task ID from the folder name, not from
+`[task].name`. Harbor keys a dataset on `[task].name`, so give every task its own name if you plan to publish.
+
+### The environment
+
+Name a prebuilt image in `[environment].docker_image` and leave `environment/` empty, as the scaffold does, or
+remove `docker_image` and put a Dockerfile in `environment/`. With both, Gym runs the declared image and skips the
+Dockerfile's build and `RUN` lines, unless `builds.force` is set. A Dockerfile with only `FROM`, `WORKDIR`, `ENV`,
+`USER` and `LABEL` lines, like Hello World's, needs no build: Gym starts the base image and applies those settings.
+Plain `RUN` lines on top run inside the sandbox each time an episode starts. Any other instruction, such as `COPY`,
+or a `RUN` with a heredoc or a flag like `--mount`, means Gym builds the image when it prepares the dataset.
+Without a build repository (`builds.repository`, default `$NEMO_GYM_BUILD_REPOSITORY`), Gym builds with `docker`
+and keeps the image in the local Docker daemon, which only the `docker` provider can start. With a repository,
+which OpenSandbox needs, Gym uses the first of `buildah`, `podman` and `docker` on `PATH` and pushes the image there.
+See
+[Dockerfile modes](/main/data/task-folders/task-folder-format#dockerfile-modes) and
+[Harbor image builds](/main/reference/configuration#harbor-image-builds).
+
+### tests/test.sh
+
+The verifier. After the agent finishes, Gym uploads `tests/` to `/tests` and runs `bash /tests/test.sh` in the
+sandbox. The script writes the reward, a number, to `/logs/verifier/reward.txt`, or a JSON object of numbers to
+`/logs/verifier/reward.json`:
+
+```bash
+#!/bin/bash
+mkdir -p /logs/verifier
+if [ "$(cat hello.txt 2>/dev/null)" = "hello" ]; then
+    echo 1 > /logs/verifier/reward.txt
+else
+    echo 0 > /logs/verifier/reward.txt
+fi
+```
+
+A verifier that writes no reward file scores 0. `reward.json` wins when both exist. Its `reward` key is the
+reward or, without one, the sum of all its values. To grade in Python instead, replace `tests/test.sh` with
+`tests/verifier.py`: when both exist, `test.sh` grades the task. See
+[Task Folder Verifiers](/main/data/task-folders/task-folder-verifiers).
+
+### solution/
+
+The reference solution. The oracle runs `solution/solve.sh` in the task's sandbox in place of an agent, then runs
+the verifier. No other harness receives `solution/`. A task graded on a
+written answer can ship `solution/answer.md` instead (see
+[Reference answers](/main/data/task-folders/task-folder-verifiers#reference-answers)).
+
+## Validate with the oracle
+
+```bash
+gym dataset validate my-dataset --sandbox docker
+```
+
+The oracle plays each task's reference solution through its verifier, with no model, and ends with one line per
+task:
+
+```text
+task_id	status	reward	verify_s	network
+hello [repeat 0]	oracle solved	1.0	0.4	public
+hello-world [repeat 0]	oracle solved	1.0	0.3	public
+```
+
+The command exits 0 only when every selected task that has a solution loaded, ran, and scored 1. That proves each
+environment starts, each solution solves its task, and each verifier accepts a correct result. It does not prove a
+verifier rejects a wrong result, so break a solution once and check that its reward drops to 0. A task without a
+solution is listed as `unvalidated` and does not fail the command, unless no selected task has one. These fail it:
+
+- `oracle solved` with a reward below 1, sometimes with a failure kind such as `(harbor:missing_reward)`: the
+  verifier did not accept the result.
+- `oracle failed`: `solve.sh` exited non-zero or ran past `[agent].timeout_sec`, or `answer.md` could not be read
+  or written, whatever the reward. The task's result row holds the tail of the output.
+- `skipped: <reason>`: the task did not load.
+- `failed: <message>` or `missing result`: the rollout produced no result.
+- `masked (<failure_kind>)`: Gym could not score the task.
+
+Validate records each task's digest in `my-dataset/manifest.toml` (unless git tracks the folder) and writes its
+results to `results/harbor/validation/my-dataset/`, apart from any agent run. Select tasks with `--only-tasks` or
+`--exclude-tasks` (comma-separated names or globs), and add `-v` for debug logs. When a reward is wrong, start from
+`rollouts_run_summary.json` in that folder, which names each task's verifier logs (see
+[The run summary](/main/reference/task-folder-storage#the-run-summary)). When no rollout produces a result, for
+example because `--sandbox` was left out or Docker is missing, the command prints no table and stops with
+`None of the N dispatched rollouts produced a result`; each task's `failure.message` in the summary says why.
+
+## Run an agent
+
+```bash
+gym eval run my-dataset --agent hermes_agent --sandbox docker \
+  --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
+```
+
+`--agent` takes the harness's folder name under `responses_api_agents/`. You can drop a trailing `_agent` or
+`_sandboxed_agent` when only one harness matches. `hermes` matches both `hermes_agent` and `hermes_sandboxed_agent`,
+so it is refused. `--model-type openai_model` serves any OpenAI-compatible endpoint, with `<url>` as its base URL.
+
+Gym prepares the dataset, starts the servers and collects one rollout per task, unless
+`[gym.defaults].num_repeats` in `dataset.toml` or `--num-repeats` sets another count. The results land in
+`results/harbor/my-dataset/`. A task that does not load stops the run before any server starts; `--skip-unloadable`
+runs the rest.
+
+Hermes calls the model from inside the sandbox through Gym's Model Server, which forwards to `<url>`, so the
+sandbox must reach the machine running `gym`. It also installs its runtime into each sandbox unless the image
+already holds it, so the sandbox needs outbound network access. Other
+harnesses that work inside the task sandbox can take its place: see
+[Harbor Environment Server](/main/agent-interactions/harbor).
+
+## Bring in existing tasks
+
+### Reuse a local task
+
+To add a task to your dataset, copy an existing task folder into it, then adapt its instruction, verifier and
+reference solution. These examples under `environments/` demonstrate different task structures:
+
+| Example | Demonstrates |
+| --- | --- |
+| [Hello World](https://github.com/NVIDIA-NeMo/Gym/tree/main/environments/hello_world) | A single task with a Dockerfile and shell verifier. |
+| [Hello Dataset](https://github.com/NVIDIA-NeMo/Gym/tree/main/environments/hello_dataset) | Two independent tasks organized as one dataset. |
+| [Hello Python Verifier](https://github.com/NVIDIA-NeMo/Gym/tree/main/environments/hello_python_verifier) | Scoring with `tests/verifier.py`. |
+| [Hello Verifier Reuse](https://github.com/NVIDIA-NeMo/Gym/tree/main/environments/hello_verifier_reuse) | Sharing Python verifier logic across tasks. |
+| [Hello MCP Tool](https://github.com/NVIDIA-NeMo/Gym/tree/main/environments/hello_mcp_tool) | A task that provides its own MCP tool. |
+| [Hello Parameterized Tasks](https://github.com/NVIDIA-NeMo/Gym/tree/main/environments/hello_parameterized_tasks) | Generating tasks from a shared template and JSONL rows. |
+
+### Pull from the Harbor hub
+
+Pull a dataset from the Harbor hub:
+
+```bash
+gym dataset pull harbor:terminal-bench/terminal-bench@4.0.0
+```
+
+`gym dataset pull` fetches the task folders into `environments/harbor/` (or `$NEMO_GYM_DATASETS_DIR`); it builds
+and runs nothing. A reference is `harbor:<org>/<name>@<tag>` for Harbor's package store, with `@sha256:<digest>`
+to pin the content, or `harbor:<dataset>@<version>` for Harbor's registry. `gym eval run` and
+`gym dataset validate` also take a `harbor:` reference and fetch it on the way.
+
+A **committed entry** is a folder under `environments/harbor/` that the Gym checkout keeps for one hub dataset,
+with a `dataset.toml` that names the reference in `[gym] source`. `terminal_bench_2_1` is one: it pins
+Terminal-Bench 2.1 by content hash. An entry may declare no `source` when a preparation script writes its task
+folders instead, as [SkillsBench's](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/skillsbench/README.md)
+does; such an entry is prepared locally, not pulled.
+
+```bash
+gym dataset pull terminal_bench_2_1
+gym dataset validate terminal_bench_2_1 --sandbox opensandbox
+```
+
+For sandbox setup, see
+[Sandbox providers](/main/agent-interactions/harbor#sandbox-providers).
+
+The pull fetches into the entry's own folder (the task folders are gitignored), or into
+`$NEMO_GYM_DATASETS_DIR/<entry>/` when that variable is set. Pulling the reference an entry declares lands there
+too, so the first pull above fills the `terminal_bench_4` entry. `gym dataset validate <entry>` and
+`gym eval run <entry>` then resolve the name to that folder without fetching. To change a task in a pulled dataset,
+copy its folder into your own dataset.
+[Evaluate Terminal-Bench 2.1 on the Harbor Path](/main/tutorials/evaluation-tutorials/terminal-bench-2-1-harbor)
+runs this entry end to end.
+
+## Publish as Harbor tasks
+
+Task folders that use only Harbor's shapes run under Harbor as they are. Gym-only shapes, such as Python verifiers,
+`solution/answer.md` and parameterized templates, need converting:
+
+```bash
+gym dataset publish --harbor my-dataset --output ./published/my-dataset
+```
+
+The command renders templates into task folders, wraps each Python verifier in a `tests/test.sh` shim and each
+`answer.md` in a `solution/solve.sh`, and drops the `[gym]` table from `dataset.toml`. It writes into a new or
+empty `--output` folder, locally only. It refuses, naming the task, what Harbor could not run, such as a Python
+verifier that reads the agent's `response`. When the `harbor` package is installed, Harbor's loader checks every
+folder before `--output` is written.
+
+## Next steps
+
+- [Task Folder Format](/main/data/task-folders/task-folder-format) and [Task Folder Verifiers](/main/data/task-folders/task-folder-verifiers)
+  for every setting and the verifier contract.
+- [Multi-Step Task Folders](/main/data/task-folders/multi-step-tasks) and [Multi-Container Tasks](/main/data/task-folders/compose-tasks)
+  for tasks with several instructions or Compose sidecars.
+- [Task Folder Patterns](/main/data/task-folders/task-folder-patterns) for parameterized tasks, typed fields, a task's own MCP
+  tool and shared verifier code.
+- [Task Folder Files and Storage](/main/reference/task-folder-storage) and
+  [Task Folders troubleshooting](/main/troubleshooting/task-folders) when a run needs checking.

@@ -4,13 +4,58 @@
 """One model call as a rollout records it: token counts, cache use, tool calls, and totals across calls."""
 
 import json
-from typing import Any, Literal, Mapping, Optional
+from typing import Any, Literal, Mapping, NamedTuple, Optional
 
 from pydantic import BaseModel, Field
 
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.core.failure_records import FailureReport
 from nemo_gym.core.failure_transport import ModelOperationObservation
+
+
+class ToolRequestEvidence(NamedTuple):
+    """Whether captured response evidence can establish a tool request."""
+
+    kind: Literal["available", "omitted", "malformed", "unsuccessful"]
+    call_ids: frozenset[str] = frozenset()
+
+    def permits_link(self, native_call_id: str) -> bool:
+        return self.kind == "omitted" or (self.kind == "available" and native_call_id in self.call_ids)
+
+
+def tool_request_evidence(
+    response: Any,
+    *,
+    status_code: int | None = None,
+    response_status: str | None = None,
+) -> ToolRequestEvidence:
+    """Classify request evidence consistently for normalization and canonical decoding.
+
+    Omitted payloads may retain an independently resolved association with a verification gap.
+    Malformed payloads and explicit failed responses cannot establish a requesting call.
+    """
+    if (status_code is not None and status_code >= 400) or response_status in {"failed", "cancelled"}:
+        return ToolRequestEvidence("unsuccessful")
+    if response is None:
+        return ToolRequestEvidence("omitted")
+    if isinstance(response, str):
+        try:
+            response = json.loads(response)
+        except ValueError:
+            return ToolRequestEvidence("malformed")
+    if not isinstance(response, dict):
+        return ToolRequestEvidence("malformed")
+    if response.get("error") is not None or response.get("status") in ("failed", "cancelled"):
+        return ToolRequestEvidence("unsuccessful")
+    if not any(isinstance(response.get(key), list) for key in ("output", "choices", "content")):
+        return ToolRequestEvidence("malformed")
+    try:
+        requests, _ = _tool_calls_and_reasoning(response)
+    except (TypeError, ValueError, AttributeError):
+        return ToolRequestEvidence("malformed")
+    return ToolRequestEvidence(
+        "available", frozenset(request["call_id"] for request in requests if isinstance(request.get("call_id"), str))
+    )
 
 
 def _token_count(value: Any) -> Optional[int]:
@@ -55,6 +100,11 @@ def extract_token_stats(usage: Any) -> dict[str, Optional[int]]:
     if tokens_out is None:
         tokens_out = _token_count(usage.get("completion_tokens"))
     cache_creation = _token_count(usage.get("cache_creation_input_tokens"))
+    if cache_creation is None:
+        # OpenAI reports cache writes as a subset of its prompt count, so they never change tokens_in.
+        cache_creation = _usage_detail_token(
+            usage, ("input_tokens_details", "prompt_tokens_details"), ("cache_write_tokens",)
+        )
     tokens_total = _token_count(usage.get("total_tokens"))
     if tokens_total is None and tokens_in is not None and tokens_out is not None:
         tokens_total = tokens_in + tokens_out
@@ -188,6 +238,11 @@ class ModelCallRecord(BaseModel):
         description="Persisted client assistant-message ID; retries may share it, model_call_id remains per attempt.",
     )
 
+    # The agent instance the request URL named (``/ng-agent-instance/<name>``) and its agent kind;
+    # ``None`` for an unnamed agent, as in a single-agent episode.
+    agent_instance: Optional[str] = None
+    agent_kind: Optional[str] = None
+
     # Durable append order, not a causal or semantic order for concurrent calls.
     call_index: int
     model_ref: Optional[ModelServerRef] = None
@@ -227,7 +282,7 @@ class ModelCallRecord(BaseModel):
     reasoning_content: Optional[str] = None
 
     # Cache visibility. cached_tokens is the cache-read count; cache_creation_tokens is the
-    # Anthropic cache-write count (also folded into tokens_in for the true prompt size).
+    # cache-write count. Both are part of tokens_in.
     cache_hit: Optional[bool] = None
     cached_tokens: Optional[int] = None
     cache_creation_tokens: Optional[int] = None
@@ -261,6 +316,8 @@ def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> Mod
                 response.get("stop_reason"),
                 first_choice.get("finish_reason"),
                 incomplete_details.get("reason"),
+                # A Responses payload says nothing for a completed call; its adapter noted the chat finish reason.
+                exchange.get("finish_reason"),
             )
             if isinstance(value, str)
         ),
@@ -278,6 +335,8 @@ def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> Mod
             if isinstance(exchange.get("client_assistant_message_id"), str)
             else None
         ),
+        agent_instance=exchange.get("agent_instance") if isinstance(exchange.get("agent_instance"), str) else None,
+        agent_kind=exchange.get("agent_kind") if isinstance(exchange.get("agent_kind"), str) else None,
         call_index=call_index,
         model_ref=exchange.get("model_ref"),
         model=model if isinstance(model, str) else None,
@@ -336,6 +395,8 @@ def _prompt_size(usage: Mapping[str, Any]) -> Optional[int]:
     - ``input_tokens`` with top-level ``cache_read_input_tokens`` or ``cache_creation_input_tokens``
       (Anthropic Messages) excludes it, so the cache counts are added.
     - ``input_tokens`` alone (Responses) includes it.
+
+    The OpenAI ``*_tokens_details`` cache read and write counts are subsets of the prompt count and are never added.
     """
     prompt_tokens = _token_count(usage.get("prompt_tokens"))
     if prompt_tokens is not None:

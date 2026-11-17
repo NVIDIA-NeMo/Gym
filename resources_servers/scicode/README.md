@@ -28,13 +28,35 @@ The agent + its `example` dataset are defined in this server's own `configs/scic
 
 The agent sends a `solutions` dict — `{"<problem_id>.<step>": accumulated_code}` — to `/verify`. For
 each scored sub-step the server builds a program (`accumulated_code` + HDF5/compare helpers + the
-sub-step's sanitized test assertions) and runs it in a **Ray subprocess** (`scicode_integration/runner.py`);
+sub-step's sanitized test assertions) and runs it in a **subprocess** (`scicode_integration/runner.py`);
 exit code 0 = pass. The HDF5 target-loading and comparison helpers (`process_hdf5_to_tuple`,
 `cmp_tuple_or_list`, …) are ported from nemo-skills' `scicode_utils.eval_prefix`; the only change is
 that the `test_data.h5` path is injected from config rather than hardcoded.
 
-Because the generated code runs in this server's own venv, `requirements.txt` pins `scipy<1.14`
-(keeps `scipy.integrate.simps`, has Python 3.12 wheels) plus `numpy`, `matplotlib`, `h5py`, `sympy`.
+By default, generated code runs in a separate local Python 3.11 environment with the scientific
+stack frozen in `grading-requirements.lock`, including SciPy 1.10.1 and
+`scipy.integrate.simps`. The server needs `uv` and download access when creating
+or updating that environment; a matching prebuilt environment can be reused
+offline. A changed lock or Python version recreates the environment and applies
+`uv pip sync`, removing obsolete packages. Explicit `grading_interpreters`
+(such as SciCode-Verified's 2024/2025 environments) take precedence.
+
+When `sandbox` is configured, grading uses the explicitly configured interpreters
+and test data inside the image. The server skips local environment creation,
+interpreter preflight, and test-data checksum checks; the sandbox runner checks the data.
+
+After editing `grading-requirements.txt`, regenerate the lock with:
+
+```bash
+uv pip compile resources_servers/scicode/grading-requirements.txt \
+  --python-version 3.11 --universal --no-header --emit-index-url \
+  --index-url https://pypi.org/simple \
+  --output-file resources_servers/scicode/grading-requirements.lock
+```
+
+Default step outputs use the environment name `scicode`. Grading fixes can
+change scores for problems that previously failed due to scientific API
+incompatibilities, including problems 2 and 28.
 
 **Scoring notes** (mirroring nemo-skills):
 - Sub-steps absent from `solutions` (prefilled reference steps) are excluded from the denominator.
@@ -60,7 +82,10 @@ the one that passed, else the last one tried; `null` for a sentinel step), `stat
 `timed_out`, `exit` (as in `step_exits`), `duration_s`, `exception_class` (the class named on the last traceback line, e.g.
 `AssertionError`, `ImportError`, `numpy.linalg.LinAlgError`; `null` when there is none) and the last
 `output_tail_chars` characters (default 2000; 0 keeps none, negative values are rejected) of `stdout_tail`
-and `stderr_tail`. The per-environment
+and `stderr_tail`. A provider-confirmed execution OOM records `exception_class: MemoryLimitExceeded`,
+`returncode: null` and `exit: unknown`; it does not invent a traceback or process exit code. The original
+OOM event remains in the response's failure report even if another interpreter subsequently passes.
+The per-environment
 pass bits and error text of SciCode-Verified's OR grading stay in `step_environment_results` /
 `step_environment_errors`; the record adds the execution details of the decisive run. The tails contain model-generated output and tracebacks, so the flag is off by
 default and the rows grow by up to `2 * output_tail_chars` per sub-step when it is on. With
@@ -119,6 +144,15 @@ gym eval run --no-serve \
     --num-repeats 1 \
     --temperature 0.0
 ```
+
+## Sandbox memory limits
+
+A provider-confirmed sandbox OOM while executing generated code fails that
+grading attempt. SciCode retains its existing rule: a sub-step passes if any
+configured interpreter passes it. Dependency and test-data preflight runs
+separately; setup OOM, unconfirmed termination and other infrastructure failures
+remain incomplete. Exit code 137 or text mentioning OOM alone is insufficient.
+Reference solutions must be qualified with the same image, test data and limits.
 
 ## Tests
 

@@ -24,7 +24,7 @@ LOG = logging.getLogger(__name__)
 def _sandbox_hermes_requirement() -> str:
     """Return the requirement the sandbox runtime is built from.
 
-    It comes from the Hermes installed with this server, so ``requirements.txt`` is the only version pin and
+    It comes from the Hermes installed with this server, whose source is declared in ``pyproject.toml``, and
     the sandbox runs the same Hermes as the host. A git install is fetched as a GitHub archive, so building it
     does not need git. The ``mcp`` extra carries Hermes' MCP client, which episode tool grants use.
     """

@@ -57,6 +57,7 @@ from nemo_gym.models.token_capture.fingerprint import (
     FINGERPRINT_VERSION,
     assistant_fingerprint,
     conversation_digest,
+    echoed_tool_call_turn_fingerprints,
     tool_call_turn_fingerprint,
     trailing_assistant_turn,
 )
@@ -70,7 +71,7 @@ from nemo_gym.models.token_capture.protocols import (
     RolloutRemovalPayload,
     RolloutRetiredError,
 )
-from nemo_gym.models.token_capture.records import ParentResolutionStatus, TokenEntry, cumulative_tokens
+from nemo_gym.models.token_capture.records import CallIdentity, ParentResolutionStatus, TokenEntry, cumulative_tokens
 
 
 if TYPE_CHECKING:
@@ -130,6 +131,7 @@ def _custody_columns(record: CallRecord, staging_chain: tuple[str, ...] | list[s
         "last_output_item": record.last_output_item,
         "root_reason": record.root_reason,
         "source_capture_key": record.source_capture_key,
+        **CallIdentity(agent_instance=record.agent_instance, model_ref=record.model_ref).columns(),
     }
 
 
@@ -153,6 +155,10 @@ def _manifest_from_rows(capture_key: str, rows: list[dict]) -> dict:
 
     records = []
     failures = []
+    # A failure row written without an identity inherits it from its call's intent row.
+    intent_identity = {
+        row["model_call_id"]: CallIdentity.from_columns(row).columns() for row in rows if row.get("intent")
+    }
     refused = {row["model_call_id"] for row in rows if row.get("refused_before_generation")}
     completed = {row["model_call_id"] for row in rows if row.get("staging_key")} | refused
     attempted = list(dict.fromkeys(row["model_call_id"] for row in rows if row.get("intent")))
@@ -162,11 +168,15 @@ def _manifest_from_rows(capture_key: str, rows: list[dict]) -> dict:
     for row in rows:
         if row.get("intent"):
             continue
+        identity = CallIdentity.from_columns(row).columns()
+        if "agent_instance" not in identity:
+            identity = {**intent_identity.get(row.get("model_call_id"), {}), **identity}
         if row.get("failure_reason") is not None:
             failures.append(
                 ManifestFailure(
                     model_call_id=str(row["model_call_id"]),
                     reason=str(row["failure_reason"]),
+                    **identity,
                 )
             )
         elif row.get("staging_key") is not None:
@@ -178,6 +188,7 @@ def _manifest_from_rows(capture_key: str, rows: list[dict]) -> dict:
                     ManifestFailure(
                         model_call_id=str(row["model_call_id"]),
                         reason=LEDGER_ROW_MISSING_RESPONSE_ID_REASON,
+                        **identity,
                     )
                 )
                 continue
@@ -188,6 +199,7 @@ def _manifest_from_rows(capture_key: str, rows: list[dict]) -> dict:
                     ManifestFailure(
                         model_call_id=str(row["model_call_id"]),
                         reason=LEDGER_ROW_MISSING_CHAIN_HASH_REASON,
+                        **identity,
                     )
                 )
                 continue
@@ -219,6 +231,7 @@ def _manifest_from_rows(capture_key: str, rows: list[dict]) -> dict:
                     source_capture_key=row.get("source_capture_key"),
                     # A row written before the column existed reads as an unstated reason.
                     finish_reason=row.get("finish_reason") or None,
+                    **identity,
                 )
             )
     manifest = RolloutManifest(
@@ -231,6 +244,18 @@ def _manifest_from_rows(capture_key: str, rows: list[dict]) -> dict:
     return manifest.model_dump(mode="json")
 
 
+def _intent_row(model_call_id: str, identity: CallIdentity | None) -> dict:
+    return {"model_call_id": model_call_id, "intent": True, **(identity.columns() if identity is not None else {})}
+
+
+def _failure_row(model_call_id: str, reason: str, identity: CallIdentity | None) -> dict:
+    return {
+        "model_call_id": model_call_id,
+        "failure_reason": reason,
+        **(identity.columns() if identity is not None else {}),
+    }
+
+
 def _validate_call_intent(rows: list[dict], model_call_id: str) -> None:
     if any(row.get("admissions_closed") for row in rows):
         raise CaptureAdmissionError("Capture admissions are closed for this rollout")
@@ -238,8 +263,12 @@ def _validate_call_intent(rows: list[dict], model_call_id: str) -> None:
         raise CaptureAdmissionError(f"Capture call ID already registered: {model_call_id}")
 
 
-def _refusal_row(rows: list[dict], model_call_id: str) -> dict | None:
-    row = {"model_call_id": model_call_id, "refused_before_generation": True}
+def _refusal_row(rows: list[dict], model_call_id: str, identity: CallIdentity | None = None) -> dict | None:
+    row = {
+        "model_call_id": model_call_id,
+        "refused_before_generation": True,
+        **(identity.columns() if identity is not None else {}),
+    }
     existing = [r for r in rows if r.get("model_call_id") == model_call_id and not r.get("intent")]
     if existing == [row]:
         return None
@@ -323,18 +352,20 @@ class RolloutLineage:
         return ParentResolutionStatus.RESOLVED, candidates[0], reason
 
     def _candidates_by_tool_call_turn(self, messages: list[dict]) -> list["LineageNode"]:
-        """Find complete output turns with unchanged context and only rewritten arguments."""
-        key = tool_call_turn_fingerprint(trailing_assistant_turn(messages))
-        if not key:
-            return []
+        """Find complete output turns with unchanged context and only rewritten arguments.
+
+        Candidates of every key the echoed turn can match are pooled, so the caller decides
+        uniqueness over all of them (``echoed_tool_call_turn_fingerprints``).
+        """
         return [
             node
+            for key in echoed_tool_call_turn_fingerprints(trailing_assistant_turn(messages))
             for call_id in self.by_tool_call_turn.get(key) or []
             if (node := self.by_call_id.get(call_id)) is not None
             and self._continues(node, messages)
             # The context check covers the prefix, while the lookup covers only
             # the trailing turn. Account for every model item between them too.
-            and tool_call_turn_fingerprint(messages[node.context_len :]) == key
+            and key in echoed_tool_call_turn_fingerprints(messages[node.context_len :])
         ]
 
     def _index_tool_call_turn(self, call_id: str, response_items: list[dict]) -> None:
@@ -547,20 +578,20 @@ class InMemoryLineageStore:
     def is_process_shared(self) -> bool:
         return False
 
-    async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
+    async def begin_call(self, rollout_id: str, model_call_id: str, *, identity: CallIdentity | None = None) -> None:
         """Register one unique call before dispatch; independent calls may overlap."""
         if rollout_id in self._retired:
             raise RolloutRetiredError(f"rollout {rollout_id} is retired")
         rows = self._ledgers.setdefault(rollout_id, [])
         _validate_call_intent(rows, model_call_id)
-        rows.append({"model_call_id": model_call_id, "intent": True})
+        rows.append(_intent_row(model_call_id, identity))
 
-    async def refuse_call(self, rollout_id: str, model_call_id: str) -> None:
+    async def refuse_call(self, rollout_id: str, model_call_id: str, *, identity: CallIdentity | None = None) -> None:
         """Settle an acknowledged refusal without erasing its audit record."""
         if rollout_id in self._retired:
             raise RolloutRetiredError(f"rollout {rollout_id} is retired")
         rows = self._ledgers.setdefault(rollout_id, [])
-        row = _refusal_row(rows, model_call_id)
+        row = _refusal_row(rows, model_call_id, identity)
         if row is not None:
             rows.append(row)
 
@@ -607,12 +638,14 @@ class InMemoryLineageStore:
             )
         rows.append(row)
 
-    async def record_failure(self, capture_key: str, model_call_id: str, reason: str) -> None:
+    async def record_failure(
+        self, capture_key: str, model_call_id: str, reason: str, *, identity: CallIdentity | None = None
+    ) -> None:
         if capture_key in self._retired:
             _log_late_write_dropped(capture_key, model_call_id)
             return
         rows = self._ledgers.setdefault(capture_key, [])
-        row = {"model_call_id": model_call_id, "failure_reason": reason}
+        row = _failure_row(model_call_id, reason, identity)
         if not any(existing == row for existing in rows):
             rows.append(row)
 
@@ -1106,28 +1139,28 @@ class FileLineageStore(IncrementalLineageStore):
             ),
         )
 
-    async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
+    async def begin_call(self, rollout_id: str, model_call_id: str, *, identity: CallIdentity | None = None) -> None:
         """Register one unique call before dispatch; independent calls may overlap."""
-        await asyncio.to_thread(self._begin_call, rollout_id, model_call_id)
+        await asyncio.to_thread(self._begin_call, rollout_id, model_call_id, identity)
 
-    def _begin_call(self, rollout_id: str, model_call_id: str) -> None:
+    def _begin_call(self, rollout_id: str, model_call_id: str, identity: CallIdentity | None = None) -> None:
         with self._locked(rollout_id):
             if self._is_retired(rollout_id):
                 raise RolloutRetiredError(f"rollout {rollout_id} is retired")
             rows = self._read(rollout_id)
             _validate_call_intent(rows, model_call_id)
-            self._append(rollout_id, {"model_call_id": model_call_id, "intent": True}, rows)
+            self._append(rollout_id, _intent_row(model_call_id, identity), rows)
 
-    async def refuse_call(self, rollout_id: str, model_call_id: str) -> None:
+    async def refuse_call(self, rollout_id: str, model_call_id: str, *, identity: CallIdentity | None = None) -> None:
         """Settle a worker-acknowledged refusal under the admission lock."""
-        await asyncio.to_thread(self._refuse_call, rollout_id, model_call_id)
+        await asyncio.to_thread(self._refuse_call, rollout_id, model_call_id, identity)
 
-    def _refuse_call(self, rollout_id: str, model_call_id: str) -> None:
+    def _refuse_call(self, rollout_id: str, model_call_id: str, identity: CallIdentity | None = None) -> None:
         with self._locked(rollout_id):
             if self._is_retired(rollout_id):
                 raise RolloutRetiredError(f"rollout {rollout_id} is retired")
             rows = self._read(rollout_id)
-            row = _refusal_row(rows, model_call_id)
+            row = _refusal_row(rows, model_call_id, identity)
             if row is not None:
                 self._append(rollout_id, row, rows)
 
@@ -1186,13 +1219,17 @@ class FileLineageStore(IncrementalLineageStore):
                 return
             self._append(commit.capture_key, record, records)
 
-    async def record_failure(self, capture_key: str, model_call_id: str, reason: str) -> None:
-        await asyncio.to_thread(self._record_failure, capture_key, model_call_id, reason)
+    async def record_failure(
+        self, capture_key: str, model_call_id: str, reason: str, *, identity: CallIdentity | None = None
+    ) -> None:
+        await asyncio.to_thread(self._record_failure, capture_key, model_call_id, reason, identity)
 
-    def _record_failure(self, capture_key: str, model_call_id: str, reason: str) -> None:
+    def _record_failure(
+        self, capture_key: str, model_call_id: str, reason: str, identity: CallIdentity | None = None
+    ) -> None:
         # No fingerprint: ``_resolve_row`` filters on it, so a failure row can
         # never be returned as a parent. Idempotent for the identical reason.
-        record = {"model_call_id": model_call_id, "failure_reason": reason}
+        record = _failure_row(model_call_id, reason, identity)
         with self._locked(capture_key):
             records = self._read(capture_key)
             if not records and self._is_retired(capture_key):

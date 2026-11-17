@@ -19,7 +19,7 @@ from nemo_gym.config.config_types import BaseServerConfig
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
 from nemo_gym.rollouts.rollout_store import RolloutStore
-from tests.single_agent_turn_helpers import _environment_server, _request
+from tests.helpers.single_agent_turn import _environment_server, _request
 
 
 @pytest.mark.parametrize("routed", [False, True])
@@ -199,12 +199,12 @@ async def test_persisted_collection_bounds_never_connected_attempts(tmp_path, mo
 
 
 def decide_persisted(job, max_infra_retries=3):
-    from nemo_gym.orchestration.recovery import (
+    from nemo_gym.eval.recovery.evidence import (
         COLLECT_SCRIPT,
         CollectedEvidence,
-        decide_from_collected,
         select_managed_evidence,
     )
+    from nemo_gym.eval.recovery.planner import decide_from_collected
 
     raw = subprocess.run(
         [sys.executable, "-I", "-S", "-c", COLLECT_SCRIPT, str(job)], capture_output=True, text=True, check=True

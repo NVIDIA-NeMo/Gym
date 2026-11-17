@@ -32,7 +32,7 @@ def _is_root(user: str | int | None) -> bool:
     return user is None or str(user).split(":")[0] in ("root", "0")
 
 
-def _is_plain_root(user: str | None) -> bool:
+def _is_plain_root(user: str | int | None) -> bool:
     """Whether ``user`` is root with no group of its own (``root:1234`` is not: the group must be kept)."""
     return user is None or str(user) in ("root", "0")
 
@@ -235,16 +235,19 @@ class HarborUsersMixin:
                 )
         return names[uid] or None
 
-    async def _image_user_name(self, sandbox: AsyncSandbox, task: HarborTask, names: dict[str, str]) -> str | None:
+    async def _image_user_name(
+        self, sandbox: AsyncSandbox, task: HarborTask, names: dict[str, str]
+    ) -> str | int | None:
         """The user the image starts as (its recorded ``User``; ``None`` is root), by name when it was numeric.
 
-        It is what the entrypoint and the image ``HEALTHCHECK`` run as. Docker runs a numeric ``User``
-        without a passwd entry; a provider that switches user by name cannot, so the number stays
-        (with :meth:`_user_name`'s warning) and the launcher's own failure then names the cause.
+        The entrypoint and healthchecks use an integer for an unnamed uid, selecting the provider's numeric
+        exec path instead of looking up the digits as an account name. An explicit group remains attached.
         """
         user = task.entrypoint_user
         if not _is_numeric_user(user):
             return user
         uid, _, group = str(user).partition(":")
         name = await self._user_name(sandbox, task, uid, names)
-        return user if name is None else name + (f":{group}" if group else "")
+        if group:
+            return f"{name or uid}:{group}"
+        return name if name is not None else int(uid)

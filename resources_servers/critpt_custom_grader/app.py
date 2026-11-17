@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Stateless HTTP adapter over the sandbox-API grader.
 
-Standard SimpleResourcesServer routes. ``/verify`` and ``/seed_session`` read the whole request body, refuse one larger
-than MAX_REQUEST_BYTES, then parse and validate it inside the handler, so a malformed or oversized request answers a
+Standard SimpleResourcesServer routes. ``/verify`` and ``/seed_session`` parse and validate the request body
+inside the handler, so a malformed request answers a
 category-only error and never reaches core's body-logging validation handler. These two handlers never log request
 bodies, validation details, provider exceptions or task sources; the stock typed routes (``/close_session``,
 ``/aggregate_metrics``) keep core's behaviour.
@@ -55,7 +55,9 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.critpt_custom_grader.execution import (
+    CANDIDATE_UNCERTAINTY_REASONS,
     CLEANUP_STATUSES,
     FAILED_CATEGORIES,
     UNSCORABLE_CATEGORIES,
@@ -67,13 +69,11 @@ from resources_servers.critpt_custom_grader.execution import (
     validate_candidate_source,
 )
 from resources_servers.critpt_custom_grader.reference_cache import ReferenceCache
-from resources_servers.critpt_custom_grader.task_data import MAX_TASK_BYTES, TaskData, bounded_json, tolerance_text
+from resources_servers.critpt_custom_grader.task_data import TaskData, bounded_json, tolerance_text
 
 
 logger = logging.getLogger(__name__)
 
-MAX_RESPONSE_BYTES = 1_048_576
-MAX_REQUEST_BYTES = 2 * MAX_TASK_BYTES + 2 * MAX_RESPONSE_BYTES
 _DOMAINS = frozenset({"reference", "comparator", "candidate"})
 _RESOLVED = frozenset({"deleted", "not_created"})
 # Candidate-code extraction: first ```python fence, else first bare ``` fence, else the whole response text.
@@ -146,6 +146,7 @@ class CritPtCustomGraderConfig(BaseResourcesServerConfig):
     comparison: ComparisonDefaults = Field(default_factory=ComparisonDefaults)
     reference_cache_dir: str | None = None
     startup_probe: bool = True
+    score_comparator_uncertain_as_incorrect: bool = False
     verified: bool = False
     description: str | None = None
     value: str | None = None
@@ -197,7 +198,7 @@ class CritPtRunRequest(BaseRunRequest):
     @field_validator("responses_create_params")
     @classmethod
     def public_params(cls, value: dict) -> dict:
-        bounded_json(value, max_bytes=MAX_RESPONSE_BYTES)
+        bounded_json(value, max_bytes=None)
         NeMoGymResponseCreateParamsNonStreaming.model_validate(value)
         if value.get("tools"):
             raise ValueError("tools are not supported")
@@ -212,7 +213,7 @@ class CritPtVerifyRequest(CritPtRunRequest, BaseVerifyRequest):
     @field_validator("response")
     @classmethod
     def saved_response(cls, value: dict) -> dict:
-        bounded_json(value, max_bytes=MAX_RESPONSE_BYTES)
+        bounded_json(value, max_bytes=None)
         NeMoGymResponse.model_validate(value)
         return value
 
@@ -226,6 +227,7 @@ class CritPtVerifyResponse(BaseVerifyResponse):
     scored: bool
     category: str
     cleanup_status: str
+    candidate_uncertainty_reasons: tuple[str, ...] = ()
     sandbox_observations: list[dict[str, Any]] = Field(default_factory=list)
     failure_class: str | None = Field(default=None, alias="_ng_failure_class")
     failure_subcategory: str | None = Field(default=None, alias="_ng_failure_subcategory")
@@ -418,8 +420,6 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
     @staticmethod
     async def _read_json(request: Request) -> tuple[dict | None, JSONResponse | None]:
         body = await request.body()
-        if len(body) > MAX_REQUEST_BYTES:
-            return None, _error("request_limit", 413)
         try:
             value = json.loads(body.decode("utf-8"))
         except (ValueError, UnicodeError, RecursionError):
@@ -456,6 +456,7 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
         terminal: bool = False,
         cleanup: str = "not_started",
         sandboxes: list[dict[str, Any]] | None = None,
+        candidate_uncertainty_reasons: tuple[str, ...] = (),
     ) -> CritPtVerifyResponse:
         if scored:
             failure_class = None
@@ -474,6 +475,7 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
             scored=scored,
             category=category,
             cleanup_status=cleanup,
+            candidate_uncertainty_reasons=candidate_uncertainty_reasons,
             sandbox_observations=sandboxes or [],
             failure_class=failure_class,
             failure_kind=failure_class,
@@ -510,8 +512,33 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
         if result.outcome == "unscorable" and result.reward is None and result.category in UNSCORABLE_CATEGORIES:
             failure_class, terminal = UNSCORABLE_CATEGORIES[result.category]
             if result.failure_class == failure_class and result.terminal is terminal:
+                if (
+                    self.config.score_comparator_uncertain_as_incorrect
+                    and counts_valid
+                    and result.cases_attempted == result.case_count
+                    and bool(result.candidate_uncertainty_reasons)
+                    and all(reason in CANDIDATE_UNCERTAINTY_REASONS for reason in result.candidate_uncertainty_reasons)
+                    and result.category == "comparator_uncertain"
+                    and body.response.get("status") == "completed"
+                    and body.response.get("output")
+                ):
+                    return self._response(
+                        body,
+                        task,
+                        result.category,
+                        scored=True,
+                        cleanup=cleanup,
+                        sandboxes=observations,
+                        candidate_uncertainty_reasons=result.candidate_uncertainty_reasons,
+                    )
                 return self._response(
-                    body, task, result.category, terminal=terminal, cleanup=cleanup, sandboxes=observations
+                    body,
+                    task,
+                    result.category,
+                    terminal=terminal,
+                    cleanup=cleanup,
+                    sandboxes=observations,
+                    candidate_uncertainty_reasons=result.candidate_uncertainty_reasons,
                 )
         return self._response(body, task, "execution_unknown", cleanup="unknown", sandboxes=observations)
 
@@ -609,3 +636,6 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     CritPtCustomGraderServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = CritPtCustomGraderServer.run_webserver()  # noqa: F401

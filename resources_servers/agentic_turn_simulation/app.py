@@ -25,11 +25,21 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, ClassVar, Literal
 
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
 from nemo_gym.client import SESSION_ID_KEY, get_response_json
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming, failure_kinds
+from nemo_gym.core import (
+    NeMoGymChatCompletion,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+    NgFailureEvent,
+    StageOutcomePolicyConfig,
+    applied_outcome_fields,
+    environment_fault_policy,
+    failure_kinds,
+    require_retry_or_fail,
+)
+from nemo_gym.core.outcome_policy import declare_action_kind
 from nemo_gym.metrics import MASK_SAMPLE_FIELD
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -39,7 +49,11 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
+    observe_llm_judge_grading,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import call_judge, is_judge_failure, record_parsed_judge_verdict
+from nemo_gym.verification.judge import _is_retryable_judge_error
 from resources_servers.agentic_turn_simulation.foreign_script import foreign_script_letters
 from resources_servers.agentic_turn_simulation.harnesses import HARNESSES, Harness, select_harness
 from resources_servers.agentic_turn_simulation.harnesses.base import ToolCallProtocol
@@ -81,6 +95,13 @@ from resources_servers.agentic_turn_simulation.workspace import Workspace
 LOG = logging.getLogger(__name__)
 
 FAILURE_KIND_PREFIX = "agentic_turn_simulation"  # the namespace of this server's failure kinds
+# Faults of the episode itself (the simulator is part of it, and the wall-clock cap is its serving speed): the shared
+# outcome policy decides what recovery does with a row that holds one. Other masked outcomes carry no decision.
+TIME_CAP_KIND = f"{FAILURE_KIND_PREFIX}:time_cap"
+SIMULATOR_FAILED_KIND = f"{FAILURE_KIND_PREFIX}:simulator_failed"
+# The outcome policy's action rules may select these kinds by name.
+declare_action_kind(TIME_CAP_KIND)
+declare_action_kind(SIMULATOR_FAILED_KIND)
 # The output items of a policy turn that are scored: its reasoning is never shown to the judge.
 SCORED_ITEM_TYPES = ("message", "function_call", "function_call_output")
 # A reply cut off by its output budget is retried with the budget doubled, starting from the params' max_tokens
@@ -133,6 +154,26 @@ class AgenticTurnSimulationResourcesServerConfig(BaseResourcesServerConfig):
     # Agent stop reasons that mask the rollout. The default masks the wall-clock cap, which tracks serving speed. A
     # context overflow before the first step (the row does not fit the policy's context) is masked whatever this lists.
     masked_stop_reasons: list[str] = Field(default_factory=lambda: ["time_cap"])
+    # The decision saved with a row masked for a time_cap or a failed simulator. By default both kinds are classified as
+    # the evaluation's and that class is retried; a deployment can reclassify a kind or select fail for a class.
+    outcome_policy: StageOutcomePolicyConfig = Field(
+        default_factory=lambda: environment_fault_policy("agent", (TIME_CAP_KIND, SIMULATOR_FAILED_KIND))
+    )
+
+    @field_validator("outcome_policy", mode="before")
+    @classmethod
+    def keep_untouched_default_rules(cls, value: object) -> object:
+        """A partial override changes only the rules it names; the others keep this server's defaults."""
+        return StageOutcomePolicyConfig.overlay(
+            environment_fault_policy("agent", (TIME_CAP_KIND, SIMULATOR_FAILED_KIND)), value
+        )
+
+    @field_validator("outcome_policy")
+    @classmethod
+    def require_retry_or_fail_decisions(cls, policy: StageOutcomePolicyConfig) -> StageOutcomePolicyConfig:
+        """This boundary can retry a masked row or leave it ungraded; it cannot count it as zero."""
+        return require_retry_or_fail(policy, "agent", (TIME_CAP_KIND, SIMULATOR_FAILED_KIND))
+
     # Agent stop reasons that leave the turn unfinished by the policy's own doing: scored 0 as code_gate
     # "unfinished_turn", without a judge, which passes many cut-off turns (it credits the progress made before the cut).
     # empty_output (a final reply with neither a message nor a call) counts only when the reply is the policy's: one
@@ -539,31 +580,56 @@ class AgenticTurnSimulationResourcesServer(SimpleResourcesServer):
         return params
 
     async def _call_judge(self, judge: JudgeSpec, system: str, conversation: str) -> dict[str, Any] | None:
-        """The judge's verdict: the first usable one, else the last one parsed (None when none was)."""
+        """The judge's verdict: the first usable one, else the last one parsed (None when none was).
+
+        The call goes through call_judge (one attempt each; this loop owns the retries). A judge that could not be
+        reached on any attempt, or that rejects the conversation as too long, raises a judge_failed event rather
+        than dropping out of the vote. An unusable verdict is retried, then left to the vote.
+        """
         params = self._judge_params(judge, system, conversation)
         name = judge.model_server.name
         verdict = None
+        failure: NgFailureEvent | None = None
         for attempt in range(self.config.judge_max_attempts):
             try:
-                status, reply = await self._post_chat(name, params, self._judge_semaphore)
-                if status >= 400:
-                    LOG.warning("judge %s HTTP %d: %s", name, status, reply[:300])
-                    error = reply.lower()
-                    if status == 400 and "context" in error and ("length" in error or "maximum" in error):
-                        return None  # the conversation does not fit this judge; retrying will not help
-                    if status == 400 and _without_rejected_param(params, error):
-                        continue  # retried at once
-                else:
-                    choice = (reply.get("choices") or [{}])[0]
-                    verdict = parse_verdict((choice.get("message") or {}).get("content"))
-                    if usable(verdict):
-                        return verdict
-                    if choice.get("finish_reason") == "length":
-                        _grow_max_tokens(params, JUDGE_DEFAULT_MAX_TOKENS, self.config.judge_max_tokens_cap)
-                    LOG.warning("judge %s gave no usable verdict (attempt %d)", name, attempt + 1)
-            except Exception as exc:  # noqa: BLE001 - a judge failure masks the rollout, it never crashes it
+                async with self._judge_semaphore:
+                    reply = await call_judge(
+                        self.server_client,
+                        server_name=name,
+                        url_path="/v1/chat/completions",
+                        json=params,
+                        response_model=NeMoGymChatCompletion,
+                        max_attempts=1,
+                    )
+            except NgFailureEvent as exc:
+                if not is_judge_failure(exc):
+                    raise
+                failure = exc
+                cause = exc.__cause__ or exc
                 LOG.warning("judge %s call failed (attempt %d): %s", name, attempt + 1, exc)
+                bad_request = getattr(cause, "status", None) == 400  # retried as before, once nothing can be relaxed
+                if bad_request:
+                    content = getattr(cause, "response_content", b"")
+                    error = (content.decode(errors="replace") if isinstance(content, bytes) else str(content)).lower()
+                    if "context" in error and ("length" in error or "maximum" in error):
+                        raise  # the conversation does not fit this judge; retrying will not help
+                    if _without_rejected_param(params, error):
+                        continue  # retried at once
+                if not bad_request and not _is_retryable_judge_error(cause):
+                    raise
+            else:
+                failure = None
+                choice = reply.choices[0] if reply.choices else None
+                verdict = parse_verdict(choice.message.content if choice is not None else None)
+                if usable(verdict):
+                    record_parsed_judge_verdict()
+                    return verdict
+                if choice is not None and choice.finish_reason == "length":
+                    _grow_max_tokens(params, JUDGE_DEFAULT_MAX_TOKENS, self.config.judge_max_tokens_cap)
+                LOG.warning("judge %s gave no usable verdict (attempt %d)", name, attempt + 1)
             await self._backoff(attempt)
+        if failure is not None:
+            raise failure  # the last attempt could not reach the judge: it is lost, not unusable
         return verdict
 
     async def _judge(
@@ -592,7 +658,13 @@ class AgenticTurnSimulationResourcesServer(SimpleResourcesServer):
             environment=load_prompt(harness.judge_environment) if harness.judge_environment else "",
             system_prompt_note=load_prompt(self.config.judge_system_prompt_note_file) if shows_prompt else "",
         )
-        return list(await asyncio.gather(*(self._call_judge(j, system, conversation) for j in self.config.judges)))
+        results = await asyncio.gather(
+            *(self._call_judge(j, system, conversation) for j in self.config.judges), return_exceptions=True
+        )
+        for result in results:  # a judge lost to a failed call fails the row, whatever the others voted
+            if isinstance(result, BaseException):
+                raise result
+        return list(results)
 
     # --- verify ---------------------------------------------------------------------------------------------
 
@@ -603,6 +675,10 @@ class AgenticTurnSimulationResourcesServer(SimpleResourcesServer):
         else:
             turn = _policy_output(body)
         return harness.scored_turn(turn)
+
+    def _decision(self, failure_kind: str) -> dict[str, Any]:
+        """The saved outcome decision of an episode fault: the originating stage is the agent's, whatever the action."""
+        return applied_outcome_fields(failure_kind=failure_kind, stage="agent", config=self.config.outcome_policy)
 
     def _mask_reason(
         self,
@@ -625,7 +701,9 @@ class AgenticTurnSimulationResourcesServer(SimpleResourcesServer):
                 "the conversation history does not fit the policy's context (overflow before the first step)",
             )
         if stop_reason in self.config.masked_stop_reasons:
-            return _masked(f"{FAILURE_KIND_PREFIX}:{stop_reason}", f"the turn was cut off ({stop_reason})")
+            masked = _masked(f"{FAILURE_KIND_PREFIX}:{stop_reason}", f"the turn was cut off ({stop_reason})")
+            # The wall-clock cap tracks serving speed: the policy decides what recovery does with it.
+            return masked | self._decision(TIME_CAP_KIND) if masked["failure_kind"] == TIME_CAP_KIND else masked
         for item in items:
             if item.get("type") == "function_call_output":
                 text = str(item.get("output") or "")
@@ -635,7 +713,7 @@ class AgenticTurnSimulationResourcesServer(SimpleResourcesServer):
             else:
                 continue
             if holds_simulator_failure(text):
-                return _masked(f"{FAILURE_KIND_PREFIX}:simulator_failed", text[:300])
+                return _masked(SIMULATOR_FAILED_KIND, text[:300]) | self._decision(SIMULATOR_FAILED_KIND)
         return None
 
     def _response_fields(
@@ -730,12 +808,17 @@ class AgenticTurnSimulationResourcesServer(SimpleResourcesServer):
         if gate is not None:
             return respond(0.0, code_gate=gate, correct_ladder="no")
 
-        verdicts = await self._judge(body, harness, items, tools)
-        combined = combine(verdicts)
-        judged = {key: combined[key] for key in (*VERDICT_FIELDS, "correct_ladder")} | {"judge_verdicts": verdicts}
-        if combined["n_usable"] == 0:
-            return respond(0.0, **judged, **_masked(failure_kinds.JUDGE_FAILED, "no judge returned a usable verdict"))
-        return respond(1.0 if combined["correct_ladder"] == "yes" else 0.0, **judged)
+        async def grade() -> AgenticTurnSimulationVerifyResponse:
+            verdicts = await self._judge(body, harness, items, tools)
+            combined = combine(verdicts)
+            judged = {key: combined[key] for key in (*VERDICT_FIELDS, "correct_ladder")} | {"judge_verdicts": verdicts}
+            if combined["n_usable"] == 0:
+                return respond(
+                    0.0, **judged, **_masked(failure_kinds.JUDGE_FAILED, "no judge returned a usable verdict")
+                )
+            return respond(1.0 if combined["correct_ladder"] == "yes" else 0.0, **judged)
+
+        return await observe_llm_judge_grading(grade)
 
     # --- aggregate metrics ----------------------------------------------------------------------------------
 
@@ -801,3 +884,6 @@ def _breakdowns(rows: list[dict[str, Any]], keys: list[str]) -> dict[str, Any]:
 
 if __name__ == "__main__":
     AgenticTurnSimulationResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = AgenticTurnSimulationResourcesServer.run_webserver()  # noqa: F401

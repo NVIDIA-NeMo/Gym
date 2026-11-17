@@ -222,7 +222,7 @@ Register `acme` in `RUN_EXPORTERS` and `RUN_EXPORTER_CONFIGS` exactly as above. 
 - Test an isolated exporter against a stand-in for the SDK, not the real one. Put a small fake package (here `acme_sdk`) on the worker's `PYTHONPATH` and run the real worker as a subprocess, so the payload, the harness and the result protocol are all exercised. The real launch does not pass `PYTHONPATH` on, because it would point the worker at Gym's packages, so the example test replaces `isolated._worker_environment` (which receives the interpreter) with a function that adds it.
 - If a test needs the real SDK, make it opt-in rather than blocking, like the `--with_downloads` option in `tests/conftest.py`: a flag, a marker, and a skip without the flag. It can check that the calls your worker makes still exist, without uploading anything.
 
-The two examples on this page live in `tests/unit_tests/exporter_guide/`, are exercised by `tests/unit_tests/test_exporter_guide.py`, and a test checks that the code blocks above match those files.
+The two examples on this page live in `tests/unit_tests/artifacts/exporter_guide/`, are exercised by `tests/unit_tests/artifacts/test_exporter_guide.py`, and a test checks that the code blocks above match those files.
 
 ## Handle Credentials Safely
 

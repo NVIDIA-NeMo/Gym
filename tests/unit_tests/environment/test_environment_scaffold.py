@@ -6,6 +6,7 @@ from __future__ import annotations
 import runpy
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,38 @@ from nemo_gym.environment.scaffold import (
 from nemo_gym.environment.validation import validate_environment
 from nemo_gym.rollouts.rollout_collection import _environment_servers_by_agent
 from nemo_gym.verification.verifier_fixture import exercise_verifier_fixture
+
+
+@pytest.mark.parametrize("installed_version", ["0.7.0", "0.7.0rc0", "0.7.0rc0+local"])
+def test_scaffolds_pin_installed_gym_without_a_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, installed_version: str
+) -> None:
+    def installed_gym_version(distribution: str) -> str:
+        assert distribution == "nemo-gym"
+        return installed_version
+
+    monkeypatch.setattr("nemo_gym.environment.scaffold.version", installed_gym_version)
+    scaffold_resources_server(directory=tmp_path / "resources_servers/standalone")
+    scaffold_environment(root=tmp_path, kind="environment", name="sample", profile="custom-gym-agent-loop")
+
+    projects = sorted(tmp_path.rglob("pyproject.toml"))
+    assert len(projects) == 3  # Standalone server, manifest server, and custom agent.
+    for project in projects:
+        metadata = tomllib.loads(project.read_text())
+        assert metadata["project"]["dependencies"] == [f"nemo-gym[dev]=={installed_version}"]
+        assert "nemo-gym" not in metadata["tool"]["uv"].get("sources", {})
+
+
+def test_checkout_scaffold_keeps_editable_gym_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def unexpected_version_lookup(distribution: str) -> str:
+        pytest.fail("An editable checkout must not depend on an installed Gym distribution")
+
+    monkeypatch.setattr("nemo_gym.environment.scaffold.version", unexpected_version_lookup)
+    scaffold_resources_server(directory=tmp_path / "resources_servers/sample", checkout_root=tmp_path)
+
+    metadata = tomllib.loads((tmp_path / "resources_servers/sample/pyproject.toml").read_text())
+    assert metadata["project"]["dependencies"] == ["nemo-gym[dev]"]
+    assert metadata["tool"]["uv"]["sources"]["nemo-gym"] == {"path": "../..", "editable": True}
 
 
 @pytest.mark.parametrize("kind", list(EnvironmentKind))
@@ -133,7 +166,7 @@ def test_standalone_resources_server_keeps_its_combined_composition(tmp_path: Pa
         "configs/shared.yaml",
         "data/.gitignore",
         "example.jsonl",
-        "requirements.txt",
+        "pyproject.toml",
         "tests/__init__.py",
         "tests/test_app.py",
         "tests/verifier_cases.jsonl",
@@ -803,3 +836,41 @@ shared_model:
             reward_range=(0, 1),
             higher_is_better=True,
         )
+
+
+def test_wheel_workflow_checks_scaffold_project_and_creates_lock(tmp_path):
+    """The wheel smoke workflow must exercise the same lock-before-setup scaffold contract."""
+    root = Path(__file__).resolve().parents[3]
+    workflow = yaml.safe_load((root / ".github/workflows/full-test-suite.yml").read_text())
+    job = workflow["jobs"]["test-wheel-install"]
+    assert job["env"]["UV_EXTRA_INDEX_URL"] == "http://127.0.0.1:8888/"
+    assert job["env"]["UV_INDEX_URL"] == "https://pypi.org/simple/"
+    build = next(
+        step["run"] for step in job["steps"] if step.get("name") == "Build wheel and serve as local PyPI index"
+    )
+    assert "env -u UV_EXTRA_INDEX_URL uv build" in build
+    command = next(step["run"] for step in job["steps"] if step.get("name") == "Test ng_init_resources_server")
+    server = tmp_path / "resources_servers/hello_world"
+    scaffold_resources_server(directory=server)
+    assert (server / "pyproject.toml").is_file()
+    assert not (server / "uv.lock").exists()
+    assert "test -f resources_servers/hello_world/pyproject.toml" in command
+    assert "test -f resources_servers/hello_world/requirements.txt" not in command
+    assert "uv lock --project resources_servers/hello_world" in command
+    assert "uv lock --check --project resources_servers/hello_world" in command
+    assert "test -f resources_servers/hello_world/uv.lock" in command
+    assert "uv sync --locked --project resources_servers/hello_world" in command
+    assert "resources_servers/hello_world/.venv/bin/python" in command
+    assert "import nemo_gym.server_runtime" in command
+    assert "assert version('nemo-gym') == sys.argv[1]" in command
+
+
+def test_onboarding_docs_generate_lock_before_first_test():
+    root = Path(__file__).resolve().parents[3]
+    docs = (root / "fern/versions/latest/pages/contribute/environments/new-environment.mdx").read_text()
+    example = docs.split("## Onboarding Example: Hello World", 1)[1].split("The scaffold creates", 1)[0]
+    assert example.index("gym env init") < example.index("uv lock --project resources_servers/my_eval")
+    assert example.index("uv lock --project resources_servers/my_eval") < example.index("gym env test my_eval")
+    testing = docs.split("### 4. Testing", 1)[1].split("### 5.", 1)[0]
+    assert testing.index("uv lock --project resources_servers/my_eval") < testing.index("gym env test my_eval")
+    assert "Commit both `pyproject.toml` and `uv.lock`" in testing

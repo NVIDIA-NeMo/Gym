@@ -9,8 +9,8 @@ from nemo_gym.agents.utils.sandbox_observation import lifecycle_observation
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxSpec
 from nemo_gym.trajectory.trajectory_record import SandboxObservation
-from tests.unit_tests.test_sandbox import FakeSandboxProvider
-from tests.unit_tests.test_sandbox_connect import FakeConnectableProvider
+from tests.unit_tests.sandbox.test_sandbox import FakeSandboxProvider
+from tests.unit_tests.sandbox.test_sandbox_connect import FakeConnectableProvider
 
 
 pytestmark = pytest.mark.sandbox

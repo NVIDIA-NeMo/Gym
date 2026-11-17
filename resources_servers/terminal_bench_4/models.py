@@ -74,7 +74,7 @@ class TerminalBench4RunRequest(BaseRunRequest):
 
 
 class TaskIdentity(BaseModel):
-    """The pinned package a task row names; Environment Server seeds carry it in ``task_data``."""
+    """The pinned package a task row names; episode seeds carry it in ``task_data``."""
 
     task_name: str
     task_ref: str
@@ -82,7 +82,7 @@ class TaskIdentity(BaseModel):
 
 
 class ResourcesSessionVerifyRequest(BaseVerifyRequest, TaskIdentity):
-    """Environment Server verification: the task row plus the agent's response.
+    """Episode session verification: the task row plus the agent's response.
 
     The resources-session cookie, not a field, names the episode. The agent has already been
     closed, so the request carries no termination; it is derived from ``response.status``.

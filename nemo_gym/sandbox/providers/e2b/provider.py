@@ -46,6 +46,7 @@ from pathlib import Path
 from time import monotonic
 from typing import Any, Awaitable, Callable, TypeVar
 
+from nemo_gym.sandbox.attribution import AttributionConfig
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
     SandboxEndpoint,
@@ -60,6 +61,9 @@ from nemo_gym.sandbox.providers.e2b._sdk import E2B_SDK_CONSTRAINT, require_e2b_
 LOGGER = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+# Non-process exec sentinel, shared with the other providers.
+SANDBOX_RUNTIME_RETURN_CODE = 125
 
 # Conservative direct-template shortcut. E2B also supports tagged names such
 # as ``name:v1`` and template IDs, but those must be explicit because ``:`` and
@@ -286,11 +290,13 @@ class E2BProvider:
         create: E2BCreateConfig | Mapping[str, Any] | None = None,
         exec: E2BExecConfig | Mapping[str, Any] | None = None,
         operations: E2BOperationConfig | Mapping[str, Any] | None = None,
+        attribution: AttributionConfig | Mapping[str, Any] | None = None,
     ) -> None:
         self._connection = _config_from_mapping(E2BConnectionConfig, connection)
         self._create = _config_from_mapping(E2BCreateConfig, create)
         self._exec = _config_from_mapping(E2BExecConfig, exec)
         self._operations = _config_from_mapping(E2BOperationConfig, operations)
+        self._attribution = _config_from_mapping(AttributionConfig, attribution)
         self._warned_resource_specs: set[str] = set()
 
     # ---------------------------------------------------------------- helpers
@@ -471,8 +477,11 @@ class E2BProvider:
             kwargs["request_timeout"] = float(spec.ready_timeout_s)
         if spec.env:
             kwargs["envs"] = {str(k): str(v) for k, v in spec.env.items()}
-        if spec.metadata:
-            kwargs["metadata"] = {str(k): str(v) for k, v in spec.metadata.items()}
+        # Job attribution (team / user / workload / run) makes every sandbox findable through the list API's
+        # metadata filter. Explicit spec keys win over it.
+        metadata = {**self._attribution.metadata(), **spec.metadata}
+        if metadata:
+            kwargs["metadata"] = {str(k): str(v) for k, v in metadata.items()}
         if self._create.network:
             kwargs["network"] = {key: list(rules) for key, rules in self._create.network.items()}
 
@@ -801,6 +810,8 @@ class E2BProvider:
         kwargs["request_timeout"] = self._exec_request_timeout()
 
         timeout_exc = getattr(e2b, "TimeoutException", None)
+        # E2B 2.62+; a TimeoutException subclass, so check it first.
+        not_running_exc = getattr(e2b, "SandboxNotRunningException", None)
         exit_exc = getattr(e2b, "CommandExitException", None)
         try:
             if self._exec.background:
@@ -814,6 +825,15 @@ class E2BProvider:
                     stdout=getattr(exc, "stdout", None),
                     stderr=getattr(exc, "stderr", None),
                     return_code=int(getattr(exc, "exit_code", 1) or 1),
+                )
+            # The sandbox was killed, paused or reached its lifetime (ttl_s): the
+            # command has no exit code and retrying on this sandbox cannot help.
+            if isinstance(not_running_exc, type) and isinstance(exc, not_running_exc):
+                return SandboxExecResult(
+                    stdout=None,
+                    stderr=f"e2b sandbox is not running: {exc}",
+                    return_code=SANDBOX_RUNTIME_RETURN_CODE,
+                    error_type="sandbox",
                 )
             # E2B uses one TimeoutException for stream-open timeouts, the
             # running stream deadline, sandbox expiry and server cancellation.

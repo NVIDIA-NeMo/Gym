@@ -128,22 +128,13 @@ def _unpack(
 # or `/logs`. Preserve the task's file modes. Some images run without the capability to switch
 # users at all; those fall back to the default user.
 TRANSFER_USER = "root"
-_NO_ROOT_MARKERS = ("CAP_SETUID", "identity switch", "switching to uid=0", "operation not permitted")
 
 
 async def exec_as_root(sandbox: AsyncSandbox, command: str, *, timeout_s: float) -> SandboxExecResult:
     """Run ``command`` as root, or as the default user when the sandbox cannot switch users."""
-    try:
-        result = await sandbox.exec(command, cwd="/", timeout_s=timeout_s, user=TRANSFER_USER)
-    except Exception as exc:  # the SDK surfaces the refusal as a runtime error on some servers
-        if not any(marker in str(exc) for marker in _NO_ROOT_MARKERS):
-            raise
-        # The fallback goes through the same provider-error check below as the result-shaped refusal does.
+    result = await sandbox.exec(command, cwd="/", timeout_s=timeout_s, user=TRANSFER_USER)
+    if result.error_type == "user_switch_unavailable":
         result = await sandbox.exec(command, cwd="/", timeout_s=timeout_s)
-    else:
-        text = f"{result.stderr or ''} {result.stdout or ''}"
-        if result.return_code and any(marker in text for marker in _NO_ROOT_MARKERS):
-            result = await sandbox.exec(command, cwd="/", timeout_s=timeout_s)
     if result.error_type:
         raise SandboxUnavailableError(
             f"The sandbox could not run {command[:80]!r}: {result.error_type}: {result.stderr or result.stdout or ''}"

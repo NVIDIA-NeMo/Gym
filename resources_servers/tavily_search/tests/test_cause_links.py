@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from tests.judge_adapter_cause_links import (
+from tests.helpers.judge_adapter_cause_links import (
     assert_real_verifier_reply_preserves_the_original_judge_model_cause,
 )
 

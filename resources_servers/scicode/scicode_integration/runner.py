@@ -321,12 +321,12 @@ def build_test_program(full_generation: str, h5_path: str, step_number: str, san
 def process_exit(result: dict) -> str:
     """How a grading process ended, typed from `run_substep`'s result: `timeout`, `killed:<SIGNAL>` (a negative
     return code: a signal killed the process, e.g. `killed:SIGKILL` from an out-of-memory kill), `exit:<code>`, or
-    `not_run` when no process exit code exists."""
+    `unknown` when execution ended without exit evidence, or `not_run` when no process was run."""
     if result.get("timed_out"):
         return "timeout"
     code = result.get("returncode")
     if type(code) is not int:
-        return "not_run"
+        return "unknown" if result.get("exit_unknown") else "not_run"
     if code < 0:
         try:
             return f"killed:{signal.Signals(-code).name}"

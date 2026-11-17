@@ -20,7 +20,7 @@ NeMo Gym evaluation is environment-native: the same dataset, resources server, v
 4. **Scale** — shard across jobs and merge outputs with `gym eval aggregate`.
 5. **Verify health** — confirm that rollout records contain complete, internally consistent trajectory and model-call evidence.
 6. **Profile** — compute pass@1, pass@k, and per-task variance: `gym eval profile`.
-7. **Compare** — compare a candidate against a baseline and interpret confidence intervals for the score difference: [`gym eval compare`](/main/evaluation/compare-results).
+7. **Compare** — quantify baseline-to-candidate changes with [`gym eval compare`](/main/evaluation/compare-results). Use [`gym eval compare-suite`](/main/evaluation/compare-results#compare-a-benchmark-suite) to aggregate normalized scores across benchmarks and models.
 8. **Diagnose** — inspect failures, sometimes-pass tasks, and missing rows with BLADE.
 9. **Decide** — use results to determine whether the next action is model training, harness work, verifier repair, prompt change, or skill improvement.
 10. **Reverify** — if you change a verifier parameter (grading mode, threshold, judge prompt), recompute rewards on the same rollouts without re-running inference: `gym eval reverify`.
@@ -67,6 +67,8 @@ Evaluate skills as a run-level variable — swap skill sets without touching the
 
 A benchmark is a versioned evaluation protocol built on top of an environment's resources server: the same verifier plus a canonical dataset split, prompt configuration, and documented repeat count. All environments can be used for training; a benchmark is the evaluation-configured overlay.
 
+Task folders in the Harbor format carry their own verifiers and run on the `harbor` Environment Server instead. `gym eval run` takes a task folder, a folder of task folders, a committed entry under `environments/harbor/` (after `gym dataset pull <entry>`) or a `harbor:` reference; check the reference solutions with `gym dataset validate` before a model run. `gym list` and `gym search` do not show these datasets. See [Run an agent](/main/data/task-folders/harbor-tasks#run-an-agent) and [Bring in existing tasks](/main/data/task-folders/harbor-tasks#bring-in-existing-tasks).
+
 <Cards>
 
 <Card title="Benchmarks" href="/evaluation/benchmarks">
@@ -100,7 +102,7 @@ Customize metrics and key metrics for an environment.
 </Card>
 
 <Card title="Compare Results" href="/main/evaluation/compare-results">
-Compare baseline and candidate runs, inspect score deltas, and interpret confidence intervals.
+Compare runs with confidence intervals, or aggregate normalized benchmark scores across models.
 </Card>
 
 <Card title="Rollout Health Checks" href="/main/evaluation/rollout-health">

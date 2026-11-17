@@ -107,6 +107,10 @@ The reference directory must be laid out as
 `<reference_deliverables_dir>/task_<task_id>/` with `finish_params.json` and
 the deliverable files (the same layout the Stirrup agent persists).
 
+A reference directory can also be an `s3://bucket/prefix` URI with that layout. `/verify` then downloads only the
+task it judges, skipping `history.json` and `history.pkl`, into `reference_cache_dir` (default: a directory under
+the temp dir), using the server's AWS credentials.
+
 ## Run multi-stage adaptive ELO (Best Practice - AA v2 Benchmark Method)
 
 Multi-stage ELO estimates the eval model's rating in a sequence of *stages*
@@ -292,9 +296,9 @@ comparison mode.
 
 To collect deliverables without judging them, for example for a reference set,
 set `++gdpval_resources_server.resources_servers.gdpval.judge_deliverables=false`.
-`/verify` still persists each deliverable, then returns `reward: 0.0` with
-`mask_sample: true`, so the rows stay in the output with their
-`deliverables_dir` and aggregation skips them.
+`/verify` still persists each deliverable, then returns `reward: 0.0`,
+`mask_sample: true`, and `failure_kind: gdpval:judging_disabled`. The rows stay
+in the output with their `deliverables_dir`, and aggregation skips them.
 
 ### Full run as a single stage
 
@@ -559,6 +563,37 @@ Replace `opencode` with `openclaw` for OpenClaw.
   after about 300 seconds, Bun's default `fetch` timeout, so a slower `fetch_web_page` fails at about 300 s.
 - Change a harness setting with `++gdpval_opencode_agent.responses_api_agents.opencode_agent.<key>=<value>` or
   `++gdpval_openclaw_agent.responses_api_agents.openclaw_agent.<key>=<value>`.
+
+`benchmarks/gdpval/openhands.yaml` runs [OpenHands](../../responses_api_agents/openhands_agent/README.md) (the
+OpenHands Software Agent SDK) the same way:
+
+```bash
+export PERSIST_DELIVERABLES_DIR=$PWD/output/gdpval_openhands/deliverables
+gym eval prepare --benchmark gdpval/openhands
+gym eval run \
+    --model-type vllm_model \
+    --benchmark gdpval/openhands \
+    --split benchmark \
+    --output results/gdpval_openhands.jsonl \
+    --model-url <vllm_base_url> \
+    --model-api-key <vllm_api_key> \
+    --model <served_model_name>
+```
+
+- The rows, the task tools and the deliverables directory work as for Pi. The model sees the task tools as
+  `finish`, `abandon_task_finish`, `web_search` and `fetch_web_page`, next to OpenHands' own `terminal`,
+  `file_editor`, `task_tracker` and `think`.
+- A successful `finish` or `abandon_task_finish` ends the run (`finish_tool_names`), and OpenHands' own `finish` is
+  not offered. A reply without a tool call also ends the run, and so do the `timeout` and `max_iterations` limits.
+  Those endings submit nothing. The files are collected when the run ends.
+- The agent server builds the OpenHands runtime with uv on its own host at the first seed and uploads it, so the task
+  sandbox needs no egress for the install.
+- The request's `temperature`, `top_p` and `max_output_tokens` reach OpenHands (the last as a per-call limit), so
+  `gym eval run` may set them; otherwise the model server's settings apply.
+- OpenHands reports a run that reaches its `timeout` as `stop_reason: timeout`, so GDPVal's `agent_timeout` rule
+  (which requires `wall_time`) does not apply, as for Codex. A timed-out run that reaches verification without
+  submitting is judged as an empty submission, and so is a run that reaches `max_iterations` (250 here).
+- Change a harness setting with `++gdpval_openhands_agent.responses_api_agents.openhands_agent.<key>=<value>`.
 
 ## Multi-judge panel
 

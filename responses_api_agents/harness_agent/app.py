@@ -39,13 +39,15 @@ from nemo_gym.agents import (
 from nemo_gym.client import get_response_json, raise_for_status, trace_context_path_segment
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_first_server_config_dict
 from nemo_gym.core import (
+    FailureBoundary,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
     failure_kinds,
+    observe_failure,
 )
 from nemo_gym.sandbox import (
     ConnectableProvider,
-    SandboxBackendUnreachableError,
     SandboxCreateError,
     SandboxSpec,
     create_provider,
@@ -53,6 +55,7 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
 )
 from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.utils.exception_inspection import error_to_http_status, provider_error_reason, sandbox_failure_prefix
 
 
@@ -96,29 +99,23 @@ _WORKDIR_KEYS = {
 }
 
 
-# Markers in a provider failure's own message that name an OOM kill (OpenSandbox's 410 status and its typed backend loss).
-_OOM_MARKERS = ("exited with code 137", "OOMKilled", "Sandbox was OOM-killed")
-
-
 def sandbox_infra_failure_kind(exc: BaseException) -> str | None:
     """The failure_kind when ``exc`` is the sandbox runtime failing rather than the harness or model, else None.
 
-    Only a failure the provider reports counts: the OpenSandbox SDK's exceptions (e.g. ``SANDBOX::ENDED`` when the
-    container was OOM-killed or evicted), Gym's ``SandboxCreateError`` and ``SandboxBackendUnreachableError``, and a
-    timeout or dropped connection while the episode runs (to the sandbox or to the resources server). Runner output
-    never decides it, and a runner that exits on a signal stays a runner failure: the agent's own commands can send it.
-    Messages naming an OOM kill are reported as ``provider_oom_killed``, the rest as ``provider_unavailable``.
+    Shared sandbox events retain their explicit kind. Other provider exceptions identify
+    infrastructure failure but do not establish OOM from message text or exit codes.
+    Runner output never decides it: the agent's own commands can exit on a signal.
     """
+    if isinstance(exc, NgFailureEvent):
+        return exc.failure_kind if exc.boundary == FailureBoundary.SANDBOX else None
     names = {cls.__name__ for cls in type(exc).__mro__}
     infra = (
         "SandboxApiException" in names
         or type(exc).__module__.startswith("opensandbox.")
-        or isinstance(exc, (SandboxCreateError, SandboxBackendUnreachableError, TimeoutError, ConnectionError))
+        or isinstance(exc, (SandboxCreateError, TimeoutError, ConnectionError))
     )
     if not infra:
         return None
-    if any(marker in str(exc) for marker in _OOM_MARKERS):
-        return failure_kinds.PROVIDER_OOM_KILLED
     return failure_kinds.PROVIDER_UNAVAILABLE
 
 
@@ -378,6 +375,8 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 failure_kind = sandbox_infra_failure_kind(exc)
                 if failure_kind is None:
                     raise
+                if isinstance(exc, NgFailureEvent):
+                    observe_failure(exc)
                 # A dead sandbox would otherwise fail this /run with HTTP 500 and abort the whole collection.
                 LOG.warning("sandbox failed during the episode; masking this rollout: %s", exc)
                 sandbox_id = (descriptor or {}).get("sandbox_id") if isinstance(descriptor, Mapping) else None
@@ -593,3 +592,6 @@ class HarnessAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     HarnessAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = HarnessAgent.run_webserver()  # noqa: F401

@@ -26,9 +26,11 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
+    NgFailureEvent,
     failure_kinds,
 )
 from nemo_gym.metrics import MASK_SAMPLE_FIELD
+from nemo_gym.verification import is_judge_failure, judge_failsafe
 from resources_servers.agentic_turn_simulation.app import (
     AgenticTurnSimulationResourcesServer,
     AgenticTurnSimulationResourcesServerConfig,
@@ -517,12 +519,130 @@ class TestSimulateWithLLM:
 # --- /verify ------------------------------------------------------------------------------------------------
 
 
+class TestJudgeGrading:
+    async def test_a_judged_row_records_its_judge_grading_and_is_not_graded_again(self) -> None:
+        from nemo_gym.eval.recovery.grading import reverification_cause, saved_row_evidence
+        from nemo_gym.server_runtime import verifier_observability
+        from nemo_gym.trajectory import VerifierInvocation, grading_result_binding
+
+        server = make_server()
+        script(server, [judge_reply(GOOD)])
+        invocation = VerifierInvocation(invocation_id="verify-1")
+        token = verifier_observability._active_verifier.set(invocation)
+        try:
+            out = await server.verify(req(), _verify_body())
+        finally:
+            verifier_observability._active_verifier.reset(token)
+
+        (operation,) = invocation.grading_operations
+        assert (operation.kind, operation.outcome) == ("llm_judge", "completed")
+        assert len(operation.dependencies) == 1
+        assert operation.result_binding_sha256 == grading_result_binding(out)
+        row = out.model_dump(mode="json") | {
+            "ng_trial_observations": {"verifier_invocations": [invocation.model_dump(mode="json")]}
+        }
+        assert reverification_cause(saved_row_evidence(row)) is None
+
+    async def test_an_unusable_verdict_leaves_the_grading_unknown(self) -> None:
+        from nemo_gym.server_runtime import verifier_observability
+        from nemo_gym.trajectory import VerifierInvocation
+
+        server = make_server()
+        script(server, [judge_reply(text="no verdict here")] * server.config.judge_max_attempts)
+        invocation = VerifierInvocation(invocation_id="verify-1")
+        token = verifier_observability._active_verifier.set(invocation)
+        try:
+            await server.verify(req(), _verify_body())
+        finally:
+            verifier_observability._active_verifier.reset(token)
+        assert [operation.outcome for operation in invocation.grading_operations] == ["unknown"]
+
+
+def _decision_policy(kind: str, failure_class: str, action: str) -> dict:
+    """A policy that classifies ``kind`` as ``failure_class`` and selects ``action`` as the stage default."""
+    return {
+        "classification": {"by_stage": {"agent": {"by_failure_kind": {kind: failure_class}}}},
+        "by_stage": {"agent": {"default_action": action}},
+    }
+
+
+DECISIONS = [("evaluation", "retry"), ("evaluation", "fail"), ("model", "fail")]
+
+
+def test_a_policy_that_would_count_a_masked_row_as_zero_is_refused() -> None:
+    with pytest.raises(ValueError, match="supports only retry or fail"):
+        make_server(outcome_policy={"by_stage": {"agent": {"default_action": "count_as_zero"}}})
+
+
+def test_retry_for_a_kind_classified_as_the_model_is_refused() -> None:
+    # Recovery does not rerun a row attributed to the model, so the pairing would save a retry that never happens.
+    with pytest.raises(ValueError, match="cannot be retried at the agent stage while it is classified as"):
+        make_server(outcome_policy=_decision_policy(f"{SERVER}:time_cap", "model", "retry"))
+
+
+def test_an_action_override_for_an_undeclared_kind_is_refused() -> None:
+    # Only the kinds this server declares can be selected by name; a typo after the colon fails at load.
+    with pytest.raises(ValueError, match="Unregistered failure kinds"):
+        make_server(outcome_policy={"by_stage": {"agent": {"by_failure_kind": {f"{SERVER}:time_kap": "fail"}}}})
+
+
 class TestVerifyMasks:
+    @pytest.mark.parametrize("failure_class,action", DECISIONS)
+    async def test_the_saved_decision_follows_the_configured_policy(self, failure_class: str, action: str) -> None:
+        cases = [
+            (f"{SERVER}:time_cap", _verify_body(stop_reason="time_cap", steps="12")),
+            (
+                f"{SERVER}:simulator_failed",
+                _verify_body([_output_item("p1", simulator_failure("HTTP 503: busy")), _message_item("It failed.")]),
+            ),
+        ]
+        for kind, body in cases:
+            server = make_server(outcome_policy=_decision_policy(kind, failure_class, action))
+            out = await server.verify(req(), body)
+            # The observed kind and the originating stage do not depend on the action or its attribution.
+            assert out.failure_kind == kind and getattr(out, MASK_SAMPLE_FIELD) is True
+            assert (out.failure_outcome_action, out.failure_outcome_attribution) == (action, failure_class)
+            assert out.model_extra["_ng_failure_stage"] == "agent"
+
+    async def test_a_time_cap_row_follows_the_configured_class_rules(self) -> None:
+        # The kind is classified as the model's; the class rules select fail for it and retry for the evaluation.
+        server = make_server(
+            outcome_policy={
+                "classification": {"by_stage": {"agent": {"by_failure_kind": {f"{SERVER}:time_cap": "model"}}}},
+                "by_stage": {"agent": {"by_failure_class": {"model": "fail", "evaluation": "retry"}}},
+            }
+        )
+        out = await server.verify(req(), _verify_body(stop_reason="time_cap", steps="12"))
+        assert out.failure_kind == f"{SERVER}:time_cap"
+        assert (out.failure_outcome_action, out.failure_outcome_attribution) == ("fail", "model")
+
+    async def test_one_kind_can_select_fail_while_the_other_keeps_retry(self) -> None:
+        # Only the time cap's action changes; both kinds stay attributed to the evaluation.
+        server = make_server(
+            outcome_policy={"by_stage": {"agent": {"by_failure_kind": {f"{SERVER}:time_cap": "fail"}}}}
+        )
+        capped = await server.verify(req(), _verify_body(stop_reason="time_cap", steps="12"))
+        failed = await server.verify(
+            req(), _verify_body([_output_item("p1", simulator_failure("HTTP 503: busy")), _message_item("It failed.")])
+        )
+        assert (capped.failure_kind, capped.failure_outcome_action, capped.failure_outcome_attribution) == (
+            f"{SERVER}:time_cap",
+            "fail",
+            "evaluation",
+        )
+        assert (failed.failure_kind, failed.failure_outcome_action, failed.failure_outcome_attribution) == (
+            f"{SERVER}:simulator_failed",
+            "retry",
+            "evaluation",
+        )
+
     async def test_the_wall_clock_cap_is_masked(self) -> None:
         server = make_server()
         out = await server.verify(req(), _verify_body(stop_reason="time_cap", steps="12"))
         assert getattr(out, MASK_SAMPLE_FIELD) is True
         assert out.failure_kind == f"{SERVER}:time_cap" and "time_cap" in out.failure_reason
+        assert (out.failure_outcome_action, out.failure_outcome_attribution) == ("retry", "evaluation")
+        assert out.model_extra["_ng_failure_stage"] == "agent"
         assert (out.reward, out.stop_reason, out.steps) == (0.0, "time_cap", 12)
         assert out.correct is None and out.judge_verdicts == []
         server.server_client.post.assert_not_called()
@@ -659,6 +779,8 @@ class TestVerifyMasks:
         out = await server.verify(req(), _verify_body(items))
         assert getattr(out, MASK_SAMPLE_FIELD) is True
         assert out.failure_kind == f"{SERVER}:simulator_failed" and out.failure_reason == failed
+        assert (out.failure_outcome_action, out.failure_outcome_attribution) == ("retry", "evaluation")
+        assert out.model_extra["_ng_failure_stage"] == "agent"
         server.server_client.post.assert_not_called()
 
     async def test_a_tool_result_that_only_mentions_the_failure_phrase_is_judged(self) -> None:
@@ -684,7 +806,7 @@ class TestVerifyMasks:
 
     async def test_no_usable_verdict_is_masked(self, sleep: AsyncMock) -> None:
         server = make_server(judge_max_attempts=3)
-        sent = script(server, [RuntimeError("boom"), http(status=500, body="oops"), judge_reply(text="no idea")])
+        sent = script(server, [ConnectionError("boom"), http(status=500, body="oops"), judge_reply(text="no idea")])
         out = await server.verify(req(), _verify_body())
         assert getattr(out, MASK_SAMPLE_FIELD) is True and out.failure_kind == failure_kinds.JUDGE_FAILED
         assert out.reward == 0.0 and out.correct_ladder is None and out.judge_verdicts == [None]
@@ -697,14 +819,54 @@ class TestVerifyMasks:
         out = await server.verify(req(), _verify_body())
         assert getattr(out, MASK_SAMPLE_FIELD) is True and out.judge_verdicts == [partial]
 
-    async def test_context_length_rejection_gives_up_at_once(self, sleep: AsyncMock) -> None:
+    async def test_context_length_rejection_is_a_judge_failure_at_once(self, sleep: AsyncMock) -> None:
         server = make_server()
         body = "This model's maximum context length is 131072 tokens. However, you requested 150000 tokens."
         sent = script(server, [http(status=400, body=body)])
-        out = await server.verify(req(), _verify_body())
-        assert len(sent) == 1 and getattr(out, MASK_SAMPLE_FIELD) is True
-        assert out.failure_kind == failure_kinds.JUDGE_FAILED
+        with pytest.raises(NgFailureEvent) as raised:
+            await server.verify(req(), _verify_body())
+        assert len(sent) == 1 and is_judge_failure(raised.value)
         sleep.assert_not_awaited()
+
+    async def test_unreachable_judge_is_a_judge_failure_after_every_attempt(self, sleep: AsyncMock) -> None:
+        server = make_server(judge_max_attempts=3)
+        sent = script(server, [ConnectionError("boom"), http(status=500, body="oops"), http(status=503, body="down")])
+        with pytest.raises(NgFailureEvent) as raised:
+            await server.verify(req(), _verify_body())
+        assert len(sent) == 3 and is_judge_failure(raised.value) and sleep.await_count == 3
+
+    async def test_a_non_retryable_status_fails_at_once(self) -> None:
+        server = make_server()
+        sent = script(server, [http(status=401, body="bad key")])
+        with pytest.raises(NgFailureEvent) as raised:
+            await server.verify(req(), _verify_body())
+        assert len(sent) == 1 and is_judge_failure(raised.value)
+
+    async def test_a_transport_error_then_a_usable_verdict_is_scored(self) -> None:
+        server = make_server()
+        sent = script(server, [http(status=429, body="slow down"), judge_reply(GOOD)])
+        out = await server.verify(req(), _verify_body())
+        assert len(sent) == 2 and out.reward == 1.0 and not getattr(out, MASK_SAMPLE_FIELD)
+
+    async def test_one_lost_judge_of_two_fails_the_row_instead_of_shrinking_the_vote(self) -> None:
+        server = make_server(n_judges=2, judge_max_attempts=1)
+        script(server, {"judge_0": [judge_reply(GOOD)], "judge_1": [http(status=500, body="down")]})
+        with pytest.raises(NgFailureEvent) as raised:
+            await server.verify(req(), _verify_body())
+        assert is_judge_failure(raised.value)
+
+    async def test_one_unusable_judge_of_two_still_votes_on_the_rest(self) -> None:
+        server = make_server(n_judges=2, judge_max_attempts=1)
+        script(server, {"judge_0": [judge_reply(GOOD)], "judge_1": [judge_reply(text="no idea")]})
+        out = await server.verify(req(), _verify_body())
+        assert out.reward == 1.0 and not getattr(out, MASK_SAMPLE_FIELD) and out.judge_verdicts[1] is None
+
+    async def test_failsafe_masks_a_lost_judge_as_judge_failed(self) -> None:
+        server = make_server(judge_max_attempts=1)
+        script(server, [http(status=500, body="down")])
+        out = json.loads((await judge_failsafe(server.verify)(req(), _verify_body())).body)
+        assert out["reward"] == 0.0 and out[MASK_SAMPLE_FIELD] is True
+        assert out["failure_kind"] == failure_kinds.JUDGE_FAILED and out["_ng_failure_class"] == "judge_failed"
 
 
 class TestVerifyCodeGates:
@@ -1049,9 +1211,8 @@ class TestVerifyJudge:
         [
             ([GOOD, GOOD], 1.0, 2),
             ([GOOD, BAD], 0.0, 2),  # a tie does not give the policy credit
-            ([None, GOOD], 1.0, 1),  # one judge without a verdict: the other decides
         ],
-        ids=["agree", "tie", "one-failed"],
+        ids=["agree", "tie"],
     )
     async def test_two_judges_vote(self, verdicts: list[dict[str, Any] | None], reward: float, usable: int) -> None:
         server = make_server(n_judges=2, judge_max_attempts=1)

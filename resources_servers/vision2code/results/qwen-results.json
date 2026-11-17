@@ -1,0 +1,127 @@
+{
+  "description": "Saved Qwen3.8-27B test-mini evaluations; scores computed from the selected saved attempt for each task, without model calls or rescoring images.",
+  "aggregation": "Equal weight per task. Code/render failures contribute zero. Masked samples are excluded; neither run has masked, missing, or unresolved tasks.",
+  "reward": "0.1 * foreground RGB similarity + 0.2 * foreground tolerant F1 + 0.2 * edge tolerant F1 + 0.5 * raw judge score / 5; judge term is uncapped.",
+  "judge_only_metrics": "Offline transforms of llm_final_rating_0_to_5 / 5, including rubric caps and rounding, from the same selected attempts. These metrics did not control selection or stopping.",
+  "comparison_caveat": "The three-pass setup also appends canvas dimensions and supplies rendered-image, judge, and pixel feedback. This is not an isolated ablation of pass count. Saved runs predate subsequent infrastructure optimizations.",
+  "runs": [
+    {
+      "source_run": "qwen38-test-mini-blend-uncapped-gpt61sol-v2",
+      "settings": {
+        "policy": "nvidia/qwen/qwen3.8-27b",
+        "judge": "openai/openai/gpt-6.1-sol",
+        "temperature": 0.0,
+        "max_output_tokens": 32768,
+        "judge_max_output_tokens": 4096,
+        "thinking_mode": "endpoint_default",
+        "num_repeats": 1,
+        "num_passes": 1,
+        "stop_on": "final_judge_score",
+        "result_selection": "last",
+        "preparation": {
+          "include_canvas_dimensions": false,
+          "include_rendering_instructions": false,
+          "include_library_instructions": false
+        },
+        "gym_commit": "9515d94e4dfec05b7637879e60b60788b5fad5b1",
+        "renderer_sha256": "3a073b675472ff47052263ae6325510d41a01563c86984f11c8abd5ad0313d3d"
+      },
+      "source_files_sha256": {
+        "submission-settings.json": "5f1c176fff088267f0c0fe679c7c2cfbdfb8311fc1bf4d2e4db35021ba1646f2",
+        "rollouts.jsonl": "e8d26126126c38f76eef9a63cf4ca2ee31264c7643b0a270470c17adbd289fa6",
+        "rollouts_aggregate_metrics.json": "d672095460616febce8d3472e058bc035d27c2d2bf1b29352159e151bad4f047",
+        "rollouts_materialized_inputs.jsonl": "c8721cccae4e322591509798ebf2995069a8d16fd6eb36a80537e3c92d35bcc6",
+        "quality_summary.json": "6738eaa7a5d9000e6fe3a9f226dedc9fac9d8332b6072d5e5a82b5eaa8ed8f69"
+      },
+      "scoring_code_sha256": {
+        "resources_servers/vision2code/__init__.py": "1803fe55c8fca2f14127635ab03df5457e557ea94d06ccc4d204ca298137abdd",
+        "resources_servers/vision2code/app.py": "571868a6a165393fb79f9fa7424ecfb56918c2b400ec08d7a7256fb61192c9a5",
+        "resources_servers/vision2code/evaluation.py": "8cd2dea9f5eff417cc630a570cd3f40494dc330668aed2eb58802d3c9fb1845e",
+        "resources_servers/vision2code/generic_rubric.py": "7c3fcbbc9e947c370f677d88b9e2582637e7f81ff38758ebb76bb86c1fa54dcb",
+        "resources_servers/vision2code/image_metrics.py": "0b3af370ef1d142c8445a77d6173afad1eb1e74c79201d19250a23cd538df2f6",
+        "resources_servers/vision2code/judge_recovery.py": "c14e150b4ef328a2da560ce1eb3a3c59cc5ccb213a13a6a02299227b4adc8685",
+        "resources_servers/vision2code/judge_transport.py": "50c20f9ec687eb20efff96e4af86a966e4e3c0d8788be9197b6b983857a79094",
+        "resources_servers/vision2code/launcher.py": "38292de36bd5c08bad4551ebc0f7caf298960aa1297cb257605ccb77374a5a69",
+        "resources_servers/vision2code/prepare.py": "0f27558186f17c121ff4c3cd5ce91e580ba43d7241c17e9d70f66a3abea322c3",
+        "resources_servers/vision2code/prompts.py": "5f058c4412f09a9b433efcdcdf09ae86fdc173bc3b102764540d4c8eda4fae3d",
+        "resources_servers/vision2code/render.py": "88c0f1d2e5884232d41de563a806eeb28fac24a5cfcba013c2e98807bf371dbc",
+        "resources_servers/vision2code/rubrics.py": "539f19346c3fe9ccc818f25e67e6f15bce9a8d7f1715c9945140dccc56cb0642",
+        "resources_servers/vision2code/smoke.py": "ec130fc5e5f1c65cb037d8a20cc2a762dd904014f9bfcfa17a72c4731192f9e4",
+        "resources_servers/vision2code/task_data.py": "ef52dfc18d7b285139670e215b6d7c96cc58a218ed905caef2252001e7b51542",
+        "responses_api_agents/vision2code_agent/app.py": "0d7c54bddc8e58bf8f7304d79f73db8c47b619f6ff260eafef8cfe020db27782"
+      },
+      "task_identity_sha256": "9b3a1a12b8458f7cf7f75f7375b2946a438310f675fa1bd8b3b0693fc5001cb3",
+      "metrics": {
+        "tasks_scored": 539,
+        "rubrics": 15,
+        "successful_selected_renders": 513,
+        "code_errors": 26,
+        "masked": 0,
+        "missing": 0,
+        "unresolved": 0,
+        "weighted_reward_mean": 0.5894141743970316,
+        "judge_linear_mean_offline": 0.7765862708719852,
+        "judge_squared_mean_offline": 0.6645855287569573
+      }
+    },
+    {
+      "source_run": "qwen38-test-mini-blend-uncapped-gpt61sol-pass3",
+      "settings": {
+        "policy": "nvidia/qwen/qwen3.8-27b",
+        "judge": "openai/openai/gpt-6.1-sol",
+        "temperature": 0.0,
+        "max_output_tokens": 32768,
+        "judge_max_output_tokens": 4096,
+        "thinking_mode": "endpoint_default",
+        "num_repeats": 1,
+        "num_passes": 3,
+        "stop_on": "final_judge_score",
+        "result_selection": "best",
+        "preparation": {
+          "include_canvas_dimensions": true,
+          "include_rendering_instructions": false,
+          "include_library_instructions": false
+        },
+        "gym_commit": "9515d94e4dfec05b7637879e60b60788b5fad5b1",
+        "renderer_sha256": "3a073b675472ff47052263ae6325510d41a01563c86984f11c8abd5ad0313d3d"
+      },
+      "source_files_sha256": {
+        "submission-settings.json": "206c777c9524a971f8697dc64641e1b56d4b43057e6d250d9b03ecfe6496e60c",
+        "rollouts.jsonl": "337a1ffa54fca3d980cec00976cc94ee618259b2f89d4c8f0a7058a0e2171cb2",
+        "rollouts_aggregate_metrics.json": "bec6b0253ad6d1f36555bae37cec95cb9a110c46ec64e2f33eed8689b7e381ca",
+        "rollouts_materialized_inputs.jsonl": "4bba7bc349f640500bf90299251e6a8cd79b9cd2d51da5396e9f8341573433c8",
+        "quality_summary.json": "04445098727a7169ec97ba68cb3a3a89118a100b7bb89924eb4a7027f2f58cec"
+      },
+      "scoring_code_sha256": {
+        "resources_servers/vision2code/__init__.py": "1803fe55c8fca2f14127635ab03df5457e557ea94d06ccc4d204ca298137abdd",
+        "resources_servers/vision2code/app.py": "571868a6a165393fb79f9fa7424ecfb56918c2b400ec08d7a7256fb61192c9a5",
+        "resources_servers/vision2code/evaluation.py": "8cd2dea9f5eff417cc630a570cd3f40494dc330668aed2eb58802d3c9fb1845e",
+        "resources_servers/vision2code/generic_rubric.py": "7c3fcbbc9e947c370f677d88b9e2582637e7f81ff38758ebb76bb86c1fa54dcb",
+        "resources_servers/vision2code/image_metrics.py": "0b3af370ef1d142c8445a77d6173afad1eb1e74c79201d19250a23cd538df2f6",
+        "resources_servers/vision2code/judge_recovery.py": "c14e150b4ef328a2da560ce1eb3a3c59cc5ccb213a13a6a02299227b4adc8685",
+        "resources_servers/vision2code/judge_transport.py": "50c20f9ec687eb20efff96e4af86a966e4e3c0d8788be9197b6b983857a79094",
+        "resources_servers/vision2code/launcher.py": "38292de36bd5c08bad4551ebc0f7caf298960aa1297cb257605ccb77374a5a69",
+        "resources_servers/vision2code/prepare.py": "0f27558186f17c121ff4c3cd5ce91e580ba43d7241c17e9d70f66a3abea322c3",
+        "resources_servers/vision2code/prompts.py": "5f058c4412f09a9b433efcdcdf09ae86fdc173bc3b102764540d4c8eda4fae3d",
+        "resources_servers/vision2code/render.py": "88c0f1d2e5884232d41de563a806eeb28fac24a5cfcba013c2e98807bf371dbc",
+        "resources_servers/vision2code/rubrics.py": "539f19346c3fe9ccc818f25e67e6f15bce9a8d7f1715c9945140dccc56cb0642",
+        "resources_servers/vision2code/smoke.py": "ec130fc5e5f1c65cb037d8a20cc2a762dd904014f9bfcfa17a72c4731192f9e4",
+        "resources_servers/vision2code/task_data.py": "ef52dfc18d7b285139670e215b6d7c96cc58a218ed905caef2252001e7b51542",
+        "responses_api_agents/vision2code_agent/app.py": "0d7c54bddc8e58bf8f7304d79f73db8c47b619f6ff260eafef8cfe020db27782"
+      },
+      "task_identity_sha256": "9b3a1a12b8458f7cf7f75f7375b2946a438310f675fa1bd8b3b0693fc5001cb3",
+      "metrics": {
+        "tasks_scored": 539,
+        "rubrics": 15,
+        "successful_selected_renders": 538,
+        "code_errors": 1,
+        "masked": 0,
+        "missing": 0,
+        "unresolved": 0,
+        "weighted_reward_mean": 0.7455643042671614,
+        "judge_linear_mean_offline": 0.912430426716141,
+        "judge_squared_mean_offline": 0.8494367346938776
+      }
+    }
+  ]
+}

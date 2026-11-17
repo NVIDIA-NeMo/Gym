@@ -1,0 +1,7 @@
+config_paths:
+- resources_servers/agentic_if_realworld/configs/agentic_if_realworld.yaml
+agentic_if_realworld_resources:
+  resources_servers:
+    agentic_if_realworld:
+      response_source: gym_response
+      verified: false

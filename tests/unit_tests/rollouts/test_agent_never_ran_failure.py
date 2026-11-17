@@ -32,7 +32,7 @@ from nemo_gym.config.config_types import BaseServerConfig
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 from nemo_gym.rollouts.rollout_recovery import RunManifest, has_recorded_grade, has_saved_generation
 from nemo_gym.rollouts.rollout_store import RolloutStore
-from tests.single_agent_turn_helpers import _environment_server, _request
+from tests.helpers.single_agent_turn import _environment_server, _request
 
 
 # The agent's own response object when its sandbox was never created: no output items and no status.

@@ -19,11 +19,11 @@ from omegaconf import OmegaConf
 from pydantic import ValidationError
 from stirrup.core.models import AssistantMessage, TokenUsage, ToolCall, UserMessage
 
-from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, OutcomeAction, agent_outcome_policy
 from nemo_gym.cli.env import validate_server_configs
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import MODEL_REQUEST_ERROR, EpisodeId, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import AGENT_INVALID_OUTPUT, MODEL_REQUEST_ERROR, EpisodeId, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_runtime import DirectHTTPToolAccess
 from responses_api_agents.stirrup_agent.app import StirrupAgentWrapper, StirrupAgentWrapperConfig, _observations
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent, NeMoUserMessage
@@ -107,8 +107,9 @@ async def _run_episode(config, body, report=None, *, execute_error=None, artifac
     """Run one episode against a state whose sandbox runner returns ``report`` (or raises); return response, payload, state."""
     sent = []
 
-    async def execute(payload, **_):
+    async def execute(payload, **kwargs):
         sent.append(payload)
+        state.execute_kwargs = kwargs
         if execute_error:
             raise execute_error
         return report or _report()
@@ -252,11 +253,36 @@ class TestApp:
         )
 
         assert response.status == "incomplete"
-        assert response.metadata == {"elapsed_seconds": "1.5", "stop_reason": "cancelled"}
+        assert response.metadata == {
+            "elapsed_seconds": "1.5",
+            "agent_timeout_sec": "12600.0",
+            "stop_reason": "cancelled",
+        }
         assert [item.type for item in response.output] == ["message", "message"]
         assert (response.usage.input_tokens, response.usage.output_tokens, response.usage.total_tokens) == (20, 10, 30)
         assert response.usage.input_tokens_details.cached_tokens == 8
         assert response.usage.output_tokens_details.reasoning_tokens == 4
+
+    @pytest.mark.parametrize(
+        "metadata,budget",
+        [
+            (None, 900.0),
+            ({"agent_timeout_sec": "600"}, 600.0),
+            ({"agent_timeout_sec": "5000"}, 900.0),
+            ({"agent_timeout_sec": "not-a-number"}, 900.0),
+        ],
+    )
+    async def test_task_timeout_shortens_but_never_extends_the_configured_budget(
+        self, metadata: dict | None, budget: float
+    ) -> None:
+        """A Harbor task row carries `metadata.agent_timeout_sec`; the runner gets min(config, task) seconds."""
+        response, _, state = await _run_episode(
+            _make_config(sandbox_runner_timeout_seconds=900),
+            NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy", metadata=metadata),
+        )
+
+        assert state.execute_kwargs["timeout"] == budget
+        assert response.metadata["agent_timeout_sec"] == str(budget)
 
     @pytest.mark.asyncio
     async def test_a_run_whose_model_calls_reported_no_usage_has_none(self) -> None:
@@ -291,6 +317,26 @@ class TestApp:
         assert (response.usage.input_tokens, response.usage.output_tokens, response.usage.total_tokens) == (0, 0, 0)
         assert response.usage.input_tokens_details.cached_tokens is None
         assert response.usage.output_tokens_details.reasoning_tokens is None
+
+    @pytest.mark.asyncio
+    async def test_a_run_ended_by_unusable_compaction_summaries_is_the_models_invalid_output(self) -> None:
+        report = _report(
+            stop_reason="compaction_failed",
+            invalid_output="Compaction summarizer produced no usable text after 3 attempts",
+            observations={"status": "failed", "model_response_ids": ["chatcmpl-1"]},
+        )
+
+        response, _, _ = await _run_episode(
+            _make_config(), NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy"), report
+        )
+
+        assert response.status == "failed"
+        assert response.error is None
+        assert response.metadata["stop_reason"] == "compaction_failed"
+        assert AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == AgentOutcome(
+            failure_kind=AGENT_INVALID_OUTPUT
+        )
+        assert agent_outcome_policy(response) == OutcomeAction.VERIFY
 
     @pytest.mark.asyncio
     async def test_a_run_killed_before_any_model_response_has_unknown_usage_and_no_error(self) -> None:

@@ -1,4 +1,0 @@
--e nemo-gym[dev] @ ../../
-numpy
-scipy
-pandas

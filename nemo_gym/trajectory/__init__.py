@@ -23,8 +23,11 @@ from nemo_gym._public_api import lazy_exports
 if TYPE_CHECKING:
     from nemo_gym.trajectory.atif_export import AtifExportError, encode_atif_trajectory, transcript_to_atif
     from nemo_gym.trajectory.model_call_record import ModelCallRecord, build_model_call_record
+    from nemo_gym.trajectory.tool_timing import normalize_operation_timing, normalize_tool_calls, tool_attempt_id
+    from nemo_gym.trajectory.trajectory_format import project_bundle_v1, project_trajectory_v1
     from nemo_gym.trajectory.trajectory_record import (
         NG_AGENT_OBSERVATIONS_KEY,
+        NG_AGENT_SANDBOX_OBSERVATION_KEY,
         NG_TRAJECTORY_KEY,
         NG_VERIFIER_INVOCATIONS_KEY,
         AgentEpisode,
@@ -52,6 +55,11 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "normalize_operation_timing": "tool_timing",
+    "normalize_tool_calls": "tool_timing",
+    "tool_attempt_id": "tool_timing",
+    "project_bundle_v1": "trajectory_format",
+    "project_trajectory_v1": "trajectory_format",
     "AgentEpisode": "trajectory_record",
     "AgentInvocation": "trajectory_record",
     "AgentObservationBundle": "trajectory_record",
@@ -60,6 +68,7 @@ _PUBLIC_API = {
     "ModelCallRecord": "model_call_record",
     "ModelCallRef": "trajectory_record",
     "NG_AGENT_OBSERVATIONS_KEY": "trajectory_record",
+    "NG_AGENT_SANDBOX_OBSERVATION_KEY": "trajectory_record",
     "NG_TRAJECTORY_KEY": "trajectory_record",
     "NG_VERIFIER_INVOCATIONS_KEY": "trajectory_record",
     "ObservationGap": "trajectory_record",
