@@ -4,8 +4,8 @@ experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
 domain: math
-description: Math QA verified by a Skills-style autograder LLM judge with math-verify
-  symbolic fallback
+description: ArXivMath April 2026 with symbolic-first grading and an autograder LLM
+  fallback.
 modality: text
 licensing: unknown
 authors:

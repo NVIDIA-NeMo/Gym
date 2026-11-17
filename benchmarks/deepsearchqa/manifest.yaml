@@ -4,8 +4,8 @@ experimental: true
 kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: knowledge
-description: Multi-step web research with answer-set F1 scoring using the claude_code
-  harness and Exa search.
+description: Multi-step web research with answer-set F1 scoring, run by any Gym harness
+  with Exa search.
 modality: text
 licensing: unknown
 authors:

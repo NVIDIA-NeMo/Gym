@@ -4,8 +4,8 @@ experimental: true
 kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: knowledge
-description: Broad web research with official strict table and item matching using
-  the claude_code harness and Exa search.
+description: Broad web research with official strict table and item matching, run
+  by any Gym harness with Exa search.
 modality: text
 licensing: MIT
 authors:

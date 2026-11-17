@@ -4,7 +4,7 @@ experimental: true
 kind: benchmark
 integration_profile: custom-gym-verifier
 domain: math
-description: OpenMathReasoning math dataset with math-verify and LLM-as-a-judge
+description: APEX 2025 math problems with symbolic-only math-verify grading.
 modality: text
 licensing: unknown
 authors:
