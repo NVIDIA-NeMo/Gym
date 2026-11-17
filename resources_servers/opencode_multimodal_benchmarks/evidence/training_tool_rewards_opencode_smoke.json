@@ -351,10 +351,8 @@
   },
   "scope": "Live local OpenCode CLI smoke on synthetic tasks using GPT-4o-mini. Shipped reward defaults, no tool-name or reward overrides. No optimizer steps or sandbox-session validation.",
   "provenance": {
-    "checkout_head": "bca494cb3c3d3076a602cc8b50b43b9381c52397",
-    "working_diff_sha256": "325392a465cb690cd51e137731c3436c45029fd38e6486daf38359d929f14e94",
-    "working_tree": "Uncommitted changes were present; checkout_head alone is not the tested revision.",
-    "limitation": "The original report recorded the working-diff digest, but the patch itself is not included in this report."
+    "working_tree": "Uncommitted changes were present during this historical smoke.",
+    "limitation": "The exact tested source snapshot is not included in this report; this is historical behavior evidence, not validation of the current PR head."
   },
   "coverage_note": "Historical single-shell smoke; does not exercise shell_tool_names."
 }
