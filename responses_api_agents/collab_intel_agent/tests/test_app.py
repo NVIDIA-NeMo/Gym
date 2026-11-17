@@ -134,13 +134,6 @@ def _agent_with_fake_cli(
     agent = CollabIntelAgent.model_construct(config=SimpleNamespace(episode_timeout_s=timeout_s))
     agent._python, agent._root = str(script), tmp_path
     agent._env = lambda home, phase_key: {}
-
-    # These tests exercise transcript/error handling with a trusted fake executable.
-    # The production _run isolation boundary is covered in test_isolation.py.
-    async def run_fake_harness(path, version, seed, out, phase_key=""):
-        return await agent._run_harness(path, version, seed, out, phase_key, "unused-test-socket", tmp_path)
-
-    agent._run = run_fake_harness
     return agent
 
 

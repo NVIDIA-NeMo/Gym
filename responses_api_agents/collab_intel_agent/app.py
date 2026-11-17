@@ -56,7 +56,6 @@ from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.trajectory import AgentInvocation, ModelCallRef, ObservationGap, TrajectoryRecord, TrajectoryTurn
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.collab_intel.task_data import TaskData
-from responses_api_agents.collab_intel_agent.isolation import PytestIsolation
 
 
 PARTNERS = ["ci-partner-1", "ci-partner-2", "ci-partner-3"]
@@ -105,8 +104,6 @@ class CollabIntelAgentConfig(BaseResponsesAPIAgentConfig):
     policy_extra: dict[str, Any] = {}
     max_concurrent: int = 16
     episode_timeout_s: int = 7200
-    sandbox_provider: str | dict[str, Any] = "sandbox"
-    pytest_sandbox_image: str | None = None
 
 
 class CollabIntelRunRequest(BaseRunRequest, TaskData):
@@ -172,32 +169,12 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
         }
 
     async def _run(self, path: Path, version: str, seed: int, out: Path, phase_key: str = "") -> dict[str, Any]:
-        """Fail closed unless every model-written pytest call can run in isolation."""
-        try:
-            out.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.TemporaryDirectory(dir=out.parent, prefix="pytest-phase-") as temporary:
-                root = Path(temporary)
-                isolation = PytestIsolation(
-                    root,
-                    self.config.sandbox_provider,
-                    self.server_client.global_config_dict,
-                    self.config.pytest_sandbox_image,
-                )
-                async with isolation.serve() as endpoint:
-                    result = await self._run_harness(path, version, seed, out, phase_key, endpoint, root)
-                return result
-        except Exception as error:
-            return _failed(AGENT_RUN_ERROR, f"Isolated pytest unavailable: {error}")
-
-    async def _run_harness(
-        self, path: Path, version: str, seed: int, out: Path, phase_key: str, endpoint: str, root: Path
-    ) -> dict[str, Any]:
         """One upstream episode (collab_intel.harness.cli): returns its pass and outcome from the saved transcript, or
         pass false with a failure_kind and failure_reason when it did not finish."""
         cmd = [
             self._python,
-            str(Path(__file__).with_name("pytest_bridge.py")),
-            endpoint,
+            "-m",
+            "collab_intel.harness.cli",
             str(path),
             "--version",
             version,
@@ -213,7 +190,7 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
         # its own process group, so a timeout or cancel also stops the pytest runs it starts in coding scenarios
         proc = await asyncio.create_subprocess_exec(
             *cmd,
-            env=self._env(out.parent, phase_key) | {"TMPDIR": str(root)},
+            env=self._env(out.parent, phase_key),
             cwd=str(self._root),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
