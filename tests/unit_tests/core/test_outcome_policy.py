@@ -302,3 +302,23 @@ def test_a_boundary_that_cannot_count_a_zero_refuses_that_action_for_its_kinds(r
         ValueError, match="demo:cut_off supports only retry or fail at the agent stage, not count_as_zero"
     ):
         require_retry_or_fail(policy, "agent", ("demo:cut_off",))
+
+
+def test_a_boundary_refuses_retry_for_a_kind_classified_as_the_model() -> None:
+    # Recovery does not rerun a row attributed to the model, so the pairing would save a retry that never happens.
+    policy = StageOutcomePolicyConfig.model_validate(
+        StageOutcomePolicyConfig.overlay(
+            environment_fault_policy("agent", ("demo:cut_off",)),
+            {"classification": {"by_stage": {"agent": {"by_failure_kind": {"demo:cut_off": "model"}}}}},
+        )
+    )
+
+    with pytest.raises(
+        ValueError, match="demo:cut_off cannot be retried at the agent stage while it is classified as"
+    ):
+        require_retry_or_fail(policy, "agent", ("demo:cut_off",))
+    # Leaving the same kind ungraded is consistent with the model attribution.
+    ungraded = StageOutcomePolicyConfig.model_validate(
+        StageOutcomePolicyConfig.overlay(policy, {"by_stage": {"agent": {"default_action": "fail"}}})
+    )
+    assert require_retry_or_fail(ungraded, "agent", ("demo:cut_off",)) is ungraded

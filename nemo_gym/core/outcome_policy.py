@@ -286,11 +286,17 @@ def require_retry_or_fail(
 
     These boundaries mask the row and either let the harness run it again (``retry``) or leave it ungraded
     (``fail``). ``count_as_zero`` would save a masked row that is not a counted zero, so it is refused at load.
+    Recovery never reruns a row attributed to the model, so ``retry`` for a kind classified as ``model`` would
+    leave the masked row final under a decision that says otherwise: that pairing is refused too.
     """
     for kind in failure_kinds:
-        action = choose_stage_outcome(failure_kind=kind, http_status=None, stage=stage, config=policy).action
-        if action not in (OutcomeAction.RETRY, OutcomeAction.FAIL):
-            raise ValueError(f"{kind} supports only retry or fail at the {stage} stage, not {action}")
+        decision = choose_stage_outcome(failure_kind=kind, http_status=None, stage=stage, config=policy)
+        if decision.action not in (OutcomeAction.RETRY, OutcomeAction.FAIL):
+            raise ValueError(f"{kind} supports only retry or fail at the {stage} stage, not {decision.action}")
+        if decision.action == OutcomeAction.RETRY and decision.attribution == FailureClass.MODEL:
+            raise ValueError(
+                f"{kind} cannot be retried at the {stage} stage while it is classified as {decision.attribution}"
+            )
     return policy
 
 
