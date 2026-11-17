@@ -19,6 +19,11 @@ cvdp_agentic_sandbox:
       mount_point: /code
       # The image is read-only; the agent writes outside /code too (its runtime, caches, simulator output).
       extra_start_args: [--writable-tmpfs]
+    exec:
+      # Harness agents install their runtime under /tmp, outside /code. The provider copies such uploads in as "root"
+      # through --fakeroot, which fails where the user has no /etc/subuid entry ("Failed to enter in user namespace").
+      # Apptainer binds the host's /tmp, so the user that started the sandbox can write there without it.
+      fakeroot_for_root: false
 
 cvdp_agentic_resources_server:
   resources_servers:

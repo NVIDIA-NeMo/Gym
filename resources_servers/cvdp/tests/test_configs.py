@@ -51,6 +51,8 @@ def test_each_harness_borrows_the_task_sandbox_of_the_cvdp_server(harness):
     # The agent reattaches through the provider block the server names, which mounts the workspace.
     sandbox = OmegaConf.to_container(config[resources["agent_sandbox_provider"]], resolve=True)
     assert sandbox["apptainer"]["create"]["mount_point"] == resources["agent_workdir"] == "/code"
+    # The agent installs its runtime under /tmp, which needs no --fakeroot.
+    assert sandbox["apptainer"]["exec"]["fakeroot_for_root"] is False
     # A provider that expires sandboxes keeps the task sandbox for the whole episode.
     assert resources["agent_sandbox_config"]["ttl_s"] >= environment["default_episode_timeout_seconds"]
     assert [dataset["jsonl_fpath"] for dataset in resources["datasets"]] == [
