@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Unified video environment: one Gym config that serves several video environments at once, so one mixed
+# JSONL (see prepare.py) can be collected or trained on in a single run. This file adds no server of its own;
+# it composes the member environments' configs. Add a policy model on the command line (`--model-type vllm_model`
+# or `--model-type openai_model`).
+#
+# The JSONL members are listed here; their rows route by `agent_ref`. The two Harbor task-folder members,
+# Agentic-VBench (environments/harbor/agentic_vbench_train) and ClawEval (environments/harbor/claweval_train), are
+# materialized per run: `gym eval run <entry> --limit 1` writes results/harbor/<entry>/run_config_opencode_agent.yaml,
+# and a run lists that file and the entry's harbor_train.yaml before this one (README, "Run all four"). Their rows
+# route by taskset in every mode, so one batch mixes them with the JSONL members' rows.
+config_paths:
+  - resources_servers/video_caption/configs/video_caption_api_judge.yaml   # agent: video_caption_simple_agent
+  - resources_servers/videomme_v1/configs/videomme_v1_single_turn.yaml     # agent: videomme_v1_single_turn
+
+# The Harbor run configs set `taskset` routing, which refuses the JSONL members' flat rows; `agent` routes flat
+# rows by `agent_ref` and still sends materialized rows to their taskset's server. Listed last, this file wins.
+environment_routing_mode: agent
+
+# Video-MME scores against a frozen annotation cohort; the member's example cohort lets the composed config start
+# and run the example rows. A real run names its own: `++videomme_v1_cohort_manifest=/path/to/cohort.json`.
+videomme_v1_cohort_manifest: resources_servers/videomme_v1/data/example_cohort.json

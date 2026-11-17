@@ -1,0 +1,19 @@
+# Opt-in overlay: OpenCode compaction continuity for long ClawEval episodes. Pass it after `harbor_train.yaml`.
+#
+# The prepare script stages the three OpenCode plugins of benchmarks/agentic_vbench/opencode_plugins/ into every
+# task's step workdir (they reach the sandbox at `/workspace/.opencode-plugins/`); this overlay loads them and turns
+# on the model server's compaction-summary recovery, exactly as environments/harbor/agentic_vbench_train/compaction_plugins.yaml
+# does for the Agentic-VBench tasks. See that file and the plugins' README for what each plugin does.
+opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      plugins:
+        - /workspace/.opencode-plugins/compaction_order.mjs
+        - /workspace/.opencode-plugins/compaction_anchor.mjs
+        - /workspace/.opencode-plugins/compaction_summary_header.mjs
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      compaction_summary_max_tokens: ${oc.select:claweval_summary_tokens,8192}
+      compaction_summary_max_attempts: 3

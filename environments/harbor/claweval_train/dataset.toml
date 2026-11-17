@@ -1,0 +1,20 @@
+# ClawEval training tasks on the Harbor task shape: ClawEval task packages (video QA, OCR, search, edit, chart,
+# image, webpage and workflow tasks over a fixture video or image, graded by the package's own `claw_eval` grader with
+# an LLM judge), written into this folder by `python -m benchmarks.claweval.prepare_harbor_env --tasks-root <root>
+# --claw-eval-source <checkout>`. The packages, the ClawEval package and the judge route are NVIDIA-internal; nothing
+# of them is committed here.
+#
+# `dataset.toml` declares no source: the tasks come from the root the prepare script was given (the task folders and
+# the preparation record are gitignored beside this file), and `gym eval run claweval_train ...` resolves the entry
+# name to it.
+[dataset]
+name = "nvidia/claweval-train"
+version = "0.1.0"
+
+[gym]
+type = "train"
+domain = "agent"
+license = "NVIDIA Internal Use Only, Do Not Distribute"
+# The harness the recipe trains (OpenCode inside the task container); another sandboxed session harness runs with
+# `--allow-unsupported-pairing` but is not what the entry validates.
+allowed_agents = ["opencode_agent"]
