@@ -14,8 +14,33 @@ authors:
   - Frederic Lafrance
 maintainers:
 - lafrancef
-capabilities: unknown
-domains: unknown
+capabilities:
+- coding
+- coding/repository_coding
+- coding/debugging_and_testing
+- coding/code_editing
+- coding/code_understanding
+- coding/code_generation
+- tool_and_computer_use
+- tool_and_computer_use/file_operations
+- tool_and_computer_use/terminal_and_cli_use
+- tool_and_computer_use/multi_step_tool_use
+- human_ai_interaction
+- human_ai_interaction/human_in_the_loop_communication
+- context_management
+- context_management/constraint_preservation
+- retrieval_and_grounding
+- retrieval_and_grounding/long_context_learning
+- retrieval_and_grounding/open_retrieval
+- retrieval_and_grounding/evidence_synthesis
+- instruction_and_format_following
+- instruction_and_format_following/instruction_following
+- planning_and_autonomy
+- planning_and_autonomy/self_verification
+- planning_and_autonomy/long_horizon_execution
+domains:
+- computer_science
+- artificial_intelligence
 primary_metric: unknown
 requirements:
   gpu: false
