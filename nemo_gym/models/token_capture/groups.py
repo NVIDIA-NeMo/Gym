@@ -92,16 +92,15 @@ def by_agent_instance(items: Iterable[_T], key: Any) -> dict[str | None, list[_T
 def primary_agent_instance(agent_instances: Iterable[str | None]) -> str | None:
     """The agent instance whose result is the episode's top-level result.
 
-    The unnamed agent of a single-agent episode; otherwise ``assistant``; otherwise the only agent instance.
-    Raise ``LookupError`` when none of these exists.
+    The unnamed agent of a single-agent episode; otherwise ``assistant``. Raise ``LookupError`` when neither
+    exists: another agent instance is never the primary, even when it is the only one captured, because the
+    scored response is not its own.
     """
     names = list(dict.fromkeys(agent_instances))
     if UNNAMED_AGENT_INSTANCE in names:
         return UNNAMED_AGENT_INSTANCE
     if PRIMARY_AGENT_INSTANCE in names:
         return PRIMARY_AGENT_INSTANCE
-    if len(names) == 1:
-        return names[0]
     raise LookupError(f"no primary agent instance among {names}")
 
 

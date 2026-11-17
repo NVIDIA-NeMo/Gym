@@ -95,7 +95,7 @@ def test_task_env_prefixes_configured_gym_model_servers():
     )
     resolved = []
 
-    def resolve(_self, name, rollout_id, *, trained=True):
+    def resolve(_self, name, rollout_id, *, trained=True, **_):
         resolved.append((name, trained))
         return f"http://{name}/ng-rollout/{rollout_id}/v1"
 
@@ -106,6 +106,38 @@ def test_task_env_prefixes_configured_gym_model_servers():
     assert env["JUDGE_BASE_URL"] == "http://judge/ng-rollout/7-2/v1"
     # The judge is not the agent a training framework trains, so it keeps its own sampling.
     assert resolved == [("policy", True), ("judge", False)]
+
+
+@pytest.mark.parametrize(
+    "training_agent_instances, assistant_segment, judge_segment",
+    [
+        (None, "/training-token-capture", ""),
+        (["assistant", "judge"], "/training-token-capture", "/training-token-capture"),
+        # Selecting only the judge takes the tag off the assistant's URL.
+        (["judge"], "", "/training-token-capture"),
+    ],
+)
+def test_task_env_names_the_assistant_and_the_judge(
+    monkeypatch, training_agent_instances, assistant_segment, judge_segment
+):
+    import nemo_gym.agents.base_responses_api_agent as base_agent
+
+    agent = make_agent(
+        model_server=ModelServerRef(type="responses_api_models", name="policy"),
+        judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
+        token_id_capture=True,
+    )
+    capture = {"enabled": True, "dir": "/capture"}
+    if training_agent_instances is not None:
+        capture["training_agent_instances"] = training_agent_instances
+    agent.server_client.global_config_dict = {"token_id_capture": capture}
+    monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _config, name: {"name": name})
+    agent.server_client._build_server_base_url = lambda config: f"http://{config['name']}"
+
+    env = agent._task_env("task_x", "7-2")
+
+    assert env["MODEL_BASE_URL"] == f"http://policy/ng-rollout/7-2/ng-agent-instance/assistant{assistant_segment}/v1"
+    assert env["JUDGE_BASE_URL"] == f"http://judge/ng-rollout/7-2/ng-agent-instance/judge{judge_segment}/v1"
 
 
 def test_build_spec_from_config(tmp_path):

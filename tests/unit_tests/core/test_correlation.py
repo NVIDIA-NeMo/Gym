@@ -28,6 +28,7 @@ from nemo_gym.core.correlation import (
     remember,
     resolve,
     validate_agent_instance,
+    verifier_invocation_id_of,
 )
 
 
@@ -156,6 +157,21 @@ def test_the_agent_kind_is_the_part_before_the_dot():
     assert agent_kind_of("judge") == "judge"
     assert CorrelationContext(capture_key="k", agent_instance="verify.0a").agent_kind == "verify"
     assert CorrelationContext(capture_key="k").agent_kind is None
+
+
+@pytest.mark.parametrize(
+    "agent_instance, invocation_id",
+    [
+        ("verify.3f2a", "3f2a"),
+        ("verify", None),
+        ("judge.3f2a", None),
+        ("verifier.3f2a", None),
+        ("assistant", None),
+        (None, None),
+    ],
+)
+def test_only_an_agent_instance_of_kind_verify_names_a_verifier_invocation(agent_instance, invocation_id):
+    assert verifier_invocation_id_of(agent_instance) == invocation_id
 
 
 @pytest.mark.parametrize(
