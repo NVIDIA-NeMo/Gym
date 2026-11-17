@@ -433,12 +433,10 @@ def _translate_agent_type(args: argparse.Namespace) -> list[str]:
             "running, so it cannot be combined with `--no-serve`. Use `--agent` to name one of them."
         )
     config_path = asset_config_path("agent-type", name)
-    overrides = [f"+config_paths=[{config_path}]"]
-    if name.split("/", 1)[0] == "langgraph_agent":
-        # Null-bound LangGraph configs also serve independently wired session agents. Only an explicit
-        # --agent-type selection asks the composer to replace the workload's existing agent.
-        overrides.append(f"+_selected_langgraph_config={_hydra_quote(config_path)}")
-    return overrides
+    # The parser reads the selected config to compose its LangGraph agent (null-bound LangGraph configs also serve
+    # independently wired session agents, so only an explicit selection replaces the workload's agent), and to refuse
+    # a selection the composed config would not run, such as a session agent the workload's routes never bind.
+    return [f"+config_paths=[{config_path}]", f"+_selected_agent_config={_hydra_quote(config_path)}"]
 
 
 # `--search-dir`: extra component-search roots. `main()` folds these into the `NEMO_GYM_EXTRA_ROOTS` env
@@ -607,8 +605,8 @@ def _raise_keyboard_interrupt_on_sigterm() -> None:
 def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
     if overrides:
         args._parser.error("resubmit does not accept Hydra overrides")
-    from nemo_gym.orchestration.executors.slurm import RemoteReaderInterrupted
-    from nemo_gym.orchestration.recovery import operator_verdict_line
+    from nemo_gym.eval.recovery.gate import operator_verdict_line
+    from nemo_gym.orchestration.executors.slurm.reader import RemoteReaderInterrupted
     from nemo_gym.orchestration.submit import inspect_recovery, load_original_submission_record, recover, resubmit
 
     _raise_keyboard_interrupt_on_sigterm()
@@ -2209,6 +2207,28 @@ COMMANDS = {
                 "output-dir",
                 "output_dirpath",
                 "Where to write the reports (default: the suite YAML's directory).",
+                aliases=("-o",),
+                quote=True,
+            ),
+            _value_flag(
+                "report-format",
+                "report_format",
+                "Report artifacts to write (default: both).",
+                choices=("md", "json", "both"),
+            ),
+        ),
+    ),
+    "eval plan-repeats": Command(
+        target="nemo_gym.cli.eval:plan_repeats",
+        summary="Plan fixed benchmark, model, or suite repeats from normalized standard deviations.",
+        flags=(
+            _value_flag(
+                "plan", "repeat_plan_fpath", "Path to the direct-input repeat-planning YAML (required).", quote=True
+            ),
+            _value_flag(
+                "output-dir",
+                "output_dirpath",
+                "Where to write the reports (default: the plan YAML's directory).",
                 aliases=("-o",),
                 quote=True,
             ),
