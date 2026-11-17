@@ -5,6 +5,7 @@
 import ast
 import asyncio
 import json
+import math
 import os
 import signal
 import subprocess
@@ -124,6 +125,31 @@ def test_the_run_reports_its_model_calls_and_tool_executions(tmp_path, resources
     assert all(t["completed_at"] >= t["started_at"] > 1e9 and t["duration_ms"] >= 0 for t in tools)
     counts = [(u["prompt_tokens"], u["completion_tokens"], u["total_tokens"]) for u in output["usages"]]
     assert counts == [(10, 5, 15)] * 4
+
+
+@pytest.mark.parametrize(("cutoff", "recover"), [(0.7, True), (None, False)])
+def test_the_history_options_reach_stirrup(tmp_path, resources, monkeypatch, cutoff, recover):
+    """Training keeps one unbroken history: no summary (cutoff None) and no unwinding of completed turns."""
+    seen = {}
+    init = NeMoAgent.__init__
+
+    def record(self, **kwargs):
+        seen.update(kwargs)
+        init(self, **kwargs)
+
+    monkeypatch.setattr(NeMoAgent, "__init__", record)
+    workdir = tmp_path / "root"
+    workdir.mkdir()
+    model = _ModelServer([_call("finish", json.dumps({"reason": "done", "paths": []}))])
+    payload = _payload(model.base_url, resources.base_url, workdir)
+    payload |= {"context_summarization_cutoff": cutoff, "recover_from_context_overflow": recover}
+    try:
+        asyncio.run(run(payload, tmp_path, Observer()))
+    finally:
+        model.close()
+
+    assert seen["context_summarization_cutoff"] == (math.inf if cutoff is None else cutoff)
+    assert seen["recover_from_context_overflow"] is recover
 
 
 async def _cancelled_after_the_model_hangs(payload: dict, tmp_path: Path, model: _ModelServer) -> dict:

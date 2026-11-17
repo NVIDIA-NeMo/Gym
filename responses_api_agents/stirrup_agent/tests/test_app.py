@@ -205,6 +205,18 @@ class TestApp:
         # Unset keeps the shell, as before the option existed.
         assert payload["code_exec"] is (code_exec is not False)
 
+    @pytest.mark.parametrize("training", [False, True])
+    @pytest.mark.asyncio
+    async def test_the_history_options_are_forwarded_to_the_rollout(self, training) -> None:
+        # Stirrup's defaults summarize at 0.7 of the window and unwind turns on overflow; training keeps the history.
+        body = NeMoGymResponseCreateParamsNonStreaming(input="ignored", model="policy")
+        fields = {"context_summarization_cutoff": None, "recover_from_context_overflow": False} if training else {}
+
+        payload = await _runner_payload(_make_config(**fields), body)
+
+        assert payload["context_summarization_cutoff"] == (None if training else 0.7)
+        assert payload["recover_from_context_overflow"] is not training
+
     @pytest.mark.asyncio
     async def test_runtime_knobs_shape_the_model_requests_the_runner_makes(self) -> None:
         config = _make_config(

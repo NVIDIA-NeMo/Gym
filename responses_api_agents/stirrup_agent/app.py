@@ -281,6 +281,18 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         "The generic default rejects only empty output; long-horizon benchmarks can require a "
         "more complete summary.",
     )
+    context_summarization_cutoff: float | None = Field(
+        default=0.7,
+        gt=0,
+        description="Fraction of the context window at which Stirrup replaces the history with a summary (Stirrup's "
+        "own default, 0.7). None never summarizes: training on recorded tokens needs one unbroken history, so an "
+        "episode at the context limit ends there.",
+    )
+    recover_from_context_overflow: bool = Field(
+        default=True,
+        description="Let Stirrup unwind completed turns when a call overflows the context (its default). Off for "
+        "training, which needs the history as it was recorded.",
+    )
     finish_tool_names: Optional[List[str]] = Field(
         default=None,
         description="Request tools that end the episode when they succeed. None uses Stirrup's own finish tool.",
@@ -428,6 +440,8 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             "stop_request_path": state.session.stop_request_path,
             "max_turns": self.config.agent_max_turns,
             "min_compaction_summary_words": self.config.min_compaction_summary_words,
+            "context_summarization_cutoff": self.config.context_summarization_cutoff,
+            "recover_from_context_overflow": self.config.recover_from_context_overflow,
             "client": {
                 "model": model_name,
                 # The sandbox reaches the Model Server directly; the rollout prefix keeps its calls correlated.
