@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# AutomationBench with NOOA in place of simple_agent: same resources server, rows, sampling and aa_headline scoring as
+# config.yaml. NOOA runs embedded (no sandbox) and calls the api tools over the direct HTTP grant. See README.md.
+config_paths:
+  - benchmarks/automationbench/config.yaml
+  - responses_api_agents/nooa_agent/configs/nooa_agent.yaml
+
+# Drop simple_agent and NOOA's generic environment; the environment below owns the pairing.
+automationbench: null
+nooa_environment_server: null
+
+automationbench_nooa_agent:
+  _inherit_from: nooa_agent
+  responses_api_agents:
+    nooa_agent:
+      resources_server:
+        type: resources_servers
+        name: automationbench_resources_server
+      # Model calls per rollout, as verifiers' max_turns of 50; config.yaml's simple_agent caps 49 tool rounds instead.
+      max_policy_calls: 50
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: benchmarks/automationbench/data/example.jsonl
+          license: MIT
+        - name: automationbench
+          type: benchmark
+          jsonl_fpath: benchmarks/automationbench/data/automationbench-600.jsonl
+          prepare_script: benchmarks/automationbench/prepare.py
+          prepare_project: benchmarks/automationbench
+          num_repeats: 1
+          license: MIT
+
+automationbench_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server:
+        type: responses_api_agents
+        name: automationbench_nooa_agent

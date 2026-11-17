@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Overlay for `--agent-type claude_code_agent`: the shipped config calls Anthropic directly with a 5 min timeout and
+# 30 turns. This points it at the policy model, pins the CLI sandbox sessions require, and uses 500 turns and the 8 h budget.
+harbor_terminal_5fbench_5f4_agent:
+  responses_api_agents:
+    claude_code_agent:
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      anthropic_api_key: ""
+      claude_code_version: "2.1.108"
+      max_turns: 500
+      timeout: 28800
