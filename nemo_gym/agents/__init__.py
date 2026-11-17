@@ -32,6 +32,7 @@ if TYPE_CHECKING:
         OutcomePolicyConfig,
         RunDecision,
         RunEvidence,
+        StopReason,
         agent_outcome_policy,
         agent_response_action,
         confirmed_policy_response_timeout,
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
         failure_outcome_policy,
         model_http_error_outcome,
         queued_policy_response_timeout,
+        reported_agent_failure,
     )
     from nemo_gym.agents.agent_tools import (
         restricted_network_policy,
@@ -137,6 +139,7 @@ _PUBLIC_API = {
     "OutcomePolicyConfig": "agent_outcome",
     "RunDecision": "agent_outcome",
     "RunEvidence": "agent_outcome",
+    "StopReason": "agent_outcome",
     "ROLLOUT_STOP_METADATA_KEY": "base_responses_api_agent",
     "RolloutStopRequest": "base_responses_api_agent",
     "STOP_REQUEST_FILE": "utils.supervisor_client",
@@ -163,6 +166,7 @@ _PUBLIC_API = {
     "parse_cleanup_receipt": "utils.supervisor_client",
     "probe_sandbox_platform": "utils.sandbox_python",
     "raises_agent_failure": "testing.failure_assertions",
+    "reported_agent_failure": "agent_outcome",
     "resolve_agent_context_artifact": "utils.agent_context",
     "resolve_agent_timeout": "utils.task_timeout",
     "restrict_sandbox_network": "utils.sandbox_network",

@@ -15,8 +15,12 @@ One `/run` call is one whole episode, and no Resources Server takes part. For ea
    directory, start the image's `ENTRYPOINT` and wait for the health checks.
 2. **Agent.** Open a session on the configured Agent Server with a `SandboxAccess` for that sandbox, post the
    task's `responses_create_params`, then close the session and keep what the agent observed. A failed response
-   whose harness names its cause goes through `agent_outcome_policy` before verification; by default a transport or
-   unknown cause is retried ungraded. When the agent is `harbor_oracle_agent`, the seed first uploads the task's
+   whose harness names its cause goes through `agent_response_action` before verification. By default,
+   `model_transport_error`, `agent_run_error`, `model_server_queue_timeout` and `unknown` retry ungraded;
+   `model_context_limit` is verified and `model_request_rejected` fails without retry. A selected failure report must
+   match the outcome; mismatched or unreadable selections, and omitted or null reports, fail. An unselected report keeps the policy action.
+   A selected status-less model request error fails unless every attempt never connected. Confirmed policy timeouts
+   follow the outcome policy (FAIL by default); Harbor does not apply single_agent_turn's agent timeout rule. When the agent is `harbor_oracle_agent`, the seed first uploads the task's
    `solution/` to `/solution`; a `[[steps]]` task instead gets each step's `steps/<name>/solution/` (else the
    task's) before that step.
 3. **Verify.** Run the `[[verifier.collect]]` hooks. In shared mode, empty `/tests` and `/logs/verifier` in the

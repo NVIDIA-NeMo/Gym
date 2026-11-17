@@ -138,7 +138,7 @@ python -m scripts.run_harness_conformance --harness codex \
 | `usage_omitted` | Successful tool sequence with no provider usage fields | TE-1–TE-9, including unknown usage |
 | `retry_429` | Two 429 replies before the tool sequence | TE-1–TE-9, including distinct attempts with identical request bodies |
 | `retry_500` | One 500 reply before the tool sequence | TE-1–TE-9, including retained error payloads |
-| `model_error` | Persistent 400 reported to EnvServer as a failed response with the original error | TE-1, TE-2, TE-4, TE-7, TE-8; no grading-policy requirement |
+| `model_error` | Persistent 400 reported to EnvServer as a failed response with the original error | TE-1, TE-2, TE-4, TE-7, TE-8; accepts `model_request_rejected`, or `model_request_error` with status 400 until the final ladder migration (#5873) |
 | `judge_verifier` | Final policy answer graded by a separate scripted judge; the saved grade references its verifier-owned call, which has no policy step | TE-1–TE-4, TE-6–TE-9 |
 | `verifier_failure` | Completed tool sequence graded zero | TE-1–TE-9, including a known verifier failure |
 | `context_compaction` | Automatic compaction between shell actions; summary reused, helper retained without becoming a turn | Existing P0 checks plus P1 compaction checks (TE-13) |

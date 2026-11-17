@@ -1858,7 +1858,7 @@ async def test_classified_agent_failure_policy(outcome: dict, verifiable: bool, 
         ({"by_failure_kind": {"unknown": "retry"}}, {"failure_kind": "agent_invalid_output"}, True, False),
         ({"by_failure_kind": {"unknown": "verify"}}, {"failure_kind": "unknown"}, True, False),
         ({"by_failure_kind": {"unknown": "fail"}}, {"failure_kind": "unknown"}, False, False),
-        ({"default_action": "retry"}, {"failure_kind": "agent_run_error"}, False, True),
+        ({"default_action": "retry"}, {"failure_kind": "session_lost"}, False, True),
         ({"by_failure_kind": {}, "by_status_code": {}}, {"failure_kind": "model_transport_error"}, False, True),
     ],
 )

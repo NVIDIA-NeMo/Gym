@@ -1359,7 +1359,10 @@ class HarborEnvironmentServer(
 
         As on ``single_agent_turn`` (``agent_response_action``), a ``failure_report`` that selects a failure not
         matching the response's outcome fails the episode, and the selected failure is the episode failure's cause,
-        so the failure row keeps its kind."""
+        so the failure row keeps its kind. Omitted or null reports and unreadable selections also fail. An unselected
+        report keeps the
+        policy action. Unlike single_agent_turn, Harbor does not consult an agent timeout rule: a confirmed policy
+        response timeout follows the outcome policy (FAIL by default)."""
         action, cause = agent_response_action(agent_response, config=self.config.agent_outcome_policy)
         if action != OutcomeAction.VERIFY:
             raise self._failure(

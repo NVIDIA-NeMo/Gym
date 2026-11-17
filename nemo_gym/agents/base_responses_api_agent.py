@@ -83,7 +83,7 @@ from nemo_gym.core.episode_context import (
 )
 from nemo_gym.core.episode_types import EpisodeId, TaskId
 from nemo_gym.core.failure_kinds import FailureStage
-from nemo_gym.core.failure_records import FailureBoundary
+from nemo_gym.core.failure_records import FailureBoundary, FailureEvent, FailureReport
 from nemo_gym.core.model_call_sampling import (
     MODEL_SAMPLING_NULL,
     current_model_sampling_segment,
@@ -1667,12 +1667,15 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         failed lifecycle step (launch, supervisor, artifacts, provider). This sets the response's ``status``, writes
         ``ng_agent_outcome`` on a failed response only (and removes it from any other), names the deciding row in
         ``ng_agent_stop_reason``, and sets ``incomplete_details`` for an output-limit stop. With ``session``, a run
-        that timed out after a rollout stop expired the session counts as stopped and gains the ``ng_rollout_stop``
+        whose session expired counts as stopped and gains the ``ng_rollout_stop``
         marker, as ``report_rollout_stop`` adds it; a run the session's close cancelled (``evidence.stopped`` without
-        an expired session) is stopped without the marker. The output, usage and ``error`` stay the adapter's; a failed
-        response without an ``error`` gets a generic one.
+        an expired session) is stopped without the marker. Output and usage stay the adapter's. A graded response
+        clears ``error``; a failed response without one gets a generic error. Only incomplete responses keep
+        ``incomplete_details``. If the ladder reclassifies a selected failure, an agent event records the decision
+        with the original selection as its cause; an ``unknown`` outcome clears the selection instead, since it is
+        not a canonical failure kind. The original events remain diagnostic evidence.
         """
-        if session is not None and session.expired and evidence.timed_out and not evidence.stopped:
+        if session is not None and session.expired and not evidence.stopped:
             evidence = replace(evidence, stopped=True)
         decision = decide_outcome(evidence)
         metadata = {
@@ -1691,6 +1694,40 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             update["incomplete_details"] = IncompleteDetails(reason="max_output_tokens")
         if decision.status == "failed" and response.error is None:
             update["error"] = ResponseError(code="server_error", message=_FAILED_RUN_MESSAGES[decision.stop_reason])
+        if decision.status != "failed":
+            update["error"] = None
+        if decision.status != "incomplete":
+            update["incomplete_details"] = None
+        if decision.outcome is not None and (response.model_extra or {}).get("failure_report") is not None:
+            try:
+                report = FailureReport.model_validate(response.model_extra["failure_report"])
+            except (ValidationError, TypeError):
+                # Leave malformed evidence for the Environment Server's consistency check.
+                pass
+            else:
+                if report.failure_id is not None and not report.omitted:
+                    selected = report.events[report.failure_id]
+                    outcome = decision.outcome
+                    if selected.failure_kind != outcome.failure_kind or (
+                        selected.http_status is not None and selected.http_status != outcome.status_code
+                    ):
+                        if outcome.failure_kind == "unknown":
+                            # Unknown is an outcome fallback, not a canonical failure kind. Keep the evidence
+                            # without claiming that its selected failure explains this run's decision.
+                            report = report.model_copy(update={"failure_id": None})
+                        else:
+                            event = FailureEvent(
+                                boundary=FailureBoundary.AGENT,
+                                failure_kind=outcome.failure_kind,
+                                http_status=outcome.status_code,
+                                operation="agent.run",
+                                failure_reason=_FAILED_RUN_MESSAGES[decision.stop_reason],
+                                cause_id=report.failure_id,
+                            )
+                            report = FailureReport(
+                                failure_id=event.event_id, events={**report.events, event.event_id: event}
+                            )
+                        update["failure_report"] = report.model_dump(mode="json")
         return response.model_copy(update=update)
 
     def report_rollout_stop(self, response: NeMoGymResponse, session: SandboxSession) -> NeMoGymResponse:
@@ -1711,7 +1748,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 # The ``error`` message ``finish_response`` gives a failed response that has none, by the ladder row that failed it.
 _FAILED_RUN_MESSAGES = {
     "infra": "The run reached its deadline while a server or provider fault was recorded",
-    "timeout": "The run reached its deadline before any model reply",
+    "timeout": "The run reached its deadline without an observed model reply",
     "error": "The run ended on an error",
     "no_result": "The harness produced no usable result",
 }

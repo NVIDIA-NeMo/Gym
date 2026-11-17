@@ -810,26 +810,26 @@ confirm cleanup, artifacts that cannot be read, or a provider exec error. Raise 
 | `has_result` | The harness exited cleanly and left its answer or its work. A nonzero exit or a missing result is not a result. |
 | `timed_out` | The run's deadline ended it, from the supervisor's receipt or a structured deadline. Never from message text: a "timed out" message is at most `model_transport_error` evidence. |
 | `model_replied` | Whether any reply of the policy model was observed; `None` when the adapter cannot tell. |
-| `stopped` | A rollout stop, or the session's close, ended the run before it finished. `finish_response` sets it for a timed-out run whose session a stop expired. |
+| `stopped` | A rollout stop, or the session's close, ended the run before it finished. `finish_response` sets it whenever the session is expired; expiry already records a timed-out cleanup. |
 | `context_limit` | The harness or the endpoint explicitly reported that the context window was exceeded. HTTP 400 or 413 alone is not this evidence. |
-| `model_limit` | `output` (the model's output limit) or `turns` (the harness's configured turn or step limit). |
+| `model_limit` | `output` (the model's output limit) or `turns` (the harness stopped at its turn or step limit without a final answer). An answer at the limit is `has_result`, with `HARNESS_STEP_LIMIT_METADATA_KEY` set. |
 | `refusal` | The model refused the task. |
 | `error` | `classify_outcome()` of the error the run ended on. An error the harness recovered from is not one. |
-| `infra_fault` | A recorded server or provider fault in the run's window (a model call that failed with a 5xx, a transport error or a queue timeout, or a sandbox provider failure). |
+| `infra_fault` | An unrecovered or in-flight server or provider fault at the deadline (a model 5xx, transport error, queue timeout or sandbox provider failure). A fault the harness recovered from does not qualify. |
 
 The ladder (`decide_outcome`); the first matching row wins:
 
-| # | Evidence | Response | Default action | Harbor equivalent |
-| --- | --- | --- | --- | --- |
-| 1 | `stopped` | `incomplete`; `ng_rollout_stop` only for a rollout stop | Verify | — |
-| 2 | `context_limit` (or an `error` classified `model_context_limit`) | `incomplete` | Verify | `ContextLengthExceededError`: graded |
-| 3 | `timed_out` and `infra_fault` | `failed`, the fault's kind | Retry | — |
-| 4 | `timed_out` | `incomplete` | Verify | `AgentTimeoutError`: graded |
-| 5 | `error` | `failed`, the classified outcome; a 4xx other than 408/425/429 with `model_replied` false → `model_request_rejected` | By the policy table below | — |
-| 6 | `model_limit` | `incomplete` | Verify | `OutputLengthExceededError` |
-| 7 | `refusal` | `completed`, graded as the model's answer | Verify | `AgentSafetyRefusalError`: graded |
-| 8 | `has_result` | `completed` | Verify | — |
-| 9 | Otherwise: no usable result | `failed`, `agent_run_error` | Retry | `NonZeroAgentExitCodeError`: graded (available as a policy override) |
+| # | Evidence | Response | Default action |
+| --- | --- | --- | --- |
+| 1 | `stopped` | `incomplete`; `ng_rollout_stop` only for a rollout stop | Verify |
+| 2 | `context_limit` (or an `error` classified `model_context_limit`) | `incomplete` | Verify |
+| 3 | `timed_out` and `infra_fault` | `failed`, the fault's kind | By the fault kind's policy; retry for transient server and provider faults |
+| 4 | `timed_out` | `incomplete` | Verify |
+| 5 | `error` | `failed`, the classified outcome; a 4xx other than 408/425/429 with `model_replied` false → `model_request_rejected` | By the policy table below |
+| 6 | `model_limit` | `incomplete` | Verify |
+| 7 | `refusal` | `completed`, graded as the model's answer | Verify |
+| 8 | `has_result` | `completed` | Verify |
+| 9 | Otherwise: no usable result | `failed`, `agent_run_error` | Retry |
 
 Row 4 grades a deadline whatever the agent kept, as Harbor and Gym's rollout recovery do. Until every model call
 carries `x-session-id`, so that capture can supply `infra_fault` for every harness, an adapter whose harness retries
@@ -851,11 +851,23 @@ failed responses after closing the agent:
 | Reported cause | Verify | Eligible for episode retry |
 | --- | --- | --- |
 | `agent_invalid_output`, `agent_limit`, `model_context_limit`, or model request errors 400/413/422 | Yes | No |
-| Model request errors 408/425/429/5xx, `model_transport_error`, `agent_run_error`, or `unknown` | No | Yes |
+| Model request errors 408/425/429/5xx, `model_transport_error`, `agent_run_error`, `model_server_queue_timeout`, or `unknown` | No | Yes |
 | `model_request_rejected`, other failures including model request errors 401/403/404, or malformed metadata | No | No |
 
 When a failed response also carries a `failure_report`, both Environment Servers check that the failure it selects
-matches `ng_agent_outcome`; a mismatch fails the episode, and a match becomes the episode failure's cause and kind.
+matches `ng_agent_outcome` in kind and, when the selected event has one, HTTP status. A mismatch, an omitted or
+null report, or an unreadable selection fails the episode. An unselected report keeps the policy action; no report also
+keeps the policy action. A matching selection becomes the episode failure's cause and kind. A selected
+`model_request_error` without an HTTP status fails unless every attempt of that operation is proven never to have
+connected (connection refusal or handshake timeout). Harbor now applies these checks too.
+
+A confirmed `model_policy_response_timeout` follows the configured outcome policy on Harbor (FAIL by default).
+`single_agent_turn` also consults the agent's timeout rule (RETRY by default) unless the environment overrides it.
+
+When the ladder reclassifies a selected failure, `finish_response` keeps its events and selects a new agent event
+whose cause is the original selection. An `unknown` outcome clears the selection instead because it is not a
+canonical failure kind. It clears `error` on completed and incomplete responses and clears
+`incomplete_details` on completed and failed responses, so stale adapter fields cannot mask a graded result.
 
 Excluded attempts retain their partial response and observations in the existing
 failure flow. Retry eligibility does not force a retry; the collector's retry budget
@@ -874,7 +886,10 @@ Configure `agent_outcome_policy` inside the `single_agent_turn` or `harbor` Envi
 config to choose `verify`, `retry`, or `fail` (ungraded and nonretryable) for classified
 failed responses. For Harbor's own behavior, which grades a run without a usable result, set
 `by_failure_kind: {agent_run_error: verify}`. These overrides do not apply to completed or incomplete responses.
-HTTP status rules take precedence over failure-kind rules; unmatched failures use `default_action`
+HTTP status rules take precedence over failure-kind rules only while the outcome carries a status. A first-request
+4xx reclassified as `model_request_rejected` carries none: `by_status_code: {401: retry}` or `{404: retry}` no longer
+applies after an adapter migrates. Use `by_failure_kind: {model_request_rejected: retry}` to override that decision;
+the original status remains in the cause event when the adapter supplied a failure report. Unmatched failures use `default_action`
 (default: `fail`). Supplied entries override matching defaults; omitted entries retain
 their defaults. Failure names must be registered or `unknown`, and
 HTTP status keys must be 400–599. Malformed outcome metadata always fails without retry.

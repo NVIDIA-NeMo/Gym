@@ -318,7 +318,7 @@ never reopened: a scored answer or zero (including a typed answer failure: trunc
 malformed), and a clean agent timeout, which is the model's result under the benchmark's own time limit.
 An `agent_timeout` that kept no answer is a saved failure the policy decides, retried by default
 (`recovery_outcome_policy: {by_failure_kind: {agent_timeout: fail}}` keeps it final instead). A
-failure the Environment Server marked terminal (a typed model failure such as `model_context_limit`) is
+failure the Environment Server marked terminal (a rejected model request such as `model_request_rejected`) is
 never retried. `--inspect` lists the identities in each state and the policy in force (`outcome_policy`,
 with its `source`: `default`, `config` or `python`).
 
