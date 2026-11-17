@@ -1,0 +1,145 @@
+{
+  "scope": "Integration and execution evidence. Different harness limits and incomplete scoring prohibit treating these as comparable certified benchmark scores. No training qualification.",
+  "observed_at": "2026-11-11T22:09:00.004210+00:00",
+  "gym_runtime_and_composer_commit": "10f5459ed8c33f527c61f577488e1747e9e1cb7c",
+  "original_source_commit": "a3385d51d0c3dd0c8501350a08d52065e3e94ab4",
+  "image_sha256": "d97355314b764b47fd29c2acd1ba7bef55af24ed03ac0bcfdbd3c27739d4beb5",
+  "dataset_sha256": "0b9b973e9f9d23bd76cb431809f3f263bd4c2053d21ad1710259a0f6c2e6b54f",
+  "matched_25_tasks": {
+    "task_ids": [
+      "agentvista-000",
+      "agentvista-001",
+      "agentvista-002",
+      "agentvista-003",
+      "agentvista-004",
+      "agentvista-005",
+      "agentvista-006",
+      "agentvista-007",
+      "agentvista-008",
+      "agentvista-009",
+      "agentvista-010",
+      "agentvista-011",
+      "agentvista-012",
+      "agentvista-013",
+      "agentvista-014",
+      "agentvista-015",
+      "agentvista-016",
+      "agentvista-017",
+      "agentvista-018",
+      "agentvista-019",
+      "agentvista-020",
+      "agentvista-021",
+      "agentvista-022",
+      "agentvista-023",
+      "agentvista-024"
+    ],
+    "cases": [
+      {
+        "case": "super-default",
+        "harness": "default",
+        "model": "local-policy",
+        "slurm_state": "COMPLETED",
+        "exit_code": "0:0",
+        "collected": 25,
+        "scored": 25,
+        "masked": 0,
+        "passes": 7,
+        "mean_over_scored": 0.28,
+        "concurrency_per_node": 4,
+        "configured_output_tokens": 32768,
+        "actor_context_tokens": 65536,
+        "rollouts": [
+          {
+            "rank": 0,
+            "sha256": "788766a18a5ede7be046592528b5f4b5fb76187fd35e1700b80cc5c4126eb270"
+          },
+          {
+            "rank": 1,
+            "sha256": "aa8226d15a1140267b9675e95f7059d685aace30321e0e25f3bc70168c0d5370"
+          }
+        ],
+        "policy_call_capture": {
+          "calls": 179,
+          "all_http_status_200": true,
+          "observed_request_max_tokens": 32768
+        }
+      },
+      {
+        "case": "kimi-opencode",
+        "harness": "opencode",
+        "model": "hosted-policy",
+        "slurm_state": "COMPLETED",
+        "exit_code": "0:0",
+        "collected": 25,
+        "scored": 24,
+        "masked": 1,
+        "passes": 11,
+        "mean_over_scored": 0.4583333333333333,
+        "concurrency_per_node": 4,
+        "configured_output_tokens": 32768,
+        "actor_context_tokens": 65536,
+        "rollouts": [
+          {
+            "rank": 0,
+            "sha256": "c0e5d04c3401d311b5cc7bf96d6cecf20f5c10df76e7aec37dbca0843209e522"
+          },
+          {
+            "rank": 1,
+            "sha256": "f9c8c54a58b0229c4e22ccdffa15f39b7928ff4025b4e995cada5b2e3abc678f"
+          }
+        ],
+        "masked_reason": "agentvista-008 reached the 5400-second actor timeout; 101 tool calls, zero recorded tool errors.",
+        "policy_call_capture": {
+          "calls": 488,
+          "all_http_status_200": true,
+          "observed_request_max_tokens": 32000
+        }
+      },
+      {
+        "case": "kimi-default",
+        "harness": "default",
+        "model": "hosted-policy",
+        "slurm_state": "COMPLETED",
+        "exit_code": "0:0",
+        "collected": 25,
+        "scored": 25,
+        "masked": 0,
+        "passes": 12,
+        "mean_over_scored": 0.48,
+        "concurrency_per_node": 4,
+        "configured_output_tokens": 32768,
+        "actor_context_tokens": 65536,
+        "rollouts": [
+          {
+            "rank": 0,
+            "sha256": "daa91c3a37230c9e9c8be0f96af34731145ac074ff48cb290f99ffb119728f9b"
+          },
+          {
+            "rank": 1,
+            "sha256": "33dae144db8be536cdd3972653476d39b5585656d92c2ec4b603b505f68f0d6a"
+          }
+        ],
+        "policy_call_capture": {
+          "calls": 196,
+          "all_http_status_200": true,
+          "observed_request_max_tokens": 32768
+        }
+      }
+    ]
+  },
+  "super_opencode_full209": {
+    "all_jobs_completed_exit_zero": true,
+    "collected": 209,
+    "scored": 184,
+    "masked": 25,
+    "masked_reason": "5400-second actor timeouts",
+    "passes": 47,
+    "mean_over_scored": 0.2554347826086957,
+    "full_benchmark_score_qualified": false,
+    "configured_output_tokens": 32768,
+    "observed_opencode_request_max_tokens": 32000,
+    "actor_context_tokens": 65536,
+    "episode_artifacts_missing": []
+  },
+  "qualification": "Historical harness 2.1.1 execution audit only; superseded by review fixes. Not valid benchmark-accuracy evidence for harness 3.0.0."
+}

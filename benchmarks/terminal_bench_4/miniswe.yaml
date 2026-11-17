@@ -1,4 +1,4 @@
-# Terminal-Bench 4.0 with mini-SWE 2.4.6, run through the Harbor environment server on the pinned task folders of
+# Terminal-Bench 4.1 with mini-SWE 2.4.6, run through the Harbor environment server on the pinned task folders of
 # environments/harbor/terminal_bench_4 (`gym dataset pull terminal_bench_4` fetches them). The server owns each task
 # sandbox, its Compose group and the separate verifier, and lends the sandbox to mini_swe_agent's agent session; each
 # row carries the official instruction and the task's own agent budget. `--agent-type` runs another harness on the

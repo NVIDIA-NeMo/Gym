@@ -1442,7 +1442,7 @@ version = "0.0.0"
 source = { virtual = "." }
 dependencies = [
     { name = "harbor" },
-    { name = "nemo-gym", extra = ["dev"] },
+    { name = "nemo-gym", extra = ["dev", "sandbox"] },
 ]
 
 [package.optional-dependencies]
@@ -1453,7 +1453,7 @@ telemetry = [
 [package.metadata]
 requires-dist = [
     { name = "harbor", git = "https://github.com/laude-institute/harbor.git?rev=9dddd797b57ab8a0f9d6352a20fce73abbb29573" },
-    { name = "nemo-gym", extras = ["dev"], editable = "../../" },
+    { name = "nemo-gym", extras = ["dev", "sandbox"], editable = "../../" },
     { name = "nemo-gym", extras = ["telemetry"], marker = "extra == 'telemetry'", editable = "../../" },
 ]
 provides-extras = ["telemetry"]
@@ -2449,6 +2449,13 @@ dev = [
     { name = "ruff" },
     { name = "tomlkit" },
 ]
+sandbox = [
+    { name = "boto3" },
+    { name = "daytona" },
+    { name = "e2b" },
+    { name = "opensandbox" },
+    { name = "tenacity" },
+]
 telemetry = [
     { name = "nemo-lens", extra = ["sdk"] },
     { name = "opentelemetry-instrumentation-fastapi" },
@@ -2691,6 +2698,24 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/78/60/d4219875289b11d2c2f7da93c36283da224a2e55865ed865ab64e0ce9217/openai-2.45.0.tar.gz", hash = "sha256:10d34ca9c5643bce775852fddbfc172505cb1d4de1ccd101696c3ecff358765d", size = 1109653, upload-time = "2026-07-09T18:02:44.091Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f1/b0/2291689e3ec4723fbf5bbf3b54afcd7b160f9ddc98ca7aedfd0132af5677/openai-2.45.0-py3-none-any.whl", hash = "sha256:5df105f5f8c9b711fcb9d06d2d3888cebc82506db216484c14a4e53cdf651777", size = 1629470, upload-time = "2026-07-09T18:02:42.21Z" },
+]
+
+[[package]]
+name = "opensandbox"
+version = "1.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "attrs" },
+    { name = "httpcore" },
+    { name = "httpx" },
+    { name = "httpx-sse" },
+    { name = "opentelemetry-api" },
+    { name = "pydantic" },
+    { name = "python-dateutil" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0b/2f/6682d18a69043b5ad29e8a411e969e2ee4216127dbc2257752690f502287/opensandbox-1.2.0.tar.gz", hash = "sha256:e7936d0bf3f7defa4e26571b0634089b4c3eb15d023909f6da9d940b95736c54", size = 329030, upload-time = "2026-10-27T12:36:39.214Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4f/18/2de1578aead2e5da094c352e2c1610d750c399070769feac02cb42ff8941/opensandbox-1.2.0-py3-none-any.whl", hash = "sha256:15a0f3c3245018afa43b75fb14e892a64c2c8807276a0fdaf2a1a469f5e214ea", size = 744130, upload-time = "2026-10-27T12:36:37.805Z" },
 ]
 
 [[package]]
