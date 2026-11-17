@@ -33,7 +33,8 @@ A rubric has `criteria` and optional `contradictions`:
 Other keys reach the judge unchanged, for example per-criterion `full_credit`, `partial_credit`, `zero_credit` and
 `acceptable_variants`, evidence from the video, or a rubric-wide `answer_policy`. `task_data.py` holds the schema, and
 `task.prepare_single_turn(task_id, question, rubric, video_url=...)` builds a single-turn row; the video can be any
-URL the policy's model server accepts, such as a local file path or a data URL.
+URL the policy's model server accepts: an http(s) or data URL, or a `file://` URL the server is allowed to read (vLLM's
+`--allowed-local-media-path`).
 
 ## Grading
 
@@ -84,7 +85,8 @@ openqa_rubric:
         max_completion_tokens: 32768
 ```
 
-To use a model served with vLLM instead, point `judge_model_server` at a `vllm_model` server.
+A model served with vLLM works through the same `openai_model` server and vLLM's OpenAI-compatible endpoint, as in
+the example rollouts below.
 
 ## Use in RL training
 
