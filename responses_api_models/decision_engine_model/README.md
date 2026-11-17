@@ -22,7 +22,7 @@ policy_model:
   responses_api_models:
     decision_engine_model:
       entrypoint: app.py
-      base_url: ${oc.env:DECISION_ENGINE_BASE_URL}   # required, no default
+      base_url: ${oc.env:DECISION_ENGINE_BASE_URL,null}   # required to start the server, no default URL
       api_key: ${oc.env:DECISION_ENGINE_API_KEY,${decision_engine_api_key}}
       model: ${oc.env:DECISION_ENGINE_MODEL,${decision_engine_model_name}}
       endpoint: systemone

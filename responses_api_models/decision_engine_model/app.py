@@ -53,7 +53,10 @@ CAPACITY_MARKERS = (
 
 
 class DecisionEngineModelConfig(BaseResponsesAPIModelConfig):
-    base_url: str = Field(description="Engine root URL, without the endpoint path.")
+    base_url: Optional[str] = Field(
+        default=None,
+        description="Engine root URL, without the endpoint path. Required to start the server (DECISION_ENGINE_BASE_URL).",
+    )
     api_key: Optional[str] = Field(default=None, description="Bearer token; set it from the environment in YAML.")
     model: str = Field(default="default", description="Model id sent in the request body.")
     endpoint: Literal["systemone", "decisions"] = "systemone"
@@ -149,6 +152,11 @@ class DecisionEngineModel(SimpleResponsesAPIModel):
     config: DecisionEngineModelConfig
 
     def model_post_init(self, context: Any) -> None:
+        if not self.config.base_url:
+            # Configs resolve without it (offline validation); serving needs the engine.
+            raise ValueError(
+                "decision_engine_model needs base_url: set DECISION_ENGINE_BASE_URL to the engine's root URL"
+            )
         self._semaphore = asyncio.Semaphore(self.config.max_concurrent_requests)
         return super().model_post_init(context)
 

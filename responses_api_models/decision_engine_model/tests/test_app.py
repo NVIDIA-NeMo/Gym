@@ -39,11 +39,13 @@ def _model(**overrides) -> DecisionEngineModel:
         port=8080,
         entrypoint="",
         name="",
-        base_url="http://engine.test/",
-        api_key="test-key",  # pragma: allowlist secret
-        model="decider",
-        backoff_seconds=0.0,
-        **overrides,
+        **{
+            "base_url": "http://engine.test/",
+            "api_key": "test-key",  # pragma: allowlist secret
+            "model": "decider",
+            "backoff_seconds": 0.0,
+            **overrides,
+        },
     )
     return DecisionEngineModel(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -195,3 +197,8 @@ class TestEngineCalls:
         )
         model.config.api_key = None
         assert "Authorization" not in model._headers()
+
+
+def test_server_refuses_to_start_without_an_engine_url() -> None:
+    with pytest.raises(ValueError, match="DECISION_ENGINE_BASE_URL"):
+        _model(base_url=None)
