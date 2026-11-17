@@ -316,8 +316,9 @@ class TestMaskedTerminalFailureKinds:
         assert verified.reward == 1.0
         assert verified.failure_kind == kind
         assert verified.failure_reason
-        # Where NeMo RL reads the mask: without it, a training run would train on the capped run's reward.
-        assert verified.instance_config == {"mask_sample": True}
+        # The mask stays on the row. NeMo RL reads its loss mask from instance_config, which a budget ending leaves as
+        # sent, so a training run keeps the capped run's reward.
+        assert getattr(verified, "instance_config", None) is None
 
     @pytest.mark.parametrize("reward", [0.0, 1.0])
     async def test_normal_ending_has_no_failure_fields(self, monkeypatch, reward):

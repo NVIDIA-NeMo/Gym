@@ -517,7 +517,8 @@ class SearchResourcesServerConfig(BaseResourcesServerConfig):
     # the 0 is counted against the evaluation rather than the model (failure_kind judge_unparseable,
     # failure_outcome_action count_as_zero, failure_outcome_attribution evaluation). "mask", which a training run sets:
     # the reward measures nothing about the model, so the row is masked (mask_sample, and instance_config.mask_sample,
-    # which NeMo RL reads), and Gym's recovery judges it again. Named and valued as in webvoyager_judge.
+    # which NeMo RL reads, on a budget ending too), and Gym's recovery judges it again. Named and valued as in
+    # webvoyager_judge.
     unparseable_verdict_policy: Literal["zero", "mask"] = "zero"
     # Budget covers reasoning + final message combined. 2048 makes reasoning judges burn the
     # whole budget thinking, emitting no final message, which reads as an unparseable verdict.
@@ -564,7 +565,9 @@ class SearchVerifyRequest(SearchRunRequest, BaseVerifyRequest):
 # GRADIENT, not the eval metric. Its published comparator scored the capped rows: its denominator
 # is the full row count including max_iteration endings. So these rows keep their judged reward,
 # and a number on that denominator is computed from the rows; Gym's own aggregate metrics leave
-# masked rows out (see aggregate_metrics).
+# masked rows out (see aggregate_metrics). Here the mask stays on the row: NeMo RL reads its loss
+# mask from instance_config.mask_sample, which a budget ending alone does not set (_training_mask),
+# so training keeps these rows' rewards.
 # agent_timed_out joins these: legacy masked it in the same branch (app.py:5742-5751, the
 # eval_timed_out/agent_timed_out arm), and it is masked the same way.
 MASKED_TERMINAL_REASONS = frozenset({"max_iteration", "context_window", "agent_timed_out"})
@@ -589,7 +592,9 @@ class SearchVerifyResponse(BaseVerifyResponse):
     # True when the reward is not a measurement of the answer: the session was lost before verify,
     # or the judge gave no verdict with unparseable_verdict_policy "mask" (reward 0). Also true when the rollout ran
     # out of budget rather than answering wrongly; that row keeps its judged reward. Gym's aggregate metrics leave
-    # masked rows out of the quality scores. A masked row also sets instance_config.mask_sample (_training_mask).
+    # masked rows out of the quality scores. The first two also set instance_config.mask_sample, where NeMo RL reads
+    # the training mask, whatever the ending; a budget ending's own mask does not, so training keeps its reward
+    # (_training_mask).
     mask_sample: bool = False
     # Whether grading reached a result: the judge's verdict, or the empty answer that needs none.
     # False for a lost session, a judge that gave no verdict and an episode scored 0 for its plugin log.
@@ -666,13 +671,17 @@ _NOT_GRADED: Dict[str, Any] = {
 }
 
 
-def _training_mask(body: SearchVerifyRequest, masked: bool) -> Dict[str, Any]:
-    """For a masked row, the request's instance_config with mask_sample set; nothing for another row.
+def _training_mask(body: SearchVerifyRequest, unmeasured: bool) -> Dict[str, Any]:
+    """For a row whose reward is no outcome of the model, the request's instance_config with mask_sample set; nothing
+    for another row.
 
-    NeMo RL masks a sample's loss by its instance_config.mask_sample rather than by the row's own mask_sample, so every
-    row this server masks sets both, as judge_failsafe does for the rows it answers with.
+    NeMo RL masks a sample's loss by its instance_config.mask_sample rather than by the row's own mask_sample, so such a
+    row sets both, as judge_failsafe does for the rows it answers with: a lost session, and a judge without a verdict
+    under unparseable_verdict_policy "mask", whatever the ending. A rollout that ended on its budget is the model's
+    outcome: it sets only the row's mask_sample, which leaves it out of Gym's quality metrics, and training keeps its
+    reward.
     """
-    if not masked:
+    if not unmeasured:
         return {}
     instance_config = getattr(body, "instance_config", None)
     return {"instance_config": {**(instance_config if isinstance(instance_config, dict) else {}), "mask_sample": True}}
@@ -1517,7 +1526,9 @@ class SearchResourcesServer(SimpleResourcesServer):
         unparseable_verdict_policy: "zero" scores it 0 as the evaluation's (count_as_zero, attribution evaluation),
         which Gym counts in the score, settles and does not judge again; "mask" masks it, and Gym judges it again from
         its saved answer. Either way judge_parsed and evaluation_completed are false, so an identical retry of the verify
-        asks the judge again. Every masked grade also sets instance_config.mask_sample (_training_mask).
+        asks the judge again. Under "mask" such a grade also sets instance_config.mask_sample, which keeps it out of a
+        training run's loss, also when the rollout ended on its budget; a budget ending's own mask does not set it, so
+        training keeps that reward (_training_mask).
         """
         if plugin_log_fault is not None:
             failure_kind, failure_reason = plugin_log_fault
@@ -1540,17 +1551,13 @@ class SearchResourcesServer(SimpleResourcesServer):
         if not final_text.strip():
             # The agent produced no answer at all. That is a real zero, not judge noise, and
             # spending a judge call on an empty string would only add latency.
-            return (
-                _NOT_GRADED
-                | {
-                    "reward": 0.0,
-                    "mask_sample": masked,
-                    "failure_kind": failure_kind,
-                    "failure_reason": failure_reason,
-                    "evaluation_completed": True,
-                }
-                | _training_mask(body, masked)
-            )
+            return _NOT_GRADED | {
+                "reward": 0.0,
+                "mask_sample": masked,
+                "failure_kind": failure_kind,
+                "failure_reason": failure_reason,
+                "evaluation_completed": True,
+            }
 
         try:
             result = await self._judge_answer(
@@ -1564,6 +1571,9 @@ class SearchResourcesServer(SimpleResourcesServer):
             body.evaluation_completed = False
             raise
         outcome_action = outcome_attribution = None
+        # Without a verdict the judge, not the model, decided this reward: under "mask", which a training run sets, the
+        # row stays out of the training loss, whatever the ending.
+        unjudged = not result["judge_parsed"] and self.config.unparseable_verdict_policy == "mask"
         if not result["judge_parsed"] and not masked:
             # Without a verdict the reward measures nothing about the answer, and the judge failed rather than the
             # model. An evaluation counts it as a 0 against the evaluation, with its kind; a training run masks it. A
@@ -1591,7 +1601,7 @@ class SearchResourcesServer(SimpleResourcesServer):
             "evaluation_completed": result["judge_parsed"],
             "failure_outcome_action": outcome_action,
             "failure_outcome_attribution": outcome_attribution,
-        } | _training_mask(body, masked)
+        } | _training_mask(body, unjudged)
 
 
 if __name__ == "__main__":

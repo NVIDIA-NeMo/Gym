@@ -74,8 +74,9 @@ kind, with `judge_parsed` and `evaluation_completed` false. Verify masks the end
 `opencode_sandboxed_agent` sends only `max_iteration` or `context_window`, read from the turn-budget
 plugin's lines in its run output; on an episode session with `plugin_log_path` set, verify reads them
 from the plugin log instead (see Sessions). Gym's aggregate metrics leave masked rows out of the quality
-scores; the reward stays on each row. Every row verify masks also sets `instance_config.mask_sample`
-(see [Training](#training)).
+scores; the reward stays on each row. A budget ending is the model's outcome, so its own mask stays on
+the row: it does not set `instance_config.mask_sample`, and a training run keeps its reward (see
+[Training](#training)).
 
 A verify that grades a saved answer again (`gym eval reverify`, which `REVERIFY_MODE: STATELESS` allows,
 or recovery re-judging a row whose judge failed) cannot mask a budget ending, on either pairing: its
@@ -109,11 +110,14 @@ on a Gym rollout collection (both BrowseComp presets name the server instance
 `search_browsecomp_resources_server`). Such a row then has `mask_sample` true,
 `failure_kind: judge_unparseable`, a `failure_reason` that ends in "masked", and no applied outcome.
 NeMo RL masks a sample's loss by its `instance_config.mask_sample`, not by the row's own `mask_sample`,
-so every row this server masks also sets that field, over the request's other `instance_config` fields,
-as `judge_failsafe` does for its rows: a rollout that ended on its budget, a judge without a verdict
-under this policy and a lost session. A row whose judge never answered is masked the same way by
-`judge_failsafe`. A run that leaves the default trains on such a rollout as a 0. The judge's failures
-count toward `judge_max_consecutive_failures` under either policy, so a dead judge still stops the run.
+so a row whose reward is no outcome of the model also sets that field, over the request's other
+`instance_config` fields, as `judge_failsafe` does for its rows: a judge without a verdict under this
+policy, whatever the ending, and a lost session. A row whose judge never answered is masked the same way
+by `judge_failsafe`. A run that leaves the default trains on a rollout without a verdict as a 0. A
+rollout that ended on its budget (`max_iteration`, `context_window`, `agent_timed_out`), with a verdict
+or without an answer, is the model's outcome: it is masked on its row only, which keeps it out of Gym's
+quality metrics, and training keeps its reward. The judge's failures count toward
+`judge_max_consecutive_failures` under either policy, so a dead judge still stops the run.
 
 ## Sessions
 

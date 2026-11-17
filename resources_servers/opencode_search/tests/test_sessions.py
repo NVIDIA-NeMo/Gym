@@ -684,7 +684,8 @@ def test_with_the_mask_policy_a_judge_without_a_verdict_masks_the_row_for_traini
 @pytest.mark.parametrize("policy", ["zero", "mask"])
 def test_a_budget_ending_keeps_its_kind_when_the_judge_gives_no_verdict(workdir, policy) -> None:
     """Recovery re-judges a judge_unparseable row from a payload that carries no ending, which would grade a capped
-    run unmasked; agent_limit keeps it masked, as when the judge gave a verdict, under either policy."""
+    run unmasked; agent_limit keeps it masked, as when the judge gave a verdict, under either policy. The judge decided
+    its reward, so the mask policy also keeps it out of the training loss, as for any rollout without a verdict."""
     server = _server(workdir, unparseable_verdict_policy=policy)
     client = TestClient(server.setup_webserver())
     _mock_judge(server, NO_VERDICT)
@@ -693,7 +694,7 @@ def test_a_budget_ending_keeps_its_kind_when_the_judge_gives_no_verdict(workdir,
 
     assert _graded(verified) == (0.0, True, "agent_limit", False)
     assert verified.json()["judge_parsed"] is False
-    assert verified.json()["instance_config"] == {"mask_sample": True}
+    assert verified.json().get("instance_config") == ({"mask_sample": True} if policy == "mask" else None)
 
 
 def test_a_judge_that_echoes_the_template_line_gives_no_verdict_unless_the_answer_is_that_line(workdir) -> None:
@@ -2032,11 +2033,14 @@ def test_a_row_left_without_a_grade_names_its_failure_and_gives_a_reason(workdir
 
 
 @pytest.mark.parametrize("instance_config", [None, {"split": "train"}], ids=["none_sent", "sent"])
-def test_every_row_verify_masks_sets_mask_sample_in_its_instance_config(workdir, instance_config) -> None:
-    """NeMo RL masks a sample's loss by its instance_config.mask_sample, not by the row's mask_sample, so every row
-    verify masks sets both, over the request's own instance_config: a budget ending, graded or with an empty answer, a
-    judge without a verdict under the mask policy, and a lost session. A row verify does not mask keeps the request's
-    instance_config as it was sent."""
+def test_only_a_row_whose_reward_is_no_model_outcome_sets_mask_sample_in_its_instance_config(
+    workdir, instance_config
+) -> None:
+    """NeMo RL masks a sample's loss by its instance_config.mask_sample, not by the row's mask_sample. Verify sets both,
+    over the request's own instance_config, on a row whose reward is no outcome of the model: a judge without a verdict
+    under the mask policy, also after a budget ending, and a lost session. A budget ending the judge graded, or with an
+    empty answer, is the model's outcome: it is masked on the row only, so training keeps its reward. Every row without
+    the training mask keeps the request's instance_config as it was sent."""
     server = _server(workdir, unparseable_verdict_policy="mask")
     client = TestClient(server.setup_webserver())
     sent = {} if instance_config is None else {"instance_config": instance_config}
@@ -2046,25 +2050,24 @@ def test_every_row_verify_masks_sets_mask_sample_in_its_instance_config(workdir,
         client.cookies.clear()
         return client.post("/verify", json=_verify_body(answer, **sent, **fields)).json()
 
-    masked = [
-        verify(CORRECT, opencode_terminal_reason="max_iteration"),
-        verify(CORRECT, "", opencode_terminal_reason="context_window"),
-        verify(NO_VERDICT),
-    ]
+    left_out = [verify(NO_VERDICT), verify(NO_VERDICT, opencode_terminal_reason="max_iteration")]
     client.cookies.clear()
     assert client.post("/seed_session", json=_seed()).status_code == 200
     assert client.post("/close_session", json=_close()).status_code == 200
-    masked.append(client.post("/verify", json=_verify_body(**sent)).json())
+    left_out.append(client.post("/verify", json=_verify_body(**sent)).json())
+    budget_endings = [
+        verify(CORRECT, opencode_terminal_reason="max_iteration"),
+        verify(WRONG, opencode_terminal_reason="agent_timed_out"),
+        verify(CORRECT, "", opencode_terminal_reason="context_window"),
+    ]
     unmasked = [verify(CORRECT), verify(WRONG), verify(CORRECT, "")]
 
-    assert [row["failure_kind"] for row in masked] == [
-        "agent_limit",
-        "model_context_limit",
-        "judge_unparseable",
-        "session_lost",
-    ]
-    assert all(row["mask_sample"] for row in masked)
-    assert [row["instance_config"] for row in masked] == [(instance_config or {}) | {"mask_sample": True}] * 4
+    assert [row["failure_kind"] for row in left_out] == ["judge_unparseable", "agent_limit", "session_lost"]
+    assert [row["failure_kind"] for row in budget_endings] == ["agent_limit", "agent_timeout", "model_context_limit"]
+    assert [row["reward"] for row in budget_endings] == [1.0, 0.0, 0.0]
+    assert all(row["mask_sample"] for row in left_out + budget_endings)
+    assert [row["instance_config"] for row in left_out] == [(instance_config or {}) | {"mask_sample": True}] * 3
+    assert [row.get("instance_config") for row in budget_endings] == [instance_config] * 3
     assert [(row["mask_sample"], row.get("instance_config")) for row in unmasked] == [(False, instance_config)] * 3
 
 
