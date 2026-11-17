@@ -35,7 +35,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from nemo_gym.agents.utils.sandbox_observation import lifecycle_observation
+from nemo_gym.agents import lifecycle_observation
 from nemo_gym.sandbox import AsyncSandbox, SandboxProvider, SandboxSpec, create_provider
 
 
