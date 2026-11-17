@@ -3,11 +3,29 @@
 
 """Small task-local CLI for mini-SWE's bash harness; no provider credentials."""
 
+import argparse
 import asyncio
 import json
+import os
 import sys
 from contextlib import AsyncExitStack
 from pathlib import Path
+
+
+# This directory is the venv with the MCP packages. Run by another interpreter (`python client.py`), the file reruns
+# under the venv's python before the imports below need them. That python is run by its own path, not its symlink
+# target, because the path is how it finds pyvenv.cfg. Comparing `sys.executable` allows one rerun, so a broken venv
+# fails on the import instead of looping. The whole file is compiled before this runs, so it must stay parseable by
+# older Pythons.
+_VENV = Path(__file__).resolve().parent
+_VENV_PYTHON = _VENV / "bin" / "python"
+if (
+    __name__ == "__main__"
+    and Path(sys.prefix).resolve() != _VENV
+    and Path(sys.executable) != _VENV_PYTHON
+    and _VENV_PYTHON.exists()
+):
+    os.execv(_VENV_PYTHON, [str(_VENV_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]])
 
 from httpx_aiohttp import HttpxAiohttpClient
 from mcp import ClientSession, StdioServerParameters
@@ -87,24 +105,42 @@ async def request(socket_path, message):
         await writer.wait_closed()
 
 
-async def main():
+def json_object(text: str) -> dict:
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise argparse.ArgumentTypeError(f"not valid JSON ({error}); pass one JSON object in single quotes") from None
+    if not isinstance(value, dict):
+        raise argparse.ArgumentTypeError("must be a JSON object, such as '{}'")
+    return value
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    # Usage errors exit 2 with the usage line, which the model reads, instead of an IndexError traceback.
+    parser = argparse.ArgumentParser(prog=f"{_VENV_PYTHON} {Path(__file__).resolve()}")
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("serve")
+    commands.add_parser("list")
+    call = commands.add_parser("call")
+    call.add_argument("server", metavar="SERVER")
+    call.add_argument("tool", metavar="TOOL")
+    call.add_argument("arguments", metavar="JSON_ARGUMENTS", type=json_object)
+    return parser.parse_args(argv)
+
+
+async def main(args: argparse.Namespace) -> None:
     servers = json.loads(Path(__file__).with_name("servers.json").read_text())
     socket_path = str(Path(__file__).with_name("server.sock"))
-    if sys.argv[1] == "serve":
+    if args.command == "serve":
         await serve(servers, socket_path)
         return
-    if sys.argv[1] == "list":
+    if args.command == "list":
         message = {"operation": "list"}
     else:
-        message = {
-            "operation": "call",
-            "server": sys.argv[2],
-            "tool": sys.argv[3],
-            "arguments": json.loads(sys.argv[4]),
-        }
+        message = {"operation": "call", "server": args.server, "tool": args.tool, "arguments": args.arguments}
     result = await request(socket_path, message)
     print(json.dumps(result))
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main(parse_args(sys.argv[1:])))
