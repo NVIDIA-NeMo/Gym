@@ -422,6 +422,7 @@ def _normal_start(
 def _suite_counts(
     cells: Sequence[PlanningCell], parameters: PlanningParameters, weights: tuple[float, ...]
 ) -> tuple[NDArray[np.float64], str]:
+    # Determine the legal count range, increment, and cost for both arms of every cell.
     repeat_limits = np.array([_limits(cell, parameters) for cell in cells], dtype=float)
     minimum_counts = np.repeat(repeat_limits[:, 0], 2)
     maximum_counts = np.repeat(repeat_limits[:, 1], 2)
@@ -429,6 +430,8 @@ def _suite_counts(
     repeat_costs = np.array(
         [(cell.repeat_cost, cell.repeat_cost * parameters.candidate_experiments) for cell in cells]
     )
+
+    # Keep existing baseline counts fixed and exclude their collection cost from new work.
     if parameters.baseline_mode == "existing":
         for index, cell in enumerate(cells):
             if cell.existing_baseline_repeats is None:
@@ -436,6 +439,8 @@ def _suite_counts(
             minimum_counts[2 * index] = maximum_counts[2 * index] = cell.existing_baseline_repeats
         repeat_costs[:, 0] = 0.0
     repeat_costs = repeat_costs.ravel()
+
+    # Start at the legal minimum, using a normal approximation if more repeats are needed.
     selected_counts = minimum_counts.copy()
     variance_coefficients = (
         np.square(weights)[:, None] * [(c.baseline_variance, c.candidate_variance) for c in cells]
@@ -448,6 +453,8 @@ def _suite_counts(
         selected_counts = _normal_start(
             parameters, variance_coefficients, minimum_counts, maximum_counts, repeat_steps, repeat_costs
         )
+
+    # Reach target power by adding the repeat increment with the greatest power gain per cost.
     for _ in range(20_000):
         current_power = _power(cells, selected_counts, weights, parameters)
         if current_power >= parameters.target_power:
@@ -463,14 +470,18 @@ def _suite_counts(
         selected_counts = proposals[int(np.argmax(power_gain_per_cost))]
     else:
         raise ValueError("Suite allocation exceeded its finite repair search.")
-    # Remove steps or exchange one expensive step for up to 20 cheaper steps.
-    # Four promising partner coordinates bound the work; this is a local search.
+
+    # Lower cost through bounded local removals and exchanges while preserving target power.
     for _ in range(1_000):
         best_counts, best_cost = selected_counts, float(np.dot(repeat_costs, selected_counts))
+
+        # Look for cheaper allocations by removing one repeat increment at a time.
         for index in np.flatnonzero(selected_counts > minimum_counts):
             reduced_counts = selected_counts.copy()
             reduced_counts[index] -= repeat_steps[index]
             proposals = [reduced_counts]
+
+            # Limit exchange partners to the top four other arms by variance reduction per cost.
             variance_reduction_per_cost = np.divide(
                 variance_coefficients,
                 reduced_counts * (reduced_counts + repeat_steps) * repeat_costs,
@@ -482,6 +493,8 @@ def _suite_counts(
                 for arm_index in np.argsort(-variance_reduction_per_cost, kind="stable")
                 if arm_index != index and repeat_costs[arm_index] > 0
             ][:4]
+
+            # Try cheaper exchanges with up to 20 increments in one other arm.
             for other_arm_index in exchange_indices:
                 maximum_added_steps = min(
                     20,
@@ -495,6 +508,8 @@ def _suite_counts(
                     proposed_counts[other_arm_index] += added_steps * repeat_steps[other_arm_index]
                     if np.dot(repeat_costs, proposed_counts) < best_cost:
                         proposals.append(proposed_counts)
+
+            # Select the cheapest proposal whose power still meets the target.
             designs = np.stack(proposals)
             design_powers = _power(cells, designs, weights, parameters)
             design_costs = designs @ repeat_costs
@@ -502,9 +517,13 @@ def _suite_counts(
             if len(feasible_indices):
                 chosen_index = int(feasible_indices[np.argmin(design_costs[feasible_indices])])
                 best_counts, best_cost = designs[chosen_index], float(design_costs[chosen_index])
+
+        # Return once no tested local move can reduce cost while retaining target power.
         if np.array_equal(best_counts, selected_counts):
             return selected_counts, "feasible cost-aware local allocation; global minimum not established"
         selected_counts = best_counts
+
+    # Fail explicitly if the bounded improvement search does not converge.
     raise ValueError("Suite allocation exceeded its finite improvement search.")
 
 
