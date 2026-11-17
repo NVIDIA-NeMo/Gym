@@ -28,7 +28,7 @@ from uuid import uuid4
 
 from openai.types.completion_usage import CompletionUsage
 from openai.types.responses.response_create_params import ToolParam
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.core.responses_api_types import (
@@ -318,6 +318,45 @@ CustomToolStrategy = Literal["passthrough", "function_bridge"]
 # so an unguarded warning would repeat each turn.
 _BRIDGE_GRAMMAR_DROP_WARNED: set = set()
 
+# The JSON types that `tool_parameter_types` can name for a tool parameter.
+ToolParameterType = Literal["integer", "boolean"]
+
+
+def _retype_tool_arguments(arguments: Any, parameter_types: Optional[Dict[str, ToolParameterType]]) -> Any:
+    """Convert string parameters of one tool call to the JSON types in `parameter_types`.
+
+    `arguments` is the JSON text of the call's arguments, and `parameter_types`
+    maps a parameter name to its type. A parameter is converted only when its
+    value is a string that spells a whole number of at most 18 ASCII digits,
+    which every 64-bit integer type holds (for `integer`), or `true` or `false`
+    in any letter case (for `boolean`). Whitespace and quote characters around
+    the value are ignored, because a model also writes `"1000"` or `False`.
+    Every other value is kept, and arguments that are not the text of a JSON
+    object are returned unchanged. When nothing was converted the same text is
+    returned, so a call that the backend already typed is not rewritten.
+    """
+    if not parameter_types or not isinstance(arguments, str):
+        return arguments
+    try:
+        parsed = json.loads(arguments)
+    except ValueError:
+        return arguments
+    if not isinstance(parsed, dict):
+        return arguments
+    changed = False
+    for key, kind in parameter_types.items():
+        value = parsed.get(key)
+        if not isinstance(value, str):
+            continue
+        text = value.strip().strip("\"'").strip()
+        if kind == "integer" and re.fullmatch(r"-?[0-9]{1,18}", text):
+            parsed[key] = int(text)
+            changed = True
+        elif kind == "boolean" and text.lower() in ("true", "false"):
+            parsed[key] = text.lower() == "true"
+            changed = True
+    return json.dumps(parsed) if changed else arguments
+
 
 class ChatCompletionsConverter(BaseModel):
     """Converts between OpenAI Responses API and Chat Completions API formats."""
@@ -340,6 +379,14 @@ class ChatCompletionsConverter(BaseModel):
     # default: OpenAI's chat tool messages carry text only, so such an output fails the conversion, or
     # becomes a text placeholder with ``drop_unrepresentable_request_fields``.
     inline_tool_output_images: bool = False
+    # The JSON type of tool parameters, by tool name and then parameter name.
+    # A backend's tool parser types a parameter from the schema that the
+    # request declares, so it returns every parameter of a tool that the
+    # request did not declare as a string. A harness that runs such a call all
+    # the same needs the types back: a returned function call to a tool named
+    # here has the listed parameters converted (`_retype_tool_arguments`).
+    # Empty leaves every call as the backend returned it.
+    tool_parameter_types: Dict[str, Dict[str, ToolParameterType]] = Field(default_factory=dict)
 
     THINK_TAG_PATTERN: ClassVar = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 
@@ -1332,7 +1379,9 @@ class ChatCompletionsConverter(BaseModel):
                 response_output.append(
                     NeMoGymResponseFunctionToolCall(
                         name=tc["function"]["name"],
-                        arguments=tc["function"]["arguments"],
+                        arguments=_retype_tool_arguments(
+                            tc["function"]["arguments"], self.tool_parameter_types.get(tc["function"]["name"])
+                        ),
                         call_id=tc["id"],
                         type="function_call",
                         status="completed",

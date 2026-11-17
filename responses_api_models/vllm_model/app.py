@@ -62,6 +62,7 @@ from nemo_gym.models import (
     ChatCompletionsConverter,
     ExternalCaptureHandler,
     SimpleResponsesAPIModel,
+    ToolParameterType,
     VLLMConverter,  # noqa: F401  # re-exported for importers of this module
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
     add_dynamo_gym_extras,
@@ -686,6 +687,22 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             "sent as `high`. Requires `is_responses_native: false`."
         ),
     )
+    tool_parameter_types: Dict[str, Dict[str, ToolParameterType]] = Field(
+        default_factory=dict,
+        description=(
+            "The JSON type of tool parameters, by tool name and then parameter name, for example "
+            "`{exec_command: {yield_time_ms: integer, tty: boolean}}`. The engine's tool parser types a "
+            "parameter from the schema that the request declares, so every parameter of a tool that the "
+            "request did not declare comes back as a string. A harness that runs such a call all the same "
+            "(the Codex CLI answers a direct `exec_command` or `write_stdin` in a code-mode session, which "
+            "declares only `exec` and `wait`) then refuses a string where it expects a number or a boolean. "
+            "The Chat-to-Responses conversion gives the parameters listed here their type back: a string "
+            "that spells a whole number of at most 18 digits becomes an `integer`, and `true` or `false` "
+            "in any letter case becomes a `boolean`. Whitespace and quote characters around the value are "
+            "ignored. Every other value, and every tool and parameter not listed, is returned as the engine "
+            "sent it. Empty by default, which converts nothing. Requires `is_responses_native: false`."
+        ),
+    )
 
     # Whether or not the model can generate a reasoning output, and called again to produce additional reasoning output.
     sequential_reasoning_allowed: bool = True
@@ -840,6 +857,16 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
                 "native Responses route forwards requests without the Responses-to-Chat conversion that "
                 "implements the bridge, and vLLM's native route renders function tools only, so a custom "
                 "tool would be accepted but never shown to the model."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_tool_parameter_types(self) -> "VLLMModelConfig":
+        if self.tool_parameter_types and self.is_responses_native:
+            raise ValueError(
+                "tool_parameter_types is not supported with is_responses_native=true: the native Responses "
+                "route forwards the engine's response without the Chat-to-Responses conversion that converts "
+                "the parameters, so the setting would have no effect."
             )
         return self
 
@@ -1157,6 +1184,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             uses_reasoning_parser=self.config.uses_reasoning_parser,
             custom_tool_strategy=self.config.custom_tool_strategy,
             inline_tool_output_images=self.config.inline_tool_output_images,
+            tool_parameter_types=self.config.tool_parameter_types,
         )
 
     def model_post_init(self, context):

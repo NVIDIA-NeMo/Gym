@@ -1584,6 +1584,91 @@ def test_postprocess_tool_calls(converter: ChatCompletionsConverter):
     assert tool_calls[0].call_id == "call_1"
 
 
+def _function_call_arguments(converter: ChatCompletionsConverter, name: str, arguments: str) -> str:
+    output = converter.postprocess_assistant_message_dict(
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call_1", "function": {"name": name, "arguments": arguments}}],
+        }
+    )
+    tool_calls = [item for item in output if isinstance(item, NeMoGymResponseFunctionToolCall)]
+    assert len(tool_calls) == 1
+    return tool_calls[0].arguments
+
+
+# Tool parameter types as a run configures them (`tool_parameter_types`): the
+# parameters of the Codex CLI's shell tools that are not strings.
+_TOOL_PARAMETER_TYPES = {
+    "exec_command": {"yield_time_ms": "integer", "max_output_tokens": "integer", "login": "boolean", "tty": "boolean"},
+    "write_stdin": {"session_id": "integer", "yield_time_ms": "integer", "max_output_tokens": "integer"},
+}
+
+
+@pytest.fixture
+def typing_converter() -> ChatCompletionsConverter:
+    return ChatCompletionsConverter(return_token_id_information=False, tool_parameter_types=_TOOL_PARAMETER_TYPES)
+
+
+def test_listed_tool_parameters_get_their_json_type_back(typing_converter: ChatCompletionsConverter):
+    """A tool parser types parameters from the declared schema, so an undeclared tool's parameters are all strings."""
+    write_stdin = _function_call_arguments(
+        typing_converter,
+        "write_stdin",
+        json.dumps({"session_id": "86902", "chars": "12\n", "yield_time_ms": " 1000 "}),
+    )
+    assert json.loads(write_stdin) == {"session_id": 86902, "chars": "12\n", "yield_time_ms": 1000}
+
+    exec_command = _function_call_arguments(
+        typing_converter,
+        "exec_command",
+        json.dumps({"cmd": "sleep 30", "yield_time_ms": '"30000"', "max_output_tokens": "-1", "tty": "False"}),
+    )
+    assert json.loads(exec_command) == {
+        "cmd": "sleep 30",
+        "yield_time_ms": 30000,
+        "max_output_tokens": -1,
+        "tty": False,
+    }
+
+
+@pytest.mark.parametrize(
+    "name, arguments",
+    [
+        # Already typed by the parser: returned byte for byte, key order and spacing included.
+        ("exec_command", '{"yield_time_ms":1000,  "cmd":"ls"}'),
+        # A string parameter that happens to spell a number is not one of the listed parameters.
+        ("exec_command", '{"cmd": "42", "workdir": "7"}'),
+        # Not a whole number or a boolean: the harness reports the value itself.
+        ("exec_command", '{"cmd": "ls", "yield_time_ms": "1.5", "login": "yes"}'),
+        ("write_stdin", '{"session_id": "abc", "yield_time_ms": "-"}'),
+        # A digit outside ASCII, and more digits than a 64-bit integer holds.
+        ("write_stdin", '{"session_id": "\u00b2", "yield_time_ms": "1234567890123456789"}'),
+        # Arguments that are not a JSON object.
+        ("write_stdin", "not json"),
+        ("write_stdin", '["86902"]'),
+        # A tool that is not listed is left alone, whatever its parameters are called.
+        ("get_weather", '{"session_id": "86902", "yield_time_ms": "1000"}'),
+    ],
+)
+def test_retyping_leaves_every_other_call_unchanged(
+    typing_converter: ChatCompletionsConverter, name: str, arguments: str
+):
+    assert _function_call_arguments(typing_converter, name, arguments) == arguments
+
+
+def test_a_converter_without_tool_parameter_types_converts_nothing(converter: ChatCompletionsConverter):
+    arguments = json.dumps({"session_id": "86902", "yield_time_ms": "1000"})
+    assert _function_call_arguments(converter, "write_stdin", arguments) == arguments
+
+
+def test_tool_parameter_types_refuses_an_unknown_type():
+    with pytest.raises(ValidationError):
+        ChatCompletionsConverter(
+            return_token_id_information=False, tool_parameter_types={"write_stdin": {"session_id": "number"}}
+        )
+
+
 def test_postprocess_chat_response_via_choice(converter: ChatCompletionsConverter):
     choice = NeMoGymChoice(
         index=0,
