@@ -42,6 +42,7 @@ from aiohttp import (
     ClientPayloadError,
     ClientResponseError,
     ClientSession,
+    ClientTimeout,
     ConnectionTimeoutError,
     ServerDisconnectedError,
 )
@@ -74,11 +75,12 @@ from nemo_gym.config.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
+    SKIP_TOKEN_CAPTURE_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
-from nemo_gym.core.episode_types import EpisodeId
+from nemo_gym.core.episode_types import BaseEpisodeRequest, EpisodeId
 from nemo_gym.core.failure_kinds import CANCELLED, KILL_SHAPED, PROVIDER_OOM_KILLED
 from nemo_gym.core.failure_records import FailureBoundary, FailureReport, SandboxFailureDetails
 from nemo_gym.core.failure_transport import FailureReportRow
@@ -2233,7 +2235,7 @@ class TestRolloutCollection:
         monkeypatch.setattr(
             nemo_gym.rollouts.rollout_collection, "setup_server_client_utils", lambda *_args, **_kwargs: client
         )
-        transport = MagicMock()
+        transport = MagicMock(timeout=ClientTimeout())
         failure = (
             ClientConnectorError(MagicMock(), ConnectionRefusedError("not sent"))
             if connection_refused
@@ -2253,6 +2255,29 @@ class TestRolloutCollection:
         for call in transport.request.call_args_list:
             assert call.kwargs["url"] == "http://agent:1234/run"
             assert "_resend_after_disconnect" not in call.kwargs
+
+    @pytest.mark.parametrize("retry_requests", [True, False])
+    async def test_run_examples_resends_a_handshake_timeout_even_without_replay(
+        self, monkeypatch: pytest.MonkeyPatch, retry_requests: bool
+    ) -> None:
+        """A /run whose connection timed out connecting was never sent, so the replay switch does not apply."""
+        config = install_fake_server_client(monkeypatch, AsyncMock()).global_config_dict
+        config.my_environment_server.environment_servers.legacy_agent.update({"host": "agent", "port": 1234})
+        client = ServerClient(head_server_config=BaseServerConfig(host="head", port=11000), global_config_dict=config)
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "setup_server_client_utils", lambda *_args, **_kwargs: client
+        )
+        transport = MagicMock(timeout=ClientTimeout())
+        transport.request = AsyncMock(
+            side_effect=[ConnectionTimeoutError("handshake timed out"), FakeResponse(200, {"reward": 1})]
+        )
+        monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", lambda: transport)
+        monkeypatch.setattr(nemo_gym.client.http_client.asyncio, "sleep", AsyncMock())
+
+        _, result = await next(RolloutCollectionHelper().run_examples([failing_row()], retry_requests=retry_requests))
+
+        assert result["reward"] == 1
+        assert transport.request.await_count == 2
 
     @pytest.mark.parametrize("route_failures_to_sidecar", [False, True])
     @pytest.mark.parametrize("retry_requests", [True, False])
@@ -7150,6 +7175,74 @@ class TestRolloutCollection:
 
         assert await run(rows_per_agent=1) == await run(rows_per_agent=20)
 
+    async def test_run_from_config_does_not_finalize_a_row_that_skips_token_capture(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A validation row that skips capture made no captured calls, so it is neither rebuilt nor masked."""
+        global_config = {
+            "token_id_capture": {"enabled": True, "all_agents": True, "dir": str(tmp_path / "tokens")},
+            "agent": {"responses_api_agents": {"implementation": {}}},
+        }
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_global_config_dict", lambda: global_config)
+        server_client = MagicMock()
+        server_client.global_config_dict = OmegaConf.create(global_config)
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: server_client
+        )
+        finalized_splits: list[str] = []
+
+        async def finalize(result, token_source, **kwargs):
+            finalized_splits.append(result["split"])
+            return None
+
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "finalize_rollout_token_capture", finalize)
+
+        class Helper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                futures = []
+                for example in examples:
+                    future = Future()
+                    future.set_result(
+                        _CompletedRollout(
+                            row=example,
+                            result={"response": {"output": [], "usage": {}}, "split": example["split"]},
+                            rollout_latency_ms=None,
+                        )
+                    )
+                    futures.append(future)
+                return futures
+
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_bytes(
+            b"".join(
+                orjson.dumps(
+                    {
+                        "responses_create_params": {"input": []},
+                        AGENT_REF_KEY_NAME: {"name": "agent"},
+                        "split": split,
+                        **row_setting,
+                    }
+                )
+                + b"\n"
+                for split, row_setting in (
+                    ("train", {}),
+                    ("validation", {SKIP_TOKEN_CAPTURE_KEY_NAME: True}),
+                    # null, as a table writes for a row that does not set the column, counts as unset.
+                    ("unset", {SKIP_TOKEN_CAPTURE_KEY_NAME: None}),
+                )
+            )
+        )
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            resume_from_cache=False,
+            disable_aggregation=True,
+        )
+
+        await Helper().run_from_config(config)
+
+        assert finalized_splits == ["train", "unset"]
+
     async def test_run_from_config_requires_source_before_dispatch(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
@@ -11086,6 +11179,36 @@ class TestValidateAgentNames:
         cfg = self._cfg(agents=["math_agent"], extra={"math_rs": {"resources_servers": {"impl": {}}}})
         with pytest.raises(ValueError, match="exists but is not an agent instance"):
             RolloutCollectionHelper._validate_agent_names(self._rows("math_rs"), cfg)
+
+    def test_agent_type_points_at_its_instances(self) -> None:
+        """NVIDIA-NeMo/Gym#4725: `--agent simple_agent` names the agent type, not the instance."""
+        cfg = OmegaConf.create(
+            {
+                "ontology_simple_agent": {"responses_api_agents": {"simple_agent": {}}},
+                "other_simple_agent": {"responses_api_agents": {"simple_agent": {}}},
+            }
+        )
+        with pytest.raises(ValueError) as error:
+            RolloutCollectionHelper._validate_agent_names(self._rows("simple_agent"), cfg)
+        message = str(error.value)
+        assert "an agent type, not an instance; use 'ontology_simple_agent', 'other_simple_agent'" in message
+        assert "Agent instances in this run: 'ontology_simple_agent', 'other_simple_agent'" in message
+
+    def test_a_run_without_agent_instances_says_so(self) -> None:
+        cfg = self._cfg(extra={"math_rs": {"resources_servers": {"impl": {}}}})
+        with pytest.raises(ValueError, match="Agent instances in this run: none. "):
+            RolloutCollectionHelper._validate_agent_names(self._rows("simple_agent"), cfg)
+
+    def test_listed_agent_instances_are_capped_at_ten(self) -> None:
+        cfg = OmegaConf.create(
+            {f"env_{index:02d}_agent": {"responses_api_agents": {"simple_agent": {}}} for index in range(12)}
+        )
+        with pytest.raises(ValueError) as error:
+            RolloutCollectionHelper._validate_agent_names(self._rows("simple_agent"), cfg)
+        message = str(error.value)
+        assert "use 'env_00_agent', " in message and "'env_09_agent' and 2 more)" in message
+        assert "'env_10_agent'" not in message
+        assert "Agent instances in this run: 'env_00_agent', " in message and "'env_09_agent' and 2 more." in message
 
 
 # A merged config shaped like real ones: one RS instance, agents pointing at RSes via the
@@ -15414,6 +15537,124 @@ class TestRunRecordWriter:
             )
         assert self._lines(run_dir / "rollouts-step_3.jsonl") == [written]
 
+    @pytest.mark.parametrize("scope_rollout_ids", [True, False])
+    async def test_a_caller_with_unique_ids_can_keep_them_in_a_recorded_shard(
+        self, tmp_path: Path, scope_rollout_ids: bool
+    ) -> None:
+        capture_dir = tmp_path / "capture"
+        global_config = {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)}
+        row = TestEnrichRunResult._row() | {ROLLOUT_ID_KEY_NAME: "gate-7"}
+        dispatched_ids: list[str] = []
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict=global_config)
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                dispatched_ids.append(maybe_rollout_id_from_run_body(examples[0]))
+                TestEnrichRunResult._store_call(capture_dir, dispatched_ids[0], "c1", "first")
+                future = Future()
+                future.set_result(
+                    _CompletedRollout(row=examples[0], result={"reward": 1.0, "response": {}}, rollout_latency_ms=1.0)
+                )
+                return iter([future])
+
+        run_dir = tmp_path / "run"
+        [completion] = list(
+            Helper().run_examples(
+                [row], record_output_dir=run_dir, record_shard="step_1", scope_rollout_ids=scope_rollout_ids
+            )
+        )
+        _, returned = await completion
+
+        # By default the shard scopes the id; opted out, the id the caller dispatched comes back unchanged.
+        [dispatched] = dispatched_ids
+        assert (dispatched == "gate-7") is not scope_rollout_ids
+        assert dispatched.endswith("gate-7")
+        assert maybe_rollout_id_from_run_body(returned) == dispatched
+        [written] = self._lines(run_dir / "rollouts-step_1.jsonl")
+        assert [call["model_call_id"] for call in written["ng_model_call_capture"]["calls"]] == ["c1"]
+
+    async def test_a_row_without_an_explicit_id_keeps_its_task_and_rollout_id_when_unscoped(
+        self, tmp_path: Path
+    ) -> None:
+        row = {key: value for key, value in TestEnrichRunResult._row().items() if key != ROLLOUT_ID_KEY_NAME}
+        dispatched_ids: list[str] = []
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict={})
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                dispatched_ids.append(maybe_rollout_id_from_run_body(examples[0]))
+                future = Future()
+                future.set_result(
+                    _CompletedRollout(row=examples[0], result={"reward": 1.0, "response": {}}, rollout_latency_ms=1.0)
+                )
+                return iter([future])
+
+        [completion] = list(
+            Helper().run_examples([row], record_output_dir=tmp_path, record_shard="s", scope_rollout_ids=False)
+        )
+        _, returned = await completion
+        expected = f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
+        assert dispatched_ids == [expected] and maybe_rollout_id_from_run_body(returned) == expected
+
+    @pytest.mark.parametrize("scope_rollout_ids", [True, False])
+    async def test_an_id_dispatched_again_shares_its_capture_only_when_unscoped(
+        self, tmp_path: Path, scope_rollout_ids: bool
+    ) -> None:
+        capture_dir = tmp_path / "capture"
+        global_config = {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)}
+        row = TestEnrichRunResult._row() | {ROLLOUT_ID_KEY_NAME: "gate-7"}
+        calls = iter(["call1", "call2"])
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict=global_config)
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                TestEnrichRunResult._store_call(
+                    capture_dir, maybe_rollout_id_from_run_body(examples[0]), next(calls), "x"
+                )
+                future = Future()
+                future.set_result(
+                    _CompletedRollout(row=examples[0], result={"reward": 1.0, "response": {}}, rollout_latency_ms=1.0)
+                )
+                return iter([future])
+
+        for shard in ("s1", "s2"):
+            [completion] = list(
+                Helper().run_examples(
+                    [row], record_output_dir=tmp_path / "run", record_shard=shard, scope_rollout_ids=scope_rollout_ids
+                )
+            )
+            await completion
+
+        def captured(shard: str) -> list[str]:
+            [written] = self._lines(tmp_path / "run" / f"rollouts-{shard}.jsonl")
+            return [call["model_call_id"] for call in written["ng_model_call_capture"]["calls"]]
+
+        # Unscoped, nothing checks across calls: the second shard reads the first one's capture file too.
+        assert captured("s1") == ["call1"]
+        assert captured("s2") == (["call2"] if scope_rollout_ids else ["call1", "call2"])
+
+    def test_rows_that_share_an_id_are_refused_with_or_without_scoping(self, tmp_path: Path) -> None:
+        row = TestEnrichRunResult._row() | {ROLLOUT_ID_KEY_NAME: "gate-7"}
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict={})
+
+        for scope_rollout_ids in (True, False):
+            with pytest.raises(ValueError, match="would share one rollout"):
+                Helper().run_examples(
+                    [row, dict(row)],
+                    record_output_dir=tmp_path / str(scope_rollout_ids),
+                    record_shard="s",
+                    scope_rollout_ids=scope_rollout_ids,
+                )
+
     def test_a_shard_whose_every_rollout_failed_still_has_its_rollouts_file(self, tmp_path: Path) -> None:
         from nemo_gym.rollouts.rollout_collection import _RunRecordWriter
 
@@ -16540,3 +16781,37 @@ def test_an_episode_request_carries_a_rows_sampling_values_beside_the_unchanged_
     assert body["task"] == {"task_id": row["task_id"], "task_input": row["task_input"]}
     # Gym-only evaluation sends exactly what it sent before.
     assert "model_sampling" not in _episode_request_body({k: v for k, v in row.items() if k != "_ng_model_sampling"})
+
+
+@pytest.mark.parametrize(
+    ("row_setting", "episode_setting"),
+    [
+        ({}, {}),
+        ({SKIP_TOKEN_CAPTURE_KEY_NAME: False}, {}),
+        ({SKIP_TOKEN_CAPTURE_KEY_NAME: None}, {}),
+        ({SKIP_TOKEN_CAPTURE_KEY_NAME: True}, {"skip_token_capture": True}),
+    ],
+)
+def test_an_episode_request_carries_a_rollout_that_skips_token_capture(
+    row_setting: dict, episode_setting: dict
+) -> None:
+    row = {
+        "task_id": {"taskset": "swe_pro", "task_id": "instance"},
+        "task_input": {"responses_create_params": {"input": "fix it"}},
+        TASK_INDEX_KEY_NAME: 3,
+        ROLLOUT_INDEX_KEY_NAME: 1,
+        **row_setting,
+    }
+
+    body = nemo_gym.rollouts.rollout_collection._episode_request_body(row)
+
+    assert body == {
+        "episode_id": {"rollout_id": "3-1", "attempt": 0},
+        "task": {"task_id": row["task_id"], "task_input": row["task_input"]},
+        **episode_setting,
+    }
+    # An Environment Server parses the body with its episode request model, which refuses unknown keys.
+    request = BaseEpisodeRequest[dict].model_validate(body)
+    assert request.skip_token_capture is bool(episode_setting)
+    # The model leaves the setting out when it is false, so a request that does not skip is unchanged.
+    assert ("skip_token_capture" in request.model_dump()) is bool(episode_setting)

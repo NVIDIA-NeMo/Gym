@@ -1,0 +1,21 @@
+{
+  "email": {
+    "from": "",
+    "sendGridAPIKey": ""
+  },
+  "integrations": {
+    "azureDocumentIntelligence": {
+      "endpoint": "",
+      "key": ""
+    }
+  },
+  "server": {
+    "autologin": false,
+    "bypassGuide": true,
+    "isDemo": false,
+    "noSignups": false,
+    "isProduction": false,
+    "port": 8078,
+    "url": "http://0.0.0.0:8078"
+  }
+}

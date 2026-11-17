@@ -33,6 +33,7 @@ from pydantic import (
     JsonValue,
     PrivateAttr,
     SerializerFunctionWrapHandler,
+    StrictBool,
     TypeAdapter,
     ValidationError,
     field_validator,
@@ -184,6 +185,13 @@ class BaseRunRequest(BaseModel):
         alias=MODEL_SAMPLING_KEY_NAME,
         exclude=True,
     )
+    # True turns token capture off for this rollout's model calls; null counts as unset. See
+    # nemo_gym.core.episode_context.
+    skip_token_capture: Optional[StrictBool] = Field(
+        default=False,
+        alias="_ng_skip_token_capture",
+        exclude=True,
+    )
 
 
 class BaseVerifyRequest(BaseRunRequest):
@@ -298,6 +306,20 @@ class ResourcesSeedSessionRequest(BaseModel):
     episode_id: EpisodeId
     task_id: TaskId
     task_data: dict[str, JsonValue]
+    # The task's own responses_create_params, which task_data leaves out: the prompt params /verify also receives.
+    # A server whose seed_request_model declares a `responses_create_params` field gets them in its seed request,
+    # for a session built from the task's history or tools; every other server's task_data validates as before.
+    responses_create_params: dict[str, JsonValue] | None = None
+
+    # A return annotation would replace the model's serialization schema with that container schema.
+    @model_serializer(mode="wrap")
+    def _serialize_responses_create_params(self, handler: SerializerFunctionWrapHandler):
+        """Leave the key out when there are no params, so tool-server seeds keep the wire shape an older server's
+        extra="forbid" model accepts."""
+        result = handler(self)
+        if self.responses_create_params is None:
+            result.pop("responses_create_params", None)
+        return result
 
 
 def reject_partial_typed_seed(value: object) -> object:
@@ -912,6 +934,15 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             )
         )
 
+    def checkpoint_mode_in_effect(self) -> CheckpointMode:
+        """How this instance takes part in checkpoints; the class's ``checkpoint_mode`` unless an override knows better.
+
+        Status, discovery and seed replies report it.
+        A server whose capture depends on its configuration, such as on a sandbox provider that can snapshot,
+        overrides it.
+        """
+        return self.checkpoint_mode
+
     def setup_resources_checkpoint(self, app: FastAPI) -> None:
         # The declarations are class attributes nothing else checks: a typo would act as a mode of its own.
         for name, allowed in (("checkpoint_mode", CheckpointMode), ("checkpoint_verify", StepType)):
@@ -927,7 +958,10 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
         if settings is None:
             return
-        if self.checkpoint_mode == "exported":
+        mode = self.checkpoint_mode_in_effect()
+        if mode not in get_args(CheckpointMode):
+            raise ValueError(f"{type(self).__name__}.checkpoint_mode_in_effect() returned {mode!r}")
+        if mode == "exported":
             # Hooks from an intermediate base class or a mixin count; only the stubs here do not.
             missing = [
                 name
@@ -941,9 +975,12 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 )
         participant = ResourcesParticipant(
             self,
-            self.checkpoint_mode,
+            mode,
             verify_step_type=self.checkpoint_verify,
             session_release_pending=self.session_release_pending,
+        )
+        participant.keeps_external_state = (
+            mode == "exported" and type(self).delete_external_state is not SimpleResourcesServer.delete_external_state
         )
         self._checkpoint = participant
         install_server_participant(
@@ -1026,8 +1063,9 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         if lifetimes is not None and session_id is not None:
             lifetimes.ended(session_id)
 
-    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
-        """Return each session's state for a checkpoint, leaving out sessions this server no longer holds."""
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
+        """Return each session's state for checkpoint ``checkpoint_id``, leaving out sessions this server no longer
+        holds."""
         raise NotImplementedError
 
     async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
@@ -1047,6 +1085,20 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             await self.release_session_state(session_id)
             self._forget_session(session_id)
 
+    async def delete_external_state(self, kept: frozenset[str]) -> None:
+        """Delete what exports of checkpoints outside ``kept`` kept outside Gym, such as sandbox snapshots.
+
+        Called after the controller published a checkpoint and pruned old ones, only in the ``exported`` mode;
+        an empty ``kept`` means nothing will be restored again. The default keeps nothing outside Gym.
+
+        - It holds the control lock: no prepare, commit, or restore runs meanwhile, and no checkpoint is open.
+        - It is cancelled at the release request's deadline, and the controller releases again later,
+          so it must tolerate state an earlier call already deleted and resume a deletion one left half done.
+        - Admission stays open: episodes keep running, so it must not touch what live sessions use.
+        - With several workers every worker runs it, so deleting what another worker already deleted must not fail.
+        - Keep by reference, not by age: keep whatever a checkpoint in ``kept`` refers to, and delete the rest.
+        """
+
     def normalize_tool_name(self, name: str) -> str:
         """Strip this server's MCP namespace from a trajectory tool-call name (see module function)."""
         return normalize_tool_name(name, self.config.name or self.__class__.__name__)
@@ -1065,6 +1117,16 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         ``/seed_session``, or its ``task_data`` when an Environment Server seeds the session.
         """
         return None
+
+    def _typed_seed_fields(self, body: ResourcesSeedSessionRequest) -> dict[str, Any]:
+        """What a typed seed's ``seed_request_model`` validates: its ``task_data``, plus the task's
+        ``responses_create_params`` when the model declares that field and the seed carries them."""
+        if (
+            body.responses_create_params is None
+            or "responses_create_params" not in self.seed_request_model.model_fields
+        ):
+            return body.task_data
+        return {**body.task_data, "responses_create_params": body.responses_create_params}
 
     async def seed_session(
         self,
@@ -1144,7 +1206,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 raise ResourcesSessionConflictError("A typed seed cannot replace a cookie-seeded session")
             if session_id not in self._session_episodes:
                 try:
-                    task = self.seed_request_model.model_validate(body.task_data)
+                    task = self.seed_request_model.model_validate(self._typed_seed_fields(body))
                 except ValidationError as error:
                     raise ResourcesSeedRejectedError(
                         f"task_data is not a valid {self.seed_request_model.__name__}: {error}"

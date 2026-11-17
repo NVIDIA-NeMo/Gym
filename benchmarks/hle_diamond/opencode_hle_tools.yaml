@@ -1,9 +1,13 @@
+# Deprecated relay: this preset runs opencode_sandboxed_agent behind the legacy_agent relay, like the
+# *_legacy_agent presets, and goes away with the relay unless it is moved to an opencode_agent session (a
+# follow-up change; the two harnesses are configured differently, so do not compare their scores as the same
+# measurement). It extends opencode_legacy_agent.yaml, the text preset as it ran before agent sessions.
 # OpenCode preset with upstream's two web tools. The only tool server is resources_servers/hle_web_tools,
 # which exposes exactly web_search and web_fetch over MCP behind the upstream docs/blocklist.json (all seven
 # rule families, query and fetch refusals, content re-checks) with Tavily as the search and extraction
 # backend. See benchmarks/hle_diamond/README.md > Sandboxed agents (with tools) > Upstream web tools.
 config_paths:
-- benchmarks/hle_diamond/opencode.yaml
+- benchmarks/hle_diamond/opencode_legacy_agent.yaml
 hle_tools:
   resources_servers:
     hle_web_tools:

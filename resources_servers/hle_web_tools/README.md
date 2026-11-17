@@ -233,8 +233,10 @@ grades the rollout with its own `resources_server` (for HLE-Diamond, the equival
 ## Use in a preset
 
 `benchmarks/hle_diamond/opencode_hle_tools.yaml` runs the OpenCode harness with this server as its only
-tool server. Live runs of that preset need `TAVILY_API_KEY` in the environment of the process that starts
-the servers; see that benchmark's README.
+tool server, on the deprecated `opencode_sandboxed_agent` behind the `legacy_agent` relay (it extends
+`opencode_legacy_agent.yaml`; moving it to an `opencode_agent` session is a follow-up). Live runs of that
+preset need `TAVILY_API_KEY` in the environment of the process that starts the servers; see that
+benchmark's README.
 
 ## Example data
 
