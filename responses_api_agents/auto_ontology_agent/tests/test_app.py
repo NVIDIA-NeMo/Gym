@@ -10,15 +10,21 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+from aiohttp import ClientResponseError, RequestInfo
 from fastapi.testclient import TestClient
 from langchain_core.runnables.config import ContextThreadPoolExecutor
+from multidict import CIMultiDict, CIMultiDictProxy
+from yarl import URL
 
+from environment_servers.bird_interact import adk_prompts
 from nemo_gym.agents import AGENT_ACTIVATION_HEADER, AgentSeedSessionRequest, check_agent_seed_rejected
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
-from nemo_gym.server_runtime import AgentContext, DirectHTTPToolAccess
+from nemo_gym.server_runtime import AgentContext, DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
+from nemo_gym.trajectory import TrajectoryRecord
+from responses_api_agents.auto_ontology_agent import c_interact
 from responses_api_agents.auto_ontology_agent.app import (
     AutoOntologyAgent,
     AutoOntologyAgentConfig,
@@ -29,7 +35,14 @@ from responses_api_agents.auto_ontology_agent.model_calls import (
     ModelCallTransport,
     model_call_route,
 )
-from responses_api_agents.auto_ontology_agent.runtime import AutoOntologyRuntime, Episode, send_through
+from responses_api_agents.auto_ontology_agent.runtime import (
+    AskUser,
+    AutoOntologyRuntime,
+    Episode,
+    SubmitSQL,
+    send_model_calls_through,
+    send_through,
+)
 
 
 TASK = {
@@ -152,7 +165,8 @@ class TestSeed:
             ({"agent_context": None}, "question: Field required"),
             ({"agent_context": AgentContext(values={**TASK, "schema": "CREATE TABLE t (x)"})}, "schema"),
             ({"agent_context": AgentContext(values={"question": "?"})}, "database"),
-            ({"continuation": {"observations": ["trajectory"]}}, "continuation"),
+            # A seed with continuation is a c-Interact session, which needs the fast model.
+            ({"continuation": {"observations": ["trajectory"]}}, "fast model"),
         ],
     )
     def test_a_seed_the_agent_cannot_serve_is_refused_for_good(self, fields: dict, reason: str) -> None:
@@ -526,3 +540,441 @@ def test_the_react_loop_has_the_signature_the_runtime_calls() -> None:
 def test_a_chat_client_other_than_chat_openai_is_refused() -> None:
     with pytest.raises(TypeError, match="only its ChatOpenAI client"):
         send_through(object(), httpx.Client())
+
+
+# ----- c-Interact ----- #
+
+KNOWLEDGE = [
+    {"id": 0, "knowledge": "Whale Trade", "description": "A large trade.", "definition": "amount > 1000"},
+    {"id": 1, "knowledge": "Whale Day", "description": "A day with whale trades.", "definition": "count >= 3"},
+]
+INSTRUCTIONS = adk_prompts.C_INTERACT_INSTRUCTION.format(
+    db_name="crypto",
+    db_schema="CREATE TABLE trades (\n  id integer,\n  amount numeric\n);",
+    external_kg=json.dumps(KNOWLEDGE, indent=2),
+    max_turn=3,
+)
+QUESTION = "Which days had whale trades?\n\nShow the newest first."
+PHASE_1 = adk_prompts.PHASE_1_MESSAGE.format(amb_user_query=QUESTION, max_turn=3)
+FOLLOW_UP = adk_prompts.FOLLOW_UP_MESSAGE.format(follow_up_query="Now count them by month.")
+PASSED_WITH_FOLLOW_UP = (
+    adk_prompts.PHASE_1_PASSED_WITH_FOLLOW_UP.format(reward=0.7) + "\nReward: 0.7\nFollow-up question: Now count them."
+)
+FAILED = adk_prompts.PHASE_FAILED.format(phase=1, message=adk_prompts.WRONG_RESULT)
+TOOLS = [
+    {"type": "function", "name": "ask_user", "parameters": {}, "strict": False},
+    {"type": "function", "name": "submit_sql", "parameters": {}, "strict": False},
+]
+GRANT = DirectHTTPToolAccess(
+    name="bird_interact.direct_http",
+    required=True,
+    base_url="http://environment:9000/ng-rollout/rollout",
+    headers={"X-NeMo-Gym-Episode-Token": "token"},
+)
+
+
+class FakeInteractiveRuntime:
+    """Auto Ontology's interactive session calls, scripted: ``step`` makes ``model_call``, if any, and returns the next
+    action."""
+
+    def __init__(self, actions: list[Any], model_call: Optional[Callable[[], None]] = None) -> None:
+        self.actions = list(actions)
+        self.model_call = model_call
+        self.calls: list[tuple] = []
+
+    def create_session(self, **kwargs: Any) -> str:
+        self.calls.append(("create_session", kwargs))
+        return "session"
+
+    def step(self, session: str, *, turn: str, text: Optional[str]) -> Any:
+        self.calls.append(("step", turn, text))
+        if self.model_call is not None:
+            self.model_call()
+        return self.actions.pop(0) if len(self.actions) > 1 else self.actions[0]
+
+    def apply_user_answer(self, session: str, answer: str) -> None:
+        self.calls.append(("answer", answer))
+
+    def apply_submit_result(self, session: str, result: dict) -> None:
+        self.calls.append(("result", result))
+
+
+def _c_agent(**config: Any) -> AutoOntologyAgent:
+    return _agent(
+        fast_model_server=ModelServerRef(type="responses_api_models", name="auto_ontology_fast_model"),
+        fast_model="openai/fast",
+        **config,
+    )
+
+
+def _c_seed(**fields: Any) -> AgentSeedSessionRequest:
+    return _seed(
+        **{
+            "task_id": TaskId(taskset="bird_interact:c_interact", task_id="crypto_2"),
+            "agent_context": None,
+            "tool_accesses": [GRANT],
+            "continuation": {"observations": ["trajectory", "timing"]},
+            **fields,
+        }
+    )
+
+
+def _tool_server(monkeypatch: pytest.MonkeyPatch, replies: dict[str, list[Any]]) -> list[tuple[str, dict]]:
+    """Answer the agent's tool calls with ``replies`` (by tool name, in order); return the calls made."""
+    calls: list[tuple[str, dict]] = []
+
+    async def request(*, method: str, url: str, headers: dict, **kwargs: Any) -> MagicMock:
+        name = url.rsplit("/", 1)[-1]
+        assert (method, url) == ("POST", f"http://environment:9000/ng-rollout/rollout/{name}")
+        assert headers == {"X-NeMo-Gym-Episode-Token": "token"}
+        # Each call changes the episode, so the client must not send it again after it may have arrived.
+        assert kwargs["_resend_after_disconnect"] is False
+        calls.append((name, kwargs["json"]))
+        reply = replies[name].pop(0)
+        status, body = (reply, {"detail": "boom"}) if isinstance(reply, int) else (200, reply)
+        response = MagicMock(status=status, ok=status < 400, cookies={})
+        response.read = AsyncMock(return_value=json.dumps(body).encode())
+        response.content.read = AsyncMock(return_value=json.dumps(body).encode())
+        if status >= 400:
+            info = RequestInfo(url=URL(url), method=method, headers=CIMultiDictProxy(CIMultiDict()), real_url=URL(url))
+            response.raise_for_status.side_effect = ClientResponseError(info, (), status=status, message="boom")
+        return response
+
+    monkeypatch.setattr("responses_api_agents.auto_ontology_agent.app.http_request", request)
+    return calls
+
+
+def _turn(client: TestClient, activation: int, messages: list[dict], tools: Optional[list] = None) -> Any:
+    body: dict[str, Any] = {"input": messages}
+    if tools is not None:
+        body["tools"] = tools
+    return client.post(
+        "/ng-rollout/rollout/v1/responses", json=body, headers={AGENT_ACTIVATION_HEADER: str(activation)}
+    )
+
+
+def _first_turn() -> list[dict]:
+    return [{"role": "system", "content": INSTRUCTIONS}, {"role": "user", "content": PHASE_1}]
+
+
+class TestCInteractTexts:
+    def test_the_instruction_gives_the_database_schema_knowledge_and_budget(self) -> None:
+        context = c_interact.read_instructions(INSTRUCTIONS)
+
+        assert (context.database, context.question_budget, context.knowledge) == ("crypto", 3, KNOWLEDGE)
+        assert context.schema == "CREATE TABLE trades (\n  id integer,\n  amount numeric\n);"
+
+    def test_the_phase_1_message_gives_the_whole_question(self) -> None:
+        assert c_interact.read_question(PHASE_1) == QUESTION
+
+    @pytest.mark.parametrize(
+        ("message", "expected"),
+        [
+            (FOLLOW_UP, c_interact.NextTurn("follow_up", "Now count them by month.")),
+            (
+                adk_prompts.DEBUG_EXECUTION_ERROR_MESSAGE.format(error='column "amt" does not exist'),
+                c_interact.NextTurn("debug", 'column "amt" does not exist'),
+            ),
+            (adk_prompts.DEBUG_WRONG_RESULT_MESSAGE, c_interact.NextTurn("debug", None)),
+        ],
+    )
+    def test_a_later_message_names_its_turn(self, message: str, expected: c_interact.NextTurn) -> None:
+        assert c_interact.read_next_turn(message) == expected
+
+    @pytest.mark.parametrize(
+        "read", [c_interact.read_instructions, c_interact.read_question, c_interact.read_next_turn]
+    )
+    def test_an_unknown_text_is_a_protocol_error(self, read: Any) -> None:
+        with pytest.raises(c_interact.ProtocolError):
+            read("Please write SQL for me.")
+
+    def test_the_answer_loses_only_the_note_on_the_clarifications_left(self) -> None:
+        note = adk_prompts.CLARIFICATIONS_LEFT_NOTE.format(remaining=2, max_turn=3)
+
+        assert (
+            c_interact.user_answer("Only trades above 1000.\n\nIn USD." + note) == "Only trades above 1000.\n\nIn USD."
+        )
+
+    @pytest.mark.parametrize(
+        ("reply", "phase"),
+        [
+            (PASSED_WITH_FOLLOW_UP, 1),
+            (adk_prompts.PHASE_2_PASSED.format(reward=0.3) + "\nReward: 0.3", 2),
+            (FAILED, None),
+        ],
+    )
+    def test_a_submission_reply_gives_the_graders_message_and_phase(self, reply: str, phase: Optional[int]) -> None:
+        assert c_interact.submit_result(reply) == {"message": reply.split("\n")[0], "phase_completed": phase}
+
+    def test_the_knowledge_is_one_block_and_children_are_listed_by_name(self) -> None:
+        text, children = c_interact.format_knowledge(KNOWLEDGE, {1: [0, 7]})
+
+        assert text == (
+            "- Whale Trade\n  Description: A large trade.\n  Definition: amount > 1000\n"
+            "- Whale Day\n  Description: A day with whale trades.\n  Definition: count >= 3"
+        )
+        assert children == {"Whale Day": ["- Whale Trade\n  Description: A large trade.\n  Definition: amount > 1000"]}
+        assert c_interact.format_knowledge(KNOWLEDGE)[1] == {}
+
+    @pytest.mark.parametrize(
+        ("sql", "expected"),
+        [
+            ("SELECT t.id FROM crypto.public.trades AS t", "SELECT t.id FROM public.trades AS t"),
+            ("SELECT id FROM public.trades", "SELECT id FROM public.trades"),
+            ("SELEC id FORM", "SELEC id FORM"),
+        ],
+    )
+    def test_the_database_name_is_dropped_from_table_names(self, sql: str, expected: str) -> None:
+        assert c_interact.strip_catalog_qualifiers(sql) == expected
+
+
+class TestCInteractSeed:
+    @pytest.mark.parametrize(
+        ("fields", "reason"),
+        [
+            ({"tool_accesses": []}, "got 0"),
+            (
+                {
+                    "tool_accesses": [
+                        GRANT,
+                        MCPToolAccess(
+                            name="bird_interact",
+                            required=True,
+                            connection=MCPStreamableHTTPConnection(url="http://environment:9000/mcp"),
+                        ),
+                    ]
+                },
+                "direct HTTP only",
+            ),
+            ({"agent_context": AgentContext(values=TASK)}, "from its turns"),
+        ],
+    )
+    def test_a_seed_the_agent_cannot_serve_is_refused_for_good(self, fields: dict, reason: str) -> None:
+        assert reason in check_agent_seed_rejected(_c_agent().setup_webserver(), _c_seed(**fields))
+
+
+class TestCInteractSession:
+    def test_each_turn_runs_auto_ontology_until_it_submits_and_close_returns_the_trajectory(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        agent = _c_agent()
+        runtime = FakeInteractiveRuntime(
+            [AskUser("Above which amount?"), SubmitSQL("SELECT d FROM crypto.public.trades"), SubmitSQL("SELECT 2")]
+        )
+        agent._runtime = runtime
+        note = adk_prompts.CLARIFICATIONS_LEFT_NOTE.format(remaining=2, max_turn=3)
+        tool_calls = _tool_server(
+            monkeypatch,
+            {
+                "ask_user": ["Above 1000." + note],
+                "submit_sql": [PASSED_WITH_FOLLOW_UP, "Phase 2 correct! (Reward: 0.3)."],
+            },
+        )
+        client = TestClient(agent.setup_webserver())
+        seed = client.post("/v1/agent_sessions", json=_c_seed().model_dump(mode="json"))
+
+        first = _turn(client, 1, _first_turn(), TOOLS)
+        second = _turn(client, 2, [{"role": "user", "content": FOLLOW_UP}])
+        close = _close(client)
+
+        assert seed.status_code == first.status_code == second.status_code == close.status_code == 200
+        assert seed.json()["capabilities"]["observations"] == ["trajectory", "timing"]
+        created = runtime.calls[0][1]
+        assert (created["database"], created["question_budget"], created["knowledge_children"]) == ("crypto", 3, {})
+        assert created["knowledge"].startswith("- Whale Trade\n")
+        assert runtime.calls[1:] == [
+            ("step", "initial", QUESTION),
+            ("answer", "Above 1000."),
+            ("step", "initial", QUESTION),
+            ("result", {"message": PASSED_WITH_FOLLOW_UP.split("\n")[0], "phase_completed": 1}),
+            ("step", "follow_up", "Now count them by month."),
+            ("result", {"message": "Phase 2 correct! (Reward: 0.3).", "phase_completed": 2}),
+        ]
+        assert tool_calls == [
+            ("ask_user", {"question": "Above which amount?"}),
+            ("submit_sql", {"sql": "SELECT d FROM public.trades"}),
+            ("submit_sql", {"sql": "SELECT 2"}),
+        ]
+        output = first.json()["output"]
+        assert [(item["type"], item.get("name")) for item in output] == [
+            ("function_call", "ask_user"),
+            ("function_call_output", None),
+            ("function_call", "submit_sql"),
+            ("function_call_output", None),
+        ]
+        assert output[3]["output"] == PASSED_WITH_FOLLOW_UP
+        trajectory = TrajectoryRecord.model_validate(close.json()["trajectory"])
+        assert [(i.invocation_id, i.activation_id, i.status) for i in trajectory.invocations] == [
+            ("root", 1, "completed"),
+            ("activation-2", 2, "completed"),
+        ]
+        assert [(call.invocation_id, call.tool_name, call.status) for call in trajectory.tool_calls] == [
+            ("root", "ask_user", "completed"),
+            ("root", "submit_sql", "completed"),
+            ("activation-2", "submit_sql", "completed"),
+        ]
+        # The activations came on the rollout's route, and the turns made no model call without usage.
+        assert close.json()["agent_observations"]["gaps"] == []
+
+    @pytest.mark.parametrize(
+        ("message", "turn", "text"),
+        [
+            (adk_prompts.DEBUG_EXECUTION_ERROR_MESSAGE.format(error="syntax error"), "debug", "syntax error"),
+            (adk_prompts.DEBUG_WRONG_RESULT_MESSAGE, "debug", None),
+        ],
+    )
+    def test_a_debug_turn_gives_auto_ontology_the_error(
+        self, monkeypatch: pytest.MonkeyPatch, message: str, turn: str, text: Optional[str]
+    ) -> None:
+        agent = _c_agent()
+        agent._runtime = runtime = FakeInteractiveRuntime([SubmitSQL("SELECT 1")])
+        _tool_server(monkeypatch, {"submit_sql": [FAILED, FAILED]})
+        client = TestClient(agent.setup_webserver())
+        client.post("/v1/agent_sessions", json=_c_seed().model_dump(mode="json"))
+
+        _turn(client, 1, _first_turn(), TOOLS)
+        response = _turn(client, 2, [{"role": "user", "content": message}])
+
+        assert response.status_code == 200
+        assert runtime.calls[-2] == ("step", turn, text)
+        assert runtime.calls[-1] == ("result", {"message": FAILED, "phase_completed": None})
+
+    def test_a_turn_that_never_submits_stops_after_the_budget_and_its_margin(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        agent = _c_agent(step_margin=1)
+        agent._runtime = runtime = FakeInteractiveRuntime([AskUser("And?")])
+        tool_calls = _tool_server(monkeypatch, {"ask_user": ["No idea."] * 10})
+        client = TestClient(agent.setup_webserver())
+        client.post("/v1/agent_sessions", json=_c_seed().model_dump(mode="json"))
+
+        response = _turn(client, 1, _first_turn(), TOOLS)
+
+        # A budget of 3 questions, a margin of 1, and the step that would submit.
+        assert response.status_code == 200
+        assert [name for name, _ in tool_calls] == ["ask_user"] * 5
+        assert [call[0] for call in runtime.calls].count("step") == 5
+
+    def test_a_failed_tool_call_fails_the_turn_and_stays_in_the_trajectory(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        agent = _c_agent()
+        agent._runtime = FakeInteractiveRuntime([SubmitSQL("SELECT 1")])
+        _tool_server(monkeypatch, {"submit_sql": [500]})
+        client = TestClient(agent.setup_webserver(), raise_server_exceptions=False)
+        client.post("/v1/agent_sessions", json=_c_seed().model_dump(mode="json"))
+
+        response = _turn(client, 1, _first_turn(), TOOLS)
+        close = _close(client)
+
+        assert response.status_code == 500
+        trajectory = TrajectoryRecord.model_validate(close.json()["trajectory"])
+        assert [(i.status, i.error_type) for i in trajectory.invocations] == [("failed", "ClientResponseError")]
+        assert [(call.tool_name, call.status) for call in trajectory.tool_calls] == [("submit_sql", "failed")]
+
+    @pytest.mark.parametrize(
+        ("messages", "tools", "detail"),
+        [
+            (_first_turn(), [{"type": "function", "name": "submit", "parameters": {}, "strict": False}], "declare"),
+            (
+                [{"role": "system", "content": "Be helpful."}, {"role": "user", "content": PHASE_1}],
+                TOOLS,
+                "instruction",
+            ),
+        ],
+    )
+    def test_a_first_turn_that_is_not_c_interact_is_refused(
+        self, messages: list[dict], tools: list, detail: str
+    ) -> None:
+        agent = _c_agent()
+        agent._runtime = FakeInteractiveRuntime([SubmitSQL("SELECT 1")])
+        client = TestClient(agent.setup_webserver())
+        client.post("/v1/agent_sessions", json=_c_seed().model_dump(mode="json"))
+
+        response = _turn(client, 1, messages, tools)
+
+        assert response.status_code == 422 and detail in response.json()["detail"]
+
+    def test_the_children_of_knowledge_entries_are_read_only_when_configured(self, tmp_path: Any) -> None:
+        (tmp_path / "crypto").mkdir()
+        rows = [{"id": 0, "children_knowledge": -1}, {"id": 1, "children_knowledge": [0]}]
+        (tmp_path / "crypto" / "crypto_kb.jsonl").write_text("\n".join(json.dumps(row) for row in rows))
+
+        assert _c_agent()._children_of("crypto") is None
+        assert _c_agent(knowledge_children_dir=str(tmp_path))._children_of("crypto") == {1: [0]}
+
+
+async def test_c_interact_gets_the_fast_models_server_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = _c_agent()
+    monkeypatch.setattr(
+        AutoOntologyAgent, "resolve_model_base_url", lambda self, name, **kwargs: f"http://{name}:8000/v1"
+    )
+
+    environment = agent.runtime()._environment
+
+    assert (environment["NON_REASONING_ENDPOINT"], environment["NON_REASONING_MODEL"]) == (
+        "http://auto_ontology_fast_model:8000/v1",
+        "openai/fast",
+    )
+    # Each role's calls go to its own Model Server.
+    assert agent._model_transport._model_servers == {
+        ("policy_model", 8000): "policy_model",
+        ("auto_ontology_fast_model", 8000): "auto_ontology_fast_model",
+    }
+
+
+def test_auto_ontology_builds_every_chat_client_on_the_agents_http_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """At the pinned revision: the two attributes the agent sets exist, and a client Auto Ontology builds uses them."""
+    from auto_ontology.retrieval.interactive import coordinator
+    from auto_ontology.utils import llm_invoke
+
+    # send_model_calls_through replaces both; monkeypatch puts them back after the test.
+    monkeypatch.setattr(llm_invoke, "_build_client", llm_invoke._build_client)
+    monkeypatch.setattr(coordinator, "ThreadPoolExecutor", coordinator.ThreadPoolExecutor)
+    monkeypatch.setattr(llm_invoke, "_NON_REASONING_API_KEY", "gym-model-server")
+    monkeypatch.setattr(llm_invoke, "_NON_REASONING_BASE_URL", "http://policy_model:8000/v1")
+    monkeypatch.setattr(llm_invoke, "_NON_REASONING_MODEL_NAME", "openai/fast")
+    requests: list[httpx.Request] = []
+
+    def reply(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=CHAT_COMPLETION)
+
+    send_model_calls_through(
+        httpx.Client(transport=httpx.MockTransport(reply)), llm_invoke=llm_invoke, coordinator=coordinator
+    )
+    answer = llm_invoke.get_non_reasoning_llm_client().invoke("Merge the answer into the question.")
+
+    assert answer.content == "frpm"
+    assert [str(request.url) for request in requests] == [MODEL_URL]
+    assert json.loads(requests[0].content)["model"] == "openai/fast"
+    assert coordinator.ThreadPoolExecutor is ContextThreadPoolExecutor
+
+
+def test_the_interactive_mode_has_the_calls_the_runtime_makes() -> None:
+    """At the pinned revision: the interactive mode's names and parameters that ``AutoOntologyRuntime`` uses exist."""
+    import inspect
+
+    from auto_ontology.retrieval import interactive
+
+    assert {
+        "session_id",
+        "task_id",
+        "db_name",
+        "db_schema",
+        "external_kb",
+        "question",
+        "data_retriever",
+        "semantic_retriever",
+        "connectors",
+        "max_clarify_turns",
+        "external_kb_children_map",
+        "skip_evidence_refinement",
+        "numeric_type_alignment",
+    } <= set(inspect.signature(interactive.create_session).parameters)
+    assert {"turn_type", "initial_question", "follow_up_question", "debug_error"} <= set(
+        inspect.signature(interactive.step).parameters
+    )
+    assert {turn.value for turn in interactive.TurnType} >= {"initial", "follow_up", "debug"}
+    assert callable(interactive.apply_user_answer) and callable(interactive.apply_submit_result)
+    assert interactive.AskUserAction and interactive.SubmitSQLAction
