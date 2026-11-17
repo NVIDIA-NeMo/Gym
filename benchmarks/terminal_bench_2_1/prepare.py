@@ -4,6 +4,7 @@
 """Prepare source rows for the terminal_bench_2_1 benchmark."""
 
 import json
+import re
 import tomllib
 from glob import glob
 from pathlib import Path
@@ -13,17 +14,46 @@ from subprocess import run
 BENCHMARK_DIR = Path(__file__).parent
 OUTPUT_PATH = BENCHMARK_DIR / "data" / "benchmark.jsonl"
 NUM_TASKS = 89
+TASK_REPOSITORY = "https://github.com/harbor-framework/terminal-bench-2-1"
+_FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
 
 
-def prepare() -> Path:
+def _git(repo_path: Path, *args: str) -> str:
+    return run(["git", "-C", str(repo_path), *args], check=True, capture_output=True, text=True).stdout.strip()
+
+
+def _check_out(repo_path: Path, task_revision: str) -> None:
+    """Leave the task repository checked out at exactly ``task_revision``."""
+    # The verifier uploads every non-hidden file under a task's tests directory, so a change anywhere in the checkout,
+    # an untracked file, or an ignored file under tasks/*/tests/ counts. Ignored files elsewhere (bytecode caches from
+    # an earlier run) are not uploaded and do not. The flags also override a user's status.showUntrackedFiles setting.
+    if _git(repo_path, "status", "--porcelain", "--untracked-files=all") or _git(
+        repo_path, "status", "--porcelain", "--untracked-files=all", "--ignored", "--", "tasks/*/tests/*"
+    ):
+        # The checkout is never reset under a run.
+        raise ValueError(f"Task checkout {repo_path} is modified. Move it aside and retry; it will not be reset.")
+    if _git(repo_path, "rev-parse", "HEAD") == task_revision:
+        return
+    if run(["git", "-C", str(repo_path), "cat-file", "-e", f"{task_revision}^{{commit}}"]).returncode != 0:
+        _git(repo_path, "fetch", "--quiet", "origin", task_revision)
+    _git(repo_path, "checkout", "--quiet", "--detach", task_revision)
+
+
+def prepare(*, task_revision: str | None = None) -> Path:
+    """Write the benchmark rows from the task repository.
+
+    ``task_revision`` is the full commit of the task repository to check out. Without it the checkout is whatever
+    ``git clone`` or an existing ``terminal-bench-2-1`` directory provides, so two runs can read different tasks.
+    """
+    if task_revision is not None and not _FULL_COMMIT.fullmatch(task_revision):
+        raise ValueError(f"task_revision must be a full 40-character commit hash, got {task_revision!r}")
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     repo_path = BENCHMARK_DIR / "terminal-bench-2-1"
     if not repo_path.exists():
-        run(
-            "git clone https://github.com/harbor-framework/terminal-bench-2-1".split(),
-            cwd=str(BENCHMARK_DIR),
-        )
+        run(["git", "clone", TASK_REPOSITORY], cwd=str(BENCHMARK_DIR), check=True)
+    if task_revision is not None:
+        _check_out(repo_path, task_revision)
 
     num_samples = 0
     task_ids = set()
