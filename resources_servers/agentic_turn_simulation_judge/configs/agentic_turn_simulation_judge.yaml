@@ -1,0 +1,42 @@
+agentic_turn_simulation_judge_resources_server:
+  resources_servers:
+    agentic_turn_simulation_judge:
+      entrypoint: app.py
+      domain: rlhf
+      verified: false
+      description: The policy plays the agentic_turn_simulation judge. It reads the judge's exact prompt (rubrics, tools, recorded agent turn) and writes the JSON verdict; the reward is agreement of its correctness ladder with a reference label.
+      value: Train and measure agent-turn judging (did the agent do the right thing in its turn) against reference judge labels.
+      # strict: exactly one JSON object (one ```json fence allowed). lenient: the ATS judge parser without salvage.
+      parse_mode: strict
+      # Require every key of the evaluation schema and allowed enum values.
+      validate_schema: true
+      # hard: 1 if the ladder matches gold_ladder. soft: gold_p_yes for "yes", 1 - gold_p_yes for "no".
+      reward_mode: hard
+      # e.g. {weight: 0.2, fields: [blocked_by, request_questionable, discard]}; gated by the ladder.
+      field_bonus: null
+      # Score an analysis longer than this many words as "too_long" (null: off).
+      max_analysis_words: null
+
+agentic_turn_simulation_judge_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: agentic_turn_simulation_judge_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/agentic_turn_simulation_judge/data/example.jsonl
+      # Add train / validation datasets the same way, with the paths of your built row files.
+
+agentic_turn_simulation_judge_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: agentic_turn_simulation_judge_simple_agent
