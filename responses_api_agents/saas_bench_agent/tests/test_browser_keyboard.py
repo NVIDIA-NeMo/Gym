@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Real Chromium checks for focused input; run in the provisioned worker runtime."""
 
+import asyncio
 import json
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -146,3 +147,60 @@ async def test_stale_observation_and_invalid_chord_do_not_insert_text(browser):
     result = await function(server, "press_key")(key="x", observation_id=f"{tools.sequence:05d}", expected_url=urls[0])
     assert await tools.page.get_by_role("textbox", name="Normal").input_value() == "x"
     assert json.loads(result[0])["screenshot_available"]
+
+
+@pytest.mark.asyncio
+async def test_renderer_crash_records_trusted_fault_and_stops_actions(browser):
+    tools, server, urls = browser
+    await tools.observe()
+    client = await tools.context.new_cdp_session(tools.page)
+    # This is actual Chromium renderer termination, not a mocked error string.
+    with pytest.raises((browser_module.PlaywrightError, asyncio.TimeoutError)):
+        await asyncio.wait_for(client.send("Page.crash"), timeout=3)
+    for _ in range(50):
+        if tools.browser_fault:
+            break
+        await asyncio.sleep(0.02)
+    receipt = json.loads((tools.artifacts / "browser_fault.json").read_text())
+    assert receipt["kind"] == "renderer_crash"
+    assert receipt["observation_id"] == f"{tools.sequence:05d}"
+    assert "limits" in receipt and "shared_memory" in receipt
+    with pytest.raises(RuntimeError, match="fresh runtime retry"):
+        await function(server, "navigate")(url=urls[1])
+    assert len(tools.context.pages) == 1  # No replay or replacement tab.
+
+
+@pytest.mark.asyncio
+async def test_browser_disconnect_is_fault_but_clean_shutdown_is_not(browser):
+    tools, server, urls = browser
+    await tools.browser.close()  # Unexpected backend disappearance, not tools.close().
+    assert json.loads((tools.artifacts / "browser_fault.json").read_text())["kind"] == "browser_disconnected"
+    await tools.close()
+    assert tools.browser_fault["kind"] == "browser_disconnected"  # First cause retained.
+
+
+@pytest.mark.asyncio
+async def test_normal_tab_close_and_selector_errors_are_not_browser_faults(browser):
+    tools, server, urls = browser
+    await function(server, "navigate")(url=urls[1])
+    await function(server, "close_tab")()
+    with pytest.raises(ValueError):
+        await function(server, "interact")(action="click", selector='button "Target crashed"', expected_url=urls[0])
+    assert tools.browser_fault is None
+    await tools.close()
+    assert not (tools.artifacts / "browser_fault.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_target_creation_failure_is_classified_only_at_browser_api(browser, monkeypatch):
+    tools, server, urls = browser
+
+    async def fail_creation():
+        raise browser_module.PlaywrightError("BrowserContext.new_page: Target crashed")
+
+    monkeypatch.setattr(tools.context, "new_page", fail_creation)
+    with pytest.raises(browser_module.PlaywrightError, match="Target crashed"):
+        await function(server, "navigate")(url=urls[1])
+    receipt = json.loads((tools.artifacts / "browser_fault.json").read_text())
+    assert receipt["kind"] == "target_creation_crash"
+    assert len(tools.context.pages) == 1

@@ -22,6 +22,8 @@ from responses_api_agents.saas_bench_agent.runtime import BENCHMARK_ROOT
         "timeout_empty",
         "timeout_start",
         "setup_failure",
+        "browser_crash",
+        "crash_text_only",
     ],
 )
 def test_opencode_model_endings_grade_live_state(tmp_path, monkeypatch, ending):
@@ -57,6 +59,14 @@ def test_opencode_model_endings_grade_live_state(tmp_path, monkeypatch, ending):
     for name, module in [("loader", loader), ("slot", slots), ("verify_runner", verifier)]:
         monkeypatch.setitem(sys.modules, "saas_bench." + name, module)
     event = {"type": "error", "error": {"name": "ContextOverflowError"}}
+    if ending == "crash_text_only":
+        event = {
+            "type": "tool_use",
+            "part": {
+                "tool": "saas_browser_interact",
+                "state": {"status": "error", "error": "Invalid selector: Target crashed"},
+            },
+        }
     if ending == "output_token_limit":
         event = {"type": "step_finish", "part": {"reason": "length"}}
     if ending == "model_protocol_error":
@@ -79,9 +89,19 @@ def test_opencode_model_endings_grade_live_state(tmp_path, monkeypatch, ending):
             )
             + "time.sleep(30)\n"
             if ending.startswith("timeout")
-            else f"print({json.dumps(event)!r}, flush=True)\nsys.exit(1)\n"
+            else f"print({json.dumps(event)!r}, flush=True)\nsys.exit({0 if ending == 'crash_text_only' else 1})\n"
         )
     )
+    if ending == "browser_crash":
+        fault_path = tmp_path / "episode/browser/browser_fault.json"
+        executable.write_text(
+            f"#!{sys.executable}\nimport sys,time,json\nfrom pathlib import Path\n"
+            "if '--version' in sys.argv:\n print('1.17.11');sys.exit(0)\n"
+            "print(json.dumps({'type':'text','part':{'text':'I will inspect the app'}}),flush=True)\n"
+            f"p=Path({str(fault_path)!r});p.parent.mkdir(parents=True);"
+            "p.write_text(json.dumps({'kind':'renderer_crash'}))\n"
+            "time.sleep(30)\n"
+        )
     executable.chmod(0o700)
     monkeypatch.delenv("SAAS_NRT_ENROOT", raising=False)
     monkeypatch.chdir(tmp_path)
@@ -104,14 +124,21 @@ def test_opencode_model_endings_grade_live_state(tmp_path, monkeypatch, ending):
         }
     )
     slot.stop_apps.assert_called_once_with(["fixture"])
-    if ending in {"setup_failure", "timeout_empty", "timeout_start"}:
+    if ending in {"setup_failure", "timeout_empty", "timeout_start", "browser_crash"}:
         assert result["mask_sample"] is True and result["failure_kind"] == "saas_bench:infrastructure"
         verifier.run_verify.assert_not_called()
+        if ending == "browser_crash":
+            assert result["browser_fault"]["kind"] == "renderer_crash"
+            assert result["execution_health"]["termination"] == "browser_runtime_fault"
+            assert result["model_turn_observed"] is True
+            assert result["native_trajectory"]  # Evidence survives interruption.
     else:
         verifier.run_verify.assert_called_once()
         assert result["status"] == "completed" and result["mask_sample"] is False, result
         assert result["verify"]["score"] == 0.5  # Measured state is retained separately from policy zero.
         assert result["reward"] == 0.5
-        assert result["execution_health"]["termination"] == ending
+        assert result["execution_health"]["termination"] == (
+            "task_incomplete" if ending == "crash_text_only" else ending
+        )
         if ending == "timeout":
             assert result["failure_kind"] == "agent_timeout"

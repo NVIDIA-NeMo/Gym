@@ -226,3 +226,32 @@ an xterm command using Kimi, and saved/downloaded an OnlyOffice DOCX whose XML
 contained the inserted Unicode text. These are input capability checks, not a
 full benchmark evaluation. Start fresh pinned campaigns to compare the changed
 action space; existing frozen runs are unchanged.
+
+
+### Browser process faults
+
+OpenCode's browser MCP records Chromium renderer crashes, unexpected browser
+shutdown and target-creation crashes in `browser/browser_fault.json`. The episode
+owner watches this trusted runtime artifact, stops the CLI promptly, preserves
+native events and masks the attempt as an evaluation failure. The normal outer
+retry/continuation path must use a new rollout ID and fresh app/browser state.
+No mutating action is automatically replayed, and no browser session is silently
+reset mid-task. Ordinary selector errors, deliberate tab closure and orderly
+teardown do not trigger this path. Real model timeouts/context/output limits keep
+their existing live-state grading policy.
+
+The crash receipt retains resource limits and available temporary/shared-memory
+storage for diagnosis. It does not establish the cause of historical crashes or
+guarantee they cannot recur. Historical scores are not rewritten by this change.
+
+
+Validation: 202 SaaS tests pass in the controller environment (the browser module
+requires the worker runtime); all eight real Chromium tests pass in that runtime.
+A Kimi API smoke on `media_012` completed nine browser actions before an external
+test driver deliberately killed its own renderer. The exact candidate worker
+persisted the crash receipt and returned a masked evaluation fault within 3.3
+seconds, without running verification; app cleanup completed. An independent
+receipt/source/outcome checker qualifies this result: the smoke driver's final
+bookkeeping assertion expected an in-process injection record and failed after
+external injection. These tests establish handling, not task success or prevention
+of the five historical Chromium failures.

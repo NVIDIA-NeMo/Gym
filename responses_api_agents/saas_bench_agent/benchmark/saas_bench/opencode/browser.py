@@ -10,6 +10,8 @@ import inspect
 import json
 import os
 import re
+import resource
+import time
 import sys
 from contextlib import asynccontextmanager
 from functools import wraps
@@ -19,7 +21,7 @@ from urllib.parse import urlsplit
 
 from mcp.server.fastmcp import FastMCP, Image
 from playwright.async_api import Error as PlaywrightError
-from playwright.async_api import async_playwright
+from playwright.async_api import Page, async_playwright
 
 
 def origin(url: str) -> str:
@@ -60,6 +62,8 @@ class BrowserTools:
         self.refresh_server = None
         self.refresh_tasks = set()
         self.redirect_guards = {}
+        self.closing = False
+        self.browser_fault = None
 
     def scope(self, frame_path: list[str] | None = None):
         """Select nested UI frames by selectors, without granting scripting access."""
@@ -130,12 +134,66 @@ class BrowserTools:
             raise ValueError("File must be inside the task working-files directory")
         return path
 
+    def record_browser_fault(self, kind: str) -> None:
+        """Persist a trusted runtime fault, without replaying a possible mutation.
+
+        This directory is outside the actor's working-file permissions. The
+        episode owner watches it and retries the whole row in a fresh runtime.
+        Do not infer a crash from arbitrary page content or selector errors.
+        """
+        if self.closing or self.browser_fault is not None:
+            return
+        report = {
+            "kind": kind,
+            "time": time.time(),
+            "observation_id": f"{self.sequence:05d}",
+            "open_pages": len(self.context.pages) if hasattr(self, "context") else 0,
+            "limits": {
+                name: list(resource.getrlimit(limit))
+                for name, limit in (
+                    ("open_files", resource.RLIMIT_NOFILE),
+                    ("processes", resource.RLIMIT_NPROC),
+                )
+            },
+        }
+        for name, path in (
+            ("shared_memory", "/dev/shm"),
+            ("temporary_storage", os.environ.get("TMPDIR", "/tmp")),
+        ):
+            try:
+                stats = os.statvfs(path)
+                report[name] = {
+                    "free_bytes": stats.f_bavail * stats.f_frsize,
+                    "free_inodes": stats.f_favail,
+                }
+            except OSError:
+                pass
+        self.browser_fault = report
+        temporary = self.artifacts / "browser_fault.tmp"
+        temporary.write_text(json.dumps(report, indent=2))
+        temporary.replace(self.artifacts / "browser_fault.json")
+
+    async def new_page(self) -> Page:
+        """Create a tab; a Chromium target crash is an evaluation fault."""
+        try:
+            return await self.context.new_page()
+        except PlaywrightError as exc:
+            # Chromium can fail to create the target before a Page object (and
+            # therefore its crash event) exists. Keep this match at that exact
+            # API boundary, never on model text or general tool errors.
+            if "Target crashed" in str(exc):
+                self.record_browser_fault("target_creation_crash")
+            raise
+
     async def start(self) -> None:
         self.playwright = await async_playwright().start()
         # The rootless publishers bind IPv4 loopback. Keep localhost browser
         # resolution on that same address even when the host also supplies ::1.
         self.browser = await self.playwright.chromium.launch(
             headless=True, args=["--host-resolver-rules=MAP localhost 127.0.0.1"]
+        )
+        self.browser.on(
+            "disconnected", lambda: self.record_browser_fault("browser_disconnected")
         )
         self.context = await self.browser.new_context(
             viewport=self.config.get("viewport", {"width": 1280, "height": 960}),
@@ -171,7 +229,7 @@ class BrowserTools:
 
         await self.context.route("**/*", guard)
         self.context.on("page", self._new_page)
-        self.page = await self.context.new_page()
+        self.page = await self.new_page()
         await self.redirect_guards[self.page]
         if self.config.get("refresh_socket"):
             path = Path(self.config["refresh_socket"])
@@ -230,6 +288,7 @@ class BrowserTools:
 
     def _new_page(self, page) -> None:
         self.page = page
+        page.on("crash", lambda: self.record_browser_fault("renderer_crash"))
         self.redirect_guards[page] = asyncio.create_task(self.guard_redirects(page))
         page.on("download", lambda download: self.on_download(page, download))
         page.on("dialog", lambda dialog: self.handle_dialog(page, dialog))
@@ -336,6 +395,7 @@ class BrowserTools:
             self.page = target
 
     async def close(self) -> None:
+        self.closing = True
         for task in self.redirect_guards.values():
             if not task.done():
                 task.cancel()
@@ -565,6 +625,10 @@ def create_server(config: dict, *, evidence_factory=None) -> FastMCP:
             async with tools.lock:
                 capture = None
                 try:
+                    if tools.browser_fault is not None:
+                        raise RuntimeError(
+                            "Browser runtime failed; episode requires a fresh runtime retry"
+                        )
                     if evidence is not None:
                         capture = await evidence.begin(fn, args, kwargs)
                         capture["execution_phase"] = "dispatch_validation"
@@ -628,7 +692,11 @@ def create_server(config: dict, *, evidence_factory=None) -> FastMCP:
                     # Keep the original exception/error semantics. Retain fresh
                     # screenshot evidence and include bounded state in the error.
                     detail = None
-                    if tools.page is not None and not tools.page.is_closed():
+                    if (
+                        tools.browser_fault is None
+                        and tools.page is not None
+                        and not tools.page.is_closed()
+                    ):
                         try:
                             observation = await tools.observe(timeout=2000)
                             state = json.loads(observation[0])
@@ -689,7 +757,7 @@ def create_server(config: dict, *, evidence_factory=None) -> FastMCP:
                 )
             )
         ):
-            tools.page = await tools.context.new_page()
+            tools.page = await tools.new_page()
         await tools.page.goto(url, wait_until="domcontentloaded")
         return await tools.observe()
 
@@ -1025,7 +1093,7 @@ def create_server(config: dict, *, evidence_factory=None) -> FastMCP:
             tools.page = (
                 tools.context.pages[-1]
                 if tools.context.pages
-                else await tools.context.new_page()
+                else await tools.new_page()
             )
         return await tools.observe()
 

@@ -296,6 +296,8 @@ def execute(config: dict) -> dict:
                 (output / "prompt.txt").write_text(instruction)
                 (output / "todo.md").write_text(todo)
                 (files / "todo.md").write_text(todo)
+                browser_fault_path = output / "browser/browser_fault.json"
+                fault_before_stop = False
                 with (
                     (output / "events.jsonl").open("w") as stdout,
                     (output / "opencode.stderr").open("w") as stderr,
@@ -322,12 +324,24 @@ def execute(config: dict) -> dict:
                         stderr=stderr,
                         start_new_session=True,
                     )
+                    deadline = time.monotonic() + config["agent_timeout"]
+                    timed_out = False
                     try:
-                        process.wait(timeout=config["agent_timeout"])
-                        timed_out = False
-                    except subprocess.TimeoutExpired:
-                        timed_out = True
+                        while process.poll() is None:
+                            if browser_fault_path.is_file():
+                                break
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                timed_out = True
+                                break
+                            try:
+                                process.wait(timeout=min(1.0, remaining))
+                            except subprocess.TimeoutExpired:
+                                pass
                     finally:
+                        # Teardown itself disconnects Chromium. Latch only a
+                        # fault observed before the owner's deliberate stop.
+                        fault_before_stop = browser_fault_path.is_file()
                         stop_process(process)
                 events, text = parse_events((output / "events.jsonl").read_text(errors="replace"))
                 from saas_bench.opencode.protocol import has_model_turn
@@ -350,6 +364,11 @@ def execute(config: dict) -> dict:
                     source_sha256=task["source_sha256"],
                     opencode_version=actual_version,
                 )
+                if fault_before_stop:
+                    result["browser_fault"] = json.loads(browser_fault_path.read_text())
+                    health.update(termination="browser_runtime_fault", execution_healthy=False)
+                    (output / "execution_health.json").write_text(json.dumps(health, indent=2))
+                    raise RuntimeError("Chromium runtime failed; retry this row with fresh apps/browser")
                 if timed_out and not model_turn:
                     raise RuntimeError("OpenCode timed out before any model turn; endpoint/runtime unavailable")
                 # A permission abort after real activity still has a verifiable app
