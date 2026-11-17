@@ -103,6 +103,11 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 # page of the store is read, and fewer pages are fewer requests and fewer chances for a concurrent change to
 # shift an item between two of them.
 SNAPSHOT_LIST_PAGE_SIZE = 200
+# The process that keeps a sandbox running when its spec names no entrypoint. The SDK's own default is
+# ``tail -f /dev/null``: OpenSandbox's bootstrap (PID 1) waits on that process and exits with its status, so a
+# task command that matches it (``pkill -9 -f tail``) ends the whole container with exit code 137. This loop
+# has no ``tail`` in its command line, and killing its ``sleep`` child only restarts it.
+DEFAULT_KEEPALIVE_ENTRYPOINT = ("sh", "-c", "while :; do sleep 2147483647; done")
 # The management API's error code for a snapshot it does not have.
 SNAPSHOT_NOT_FOUND_CODE = "SNAPSHOT::NOT_FOUND"
 # How much of a management API error body is kept in an error message.
@@ -2627,6 +2632,9 @@ class OpenSandboxProvider:
             kwargs["ready_timeout"] = timedelta(seconds=spec.ready_timeout_s)
         if spec.entrypoint is not None:
             kwargs["entrypoint"] = spec.entrypoint
+        elif options.snapshot_id is None:
+            # A snapshot restores its own entrypoint; any other sandbox would get the SDK's ``tail -f /dev/null``.
+            kwargs["entrypoint"] = list(DEFAULT_KEEPALIVE_ENTRYPOINT)
         if options.platform is not None:
             kwargs["platform"] = _to_platform_spec(options.platform)
         if options.network_policy is not None:

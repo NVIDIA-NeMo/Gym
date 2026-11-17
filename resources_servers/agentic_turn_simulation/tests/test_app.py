@@ -521,7 +521,7 @@ class TestSimulateWithLLM:
 
 class TestJudgeGrading:
     async def test_a_judged_row_records_its_judge_grading_and_is_not_graded_again(self) -> None:
-        from nemo_gym.orchestration.recovery import reverification_cause, saved_row_evidence
+        from nemo_gym.eval.recovery.grading import reverification_cause, saved_row_evidence
         from nemo_gym.server_runtime import verifier_observability
         from nemo_gym.trajectory import VerifierInvocation, grading_result_binding
 
@@ -558,12 +558,91 @@ class TestJudgeGrading:
         assert [operation.outcome for operation in invocation.grading_operations] == ["unknown"]
 
 
+def _decision_policy(kind: str, failure_class: str, action: str) -> dict:
+    """A policy that classifies ``kind`` as ``failure_class`` and selects ``action`` as the stage default."""
+    return {
+        "classification": {"by_stage": {"agent": {"by_failure_kind": {kind: failure_class}}}},
+        "by_stage": {"agent": {"default_action": action}},
+    }
+
+
+DECISIONS = [("evaluation", "retry"), ("evaluation", "fail"), ("model", "fail")]
+
+
+def test_a_policy_that_would_count_a_masked_row_as_zero_is_refused() -> None:
+    with pytest.raises(ValueError, match="supports only retry or fail"):
+        make_server(outcome_policy={"by_stage": {"agent": {"default_action": "count_as_zero"}}})
+
+
+def test_retry_for_a_kind_classified_as_the_model_is_refused() -> None:
+    # Recovery does not rerun a row attributed to the model, so the pairing would save a retry that never happens.
+    with pytest.raises(ValueError, match="cannot be retried at the agent stage while it is classified as"):
+        make_server(outcome_policy=_decision_policy(f"{SERVER}:time_cap", "model", "retry"))
+
+
+def test_an_action_override_for_an_undeclared_kind_is_refused() -> None:
+    # Only the kinds this server declares can be selected by name; a typo after the colon fails at load.
+    with pytest.raises(ValueError, match="Unregistered failure kinds"):
+        make_server(outcome_policy={"by_stage": {"agent": {"by_failure_kind": {f"{SERVER}:time_kap": "fail"}}}})
+
+
 class TestVerifyMasks:
+    @pytest.mark.parametrize("failure_class,action", DECISIONS)
+    async def test_the_saved_decision_follows_the_configured_policy(self, failure_class: str, action: str) -> None:
+        cases = [
+            (f"{SERVER}:time_cap", _verify_body(stop_reason="time_cap", steps="12")),
+            (
+                f"{SERVER}:simulator_failed",
+                _verify_body([_output_item("p1", simulator_failure("HTTP 503: busy")), _message_item("It failed.")]),
+            ),
+        ]
+        for kind, body in cases:
+            server = make_server(outcome_policy=_decision_policy(kind, failure_class, action))
+            out = await server.verify(req(), body)
+            # The observed kind and the originating stage do not depend on the action or its attribution.
+            assert out.failure_kind == kind and getattr(out, MASK_SAMPLE_FIELD) is True
+            assert (out.failure_outcome_action, out.failure_outcome_attribution) == (action, failure_class)
+            assert out.model_extra["_ng_failure_stage"] == "agent"
+
+    async def test_a_time_cap_row_follows_the_configured_class_rules(self) -> None:
+        # The kind is classified as the model's; the class rules select fail for it and retry for the evaluation.
+        server = make_server(
+            outcome_policy={
+                "classification": {"by_stage": {"agent": {"by_failure_kind": {f"{SERVER}:time_cap": "model"}}}},
+                "by_stage": {"agent": {"by_failure_class": {"model": "fail", "evaluation": "retry"}}},
+            }
+        )
+        out = await server.verify(req(), _verify_body(stop_reason="time_cap", steps="12"))
+        assert out.failure_kind == f"{SERVER}:time_cap"
+        assert (out.failure_outcome_action, out.failure_outcome_attribution) == ("fail", "model")
+
+    async def test_one_kind_can_select_fail_while_the_other_keeps_retry(self) -> None:
+        # Only the time cap's action changes; both kinds stay attributed to the evaluation.
+        server = make_server(
+            outcome_policy={"by_stage": {"agent": {"by_failure_kind": {f"{SERVER}:time_cap": "fail"}}}}
+        )
+        capped = await server.verify(req(), _verify_body(stop_reason="time_cap", steps="12"))
+        failed = await server.verify(
+            req(), _verify_body([_output_item("p1", simulator_failure("HTTP 503: busy")), _message_item("It failed.")])
+        )
+        assert (capped.failure_kind, capped.failure_outcome_action, capped.failure_outcome_attribution) == (
+            f"{SERVER}:time_cap",
+            "fail",
+            "evaluation",
+        )
+        assert (failed.failure_kind, failed.failure_outcome_action, failed.failure_outcome_attribution) == (
+            f"{SERVER}:simulator_failed",
+            "retry",
+            "evaluation",
+        )
+
     async def test_the_wall_clock_cap_is_masked(self) -> None:
         server = make_server()
         out = await server.verify(req(), _verify_body(stop_reason="time_cap", steps="12"))
         assert getattr(out, MASK_SAMPLE_FIELD) is True
         assert out.failure_kind == f"{SERVER}:time_cap" and "time_cap" in out.failure_reason
+        assert (out.failure_outcome_action, out.failure_outcome_attribution) == ("retry", "evaluation")
+        assert out.model_extra["_ng_failure_stage"] == "agent"
         assert (out.reward, out.stop_reason, out.steps) == (0.0, "time_cap", 12)
         assert out.correct is None and out.judge_verdicts == []
         server.server_client.post.assert_not_called()
@@ -700,6 +779,8 @@ class TestVerifyMasks:
         out = await server.verify(req(), _verify_body(items))
         assert getattr(out, MASK_SAMPLE_FIELD) is True
         assert out.failure_kind == f"{SERVER}:simulator_failed" and out.failure_reason == failed
+        assert (out.failure_outcome_action, out.failure_outcome_attribution) == ("retry", "evaluation")
+        assert out.model_extra["_ng_failure_stage"] == "agent"
         server.server_client.post.assert_not_called()
 
     async def test_a_tool_result_that_only_mentions_the_failure_phrase_is_judged(self) -> None:
