@@ -45,22 +45,22 @@ A server runs with its own source folder as its working directory. A relative pa
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `temp_dir` | `null`: `<system temp>/nemo_gym/<user id>/`, found by each process on its node | Where temporary folders go. Launchers set it, for example to a per-job folder on the node's local disk. A server may pass its own `temp_dir` to the helpers, and that wins. Made absolute at parse time without following symlinks, unlike `results_dir` and `cache_dir`, which are resolved: every node uses the path. An empty string is refused. |
+| `temp_dir` | `null`: `<system temp>/nemo_gym-<user id>/`, found by each process on its node | Where temporary folders go. Launchers set it, for example to a per-job folder on the node's local disk. A server may pass its own `temp_dir` to the helpers, and that wins. Made absolute at parse time without following symlinks, unlike `results_dir` and `cache_dir`, which are resolved: every node uses the path. An empty string is refused. |
 
-`<system temp>/nemo_gym/` is open to every user, like `/tmp` itself (mode 1777); each user's folder inside it is private (mode 700), and Gym refuses one that is a symlink or belongs to another user. When `nemo_gym/` itself is a symlink or has the wrong owner or mode, Gym uses `<system temp>/nemo_gym-<user id>/` instead and logs why. Each process that creates a temporary folder checks `temp_dir` on its own node and logs a warning when it is on a filesystem shared by many hosts (Lustre, NFS, GPFS, BeeGFS, Ceph, CIFS, WekaFS and others), where every small file loads the metadata servers that the whole cluster shares, or in memory (`tmpfs`), where it counts against the job's memory.
+The default folder is private to its user (mode 700); Gym refuses one that is a symlink, not a folder, or another user's, with an error that says to set `temp_dir`. A server's own `temp_dir`, passed to the helpers, must be absolute; `~` is expanded. Each process that creates a temporary folder checks `temp_dir` on its own node and logs a warning when it is on a filesystem shared by many hosts (Lustre, NFS, GPFS, BeeGFS, Ceph, CIFS, WekaFS and others), where every small file loads the metadata servers that the whole cluster shares, or in memory (`tmpfs`), where it counts against the job's memory.
 
 #### Helpers
 
 | Helper | Lifetime | Notes |
 |--------|----------|-------|
 | `request_temp_dir(name, *, temp_dir=None)` / `async_request_temp_dir(...)` | One request | A context manager; the folder is always removed when the block exits, also on errors and cancellation |
-| `session_temp_dir(name, *, temp_dir=None)` and `remove_temp_dir(path)` | One session | Keep the folder on the session; remove it after the session's in-flight requests finish, under the session's lock, and remove what remains when the server shuts down. `remove_temp_dir` returns whether the folder is gone and can be called again after a failure |
-| `process_temp_dir(name, *, temp_dir=None)` | The server process | The same folder for every call with the same `name`; removed when the process exits |
+| `session_temp_dir(name, *, temp_dir=None)` and `remove_temp_dir(path)` | One session | Keep the folder on the session; remove it after the session's in-flight requests finish, under the session's lock, and remove what remains when the server shuts down. `remove_temp_dir` returns whether the folder is gone and can be called again after a failure. It removes only a temporary folder this process created, and refuses any other path with a warning |
+| `process_temp_dir(name, *, temp_dir=None)` | The server process | The same folder for every call with the same `name` and `temp_dir`; removed when the process exits. A forked child gets its own |
 | `await save_dir(src, *, server_name, name, label=None, output_dir=None)` | Kept | Copies a finished folder once into `<results_dir>/<server name>/<name>/<rollout>/<UTC time>-[<label>-]<random>/`, or under the server's `output_dir`; returns that folder, or `None` |
 
 `name` says what a folder holds, such as `verification`. For a temporary folder it starts the folder's name; for `process_temp_dir` it picks the folder; for `save_dir` it groups kept files in the results.
 
-`save_dir` copies file contents only, in a worker thread, with a few copies at most running at once in a process. It never fails the request: a failed copy is logged and returns `None`, and it returns `None` without copying when the server's `output_dir` is relative, when no `results_dir` is set, and while the calling task is being cancelled. Call it in a `finally`, so a failed request's files are kept too:
+`save_dir` copies file contents, folders and symlinks; kept files get the user's usual permissions, not the temporary folder's private ones. Copies run on a few threads of their own, so a burst of them never holds up the server's other work. It never fails the request: a failed copy is logged, leaves nothing behind and returns `None`. It also returns `None` without copying when the server's `output_dir` is relative, when no `results_dir` is set, and while the calling task is being cancelled, so shutdown skips copies that have not started. Call it in a `finally`, so a failed request's files are kept too, and outside any `asyncio.timeout` block: inside one that has expired, the task counts as being cancelled and nothing is kept. For example:
 
 ```python
 kept = None
@@ -84,8 +84,8 @@ A temporary folder is private to its process: a server passes data to another pr
 | When | What removes a temporary folder |
 |------|---------------------------------|
 | The block exits, or `remove_temp_dir` is called | The helper |
-| The process exits normally, including a SIGTERM the server handles | An exit handler removes the process's own folder, run folders included. SIGKILL, an out-of-memory kill and `ray.kill` skip it |
-| The process was killed | The next Gym process on that node that uses the same `temp_dir` removes the folders of processes that are no longer running; on storage private to the node, folders from an earlier boot too. Best effort: only if such a process starts |
+| The process exits normally, including a SIGTERM the server handles | An exit handler removes the process's own folder and everything in it. SIGKILL, an out-of-memory kill and `ray.kill` skip it |
+| The process was killed | The next Gym process on that node that uses the same `temp_dir` removes the folders of its own user's processes on the same boot that are no longer running. Best effort: only if such a process starts |
 | The job ends | The launcher removes the job's own `temp_dir`. This is the real bound |
 
 Each process keeps its temporary folders in one folder of its own, `nemo-gym-<host boot>-<pid namespace>-<pid>`, so cleanup can tell a dead process's folder from a live one, also on a filesystem many hosts share.

@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.core.filesystems import filesystem_type, warn_if_unsuitable
+from nemo_gym.core.filesystems import _filesystem_type, warn_if_unsuitable
 
 
 MOUNTS = """\
@@ -37,24 +37,24 @@ def mountinfo(tmp_path: Path) -> Path:
 
 
 def test_the_deepest_mount_above_the_path_decides(mountinfo: Path) -> None:
-    assert filesystem_type("/lustre/project/temp", mountinfo=mountinfo) == "lustre"
-    assert filesystem_type("/raid/scratch/gym", mountinfo=mountinfo) == "xfs"
-    assert filesystem_type("/lustre/local copy/x", mountinfo=mountinfo) == "ext4"
-    assert filesystem_type("/home/user", mountinfo=mountinfo) == "ext4"
+    assert _filesystem_type("/lustre/project/temp", mountinfo=mountinfo) == "lustre"
+    assert _filesystem_type("/raid/scratch/gym", mountinfo=mountinfo) == "xfs"
+    assert _filesystem_type("/lustre/local copy/x", mountinfo=mountinfo) == "ext4"
+    assert _filesystem_type("/home/user", mountinfo=mountinfo) == "ext4"
     # A sibling whose name only starts with the mount point is not under it.
-    assert filesystem_type("/lustre2/x", mountinfo=mountinfo) == "ext4"
+    assert _filesystem_type("/lustre2/x", mountinfo=mountinfo) == "ext4"
 
 
 def test_no_mount_table_means_unknown(tmp_path: Path) -> None:
-    assert filesystem_type("/lustre/x", mountinfo=tmp_path / "missing") is None
+    assert _filesystem_type("/lustre/x", mountinfo=tmp_path / "missing") is None
 
 
 def test_warns_for_shared_and_memory_filesystems_only(mountinfo: Path, caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.WARNING):
-        assert warn_if_unsuitable("temp_dir", "/lustre/project/temp", mountinfo=mountinfo) == "lustre"
-        assert warn_if_unsuitable("temp_dir", "/tmp/gym", mountinfo=mountinfo) == "tmpfs"
-        assert warn_if_unsuitable("temp_dir", "/raid/scratch/gym", mountinfo=mountinfo) is None
-        assert warn_if_unsuitable("temp_dir", None, mountinfo=mountinfo) is None
+        warn_if_unsuitable("temp_dir", "/lustre/project/temp", mountinfo=mountinfo)
+        warn_if_unsuitable("temp_dir", "/tmp/gym", mountinfo=mountinfo)
+        warn_if_unsuitable("temp_dir", "/raid/scratch/gym", mountinfo=mountinfo)
+        warn_if_unsuitable("temp_dir", None, mountinfo=mountinfo)
 
     assert len(caplog.records) == 2
     assert "temp_dir is /lustre/project/temp, on a lustre filesystem shared by many hosts" in caplog.text
@@ -79,5 +79,28 @@ def test_the_deepest_mount_wins_whatever_the_line_order(tmp_path: Path) -> None:
         "22 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw\n"
     )
 
-    assert filesystem_type("/lustre/local/x", mountinfo=mountinfo) == "ext4"
-    assert filesystem_type("/lustre/x", mountinfo=mountinfo) == "lustre"
+    assert _filesystem_type("/lustre/local/x", mountinfo=mountinfo) == "ext4"
+    assert _filesystem_type("/lustre/x", mountinfo=mountinfo) == "lustre"
+
+
+def test_the_later_of_two_mounts_on_one_point_decides(tmp_path: Path) -> None:
+    mountinfo = tmp_path / "mountinfo"
+    # A mount over an existing mount point hides the earlier one; the kernel lists it later.
+    mountinfo.write_text(
+        "22 1 259:2 / / rw shared:1 - ext4 /dev/nvme0n1p2 rw\n"
+        "40 22 0:50 / /scratch rw shared:20 - lustre 10.0.0.1@o2ib:/fs rw\n"
+        "41 40 259:3 / /scratch rw shared:21 - xfs /dev/nvme1n1 rw\n"
+    )
+
+    assert _filesystem_type("/scratch/gym", mountinfo=mountinfo) == "xfs"
+
+
+def test_a_symlink_is_followed_to_its_filesystem(tmp_path: Path) -> None:
+    (tmp_path / "link").symlink_to("/lustre/project")
+    mountinfo = tmp_path / "mountinfo"
+    mountinfo.write_text(
+        "22 1 259:2 / / rw shared:1 - ext4 /dev/nvme0n1p2 rw\n"
+        "40 22 0:50 / /lustre rw shared:20 - lustre 10.0.0.1@o2ib:/fs rw\n"
+    )
+
+    assert _filesystem_type(tmp_path / "link" / "temp", mountinfo=mountinfo) == "lustre"

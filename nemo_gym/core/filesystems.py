@@ -26,16 +26,16 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Filesystems shared by many hosts, whose metadata servers every file create and delete loads.
-SHARED_FILESYSTEM_TYPES = frozenset(
+_SHARED_FILESYSTEM_TYPES = frozenset(
     {"lustre", "nfs", "nfs4", "gpfs", "beegfs", "ceph", "cifs", "smb3", "wekafs", "glusterfs", "panfs", "dvs"}
 )
 # Filesystems held in memory: what is written there counts against the job's memory, as /tmp can be in a container.
-MEMORY_FILESYSTEM_TYPES = frozenset({"tmpfs", "ramfs"})
-MOUNTINFO = Path("/proc/self/mountinfo")
+_MEMORY_FILESYSTEM_TYPES = frozenset({"tmpfs", "ramfs"})
+_MOUNTINFO = Path("/proc/self/mountinfo")
 _OCTAL_ESCAPE = re.compile(r"\\([0-7]{3})")
 
 
-def filesystem_type(path: str | Path, *, mountinfo: Path = MOUNTINFO) -> str | None:
+def _filesystem_type(path: str | Path, *, mountinfo: Path = _MOUNTINFO) -> str | None:
     """The type of the filesystem ``path`` is on, from the mount table, or ``None`` where there is none to read.
 
     ``path`` need not exist yet: its location is resolved as far as it goes, and the deepest mount above it wins.
@@ -64,16 +64,16 @@ def warn_if_unsuitable(
     path: str | Path | None,
     *,
     advice: str = "Point it at storage private to the host, such as the node's local disk.",
-    mountinfo: Path = MOUNTINFO,
-) -> str | None:
-    """Log a warning when ``setting`` points at a shared or memory-backed filesystem; return that type, else None.
+    mountinfo: Path = _MOUNTINFO,
+) -> None:
+    """Log a warning when ``setting`` points at a shared or memory-backed filesystem.
 
     The setting still applies: the warning says what holding many small files there costs.
     """
     if not path:
-        return None
-    found = filesystem_type(path, mountinfo=mountinfo)
-    if found in SHARED_FILESYSTEM_TYPES:
+        return
+    found = _filesystem_type(path, mountinfo=mountinfo)
+    if found in _SHARED_FILESYSTEM_TYPES:
         logger.warning(
             "%s is %s, on a %s filesystem shared by many hosts. It holds many small files, and each one loads "
             "the shared metadata servers that every job on the cluster depends on. %s",
@@ -82,8 +82,7 @@ def warn_if_unsuitable(
             found,
             advice,
         )
-        return found
-    if found in MEMORY_FILESYSTEM_TYPES:
+    elif found in _MEMORY_FILESYSTEM_TYPES:
         logger.warning(
             "%s is %s, on a %s filesystem held in memory. What it holds counts against the job's memory. "
             "Point it at the node's local disk.",
@@ -91,5 +90,3 @@ def warn_if_unsuitable(
             path,
             found,
         )
-        return found
-    return None

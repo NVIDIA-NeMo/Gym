@@ -138,7 +138,7 @@ UV_LOCK_TIMEOUT_KEY_NAME = "uv_lock_timeout_seconds"
 UV_VENV_DIR_KEY_NAME = "uv_venv_dir"
 RESULTS_DIR_KEY_NAME = "results_dir"
 CACHE_DIR_KEY_NAME = "cache_dir"
-# Where temporary folders go. Null means <system temp>/nemo_gym/<user id>/ on each node.
+# Where temporary folders go. Null means <system temp>/nemo_gym-<user id>/ on each node.
 TEMP_DIR_KEY_NAME = "temp_dir"
 INHERIT_FROM_KEY_NAME = "_inherit_from"
 COPY_KEY_NAME = "_copy"

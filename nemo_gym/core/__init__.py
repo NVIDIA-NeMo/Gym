@@ -169,6 +169,14 @@ if TYPE_CHECKING:
         NeMoGymSummary,
         accumulate_response_usage,
     )
+    from nemo_gym.core.runtime_files import (
+        async_request_temp_dir,
+        process_temp_dir,
+        remove_temp_dir,
+        request_temp_dir,
+        save_dir,
+        session_temp_dir,
+    )
     from nemo_gym.core.tool_output_images import TOOL_OUTPUT_IMAGES_KEY, ToolOutputImage, split_tool_output_images
     from nemo_gym.core.typed_exceptions import (
         NgFailureEvent,
@@ -324,6 +332,12 @@ _PUBLIC_API = {
     "split_tool_output_images": "tool_output_images",
     "validate_failure_kind": "failure_kinds",
     "verifier_invocation_context": "episode_context",
+    "async_request_temp_dir": "runtime_files",
+    "process_temp_dir": "runtime_files",
+    "remove_temp_dir": "runtime_files",
+    "request_temp_dir": "runtime_files",
+    "save_dir": "runtime_files",
+    "session_temp_dir": "runtime_files",
 }
 __getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)
 __all__ = sorted(_PUBLIC_API)

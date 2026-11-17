@@ -380,10 +380,17 @@ class TestGlobalConfig:
 
         assert get_global_config_dict()["temp_dir"] == str(tmp_path / "link" / "temp")
 
-    def test_empty_temp_dir_is_refused(self, monkeypatch: MonkeyPatch) -> None:
-        # An empty string would otherwise become the working directory: the source checkout.
+    def test_a_relative_temp_dir_is_made_absolute(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
-        self._mock_parse_environment(monkeypatch, DictConfig({"temp_dir": ""}))
+        self._mock_parse_environment(monkeypatch, DictConfig({"temp_dir": "gym-temp"}))
+
+        assert get_global_config_dict()["temp_dir"] == os.path.join(os.getcwd(), "gym-temp")
+
+    # An empty string would otherwise become the working directory: the source checkout.
+    @mark.parametrize("value", ["", 5])
+    def test_an_empty_or_non_string_temp_dir_is_refused(self, monkeypatch: MonkeyPatch, value: object) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        self._mock_parse_environment(monkeypatch, DictConfig({"temp_dir": value}))
 
         with raises(ConfigError, match="temp_dir must be a non-empty path string"):
             get_global_config_dict()
