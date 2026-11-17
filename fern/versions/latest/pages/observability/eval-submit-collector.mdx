@@ -80,6 +80,9 @@ agent, model and resources servers of a rollout. An explicit value in `driver.en
 After the driver exits, the script waits one scrape interval so the final counters are collected,
 signals the collector process (not its `srun`) on its node, waits for a clean shutdown, and exits with the
 driver's return code. Once the collector stops, its step appends the node-local jsonl to the job directory.
+With `node_local`, the job also stops the collector this way before the time limit, when Slurm's `USR1` stops the
+driver, so its files reach the job directory although the job ends `TIMEOUT`. Without it, a job at its time limit
+appends them only if the shutdown fits in Slurm's `KillWait`.
 
 With `vllm_traces: true`, each vLLM service whose API server runs on the collector's node is started
 with `--otlp-traces-endpoint http://localhost:4318/v1/traces`, `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf`

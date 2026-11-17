@@ -14,9 +14,11 @@
 # limitations under the License.
 
 import contextlib
+import getpass
 import io
 import os
 import re
+import shlex
 import signal
 import subprocess
 import tarfile
@@ -31,6 +33,7 @@ from nemo_gym.core.failure_kinds import DRIVER_NODE_LOCAL_RESTORE_FAILED
 from nemo_gym.orchestration.api import BenchmarkRunConfig, NodeLocalConfig, SlurmComputeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.executors.node_local import _RESTORE_SCRIPT, NODE_LOCAL_DIR_ENV, archive_wait_seconds
+from nemo_gym.orchestration.executors.otel import FINAL_SCRAPE_GRACE_SECONDS
 from nemo_gym.orchestration.executors.script_templates import NODE_LOCAL_ARCHIVE_DONE_MARKER_ENV
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
@@ -195,7 +198,7 @@ def test_a_multi_node_driver_on_node_0_is_handled_in_the_batch_shell():
     assert "trap _gym_nl_on_term TERM" in script
 
 
-@pytest.mark.parametrize("node_local", [True, {"restore": False}])
+@pytest.mark.parametrize("node_local", [True, {"restore": False, "stop_before_walltime_seconds": 0}])
 def test_the_script_is_valid_bash(node_local):
     result = subprocess.run(["bash", "-n"], input=_script(_config(node_local)), text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
@@ -203,20 +206,25 @@ def test_the_script_is_valid_bash(node_local):
 
 # --- the rendered job, run with fake Slurm commands -------------------------------------------------------------
 
-# The fake srun runs the driver on the host, so it points the driver at the mount's host side, as the container does.
+# The fake srun runs every step on the host, so it points the driver at the mount's host side, as the container does.
+# It logs the node each node-local step and collector stop names, which only the real srun could place there.
 _FAKE_SRUN = """\
+node=""
 for arg in "$@"; do
-    case "$arg" in --container-mounts=*)
-        IFS=, read -ra mounts <<< "${arg#--container-mounts=}"
-        for mount in "${mounts[@]}"; do
-            [[ "${mount#*:}" != "${NEMO_GYM_NODE_LOCAL_DIR:-}" ]] || export NEMO_GYM_NODE_LOCAL_DIR="${mount%%:*}"
-        done ;;
+    case "$arg" in
+        --container-mounts=*)
+            IFS=, read -ra mounts <<< "${arg#--container-mounts=}"
+            for mount in "${mounts[@]}"; do
+                [[ "${mount#*:}" != "${NEMO_GYM_NODE_LOCAL_DIR:-}" ]] || export NEMO_GYM_NODE_LOCAL_DIR="${mount%%:*}"
+            done ;;
+        --nodelist=*) node=${arg#--nodelist=} ;;
     esac
 done
 case "$*" in
     *logs/driver-*) %(driver)s ;;
-    # A node-local step on the driver's node: run it here, on the host.
-    *" _gym_node_local "*) while [[ "$1" == --* ]]; do shift; done; exec "$@" ;;
+    *" _gym_node_local "*) echo "node-local step on $node" >> "$FAKE_SRUN_LOG"; while [[ "$1" == --* ]]; do shift; done; exec "$@" ;;
+    *" pkill "*) echo "pkill on $node" >> "$FAKE_SRUN_LOG"; while [[ "$1" == --* ]]; do shift; done; exec "$@" ;;
+    *logs/otel_collector-*) while [[ "$1" == --* ]]; do shift; done; exec "$@" ;;
     *) %(service)s ;;
 esac
 """
@@ -234,6 +242,7 @@ def _start_job(
     off_batch: bool = False,
     env: dict[str, str] | None = None,
     services: dict | None = None,
+    otel: dict | None = None,
 ) -> subprocess.Popen:
     """Start the rendered job.sh in its own process group.
 
@@ -252,7 +261,11 @@ def _start_job(
     )
     node_local = {"base_dir": str(host), "archive_timeout_seconds": 5, **(node_local or {})}
     config = _config(
-        node_local, exports=exports, **({"services": services} if services is not None else {}), **placement
+        node_local,
+        exports=exports,
+        otel=otel,
+        **({"services": services} if services is not None else {}),
+        **placement,
     )
     bench = tmp_path / "run" / "b"
     bench.mkdir(parents=True, exist_ok=True)
@@ -275,6 +288,8 @@ def _start_job(
                 "PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin",
                 "SLURM_JOB_ID": job_id,
                 "COPYFILE_DISABLE": "1",
+                "USER": getpass.getuser(),
+                "FAKE_SRUN_LOG": str(tmp_path / "srun-steps.log"),
                 **(env or {}),
             },
             start_new_session=True,
@@ -699,6 +714,200 @@ def test_an_archive_that_overruns_its_bound_is_dropped_whole(tmp_path):
     assert "archiving the node-local dir failed" in (tmp_path / "job.out").read_text()
     assert list((tmp_path / "run" / "b" / "node-local").iterdir()) == []
     assert not (tmp_path / "host" / "gym-node-local-11").exists()
+
+
+# --- the stop before the time limit (stop_before_walltime_seconds) ------------------------------------------------
+
+
+def test_the_stop_window_must_cover_the_stop():
+    # 100 + the stopped driver's exit (60) + the collector's shutdown (20 + 120) + Slurm's slack (60) + a margin (30).
+    with pytest.raises(ValueError, match=r"at least archive_timeout_seconds \(100\) \+ .* = 390\."):
+        NodeLocalConfig(archive_timeout_seconds=100, stop_before_walltime_seconds=389)
+    assert NodeLocalConfig(archive_timeout_seconds=100, stop_before_walltime_seconds=390)
+    assert NodeLocalConfig(archive_timeout_seconds=100, stop_before_walltime_seconds=0)
+    assert NodeLocalConfig().stop_before_walltime_seconds == 420
+
+
+def test_slurm_signals_the_batch_shell_before_the_time_limit_unless_the_window_is_0():
+    directives = _script(_config(True)).split("\n\n")[0].splitlines()
+    assert "#SBATCH --signal=B:USR1@420" in directives
+    assert all(line.startswith(("#!", "#SBATCH ")) for line in directives)
+    script = _script(_config({"stop_before_walltime_seconds": 0}))
+    assert "--signal" not in script and "USR1" not in script
+
+
+def test_a_signal_of_its_own_in_extra_args_is_refused():
+    config = _config(True)
+    config.compute["cluster"].extra_args["signal"] = "B:TERM@60"
+    with pytest.raises(ValueError, match="extra_args sets `signal`"):
+        _script(config)
+    config.driver.benchmarks["b"].node_local = NodeLocalConfig(stop_before_walltime_seconds=0)
+    assert "#SBATCH --signal=B:TERM@60" in _script(config)
+
+
+def _wait_for_text(path: Path, text: str, timeout: float = 30) -> None:
+    deadline = time.monotonic() + timeout
+    while text not in path.read_text():
+        assert time.monotonic() < deadline, f"{text!r} never appeared in {path}"
+        time.sleep(0.1)
+
+
+def _fake_collector(tmp_path: Path) -> Path:
+    """Writes a line node-local at start and one more when TERM asks it to flush, then records where it wrote."""
+    fake = tmp_path / "otelcol-contrib"
+    fake.write_text(
+        "#!/bin/bash\n"
+        "# Re-run under the real collector's command line, which the job's pkill pattern matches.\n"
+        '[ -n "${FAKE_NAMED:-}" ] || FAKE_NAMED=1 exec -a "$0 $*" /bin/bash "$0" "$@"\n'
+        'echo start >> "$GYM_OTEL_LOCAL_DIR/traces.jsonl"\n'
+        f'echo "$GYM_OTEL_LOCAL_DIR" > {shlex.quote(str(tmp_path / "collector-dir"))}\n'
+        "trap 'echo flushed >> \"$GYM_OTEL_LOCAL_DIR/traces.jsonl\"; exit 0' TERM\n"
+        "while :; do sleep 0.05; done\n"
+    )
+    fake.chmod(0o755)
+    return fake
+
+
+# The collector's stop first waits one scrape interval; the test skips that wait only.
+_NO_SCRAPE_GRACE = f'[ "$1" != {FINAL_SCRAPE_GRACE_SECONDS} ] || exit 0; exec /bin/sleep "$@"'
+
+
+def _steps(tmp_path: Path) -> list[str]:
+    log = tmp_path / "srun-steps.log"
+    return log.read_text().splitlines() if log.exists() else []
+
+
+@pytest.mark.parametrize("off_batch", [False, True], ids=["batch_node", "off_batch_node"])
+def test_usr1_stops_the_driver_archives_stops_the_collector_and_waits_for_the_time_limit(tmp_path, off_batch):
+    bench = tmp_path / "run" / "b"
+    (bench / "otel").mkdir(parents=True)
+    (bench / "otel" / "traces.jsonl").write_text("earlier segment\n")
+    otel = {"enabled": True, "gym_telemetry": False, "remote_export": False, "binary": str(_fake_collector(tmp_path))}
+    driver = f"trap 'echo driver got TERM; exit 143' TERM; {_WRITE_EVIDENCE}; sleep 600 & wait"
+    process = _start_job(tmp_path, driver=driver, otel=otel, off_batch=off_batch, fakes={"sleep": _NO_SCRAPE_GRACE})
+    try:
+        _wait_for(tmp_path / "host" / "gym-node-local-11" / "ev" / "1.json")
+        _wait_for(tmp_path / "collector-dir")
+        os.kill(process.pid, signal.SIGUSR1)
+        _wait_for_text(tmp_path / "job.out", "Waiting for the time limit")
+        time.sleep(1)
+        # The job holds its allocation until the time limit, so it ends TIMEOUT.
+        assert process.poll() is None
+        output = (tmp_path / "job.out").read_text()
+        collector_dir = (tmp_path / "collector-dir").read_text().strip()
+        # The time limit: Slurm signals the whole job.
+        os.killpg(process.pid, signal.SIGTERM)
+        returncode = _finish(process, timeout=30)
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
+
+    assert "stopping the driver and archiving the node-local dir" in output
+    assert "driver got TERM" in output
+    assert output.count("Archived the node-local files") == 1
+    assert _archive(tmp_path) == {"ev/1.json": "row1\n"}
+    assert not (tmp_path / "host" / "gym-node-local-11").exists()
+    # The collector stopped cleanly and appended its node-local files, which lived under base_dir.
+    assert (bench / "otel" / "traces.jsonl").read_text() == "earlier segment\nstart\nflushed\n"
+    assert collector_dir.startswith(f"{tmp_path / 'host'}/gym-otel-11.")
+    assert not Path(collector_dir).exists()
+    assert "The job got TERM" not in (tmp_path / "job.out").read_text()
+    if off_batch:
+        # The batch shell is on node 0: the archive, the cleanup and the collector's stop ran on the driver's node.
+        assert returncode == -signal.SIGTERM
+        assert set(_steps(tmp_path)) == {"node-local step on n1", "pkill on n1"}
+    else:
+        assert returncode == 143
+        assert _steps(tmp_path) == []
+
+
+_SLOW_ARCHIVE = 'case "$*" in *-czf*) : > %s; sleep 3 ;; esac; exec /usr/bin/tar "$@"'
+
+
+@pytest.mark.parametrize("exports", [False, True], ids=["after_the_driver", "after_the_evaluation_succeeded"])
+def test_usr1_during_a_running_archive_neither_cuts_it_short_nor_archives_twice(tmp_path, exports):
+    started = tmp_path / "tar-started"
+    archive = tmp_path / "run" / "b" / "node-local" / "11.0.tar.gz"
+    # With exports, the watch archives once the evaluation has succeeded, and the exports run on after it.
+    driver = (
+        f"trap 'echo driver got TERM; exit 143' TERM; {_WRITE_EVIDENCE}; : > \"$GYM_EVAL_SUCCEEDED_MARKER\"; "
+        f"until [ -e {archive} ]; do sleep 0.1; done; echo exports done"
+        if exports
+        else _WRITE_EVIDENCE
+    )
+    process = _start_job(tmp_path, driver=driver, exports=exports, fakes={"tar": _SLOW_ARCHIVE % started})
+    try:
+        _wait_for(started)
+        os.kill(process.pid, signal.SIGUSR1)
+        returncode = _finish(process)
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
+
+    output = (tmp_path / "job.out").read_text()
+    # The driver was past its evaluation, so the job ends as it does.
+    assert returncode == 0, output
+    assert "USR1: the time limit is 420s away; the evaluation has succeeded or the driver has ended" in output
+    assert "driver got TERM" not in output and "Waiting for the time limit" not in output
+    assert ("exports done" in output) is exports
+    assert output.count("Archived the node-local files") == 1
+    assert "archiving the node-local dir failed" not in output
+    assert _archive(tmp_path) == {"ev/1.json": "row1\n"}
+
+
+def test_usr1_before_the_stop_is_set_up_still_stops_the_job_before_the_services(tmp_path):
+    # A short time limit: USR1 comes while the restore runs, before the batch shell can stop anything.
+    started = tmp_path / "restore-started"
+    _write_archive(tmp_path / "run" / "b" / "node-local" / "10.0.tar.gz", {"ev/0.json": "row0\n"})
+    slow_restore = f'case "$*" in *-xzf*) : > {started}; sleep 2 ;; esac; exec /usr/bin/tar "$@"'
+    process = _start_job(
+        tmp_path, driver=": > driver-ran", service=": > service-ran; exec sleep 600", fakes={"tar": slow_restore}
+    )
+    try:
+        _wait_for(started)
+        os.kill(process.pid, signal.SIGUSR1)
+        _wait_for_text(tmp_path / "job.out", "Waiting for the time limit")
+        time.sleep(1)
+        assert process.poll() is None
+        os.killpg(process.pid, signal.SIGTERM)
+        returncode = _finish(process, timeout=30)
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
+
+    output = (tmp_path / "job.out").read_text()
+    assert returncode == 143, output
+    assert "the driver has not started: it does not start" in output
+    assert not (tmp_path / "run" / "b" / "service-ran").exists()
+    assert not (tmp_path / "run" / "b" / "driver-ran").exists()
+    assert not (tmp_path / "host" / "gym-node-local-11").exists()
+    # The job leaves its (empty) archive, so a later restore does not report it as lost.
+    assert _archive_names(tmp_path) == ["10.0.tar.gz", "11.0.tar.gz"]
+    assert _archive(tmp_path) == {}
+
+
+def test_a_requeued_attempt_does_not_inherit_the_stop_of_the_attempt_before(tmp_path):
+    first = _start_job(tmp_path, driver=f"trap 'exit 143' TERM; {_WRITE_EVIDENCE}; sleep 600 & wait")
+    try:
+        _wait_for(tmp_path / "host" / "gym-node-local-11" / "ev" / "1.json")
+        os.kill(first.pid, signal.SIGUSR1)
+        _wait_for_text(tmp_path / "job.out", "Waiting for the time limit")
+        os.killpg(first.pid, signal.SIGTERM)
+        _finish(first, timeout=30)
+    finally:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(first.pid, signal.SIGKILL)
+
+    # Slurm requeues the job under the same id; a stop noted in its environment is not this attempt's.
+    driver = 'cat "$NEMO_GYM_NODE_LOCAL_DIR/ev/1.json" && sleep 6 && echo row2 > "$NEMO_GYM_NODE_LOCAL_DIR/ev/2.json"'
+    returncode = _finish(
+        _start_job(tmp_path, driver=driver, env={"SLURM_RESTART_COUNT": "1", "_gym_nl_stop_asked": "1"})
+    )
+
+    output = (tmp_path / "job.out").read_text()
+    assert returncode == 0, output
+    assert "USR1" not in output and "Waiting for the time limit" not in output
+    assert _archive(tmp_path, "11.1") == {"ev/2.json": "row2\n"}
 
 
 # --- the OTel collector's node directory -------------------------------------------------------------------------

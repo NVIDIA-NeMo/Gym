@@ -23,13 +23,18 @@ files the job added or changed are written to `<job dir>/node-local/<SLURM_JOB_I
 file, renamed into place once complete) and the directory is removed. With exports, the archive is written as soon as
 the evaluation has succeeded instead, and the exports wait for it, so an exporter of the job dir finds it. Each archive
 holds one job attempt's files, so none is ever removed, and a restore extracts them all in the order the jobs ran.
+
+A step at its time limit is killed too quickly to archive, and a step off the batch node cannot start then at all. So
+Slurm sends the batch shell USR1 `stop_before_walltime_seconds` before the time limit (`--signal=B:USR1@...`). The job
+stops the driver, archives, stops the OTel collector so it appends its files, removes the directory, and waits for the
+limit, so the job still ends TIMEOUT and the auto-resume chain reads it as it reads any segment.
 """
 
 import shlex
 from pathlib import Path
 
 from nemo_gym.core.failure_kinds import DRIVER_NODE_LOCAL_RESTORE_FAILED
-from nemo_gym.orchestration.api import NodeLocalConfig
+from nemo_gym.orchestration.api import NODE_LOCAL_STOP_WAIT_SECONDS, NodeLocalConfig
 from nemo_gym.orchestration.executors.resume_script import JOB_CHAIN_NAME
 from nemo_gym.orchestration.executors.script_templates import NODE_LOCAL_ARCHIVE_DONE_MARKER_ENV
 from nemo_gym.orchestration.jobs import EVAL_SUCCEEDED_FILENAME
@@ -158,8 +163,8 @@ trap _gym_nl_cleanup EXIT"""
 
 # Only where the batch shell runs on the driver's node: a step can no longer start once the job is ending.
 _TERM_TRAP = """\
-_gym_nl_on_term() {
-    trap '' TERM
+_gym_nl_on_term() {{
+    trap '' {ignored}
     if [[ -z "$_gym_nl_done" ]]; then
         echo "The job got TERM: archiving the node-local dir before Slurm kills the job."
         _gym_nl_archive
@@ -167,8 +172,50 @@ _gym_nl_on_term() {
     _gym_nl_cleanup
     trap - EXIT
     exit 143
-}
+}}
 trap _gym_nl_on_term TERM"""
+
+# Right after the #SBATCH lines: bash dies of a USR1 it has no trap for, so one that comes before the stop is set up
+# (a short time limit) is noted and acted on then.
+_EARLY_USR1_TRAP = """\
+_gym_nl_stop_asked=""
+trap '_gym_nl_stop_asked=1' USR1"""
+
+# Bash runs a trap only between commands; the watch loop sleeps 5 s at a time, and a running archive ends first.
+_STOP_TEMPLATE = """\
+# On Slurm's USR1, {stop}s before the time limit: stop the driver, archive, then wait for the limit (TIMEOUT).
+_gym_driver_pid=""
+_gym_nl_on_usr1() {{
+    trap '' USR1
+    local stopped="" _i
+    if [[ -z "$_gym_driver_pid" ]]; then
+        echo "USR1: the time limit is {stop}s away and the driver has not started: it does not start."
+        stopped=1
+    elif [[ -e "${{GYM_EVAL_SUCCEEDED_MARKER:-}}" ]] || ! kill -0 "$_gym_driver_pid" 2>/dev/null; then
+        echo "USR1: the time limit is {stop}s away; the evaluation has succeeded or the driver has ended, so it runs on."
+    else
+        echo "USR1: the time limit is {stop}s away: stopping the driver and archiving the node-local dir."
+        kill -TERM "$_gym_driver_pid" 2>/dev/null
+        for _i in $(seq 1 {stop_wait}); do kill -0 "$_gym_driver_pid" 2>/dev/null || break; sleep 1; done
+        stopped=1
+    fi
+    # Each is done once: a later call returns at once.
+    _gym_nl_archive{stop_collector}
+    # A driver that ended, or that is past its evaluation, keeps the job's status its own.
+    [[ -n "$stopped" ]] || return 0
+    _gym_nl_cleanup
+    trap - EXIT
+    echo "Waiting for the time limit: the job ends TIMEOUT, as a segment that ran to its limit does."
+    while :; do sleep 60 & wait $!; done
+}}
+trap _gym_nl_on_usr1 USR1
+[[ -z "$_gym_nl_stop_asked" ]] || _gym_nl_on_usr1"""
+
+# Around the driver's launch: its PID is known only once the launch returns, so a USR1 in between is noted, then acted on.
+LAUNCH_GUARD = (
+    "trap '_gym_nl_stop_asked=1' USR1",
+    'trap _gym_nl_on_usr1 USR1; [[ -z "$_gym_nl_stop_asked" ]] || _gym_nl_on_usr1',
+)
 
 # Watch-loop line: archive once the evaluation succeeded. It also keeps the driver in the background, so a TERM to
 # the batch shell runs its trap at once.
@@ -200,6 +247,21 @@ def archive_wait_seconds(config: NodeLocalConfig) -> int:
     return config.archive_timeout_seconds + ARCHIVE_WAIT_MARGIN_SECONDS
 
 
+def signal_directive(config: NodeLocalConfig) -> str | None:
+    """The `#SBATCH` line that has Slurm send USR1 before the time limit, or None when the job never stops early.
+
+    Slurm times it from the job's end time as it stands then, so a TimeLimit the resume prologue changes counts.
+    """
+    if not config.stop_before_walltime_seconds:
+        return None
+    return f"#SBATCH --signal=B:USR1@{config.stop_before_walltime_seconds}"
+
+
+def render_early_trap(config: NodeLocalConfig) -> str:
+    """Batch-script lines right after the `#SBATCH` lines; empty when the job never stops early."""
+    return _EARLY_USR1_TRAP if config.stop_before_walltime_seconds else ""
+
+
 def render_setup(
     config: NodeLocalConfig,
     remote_bench_dir: Path,
@@ -207,12 +269,14 @@ def render_setup(
     *,
     exports: bool,
     failure_file: str | None = None,
+    stop_collector: str = "",
 ) -> str:
     """Batch-script lines that run before the services: create (and restore) the dir and define the archive step.
 
     `driver_node_flags` are the driver step's own `srun` node flags; empty when the batch shell runs on its node.
     With `exports`, every archive step (also a failed one) then creates the marker the exports wait for.
     `failure_file`, a shell word, is where a failed restore leaves its failure kind for the chain's next segment.
+    `stop_collector` is the command that stops the OTel collector once, which the stop before the time limit runs.
     """
     on_driver_node = f"srun --overlap{driver_node_flags} " if driver_node_flags else ""
     blocks = [
@@ -237,7 +301,16 @@ def render_setup(
             f"rm -f -- {succeeded} {_archive_done_marker(remote_bench_dir)}"
         )
     if not driver_node_flags:
-        blocks.append(_TERM_TRAP)
+        # The job is ending: a USR1 then must not start the stop before the time limit.
+        blocks.append(_TERM_TRAP.format(ignored="TERM USR1" if config.stop_before_walltime_seconds else "TERM"))
+    if config.stop_before_walltime_seconds:
+        blocks.append(
+            _STOP_TEMPLATE.format(
+                stop=config.stop_before_walltime_seconds,
+                stop_wait=NODE_LOCAL_STOP_WAIT_SECONDS,
+                stop_collector=f"\n    {stop_collector}" if stop_collector else "",
+            )
+        )
     return "\n".join(blocks)
 
 

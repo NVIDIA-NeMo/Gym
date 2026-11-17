@@ -100,6 +100,8 @@ def vllm_traces_env(component: str, service_name: str) -> dict[str, str]:
 FINAL_SCRAPE_GRACE_SECONDS = 20
 # Covers the flush and the copy of the node-local jsonl into the job directory.
 SHUTDOWN_WAIT_SECONDS = 120
+# The longest the collector's shutdown after the driver takes.
+COLLECTOR_STOP_SECONDS = FINAL_SCRAPE_GRACE_SECONDS + SHUTDOWN_WAIT_SECONDS
 
 
 def scrape_targets(config: SubmitConfig) -> dict[str, int]:

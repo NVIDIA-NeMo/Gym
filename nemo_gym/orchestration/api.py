@@ -463,6 +463,13 @@ class ResumeConfig(_StrictModel):
 
 # A host path that is safe in a pyxis mount list (no comma or colon) and in an unquoted shell word.
 _NODE_LOCAL_BASE_DIR_RE = re.compile(r"/[A-Za-z0-9._/-]+")
+# The stop before the time limit (node_local.stop_before_walltime_seconds) spends at most this long on the stopped
+# driver's exit before it archives anyway.
+NODE_LOCAL_STOP_WAIT_SECONDS = 60
+# Slurm sends `--signal` only to about a minute's accuracy.
+SLURM_SIGNAL_SLACK_SECONDS = 60
+# For what the stop does between its bounded parts: the watch's 5 s poll, starting each step, the cleanup.
+NODE_LOCAL_STOP_MARGIN_SECONDS = 30
 
 
 class NodeLocalConfig(_StrictModel):
@@ -480,6 +487,9 @@ class NodeLocalConfig(_StrictModel):
     restore: bool = True
     # Bound on writing one archive.
     archive_timeout_seconds: int = Field(default=120, gt=0)
+    # Slurm signals the batch shell (USR1) this long before the time limit: the job stops the driver, archives, stops
+    # the OTel collector, and waits for the limit, so it still ends TIMEOUT. 0 never stops it early.
+    stop_before_walltime_seconds: int = Field(default=420, ge=0)
 
     @field_validator("base_dir")
     @classmethod
@@ -490,6 +500,28 @@ class NodeLocalConfig(_StrictModel):
                 f"node_local.base_dir must be an absolute path of letters, digits, '.', '_', '-' and '/', got {value!r}"
             )
         return value.rstrip("/") or "/"
+
+    @model_validator(mode="after")
+    def _validate_stop_window(self) -> "NodeLocalConfig":
+        # Imported here: the executors import this module.
+        from nemo_gym.orchestration.executors.otel import COLLECTOR_STOP_SECONDS
+
+        # The stop runs its bounded parts one after another: the driver's exit, the archive, the collector's shutdown.
+        parts = {
+            "archive_timeout_seconds": self.archive_timeout_seconds,
+            "the stopped driver's exit": NODE_LOCAL_STOP_WAIT_SECONDS,
+            "the collector's shutdown": COLLECTOR_STOP_SECONDS,
+            "Slurm's signal slack": SLURM_SIGNAL_SLACK_SECONDS,
+            "a margin": NODE_LOCAL_STOP_MARGIN_SECONDS,
+        }
+        needed = sum(parts.values())
+        if 0 < self.stop_before_walltime_seconds < needed:
+            terms = " + ".join(f"{name} ({seconds})" for name, seconds in parts.items())
+            raise ValueError(
+                f"node_local.stop_before_walltime_seconds ({self.stop_before_walltime_seconds}) is too short for the "
+                f"stop before the time limit: set it to 0 or at least {terms} = {needed}."
+            )
+        return self
 
 
 _COMMAND_AND_RUN = (
