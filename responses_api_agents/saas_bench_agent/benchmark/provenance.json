@@ -53,7 +53,7 @@
     },
     {
       "source_path": "saas_bench/verify_runner.py",
-      "vendored_sha256": "9b18a7b494cb588d298af89caa3d3b1f126ed53e3fa4a20dac53b614da1cbb91",
+      "vendored_sha256": "181d57fdfb90f0176479a315e4dd37eafea5e8cfb9a7cb31c8812b5846b5bda9",
       "license": "Apache-2.0",
       "source_url": "https://github.com/UniPat-AI/SaaS-Bench/blob/48c22deb18b98c0ed78f81e7f3be82bc162de2c8/saas_bench/verify_runner.py",
       "source_revision": "48c22deb18b98c0ed78f81e7f3be82bc162de2c8",
@@ -157,7 +157,7 @@
     },
     {
       "source_path": "saas_bench/opencode/core.py",
-      "vendored_sha256": "c951f983457b09d884c89a05cd78e8d3a37494acc73892cfc860ee330d76c059",
+      "vendored_sha256": "fa85776d7d2bc26bbbb197406bcd2f8970282a3dd39c24d1102fbc41e20f31e2",
       "license": "Apache-2.0",
       "origin": "nvidia-authored"
     },
@@ -187,7 +187,7 @@
     },
     {
       "source_path": "saas_bench/opencode/verifier.py",
-      "vendored_sha256": "c35a57fa0466978d2890f14923b91f09281c3737adc169d29b31c12ac7bf48fe",
+      "vendored_sha256": "4b5924036b4c6ed7fc356eff89c140e470016b48f8d20bfda2f359f20382c5a8",
       "license": "Apache-2.0",
       "origin": "nvidia-authored"
     },
@@ -199,7 +199,7 @@
     },
     {
       "source_path": "saas_bench/opencode/worker.py",
-      "vendored_sha256": "8107d225bda31c4d9125421b8625f16a94e20e5b0260d11109b16f24d4174e97",
+      "vendored_sha256": "6c870ef823dd2f08504c8a2f6f058ee02ebfc0fe0d9d52fb97dee79bad49a608",
       "license": "Apache-2.0",
       "origin": "nvidia-authored"
     },
@@ -405,6 +405,12 @@
     {
       "source_path": "scripts/nrt/load_images_from_tars.sh",
       "vendored_sha256": "e88824caa45d9a34481d7570524f5875099760c38869472a8c45a9dc3a198b97",
+      "license": "Apache-2.0",
+      "origin": "nvidia-authored"
+    },
+    {
+      "source_path": "saas_bench/scoring.py",
+      "vendored_sha256": "2e3c311ea2b2a389d696697e4a5b2149e9a66e79fcbc53438b0fbcfc8615f19a",
       "license": "Apache-2.0",
       "origin": "nvidia-authored"
     }

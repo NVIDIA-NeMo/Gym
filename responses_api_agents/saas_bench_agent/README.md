@@ -174,3 +174,20 @@ Both benchmark configs use Gym's shipped `legacy_agent` Environment Server, whic
 This is evaluation support for two harnesses. It does not implement interchangeable session harnesses or qualify multi-harness RL training. The follow-up in `benchmark/VENDORING.md` moves apps, browser tools and grading to a Resources Server under `single_agent_turn_legacy`, with stock `opencode_agent` and browser-use as the baseline. Protocol and browser-tool differences mean scores are not claimed equivalent across harnesses.
 
 Enroot app networks disable host-loopback access. Docker-compatible exec uses only host PATH and explicit `-e`/runtime flags; it does not pass judge keys or Gym configuration into app commands. Cancellation reaps detached Enroot app processes even during readiness startup. Deployment platform roots are explicit absolute paths, rather than a single cluster-specific hardcoded root.
+
+### Native scoring invariant
+
+Both harnesses publish `scoring_policy: native_weighted_final_state_v1`. A task's
+unchanged verifier checks and point weights determine the reward, including zero
+and partial credit. Model step/output/context limits do not replace a conclusive
+final-state grade. Conflicting outcome-policy overrides are rejected at startup.
+
+A grade requires exactly one complete SCORE summary whose points, check weights,
+pass flags and fraction agree. Missing, malformed or contradictory summaries,
+nonfinite/out-of-range scores, unavailable app readback and judge faults are
+unscorable evaluation results. Bounded verification retries read the same live
+app state before teardown; they never rerun the actor. Masked results are excluded
+from the mean, while valid zeros remain in the denominator. Response publication
+and aggregation validate the native grade independently of cached worker rewards.
+Existing result files remain immutable; historical corrections belong in a
+separate versioned score view with source hashes.

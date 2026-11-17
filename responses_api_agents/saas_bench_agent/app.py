@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import HTTPException
-from pydantic import Field, PrivateAttr
+from pydantic import Field, PrivateAttr, model_validator
 
 from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
@@ -102,6 +102,28 @@ class SaasBenchConfig(BaseResponsesAPIAgentConfig):
     agent_timeout: int = Field(default=3600, ge=1)
     episode_timeout: int = Field(default=7200, ge=1)
     inconclusive_verification_retries: int = Field(default=1, ge=0, le=3)
+
+    @model_validator(mode="after")
+    def validate_native_scoring_policy(self):
+        """SaaS model endings retain native credit; unavailable grading cannot be scored."""
+        for kind in set(_MODEL_ENDINGS.values()):
+            decision = choose_stage_outcome(
+                failure_kind=kind, http_status=None, stage="agent", config=self.outcome_policy
+            )
+            if decision.action != OutcomeAction.VERIFY:
+                raise ValueError("SaaS model endings require VERIFY to preserve native weighted scores")
+        setup = choose_stage_outcome(
+            failure_kind=AGENT_RUN_ERROR, http_status=None, stage="agent", config=self.outcome_policy
+        )
+        if setup.action in {OutcomeAction.COUNT_AS_ZERO, OutcomeAction.VERIFY}:
+            raise ValueError("SaaS runtime faults must stay unscorable, never COUNT_AS_ZERO/VERIFY")
+        for kind in (VERIFIER_ERROR, JUDGE_FAILED, JUDGE_UNPARSEABLE):
+            decision = choose_stage_outcome(
+                failure_kind=kind, http_status=None, stage="verification", config=self.outcome_policy
+            )
+            if decision.action in {OutcomeAction.COUNT_AS_ZERO, OutcomeAction.VERIFY}:
+                raise ValueError("Unavailable SaaS grading must stay unscorable, never COUNT_AS_ZERO/VERIFY")
+        return self
 
 
 class SaasBenchAgent(SimpleResponsesAPIAgent):
@@ -291,9 +313,9 @@ class SaasBenchAgent(SimpleResponsesAPIAgent):
     def _response(
         self, body: SaasBenchRunRequest, result: dict, response: NeMoGymResponse | None = None
     ) -> SaasBenchVerifyResponse:
-        from saas_bench.opencode.core import measured_score
         from saas_bench.opencode.observability import native_trajectory
         from saas_bench.opencode.protocol import has_model_turn
+        from saas_bench.opencode.verifier import native_verification_outcome
 
         native = result.get("native_trajectory", result.get("trajectory", []))
         model_turn = result.get("model_turn_observed") is True or has_model_turn(native)
@@ -302,8 +324,21 @@ class SaasBenchAgent(SimpleResponsesAPIAgent):
         decision = None
         # Judge/readback faults take precedence over the actor's ending: there
         # is no usable evaluation verdict, even when the actor also failed.
-        diagnostics = result.get("verifier_diagnostics") or {}
-        judge_faults = (result.get("verify") or {}).get("judge_failures") or diagnostics.get("judge_failures") or []
+        worker_diagnostics = result.get("verifier_diagnostics") or {}
+        outcome = native_verification_outcome(result.get("verify") or {})
+        has_verdict = result.get("verify") is not None or result.get("status") == "completed"
+        diagnostics = {
+            **worker_diagnostics,
+            **(outcome["verifier_diagnostics"] if has_verdict else {}),
+            "unavailable": bool(worker_diagnostics.get("unavailable")) or has_verdict and outcome["mask_sample"],
+        }
+        native_verify = result.get("verify")
+        native_verify = native_verify if isinstance(native_verify, dict) else {}
+        judge_faults = diagnostics.get("judge_failures") or []
+        if not isinstance(judge_faults, list) or any(
+            not isinstance(fault, dict) or "failure_kind" not in fault for fault in judge_faults
+        ):
+            judge_faults = []
         if judge_faults:
             kind = (
                 JUDGE_UNPARSEABLE
@@ -335,11 +370,9 @@ class SaasBenchAgent(SimpleResponsesAPIAgent):
                 failure_kind=kind, http_status=None, stage=stage, config=self.config.outcome_policy
             )
             masked = decision.action not in {OutcomeAction.COUNT_AS_ZERO, OutcomeAction.VERIFY}
-        reward = (
-            0.0
-            if masked or decision and decision.action == OutcomeAction.COUNT_AS_ZERO
-            else measured_score(result["verify"])
-        )
+        if not masked and outcome["mask_sample"]:
+            raise ValueError("Cannot publish an unmasked SaaS response without a valid native verifier grade")
+        reward = 0.0 if masked else outcome["reward"]
         response = response or actor_response(
             body, result, harness=self.config.harness, model_name=self.config.model_name
         )
@@ -348,6 +381,7 @@ class SaasBenchAgent(SimpleResponsesAPIAgent):
                 **body.model_dump(by_alias=True),
                 "response": response,
                 "reward": reward,
+                "scoring_policy": outcome["scoring_policy"],
                 "mask_sample": masked,
                 "failure_kind": kind,
                 "failure_outcome_action": decision.action if decision else None,
@@ -369,13 +403,15 @@ class SaasBenchAgent(SimpleResponsesAPIAgent):
                 "task_id": body.verifier_metadata["task_id"],
                 "category_id": body.verifier_metadata["category_id"],
                 "artifacts": result["artifacts"],
-                "verify_status": result.get("verify", {}).get("status", "ERROR"),
+                "verify_status": native_verify.get("status")
+                if isinstance(native_verify.get("status"), str)
+                else "ERROR",
                 "trajectory": native,
                 "native_trajectory": native,
                 "harness": self.config.harness,
                 "execution_health": result.get("execution_health", {}),
                 "harness_version": result.get("harness_version"),
-                "verifier_diagnostics": result.get("verifier_diagnostics", {}),
+                "verifier_diagnostics": diagnostics,
                 "ng_trajectory": native_trajectory(
                     native,
                     body.verifier_metadata["task_id"],
@@ -389,7 +425,23 @@ class SaasBenchAgent(SimpleResponsesAPIAgent):
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
         rows = body.verify_responses
-        valid = [r for r in rows if not r.get("mask_sample", False)]
+        from saas_bench.opencode.verifier import native_verification_outcome
+        from saas_bench.scoring import score_validation_errors
+
+        valid = [r for r in rows if r.get("mask_sample") is False]
+        for row in valid:
+            if row.get("verify_status") not in {"PASS", "FAIL"} or score_validation_errors(
+                {"score": row.get("reward")}
+            ):
+                raise ValueError("Unmasked SaaS aggregate rows require valid native grades")
+            verifier = (row.get("native_diagnostics") or {}).get("verifier")
+            if verifier is not None and (
+                not isinstance(verifier, dict)
+                or native_verification_outcome(verifier)["mask_sample"]
+                or verifier.get("status") != row["verify_status"]
+                or verifier.get("score") != row["reward"]
+            ):
+                raise ValueError("SaaS aggregate reward/status differs from its native verifier")
         metrics = {
             "saas_bench/num_scored": len(valid),
             "saas_bench/num_masked": len(rows) - len(valid),

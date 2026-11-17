@@ -79,6 +79,10 @@ def test_caught_judge_fault_is_not_a_task_failure(tmp_path, monkeypatch, client,
     from responses_api_agents.saas_bench_agent import verifier_transport
 
     root = Path(__file__).parents[1] / "benchmark"
+    import sys
+
+    monkeypatch.syspath_prepend(str(root))
+    monkeypatch.delitem(sys.modules, "saas_bench", raising=False)
     spec = importlib.util.spec_from_file_location("fault_test_runner", root / "saas_bench/verify_runner.py")
     runner = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(runner)

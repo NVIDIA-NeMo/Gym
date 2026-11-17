@@ -14,8 +14,8 @@ import sys
 import traceback
 from pathlib import Path
 
-from saas_bench.opencode.core import inventory, measured_score
-from saas_bench.opencode.verifier import probe_onlyoffice_api, verifier_diagnostics
+from saas_bench.opencode.core import inventory
+from saas_bench.opencode.verifier import VerifierUnavailable, native_verification_outcome, probe_onlyoffice_api
 from saas_bench.opencode.worker import claim_slot
 
 from responses_api_agents.saas_bench_agent.runtime import configure_cache
@@ -136,7 +136,10 @@ def execute(config: dict) -> dict:
                 slot.start_apps(sites, hostname=hostname)
                 ports = slot.get_port_map(sites)
                 if "onlyoffice" in ports:
-                    probe_onlyoffice_api(f"http://{hostname}:{ports['onlyoffice']}")
+                    readiness = probe_onlyoffice_api(f"http://{hostname}:{ports['onlyoffice']}")
+                    (output / "verifier_preflight.json").write_text(json.dumps(readiness, indent=2))
+                    if not readiness["available"]:
+                        raise VerifierUnavailable("OnlyOffice grading API is unavailable")
                 prompt, todo, inputs = build_prompt(
                     task, ports, hostname, tasks_root=str(root / config.get("tasks_dir", "tasks"))
                 )
@@ -195,14 +198,13 @@ def execute(config: dict) -> dict:
                     run_suffix="_r0",
                     inconclusive_verification_retries=config.get("inconclusive_verification_retries", 1),
                 )
-                diagnostics = verifier_diagnostics(verify)
+                outcome = native_verification_outcome(verify)
+                diagnostics = outcome["verifier_diagnostics"]
                 result.update(actor)
                 result.update(
                     native_trajectory=native,
                     verify=verify,
-                    verifier_diagnostics=diagnostics,
-                    reward=measured_score(verify) if not diagnostics["unavailable"] else 0.0,
-                    mask_sample=diagnostics["unavailable"],
+                    **outcome,
                     failure_kind="saas_bench:verifier"
                     if diagnostics["unavailable"]
                     else "saas_bench:model_ending"
@@ -231,7 +233,9 @@ def execute(config: dict) -> dict:
         result.update(
             status="error",
             mask_sample=True,
-            failure_kind="saas_bench:infrastructure",
+            failure_kind="saas_bench:verifier"
+            if isinstance(exc, VerifierUnavailable)
+            else "saas_bench:infrastructure",
             error=f"{type(exc).__name__}: {exc}",
         )
         (output / "worker-error.txt").write_text(traceback.format_exc())
