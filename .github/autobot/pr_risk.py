@@ -40,9 +40,11 @@ import argparse
 import ast
 import difflib
 import filecmp
+import io
 import os
 import re
 import sys
+import tokenize
 from collections.abc import Iterator
 from fnmatch import fnmatch
 from pathlib import Path
@@ -64,7 +66,7 @@ PROTECTED_ENTRY = re.compile(
 )
 YAML_NON_STRINGS = frozenset({"null", "true", "false", "yes", "no", "on", "off", ".inf", ".nan"})
 MAX_LISTED = 10
-EXPORT_TABLE = re.compile(r"^(?:_PUBLIC_API|_LAZY_EXPORTS)\b[^=\n]*=\s*(\{.*?\})", re.MULTILINE | re.DOTALL)
+EXPORT_TABLES = frozenset({"_PUBLIC_API", "_LAZY_EXPORTS"})
 
 
 def walk(root: Path) -> Iterator[str]:
@@ -142,21 +144,48 @@ def module_path(package: Path, submodule: str) -> Path:
     return init if init.is_file() else stem.with_suffix(".py")
 
 
-def public_surface(tree: Path) -> set[str]:
-    """Return each ``nemo_gym`` package initializer with an export table and every submodule that table lists.
+def export_tables(source: str) -> list[str]:
+    """Return the source of each dict literal assigned to a top-level ``_PUBLIC_API`` or ``_LAZY_EXPORTS``.
 
-    An export table is a package's ``_PUBLIC_API`` dict, or the root package's ``_LAZY_EXPORTS``. Only the dict literal
-    is read, so syntax elsewhere in the initializer that this interpreter cannot parse does not hide the package.
+    The tables are found by tokens rather than by parsing, so syntax elsewhere in the file that this interpreter cannot
+    parse does not hide them, and comments or strings can neither cut nor fake one.
     """
+    tables, table, depth, armed = [], [], 0, False
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(source).readline):
+            if depth:
+                if token.type not in (tokenize.COMMENT, tokenize.NL):
+                    table.append(token.string)
+                    depth += {"{": 1, "}": -1}.get(token.string, 0) if token.type == tokenize.OP else 0
+                    if not depth:
+                        tables.append(" ".join(table))
+            elif armed and token.type == tokenize.OP and token.string == "{":
+                table, depth, armed = ["{"], 1, False
+            elif token.type == tokenize.NEWLINE:
+                armed = False
+            elif token.type == tokenize.NAME and token.start[1] == 0:
+                armed = token.string in EXPORT_TABLES
+    except (tokenize.TokenError, SyntaxError):
+        pass
+    return tables
+
+
+def public_surface(tree: Path) -> set[str]:
+    """Return each ``nemo_gym`` package initializer with an export table and every in-tree submodule it lists."""
     paths = set()
     for init in (tree / "nemo_gym").rglob("__init__.py"):
-        for table in EXPORT_TABLE.findall(init.read_text(errors="replace")):
+        try:
+            tables = export_tables(init.read_text(errors="replace"))
+        except OSError:
+            continue
+        for table in tables:
             paths.add(init)
             try:
                 submodules = ast.literal_eval(table).values()
             except (ValueError, SyntaxError, AttributeError):
                 continue
-            paths.update(module_path(init.parent, value) for value in submodules if isinstance(value, str))
+            modules = [module_path(init.parent, value) for value in submodules if isinstance(value, str)]
+            paths.update(module for module in modules if module.resolve().is_relative_to(tree.resolve()))
     return {path.relative_to(tree).as_posix() for path in paths}
 
 
