@@ -24,12 +24,13 @@ never lower it. The tiers:
 
 - ``low``: only docs changed, or at most 100 changed lines with no public-surface or scoring impact.
 - ``mid``: 101 to 400 changed lines, or a scoring change, with no public-surface impact.
-- ``high``: any public-surface change, or more than 400 changed lines.
+- ``high``: any protected file or public-surface change, or more than 400 changed lines.
 
-Changed lines are added plus removed lines outside docs, lockfiles, JSONL data and binary files. The public surface is
-each name a ``nemo_gym`` package exports through ``_PUBLIC_API`` and that name's signature, plus the dependencies,
-entry points and Python requirement in the root ``pyproject.toml``. Scoring is the code that computes rewards:
-resources servers and the shared verification, verifiers and metrics packages, excluding their tests and data.
+Protected files are the path globs listed in ``protected_files.json`` next to this file, so the target branch's list
+applies; ``*`` also matches ``/``. Adding, modifying or deleting a matching path makes the change ``high``. Changed lines
+are added plus removed lines outside docs, lockfiles, JSONL data and binary files. The public surface is each name a
+``nemo_gym`` package exports through ``_PUBLIC_API`` and that name's signature. Scoring is the code that computes
+rewards: resources servers and the shared verification, verifiers and metrics packages, excluding their tests and data.
 
 Standard library only, so it runs on Python 3.12 or newer without the repository installed.
 """
@@ -38,9 +39,9 @@ import argparse
 import ast
 import difflib
 import filecmp
+import json
 import os
 import sys
-import tomllib
 from collections.abc import Iterator
 from fnmatch import fnmatch
 from functools import cache
@@ -54,7 +55,7 @@ DOC_PATTERNS = ("*.md", "*.mdx", "*.rst", "docs/*", "fern/*", "LICENSE", "*.png"
 UNCOUNTED_PATTERNS = ("*.lock", "*.jsonl")
 SCORING_PREFIXES = ("resources_servers/", "nemo_gym/verification/", "nemo_gym/verifiers/", "nemo_gym/metrics/")
 NON_SCORING_DIRS = frozenset({"tests", "data"})
-PACKAGING_KEYS = ("dependencies", "optional-dependencies", "scripts", "requires-python")
+PROTECTED_FILES = Path(__file__).with_name("protected_files.json")
 MAX_LISTED = 10
 
 
@@ -209,35 +210,29 @@ def public_api_changes(base: Path, head: Path, changed: list[str]) -> list[str]:
     return reasons
 
 
-def packaging(tree: Path) -> dict[str, object]:
-    """Return the user-facing packaging contract from the root ``pyproject.toml``."""
-    try:
-        project = tomllib.loads((tree / "pyproject.toml").read_text()).get("project", {})
-    except (OSError, tomllib.TOMLDecodeError):
-        return {}
-    return {key: project.get(key) for key in PACKAGING_KEYS}
+def protected_patterns(path: Path = PROTECTED_FILES) -> tuple[str, ...]:
+    """Return the protected path globs from ``path``, or none when the file is absent."""
+    if not path.is_file():
+        return ()
+    patterns = json.loads(path.read_text())
+    if not isinstance(patterns, list) or not all(isinstance(pattern, str) and pattern for pattern in patterns):
+        raise ValueError(f"{path} must be a JSON list of path globs")
+    return tuple(patterns)
 
 
-def packaging_changes(base: Path, head: Path, changed: list[str]) -> list[str]:
-    """Describe each changed packaging field of the root ``pyproject.toml``."""
-    if "pyproject.toml" not in changed:
-        return []
-    before, after = packaging(base), packaging(head)
-    return [f"pyproject.toml project.{key} changed" for key in PACKAGING_KEYS if before.get(key) != after.get(key)]
-
-
-def grade(base: Path, head: Path) -> tuple[str, list[str]]:
+def grade(base: Path, head: Path, protected: tuple[str, ...] = ()) -> tuple[str, list[str]]:
     """Return the tier of the change from ``base`` to ``head`` and the evidence behind it."""
     changed = changed_files(base, head)
+    hits = [f"protected: {path}" for path in changed if any(fnmatch(path, pattern) for pattern in protected)]
     code = [path for path in changed if not matches(path, DOC_PATTERNS)]
-    if not code:
+    if not code and not hits:
         return "low", [f"no changes outside docs ({len(changed)} doc files)"]
     lines = sum(changed_line_count(base, head, path) for path in code if not matches(path, UNCOUNTED_PATTERNS))
-    surface = public_api_changes(base, head, changed) + packaging_changes(base, head, changed)
+    surface = public_api_changes(base, head, changed)
     scoring = [path for path in code if is_scoring(path)]
-    evidence = [f"{lines} changed lines in {len(code)} non-doc files", *surface[:MAX_LISTED]]
+    evidence = [f"{lines} changed lines in {len(code)} non-doc files", *hits[:MAX_LISTED], *surface[:MAX_LISTED]]
     evidence += [f"scoring: {path}" for path in scoring[:MAX_LISTED]]
-    if surface or lines > MID_MAX_LINES:
+    if hits or surface or lines > MID_MAX_LINES:
         return "high", evidence
     if scoring or lines > LOW_MAX_LINES:
         return "mid", evidence
@@ -253,7 +248,7 @@ def main(argv: list[str] | None = None) -> int:
     for tree in (args.base, args.head):
         if not tree.is_dir():
             parser.error(f"{tree} is not a directory")
-    tier, evidence = grade(args.base.resolve(), args.head.resolve())
+    tier, evidence = grade(args.base.resolve(), args.head.resolve(), protected_patterns())
     print(tier)
     print("\n".join(evidence), file=sys.stderr)
     return 0

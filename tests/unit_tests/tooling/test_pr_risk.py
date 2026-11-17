@@ -51,10 +51,12 @@ def make_tree(root: Path, files: dict[str, str | bytes]) -> Path:
     return root
 
 
-def grade(tmp_path: Path, before: dict[str, str | bytes], after: dict[str, str | bytes]) -> tuple[str, list[str]]:
+def grade(
+    tmp_path: Path, before: dict[str, str | bytes], after: dict[str, str | bytes], protected: tuple[str, ...] = ()
+) -> tuple[str, list[str]]:
     base = make_tree(tmp_path / "base", {**API, **before})
     head = make_tree(tmp_path / "head", {**API, **after})
-    return pr_risk.grade(base, head)
+    return pr_risk.grade(base, head, protected)
 
 
 @pytest.mark.parametrize(
@@ -133,10 +135,6 @@ def test_scoring_tests_data_and_docs_stay_low(tmp_path: Path, path: str) -> None
             {"nemo_gym/core/helpers.py": "def helper(a: str, b: str = '') -> str:\n    return a\n"},
             "export changed: nemo_gym.core.helper",
         ),
-        (
-            {"pyproject.toml": API["pyproject.toml"].replace('["fastapi"]', '["fastapi", "httpx"]')},
-            "pyproject.toml project.dependencies changed",
-        ),
     ],
 )
 def test_public_surface_change_is_high_at_any_size(tmp_path: Path, after: dict[str, str], reason: str) -> None:
@@ -153,11 +151,51 @@ def test_private_and_body_changes_keep_the_public_surface(tmp_path: Path) -> Non
             "    def _twice(self, x: int) -> int:\n        return 2 * x\n"
         ),
         "nemo_gym/core/helpers.py": "def helper(a: str) -> str:\n    return a.strip()\n\n\ndef _unused() -> None:\n    pass\n",
-        "pyproject.toml": API["pyproject.toml"].replace("119", "120"),
     }
     tier, evidence = grade(tmp_path, {}, after)
     assert tier == "low"
-    assert not [reason for reason in evidence if reason.startswith(("export", "pyproject"))]
+    assert not [reason for reason in evidence if reason.startswith("export")]
+
+
+PROTECTED = ("pyproject.toml", "uv.lock", ".github/workflows/*", "SECURITY.md")
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "path"),
+    [
+        ({}, {"pyproject.toml": API["pyproject.toml"] + "# note\n"}, "pyproject.toml"),
+        ({"uv.lock": "a\n"}, {}, "uv.lock"),
+        ({}, {".github/workflows/ci/test.yml": "x\n"}, ".github/workflows/ci/test.yml"),
+        ({}, {"SECURITY.md": "x\n"}, "SECURITY.md"),
+    ],
+)
+def test_protected_file_change_is_high_at_any_size(
+    tmp_path: Path, before: dict[str, str], after: dict[str, str], path: str
+) -> None:
+    tier, evidence = grade(tmp_path, before, after, PROTECTED)
+    assert tier == "high"
+    assert f"protected: {path}" in evidence
+
+
+def test_protected_globs_match_the_whole_path(tmp_path: Path) -> None:
+    after = {"resources_servers/s/tests/pyproject.toml": "x\n", "scripts/uv.lock": "x\n"}
+    assert grade(tmp_path, {}, after, PROTECTED)[0] == "low"
+
+
+def test_protected_patterns_load_from_the_companion_file(tmp_path: Path) -> None:
+    assert pr_risk.protected_patterns(tmp_path / "missing.json") == ()
+    companion = tmp_path / "protected_files.json"
+    companion.write_text('["a.toml", "b/*"]')
+    assert pr_risk.protected_patterns(companion) == ("a.toml", "b/*")
+    for invalid in ('{"files": []}', '["a", 1]', '[""]'):
+        companion.write_text(invalid)
+        with pytest.raises(ValueError, match="JSON list of path globs"):
+            pr_risk.protected_patterns(companion)
+
+
+def test_repository_protects_packaging_files() -> None:
+    assert pr_risk.PROTECTED_FILES == SCRIPT.with_name("protected_files.json")
+    assert {"pyproject.toml", "uv.lock"} <= set(pr_risk.protected_patterns())
 
 
 def test_cli_prints_only_the_tier_on_stdout_and_ignores_the_worktree_git_file(tmp_path: Path) -> None:
