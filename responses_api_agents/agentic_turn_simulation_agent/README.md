@@ -57,6 +57,9 @@ metadata. A session seeded without such a grant is refused (422). On the depreca
   not, the budget shrinks to what fits (and never grows again). Retries are not steps. Shrinking needs the overflow
   error from the model server (`propagate_context_overflow_errors: true` on a `vllm_model` policy; with Gym's default,
   false, an overflow comes back as an empty cut-off reply). Any other model-server error fails the rollout.
+- **Trajectory.** An agent session's close returns the turn's trajectory as the agent recorded it, as `/run` returns
+  it, with each tool call's output. Gym would otherwise take a call's output from the conversation's
+  `function_call_output` items, which a Cline turn does not have (its results are in a user message).
 
 ## Token usage
 

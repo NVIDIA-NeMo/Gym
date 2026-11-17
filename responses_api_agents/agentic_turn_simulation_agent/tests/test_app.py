@@ -1024,7 +1024,8 @@ class TestAgentSessions:
         agent.server_client.post.assert_not_awaited()
 
     def test_an_environment_server_episode_through_the_endpoints(self) -> None:
-        agent, script = _agent(_model(_fc("bash", "c1")), _model(_msg("done")))
+        # Under the rollout's prefix, with observability on, as the agent_arena server calls it.
+        agent, script = _agent(_model(_fc("bash", "c1")), _model(_msg("done")), observability=True)
         grant = GrantScript()
         client = TestClient(agent.setup_webserver())
         seed = AgentSeedSessionRequest(
@@ -1035,7 +1036,9 @@ class TestAgentSessions:
         )
         assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
         with patch(f"{MOD}.http_request", new=AsyncMock(side_effect=grant.request)):
-            reply = client.post("/v1/responses", json=_session_body().model_dump(mode="json", exclude_none=True))
+            reply = client.post(
+                "/ng-rollout/0-0/v1/responses", json=_session_body().model_dump(mode="json", exclude_none=True)
+            )
         assert reply.status_code == 200 and reply.json()["metadata"]["stop_reason"] == "final_message"
         assert [c["url"] for c in grant.calls] == [f"{GRANT_URL}/bash"]
         assert script.harness_calls == [] and script.tool_calls == []
@@ -1046,6 +1049,40 @@ class TestAgentSessions:
             ),
         )
         assert close.status_code == 200 and close.json()["agent_session_id"] == "agent-session"
+        # The close carries the turn's trajectory, with each call's output.
+        assert [(c["tool_call_id"], c["output"]) for c in close.json()["trajectory"]["tool_calls"]] == [
+            ("c1", "result of c1")
+        ]
+
+    def test_a_cline_session_closes_with_each_calls_output(self) -> None:
+        # A Cline result is in a user message, not a function_call_output item, so only the agent's own trajectory
+        # holds it.
+        agent, _ = _agent(
+            _model(_msg("<read_file>\n<path>a.py</path>\n</read_file>")),
+            _model(_msg("<attempt_completion>\n<result>ok</result>\n</attempt_completion>")),
+            observability=True,
+        )
+        grant = GrantScript()
+        client = TestClient(agent.setup_webserver())
+        seed = AgentSeedSessionRequest(
+            agent_session_id="agent-session",
+            episode_id=EpisodeId(rollout_id="0-0", attempt=0),
+            task_id=TaskId(taskset="agent_arena", task_id="0"),
+            tool_accesses=[_grant()],
+        )
+        assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+        body = _session_body(CLINE_STOP_TOOLS, "cline_xml")
+        with patch(f"{MOD}.http_request", new=AsyncMock(side_effect=grant.request)):
+            reply = client.post("/ng-rollout/0-0/v1/responses", json=body.model_dump(mode="json", exclude_none=True))
+        assert reply.status_code == 200 and reply.json()["metadata"]["stop_reason"] == "attempt_completion"
+        close = client.post(
+            "/v1/agent_sessions/close",
+            json=AgentCloseSessionRequest(agent_session_id="agent-session", episode_id=seed.episode_id).model_dump(
+                mode="json"
+            ),
+        )
+        (call,) = close.json()["trajectory"]["tool_calls"]
+        assert (call["tool_name"], call["output"]) == ("read_file", f"result of {call['tool_call_id']}")
 
 
 class TestUnsupportedEpisodes:

@@ -36,7 +36,7 @@ import json
 import logging
 import re
 from asyncio import sleep
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from time import monotonic, perf_counter, time
 from typing import Any, NamedTuple, TypedDict
 
@@ -335,8 +335,19 @@ class _Episode:
     model_cookies: Any = None
 
 
+@dataclass
+class _TurnSessionState(SimpleAgentSessionState):
+    """simple_agent's session state, with the trajectory its turn recorded."""
+
+    trajectory: TrajectoryRecord | None = None
+
+
 class AgenticTurnSimulationAgent(SimpleAgent):
     config: AgenticTurnSimulationAgentConfig
+
+    def _new_session_state(self, body: AgentSeedSessionRequest) -> _TurnSessionState:
+        state = super()._new_session_state(body)
+        return _TurnSessionState(**{f.name: getattr(state, f.name) for f in fields(state)})
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> SimpleAgentSessionState:
         """simple_agent's session, refused (422) without a direct HTTP grant: the row's tools are reached only through
@@ -348,10 +359,23 @@ class AgenticTurnSimulationAgent(SimpleAgent):
             )
         return state
 
-    # simple_agent's close, unchanged: it returns the session's observations and the cookies the last tool reply set.
-    # Declared here because an agent that seeds sessions must also define their close (test_session_contract_repo).
+    async def _create_session_episode(
+        self, state: SimpleAgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming, **kwargs: Any
+    ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
+        reply = await super()._create_session_episode(state, body, **kwargs)
+        if isinstance(state, _TurnSessionState) and reply[1] is not None:
+            state.trajectory = reply[1]
+        return reply
+
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
-        return await super()._close_agent_session_state(state)
+        """simple_agent's close (the session's observations and the cookies the last tool reply set), plus the turn's
+        trajectory as this agent recorded it, as `/run` returns it. The observations keep no tool output, and a
+        rollout's trajectory takes each call's output from the conversation's `function_call_output` items, which a
+        Cline turn does not have: its results are in a user message. A session restored from a checkpoint has none
+        to return, and its trajectory is rebuilt from the observations as before."""
+        closed = await super()._close_agent_session_state(state)
+        trajectory = state.trajectory if isinstance(state, _TurnSessionState) else None
+        return closed if trajectory is None else closed.model_copy(update={"trajectory": trajectory})
 
     async def _create_episode(
         self,
