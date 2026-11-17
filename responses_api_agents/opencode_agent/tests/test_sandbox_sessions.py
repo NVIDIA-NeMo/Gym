@@ -42,7 +42,12 @@ from nemo_gym.core import (
 from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from nemo_gym.sandbox import SandboxHandle
 from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
-from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig, _sandbox_prepare_command
+from responses_api_agents.opencode_agent.app import (
+    OpenCodeAgent,
+    OpenCodeAgentConfig,
+    _sandbox_prepare_command,
+    _session_opencode_config_error,
+)
 from responses_api_agents.opencode_agent.legacy_app import OpenCodeLegacyAgent
 from responses_api_agents.opencode_agent.runtime import UNRESTRICTED_IMAGE_ATTACHMENT
 
@@ -1254,9 +1259,14 @@ def test_either_marker_identifies_a_compaction_summary(setup, marker):
         ({"compaction": {"reserved": 8000.5}}, "compaction.reserved must be a positive integer"),
         ({"compaction": {"reserved": "8000"}}, "compaction.reserved must be a positive integer"),
         ({"compaction": {"reserved": True}}, "compaction.reserved must be a positive integer"),
+        ({"compaction": {"buffer": 0}}, "compaction.buffer must be a positive integer"),
+        ({"compaction": {"buffer": True}}, "compaction.buffer must be a positive integer"),
         # The whole context window (32000 here) or more: OpenCode would compact after every call.
         ({"compaction": {"reserved": 32000}}, "compaction.reserved must be below context_window"),
         ({"compaction": {"reserved": 40000}}, "compaction.reserved must be below context_window"),
+        # OpenCode 2's name for the buffer, which OpenCode 1.17.11 does not read: the error names the setting to use.
+        ({"compaction": {"buffer": 8000}}, "set compaction.reserved instead"),
+        ({"compaction": {"reserved": 8000, "buffer": 8000}}, "set compaction.reserved instead"),
         ({"agent": {"plan": {"steps": 4}}}, "agent supports only build"),
         ({"agent": {"build": {"prompt": "other"}}}, "agent.build supports only steps"),
         ({"agent": {"build": {"steps": 0}}}, "agent.build.steps must be a positive integer"),
@@ -1271,6 +1281,13 @@ def test_seed_rejects_opencode_config_outside_the_session_allowlist(setup, openc
     assert response.status_code == 422
     assert detail in response.json()["detail"]
     sandbox.exec.assert_not_awaited()
+
+
+@pytest.mark.parametrize("name", ["reserved", "buffer"])
+def test_the_allowlist_takes_either_versions_name_for_the_compaction_buffer(name):
+    """The allowlist does not know the OpenCode version, so a preset can be checked without an agent; the seed then
+    refuses the name its version does not use."""
+    assert _session_opencode_config_error({"compaction": {"auto": True, name: 8000}}) is None
 
 
 def test_token_capture_routes_every_opencode_model_call_to_the_rollout(setup):

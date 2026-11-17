@@ -203,7 +203,8 @@ that cause. `context_window` and `max_output_tokens` are independent
 config settings; leave room for the prompt in the served model's context. Request-level overrides
 are not silently ignored.
 Session `opencode_config` permits only `permission`, `tools`, `attachment`, `compaction.auto`,
-`compaction.reserved` and `agent.build.steps`, preserving Gym capture.
+the compaction buffer (`compaction.reserved` on OpenCode 1, `compaction.buffer` on OpenCode 2) and
+`agent.build.steps`, preserving Gym capture.
 OpenCode turns a `tools` map into base permission rules and merges `permission` on top,
 so a later `permission` rule such as `"*": "allow"` re-enables tools that `tools`
 disabled. Set `tools: null` (or `{}`) to make `permission` the only rule source; the
@@ -211,11 +212,14 @@ adapter then omits `tools` and passes `permission` exactly as given.
 Setting `compaction.auto: false` keeps OpenCode from
 summarizing the session and continuing from the summary, in model calls that training cannot join
 to the scored call; a run that fills the context then ends with a context-limit error.
-`compaction.reserved` (a positive integer) is the token buffer OpenCode keeps below `context_window`:
+`compaction.reserved` (a positive integer) is the token buffer OpenCode 1 keeps below `context_window`:
 automatic compaction starts after a call whose tokens reach `context_window` minus this buffer. Unset,
 the buffer is the smaller of 20000 and `max_output_tokens`. It moves only that trigger;
 `compaction.prune`, which rewrites earlier tool output, stays refused. A session refuses a buffer of
 `context_window` or more, which would compact after every call.
+OpenCode 2 renamed the setting `compaction.buffer`, and OpenCode 1.17.11 does not read that name. A
+session refuses `compaction.reserved` on OpenCode 2 and `compaction.buffer` on OpenCode 1 with HTTP 422,
+and the error names the setting to use.
 `agent.build.steps` sets the step limit of the `build` agent, which the session runs, for each
 prompt. From the call at the limit on, OpenCode adds an assistant message to each request that
 asks for a text answer. It still offers the tools, so a model that keeps calling them runs past
@@ -530,8 +534,9 @@ handled in `opencode2/`:
   private server exits with the CLI.
 - **Configuration.** The adapter writes OpenCode 2's schema for the provider, model, plugins, MCP servers and image
   limits. The session's `opencode_config` keys keep their OpenCode 1 form, which OpenCode 2 migrates: `bash` rules
-  apply to its `shell` tool and `task` rules to `subagent`; `attachment` becomes `media`. OpenCode 2 assumes image
-  input for a model it does not know, so a text-only session declares `capabilities.input: ["text"]`.
+  apply to its `shell` tool and `task` rules to `subagent`; `attachment` becomes `media`. The compaction buffer is
+  the exception: set `compaction.buffer`; the seed refuses `compaction.reserved`. OpenCode 2 assumes image input for
+  a model it does not know, so a text-only session declares `capabilities.input: ["text"]`.
 - **Plugin.** OpenCode 2 loads plugins from directories through a new API, so `opencode2/plugin/index.js` replaces
   the three OpenCode 1 plugin files. It gives tool shells the task's HOME and XDG directories, applies request
   `temperature` and `top_p` to every model call (OpenCode 2 accepts per-agent sampling but does not apply it),

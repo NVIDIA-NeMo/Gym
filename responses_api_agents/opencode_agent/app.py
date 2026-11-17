@@ -343,11 +343,12 @@ def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | 
     - ``compaction.auto`` (a boolean). Automatic compaction summarizes the session and continues from the
       summary, in model calls that do not extend the scored call's prefix. With it off, a run that fills the
       context ends with OpenCode's context-overflow error, which the adapter reports as a context limit.
-    - ``compaction.reserved`` (a positive integer): the token buffer OpenCode keeps below ``context_window``.
-      Automatic compaction starts after a call whose tokens reach ``context_window`` minus this buffer; unset, the
-      buffer is the smaller of 20000 and ``max_output_tokens``. It moves only that trigger, and the seed refuses a
-      buffer of ``context_window`` or more, which would compact after every call. ``compaction.prune`` stays
-      refused: it rewrites earlier tool output, so later calls stop extending the earlier calls' prefix.
+    - ``compaction.reserved`` (OpenCode 1) or ``compaction.buffer`` (OpenCode 2), a positive integer: the token
+      buffer OpenCode keeps below ``context_window``. On OpenCode 1, automatic compaction starts after a call whose
+      tokens reach ``context_window`` minus this buffer; unset, the buffer is the smaller of 20000 and
+      ``max_output_tokens``. It moves only that trigger. The seed refuses the other version's name, and a buffer of
+      ``context_window`` or more, which would compact after every call. ``compaction.prune`` stays refused: it
+      rewrites earlier tool output, so later calls stop extending the earlier calls' prefix.
     - ``agent.build.steps`` (a positive integer): the step limit of OpenCode's ``build`` agent, which the session
       runs, for each prompt. From the call at the limit on, OpenCode adds an assistant message to each request that
       asks for a text answer. It still offers the tools, so a model that keeps calling them runs past the limit.
@@ -357,16 +358,17 @@ def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | 
     unsupported = sorted(opencode_config.keys() - {"permission", "tools", "attachment", "compaction", "agent"})
     if unsupported:
         return (
-            "supports permission, tools, attachment, compaction.auto, compaction.reserved and agent.build.steps "
-            f"only; unsupported: {unsupported}"
+            "supports permission, tools, attachment, compaction.auto, compaction.reserved (OpenCode 1), "
+            f"compaction.buffer (OpenCode 2) and agent.build.steps only; unsupported: {unsupported}"
         )
     compaction = opencode_config.get("compaction", {})
-    if not isinstance(compaction, Mapping) or compaction.keys() - {"auto", "reserved"}:
-        return "compaction supports only auto and reserved"
+    if not isinstance(compaction, Mapping) or compaction.keys() - {"auto", "reserved", "buffer"}:
+        return "compaction supports only auto and reserved (OpenCode 1), or auto and buffer (OpenCode 2)"
     if "auto" in compaction and not isinstance(compaction["auto"], bool):
         return "compaction.auto must be true or false"
-    if "reserved" in compaction and (type(compaction["reserved"]) is not int or compaction["reserved"] <= 0):
-        return "compaction.reserved must be a positive integer"
+    for key in ("reserved", "buffer"):
+        if key in compaction and (type(compaction[key]) is not int or compaction[key] <= 0):
+            return f"compaction.{key} must be a positive integer"
     agent = opencode_config.get("agent", {})
     if not isinstance(agent, Mapping) or agent.keys() - {"build"}:
         return "agent supports only build, the agent a session runs"
@@ -1098,10 +1100,21 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         config_error = _session_opencode_config_error(self.config.opencode_config)
         if config_error is not None:
             raise HTTPException(422, f"OpenCode sandbox config: {config_error}")
-        # The allowlist made a set compaction.reserved a positive integer. OpenCode compacts after a call that reaches
-        # context_window minus it, so a buffer of the whole window compacts after every call until the budget ends.
-        if self.config.opencode_config.get("compaction", {}).get("reserved", 0) >= self.config.context_window:
-            raise HTTPException(422, "OpenCode sandbox config: compaction.reserved must be below context_window")
+        compaction = self.config.opencode_config.get("compaction", {})
+        # OpenCode 1 names the compaction buffer `reserved` and OpenCode 2 `buffer`. Each version is given only its own
+        # name: OpenCode 1.17 drops a compaction key it does not know, so a run given `buffer` would compact at the
+        # default threshold without an error.
+        key, other = ("buffer", "reserved") if self._opencode2 else ("reserved", "buffer")
+        if other in compaction:
+            raise AgentSeedRejectedError(
+                f"OpenCode sandbox config: compaction.{other} is the OpenCode {1 if self._opencode2 else 2} name of "
+                f"the compaction buffer; OpenCode {self.config.opencode_version} reads compaction.{key}: set "
+                f"compaction.{key} instead"
+            )
+        # The allowlist made a set buffer a positive integer. OpenCode compacts once a call comes within the buffer of
+        # context_window, so a buffer of the whole window compacts after every call until the budget ends.
+        if compaction.get(key, 0) >= self.config.context_window:
+            raise HTTPException(422, f"OpenCode sandbox config: compaction.{key} must be below context_window")
         if self.config.env or self.config.extra_args or self.config.command != "opencode":
             raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")
         if not all(_is_sandbox_path(path) for path in self.config.plugins):
