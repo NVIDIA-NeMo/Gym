@@ -291,9 +291,11 @@ The judge request is the resources server's
 that the judge read no option.
 
 An agentic config turns the policy on the same way: its cohort declares
-`llm_extraction_v1`, and its resources server gets one line,
-`judge_model_server: {type: responses_api_models, name: video_mcqa_answer_judge}`,
-with the `video_mcqa_answer_judge` block above added to the config.
+`llm_extraction_v1`, and `<benchmark>_agentic_llm_extraction.yaml`, listed
+after `<benchmark>_agentic.yaml` in `config_paths`, gives its resources server
+`judge_model_server` and adds the `video_mcqa_answer_judge` block. That judge
+server listens on 127.0.0.1 only, because the lent sandbox may reach every port
+of the policy model server's host.
 
 ### Letter prompts
 

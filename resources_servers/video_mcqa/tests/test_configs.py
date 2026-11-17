@@ -87,3 +87,38 @@ def test_actual_composed_agentic_configs_resolve_and_validate(tmp_path, monkeypa
     )
     assert environment.agent_server.name == f"{name}_opencode" and environment.resources_server.name == name
     assert environment.max_concurrent_episodes == agent.concurrency
+
+
+@pytest.mark.parametrize("server_name", ["videomme_v1", "lvbench", "videomme_v2"])
+def test_agentic_llm_extraction_overlays_add_a_loopback_judge(tmp_path, monkeypatch, server_name) -> None:
+    monkeypatch.setenv("VIDEO_MCQA_SANDBOX_IMAGE", "registry.example/video-mcqa-sandbox:test")
+    configs = Path(__file__).parents[2] / server_name / "configs"
+    plain = OmegaConf.load(configs / f"{server_name}_agentic.yaml")
+    overlay = OmegaConf.load(configs / f"{server_name}_agentic_llm_extraction.yaml")
+    values = {
+        f"{server_name}_agentic_cohort_manifest": str(tmp_path / "cohort.json"),
+        f"{server_name}_agentic_video_roots": [str(tmp_path)],
+        "policy_model_name": "policy",
+        "judge_base_url": "https://judge.example.invalid/v1",
+        "judge_api_key": "placeholder",
+        "judge_model_name": "judge-model",
+    }
+    merged = OmegaConf.to_container(OmegaConf.merge(plain, overlay, OmegaConf.create(values)), resolve=True)
+    name = f"{server_name}_agentic"
+    config_type = VideoMMEV2ResourcesServerConfig if server_name == "videomme_v2" else VideoMCQAResourcesServerConfig
+    resource = config_type(name=name, port=8001, **merged[name]["resources_servers"][server_name])
+    assert resource.judge_model_server.name == "video_mcqa_answer_judge"
+    resource.check_answer_judge("llm_extraction_v1")
+    judge = merged["video_mcqa_answer_judge"]["responses_api_models"]["openai_model"]
+    # The lent sandbox may reach every port of the policy model's host; the judge stays off that address.
+    assert judge["host"] == "127.0.0.1" and judge["openai_model"] == "judge-model"
+    # The overlay changes only the resources server's judge fields: the agent, environment and sandbox are the plain
+    # agentic config's.
+    plain_values = OmegaConf.to_container(OmegaConf.merge(plain, OmegaConf.create(values)), resolve=True)
+    for key in (f"{name}_opencode", f"{name}_environment"):
+        assert merged[key] == plain_values[key]
+    added = {"judge_model_server", "judge_chat_completion_create_params"}
+    resources = merged[name]["resources_servers"][server_name]
+    assert {k: v for k, v in resources.items() if k not in added} == plain_values[name]["resources_servers"][
+        server_name
+    ]
