@@ -2974,6 +2974,101 @@ class TestModelServerPairing:
         assert "vllm_model" in resolved["policy_model"]["responses_api_models"]
 
 
+class TestIgnoredAgentTypeSelection:
+    """`--agent-type` must select an agent the composed config runs the run's tasks on."""
+
+    CODEX = DictConfig({"codex_agent": {"responses_api_agents": {"codex_agent": {"resources_server": None}}}})
+
+    @staticmethod
+    def _bound_agent(agent_type: str, resources_server: str) -> dict:
+        return {
+            "responses_api_agents": {
+                agent_type: {"resources_server": {"type": "resources_servers", "name": resources_server}}
+            }
+        }
+
+    def _flat_config(self, **extra) -> DictConfig:
+        """A benchmark split that runs on Codex, composed with a train split that runs on simple_agent."""
+        return DictConfig(
+            {
+                "bench_resources_server": {
+                    "resources_servers": {"bench": {"datasets": [{"name": "bench", "type": "benchmark"}]}}
+                },
+                "train_resources_server": {
+                    "resources_servers": {"train": {"datasets": [{"name": "train", "type": "train"}]}}
+                },
+                "bench_agent": self._bound_agent("codex_agent", "bench_resources_server"),
+                "train_agent": self._bound_agent("simple_agent", "train_resources_server"),
+                **extra,
+            }
+        )
+
+    def _taskset_config(self) -> DictConfig:
+        """A taskset routed to a single_agent_turn server that binds OpenCode, plus a loaded Codex instance."""
+        return DictConfig(
+            {
+                "environment_server_routes": {"pro:benchmark": "pro_episode"},
+                "pro_resources_server": {
+                    "resources_servers": {
+                        "pro": {
+                            "datasets": [
+                                {"name": "pro", "type": "benchmark", "taskset": "pro:benchmark"},
+                                # No route: data preparation reports it, not this check.
+                                {"name": "unrouted", "type": "benchmark", "taskset": "pro:unrouted"},
+                            ]
+                        }
+                    }
+                },
+                "pro_episode": {
+                    "environment_servers": {
+                        "single_agent_turn": {
+                            "resources_server": {"type": "resources_servers", "name": "pro_resources_server"},
+                            "agent_server": {"type": "responses_api_agents", "name": "pro_agent"},
+                        }
+                    }
+                },
+                "pro_agent": {"responses_api_agents": {"opencode_agent": {"resources_server": None}}},
+                **self.CODEX,
+            }
+        )
+
+    def _check(self, config: DictConfig, selected: DictConfig = CODEX) -> None:
+        parser = GlobalConfigDictParser()
+        parser._raise_on_ignored_agent_type(config, parser._agent_instances(selected))
+
+    def test_only_the_split_the_run_collects_is_checked(self) -> None:
+        self._check(self._flat_config(split="benchmark"))
+        with raises(AgentCompositionError) as error:
+            self._check(self._flat_config(split="train"))
+        assert "  - dataset 'train' of train_resources_server runs on train_agent (simple_agent)" in str(error.value)
+
+    def test_without_a_split_every_mismatched_dataset_is_listed(self) -> None:
+        with raises(AgentCompositionError) as error:
+            self._check(self._flat_config())
+        listing = [line for line in str(error.value).splitlines() if line.startswith("  - ")]
+        assert listing == ["  - dataset 'train' of train_resources_server runs on train_agent (simple_agent)"]
+
+    def test_taskset_mismatch_names_the_route_and_its_rebinding(self) -> None:
+        with raises(AgentCompositionError) as error:
+            self._check(self._taskset_config())
+        message = str(error.value)
+        assert message.startswith("--agent-type loaded codex_agent (codex_agent), but these tasks")
+        listing = [line for line in message.splitlines() if line.startswith("  - ")]
+        assert listing == [
+            "  - taskset 'pro:benchmark' of pro_resources_server routes to pro_episode, which runs pro_agent "
+            "(opencode_agent)"
+        ]
+        assert "  ++pro_episode.environment_servers.single_agent_turn.agent_server.name=codex_agent" in message
+
+    def test_rebinding_the_route_satisfies_the_selection(self) -> None:
+        config = self._taskset_config()
+        config.pro_episode.environment_servers.single_agent_turn.agent_server.name = "codex_agent"
+        self._check(config)
+
+    def test_a_config_that_declares_no_agent_selects_nothing_to_check(self) -> None:
+        self._check(self._taskset_config(), DictConfig({"overlay": {"timeout": 60}}))
+
+
 class TestComposeUnboundAgent:
     """Composition of a standalone agent config onto the environment's agent instances."""
 

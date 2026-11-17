@@ -24,28 +24,31 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from nemo_gym.orchestration.api import KubernetesComputeConfig, SlurmComputeConfig, SubmitConfig
-from nemo_gym.orchestration.executors.base import SchedulerRefusedError
-from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
-from nemo_gym.orchestration.executors.resume_script import fresh_restart_command
-from nemo_gym.orchestration.executors.slurm import SlurmExecutor, reader_token
-from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord, load_submission_record
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery.budgets import OperatorBudget
+from nemo_gym.eval.recovery.decision import (
     ACKNOWLEDGE_JUDGE_JOBS_FLAGS,
-    MLFLOW_NOT_REQUIRED_NOTE,
     RERUN_MASKED_FLAGS,
-    GateCriteria,
-    OperatorBudget,
     RecoveryAction,
     RecoveryDecision,
     RecoveryOutcome,
-    RecoveryOutcomePolicyConfig,
+)
+from nemo_gym.eval.recovery.gate import (
+    MLFLOW_NOT_REQUIRED_NOTE,
+    GateCriteria,
     gate_summary_from_collected,
     gate_task_summary,
     mlflow_tracking_required,
     tracking_export_due,
     with_operator_verdict,
 )
+from nemo_gym.eval.recovery.policy import RecoveryOutcomePolicyConfig
+from nemo_gym.orchestration.api import KubernetesComputeConfig, SlurmComputeConfig, SubmitConfig
+from nemo_gym.orchestration.executors.base import SchedulerRefusedError
+from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
+from nemo_gym.orchestration.executors.slurm import SlurmExecutor
+from nemo_gym.orchestration.executors.slurm.reader import reader_token
+from nemo_gym.orchestration.executors.slurm.resume_script import fresh_restart_command
+from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord, load_submission_record
 from nemo_gym.utils.decorators import experimental
 
 
@@ -434,10 +437,9 @@ def _recover(
         else None
     )
     # A walltime raise the partition cannot take is refused at once, before the slow evidence read.
-    plan_walltime = getattr(executor, "walltime_plan", None)
     walltime_plan = (
-        plan_walltime(record, benchmark, max_walltime)
-        if max_walltime is not None and not inspect_only and plan_walltime is not None
+        executor.walltime_plan(record, benchmark, max_walltime)
+        if max_walltime is not None and not inspect_only
         else None
     )
     if walltime_plan is not None and walltime_plan.get("refused"):
@@ -514,7 +516,7 @@ def _recover(
         return decision, collected, gate_task, mlflow
 
     # A run pinned at another commit is planned with the installed Gym's rules; its pin moves only when it must.
-    pinned = executor.gym_pin(record) if repin is None and hasattr(executor, "gym_pin") else None
+    pinned = executor.gym_pin(record) if repin is None else None
     installed = executor.installed_commit() if pinned is not None else None
     pin_plan: dict[str, Any] | None = None
     if (

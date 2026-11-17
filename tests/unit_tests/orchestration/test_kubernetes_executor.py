@@ -19,9 +19,9 @@ import subprocess
 import pytest
 
 from nemo_gym.orchestration.api import SubmitConfig
-from nemo_gym.orchestration.executors import kubernetes as kubernetes_module
 from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
-from nemo_gym.orchestration.executors.kubernetes_script import _dns_label, _scale_quantity, job_name
+from nemo_gym.orchestration.executors.kubernetes import executor as kubernetes_module
+from nemo_gym.orchestration.executors.kubernetes.script import _dns_label, _scale_quantity, job_name
 from nemo_gym.orchestration.jobs import SubmissionRecord
 
 
@@ -89,7 +89,7 @@ def test_scale_quantity_rejects_an_unparseable_value():
 
 
 def test_gpu_sidecar_gets_a_memory_request_scaled_by_gpu_count(tmp_path):
-    from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
+    from nemo_gym.orchestration.executors.kubernetes.script import build_job_manifest
 
     services = {
         "vllm_model": {
@@ -125,7 +125,7 @@ def test_gpu_sidecar_has_a_startup_probe_that_gates_the_driver(tmp_path):
     # readinessProbe alone does not delay when kubelet starts the next (driver) container for a
     # native sidecar -- only startupProbe does. Missing this means the driver runs before vLLM is
     # actually serving.
-    from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
+    from nemo_gym.orchestration.executors.kubernetes.script import build_job_manifest
 
     services = {
         "vllm_model": {
@@ -160,7 +160,7 @@ def test_gpu_sidecar_mounts_a_larger_dev_shm(tmp_path):
     # Kubernetes' default 64Mi /dev/shm is too small for vLLM's multiprocess engine at TP>1 or
     # number_of_instances>1 ("Insufficient space in /dev/shm ..."), observed for real against a
     # cluster.
-    from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
+    from nemo_gym.orchestration.executors.kubernetes.script import build_job_manifest
 
     services = {
         "vllm_model": {
@@ -289,7 +289,7 @@ def test_ray_serve_service_is_rejected(tmp_path):
 def test_multi_instance_uses_plain_data_parallel_flag(tmp_path):
     # All replicas run as local ranks in this one pod -- vLLM's plain single-node data-parallel
     # mode, no head/worker split, no second pod.
-    from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
+    from nemo_gym.orchestration.executors.kubernetes.script import build_job_manifest
 
     services = {
         "vllm_model": {
@@ -323,7 +323,7 @@ def test_multi_instance_uses_plain_data_parallel_flag(tmp_path):
 def test_multi_instance_sidecar_requests_gpus_for_all_replicas(tmp_path):
     # tensor_parallel_size=2 x number_of_instances=4 = 8 GPUs, not just tensor_parallel_size=2 --
     # all replicas share this one pod.
-    from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
+    from nemo_gym.orchestration.executors.kubernetes.script import build_job_manifest
 
     services = {
         "vllm_model": {
@@ -355,7 +355,7 @@ def test_multi_instance_sidecar_requests_gpus_for_all_replicas(tmp_path):
 
 
 def test_job_has_ttl_seconds_after_finished_by_default(tmp_path):
-    from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
+    from nemo_gym.orchestration.executors.kubernetes.script import build_job_manifest
 
     config = _submit_config(tmp_path, ["bench_a"])
     compute = next(iter(config.compute.values()))
@@ -378,7 +378,7 @@ def test_job_has_ttl_seconds_after_finished_by_default(tmp_path):
 
 
 def test_job_uses_configured_active_deadline_seconds(tmp_path):
-    from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
+    from nemo_gym.orchestration.executors.kubernetes.script import build_job_manifest
 
     config = _submit_config(
         tmp_path, ["bench_a"], compute_overrides={"active_deadline_seconds": 3600, "ttl_seconds_after_finished": 60}
@@ -422,7 +422,7 @@ def test_kubectl_timeout_is_recorded_as_that_benchmarks_error(tmp_path, monkeypa
 def test_benchmark_command_is_forwarded_to_the_driver(tmp_path):
     # A `command` benchmark replaces `gym eval run` with its own harness -- unlike the Slurm
     # executor, this was silently dropped, so the benchmark always ran `gym eval run` instead.
-    from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
+    from nemo_gym.orchestration.executors.kubernetes.script import build_job_manifest
 
     config = SubmitConfig.model_validate(
         {
@@ -461,7 +461,7 @@ def test_benchmark_command_gets_policy_and_bench_dir_env_vars(tmp_path, command)
     # driver.policy_model injects policy_base_url/model_name/api_key into benchmark.run *after*
     # construction (see SubmitConfig._resolve_and_validate_placements), so this works even for a
     # `command` benchmark -- it just reaches the policy via env vars instead of CLI args.
-    from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest
+    from nemo_gym.orchestration.executors.kubernetes.script import build_job_manifest
 
     config = SubmitConfig.model_validate(
         {

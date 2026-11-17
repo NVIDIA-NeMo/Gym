@@ -35,8 +35,8 @@ from pathlib import Path
 
 from nemo_gym.core.failure_kinds import DRIVER_NODE_LOCAL_RESTORE_FAILED
 from nemo_gym.orchestration.api import NODE_LOCAL_STOP_WAIT_SECONDS, NodeLocalConfig
-from nemo_gym.orchestration.executors.resume_script import JOB_CHAIN_NAME
 from nemo_gym.orchestration.executors.script_templates import NODE_LOCAL_ARCHIVE_DONE_MARKER_ENV
+from nemo_gym.orchestration.executors.slurm.resume_script import JOB_CHAIN_NAME
 from nemo_gym.orchestration.jobs import EVAL_SUCCEEDED_FILENAME
 
 
