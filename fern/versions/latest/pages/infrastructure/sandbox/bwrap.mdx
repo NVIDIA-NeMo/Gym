@@ -31,12 +31,16 @@ The provider README (`nemo_gym/sandbox/providers/bwrap/README.md`) has the full 
 
 | Operation | bwrap behavior |
 | --- | --- |
-| Create | Creates the sandbox directory (mode 0700) and runs `true` once as a readiness probe. |
+| Create | Creates the sandbox directory (mode 0700). With `probe_on_create` (the default), runs `true` once as a readiness probe. |
 | Exec | `bwrap <flags> -- /bin/bash -c <command>`, in `--chdir <cwd or workdir>`. The environment is whitelisted, and GPUs are hidden (`CUDA_VISIBLE_DEVICES=""`, `NVIDIA_VISIBLE_DEVICES=void`, fresh `/dev`). |
-| Timeout or cancel | SIGKILLs the bwrap process group, which tears down the command's whole pid namespace. Returns `error_type="timeout"`. |
+| Timeout | SIGKILLs the bwrap process group, which tears down the command's whole pid namespace. Returns `error_type="timeout"`. |
+| Cancel | The same kill, then re-raises `CancelledError`. |
+| Process proof | `AsyncSandbox.exec_processes_terminated()` is True only when no exec of the sandbox is queued, starting or running and every recorded bwrap process and namespace init is gone (`SupportsSandboxExecScopedProcesses`). |
 | Upload / download | Host-side file I/O. Paths may be under the workdir, `/tmp`, the home path or an extra mount. `..` and symlinks are refused. |
 | Status | `running` while the directory exists. |
-| Stop | Kills every recorded bwrap process of the sandbox, then deletes the directory. |
+| Stop | Refuses new execs, kills every recorded bwrap process of the sandbox, waits for this instance's execs that are about to spawn, then deletes the directory. |
+
+bwrap still reports setup failures through the compatibility classes (`SandboxCreateError`, error-valued exec results); it is listed under [Required provider migrations](./index#required-provider-migrations) for the failure-event contract.
 
 Processes never outlive their exec, so there are no background services, endpoints or PTYs. `user`, `entrypoint` and `resources.gpu` are rejected. `image`, `ttl_s` and the cpu, memory and disk limits are ignored with a warning.
 
