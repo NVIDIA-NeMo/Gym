@@ -15,8 +15,7 @@ import pytest
 from fastapi import HTTPException
 
 from nemo_gym.client import ServerClient
-from nemo_gym.config import AggregateMetricsRequest
-from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetricsRequest
 from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming
 from nemo_gym.verification import judge_failsafe
 from resources_servers.audio_eval._scoring.evaluation.evaluator.base import BaseEvaluator
