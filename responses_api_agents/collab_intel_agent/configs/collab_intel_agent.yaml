@@ -17,4 +17,4 @@ collab_intel_agent:
       # Required for coding scenarios; no host execution fallback is permitted.
       # Use a prepared Python image with pytest; tests run without network or host mounts.
       sandbox_provider: sandbox
-      pytest_sandbox_image: ${oc.env:COLLAB_INTEL_PYTEST_SANDBOX_IMAGE,null}
+      pytest_sandbox_image: null

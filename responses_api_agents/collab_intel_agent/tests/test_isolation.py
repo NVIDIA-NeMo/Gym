@@ -17,6 +17,10 @@ from responses_api_agents.collab_intel_agent.app import CollabIntelAgent
 from responses_api_agents.collab_intel_agent.pytest_bridge import run_isolated_pytest
 
 
+def _file(data=b"updated", mode=0o644):
+    return {"data": base64.b64encode(data).decode(), "mode": mode}
+
+
 def _runner(tmp_path, provider=None):
     return isolation.PytestIsolation(
         tmp_path,
@@ -63,7 +67,7 @@ def _sandbox(monkeypatch, *, failure=None, error_type=None, return_code=0):
         async def download(self, remote_path, local_path):
             if failure == "download":
                 raise RuntimeError("transfer failed")
-            Path(local_path).write_text(json.dumps({"test_code.py": base64.b64encode(b"updated").decode()}))
+            Path(local_path).write_text(json.dumps({"test_code.py": _file()}))
 
         async def stop(self):
             self.stopped = True
@@ -102,7 +106,8 @@ def test_only_episode_files_enter_a_fresh_offline_sandbox(tmp_path, monkeypatch)
         assert sandbox.provider["docker"]["create"]["cap_drop"] == ["ALL"]
         assert sandbox.spec.ttl_s == 150
         assert sandbox.stopped
-        assert "python -I -m pytest -q -x --no-header -p no:cacheprovider test_code.py" == sandbox.calls[0][0]
+        assert sandbox.calls[0][0].endswith("python -I -m pytest -q -x --no-header -p no:cacheprovider test_code.py")
+        assert sandbox.calls[0][0].startswith("chmod 644 -- /workspace/episode/test_code.py && ")
     assert (episode / "test_code.py").read_text() == "updated"
     assert (root / "other_episode_secret").read_text() == "not this episode"
 
@@ -173,28 +178,29 @@ def test_path_and_symlink_cannot_read_server_or_other_phase(tmp_path, monkeypatc
 def test_returned_paths_are_validated_before_any_write(tmp_path, name):
     (tmp_path / "keep").write_text("original")
     with pytest.raises(ValueError):
-        isolation.restore_files(tmp_path, {"keep": "Y2hhbmdlZA==", name: "eA=="})
+        isolation.restore_files(tmp_path, {"keep": _file(b"changed"), name: _file(b"x")})
     assert (tmp_path / "keep").read_text() == "original"
 
 
 def test_returned_symlinks_fail_collection_and_cannot_be_followed(tmp_path, monkeypatch):
     (tmp_path / "keep").write_text("original")
     with pytest.raises(ValueError):
-        isolation.restore_files(tmp_path, {"a": "eA==", "a/b": "eA=="})
+        isolation.restore_files(tmp_path, {"a": _file(b"x"), "a/b": _file(b"x")})
     (tmp_path / "link").symlink_to(tmp_path / "keep")
     with pytest.raises(ValueError):
-        isolation.restore_files(tmp_path, {"keep": "Y2hhbmdlZA=="})
+        isolation.restore_files(tmp_path, {"keep": _file(b"changed")})
     assert (tmp_path / "keep").read_text() == "original"
 
 
 def test_opensandbox_disables_egress_without_volumes(tmp_path):
     runner = _runner(tmp_path, {"opensandbox": {}})
+    assert runner.provider == {"opensandbox": {}}
     assert runner.provider_options == {"network_policy": {"defaultAction": "deny", "egress": []}}
 
 
 def test_unsupported_provider_fails_closed(tmp_path):
     with pytest.raises(ValueError, match="isolation policy"):
-        _runner(tmp_path, {"not_isolated": {}})
+        _runner(tmp_path, {"not_isolated": {}}).provider
 
 
 def test_bridge_runs_every_pytest_request_in_gym(tmp_path, monkeypatch):
@@ -258,13 +264,21 @@ def test_cancellation_stops_inflight_sandbox(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
-def test_agent_fails_closed_without_isolation_configuration(tmp_path, monkeypatch):
+def test_non_coding_phase_does_not_require_sandbox_configuration(tmp_path, monkeypatch):
     monkeypatch.setattr(CollabIntelAgent, "model_post_init", lambda self, context: None)
-    agent = CollabIntelAgent.model_construct(config=SimpleNamespace(pytest_sandbox_image=None))
-    agent._run_harness = AsyncMock()
-    result = asyncio.run(agent._run(tmp_path, "solo", 1, tmp_path / "out"))
-    assert result["pass"] is False and result["failure_kind"] == "agent_run_error"
-    agent._run_harness.assert_not_awaited()
+    agent = CollabIntelAgent.model_construct(
+        config=SimpleNamespace(pytest_sandbox_image=None, sandbox_provider="missing"),
+        server_client=SimpleNamespace(global_config_dict={}),
+    )
+    agent._run_harness = AsyncMock(return_value={"pass": True})
+    assert asyncio.run(agent._run(tmp_path, "solo", 1, tmp_path / "out")) == {"pass": True}
+    agent._run_harness.assert_awaited_once()
+
+
+def test_pytest_fails_closed_without_isolation_configuration(tmp_path):
+    runner = isolation.PytestIsolation(tmp_path, "missing", {}, None)
+    with pytest.raises(ValueError, match="required; host execution is disabled"):
+        asyncio.run(runner.run(_request(tmp_path)))
 
 
 def test_agent_wraps_harness_in_phase_isolation(tmp_path, monkeypatch):
@@ -326,3 +340,112 @@ def test_bridge_installs_hook_for_fresh_worker_contexts(monkeypatch):
     pytest_bridge.main()
     assert calls == [("/private/runner.sock", Path("episode"), [], True, False, 30)]
     assert upstream.PYTEST_RUNNER is original
+
+
+@pytest.mark.parametrize("kind", ["symlink", "fifo"])
+def test_downloaded_manifest_must_be_regular_before_reading(tmp_path, monkeypatch, kind):
+    import os
+
+    (tmp_path / "test_code.py").write_text("original")
+    outside = tmp_path.parent / (tmp_path.name + "-outside.json")
+    outside.write_text(json.dumps({"test_code.py": _file(b"outside sentinel")}))
+    instances = _sandbox(monkeypatch)
+    factory = isolation.AsyncSandbox
+
+    def sandbox(*args):
+        instance = factory(*args)
+
+        async def download(remote, local):
+            if kind == "symlink":
+                Path(local).symlink_to(outside)
+            else:
+                os.mkfifo(local)
+
+        instance.download = download
+        return instance
+
+    monkeypatch.setattr(isolation, "AsyncSandbox", sandbox)
+    with pytest.raises(ValueError, match="regular file"):
+        asyncio.run(_runner(tmp_path).run(_request(tmp_path)))
+    assert (tmp_path / "test_code.py").read_text() == "original"
+    assert instances[0].stopped
+
+
+def test_transfer_preserves_executable_bits_and_rejects_special_mode_bits(tmp_path):
+    helper = tmp_path / "helper.sh"
+    helper.write_bytes(b"#!/bin/sh\nexit 0\n")
+    helper.chmod(0o755)
+    files = isolation.episode_files(tmp_path)
+    isolation.restore_files(tmp_path, {"helper.sh": _file(files["helper.sh"], 0o755)})
+    assert helper.stat().st_mode & 0o777 == 0o755
+    assert helper.read_bytes() == b"#!/bin/sh\nexit 0\n"
+    with pytest.raises(ValueError, match="mode"):
+        isolation.restore_files(tmp_path, {"helper.sh": _file(b"changed", 0o4755)})
+    assert helper.stat().st_mode & 0o777 == 0o755
+
+
+def test_uploaded_executable_mode_is_restored_before_pytest(tmp_path, monkeypatch):
+    (tmp_path / "helper.sh").write_text("#!/bin/sh\nexit 0\n")
+    (tmp_path / "helper.sh").chmod(0o755)
+    instances = _sandbox(monkeypatch)
+    asyncio.run(_runner(tmp_path).run(_request(tmp_path)))
+    command = instances[0].calls[0][0]
+    assert command.startswith("chmod 755 -- /workspace/episode/helper.sh && python -I -m pytest")
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_server_shutdown_cancels_active_pytest_and_reports_cleanup_failure(tmp_path, monkeypatch, cleanup_fails):
+    started = asyncio.Event()
+    stopped = asyncio.Event()
+
+    class Sandbox:
+        def __init__(self, *args):
+            pass
+
+        async def start(self):
+            pass
+
+        async def exec(self, *args, **kwargs):
+            started.set()
+            await asyncio.Event().wait()
+
+        async def stop(self):
+            stopped.set()
+            if cleanup_fails:
+                raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(isolation, "AsyncSandbox", Sandbox)
+
+    async def run():
+        runner = _runner(tmp_path)
+        reader = writer = None
+        try:
+            async with runner.serve() as endpoint:
+                reader, writer = await asyncio.open_unix_connection(endpoint)
+                writer.write(json.dumps(_request(tmp_path)).encode() + b"\n")
+                await writer.drain()
+                await started.wait()
+            assert stopped.is_set()
+            assert not runner.tasks
+        finally:
+            if writer is not None:
+                writer.close()
+                await writer.wait_closed()
+
+    if cleanup_fails:
+        with pytest.raises(RuntimeError, match="Isolated pytest failed"):
+            asyncio.run(asyncio.wait_for(run(), 2))
+        assert stopped.is_set()
+    else:
+        asyncio.run(asyncio.wait_for(run(), 2))
+
+
+def test_checked_in_image_cannot_be_selected_by_environment(monkeypatch):
+    from omegaconf import OmegaConf
+
+    monkeypatch.setenv("COLLAB_INTEL_PYTEST_SANDBOX_IMAGE", "untrusted:latest")
+    config = OmegaConf.load(Path(app_module.__file__).parent / "configs/collab_intel_agent.yaml")
+    agent_config = config.collab_intel_agent.responses_api_agents.collab_intel_agent
+    assert agent_config.pytest_sandbox_image is None
+    agent_config.pytest_sandbox_image = "example.invalid/pytest-sandbox:test"
+    assert agent_config.pytest_sandbox_image == "example.invalid/pytest-sandbox:test"

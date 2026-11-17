@@ -38,7 +38,7 @@ for path in root.rglob('*'):
     if size > 16 * 1024 * 1024:
         raise RuntimeError('pytest files exceed transfer limit')
     data = path.read_bytes()
-    files[path.relative_to(root).as_posix()] = base64.b64encode(data).decode()
+    files[path.relative_to(root).as_posix()] = {'data': base64.b64encode(data).decode(), 'mode': stat.S_IMODE(mode) & 0o777}
 pathlib.Path('/tmp/gym-pytest-files.json').write_text(json.dumps(files))
 """
 
@@ -61,19 +61,22 @@ def episode_files(directory: Path) -> dict[str, bytes]:
     return files
 
 
-def restore_files(directory: Path, files: dict[str, str]) -> None:
+def restore_files(directory: Path, files: dict[str, dict[str, Any]]) -> None:
     """Validate the complete returned tree before changing any episode file."""
-    decoded: dict[str, bytes] = {}
+    decoded: dict[str, tuple[bytes, int]] = {}
     size = 0
     for name, value in files.items():
         path = PurePosixPath(name)
         if not name or name == "." or path.is_absolute() or ".." in path.parts or path.as_posix() != name:
             raise ValueError("Sandbox returned a path outside the episode")
-        data = base64.b64decode(value, validate=True)
+        mode = value["mode"]
+        if isinstance(mode, bool) or not isinstance(mode, int) or not 0 <= mode <= 0o777:
+            raise ValueError("Sandbox returned an invalid regular-file mode")
+        data = base64.b64decode(value["data"], validate=True)
         size += len(data)
         if size > MAX_FILES_BYTES:
             raise ValueError("Sandbox files exceed transfer limit")
-        decoded[name] = data
+        decoded[name] = (data, mode)
     # Reject file/directory collisions before writing any part of the result.
     if any(parent.as_posix() in decoded for name in decoded for parent in PurePosixPath(name).parents):
         raise ValueError("Sandbox returned conflicting file paths")
@@ -83,10 +86,11 @@ def restore_files(directory: Path, files: dict[str, str]) -> None:
     for path in sorted(directory.rglob("*"), reverse=True):
         if path.is_dir():
             path.rmdir()
-    for name, data in decoded.items():
+    for name, (data, mode) in decoded.items():
         path = directory / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
+        path.chmod(mode)
 
 
 def isolated_provider(provider: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -114,15 +118,30 @@ class PytestIsolation:
         root: Path,
         provider_ref: str | dict[str, Any],
         named_configs: dict[str, Any],
-        image: str,
+        image: str | None,
     ) -> None:
         self.root = root.resolve()
         self.image = image
-        self.provider, self.provider_options = isolated_provider(resolve_provider_config(provider_ref, named_configs))
-        self.metadata = resolve_provider_metadata(provider_ref, named_configs)
+        self.provider_ref = provider_ref
+        self.named_configs = named_configs
+        self._provider: dict[str, Any] | None = None
+        self.provider_options: dict[str, Any] = {}
+        self.metadata: dict[str, Any] = {}
         self.tasks: set[asyncio.Task[None]] = set()
         self.lock = asyncio.Lock()
         self.failure: Exception | None = None
+
+    @property
+    def provider(self) -> dict[str, Any]:
+        """Resolve isolation only when a coding scenario actually requests pytest."""
+        if self._provider is None:
+            if not self.image:
+                raise ValueError("pytest_sandbox_image is required; host execution is disabled")
+            self._provider, self.provider_options = isolated_provider(
+                resolve_provider_config(self.provider_ref, self.named_configs)
+            )
+            self.metadata = resolve_provider_metadata(self.provider_ref, self.named_configs)
+        return self._provider
 
     async def run(self, request: dict[str, Any]) -> dict[str, Any]:
         """Execute the unchanged pytest arguments with just the current directory."""
@@ -150,7 +169,9 @@ class PytestIsolation:
             or not 0 < timeout_s <= 7200
         ):
             raise ValueError("Invalid pytest timeout")
+        provider = self.provider
         files = episode_files(directory)
+        modes = {name: stat.S_IMODE((directory / name).stat().st_mode) & 0o777 for name in files}
         spec = SandboxSpec(
             image=self.image,
             workdir=WORKDIR,
@@ -160,7 +181,7 @@ class PytestIsolation:
             provider_options=self.provider_options,
             env={"HOME": WORKDIR, "PYTHONDONTWRITEBYTECODE": "1"},
         )
-        sandbox = AsyncSandbox(self.provider, spec)
+        sandbox = AsyncSandbox(provider, spec)
         try:
             await sandbox.start()
             args = ["python", "-I", "-m", "pytest", "-q"]
@@ -169,7 +190,12 @@ class PytestIsolation:
             args += ["--no-header", "-p", "no:cacheprovider"]
             if request["noconftest"]:
                 args += ["--noconftest", "--rootdir", WORKDIR, "-c", "/dev/null"]
-            result = await sandbox.exec(shlex.join(args + targets), cwd=WORKDIR, timeout_s=timeout_s)
+            # Uploads may not retain modes. Restore only regular-file permissions before executing pytest.
+            setup = [
+                shlex.join(["chmod", format(mode, "o"), "--", f"{WORKDIR}/{name}"]) for name, mode in modes.items()
+            ]
+            command = " && ".join([*setup, shlex.join(args + targets)])
+            result = await sandbox.exec(command, cwd=WORKDIR, timeout_s=timeout_s)
             if result.error_type == "timeout":
                 return {"return_code": None, "output": ""}
             if result.error_type is not None or result.return_code is None:
@@ -180,7 +206,10 @@ class PytestIsolation:
             with tempfile.TemporaryDirectory() as temporary:
                 output = Path(temporary) / "files.json"
                 await sandbox.download("/tmp/gym-pytest-files.json", output)
-                if output.stat().st_size > 2 * MAX_FILES_BYTES:
+                info = output.lstat()
+                if not stat.S_ISREG(info.st_mode):
+                    raise ValueError("Sandbox result must be a regular file")
+                if info.st_size > 2 * MAX_FILES_BYTES:
                     raise ValueError("Sandbox result exceeds transfer limit")
                 restore_files(directory, json.loads(output.read_text()))
             return {"return_code": result.return_code, "output": (result.stdout or "") + (result.stderr or "")}
@@ -216,12 +245,13 @@ class PytestIsolation:
             server = await asyncio.start_unix_server(self.handle, path=endpoint)
             try:
                 yield endpoint
-                if self.failure is not None:
-                    raise RuntimeError("Isolated pytest failed") from self.failure
             finally:
                 server.close()
-                await server.wait_closed()
                 with CancelScope(shield=True):
-                    for task in list(self.tasks):
+                    tasks = list(self.tasks)
+                    for task in tasks:
                         task.cancel()
-                    await asyncio.gather(*self.tasks, return_exceptions=True)
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    await server.wait_closed()
+            if self.failure is not None:
+                raise RuntimeError("Isolated pytest failed") from self.failure

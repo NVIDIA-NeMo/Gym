@@ -7,8 +7,9 @@ messages. Setup, data and the run command are in [benchmarks/collab_intel/README
 
 ## Coding-scenario isolation
 
-Set `pytest_sandbox_image` (or `COLLAB_INTEL_PYTEST_SANDBOX_IMAGE`) to a prepared Python image with pytest and the
-scenario's test dependencies. Configure `sandbox_provider` as a Gym Docker or OpenSandbox provider. The agent uses
+The checked-in `pytest_sandbox_image` is unset. Set it in a reviewed deployment configuration to a prepared image
+with Python, pytest and the scenario dependencies; no environment variable selects executable image content.
+A coding scenario that requests pytest without this setting fails closed with a clear configuration error. Configure `sandbox_provider` as a Gym Docker or OpenSandbox provider. The agent uses
 Gym's named provider configuration, but disables pytest networking, host mounts and additional Docker run arguments.
 Other providers fail closed until an equivalent isolation policy is supported.
 

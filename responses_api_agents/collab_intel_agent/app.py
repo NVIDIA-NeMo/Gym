@@ -174,8 +174,6 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
     async def _run(self, path: Path, version: str, seed: int, out: Path, phase_key: str = "") -> dict[str, Any]:
         """Fail closed unless every model-written pytest call can run in isolation."""
         try:
-            if not self.config.pytest_sandbox_image:
-                raise ValueError("pytest_sandbox_image is required; host execution is disabled")
             out.parent.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(dir=out.parent, prefix="pytest-phase-") as temporary:
                 root = Path(temporary)
@@ -186,7 +184,8 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
                     self.config.pytest_sandbox_image,
                 )
                 async with isolation.serve() as endpoint:
-                    return await self._run_harness(path, version, seed, out, phase_key, endpoint, root)
+                    result = await self._run_harness(path, version, seed, out, phase_key, endpoint, root)
+                return result
         except Exception as error:
             return _failed(AGENT_RUN_ERROR, f"Isolated pytest unavailable: {error}")
 
