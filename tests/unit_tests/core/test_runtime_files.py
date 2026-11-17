@@ -13,12 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import atexit
 import os
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -33,7 +35,6 @@ from nemo_gym.core.episode_context import rollout_context
 from nemo_gym.core.runtime_files import (
     async_request_temp_dir,
     process_temp_dir,
-    remove_stale_temp_dirs,
     remove_temp_dir,
     request_temp_dir,
     save_dir,
@@ -41,9 +42,23 @@ from nemo_gym.core.runtime_files import (
 )
 
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
+LINUX_IDS = pytest.mark.skipif(
+    not Path("/proc/self/ns/pid").exists() or not Path("/proc/sys/kernel/random/boot_id").exists(),
+    reason="needs Linux PID namespaces and a boot id",
+)
+NOT_ROOT = pytest.mark.skipif(os.getuid() == 0, reason="root writes through folder permissions")
+
+
 def _request_folders(parent: Path) -> list[Path]:
-    """The request folders under ``parent``: everything inside its per-process folders."""
+    """The request folders under ``parent``: everything inside its process folders."""
     return [folder for process in parent.iterdir() for folder in process.iterdir()]
+
+
+def _umask() -> int:
+    umask = os.umask(0)
+    os.umask(umask)
+    return umask
 
 
 @pytest.fixture
@@ -57,58 +72,104 @@ def set_global_config(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.fixture(autouse=True)
 def system_temp(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point the system temporary directory at a test folder, so no test writes into the host's own /tmp."""
+    """Point the system temporary directory at a test folder and start each test with no per-process state."""
     folder = tmp_path_factory.mktemp("system-temp")
     monkeypatch.setattr(tempfile, "tempdir", str(folder))
+    monkeypatch.setattr(runtime_files, "_default_temp_dir", None)
     monkeypatch.setattr(runtime_files, "_checked_temp_parents", set())
-    monkeypatch.setattr(runtime_files, "_default_temp_dirs", {})
-    monkeypatch.setattr(runtime_files, "_process_temp_dirs", {})
+    monkeypatch.setattr(runtime_files, "_process_dirs", {})
+    monkeypatch.setattr(runtime_files, "_warned", set())
     return folder
 
 
 class TestDefaultTempDir:
-    def test_is_a_private_folder_per_user_under_a_folder_shared_like_tmp(self, set_global_config, system_temp) -> None:
+    def test_is_a_private_folder_per_user_in_the_system_temp(self, set_global_config, system_temp) -> None:
         set_global_config(None)
 
         with request_temp_dir("workspace") as path:
-            user_folder = system_temp / "nemo_gym" / str(os.getuid())
+            user_folder = system_temp / f"nemo_gym-{os.getuid()}"
             assert path.parent.parent == user_folder
 
-        assert stat.S_IMODE(os.lstat(system_temp / "nemo_gym").st_mode) == 0o1777
         assert stat.S_IMODE(os.lstat(user_folder).st_mode) == 0o700
         assert not path.exists()
 
-    @pytest.mark.parametrize("problem", ["symlink", "not-sticky"])
-    def test_an_unsafe_shared_folder_falls_back_to_one_per_user(
-        self, set_global_config, system_temp, tmp_path: Path, caplog, problem: str
+    @pytest.mark.parametrize("problem", ["symlink", "file", "other-user"])
+    def test_a_default_that_is_not_this_users_own_folder_is_refused(
+        self, set_global_config, system_temp, tmp_path: Path, monkeypatch, problem: str
     ) -> None:
         set_global_config(None)
-        shared = system_temp / "nemo_gym"
+        real_uid = os.getuid()
+        if problem == "other-user":
+            # The folder this test creates is owned by the real user, so it is another user's to a fake one.
+            monkeypatch.setattr(os, "getuid", lambda: real_uid + 1)
+        folder = system_temp / f"nemo_gym-{os.getuid()}"
         if problem == "symlink":
             (tmp_path / "elsewhere").mkdir()
-            shared.symlink_to(tmp_path / "elsewhere")
+            folder.symlink_to(tmp_path / "elsewhere")
+        elif problem == "file":
+            folder.write_text("")
         else:
-            shared.mkdir()
-            os.chmod(shared, 0o777)
+            folder.mkdir(mode=0o700)
 
-        with caplog.at_level("WARNING"), request_temp_dir("workspace") as path:
-            assert path.parent.parent == system_temp / f"nemo_gym-{os.getuid()}"
+        with pytest.raises(PermissionError, match="Set temp_dir"):
+            with request_temp_dir("workspace"):
+                pass
+        if problem == "symlink":
+            assert not any((tmp_path / "elsewhere").iterdir())
 
-        assert "Not using" in caplog.text
-        assert not any((tmp_path / "elsewhere").iterdir()) if problem == "symlink" else True
+    @NOT_ROOT
+    def test_an_unwritable_system_temp_names_the_setting(self, set_global_config, system_temp: Path) -> None:
+        set_global_config(None)
+        os.chmod(system_temp, 0o555)
+        try:
+            with pytest.raises(PermissionError, match="Could not create the default temp_dir .*Set temp_dir"):
+                with request_temp_dir("workspace"):
+                    pass
+        finally:
+            os.chmod(system_temp, 0o755)
 
-    def test_a_user_folder_that_is_a_symlink_is_refused_with_the_setting_named(
-        self, set_global_config, system_temp, tmp_path: Path
+    def test_a_default_removed_from_outside_is_made_again_and_private(self, set_global_config, system_temp) -> None:
+        set_global_config(None)
+        with request_temp_dir("workspace") as first:
+            pass
+        shutil.rmtree(first.parent.parent)
+
+        with request_temp_dir("workspace") as second:
+            assert second.parent.parent == first.parent.parent
+
+        assert stat.S_IMODE(os.lstat(first.parent.parent).st_mode) == 0o700
+
+
+class TestTempDirChoice:
+    def test_the_setting_replaces_the_default(self, set_global_config, tmp_path: Path) -> None:
+        set_global_config({"temp_dir": str(tmp_path / "temp")})
+
+        with request_temp_dir("workspace") as path:
+            assert path.parent.parent == tmp_path / "temp"
+
+        assert _request_folders(tmp_path / "temp") == []
+
+    def test_the_argument_replaces_the_setting_for_code_without_gym_configuration(
+        self, set_global_config, tmp_path: Path
+    ) -> None:
+        set_global_config({"temp_dir": str(tmp_path / "from-config")})
+
+        with request_temp_dir("harbor-job", temp_dir=tmp_path / "from-server") as path:
+            assert path.parent.parent == tmp_path / "from-server"
+
+        assert not path.exists()
+
+    def test_the_argument_expands_home_and_refuses_a_relative_path(
+        self, set_global_config, tmp_path: Path, monkeypatch
     ) -> None:
         set_global_config(None)
-        (tmp_path / "elsewhere").mkdir()
-        shared = system_temp / "nemo_gym"
-        shared.mkdir()
-        os.chmod(shared, 0o1777)
-        (shared / str(os.getuid())).symlink_to(tmp_path / "elsewhere")
+        monkeypatch.setenv("HOME", str(tmp_path))
 
-        with pytest.raises(PermissionError, match="default temp_dir"):
-            with request_temp_dir("workspace"):
+        with request_temp_dir("workspace", temp_dir="~/gym-temp") as path:
+            assert path.parent.parent == tmp_path / "gym-temp"
+        # A relative path would resolve against the server's own source folder.
+        with pytest.raises(ValueError, match="absolute"):
+            with request_temp_dir("workspace", temp_dir="gym-temp"):
                 pass
 
     def test_a_temp_dir_that_cannot_be_created_names_the_folder_and_the_setting(
@@ -122,8 +183,249 @@ class TestDefaultTempDir:
             with request_temp_dir("workspace"):
                 pass
 
+    def test_temp_dir_is_checked_once_on_the_writing_node(
+        self, set_global_config, tmp_path: Path, monkeypatch
+    ) -> None:
+        checked: list[tuple[str, Path]] = []
+        monkeypatch.setattr(runtime_files, "warn_if_unsuitable", lambda setting, path: checked.append((setting, path)))
+        set_global_config({"temp_dir": str(tmp_path / "temp")})
 
-class TestSessionAndRunFolders:
+        with request_temp_dir("workspace"):
+            pass
+        with request_temp_dir("workspace"):
+            pass
+
+        assert checked == [("temp_dir", tmp_path / "temp")]
+
+    def test_a_temp_dir_removed_from_outside_is_checked_and_made_again(
+        self, set_global_config, tmp_path: Path, monkeypatch
+    ) -> None:
+        checked: list[Path] = []
+        monkeypatch.setattr(runtime_files, "warn_if_unsuitable", lambda setting, path: checked.append(path))
+        set_global_config({"temp_dir": str(tmp_path / "temp")})
+        with request_temp_dir("workspace") as first:
+            pass
+        # A cleaner of old temporary files can remove the whole folder, not only this process's.
+        shutil.rmtree(tmp_path / "temp")
+
+        with request_temp_dir("workspace") as second:
+            assert second.parent == first.parent
+        assert process_temp_dir("cache").is_dir()
+
+        assert checked == [tmp_path / "temp", tmp_path / "temp"]
+
+    def test_a_name_must_be_one_safe_part(self, set_global_config, tmp_path: Path) -> None:
+        set_global_config({"temp_dir": str(tmp_path)})
+
+        for name in ("../escape", "", "Upper", "a.b"):
+            with pytest.raises(ValueError, match="name"):
+                session_temp_dir(name)
+            with pytest.raises(ValueError, match="name"):
+                process_temp_dir(name)
+
+
+class TestRequestTempDir:
+    def test_folders_of_one_process_share_one_process_folder(self, set_global_config, tmp_path: Path) -> None:
+        set_global_config({"temp_dir": str(tmp_path)})
+
+        with request_temp_dir("workspace") as first, request_temp_dir("harness") as second:
+            assert first.parent == second.parent
+            assert first.parent.parent == tmp_path
+            assert first.name.startswith("workspace-") and second.name.startswith("harness-")
+
+        assert [p.name for p in tmp_path.iterdir()] == [first.parent.name]
+
+    def test_folder_is_removed_when_the_block_raises(self, set_global_config, tmp_path: Path) -> None:
+        set_global_config({"temp_dir": str(tmp_path)})
+
+        with pytest.raises(RuntimeError):
+            with request_temp_dir("workspace") as path:
+                (path / "file.txt").write_text("x")
+                raise RuntimeError("boom")
+
+        assert not path.exists()
+
+    @NOT_ROOT
+    def test_read_only_folders_inside_are_removed_too(self, set_global_config, tmp_path: Path) -> None:
+        # Tools such as the Go module cache leave folders this user cannot write into.
+        set_global_config({"temp_dir": str(tmp_path)})
+
+        with request_temp_dir("workspace") as path:
+            (path / "cache" / "module").mkdir(parents=True)
+            (path / "cache" / "module" / "file.go").write_text("x")
+            os.chmod(path / "cache" / "module", 0o500)
+            os.chmod(path / "cache", 0o500)
+
+        assert not path.exists()
+
+    def test_a_stale_folder_with_this_process_name_is_cleared_before_use(
+        self, set_global_config, tmp_path: Path
+    ) -> None:
+        # Only an earlier process with the same id, now dead, can have left a folder with this name.
+        stale = tmp_path / runtime_files._process_dir_name()
+        (stale / "workspace-old").mkdir(parents=True)
+        set_global_config({"temp_dir": str(tmp_path)})
+
+        with request_temp_dir("workspace") as path:
+            assert path.parent == stale
+
+        assert not (stale / "workspace-old").exists()
+
+    def test_concurrent_first_use_of_a_parent_loses_no_request(self, tmp_path: Path) -> None:
+        count = 16
+        start, written = threading.Barrier(count), threading.Barrier(count)
+        errors: list[BaseException] = []
+        missing: list[Path] = []
+
+        def request(index: int) -> None:
+            try:
+                start.wait(5)
+                with request_temp_dir("workspace", temp_dir=tmp_path) as path:
+                    (path / f"{index}.txt").write_text("x")
+                    # Every request holds its folder open until all have written, so a lost file shows here.
+                    written.wait(5)
+                    if not (path / f"{index}.txt").exists():
+                        missing.append(path)
+            except BaseException as error:
+                errors.append(error)
+
+        threads = [threading.Thread(target=request, args=(index,)) for index in range(count)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(10)
+
+        assert not any(thread.is_alive() for thread in threads)
+        assert errors == []
+        assert missing == []
+
+
+class TestAsyncRequestTempDir:
+    async def test_folder_is_removed_when_the_task_is_cancelled(self, set_global_config, tmp_path: Path) -> None:
+        set_global_config({"temp_dir": str(tmp_path)})
+        created: list[Path] = []
+        entered = asyncio.Event()
+
+        async def work() -> None:
+            async with async_request_temp_dir("workspace") as path:
+                created.append(path)
+                (path / "file.txt").write_text("x")
+                entered.set()
+                await asyncio.sleep(3600)
+
+        task = asyncio.create_task(work())
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert created and not created[0].exists()
+
+    async def test_folder_is_removed_when_cancelled_while_it_is_created(
+        self, set_global_config, tmp_path: Path, monkeypatch
+    ) -> None:
+        set_global_config({"temp_dir": str(tmp_path)})
+        started, release, created = threading.Event(), threading.Event(), threading.Event()
+        create = runtime_files._create_temp_dir
+        made: list[Path] = []
+
+        def slow_create(name: str, temp_dir: Path | None) -> Path:
+            started.set()
+            release.wait(5)
+            made.append(create(name, temp_dir))
+            created.set()
+            return made[0]
+
+        monkeypatch.setattr(runtime_files, "_create_temp_dir", slow_create)
+
+        async def work() -> None:
+            async with async_request_temp_dir("workspace"):
+                pass
+
+        task = asyncio.create_task(work())
+        await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        # The folder must really be created after the cancel, or the test would prove nothing.
+        assert await asyncio.to_thread(created.wait, 5)
+        for _ in range(200):
+            if not made[0].exists():
+                break
+            await asyncio.sleep(0.01)
+
+        assert not made[0].exists()
+        assert _request_folders(tmp_path) == []
+
+    async def test_folder_is_removed_when_an_anyio_cancel_scope_fires(self, set_global_config, tmp_path: Path) -> None:
+        set_global_config({"temp_dir": str(tmp_path)})
+
+        with anyio.move_on_after(0.05):
+            async with async_request_temp_dir("workspace"):
+                await anyio.sleep(3600)
+
+        for _ in range(100):
+            if not _request_folders(tmp_path):
+                break
+            await asyncio.sleep(0.01)
+        assert _request_folders(tmp_path) == []
+
+
+def _cleanup_left_after_a_repeated_cancellation(cancel_kind: str) -> list[Path]:
+    """Cancel again while cleanup waits behind a busy worker thread, as under load, and return what is left."""
+
+    async def main() -> list[Path]:
+        loop = asyncio.get_running_loop()
+        executor = ThreadPoolExecutor(max_workers=1)
+        loop.set_default_executor(executor)
+        created: list[Path] = []
+        entered = asyncio.Event()
+        scopes: list[anyio.CancelScope] = []
+
+        async def work() -> None:
+            with anyio.CancelScope() as scope:
+                scopes.append(scope)
+                async with async_request_temp_dir("workspace") as path:
+                    created.append(path)
+                    entered.set()
+                    await asyncio.sleep(3600)
+
+        task = asyncio.create_task(work())
+        await entered.wait()
+        gate = threading.Event()
+        busy = loop.run_in_executor(None, gate.wait)
+        if cancel_kind == "anyio":
+            # anyio delivers the cancellation again at every await in the scope, as the disconnect middleware does.
+            scopes[0].cancel()
+        else:
+            task.cancel()
+            await asyncio.sleep(0.05)
+            task.cancel()
+        try:
+            await asyncio.wait_for(task, 5)
+        except asyncio.CancelledError:
+            pass
+        gate.set()
+        await busy
+        await loop.run_in_executor(None, lambda: None)
+        executor.shutdown(wait=True)
+        return [path for path in created if path.exists()]
+
+    return asyncio.run(main())
+
+
+@pytest.mark.parametrize("cancel_kind", ["anyio", "task"])
+def test_cleanup_survives_a_repeated_cancellation_while_queued(
+    set_global_config, tmp_path: Path, cancel_kind: str
+) -> None:
+    set_global_config({"temp_dir": str(tmp_path / "temp")})
+
+    assert _cleanup_left_after_a_repeated_cancellation(cancel_kind) == []
+    assert _request_folders(tmp_path / "temp") == []
+
+
+class TestSessionTempDir:
     def test_a_session_folder_lasts_until_it_is_removed_and_removing_twice_is_fine(
         self, set_global_config, tmp_path: Path
     ) -> None:
@@ -145,7 +447,7 @@ class TestSessionAndRunFolders:
         real_rmtree = shutil.rmtree
 
         def failing(path, *args, **kwargs):
-            raise PermissionError(13, "busy")
+            raise OSError(16, "busy")
 
         monkeypatch.setattr(shutil, "rmtree", failing)
         assert remove_temp_dir(folder) is False
@@ -155,39 +457,157 @@ class TestSessionAndRunFolders:
         assert remove_temp_dir(folder) is True
         assert not folder.exists()
 
-    def test_a_run_folder_is_the_same_for_every_call_with_its_name(self, set_global_config, tmp_path: Path) -> None:
+    def test_only_a_temporary_folder_this_process_created_is_removed(
+        self, set_global_config, tmp_path: Path, caplog
+    ) -> None:
+        set_global_config({"temp_dir": str(tmp_path / "temp")})
+        session = session_temp_dir("session")
+        process = process_temp_dir("cache")
+        elsewhere = tmp_path / "results"
+        elsewhere.mkdir()
+        # Folders with the right shape under another process's folder are that process's to remove.
+        other = tmp_path / "temp" / "nemo-gym-000000000000-1-1" / "session-abc"
+        other.mkdir(parents=True)
+
+        with caplog.at_level("WARNING"):
+            for path in (elsewhere, Path(""), session.parent, process, other, Path("session-abc")):
+                assert remove_temp_dir(path) is False
+
+        assert elsewhere.exists() and session.exists() and process.exists() and other.exists()
+        assert "is not a temporary folder this process created" in caplog.text
+
+
+class TestProcessTempDir:
+    def test_is_the_same_for_every_call_with_its_name(self, set_global_config, tmp_path: Path) -> None:
         set_global_config({"temp_dir": str(tmp_path / "temp")})
 
         first = process_temp_dir("image-cache")
         assert process_temp_dir("image-cache") == first
         assert process_temp_dir("venvs") != first
-        assert first.is_dir() and first.name.startswith("image-cache-")
+        assert first.is_dir() and first.name == "process.image-cache"
 
-    def test_a_forked_child_gets_run_folders_of_its_own(self, set_global_config, tmp_path: Path, monkeypatch) -> None:
-        set_global_config({"temp_dir": str(tmp_path / "temp")})
-        monkeypatch.setattr(runtime_files, "_process_dirs", {})
-        parent_folder = process_temp_dir("image-cache")
-        real_pid = os.getpid()
+    def test_concurrent_first_calls_get_the_same_folder(self, set_global_config, tmp_path: Path) -> None:
+        set_global_config({"temp_dir": str(tmp_path)})
+        start = threading.Barrier(8)
+        results: list[Path] = []
 
-        # A forked child has a new process id and inherits the parent's tables.
-        monkeypatch.setattr(os, "getpid", lambda: real_pid + 1)
-        child_folder = process_temp_dir("image-cache")
+        def call() -> None:
+            start.wait(5)
+            results.append(process_temp_dir("image-cache"))
 
-        assert child_folder != parent_folder
-        assert child_folder.parent != parent_folder.parent
+        threads = [threading.Thread(target=call) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(10)
 
-    def test_the_exit_handler_removes_run_folders(self, set_global_config, tmp_path: Path, monkeypatch) -> None:
-        set_global_config({"temp_dir": str(tmp_path / "temp")})
-        monkeypatch.setattr(runtime_files, "_process_dirs", {})
-        folder = process_temp_dir("image-cache")
-        (folder / "a.txt").write_text("x")
+        assert len(results) == 8 and len(set(results)) == 1
+        assert [p.name for p in results[0].parent.iterdir()] == ["process.image-cache"]
 
-        runtime_files._remove_own_process_dirs(os.getpid())
+    def test_a_folder_removed_from_outside_is_made_again(self, set_global_config, tmp_path: Path) -> None:
+        set_global_config({"temp_dir": str(tmp_path)})
+        first = process_temp_dir("image-cache")
+        shutil.rmtree(first.parent)
 
-        assert not folder.parent.exists()
+        assert process_temp_dir("image-cache") == first
+        assert first.is_dir()
 
 
-class TestSaveFolder:
+class TestProcessLifetime:
+    def test_the_exit_handler_is_registered_once_for_this_process(
+        self, set_global_config, tmp_path: Path, monkeypatch
+    ) -> None:
+        registered: list[tuple] = []
+        monkeypatch.setattr(runtime_files, "_exit_handler_registered", False)
+        monkeypatch.setattr(atexit, "register", lambda *args: registered.append(args))
+        set_global_config({"temp_dir": str(tmp_path)})
+
+        process_temp_dir("cache")
+        with request_temp_dir("workspace", temp_dir=tmp_path / "other"):
+            pass
+
+        assert registered == [(runtime_files._remove_own_process_dirs, os.getpid())]
+
+    def test_exit_removes_this_process_folder_and_a_forked_child_does_not(
+        self, set_global_config, tmp_path: Path, monkeypatch
+    ) -> None:
+        set_global_config({"temp_dir": str(tmp_path)})
+        with request_temp_dir("workspace") as path:
+            (path / "file.txt").write_text("x")
+            process_folder = path.parent
+
+            # A forked child inherits the exit handler and the record of this folder, but must leave it alone.
+            real_pid = os.getpid()
+            monkeypatch.setattr(os, "getpid", lambda: real_pid + 1)
+            runtime_files._remove_own_process_dirs(real_pid)
+            monkeypatch.setattr(os, "getpid", lambda: real_pid)
+            assert process_folder.exists()
+
+            runtime_files._remove_own_process_dirs(os.getpid())
+
+        assert not process_folder.exists()
+
+
+_CHILD = textwrap.dedent(
+    """
+    import os, sys
+    from pathlib import Path
+    import nemo_gym.core.runtime_files as rf
+
+    temp_dir = Path(sys.argv[1])
+    process = rf.process_temp_dir("image-cache", temp_dir=temp_dir)
+    (process / "a").write_text("x")
+    session = rf.session_temp_dir("session", temp_dir=temp_dir)
+    if sys.argv[2] == "exit":
+        sys.exit(0)
+    # Hold the lock, as another thread of the parent might at a fork, then fork and exit the child normally.
+    rf._first_use_lock.acquire()
+    parent_executor = rf._save_executor
+    pid = os.fork()
+    if pid == 0:
+        ok = rf._first_use_lock.acquire(blocking=False) and rf._save_executor is not parent_executor
+        rf._first_use_lock.release()
+        child = rf.session_temp_dir("child", temp_dir=temp_dir)
+        ok = ok and child.parent != session.parent and not rf.remove_temp_dir(session)
+        sys.exit(0 if ok else 3)
+    _, status = os.waitpid(pid, 0)
+    print(os.waitstatus_to_exitcode(status), process.exists(), session.exists(), flush=True)
+    """
+)
+
+
+def _run_child(tmp_path: Path, mode: str) -> subprocess.CompletedProcess:
+    script = tmp_path / "child.py"
+    script.write_text(_CHILD)
+    return subprocess.run(
+        [sys.executable, str(script), str(tmp_path / "temp"), mode],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=REPO_ROOT,
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT)},
+    )
+
+
+def test_a_process_removes_its_folders_when_it_exits(tmp_path: Path) -> None:
+    result = _run_child(tmp_path, "exit")
+
+    assert result.returncode == 0, result.stderr
+    assert list((tmp_path / "temp").iterdir()) == []
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs fork")
+def test_a_forked_child_gets_state_of_its_own_and_leaves_its_parents_folders(tmp_path: Path) -> None:
+    result = _run_child(tmp_path, "fork")
+
+    assert result.returncode == 0, result.stderr
+    # The child's exit code, then whether the parent's process and session folders survived the child's exit.
+    assert result.stdout.split() == ["0", "True", "True"]
+    # The parent then exits and removes its own folder; the child removed its own.
+    assert list((tmp_path / "temp").iterdir()) == []
+
+
+class TestSaveDir:
     @staticmethod
     def _logs(tmp_path: Path) -> Path:
         logs = tmp_path / "logs"
@@ -211,18 +631,34 @@ class TestSaveFolder:
         # The source is left as it was; the temporary folder's own block removes it.
         assert (logs / "report.json").exists()
 
-    async def test_copies_contents_only_not_permissions_or_times(self, set_global_config, tmp_path: Path) -> None:
+    async def test_copies_contents_with_the_users_usual_permissions(self, set_global_config, tmp_path: Path) -> None:
         set_global_config({"results_dir": str(tmp_path / "results")})
         logs = self._logs(tmp_path)
         os.utime(logs / "report.json", (1, 1))
         os.chmod(logs / "report.json", 0o600)
+        # Temporary folders are private; kept ones should be readable as the user's other files are.
+        os.chmod(logs / "sub", 0o700)
 
         kept = await save_dir(logs, server_name="swebench", name="verification")
 
-        umask = os.umask(0)
-        os.umask(umask)
+        umask = _umask()
         assert (kept / "report.json").stat().st_mtime != 1
         assert stat.S_IMODE((kept / "report.json").stat().st_mode) == 0o666 & ~umask
+        assert stat.S_IMODE((kept / "sub").stat().st_mode) == 0o777 & ~umask
+
+    async def test_symlinks_stay_symlinks_and_special_files_are_skipped(
+        self, set_global_config, tmp_path: Path
+    ) -> None:
+        set_global_config({"results_dir": str(tmp_path / "results")})
+        logs = self._logs(tmp_path)
+        (logs / "link").symlink_to("/etc/hostname")
+        os.mkfifo(logs / "pipe")
+
+        kept = await save_dir(logs, server_name="swebench", name="verification")
+
+        assert kept is not None
+        assert os.readlink(kept / "link") == "/etc/hostname"
+        assert not (kept / "pipe").exists()
 
     async def test_outside_a_rollout_and_on_repeat_each_copy_gets_its_own_folder(
         self, set_global_config, tmp_path: Path
@@ -246,9 +682,8 @@ class TestSaveFolder:
         assert kept is not None and kept.parent == tmp_path / "mine" / "verification" / "no-rollout"
 
     async def test_a_relative_output_dir_keeps_nothing_with_one_warning(
-        self, set_global_config, tmp_path: Path, monkeypatch, caplog
+        self, set_global_config, tmp_path: Path, caplog
     ) -> None:
-        monkeypatch.setattr(runtime_files, "_warned_relative_output_dirs", set())
         set_global_config({"results_dir": str(tmp_path / "results")})
         logs = self._logs(tmp_path)
 
@@ -258,23 +693,33 @@ class TestSaveFolder:
 
         assert caplog.text.count("is not an absolute path") == 1
 
-    async def test_a_process_without_gym_configuration_keeps_nothing(self, set_global_config, tmp_path: Path) -> None:
+    async def test_a_process_without_results_dir_keeps_nothing_with_one_warning(
+        self, set_global_config, tmp_path: Path, caplog
+    ) -> None:
         set_global_config(None)
 
-        assert await save_dir(self._logs(tmp_path), server_name="swebench", name="verification") is None
+        with caplog.at_level("WARNING"):
+            assert await save_dir(self._logs(tmp_path), server_name="swebench", name="verification") is None
+            assert await save_dir(tmp_path / "logs", server_name="swebench", name="verification") is None
+
+        assert caplog.text.count("No results_dir") == 1
 
     async def test_a_failed_copy_returns_none_and_leaves_no_partial_folder(
         self, set_global_config, tmp_path: Path, monkeypatch
     ) -> None:
         set_global_config({"results_dir": str(tmp_path / "results")})
+        copied = []
+        copyfile = shutil.copyfile
 
-        def failing_copy(*args, **kwargs):
-            raise OSError(28, "No space left on device")
+        def fail_second_copy(*args, **kwargs):
+            if copied:
+                raise OSError(28, "No space left on device")
+            copied.append(copyfile(*args, **kwargs))
 
-        monkeypatch.setattr(shutil, "copyfile", failing_copy)
+        monkeypatch.setattr(shutil, "copyfile", fail_second_copy)
         kept = await save_dir(self._logs(tmp_path), server_name="swebench", name="verification")
 
-        assert kept is None
+        assert kept is None and copied
         assert not any((tmp_path / "results" / "swebench" / "verification" / "no-rollout").iterdir())
 
     async def test_a_failed_request_keeps_its_files_from_a_finally(self, set_global_config, tmp_path: Path) -> None:
@@ -316,6 +761,77 @@ class TestSaveFolder:
         assert kept == [None]
         assert not (tmp_path / "results").exists()
 
+    async def test_nothing_is_copied_when_an_anyio_cancel_scope_fires(self, set_global_config, tmp_path: Path) -> None:
+        set_global_config({"results_dir": str(tmp_path / "results")})
+        logs = self._logs(tmp_path)
+        kept: list[Path | None] = []
+
+        with anyio.move_on_after(0.05):
+            try:
+                await anyio.sleep(3600)
+            finally:
+                kept.append(await save_dir(logs, server_name="swebench", name="verification"))
+
+        assert kept == [None]
+        assert not (tmp_path / "results").exists()
+
+    async def test_a_save_after_an_expired_timeout_block_keeps_the_files(
+        self, set_global_config, tmp_path: Path
+    ) -> None:
+        set_global_config({"results_dir": str(tmp_path / "results")})
+        logs = self._logs(tmp_path)
+        inside: list[Path | None] = []
+
+        try:
+            async with asyncio.timeout(0.01):
+                try:
+                    await asyncio.sleep(3600)
+                finally:
+                    # Inside the block the task counts as being cancelled, so nothing is kept.
+                    inside.append(await save_dir(logs, server_name="swebench", name="verification"))
+        except TimeoutError:
+            after = await save_dir(logs, server_name="swebench", name="verification")
+
+        assert inside == [None]
+        assert after is not None and (after / "report.json").exists()
+
+    async def test_copies_run_on_threads_of_their_own(self, set_global_config, tmp_path: Path, monkeypatch) -> None:
+        set_global_config({"results_dir": str(tmp_path / "results")})
+        logs = self._logs(tmp_path)
+        loop = asyncio.get_running_loop()
+        # A small default executor, so copies queued on it would starve other work.
+        default = ThreadPoolExecutor(max_workers=4)
+        loop.set_default_executor(default)
+        lock, release = threading.Lock(), threading.Event()
+        running = [0, 0]  # now, most at once
+        copy = runtime_files._copy_dir
+
+        def blocked_copy(src: Path, dest: Path) -> Path:
+            with lock:
+                running[0] += 1
+                running[1] = max(running)
+            release.wait(10)
+            with lock:
+                running[0] -= 1
+            return copy(src, dest)
+
+        monkeypatch.setattr(runtime_files, "_copy_dir", blocked_copy)
+        saves = [asyncio.create_task(save_dir(logs, server_name="swebench", name="verification")) for _ in range(8)]
+        try:
+            for _ in range(200):
+                if running[0] >= runtime_files._SAVE_WORKERS:
+                    break
+                await asyncio.sleep(0.01)
+            # Other file work, and DNS lookups, still get a thread while every copy waits.
+            assert await asyncio.wait_for(asyncio.to_thread(lambda: "free"), 2) == "free"
+            assert running[1] == runtime_files._SAVE_WORKERS
+        finally:
+            release.set()
+            kept = await asyncio.gather(*saves)
+            default.shutdown(wait=True)
+
+        assert all(path is not None for path in kept)
+
     async def test_names_and_labels_stay_one_folder_under_the_root(self, set_global_config, tmp_path: Path) -> None:
         set_global_config({"results_dir": str(tmp_path / "results")})
         logs = self._logs(tmp_path)
@@ -326,6 +842,13 @@ class TestSaveFolder:
         assert kept is not None
         assert kept.relative_to(tmp_path / "results").parts[0] == "..%2Fserver"
         assert ".." not in kept.parts
+
+    async def test_a_long_label_still_keeps_the_files(self, set_global_config, tmp_path: Path) -> None:
+        set_global_config({"results_dir": str(tmp_path / "results")})
+
+        kept = await save_dir(self._logs(tmp_path), server_name="swebench", name="verification", label="x" * 300)
+
+        assert kept is not None and len(kept.name.encode()) <= 255
 
     async def test_a_name_must_be_one_safe_part_and_a_server_name_must_name_a_server(
         self, set_global_config, tmp_path: Path
@@ -340,59 +863,8 @@ class TestSaveFolder:
                 await save_dir(logs, server_name=server_name, name="verification")
 
 
-class TestTempFolder:
-    def test_folder_is_under_the_temporary_directory_and_removed_on_exit(
-        self, set_global_config, tmp_path: Path, monkeypatch
-    ) -> None:
-        # The system temporary directory, pointed at a test folder so the host's own /tmp is left alone.
-        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
-        monkeypatch.setattr(runtime_files, "_checked_temp_parents", set())
-        set_global_config(None)
-
-        with request_temp_dir(name="workspace") as path:
-            (path / "file.txt").write_text("x")
-            assert path.parent.parent == Path(tempfile.gettempdir()) / "nemo_gym" / str(os.getuid())
-
-        assert not path.exists()
-
-    def test_folder_is_under_temp_dir_when_set(self, set_global_config, tmp_path: Path) -> None:
-        set_global_config({"temp_dir": str(tmp_path / "temp")})
-
-        with request_temp_dir(name="workspace") as path:
-            assert path.parent.parent == tmp_path / "temp"
-
-        assert _request_folders(tmp_path / "temp") == []
-
-    def test_folder_is_removed_when_the_block_raises(self, set_global_config) -> None:
-        set_global_config(None)
-
-        with pytest.raises(RuntimeError):
-            with request_temp_dir(name="workspace") as path:
-                (path / "file.txt").write_text("x")
-                raise RuntimeError("boom")
-
-        assert not path.exists()
-
-
-def test_temp_dir_is_checked_once_on_the_writing_node(set_global_config, tmp_path: Path, monkeypatch) -> None:
-    checked: list[tuple[str, Path]] = []
-    monkeypatch.setattr(runtime_files, "warn_if_unsuitable", lambda setting, path: checked.append((setting, path)))
-    monkeypatch.setattr(runtime_files, "_checked_temp_parents", set())
-    set_global_config({"temp_dir": str(tmp_path / "temp")})
-
-    with request_temp_dir(name="workspace"):
-        pass
-    with request_temp_dir(name="workspace"):
-        pass
-
-    assert checked == [("temp_dir", tmp_path / "temp")]
-
-
-@pytest.mark.skipif(
-    not Path("/proc/self/ns/pid").exists() or not Path("/proc/sys/kernel/random/boot_id").exists(),
-    reason="needs Linux PID namespaces and a boot id",
-)
-class TestStaleTempFolders:
+@LINUX_IDS
+class TestStaleProcessDirs:
     def _dead_pid(self) -> int:
         process = subprocess.Popen([sys.executable, "-c", "pass"])
         process.wait()
@@ -403,7 +875,7 @@ class TestStaleTempFolders:
         namespace = namespace or os.stat("/proc/self/ns/pid").st_ino
         return f"nemo-gym-{host}-{namespace}-{pid}"
 
-    def test_only_folders_of_dead_processes_on_this_host_and_namespace_are_removed(self, tmp_path: Path) -> None:
+    def test_only_folders_of_dead_processes_on_this_host_boot_and_namespace_are_removed(self, tmp_path: Path) -> None:
         namespace = os.stat("/proc/self/ns/pid").st_ino
         dead = tmp_path / self._name(self._dead_pid())
         live = tmp_path / self._name(os.getpid())
@@ -411,70 +883,59 @@ class TestStaleTempFolders:
         (dead / "workspace-abc" / "nested").mkdir(parents=True)
         (dead / "workspace-abc" / "nested" / "file.txt").write_text("x")
         other_namespace = tmp_path / self._name(self._dead_pid(), namespace=namespace + 1)
-        # Another host's folder on a shared directory: same namespace number, a dead pid here, a live process there.
+        # Another host's or boot's folder on a shared directory: the same namespace number and a pid dead here.
         other_host = tmp_path / self._name(self._dead_pid(), host="0" * 12)
         unrelated = tmp_path / "something-else"
         for folder in (live, other_namespace, other_host, unrelated):
             folder.mkdir()
 
-        assert remove_stale_temp_dirs(tmp_path) == [dead]
+        assert runtime_files._remove_stale_process_dirs(tmp_path) == [dead]
         assert sorted(p.name for p in tmp_path.iterdir()) == sorted(
             p.name for p in (live, other_namespace, other_host, unrelated)
         )
 
-        # On storage private to this host, a folder from another boot id is from an earlier boot: no process of it runs.
-        assert remove_stale_temp_dirs(tmp_path, private_to_host=True) == [other_host]
-        assert sorted(p.name for p in tmp_path.iterdir()) == sorted(p.name for p in (live, other_namespace, unrelated))
-
-    def test_first_folder_in_a_temp_dir_clears_leftovers(self, set_global_config, tmp_path: Path, monkeypatch) -> None:
-        monkeypatch.setattr(runtime_files, "_checked_temp_parents", set())
+    def test_first_folder_in_a_temp_dir_clears_leftovers(self, set_global_config, tmp_path: Path) -> None:
         leftover = tmp_path / self._name(self._dead_pid())
         leftover.mkdir()
         set_global_config({"temp_dir": str(tmp_path)})
 
-        with request_temp_dir(name="workspace") as path:
+        with request_temp_dir("workspace") as path:
             assert path.parent.name == self._name(os.getpid())
 
         assert not leftover.exists()
 
-    def test_leftovers_are_removed_on_a_shared_filesystem_too(
-        self, set_global_config, tmp_path: Path, monkeypatch
-    ) -> None:
-        # The boot id keeps other hosts' folders safe, so a shared temp_dir still gets an end of life.
-        monkeypatch.setattr(runtime_files, "_checked_temp_parents", set())
-        monkeypatch.setattr(runtime_files, "warn_if_unsuitable", lambda setting, path: "lustre")
-        leftover = tmp_path / self._name(self._dead_pid())
-        leftover.mkdir()
-        set_global_config({"temp_dir": str(tmp_path)})
+    def test_an_unknown_host_removes_nothing(self, tmp_path: Path, monkeypatch) -> None:
+        # Without a boot id no folder can be told apart from another host's.
+        folder = tmp_path / self._name(self._dead_pid())
+        folder.mkdir()
+        monkeypatch.setattr(runtime_files, "_host_id", lambda: runtime_files._UNKNOWN_HOST)
 
-        with request_temp_dir(name="workspace"):
-            pass
+        assert runtime_files._remove_stale_process_dirs(tmp_path) == []
+        assert folder.exists()
 
-        assert not leftover.exists()
+    def test_a_missing_parent_removes_nothing(self, tmp_path: Path) -> None:
+        assert runtime_files._remove_stale_process_dirs(tmp_path / "missing") == []
 
     def test_a_folder_name_with_an_impossible_pid_is_kept_and_never_fails_the_request(
-        self, set_global_config, tmp_path: Path, monkeypatch
+        self, set_global_config, tmp_path: Path
     ) -> None:
-        monkeypatch.setattr(runtime_files, "_checked_temp_parents", set())
         crafted = tmp_path / self._name(10**30)
         crafted.mkdir()
         set_global_config({"temp_dir": str(tmp_path)})
 
-        with request_temp_dir(name="workspace") as path:
+        with request_temp_dir("workspace") as path:
             assert path.exists()
 
         assert crafted.exists()
 
     def test_a_failing_cleanup_never_fails_the_request(self, set_global_config, tmp_path: Path, monkeypatch) -> None:
-        monkeypatch.setattr(runtime_files, "_checked_temp_parents", set())
-
         def broken(parent: Path) -> list[Path]:
             raise OSError("listing failed")
 
-        monkeypatch.setattr(runtime_files, "remove_stale_temp_dirs", broken)
+        monkeypatch.setattr(runtime_files, "_remove_stale_process_dirs", broken)
         set_global_config({"temp_dir": str(tmp_path)})
 
-        with request_temp_dir(name="workspace") as path:
+        with request_temp_dir("workspace") as path:
             assert path.exists()
 
     def test_another_users_folders_stay(self, tmp_path: Path, monkeypatch) -> None:
@@ -483,7 +944,7 @@ class TestStaleTempFolders:
         real_uid = os.getuid()
         monkeypatch.setattr(os, "getuid", lambda: real_uid + 1)
 
-        assert remove_stale_temp_dirs(tmp_path) == []
+        assert runtime_files._remove_stale_process_dirs(tmp_path) == []
         assert folder.exists()
 
     def test_files_and_symlinks_with_a_matching_name_are_left_alone(self, tmp_path: Path) -> None:
@@ -493,255 +954,14 @@ class TestStaleTempFolders:
         (target / "keep").write_text("")
         (tmp_path / self._name(self._dead_pid())).symlink_to(target)
 
-        assert remove_stale_temp_dirs(tmp_path) == []
+        assert runtime_files._remove_stale_process_dirs(tmp_path) == []
         assert (target / "keep").exists()
 
+    @NOT_ROOT
     def test_a_process_this_user_cannot_signal_counts_as_running(self, tmp_path: Path) -> None:
-        if os.getuid() == 0:
-            pytest.skip("root may signal every process")
         # PID 1 is alive in every namespace, and a process of another user answers with PermissionError.
         folder = tmp_path / self._name(1)
         folder.mkdir()
 
-        assert remove_stale_temp_dirs(tmp_path) == []
+        assert runtime_files._remove_stale_process_dirs(tmp_path) == []
         assert folder.exists()
-
-
-def test_request_folders_share_one_folder_per_process(set_global_config, tmp_path: Path) -> None:
-    set_global_config({"temp_dir": str(tmp_path)})
-
-    with request_temp_dir(name="workspace") as first, request_temp_dir(name="harness") as second:
-        assert first.parent == second.parent
-        assert first.parent.parent == tmp_path
-        assert first.name.startswith("workspace-") and second.name.startswith("harness-")
-
-    assert [p.name for p in tmp_path.iterdir()] == [first.parent.name]
-
-
-def test_exit_removes_this_process_folder_and_a_forked_child_does_not(
-    set_global_config, tmp_path: Path, monkeypatch
-) -> None:
-    monkeypatch.setattr(runtime_files, "_process_dirs", {})
-    set_global_config({"temp_dir": str(tmp_path)})
-    with request_temp_dir(name="workspace") as path:
-        (path / "file.txt").write_text("x")
-        process_folder = path.parent
-
-        # A forked child inherits the exit handler and the record of this folder, but must leave it alone.
-        real_pid = os.getpid()
-        monkeypatch.setattr(os, "getpid", lambda: real_pid + 1)
-        runtime_files._remove_own_process_dirs(real_pid)
-        monkeypatch.setattr(os, "getpid", lambda: real_pid)
-        assert process_folder.exists()
-
-        runtime_files._remove_own_process_dirs(os.getpid())
-
-    assert not process_folder.exists()
-
-
-def test_a_stale_folder_with_this_process_name_is_cleared_before_use(
-    set_global_config, tmp_path: Path, monkeypatch
-) -> None:
-    # Only an earlier process with the same id, now dead, can have left a folder with this name.
-    monkeypatch.setattr(runtime_files, "_process_dirs", {})
-    stale = tmp_path / runtime_files._process_dir_name()
-    (stale / "workspace-old").mkdir(parents=True)
-    set_global_config({"temp_dir": str(tmp_path)})
-
-    with request_temp_dir(name="workspace") as path:
-        assert path.parent == stale
-
-    assert not (stale / "workspace-old").exists()
-
-
-def test_a_temp_dir_argument_replaces_the_setting_for_code_without_gym_configuration(
-    set_global_config, tmp_path: Path
-) -> None:
-    set_global_config(None)
-
-    with request_temp_dir(name="harbor-job", temp_dir=tmp_path / "from-server") as path:
-        assert path.parent.parent == tmp_path / "from-server"
-
-    assert not path.exists()
-
-
-class TestAsyncTempFolder:
-    async def test_folder_is_removed_when_the_task_is_cancelled(self, set_global_config) -> None:
-        set_global_config(None)
-        created: list[Path] = []
-        entered = asyncio.Event()
-
-        async def work() -> None:
-            async with async_request_temp_dir(name="workspace") as path:
-                created.append(path)
-                (path / "file.txt").write_text("x")
-                entered.set()
-                await asyncio.sleep(3600)
-
-        task = asyncio.create_task(work())
-        await entered.wait()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-        assert created and not created[0].exists()
-
-
-async def test_folder_is_removed_when_cancelled_while_it_is_created(
-    set_global_config, tmp_path: Path, monkeypatch
-) -> None:
-    set_global_config({"temp_dir": str(tmp_path)})
-    started, release, created = threading.Event(), threading.Event(), threading.Event()
-    create = runtime_files._create_temp_dir
-    made: list[Path] = []
-
-    def slow_create(kind: str, parent: Path | None) -> Path:
-        started.set()
-        release.wait(5)
-        made.append(create(kind, parent))
-        created.set()
-        return made[0]
-
-    monkeypatch.setattr(runtime_files, "_create_temp_dir", slow_create)
-
-    async def work() -> None:
-        async with async_request_temp_dir(name="workspace"):
-            pass
-
-    task = asyncio.create_task(work())
-    await asyncio.to_thread(started.wait, 5)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    release.set()
-    # The folder must really be created after the cancel, or the test would prove nothing.
-    assert await asyncio.to_thread(created.wait, 5)
-    for _ in range(200):
-        if not made[0].exists():
-            break
-        await asyncio.sleep(0.01)
-
-    assert not made[0].exists()
-    assert _request_folders(tmp_path) == []
-
-
-async def test_folder_is_removed_when_an_anyio_cancel_scope_fires(set_global_config, tmp_path: Path) -> None:
-    import anyio
-
-    set_global_config({"temp_dir": str(tmp_path)})
-
-    with anyio.move_on_after(0.05):
-        async with async_request_temp_dir(name="workspace"):
-            await anyio.sleep(3600)
-
-    for _ in range(100):
-        if not _request_folders(tmp_path):
-            break
-        await asyncio.sleep(0.01)
-    assert _request_folders(tmp_path) == []
-
-
-def _cleanup_left_after_a_repeated_cancellation(cancel_kind: str) -> list[Path]:
-    """Cancel again while cleanup waits behind a busy worker thread, as under load, and return what is left."""
-
-    async def main() -> list[Path]:
-        loop = asyncio.get_running_loop()
-        executor = ThreadPoolExecutor(max_workers=1)
-        loop.set_default_executor(executor)
-        created: list[Path] = []
-        entered = asyncio.Event()
-        scopes: list[anyio.CancelScope] = []
-
-        async def work() -> None:
-            with anyio.CancelScope() as scope:
-                scopes.append(scope)
-                async with async_request_temp_dir(name="workspace") as path:
-                    created.append(path)
-                    entered.set()
-                    await asyncio.sleep(3600)
-
-        task = asyncio.create_task(work())
-        await entered.wait()
-        gate = threading.Event()
-        busy = loop.run_in_executor(None, gate.wait)
-        if cancel_kind == "anyio":
-            # anyio delivers the cancellation again at every await in the scope, as the disconnect middleware does.
-            scopes[0].cancel()
-        else:
-            task.cancel()
-            await asyncio.sleep(0.05)
-            task.cancel()
-        try:
-            await asyncio.wait_for(task, 5)
-        except asyncio.CancelledError:
-            pass
-        gate.set()
-        await busy
-        await loop.run_in_executor(None, lambda: None)
-        executor.shutdown(wait=True)
-        return [path for path in created if path.exists()]
-
-    return asyncio.run(main())
-
-
-@pytest.mark.parametrize("cancel_kind", ["anyio", "task"])
-def test_cleanup_survives_a_repeated_cancellation_while_queued(
-    set_global_config, tmp_path: Path, cancel_kind: str
-) -> None:
-    set_global_config({"temp_dir": str(tmp_path / "temp")})
-
-    assert _cleanup_left_after_a_repeated_cancellation(cancel_kind) == []
-    assert _request_folders(tmp_path / "temp") == []
-
-
-def test_concurrent_first_use_of_a_parent_loses_no_request(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(runtime_files, "_process_dirs", {})
-    monkeypatch.setattr(runtime_files, "_checked_temp_parents", set())
-    count = 16
-    start, written = threading.Barrier(count), threading.Barrier(count)
-    errors: list[BaseException] = []
-    missing: list[Path] = []
-
-    def request(index: int) -> None:
-        try:
-            start.wait(5)
-            with request_temp_dir(name="workspace", temp_dir=tmp_path) as path:
-                (path / f"{index}.txt").write_text("x")
-                # Every request holds its folder open until all have written, so a lost file shows here.
-                written.wait(5)
-                if not (path / f"{index}.txt").exists():
-                    missing.append(path)
-        except BaseException as error:
-            errors.append(error)
-
-    threads = [threading.Thread(target=request, args=(index,)) for index in range(count)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join(10)
-
-    assert errors == []
-    assert missing == []
-
-
-def test_a_process_folder_removed_from_outside_is_made_again(set_global_config, tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(runtime_files, "_process_dirs", {})
-    set_global_config({"temp_dir": str(tmp_path)})
-    with request_temp_dir(name="workspace") as first:
-        pass
-    shutil.rmtree(first.parent)
-
-    with request_temp_dir(name="workspace") as second:
-        assert second.parent == first.parent
-
-
-def test_a_forked_child_gets_a_free_first_use_lock(monkeypatch) -> None:
-    held = threading.Lock()
-    held.acquire()
-    monkeypatch.setattr(runtime_files, "_first_use_lock", held)
-
-    # What os.register_at_fork runs in the child after a fork.
-    runtime_files._reset_locks_after_fork()
-
-    assert runtime_files._first_use_lock is not held
-    assert runtime_files._first_use_lock.acquire(blocking=False)
