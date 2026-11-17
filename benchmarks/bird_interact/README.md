@@ -41,11 +41,17 @@ The public releases withhold the solution SQL and the test cases. Email
 [BIRD-Interact repository](https://github.com/bird-bench/BIRD-Interact#dataset-uses) asks, and the file is sent
 automatically.
 
+Put the file in `benchmarks/bird_interact/data/`, where `prepare.py` reads it by default:
+`bird_interact_gt_kg_testcases_1008.jsonl` for Lite and `bird_interact_full_gt_kg_testcases_08022.jsonl` for Full.
+`data/.gitignore` keeps it out of the repository: the authors withhold the ground truth, so never publish it.
+
 ## 3. Prepare
 
 ```bash
-gym eval prepare --benchmark bird_interact +prepare_script_args.ground_truth_jsonl=<ground truth file>
+gym eval prepare --benchmark bird_interact
 ```
+
+To read the ground truth from another place, add `+prepare_script_args.ground_truth_jsonl=<file>`.
 
 `prepare.py` downloads the release from Hugging Face (`birdsql/bird-interact-lite` or `-full`): its rows, and for each
 database the schema, column meanings and knowledge base, into `data/<release>/databases/`, the servers'
