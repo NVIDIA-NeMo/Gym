@@ -25,7 +25,12 @@ METRICS = (
     "wrong_answer",
     "uncertain",
     "unrecognized_name",
+    "identity_refusal",
+    "training_data_claim",
+    "version_mismatch",
 )
+# Rated only over samples graded with the setting they need: an expected version.
+OPTIONAL_METRICS = ("version_mismatch",)
 
 
 # A policy failure (e.g. a disabled-tool call) has no scoring result: count it as 0 in
@@ -56,6 +61,9 @@ def _summarize(records: list[dict]) -> dict:
     counts = Counter(r["status"] for r in records)
 
     def rate(metric: str) -> float | None:
+        if metric in OPTIONAL_METRICS:
+            graded = [r for r in scored if metric in r["metrics"]]
+            return sum(r["metrics"][metric] for r in graded) / len(graded) if graded else None
         pool = scored + failed if metric in FAILED_BY_POLICY_FAILURE else scored
         return (
             sum(r["metrics"].get(metric, 0.0) for r in pool if r["status"] == "scored") / len(pool) if pool else None

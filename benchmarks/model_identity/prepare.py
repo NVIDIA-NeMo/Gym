@@ -55,6 +55,7 @@ def _settings(
     expected_model: str,
     expected_model_aliases=None,
     expected_lineage=None,
+    expected_version: str | None = None,
 ) -> dict:
     """Normalized preparation settings, as the manifest records them."""
     developer = expected_developer.strip().casefold()
@@ -69,6 +70,8 @@ def _settings(
         raise ValueError("Expected at least one locale")
     if expected_model_aliases is None:
         expected_model_aliases = DEFAULT_MODEL_ALIASES.get(model.casefold(), ())
+    if expected_version is not None and not expected_version.strip():
+        raise ValueError("Expected version must be nonempty when given")
     return {
         "single_per_tactic": single_per_tactic,
         "multi_per_strategy": multi_per_strategy,
@@ -82,6 +85,7 @@ def _settings(
         "expected_model": model,
         "expected_model_names": [model, *expected_model_aliases],
         "expected_lineage": sorted({d.strip().casefold() for d in expected_lineage or () if d.strip()}),
+        "expected_version": None if expected_version is None else expected_version.strip(),
     }
 
 
@@ -251,6 +255,7 @@ def _build(
     expected_model: str = "Nemotron",
     expected_model_aliases: list[str] | None = None,
     expected_lineage: list[str] | None = None,
+    expected_version: str | None = None,
 ) -> dict:
     from benchmarks.model_identity.usersim_api import (
         ConversationSimulatorConfig,
@@ -272,6 +277,7 @@ def _build(
         expected_model=expected_model,
         expected_model_aliases=expected_model_aliases,
         expected_lineage=expected_lineage,
+        expected_version=expected_version,
     )
     spec_path = output.with_suffix(".spec.yaml")
     _write_spec(
@@ -324,6 +330,12 @@ def _build(
                 "mode": "single_turn" if strategy == "none" else "multi_turn",
             }
             cases.append(case)
+            # Grading reads the expected version from the row's case.
+            row_case = (
+                case
+                if settings["expected_version"] is None
+                else {**case, "expected_version": settings["expected_version"]}
+            )
             config = ConversationSimulatorConfig(
                 name="conversation_messages",
                 locale=locale,
@@ -340,7 +352,7 @@ def _build(
                     "identity_strategy_id": strategy,
                     "theme": "__not_used__",
                     "trajectory_id": task_id,
-                    "identity_case": case,
+                    "identity_case": row_case,
                 },
                 config=config,
                 models=models,
@@ -427,6 +439,7 @@ def prepare(
     expected_model: str = "Nemotron",
     expected_model_aliases: list[str] | None = None,
     expected_lineage: list[str] | None = None,
+    expected_version: str | None = None,
 ) -> Path:
     """Create a frozen panel; preparation performs no model calls.
 
@@ -438,6 +451,8 @@ def prepare(
     `expected_model_aliases` lists other spellings that also count as the expected model.
     When omitted, it defaults to `DEFAULT_MODEL_ALIASES` for that model, if any.
     `expected_lineage` lists UserSim developer ids whose base model the evaluated model is built on.
+    `expected_version`, when given, is the version a reply should state; grading reports how often a
+    stated version differs, without changing the reward.
     """
     options = {
         "single_per_tactic": single_per_tactic,
@@ -452,6 +467,7 @@ def prepare(
         "expected_model": expected_model,
         "expected_model_aliases": None if expected_model_aliases is None else list(expected_model_aliases),
         "expected_lineage": None if expected_lineage is None else list(expected_lineage),
+        "expected_version": expected_version,
     }
     executable = shutil.which("uv")
     if executable is None:

@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import Request
 
 from benchmarks.model_identity.report import CORRECTNESS_METRICS, validate_correctness_metrics
-from benchmarks.model_identity.scoring import OTHER_MISTAKE_KINDS, score_model_identity
+from benchmarks.model_identity.scoring import INFORMATIONAL_KINDS, OTHER_MISTAKE_KINDS, score_model_identity
 from benchmarks.model_identity.usersim_api import scorer_state
 from resources_servers.nemo_user_sim.app import UserSimResourcesServer, _ResourcesModelFacade
 from resources_servers.nemo_user_sim.episode_contracts import (
@@ -56,6 +56,9 @@ def identity_metrics(tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
         **{f"mean/{kind}": mean(kind, graded) for kind in OTHER_MISTAKE_KINDS},
         # Samples with a model name outside UserSim's vocabulary.
         "mean/unrecognized_name": mean("unrecognized_name", graded),
+        **{f"mean/{kind}": mean(kind, graded) for kind in INFORMATIONAL_KINDS},
+        # Only samples graded with an expected version.
+        "mean/version_mismatch": mean("version_mismatch", [o for o in graded if "version_mismatch" in o["metrics"]]),
     }
     return {key: value for key, value in metrics.items() if value is not None}
 

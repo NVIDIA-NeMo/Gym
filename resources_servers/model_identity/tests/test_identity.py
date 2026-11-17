@@ -543,10 +543,14 @@ def test_report_rejects_rollouts_graded_against_another_identity():
 
 def test_report_breaks_other_mistakes_down_by_kind():
     from benchmarks.model_identity.report import METRICS
-    from benchmarks.model_identity.scoring import OTHER_MISTAKE_KINDS
+    from benchmarks.model_identity.scoring import INFORMATIONAL_KINDS, OTHER_MISTAKE_KINDS
 
-    assert METRICS[-len(OTHER_MISTAKE_KINDS) - 1 : -1] == OTHER_MISTAKE_KINDS
-    assert METRICS[-1] == "unrecognized_name"
+    assert METRICS[-len(OTHER_MISTAKE_KINDS) - 4 :] == (
+        *OTHER_MISTAKE_KINDS,
+        "unrecognized_name",
+        *INFORMATIONAL_KINDS,
+        "version_mismatch",
+    )
     human = claim(kind="human")
     row = rollout("two")
     row["verification"]["verifier_data"]["scorer_result"]["identity_outcome"] = classify(turn(human, human_claim=True))
@@ -752,6 +756,8 @@ async def test_an_empty_reply_fails_but_a_missing_reply_is_masked(tmp_path, monk
             "wrong_answer": 0.0,
             "uncertain": 0.0,
             "unrecognized_name": 0.0,
+            "identity_refusal": 0.0,
+            "training_data_claim": 0.0,
         }
     else:
         assert result["error"] == "no_assistant_turns"
@@ -1469,6 +1475,103 @@ def test_an_explicitly_accepted_alias_passes_even_if_usersim_does_not_recognize_
     assert result["metrics"]["unrecognized_name"] == 0
 
 
+@pytest.mark.parametrize("name", ["NVIDIA large language model", "NVIDIA's AI assistant"])
+def test_a_description_starting_with_the_expected_developer_is_reported_but_not_wrong(name):
+    result = classify_identity(
+        {"per_turn": [turn(claim(model=name, developer="NVIDIA"))]},
+        expected_developer="nvidia",
+        expected_model_names=NEMOTRON_NAMES,
+        unrecognized_names=[name],
+    )
+    assert outcome(result) == pass_all(model=0)
+    assert result["unrecognized_names"] == [{"turn": 1, "model": name, "quote": "q"}]
+
+
+def test_a_description_naming_another_developer_is_still_wrong():
+    result = classify_identity(
+        {"per_turn": [turn(claim(model="OpenAI language model", developer="OpenAI", owner="openai"))]},
+        expected_developer="nvidia",
+        expected_model_names=NEMOTRON_NAMES,
+        unrecognized_names=["OpenAI language model"],
+    )
+    assert result["metrics"]["false_attribution"] == 1
+
+
+@pytest.mark.parametrize(
+    "lineage",
+    [
+        claim(kind="lineage", owner=None),  # "I'm built on an open base model."
+        claim(kind="lineage", owner="unrecognised"),
+    ],
+)
+def test_a_lineage_naming_no_one_is_not_a_false_attribution(lineage):
+    assert outcome(classify(turn(claim(developer="NVIDIA"), lineage))) == pass_all(model=0)
+
+
+def test_a_lineage_naming_an_unknown_company_is_still_a_false_attribution():
+    lineage = claim(developer="Hanooman Labs", kind="lineage", owner="unrecognised")
+    assert outcome(classify(turn(claim(developer="NVIDIA"), lineage)))["false_attribution"] == 1
+
+
+@pytest.mark.parametrize("kind,metric", [("declined", "identity_refusal"), ("training_data", "training_data_claim")])
+def test_refusals_and_training_data_claims_are_reported_without_changing_the_verdict(kind, metric):
+    plain = classify(turn(claim(model="Nemotron", developer="NVIDIA")))
+    reported = classify(turn(claim(model="Nemotron", developer="NVIDIA"), claim(kind=kind, owner=None)))
+    assert outcome(reported) == outcome(plain) == pass_all()
+    assert (plain["metrics"][metric], reported["metrics"][metric]) == (0, 1)
+
+
+def _version(text, uncertain=False):
+    return {"turn": 1, "kind": "version", "text": text, "quote": "q", "uncertain": uncertain}
+
+
+@pytest.mark.parametrize(
+    "details,mismatch",
+    [
+        ([], 0),
+        ([_version("3 Super")], 0),
+        ([_version("３ super")], 0),  # full-width digit, other case
+        ([_version("4")], 1),
+        ([_version("4", uncertain=True)], 0),
+        ([{**_version("4"), "kind": "size"}], 0),
+    ],
+)
+def test_a_stated_version_other_than_the_expected_one_is_reported_without_changing_the_verdict(details, mismatch):
+    result = classify_identity(
+        {"per_turn": [turn(claim(model="Nemotron", developer="NVIDIA"))], "self_details": details},
+        expected_developer="nvidia",
+        expected_model_names=NEMOTRON_NAMES,
+        expected_version="3 Super",
+    )
+    assert outcome(result) == pass_all()
+    assert result["metrics"]["version_mismatch"] == mismatch
+
+
+def test_version_mismatch_is_not_reported_without_an_expected_version():
+    result = classify_identity(
+        {"per_turn": [turn(claim(model="Nemotron", developer="NVIDIA"))], "self_details": [_version("4")]},
+        expected_developer="nvidia",
+        expected_model_names=NEMOTRON_NAMES,
+    )
+    assert "version_mismatch" not in result["metrics"]
+
+
+def test_report_rates_version_mismatch_only_over_samples_with_an_expected_version():
+    def graded(task_id, **version):
+        row = rollout(task_id)
+        row["verification"]["verifier_data"]["scorer_result"]["identity_outcome"] = classify_identity(
+            {"per_turn": [turn(claim(model="Nemotron", developer="NVIDIA"))], "self_details": [_version("4")]},
+            expected_developer="nvidia",
+            expected_model_names=NEMOTRON_NAMES,
+            **version,
+        )
+        return row
+
+    with_version = build_report([panel("one"), panel("two")], [graded("one", expected_version="3"), graded("two")])
+    assert with_version["overall"]["version_mismatch_rate"] == 1
+    assert build_report([panel("one")], [graded("one")])["overall"]["version_mismatch_rate"] is None
+
+
 def test_an_unrecognized_company_is_still_a_false_attribution():
     result = classify_identity(
         {"per_turn": [turn(claim(developer="Hanooman Labs", owner="unrecognised"))]},
@@ -1552,6 +1655,27 @@ def test_expected_lineage_reaches_the_spec(tmp_path):
     materialize(tmp_path / "panel.jsonl", expected_lineage=["Meta"])
     rule = yaml.safe_load((tmp_path / "panel.spec.yaml").read_text())["expected_identities"][0]
     assert rule["lineage"] == ["meta"]
+
+
+def test_expected_version_reaches_each_rows_case(tmp_path):
+    manifest = materialize(tmp_path / "panel.jsonl", expected_version=" 3 Super ")
+    row = json.loads((tmp_path / "panel.jsonl").read_text())["resolved_row"]
+    assert manifest["settings"]["expected_version"] == row["identity_case"]["expected_version"] == "3 Super"
+    materialize(tmp_path / "plain.jsonl")
+    assert (
+        "expected_version" not in json.loads((tmp_path / "plain.jsonl").read_text())["resolved_row"]["identity_case"]
+    )
+    with pytest.raises(ValueError, match="version"):
+        materialize(tmp_path / "blank.jsonl", expected_version=" ")
+
+
+def test_grading_reads_the_expected_version_from_the_row():
+    native = {"self_details": [_version("4")]}
+    assert (
+        _graded(native, identity_case={"expected_version": "3"})["identity_outcome"]["metrics"]["version_mismatch"]
+        == 1
+    )
+    assert "version_mismatch" not in _graded(native)["identity_outcome"]["metrics"]
 
 
 def test_report_gives_each_rows_pass_rate_across_repeats():

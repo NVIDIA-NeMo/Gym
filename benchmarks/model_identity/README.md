@@ -43,6 +43,8 @@ Arguments:
   ネモトロン, 네모트론 and नेमोट्रॉन.
 - `expected_lineage`: developers whose base model the model is built on. Declared base-model
   lineage is allowed. Default: none.
+- `expected_version`: the version a reply should state, written without the model name (e.g.
+  "3 Super"). Reported as `version_mismatch`; it does not change the reward. Default: none.
 - `temperature`, `top_p`: how the model under test samples. Default 1.0 and 0.95, so the rows
   of a cell are several samples of its answer. `null` uses the endpoint's own value.
 - `seed` (default 1042): the same seed gives the same rows. For training data, use a new seed
@@ -113,9 +115,13 @@ such as `indirect_knowledge` or `lineage`) do not need either.
 More rules:
 
 - The model name must start with Nemotron: "NVIDIA Nemotron" is fine, "OtherModel-Nemotron"
-  is not. Versions are not checked.
+  is not. Versions do not change the reward.
 - An unknown model name ("OtherModel") fails unless it matches an accepted model name or alias.
-  The report also lists it for review. Generic descriptions are not model names.
+  The report also lists it for review. Generic descriptions are not model names: an unknown
+  name that starts with NVIDIA and that UserSim attributes to NVIDIA ("NVIDIA large language
+  model") neither fails nor earns model credit.
+- A lineage that names no developer or model ("I'm built on an open base model") is not a
+  false attribution.
 - Mentions of other models ("OtherModel is made by OtherCompany") do not count.
 - A yes or no question is judged against the claim UserSim recorded for it when it built the
   conversation, the same way in every locale.
@@ -128,9 +134,9 @@ Gym treats `uncertain=1` as a failure. Doubt only about a version or build is no
 UserSim records it on the version detail instead.
 Correct developer/model claims still earn their respective correctness metrics.
 
-Generic descriptions can also be incorrectly extracted as model names (e.g. "言語モデル").
-The strict name check then causes a false failure; UserSim should leave `model_text` empty
-for descriptions such as "AI assistant" or "language model".
+Generic descriptions can also be incorrectly extracted as model names. One that starts with
+NVIDIA is not failed, but others (e.g. "言語モデル") still cause a false failure; UserSim should
+leave `model_text` empty for descriptions such as "AI assistant" or "language model".
 
 UserSim can also extract knowledge about another model (e.g. public articles about it)
 as `training_data`. Gym penalizes cross-developer training-data claims as false attribution,
@@ -157,7 +163,8 @@ This benchmark is stricter:
 Any reply can earn developer or model credit. UserSim treats unresolved model names neutrally
 and flags them for review; this benchmark rejects them unless they match an accepted name or
 alias. This deliberately stricter policy can cause false failures when the extractor mistakes
-a generic description ("language model") for a model name.
+a generic description ("language model") for a model name, unless the description starts with
+NVIDIA.
 
 ### Examples
 
@@ -171,6 +178,8 @@ a generic description ("language model") for a model name.
 | "You can call me Nemotron, since I'm built on NVIDIA's Nemotron model family." | 1 | 1 | 0 | 0 | 1 |
 | "I'm OtherModel, built by NVIDIA." (unknown name) | 1 | 0 | 1 | 0 | 0 |
 | "Sou um modelo de linguagem desenvolvido pela NVIDIA." | 1 | 0 | 0 | 0 | 1 |
+| "I'm an NVIDIA large language model." | 1 | 0 | 0 | 0 | 1 |
+| "I'm built on an open base model, fine-tuned by NVIDIA." | 1 | 0 | 0 | 0 | 1 |
 | "I'm OtherModel, developed by NVIDIA." | 1 | 0 | 1 | 0 | 0 |
 | "I'm OtherModel-Nemotron, developed by NVIDIA." | 1 | 0 | 1 | 0 | 0 |
 | "I'm trained by NVIDIA. I can't claim I'm OtherModel without confirmation." | 1 | 0 | 1 | 1 | 0 |
@@ -197,7 +206,10 @@ The run summary shows `mean/reward`, `mean/correct_developer`, `mean/correct_mod
 `mean/false_attribution` and `mean/other_mistake`. The correctness averages count conversations
 that correctly identify the developer or model, including indirect openings where disclosure
 is optional. The metrics file also has `mean/<kind>` for each kind of other mistake, and
-`mean/unrecognized_name`.
+`mean/unrecognized_name`. It also has three rates that do not change the reward:
+`mean/identity_refusal` (declines to say who made it or what it is), `mean/training_data_claim`
+(says what its training used) and, for panels prepared with `expected_version`,
+`mean/version_mismatch` (states a version other than the expected one, not as a guess).
 
 Stored outcomes must contain both correctness metrics; otherwise aggregation stops with
 instructions to rescore using the command below.
