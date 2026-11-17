@@ -33,7 +33,6 @@ from nemo_gym.config import (
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,
     TOKEN_CAPTURE_BLOCK,
-    TOKEN_CAPTURE_PATH_SEGMENT,
     AgentServerRef,
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -904,10 +903,10 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             and bool(block.get("enabled", False))
             and (bool(block.get("all_agents", False)) or bool(agent_config.get("token_id_capture", False)))
         )
-        capture_segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if token_capture else ""
         # The agent is the one the training framework trains, so its model calls carry the episode's values.
         sampling_segment = model_sampling_path_segment(self.model_sampling_segment(request, trained=True))
-        return f"/ng-rollout/{request.episode_id.capture_key}{capture_segment}{sampling_segment}/v1/responses"
+        prefix = rollout_path_prefix(request.episode_id.capture_key, token_capture=token_capture)
+        return f"{prefix}{sampling_segment}/v1/responses"
 
     @staticmethod
     def _failure(

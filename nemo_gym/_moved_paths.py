@@ -501,6 +501,8 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         # rollout_correlation imported these and they stay importable through it.
         **_names("nemo_gym.core.episode_types", "0.8.0", "EpisodeId"),
         # rollout_correlation imported these and they stay importable through it.
+        **_names("nemo_gym.config.config_types", "0.8.0", "ROLLOUT_PATH_PREFIX"),
+        # rollout_correlation imported these and they stay importable through it.
         **_names("pydantic", "0.8.0", "BaseModel"),
         # Moved, and still imported by rollout_correlation for its own use.
         **_names("nemo_gym.core.episode_context", "0.8.0", "ROLLOUT_ID_PATTERN rollout_context"),
@@ -806,6 +808,10 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
     "nemo_gym.mcp_auto_exposure": {
         # Renamed when Environment Servers started to build MCP results with it.
         "_to_result": MovedPath(new="nemo_gym.server_runtime.mcp_auto_exposure:to_call_tool_result", since="0.8.0"),
+    },
+    "nemo_gym._checkpoint.model": {
+        # _checkpoint.model imported this and it stays importable through it.
+        **_names("nemo_gym.config.config_types", "0.8.0", "ROLLOUT_PATH_PREFIX"),
     },
     "nemo_gym._checkpoint.agent": {
         # _checkpoint.agent imported this and it stays importable through it.
