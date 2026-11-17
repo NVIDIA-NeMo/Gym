@@ -18,7 +18,8 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 from mcp.server.fastmcp import FastMCP, Image
-from playwright.async_api import Error as PlaywrightError, async_playwright
+from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import async_playwright
 
 
 def origin(url: str) -> str:
@@ -532,6 +533,8 @@ def create_server(config: dict, *, evidence_factory=None) -> FastMCP:
         page_tools = {
             "interact",
             "interact_at",
+            "insert_text",
+            "press_key",
             "upload",
             "go_back",
             "wait",
@@ -564,12 +567,14 @@ def create_server(config: dict, *, evidence_factory=None) -> FastMCP:
                 try:
                     if evidence is not None:
                         capture = await evidence.begin(fn, args, kwargs)
-                        capture['execution_phase'] = 'dispatch_validation'
+                        capture["execution_phase"] = "dispatch_validation"
                     if (
                         fn.__name__
                         in {
                             "interact",
                             "interact_at",
+                            "insert_text",
+                            "press_key",
                             "upload",
                             "go_back",
                             "wait",
@@ -590,11 +595,13 @@ def create_server(config: dict, *, evidence_factory=None) -> FastMCP:
                         kwargs.get("prompt_text", ""),
                     )
                     if capture is not None:
-                        capture['execution_phase'] = 'tool_execution'
+                        capture["execution_phase"] = "tool_execution"
                     result = await fn(*args, **kwargs)
                     if fn.__name__ in {
                         "interact",
                         "interact_at",
+                        "insert_text",
+                        "press_key",
                         "upload",
                         "navigate",
                         "go_back",
@@ -745,7 +752,8 @@ def create_server(config: dict, *, evidence_factory=None) -> FastMCP:
     ) -> list:
         """Use a CSS selector, or role and exact accessible name, to interact through the UI.
 
-        fill types value; press sends a key (e.g. Enter); select chooses an option value;
+        fill replaces an editable element value; press sends a key/shortcut, not arbitrary text;
+        use insert_text and press_key after focusing custom editors; select chooses an option value;
         scroll moves vertically by value pixels (default 600). button supports context menus.
         For multiple apps, expected_url must be the app URL you intend to act on;
         the matching tab is selected atomically. Use role="textbox", name="Username"
@@ -789,6 +797,85 @@ def create_server(config: dict, *, evidence_factory=None) -> FastMCP:
             await locator.select_option(value)
         else:
             await getattr(locator, action)()
+        return await tools.observe()
+
+    def require_keyboard_observation(observation_id: str) -> None:
+        if observation_id != f"{tools.sequence:05d}":
+            raise ValueError(
+                "Keyboard input requires the latest observation_id; observe and inspect focus first"
+            )
+        state = json.loads((tools.artifacts / f"{observation_id}.json").read_text())
+        if (
+            state["url"] != tools.page.url
+            or state.get("page_id") != str(id(tools.page))
+            or state.get("viewport") != tools.page.viewport_size
+            or not state.get("screenshot_available")
+        ):
+            raise ValueError(
+                "Get a fresh screenshot of the intended tab before focused keyboard input"
+            )
+
+    @server.tool(structured_output=False if evidence is not None else None)
+    @serialized
+    async def insert_text(
+        text: str,
+        observation_id: str,
+        expected_url: str = "",
+        mode: Literal["insert", "key_events"] = "insert",
+    ) -> list:
+        """Insert arbitrary text at the current cursor without selecting or refocusing an element.
+
+        First click the editor/terminal through interact or interact_at, then use
+        that action's observation_id. Works with the focused element inside an
+        iframe; no selector or frame_path is needed. The default insert mode sends
+        an input event without per-character key events (preferred for xterm).
+        Use key_events only when the app requires individual keydown/keyup events.
+        Text replaces the current selection; it does not clear the entire editor.
+        Use press_key for Enter, shortcuts or navigation, never for prose/commands.
+        Verify the visible result before retrying text to avoid duplicate insertion.
+        """
+        require_keyboard_observation(observation_id)
+        if not text or len(text) > 50000:
+            raise ValueError("Supply between 1 and 50000 text characters")
+        if mode == "insert":
+            await tools.page.keyboard.insert_text(text)
+        else:
+            await tools.page.keyboard.type(text)
+        return await tools.observe()
+
+    @server.tool(structured_output=False if evidence is not None else None)
+    @serialized
+    async def press_key(
+        key: str,
+        observation_id: str,
+        expected_url: str = "",
+    ) -> list:
+        """Press one key or shortcut in the currently focused editor without changing focus.
+
+        Use the latest observation_id. Examples: Enter, Tab, Escape, ArrowLeft,
+        Control+A, Control+S, Control+Shift+ArrowLeft. Use insert_text for arbitrary
+        text, paragraphs or shell commands. This tool releases shortcut modifiers
+        before returning; it does not hold keys across subsequent tool calls.
+        """
+        require_keyboard_observation(observation_id)
+        if not key or len(key) > 100 or "\n" in key or "\r" in key:
+            raise ValueError(
+                "Supply one key/shortcut; use insert_text for arbitrary text"
+            )
+        try:
+            await tools.page.keyboard.press(key)
+        except PlaywrightError as exc:
+            # An invalid chord may fail after pressing its modifiers.
+            for modifier in ("Control", "Shift", "Alt", "Meta"):
+                try:
+                    await tools.page.keyboard.up(modifier)
+                except PlaywrightError:
+                    break
+            if "Unknown key" in str(exc):
+                raise ValueError(
+                    "Unknown key/shortcut. Use insert_text for arbitrary text; press_key expects e.g. Enter or Control+S"
+                ) from exc
+            raise
         return await tools.observe()
 
     @server.tool(structured_output=False if evidence is not None else None)

@@ -191,3 +191,38 @@ from the mean, while valid zeros remain in the denominator. Response publication
 and aggregation validate the native grade independently of cached worker rewards.
 Existing result files remain immutable; historical corrections belong in a
 separate versioned score view with source hashes.
+
+### Focused editor and terminal input
+
+OpenCode exposes 18 SaaS MCP tools, including `saas_browser_insert_text` and
+`saas_browser_press_key`. After clicking an editor or terminal, pass the latest
+returned `observation_id` to the focused keyboard tool. Neither tool selects or
+refocuses a DOM element. Both retain app-origin, tab, viewport and fresh-screenshot
+checks, serialized execution and post-action observations. Multi-app sessions
+require `expected_url`.
+
+`insert_text(text, observation_id, mode="insert")` inserts text at the cursor or
+replaces the current selection. The default uses Playwright keyboard text input
+without per-character key events, which avoids the xterm duplication path. Use
+`mode="key_events"` only for a widget that needs character key events. `press_key`
+sends one key or chord, such as Enter, Control+A or Control+S; arbitrary prose and
+shell command text belong in `insert_text`. Host shell tools remain unavailable;
+an assigned application's visible terminal UI can be used for tasks requiring it.
+See the [Playwright keyboard API](https://playwright.dev/python/docs/api/class-keyboard).
+
+Stale coordinates and ambiguous selectors still fail explicitly. Refresh evidence
+and inspect/narrow the target instead of choosing the first match or bypassing
+freshness checks. Double-click, drag/drop, modifier-click and horizontal-wheel
+controls remain unexposed; they are not claimed to match every possible app
+interaction. The baseline browser-use click/scroll schemas also lack these
+explicit gestures. Tool names alone do not establish app-level parity.
+
+Validation covers real Chromium focus/selection, Unicode, canvas-to-hidden-input,
+iframe input, cross-tab rejection, stale evidence and invalid chords. Run
+`tests/test_browser_keyboard.py` in the provisioned worker runtime with pytest
+and Chromium; the thin Gym controller environment intentionally lacks browser
+runtime dependencies. Live validation also saved/reopened a Monaco file and ran
+an xterm command using Kimi, and saved/downloaded an OnlyOffice DOCX whose XML
+contained the inserted Unicode text. These are input capability checks, not a
+full benchmark evaluation. Start fresh pinned campaigns to compare the changed
+action space; existing frozen runs are unchanged.
