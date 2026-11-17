@@ -29,6 +29,7 @@ lets this file stay focused on the contract and scoring.
 """
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import Mapping
@@ -57,12 +58,13 @@ from nemo_gym.server_runtime import (
     observe_verifier_sandbox,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.verification import JudgeError, SandboxVerificationError
+from nemo_gym.verification import SandboxVerificationError
 from resources_servers.cvdp.repository_workspace import RepositoryChanges
 from resources_servers.cvdp.testbench_runner import TestbenchRunner
 
 
 _helpers = ModelHelpers()
+logger = logging.getLogger(__name__)
 
 
 # ----------------------------
@@ -74,8 +76,10 @@ class CVDPResourcesServerConfig(BaseResourcesServerConfig):
     oss_sim_image: str = "ghcr.io/hdl/sim/osvb"
     oss_pnr_image: str = Field(default_factory=lambda data: data["oss_sim_image"])
     eda_sim_image: str = ""  # Set to a commercial EDA image (e.g. Cadence Xcelium)
+    cocotb_bus_version: str | None = None  # Pin legacy cocotb.runner users in prepared task images.
     container_timeout: int = 600
     num_processes: int = 4  # Max concurrent verifier sandboxes
+    inconclusive_verification_retries: int = Field(default=1, ge=0)
     harness_workspace_dir: str = ""  # Optional host directory for per-rollout temp workspaces
     container_workspace: str = "/code"
     container_transfer_dir: str = "/sandbox"
@@ -117,6 +121,7 @@ class CVDPVerifyRequest(CVDPRunRequest, BaseVerifyRequest):
 
 
 class CVDPVerifyResponse(BaseVerifyResponse):
+    evaluation_completed: bool = True
     repository_changes: Optional[RepositoryChanges] = Field(default=None, exclude_if=lambda value: value is None)
     task_id: Optional[str] = None
     category: Optional[str] = None  # e.g. "cid003" — for CVDP report
@@ -149,9 +154,15 @@ def _parse_model_response(res: str, target_files: List[str]) -> Optional[Dict[st
     # Match CVDP's openai_llm.py: strip response before parsing
     res = res.strip()
 
-    # Match CVDP's openai_llm.py: fix JSON formatting for multi-file responses
+    # Repair malformed multi-file JSON only; regex repair can alter valid RTL string contents.
     if not no_schema and res.startswith("{") and res.endswith("}"):
-        res = _helpers.fix_json_formatting(res)
+        try:
+            json.loads(res)
+        except json.JSONDecodeError:
+            res = _helpers.fix_json_formatting(res)
+        except (ValueError, RecursionError):
+            # Decoder limits are parse failures, not verifier infrastructure failures.
+            return None
 
     output, success = _helpers.parse_model_response(res, files=target_files, no_schema=no_schema)
 
@@ -366,51 +377,49 @@ class CVDPResourcesServer(SimpleResourcesServer):
 
         async with self._semaphore:
             t0 = time.time()
-            try:
-                repository_kwargs = {}
-                if meta.repository_workspace_sha256:
-                    repository_kwargs = {
-                        "repository_workspace_sha256": meta.repository_workspace_sha256,
-                        "repository_changes": body.repository_changes,
-                    }
-                exit_code, stderr, service_results = await self._harness.run(
-                    rtl_files=rtl_files or {},
-                    harness_files=meta.harness_files,
-                    task_id=meta.task_id,
-                    context_files=meta.context_files,
-                    **repository_kwargs,
-                )
-            except SandboxVerificationError as e:
-                observe_verifier_sandbox(
-                    {
-                        "role": "verifier",
-                        "provider": "docker-compose",
-                        "outcome": "sandbox_error",
-                        "error_type": e.failure_kind,
-                        "wall_time_s": time.time() - t0,
-                    }
-                )
-                # The harness never judged this RTL, so the sample gets no score.
-                logging.warning("CVDP %s harness infrastructure failure (%s): %s", meta.task_id, e.failure_kind, e)
-                if body.rtl_files:
-                    # Reverification rebuilds /verify from the saved response only and cannot replay files the
-                    # agent wrote, so mask the sample and keep the files for diagnosis.
-                    return CVDPVerifyResponse(
-                        **body.model_dump(),
-                        reward=0.0,
-                        mask_sample=True,
-                        failure_kind=e.failure_kind,
-                        failure_reason=str(e),
+            repository_kwargs = {}
+            if meta.repository_workspace_sha256:
+                repository_kwargs = {
+                    "repository_workspace_sha256": meta.repository_workspace_sha256,
+                    "repository_changes": body.repository_changes,
+                }
+            for attempt in range(self.config.inconclusive_verification_retries + 1):
+                try:
+                    exit_code, stderr, service_results = await self._harness.run(
+                        rtl_files=rtl_files or {},
+                        harness_files=meta.harness_files,
                         task_id=meta.task_id,
-                        category=category,
-                        difficulty=difficulty,
-                        extracted_rtl=rtl_files,
-                        container_stderr=str(e),
-                        execution_time=time.time() - t0,
+                        context_files=meta.context_files,
+                        **repository_kwargs,
                     )
-                # judge_failsafe turns this into a masked judge_failed row that keeps the response, the class
-                # recovery re-verifies from the saved answer, so the RTL is simulated again, not regenerated.
-                raise JudgeError(f"CVDP harness infrastructure failure ({e.failure_kind}): {e}") from e
+                    break
+                except SandboxVerificationError as exc:
+                    observe_verifier_sandbox(
+                        {
+                            "role": "verifier",
+                            "provider": "docker-compose",
+                            "outcome": "sandbox_error",
+                            "error_type": exc.failure_kind,
+                            "wall_time_s": time.time() - t0,
+                        }
+                    )
+                    if attempt == self.config.inconclusive_verification_retries:
+                        return CVDPVerifyResponse(
+                            **body.model_dump(),
+                            reward=0.0,
+                            mask_sample=True,
+                            failure_kind=exc.failure_kind,
+                            failure_reason=str(exc),
+                            evaluation_completed=False,
+                            task_id=meta.task_id,
+                            category=category,
+                            difficulty=difficulty,
+                            extracted_rtl=rtl_files,
+                            container_stderr=str(exc),
+                            container_services=[],
+                            execution_time=time.time() - t0,
+                        )
+                    logger.warning("Retrying inconclusive CVDP verification for %s: %s", meta.task_id, exc)
             execution_time = time.time() - t0
 
         # The docker-compose harness is this verifier's sandbox: its lifecycle facts are observed as such, and the
