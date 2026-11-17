@@ -838,7 +838,14 @@ def test_usr1_during_a_running_archive_neither_cuts_it_short_nor_archives_twice(
         if exports
         else _WRITE_EVIDENCE
     )
-    process = _start_job(tmp_path, driver=driver, exports=exports, fakes={"tar": _SLOW_ARCHIVE % started})
+    # A bound well past the fake tar's 3 s sleep keeps a loaded runner from timing the archive out.
+    process = _start_job(
+        tmp_path,
+        driver=driver,
+        exports=exports,
+        fakes={"tar": _SLOW_ARCHIVE % started},
+        node_local={"archive_timeout_seconds": 30},
+    )
     try:
         _wait_for(started)
         os.kill(process.pid, signal.SIGUSR1)
