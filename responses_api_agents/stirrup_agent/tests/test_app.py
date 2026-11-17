@@ -148,6 +148,29 @@ class TestApp:
         assert config.truncation_recovery is False
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("training", [False, True])
+    async def test_the_runner_gets_stirrups_history_settings(self, training: bool) -> None:
+        # Stirrup's defaults summarize at 70% of the context, unwind turns on an overflow and strip unparsed tool-call
+        # blocks from the history sent back, each replacing what the model saw; training on recorded tokens needs
+        # none of them.
+        fields = (
+            {
+                "context_summarization_cutoff": None,
+                "recover_from_context_overflow": False,
+                "strip_unparsed_tool_blocks": False,
+            }
+            if training
+            else {}
+        )
+        body = NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy")
+
+        payload = await _runner_payload(_make_config(**fields), body)
+
+        assert payload["context_summarization_cutoff"] == (None if training else 0.7)
+        assert payload["recover_from_context_overflow"] is not training
+        assert payload["client"]["strip_unparsed_tool_blocks"] is not training
+
+    @pytest.mark.asyncio
     async def test_request_output_cap_does_not_replace_model_context_window(self) -> None:
         config = _make_config(context_window_tokens=262144, max_completion_tokens_cap=64000)
         body = NeMoGymResponseCreateParamsNonStreaming(input="ignored", model="policy", max_output_tokens=8192)

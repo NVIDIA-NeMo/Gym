@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import shlex
 import signal
@@ -411,6 +412,9 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
             tool_response_as_user=True,
             skip_input_file_listing=True,
             min_compaction_summary_words=payload["min_compaction_summary_words"],
+            # None never summarizes: JSON carries no infinity
+            context_summarization_cutoff=payload["context_summarization_cutoff"] or math.inf,
+            recover_from_context_overflow=payload["recover_from_context_overflow"],
             **({"system_prompt": system_prompt} if system_prompt else {}),
         )
         observer.watch_compaction(agent)

@@ -5,6 +5,7 @@
 import ast
 import asyncio
 import json
+import math
 import os
 import signal
 import subprocess
@@ -55,6 +56,8 @@ def _payload(model_url: str, resources_url: str, workdir: Path) -> dict:
         "workdir": str(workdir),
         "max_turns": 10,
         "min_compaction_summary_words": 1,
+        "context_summarization_cutoff": 0.7,
+        "recover_from_context_overflow": True,
         "client": {"model": "policy", "base_url": model_url, "max_tokens": 32768, "temperature": 0.0},
     }
 
@@ -90,6 +93,56 @@ def test_a_conversation_runs_shell_commands_locally_and_task_tools_on_the_resour
     assert calls[1][2] == {"session": "after-search"}
     assert output["resources_cookies"] == {"session": "after-search"}
     assert len(model.requests) == 5
+
+
+@pytest.mark.parametrize(("cutoff", "recover"), [(0.7, True), (None, False)])
+def test_the_payload_sets_stirrups_summarization_and_overflow_recovery(
+    tmp_path, resources, monkeypatch, cutoff, recover
+):
+    """Both replace history the model already saw, so training turns them off: None never summarizes."""
+    seen = {}
+    init = NeMoAgent.__init__
+
+    def record(self, **kwargs):
+        seen.update(kwargs)
+        init(self, **kwargs)
+
+    monkeypatch.setattr(NeMoAgent, "__init__", record)
+    workdir = tmp_path / "root"
+    workdir.mkdir()
+    payload = _payload("http://127.0.0.1:1/v1", resources.base_url, workdir)
+    payload |= {"context_summarization_cutoff": cutoff, "recover_from_context_overflow": recover}
+    model = _ModelServer([_call("finish", json.dumps({"reason": "done", "paths": []}))])
+    payload["client"]["base_url"] = model.base_url
+    try:
+        asyncio.run(run(payload, tmp_path, Observer()))
+    finally:
+        model.close()
+    assert seen["context_summarization_cutoff"] == (math.inf if cutoff is None else cutoff)
+    assert seen["recover_from_context_overflow"] is recover
+
+
+@pytest.mark.parametrize("strip", [True, False])
+def test_an_assistant_turn_goes_back_to_the_model_as_written_unless_stripping_is_on(tmp_path, resources, strip):
+    """Training on recorded tokens needs each call to continue the previous one as the model wrote it; by default an
+    unparsed tool-call block is removed from the history sent back."""
+    workdir = tmp_path / "root"
+    workdir.mkdir()
+    reply = 'Checking first.\n<tool_call>{"name": "code_exec", "arguments": {"cmd": "true"}}</tool_call>'
+    model = _ModelServer(
+        [{"role": "assistant", "content": reply}, _call("finish", json.dumps({"reason": "done", "paths": []}))]
+    )
+    payload = _payload(model.base_url, resources.base_url, workdir)
+    payload["client"]["strip_unparsed_tool_blocks"] = strip
+    try:
+        asyncio.run(run(payload, tmp_path, Observer()))
+    finally:
+        model.close()
+    assert len(model.requests) == 2
+    (assistant,) = [m for m in model.requests[1]["messages"] if m["role"] == "assistant"]
+    content = assistant["content"]
+    text = content if isinstance(content, str) else "".join(part["text"] for part in content)
+    assert ("<tool_call>" in text) is (not strip)
 
 
 def test_the_run_reports_its_model_calls_and_tool_executions(tmp_path, resources):
