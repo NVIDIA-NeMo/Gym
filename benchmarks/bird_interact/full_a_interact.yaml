@@ -3,7 +3,7 @@
 #
 # BIRD-Interact Full in a-Interact: config.yaml on the Full release in a-Interact, with the image built for it. See README.md.
 #
-#   gym eval prepare --config benchmarks/bird_interact/full_a_interact.yaml +prepare_script_args.ground_truth_jsonl=<file>
+#   gym eval prepare --config benchmarks/bird_interact/full_a_interact.yaml
 #   gym eval run --config benchmarks/bird_interact/full_a_interact.yaml --model-type vllm_model --split benchmark \
 #     --config nemo_gym/sandbox/providers/docker/configs/docker.yaml --output results/bird_interact_full_a.jsonl
 

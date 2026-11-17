@@ -64,6 +64,14 @@ class TestSelectTasks:
         }
         assert not left_out
 
+    def test_a_solution_written_as_one_string_becomes_a_list_of_it(self) -> None:
+        truth = _truth("q1")
+        truth["follow_up"]["sol_sql"] = "SELECT 2"
+
+        (row,), _ = bird_prepare.select_tasks([_row("q1")], {"q1": truth})
+
+        assert row["follow_up"]["sol_sql"] == ["SELECT 2"]
+
     def test_rows_the_server_cannot_grade_are_left_out_with_their_reason(self) -> None:
         rows = [_row("no_truth"), _row("custom"), _row("custom_follow_up"), _row("follow_up_without_truth")]
         truth = {
@@ -106,6 +114,41 @@ class TestPrepare:
             ({}, "withholds its ground truth"),
         ],
     )
-    def test_bad_arguments_and_a_missing_ground_truth_are_refused(self, arguments: dict, message: str) -> None:
+    def test_bad_arguments_and_a_missing_ground_truth_are_refused(
+        self, arguments: dict, message: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An empty data/: the ground truth the authors sent is not there.
+        monkeypatch.setattr(bird_prepare, "DATA_DIR", tmp_path)
         with pytest.raises(ValueError, match=message):
             bird_prepare.prepare(**arguments)
+
+    def _download(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        download = tmp_path / "download"
+        download.mkdir()
+        (download / bird_prepare.ROWS_FILE).write_text(json.dumps(_row("q1")) + "\n")
+        monkeypatch.setattr(bird_prepare, "DATA_DIR", tmp_path / "data")
+        monkeypatch.setattr(bird_prepare, "download_release", lambda release: download)
+
+    @pytest.mark.parametrize("release", ["lite", "full"])
+    def test_the_ground_truth_in_data_is_read_by_default(
+        self, release: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._download(tmp_path, monkeypatch)
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / bird_prepare.GROUND_TRUTH_FILES[release]).write_text(json.dumps(_truth("q1")) + "\n")
+
+        output = bird_prepare.prepare(release, "c_interact")
+
+        assert [json.loads(line)["task_input"]["sol_sql"] for line in output.read_text().splitlines()] == [
+            ["SELECT 1"]
+        ]
+
+    def test_the_ground_truth_of_another_release_is_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._download(tmp_path, monkeypatch)
+        ground_truth = tmp_path / "other_release.jsonl"
+        ground_truth.write_text(json.dumps(_truth("full_q1")) + "\n")
+
+        with pytest.raises(ValueError, match="none of lite's tasks"):
+            bird_prepare.prepare("lite", "c_interact", ground_truth_jsonl=str(ground_truth))

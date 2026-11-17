@@ -4,7 +4,7 @@
 # BIRD-Interact Lite in c-Interact, on the bird_interact Environment Server with PostgreSQL. Each episode starts its
 # own database sandbox from the image that this folder's Dockerfile builds. See README.md.
 #
-#   gym eval prepare --benchmark bird_interact +prepare_script_args.ground_truth_jsonl=<ground truth file>
+#   gym eval prepare --benchmark bird_interact
 #   gym eval run --benchmark bird_interact --model-type vllm_model --split benchmark \
 #     --config nemo_gym/sandbox/providers/docker/configs/docker.yaml --output results/bird_interact_lite_c.jsonl
 #
@@ -20,7 +20,7 @@ bird_interact_mode: c_interact
 # The image that Dockerfile builds for the release. A remote sandbox provider needs a registry's copy.
 bird_interact_image: benchmarks/bird_interact:${bird_interact_release}
 
-# Forwarded to prepare.py's prepare(). The ground truth path comes from the command line.
+# Forwarded to prepare.py's prepare(). It reads the ground truth from data/ unless ground_truth_jsonl names a file.
 prepare_script_args:
   release: ${bird_interact_release}
   mode: ${bird_interact_mode}
