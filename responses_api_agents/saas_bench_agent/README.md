@@ -255,3 +255,43 @@ receipt/source/outcome checker qualifies this result: the smoke driver's final
 bookkeeping assertion expected an in-process injection record and failed after
 external injection. These tests establish handling, not task success or prevention
 of the five historical Chromium failures.
+
+
+### Latest browser screenshot in model requests
+
+SaaS OpenCode evaluations send only the latest browser screenshot to each actor
+decision. Immediately before request conversion, the native message-transform
+hook obtains a fresh screenshot and matching observation through the episode's
+read-only browser socket. It removes image attachments from earlier browser
+observation tools and appends one current-state user message at the end of the
+outgoing history. Action arguments must use that current observation ID.
+
+This is a SaaS input policy layered on OpenCode's native history, not its default
+image-retention behavior. Textual history, tool arguments/results and compaction
+summaries remain. `inspect_input` images/PDF pages, native file-read images and
+non-image attachments are retained. Saved screenshots and native trajectory
+objects are not deleted or rewritten: only the request-local message array is
+changed. Consumers building per-decision SFT data must use the transformed model
+requests/current-state observations rather than assume the entire saved image
+history was sent.
+
+The same refresh occurs after failed actions, file/todo-only decisions and
+compaction. If fresh evidence is unavailable, the hook fails instead of sending
+an older browser image as current. Browser-use behavior and native verification
+are unchanged. Automatic compaction remains enabled; tool-output pruning is not
+enabled by this change. Start fresh, consistently pinned campaigns to compare
+this policy; existing frozen evaluations retain their original behavior.
+
+Run `tests/test_visual_refresh.py` with Node (or the worker's Playwright Node
+binary) to test request filtering, task-image/PDF preservation, repeated and
+post-compaction transforms, source-object preservation and failed-capture refusal.
+
+
+Live validation: the actual CLI with Chromium sent three actor requests with one
+fresh, hash-matched browser image each; a missing capture socket produced zero
+actor requests and a native error. A bounded Kimi API `media_012` smoke sent eight
+actor requests, each with exactly one image matching its fresh PNG, and executed
+eight tools with no tool errors. All 15 saved PNGs remained. An independent
+request/source/outcome checker passes; the driver's extra last-role assertion
+failed on OpenCode's final-step assistant prefill, which does not change the image
+policy. This validates request handling, not completion of the benchmark task.

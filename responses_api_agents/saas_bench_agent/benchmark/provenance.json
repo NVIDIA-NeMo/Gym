@@ -151,7 +151,7 @@
     },
     {
       "source_path": "saas_bench/opencode/browser.py",
-      "vendored_sha256": "720f4d48fe0beafdf05917545af53702c533a9afeba1dab465e1e4af9af4df64",
+      "vendored_sha256": "36b9d4bec3817001676c997d24302e05cb81c0d91213e3de66860bfba5c7191f",
       "license": "Apache-2.0",
       "origin": "nvidia-authored"
     },
@@ -193,7 +193,7 @@
     },
     {
       "source_path": "saas_bench/opencode/visual_refresh.mjs",
-      "vendored_sha256": "92fbaddd6b8e326621679056db33e1a166583f08d034e4b5553c39186369945c",
+      "vendored_sha256": "8f08ea1b9501b56063c18745d37e3116f15327e6873892954443e85b4e9df10a",
       "license": "Apache-2.0",
       "origin": "nvidia-authored"
     },

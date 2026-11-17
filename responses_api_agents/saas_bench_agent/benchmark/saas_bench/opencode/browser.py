@@ -241,18 +241,23 @@ class BrowserTools:
             path.chmod(0o600)
 
     async def refresh_connection(self, reader, writer) -> None:
-        """Supply current visual evidence to the trusted native compaction hook."""
+        """Supply fresh visual evidence to the trusted model-input hook."""
         task = asyncio.current_task()
         self.refresh_tasks.add(task)
         try:
             request = json.loads(await asyncio.wait_for(reader.readline(), timeout=5))
+            request_id = request.get("decision_id", request.get("summary_id"))
             if (
                 request.get("operation") != "refresh"
-                or not isinstance(request.get("summary_id"), str)
-                or len(request["summary_id"]) > 200
+                or not isinstance(request_id, str)
+                or not 0 < len(request_id) <= 200
             ):
                 raise ValueError("Unsupported browser refresh request")
             async with self.lock:
+                if self.browser_fault is not None:
+                    raise RuntimeError(
+                        "Browser runtime failed; fresh evidence is unavailable"
+                    )
                 result = await asyncio.wait_for(self.observe(timeout=3000), timeout=20)
                 state = json.loads(result[0])
                 if not state.get("screenshot_available"):
@@ -267,9 +272,12 @@ class BrowserTools:
                     stream.write(
                         json.dumps(
                             {
-                                "summary_id": request["summary_id"],
+                                "summary_id": request.get("summary_id"),
+                                "decision_id": request.get("decision_id"),
                                 "observation_id": state["observation_id"],
-                                "reason": "post_compaction",
+                                "reason": "before_model_decision"
+                                if "decision_id" in request
+                                else "post_compaction",
                             }
                         )
                         + "\n"
