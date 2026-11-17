@@ -220,7 +220,9 @@ def _parse_litellm_version(version: str) -> tuple[int, int, int]:
 
 
 class LiteLLMModelServerConfig(SimpleModelServerConfig):
-    pass
+    # Disable only when a trusted proxy operator verifies its version separately and the endpoint does not
+    # expose version metadata to this client. Startup verification remains enabled by default.
+    check_proxy_version: bool = True
 
 
 class LiteLLMModelServer(SimpleModelServer):
@@ -340,7 +342,10 @@ class LiteLLMModelServer(SimpleModelServer):
 
         @asynccontextmanager
         async def lifespan_with_version_check(app):
-            await server._check_proxy_version()
+            if server.config.check_proxy_version:
+                await server._check_proxy_version()
+            else:
+                logger.warning("LiteLLM proxy version check skipped (check_proxy_version: false)")
             async with main_lifespan(app) as state:
                 yield state
 
