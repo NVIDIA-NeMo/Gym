@@ -1,79 +1,50 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# tasks.yaml supplies the selected task folders and their digests.
-defaults: ../../../../../examples/configs/recipes/llm/grpo-nanov3-30BA3B-2n8g-noncolocated-async-gym-single-controller-token_capture-r3-defer.yaml
-checkpointing:
-  checkpoint_dir: results/harbor-multi-harness
-data:
-  train:
-    data_path: 3rdparty/Gym-workspace/Gym/results/training/harbor/train.jsonl
-env:
-  _override_: true
-  should_use_nemo_gym: true
-  should_log_nemo_gym_responses: false
-  should_mask_flagged_samples: true
-  nemo_gym:
-    config_paths:
-    - responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
-    - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
-    - responses_api_agents/pi_agent/configs/pi_agent.yaml
-    - environment_servers/harbor/configs/harbor.yaml
-    - results/training/harbor/tasks.yaml
-    results_dir: ${oc.env:PWD}/results/harbor-multi-harness
-    use_absolute_ip: true
-    absolute_ip_server_types:
-    - responses_api_models
-    token_id_capture:
-      enabled: true
-      all_agents: true
-      external_staging: true
-      external_staging_backend: vllm_worker
-      rebuild_response: false
-      parent_resolution: source_history
-    model_call_sampling:
-      required_model_servers:
-      - policy_model
-    environment_server_routes:
-      terminal-bench-opencode: terminal-bench-opencode-environment
-      terminal-bench-pi: terminal-bench-pi-environment
-    terminal-bench-opencode-agent:
-      _inherit_from: opencode_agent
-      responses_api_agents:
-        opencode_agent:
-          datasets:
-          - name: terminal-bench-opencode
-            type: train
-            taskset: terminal-bench-opencode
-            jsonl_fpath: results/training/harbor/opencode.jsonl
-            num_repeats: 1
-            license: MIT
-    terminal-bench-opencode-environment:
-      _inherit_from: harbor_environment_server
-      environment_servers:
-        harbor:
-          agent_server:
-            type: responses_api_agents
-            name: terminal-bench-opencode-agent
-    terminal-bench-pi-agent:
-      _inherit_from: pi_agent
-      responses_api_agents:
-        pi_agent:
-          datasets:
-          - name: terminal-bench-pi
-            type: train
-            taskset: terminal-bench-pi
-            jsonl_fpath: results/training/harbor/pi.jsonl
-            num_repeats: 1
-            license: MIT
-    terminal-bench-pi-environment:
-      _inherit_from: harbor_environment_server
-      environment_servers:
-        harbor:
-          agent_server:
-            type: responses_api_agents
-            name: terminal-bench-pi-agent
-logger:
-  log_dir: logs/harbor-multi-harness
-  wandb:
-    name: harbor-multi-harness
+# Gym pairing config; use with the existing NeMo RL recipe and launcher.
+config_paths:
+- responses_api_models/vllm_model/configs/vllm_model_for_training.yaml
+- responses_api_agents/opencode_agent/configs/opencode_agent.yaml
+- responses_api_agents/pi_agent/configs/pi_agent.yaml
+- environment_servers/harbor/configs/harbor.yaml
+- results/harbor/terminal_bench_2_1/run_config_opencode_agent.yaml
+results_dir: ${oc.env:PWD}/results/harbor-multi-harness
+use_absolute_ip: true
+absolute_ip_server_types:
+- responses_api_models
+model_call_sampling:
+  required_model_servers:
+  - policy_model
+environment_server_routes:
+  terminal_bench_2_1: harbor_terminal_5fbench_5f2_5f1_environment
+  terminal-bench-pi: terminal-bench-pi-environment
+terminal-bench-pi-agent:
+  _inherit_from: pi_agent
+  responses_api_agents:
+    pi_agent:
+      datasets:
+      - name: terminal-bench-pi
+        type: train
+        taskset: terminal-bench-pi
+        jsonl_fpath: results/training/harbor/pi.jsonl
+        num_repeats: 1
+        license: MIT
+terminal-bench-pi-environment:
+  _inherit_from: harbor_environment_server
+  environment_servers:
+    harbor:
+      agent_server:
+        type: responses_api_agents
+        name: terminal-bench-pi-agent
+      tasksets:
+        terminal-bench-pi: ${harbor_terminal_5fbench_5f2_5f1_environment.environment_servers.harbor.tasksets.terminal_bench_2_1}
+harbor_terminal_5fbench_5f2_5f1_agent:
+  responses_api_agents:
+    opencode_agent:
+      datasets:
+      - name: terminal-bench-opencode
+        type: train
+        taskset: terminal_bench_2_1
+        jsonl_fpath: results/harbor/terminal_bench_2_1/tasks_opencode_agent.jsonl
+        num_repeats: 1
+        license: MIT

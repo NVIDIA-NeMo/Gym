@@ -1,103 +1,92 @@
 ---
 title: "Single- and Multi-Harness Training"
-description: "Prepare tasks and train one policy with OpenCode and Pi through SingleAgentTurn or Harbor."
+description: "Train one policy with OpenCode and Pi through SingleAgentTurn or Harbor."
 position: 5
 ---
 # Single- and Multi-Harness Training
 
-SingleAgentTurn asks a Resources Server to prepare and verify each task. Harbor reads the sandbox and verifier from a Harbor task folder. Both can train one policy with one harness or several harnesses.
+SingleAgentTurn asks a Resources Server to prepare and verify tasks. Harbor reads the sandbox and verifier from native task folders. Both support one harness or several harnesses training the same policy. A prompt's GRPO siblings share its harness; different groups can use different harnesses.
 
-These examples inherit NeMo RL's existing Nemotron Nano single-controller recipe. Its model, optimizer, sampling and GPU layout stay in that base recipe. Use a NeMo RL checkout with [taskset routing](https://github.com/NVIDIA-NeMo/RL/pull/4429), the matching Gym checkout at `3rdparty/Gym-workspace/Gym`, and the runtime described in [NeMo RL setup](/main/tutorials/training-tutorials/nemo-rl-grpo/setup). Configure your [sandbox provider](/main/infrastructure/sandbox) and tracking credentials in the usual runtime configuration. OpenCode and Pi call the same trained policy through [external harness capture](/main/tutorials/training-tutorials/external-agent-harnesses).
+Use [NeMo RL setup](/main/tutorials/training-tutorials/nemo-rl-grpo/setup), a checkout with [taskset routing](https://github.com/NVIDIA-NeMo/RL/pull/4429), your sandbox/runtime configuration, and [external harness capture](/main/tutorials/training-tutorials/external-agent-harnesses). Keep Gym at `3rdparty/Gym-workspace/Gym` in the RL checkout.
 
-## Prepare SingleAgentTurn datasets
+## SingleAgentTurn
 
-The [SingleAgentTurn recipe](https://github.com/NVIDIA-NeMo/Gym/blob/main/examples/training/single_agent_turn_multi_harness.yaml) assigns each whole dataset to one harness:
+The [full configuration](https://github.com/NVIDIA-NeMo/Gym/blob/main/examples/training/single_agent_turn_multi_harness.yaml) uses SWE-rebench and SWEmer v1 with OpenCode, and SWEmer v2 and SWE Internal v1 with Pi. Each complete dataset has one taskset and one harness. For example, its SWE-rebench environment is:
 
-| Dataset | JSONL in the Gym checkout | Harness |
-| --- | --- | --- |
-| SWE-rebench | `resources_servers/swe_rebench/data/swe_rebench_training.jsonl` | OpenCode |
-| SWEmer v1 | `resources_servers/swemer_v1/data/swemer_v1_training.jsonl` | OpenCode |
-| SWEmer v2 | `resources_servers/swemer_v2/data/swemer_v2_training.jsonl` | Pi |
-| SWE Internal v1 | `resources_servers/swe_internal_v1/data/swe_internal_v1_training.jsonl` | Pi |
-
-From the Gym checkout, prepare SWE-rebench with its existing downloader:
-
-```bash
-python resources_servers/swe_rebench/prepare_swe_rebench.py
+```yaml
+swe_rebench_single_agent_turn:
+  _inherit_from: single_agent_turn
+  environment_servers:
+    single_agent_turn:
+      resources_server:
+        type: resources_servers
+        name: swe_rebench_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: opencode_agent
+      resources_tool_transports: []
+environment_server_routes:
+  swe_rebench: swe_rebench_single_agent_turn
 ```
 
-Obtain the other three prepared JSONL files through their existing internal data distribution and place them at the paths above. Their READMEs describe the row formats and access requirements. They contain internal training data; the recipe does not distribute it. Keep the source files unchanged.
+From Gym, run `python resources_servers/swe_rebench/prepare_swe_rebench.py`. Obtain the other prepared training files through their existing internal distribution. The configuration names all four paths under `resources_servers/<dataset>/data/<dataset>_training.jsonl`; the corresponding READMEs describe access and row formats. Source JSONL files stay unchanged. Dataset `taskset` declarations tell ordinary collation which route to attach.
 
-Each dataset declaration has a `taskset`. The recipe's `environment_server_routes` maps that taskset to a SingleAgentTurn server with the selected Resources Server and harness. Collation adds this routing to generated rows. It does not choose a split between harnesses.
+## Harbor
 
-## Prepare Harbor tasks
+The [full configuration](https://github.com/NVIDIA-NeMo/Gym/blob/main/examples/training/harbor_multi_harness.yaml) reuses an **already prepared native Terminal-Bench 2.1 run** from the [existing Harbor tutorial](/main/tutorials/evaluation-tutorials/terminal-bench-2-1-harbor). It expects `results/harbor/terminal_bench_2_1/tasks_opencode_agent.jsonl` and `run_config_opencode_agent.yaml`, with the selected task folders still available. `gym dataset pull terminal_bench_2_1` fetches folders; it does not create those prepared run artifacts. Reuse your existing selection and mapping.
 
-The [Harbor recipe](https://github.com/NVIDIA-NeMo/Gym/blob/main/examples/training/harbor_multi_harness.yaml) uses Terminal-Bench 2.1 with OpenCode and Pi. Obtain its task folders with the existing preparation command:
+Both harnesses use the same selected tasks. Keep the OpenCode rows as prepared. This command changes only the Pi routing label:
 
 ```bash
-python benchmarks/terminal_bench_2_1/prepare.py
+mkdir -p results/training/harbor
+jq -c '.task_id.taskset="terminal-bench-pi"' \
+  results/harbor/terminal_bench_2_1/tasks_opencode_agent.jsonl > results/training/harbor/pi.jsonl
 ```
 
-Pin the downloaded task repository to the revision for your run. Choose the tasks permitted for your training split; keep held-out evaluation tasks separate. The following example assigns alternating task IDs, in sorted order, to the two harnesses. It uses the existing Harbor loader and materializer to write rows and a folder/digest mapping. Set `TASKS` to your selected task folder; the default below selects the downloaded benchmark tasks.
+The OpenCode environment stays as prepared. Pi uses the same folder and digest mapping:
 
-```bash
-export TASKS="$PWD/benchmarks/terminal_bench_2_1/terminal-bench-2-1/tasks"
-python - <<'PY'
-import json
-import os
-from pathlib import Path
-import yaml
-from nemo_gym.data.tasks.harbor import discover_tasks, materialize_task
-
-folder = Path(os.environ["TASKS"]).resolve()
-tasks = sorted(discover_tasks(folder), key=lambda task: task.task_id)
-out = Path("results/training/harbor")
-out.mkdir(parents=True, exist_ok=True)
-config = {}
-for index, harness in enumerate(("opencode", "pi")):
-    selected = tasks[index::2]
-    taskset = f"terminal-bench-{harness}"
-    rows = [materialize_task(task, taskset).model_dump(mode="json") for task in selected]
-    (out / f"{harness}.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
-    config[f"{taskset}-environment"] = {"environment_servers": {"harbor": {"tasksets": {
-        taskset: {"folder": str(folder), "tasks": {task.task_id: task.digest for task in selected},
-                  "paths": {task.task_id: task.path.relative_to(folder).as_posix() for task in selected}}
-    }}}}
-(out / "tasks.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
-PY
+```yaml
+terminal-bench-pi-environment:
+  _inherit_from: harbor_environment_server
+  environment_servers:
+    harbor:
+      agent_server:
+        type: responses_api_agents
+        name: terminal-bench-pi-agent
+      tasksets:
+        terminal-bench-pi: ${harbor_terminal_5fbench_5f2_5f1_environment.environment_servers.harbor.tasksets.terminal_bench_2_1}
+environment_server_routes:
+  terminal-bench-pi: terminal-bench-pi-environment
 ```
 
-Keep the task folders and their original instructions, images and verifier files available to the servers. Use available task images and your existing provider configuration. These are native Harbor tasks; the SWE Resources Servers' verification settings do not apply to them.
+The full configuration includes the matching Pi agent, OpenCode route and dataset declarations. Native Harbor uses each task's own verifier; SWE Resources Server settings do not apply to it.
 
-## Collate and run
+## Collate and train
 
-Choose either recipe from the Gym checkout:
+From Gym, select either configuration and collate its declared datasets:
 
 ```bash
-RECIPE=examples/training/single_agent_turn_multi_harness.yaml
+CONFIG=examples/training/single_agent_turn_multi_harness.yaml
 ROUTE=sat
-# Or: RECIPE=examples/training/harbor_multi_harness.yaml; ROUTE=harbor
+# Or: CONFIG=examples/training/harbor_multi_harness.yaml; ROUTE=harbor
 
-python -c 'import sys,yaml; yaml.safe_dump(yaml.safe_load(open(sys.argv[1]))["env"]["nemo_gym"], sys.stdout)' \
-  "$RECIPE" > /tmp/harness-gym.yaml
-
-gym dataset collate --config /tmp/harness-gym.yaml \
+gym dataset collate --config "$CONFIG" \
   +output_dirpath="results/training/$ROUTE" +mode=train_preparation \
   ++use_absolute_ip=false ++policy_base_url=http://127.0.0.1:8000 \
   ++policy_api_key=unused ++policy_model_name=unused
 ```
 
-Collation writes `results/training/<route>/train.jsonl`. Its placeholder model settings are used only to parse configuration; collation starts no model server. NeMo RL supplies the real policy endpoint during training. Original datasets stay unchanged. Add your normal sandbox/runtime configuration to the recipe's `env.nemo_gym` block, or supply it through the maintained launcher. The same configuration must be available during preparation and training.
+The placeholder model settings are for collation, which starts no model. NeMo RL supplies the real policy endpoint during training. Add your usual provider/runtime configuration to the selected Gym configuration.
 
-Run from the NeMo RL checkout using its existing allocation and launcher:
+From RL, use the existing Nano single-controller recipe and launcher. These overrides replace its Gym wiring and training-data path; model, optimizer, sampling and GPU layout stay in the base recipe:
 
 ```bash
 uv run examples/run_grpo_single_controller.py \
-  --config "3rdparty/Gym-workspace/Gym/$RECIPE"
+  --config examples/configs/recipes/llm/grpo-nanov3-30BA3B-2n8g-noncolocated-async-gym-single-controller-token_capture-r3-defer.yaml \
+  '~env.nemo_gym' "++env.nemo_gym.config_paths=[3rdparty/Gym-workspace/Gym/$CONFIG]" \
+  "data.train.data_path=3rdparty/Gym-workspace/Gym/results/training/$ROUTE/train.jsonl" \
+  "checkpointing.checkpoint_dir=results/$ROUTE-multi-harness" \
+  "logger.log_dir=logs/$ROUTE-multi-harness" "logger.wandb.name=$ROUTE-multi-harness"
 ```
 
-The inherited recipe uses two eight-GPU nodes, separate policy and generation workers, and token capture. Keep its runtime and resource requirements. Each example sets distinct output and tracking names; use a new output directory for each run.
-
-For a single harness, retain one matching dataset/task subset and its route, agent and Environment Server blocks. To change an assignment, change the route's agent and the Resources Server's `allowed_agents` together. Declaring the same entire dataset under two tasksets sends every task through both harnesses. For disjoint assignments, select disjoint source rows first, as in the Harbor example.
-
-A prompt's GRPO siblings share its taskset, so each group uses one harness. Different groups can use different harnesses while updating the same policy.
+This base recipe uses two eight-GPU nodes. Retain its runtime and allocation requirements and use fresh output directories. For single-harness training, keep just that harness's datasets and routes. Declaring a whole dataset for both harnesses uses every task twice; collation does not create a disjoint split.
