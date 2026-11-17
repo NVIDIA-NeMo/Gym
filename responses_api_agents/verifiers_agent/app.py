@@ -90,6 +90,7 @@ from nemo_gym.trajectory import (
     TrajectoryRecord,
     TrajectoryTurn,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 logger = logging.getLogger(__name__)
@@ -222,7 +223,7 @@ def _as_response_usage(usage: Any) -> Optional[NeMoGymResponseUsage]:
     return NeMoGymResponseUsage(
         input_tokens=usage.prompt_tokens,
         input_tokens_details=NeMoGymResponseInputTokensDetails(
-            cached_tokens=getattr(prompt_details, "cached_tokens", None) or 0
+            cached_tokens=getattr(prompt_details, "cached_tokens", None)
         ),
         output_tokens=usage.completion_tokens,
         output_tokens_details=NeMoGymResponseOutputTokensDetails(
@@ -1003,3 +1004,6 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     VerifiersAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = VerifiersAgent.run_webserver()  # noqa: F401

@@ -30,6 +30,7 @@ import nemo_gym.config.global_config as gc
 import nemo_gym.server_runtime.supervisor.server_supervisor
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
 from nemo_gym.cli.main import main
+from nemo_gym.config.config_types import AgentCompositionError
 from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 from nemo_gym.environment.assets import asset_config_path
 
@@ -153,6 +154,8 @@ class TestEvalRunFlags:
             (["--output", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["-o", "out.jsonl"], "+output_jsonl_fpath=out.jsonl"),
             (["--limit", "1024"], "+limit=1024"),
+            (["--task-ids", "a, b"], '+task_ids=["a","b"]'),
+            (["--task-ids-file", "subset_v1.txt"], "+task_ids_fpath='subset_v1.txt'"),
             (["--num-repeats", "4"], "+num_repeats=4"),
             (["--interleave-repeats"], "+interleave_repeats=true"),
             (["--concurrency", "10"], "+num_samples_in_parallel=10"),
@@ -1666,13 +1669,14 @@ class TestAgentSelector:
 
     HERMES = "responses_api_agents/hermes_agent/configs/hermes_agent.yaml"
 
-    def _resolve_langgraph_selection(
-        self, monkeypatch: MonkeyPatch, *selection: str, overrides: tuple[str, ...] = ()
-    ) -> DictConfig:
-        _, hydra_overrides = _dispatch_for(
-            monkeypatch,
-            ["eval", "run", "--benchmark", "aime24", "--model-type", "openai_model", *selection, *overrides],
-        )
+    @staticmethod
+    def _selection(config_path: str | Path) -> str:
+        """The token that tells the parser which config `--agent-type` selected."""
+        return f"+_selected_agent_config='{config_path}'"
+
+    def _resolve(self, monkeypatch: MonkeyPatch, *argv: str) -> DictConfig:
+        """Resolve `gym <argv>` the way the dispatched command parses it, without starting anything."""
+        _, hydra_overrides = _dispatch_for(monkeypatch, list(argv))
         monkeypatch.setattr(sys, "argv", ["gym", *hydra_overrides])
         return gc.GlobalConfigDictParser().parse(
             gc.GlobalConfigDictParserConfig(
@@ -1681,11 +1685,19 @@ class TestAgentSelector:
                         "policy_base_url": "https://example.invalid/v1",
                         "policy_api_key": "test-placeholder",
                         "policy_model_name": "test-model",
+                        "anthropic_api_key": "test-placeholder",
                     }
                 ),
                 skip_load_from_dotenv=True,
                 offline=True,
             )
+        )
+
+    def _resolve_langgraph_selection(
+        self, monkeypatch: MonkeyPatch, *selection: str, overrides: tuple[str, ...] = ()
+    ) -> DictConfig:
+        return self._resolve(
+            monkeypatch, "eval", "run", "--benchmark", "aime24", "--model-type", "openai_model", *selection, *overrides
         )
 
     @pytest.mark.parametrize("flavor", ["reflection", "parallel_thinking", "orchestrator", "rewoo"])
@@ -1698,7 +1710,6 @@ class TestAgentSelector:
         assert [(instance.name, instance.agent_type) for instance in instances] == [(new_name, "langgraph_agent")]
         agent = resolved[new_name].responses_api_agents.langgraph_agent
         assert agent.entrypoint == f"{flavor}_agent.py"
-        assert agent.num_workers == 1
         for binding in ("resources_server", "model_server", "datasets"):
             assert agent[binding] == original[old_name].responses_api_agents.simple_agent[binding]
         environment = resolved.aime24_math_with_judge_environment_server.environment_servers
@@ -1706,7 +1717,7 @@ class TestAgentSelector:
         assert environment.single_agent_turn_legacy.agent_server.name == new_name
         assert environment.single_agent_turn_legacy.resources_tool_transports == []
         assert resolved.agent_map[old_name] == new_name
-        assert "_selected_langgraph_config" not in resolved
+        assert "_selected_agent_config" not in resolved
         assert (
             len([value for value in resolved.values() if OmegaConf.is_dict(value) and "environment_servers" in value])
             == 1
@@ -1746,20 +1757,24 @@ class TestAgentSelector:
     )
     def test_name_resolves_to_config_path(self, monkeypatch: MonkeyPatch, command) -> None:
         _, overrides = _dispatch_for(monkeypatch, [*command, "--agent-type", "hermes_agent"])
-        assert overrides == [f"+config_paths=[{WORKING_DIR / self.HERMES}]"]
+        assert overrides == [
+            f"+config_paths=[{WORKING_DIR / self.HERMES}]",
+            self._selection(WORKING_DIR / self.HERMES),
+        ]
 
-    def test_agent_is_interchangeable_with_config(self, monkeypatch: MonkeyPatch) -> None:
+    def test_agent_type_loads_what_config_loads_and_records_the_selection(self, monkeypatch: MonkeyPatch) -> None:
         COMMAND = ["env", "start"]
-        by_name = _dispatch_for(monkeypatch, [*COMMAND, "--agent-type", "hermes_agent"])
+        target, by_name = _dispatch_for(monkeypatch, [*COMMAND, "--agent-type", "hermes_agent"])
         by_path = _dispatch_for(monkeypatch, [*COMMAND, "--config", str(WORKING_DIR / self.HERMES)])
-        assert by_name == by_path
+        # Only the selector asks the parser to check that the composed config runs the agent.
+        assert (target, by_name) == (by_path[0], [*by_path[1], self._selection(WORKING_DIR / self.HERMES)])
 
     def test_flavor_resolves_to_flavor_file(self, monkeypatch: MonkeyPatch) -> None:
         _, overrides = _dispatch_for(
             monkeypatch, ["env", "start", "--agent-type", "cvdp_agent/cvdp_agent_generic_hermes"]
         )
         expected = WORKING_DIR / "responses_api_agents/cvdp_agent/configs/cvdp_agent_generic_hermes.yaml"
-        assert overrides == [f"+config_paths=[{expected}]"]
+        assert overrides == [f"+config_paths=[{expected}]", self._selection(expected)]
 
     def test_composes_with_benchmark_into_one_config_paths_token(self, monkeypatch: MonkeyPatch) -> None:
         _, overrides = _dispatch_for(
@@ -1772,7 +1787,7 @@ class TestAgentSelector:
             str(WORKING_DIR / "benchmarks/gpqa/config.yaml"),
             str(WORKING_DIR / "responses_api_models/vllm_model/configs/vllm_model.yaml"),
         }
-        assert others == set()
+        assert others == {self._selection(WORKING_DIR / self.HERMES)}
 
     def test_composes_with_explicit_config(self, monkeypatch: MonkeyPatch) -> None:
         _, overrides = _dispatch_for(
@@ -1780,7 +1795,7 @@ class TestAgentSelector:
         )
         paths, others = _split_overrides(overrides)
         assert paths == {"mine.yaml", str(WORKING_DIR / self.HERMES)}
-        assert others == set()
+        assert others == {self._selection(WORKING_DIR / self.HERMES)}
 
     def test_unset_flag_contributes_nothing(self, monkeypatch: MonkeyPatch) -> None:
         _, overrides = _dispatch_for(monkeypatch, ["env", "start", "--benchmark", "gpqa"])
@@ -1788,7 +1803,10 @@ class TestAgentSelector:
 
     def test_agent_type_resolves_to_config_path(self, monkeypatch: MonkeyPatch) -> None:
         _, overrides = _dispatch_for(monkeypatch, ["env", "start", "--agent-type", "hermes_agent"])
-        assert overrides == [f"+config_paths=[{WORKING_DIR / self.HERMES}]"]
+        assert overrides == [
+            f"+config_paths=[{WORKING_DIR / self.HERMES}]",
+            self._selection(WORKING_DIR / self.HERMES),
+        ]
 
     def test_agent_still_names_a_running_instance(self, monkeypatch: MonkeyPatch) -> None:
         target, overrides = _dispatch_for(monkeypatch, ["eval", "run", "--no-serve", "-a", "gpqa_mcqa_simple_agent"])
@@ -1801,7 +1819,118 @@ class TestAgentSelector:
         )
         paths, others = _split_overrides(overrides)
         assert paths == {str(WORKING_DIR / self.HERMES)}
-        assert others == {"+agent_name=gpqa_mcqa_simple_agent"}
+        assert others == {"+agent_name=gpqa_mcqa_simple_agent", self._selection(WORKING_DIR / self.HERMES)}
+
+    @pytest.mark.parametrize(
+        ("workload", "selector", "running"),
+        [
+            # The taskset routes to a single_agent_turn Environment Server that binds OpenCode.
+            (
+                ["eval", "run", "--benchmark", "swebench/pro/opencode"],
+                "codex_agent",
+                "swebench_pro_opencode_agent (opencode_agent)",
+            ),
+            (
+                ["eval", "run", "--benchmark", "swebench/pro/opencode"],
+                "claude_code_agent",
+                "swebench_pro_opencode_agent (opencode_agent)",
+            ),
+            # `gym env start` serves the two-step flow, so it refuses the selection before starting servers too.
+            (
+                ["env", "start", "--benchmark", "swebench/pro/opencode"],
+                "hermes_agent",
+                "swebench_pro_opencode_agent (opencode_agent)",
+            ),
+            # A taskset routed to single_agent_turn_legacy, and rows that go to the benchmark's own agent.
+            (
+                ["eval", "run", "--benchmark", "enterpriseops_gym"],
+                "codex_agent",
+                "enterpriseops_gym_stirrup_agent (stirrup_agent)",
+            ),
+            (["eval", "run", "--benchmark", "gpqa"], "hermes_agent", "gpqa_mcqa_simple_agent (simple_agent)"),
+            # Selecting one benchmark's harness does not run it on the other.
+            (
+                ["eval", "run", "--benchmark", "gpqa", "--benchmark", "swebench/pro/opencode"],
+                "opencode_agent",
+                "gpqa_mcqa_simple_agent (simple_agent)",
+            ),
+        ],
+    )
+    def test_selection_no_task_runs_on_is_refused(
+        self, monkeypatch: MonkeyPatch, workload: list[str], selector: str, running: str
+    ) -> None:
+        # A session agent sets `resources_server: null`, so composition never puts it in place of the workload's agent.
+        with pytest.raises(AgentCompositionError) as error:
+            self._resolve(monkeypatch, *workload, "--agent-type", selector, "--model-type", "vllm_model")
+        message = str(error.value)
+        assert message.startswith(f"--agent-type loaded {selector} ({selector}), but these tasks")
+        (listed,) = [line for line in message.splitlines() if line.startswith("  - ")]
+        assert listed.endswith(f"runs {running}") or listed.endswith(f"runs on {running}")
+
+    @pytest.mark.parametrize(
+        ("workload", "selector", "overrides", "running"),
+        [
+            # The taskset route already binds the selected type.
+            (
+                ["eval", "run", "--benchmark", "swebench/pro/opencode"],
+                "opencode_agent",
+                [],
+                ("swebench_pro_opencode_agent", "opencode_agent"),
+            ),
+            # The documented example: a `???`-bound harness is composed onto the benchmark's agent.
+            (
+                ["eval", "run", "--benchmark", "terminal_bench_2_1/opencode_legacy_agent"],
+                "terminus_2_sandboxed_agent",
+                [],
+                ("terminal_bench_2_1_terminus_2_sandboxed_agent", "terminus_2_sandboxed_agent"),
+            ),
+            # A session agent's composable profile leaves `resources_server.name` unset, so it is composed.
+            (
+                ["eval", "run", "--benchmark", "hle"],
+                "codex_agent/profiles/benchmark",
+                [
+                    "++hle_equivalence_llm_judge_codex_agent.responses_api_agents.codex_agent.sandbox_runtime_dir=/opt",
+                    "++hle_equivalence_llm_judge_codex_agent.responses_api_agents.codex_agent.sandbox_config.image=x",
+                ],
+                ("hle_equivalence_llm_judge_codex_agent", "codex_agent"),
+            ),
+            # A Harbor-backed benchmark declares no datasets until `gym eval run` prepares its target.
+            (
+                ["env", "start", "--benchmark", "terminal_bench_4/miniswe"],
+                "mini_swe_agent/mini_swe_agent_sandboxed",
+                [],
+                ("mini_swe_agent", "mini_swe_agent"),
+            ),
+        ],
+    )
+    def test_selection_the_run_uses_is_accepted(
+        self,
+        monkeypatch: MonkeyPatch,
+        workload: list[str],
+        selector: str,
+        overrides: list[str],
+        running: tuple[str, str],
+    ) -> None:
+        resolved = self._resolve(
+            monkeypatch, *workload, "--agent-type", selector, "--model-type", "vllm_model", *overrides
+        )
+        instances = {
+            (agent.name, agent.agent_type) for agent in gc.GlobalConfigDictParser()._agent_instances(resolved)
+        }
+        assert running in instances
+        assert "_selected_agent_config" not in resolved
+
+    def test_printed_rebinding_runs_the_selected_agent(self, monkeypatch: MonkeyPatch) -> None:
+        argv = ["eval", "run", "--benchmark", "swebench/pro/opencode", "--agent-type", "codex_agent"]
+        argv += ["--model-type", "vllm_model", "--allow-unsupported-pairing"]
+        with pytest.raises(AgentCompositionError) as error:
+            self._resolve(monkeypatch, *argv)
+        (rebinding,) = [line.strip() for line in str(error.value).splitlines() if line.startswith("  ++")]
+
+        resolved = self._resolve(monkeypatch, *argv, rebinding)
+        route = resolved.swebench_pro_opencode_single_agent_turn.environment_servers.single_agent_turn
+        assert route.agent_server.name == "codex_agent"
+        assert list(resolved.codex_agent.responses_api_agents) == ["codex_agent"]
 
     def test_agent_type_is_rejected_with_no_serve(self, monkeypatch: MonkeyPatch, capsys) -> None:
         monkeypatch.setattr(cli_main, "dispatch", lambda target, overrides: None)

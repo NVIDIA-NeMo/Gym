@@ -284,6 +284,8 @@ class SwitchyardModel(SimpleResponsesAPIModel):
             base_url=base_url,
             api_key=self.config.switchyard_api_key,
             default_headers=self.config.default_headers,
+            # The Switchyard proxy is not a NeMo Gym server, so its retries stay bounded.
+            internal=False,
         )
 
     def setup_webserver(self):

@@ -27,7 +27,7 @@ from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from shlex import quote
 from time import monotonic, time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, ClassVar, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
@@ -40,6 +40,7 @@ from nemo_gym.agents import (
     AgentCloseSessionResponse,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -78,6 +79,7 @@ from nemo_gym.trajectory import (
     ObservationGap,
     SandboxObservation,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.claude_code_agent.observability import (
     associate_claude_code_compaction_calls,
     extract_claude_code_observations,
@@ -131,6 +133,10 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     claude_code_version: Optional[str] = None
     thinking: Optional[str] = None
     max_thinking_tokens: Optional[int] = None
+    # Whether assistant thinking is folded into message text as ``<think>...</think>``. None keeps the default:
+    # folded unless training-token capture is enabled. False emits thinking as separate ``reasoning`` items, so
+    # the final message holds only the answer (e.g. for answer-only grading). Capture requires unfolded output.
+    fold_thinking: Optional[bool] = None
     # Runtime capability knobs. The default (bare=True, no mcp_config/settings) reproduces the original
     # isolated behavior: Claude Code skips hooks, LSP, plugin sync, attribution, auto-memory, background
     # prefetches, keychain reads, and CLAUDE.md auto-discovery (skills still resolve via /skill-name).
@@ -171,6 +177,8 @@ class ClaudeCodeAgentVerifyResponse(BaseVerifyResponse):
 
 class ClaudeCodeAgent(SimpleResponsesAPIAgent):
     config: ClaudeCodeAgentConfig
+    # Sandbox sessions run the CLI inside the sandbox, which calls the model server from there.
+    calls_model_from_sandbox: ClassVar[bool] = True
     sem: Semaphore = None
     _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
     _static_mcp_config: Optional[dict[str, Any]] = PrivateAttr(default=None)
@@ -222,6 +230,15 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 token_capture=self._token_id_capture_enabled(),
             )
         return base_url
+
+    def _fold_thinking(self) -> bool:
+        """Fold thinking into message text unless capture is on or the config turns folding off."""
+        capture = self._token_id_capture_enabled()
+        if self.config.fold_thinking is None:
+            return not capture
+        if self.config.fold_thinking and capture:
+            raise ValueError("fold_thinking=True is incompatible with training-token capture")
+        return self.config.fold_thinking
 
     def _build_settings(self) -> dict[str, Any]:
         """Settings written into the run's CLAUDE_CONFIG_DIR.
@@ -389,7 +406,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 LOG.warning("claude-code timed out after %ds", self.config.timeout)
                 # Keep the actual partial work so capture can corroborate the terminal call.
                 output_items, run_metadata = parse_stream_json(
-                    stdout.decode(errors="replace"), fold_thinking=not self._token_id_capture_enabled()
+                    stdout.decode(errors="replace"), fold_thinking=self._fold_thinking()
                 )
                 run_metadata.update(
                     status="incomplete",
@@ -409,9 +426,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
             stdout_text = stdout.decode(errors="replace")
             LOG.debug("claude-code stdout (%d chars): %s", len(stdout), stdout_text[:2000])
-            output_items, run_metadata = parse_stream_json(
-                stdout_text, fold_thinking=not self._token_id_capture_enabled()
-            )
+            output_items, run_metadata = parse_stream_json(stdout_text, fold_thinking=self._fold_thinking())
             run_metadata.setdefault("duration_ms", (monotonic() - process_started_at) * 1000)
             status, error_type = _invocation_outcome(run_metadata, proc.returncode)
             run_metadata["status"] = status
@@ -797,7 +812,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             items, run_metadata = await asyncio.to_thread(
                 parse_stream_json,
                 artifacts.events,
-                fold_thinking=not self._token_id_capture_enabled(),
+                fold_thinking=self._fold_thinking(),
             )
         cleanup = state.session.cleanup
         if cleanup and cleanup["timed_out"]:
@@ -859,9 +874,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             state = self._require_agent_session(session_id)
             assert isinstance(state, ClaudeCodeSandboxSession)
             if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
-                raise HTTPException(409, "Claude activation does not match the seeded session and rollout")
+                raise AgentSessionConflictError("Claude activation does not match the seeded session and rollout")
             if state.session.closing:
-                raise HTTPException(409, "Claude session is closing")
+                raise AgentSessionConflictError("Claude session is closing")
             self._validate_sandbox_request(body)
             prompt, system = self._conversation_input(body)
             if state.task is None:
@@ -870,7 +885,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                     self._sandbox_response(state, state.activation_request, prompt=prompt, system=system)
                 )
             elif body != state.activation_request:
-                raise HTTPException(409, "Claude sandbox sessions support one activation; retry the same request")
+                raise AgentSessionConflictError(
+                    "Claude sandbox sessions support one activation; retry the same request"
+                )
             return (await asyncio.shield(state.task)).model_copy(deep=True)
         return await self._create_response(body, rollout_id=request.path_params.get("rollout_id"))
 
@@ -952,7 +969,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
     async def run(self, request: Request, body: ClaudeCodeAgentRunRequest) -> ClaudeCodeAgentVerifyResponse:
         if self._agent_session_id_from_request(request) is not None:
-            raise HTTPException(409, "Claude Code sandbox sessions must use EnvironmentServer /run")
+            raise AgentSessionConflictError("Claude Code sandbox sessions must use EnvironmentServer /run")
         if self.config.resources_server is None:
             raise HTTPException(422, "Local Claude Code /run requires resources_server")
         async with self.sem:
@@ -1020,3 +1037,6 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     ClaudeCodeAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ClaudeCodeAgent.run_webserver()  # noqa: F401

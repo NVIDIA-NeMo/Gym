@@ -1,0 +1,12 @@
+agentvista:
+  resources_servers:
+    agentvista:
+      entrypoint: app.py
+      source_root: ${oc.env:AGENTVISTA_ROOT,/opt/agentvista/source}
+      dataset: ${oc.env:AGENTVISTA_DATASET,/data/agentvista/datasets/val.json}
+      image_folder: ${oc.env:AGENTVISTA_IMAGES,/data/agentvista/datasets}
+      output_root: ${oc.env:AGENTVISTA_OUTPUT_ROOT,outputs/agentvista}
+      worker_python: ${oc.env:AGENTVISTA_WORKER_PYTHON,/opt/agentvista-worker/bin/python}
+      domain: agent
+      verified: false
+      description: Original AgentVista answer judge and evaluation metrics

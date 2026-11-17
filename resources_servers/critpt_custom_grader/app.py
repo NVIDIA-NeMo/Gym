@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Stateless HTTP adapter over the sandbox-API grader.
 
-Standard SimpleResourcesServer routes. ``/verify`` and ``/seed_session`` read the whole request body, refuse one larger
-than MAX_REQUEST_BYTES, then parse and validate it inside the handler, so a malformed or oversized request answers a
+Standard SimpleResourcesServer routes. ``/verify`` and ``/seed_session`` parse and validate the request body
+inside the handler, so a malformed request answers a
 category-only error and never reaches core's body-logging validation handler. These two handlers never log request
 bodies, validation details, provider exceptions or task sources; the stock typed routes (``/close_session``,
 ``/aggregate_metrics``) keep core's behaviour.
@@ -55,6 +55,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.critpt_custom_grader.execution import (
     CANDIDATE_UNCERTAINTY_REASONS,
     CLEANUP_STATUSES,
@@ -68,13 +69,11 @@ from resources_servers.critpt_custom_grader.execution import (
     validate_candidate_source,
 )
 from resources_servers.critpt_custom_grader.reference_cache import ReferenceCache
-from resources_servers.critpt_custom_grader.task_data import MAX_TASK_BYTES, TaskData, bounded_json, tolerance_text
+from resources_servers.critpt_custom_grader.task_data import TaskData, bounded_json, tolerance_text
 
 
 logger = logging.getLogger(__name__)
 
-MAX_RESPONSE_BYTES = 1_048_576
-MAX_REQUEST_BYTES = 2 * MAX_TASK_BYTES + 2 * MAX_RESPONSE_BYTES
 _DOMAINS = frozenset({"reference", "comparator", "candidate"})
 _RESOLVED = frozenset({"deleted", "not_created"})
 # Candidate-code extraction: first ```python fence, else first bare ``` fence, else the whole response text.
@@ -199,7 +198,7 @@ class CritPtRunRequest(BaseRunRequest):
     @field_validator("responses_create_params")
     @classmethod
     def public_params(cls, value: dict) -> dict:
-        bounded_json(value, max_bytes=MAX_RESPONSE_BYTES)
+        bounded_json(value, max_bytes=None)
         NeMoGymResponseCreateParamsNonStreaming.model_validate(value)
         if value.get("tools"):
             raise ValueError("tools are not supported")
@@ -214,7 +213,7 @@ class CritPtVerifyRequest(CritPtRunRequest, BaseVerifyRequest):
     @field_validator("response")
     @classmethod
     def saved_response(cls, value: dict) -> dict:
-        bounded_json(value, max_bytes=MAX_RESPONSE_BYTES)
+        bounded_json(value, max_bytes=None)
         NeMoGymResponse.model_validate(value)
         return value
 
@@ -421,8 +420,6 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
     @staticmethod
     async def _read_json(request: Request) -> tuple[dict | None, JSONResponse | None]:
         body = await request.body()
-        if len(body) > MAX_REQUEST_BYTES:
-            return None, _error("request_limit", 413)
         try:
             value = json.loads(body.decode("utf-8"))
         except (ValueError, UnicodeError, RecursionError):
@@ -639,3 +636,6 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     CritPtCustomGraderServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = CritPtCustomGraderServer.run_webserver()  # noqa: F401

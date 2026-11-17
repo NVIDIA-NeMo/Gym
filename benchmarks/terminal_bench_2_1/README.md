@@ -1,14 +1,137 @@
 # Terminal-Bench 2.1
 
-Terminal-Bench 2.1 evaluates agents on tasks in isolated containers. The benchmark
-prepares task data and owns sandbox setup, verification, and cleanup. Pi, Codex,
-OpenCode, OpenClaw, and Copilot can run their model/tool loops in the task sandbox through
-Gym's Environment Server.
+Terminal-Bench 2.1 evaluates agents on 89 terminal tasks, each in its own container.
+
+| Preset | Harness | Runs on |
+| --- | --- | --- |
+| `terminal_bench_2_1/terminus_2` | Harbor's Terminus 2 (`terminus_2_agent` agent sessions) | Harbor environment server |
+| `terminal_bench_2_1/opencode` | OpenCode (`opencode_agent`) | Harbor environment server |
+| `terminal_bench_2_1/nooa` | NOOA | `single_agent_turn` on the `terminal_bench_2_1` resources server |
+| `terminal_bench_2_1/inkling_small` | Terminus 2, pinned rows with a terminal-interaction note | the resources server's `legacy_agent` relay |
+| `terminal_bench_2_1/terminus_2_legacy_agent`, `terminal_bench_2_1/opencode_legacy_agent` | the previous `terminus_2` and `opencode` recipes (deprecated) | the resources server's `legacy_agent` relay |
+
+## Run
+
+`terminal_bench_2_1/terminus_2` and `terminal_bench_2_1/opencode` run the published task folders of
+[`environments/harbor/terminal_bench_2_1`](../../environments/harbor/terminal_bench_2_1/README.md), pinned by content
+hash, through the [`harbor` environment server](../../environment_servers/harbor/README.md). The server starts each
+task's prebuilt image as the sandbox, lends it to the harness's agent session, and then grades the episode with the
+task's own `tests/test.sh`; resources and time budgets come from each task's `task.toml`. Both presets take eight
+rollouts per task.
+
+```bash
+gym dataset pull terminal_bench_2_1
+gym eval run --benchmark terminal_bench_2_1/terminus_2 --sandbox opensandbox --model-type vllm_model \
+  --only-tasks 'fix-git,regex-log' --num-repeats 1
+```
+
+- `--only-tasks` and `--exclude-tasks` select task folders; drop them, and `--num-repeats`, for the full run.
+- `--agent-type <harness>` runs another session-capable harness (for example `opencode_agent`, `pi_agent`,
+  `codex_agent` or `mini_swe_agent/mini_swe_agent_sandboxed`) on the same tasks; it uses that harness's shipped
+  settings.
+- `gym dataset validate terminal_bench_2_1 --sandbox opensandbox` runs each task's reference solution.
+- These presets need no `gym eval prepare`, and refuse `--no-serve` and `gym eval plan`. Results land where
+  `gym eval run` writes them for a Harbor target; the
+  [Terminal-Bench 2.1 Harbor tutorial](https://docs.nvidia.com/nemo/gym/main/tutorials/evaluation-tutorials/terminal-bench-2-1-harbor)
+  describes the files, the deployment overlay that reproduces the resources server's fixed sandbox size, and the two
+  tasks whose published images fail their own tests (`qemu-startup`, `qemu-alpine-ssh`).
+
+### Scoring
+
+Each harness gets the task's agent budget (`[agent].timeout_sec`, capped by its own 10,800-second limit). When the
+budget runs out, the harness stops and the task's `tests/test.sh` grades the sandbox as the agent left it. Once
+`test.sh` has run, the row counts: a missing reward file scores 0. Infrastructure endings are retried or masked,
+never scored 0: a model-server or transport failure the harness reports, a sandbox or provider failure, a lost
+sandbox, and an episode that outlives its task's total budget. See the
+[`harbor` environment server](../../environment_servers/harbor/README.md#what-it-does).
+
+### Tasks the resources server repairs
+
+The Harbor path runs every task as published; the resources server repairs eleven of them at run time (see
+"Differences" below). Their reference solutions on the Harbor path
+(`gym dataset validate terminal_bench_2_1 --sandbox opensandbox --only-tasks ...`):
+
+| Task | Repair on the resources-server path | Reference solution on the Harbor path |
+| --- | --- | --- |
+| `qemu-startup`, `qemu-alpine-ssh` | Debian Bullseye security snapshot | 0: `tests/test.sh` installs `curl` from the Bullseye security mirror, which answers 404 |
+| `compile-compcert`, `extract-moves-from-video` | `ca-certificates` in `tests/test.sh` | 1 |
+| `pytorch-model-recovery`, `torch-tensor-parallelism`, `torch-pipeline-parallelism`, `mteb-retrieve` | PyTorch CPU wheel index in `tests/test.sh` | 1; the verifier downloads the CUDA build of `torch` and took 52 to 102 seconds of its 900 or 1,800 |
+| `mcmc-sampling-stan`, `build-cython-ext` | `solution/solve.sh` (golden-patch mode only) | 0: the published reference solution fails its tests; model rollouts are unaffected |
+| `build-pov-ray` | `solution/solve.sh` (golden-patch mode only) | 1 |
+
+`qemu-startup` and `qemu-alpine-ssh` score 0 on every rollout, as they do in Harbor itself: 2 of 89 tasks. When you
+compare with a source that repairs them, exclude them on both sides (`--exclude-tasks qemu-startup,qemu-alpine-ssh`)
+and say so. The `ca-certificates` repairs matter only for an agent that leaves `curl` without its CA bundle, which a
+reference solution does not show; such a rollout can score 0 on the Harbor path.
+
+### Differences from the resources-server path
+
+The `*_legacy_agent` recipes and the sections below run the same tasks through the `terminal_bench_2_1` resources
+server. Scores on the two paths are not interchangeable:
+
+- **Tasks.** The Harbor entry is Harbor's package-store copy; the resources server prepares rows from a clone of
+  `harbor-framework/terminal-bench-2-1` at `7131e437`. The two differ in one file,
+  `sanitize-git-repo/tests/test_outputs.py`.
+- **Repairs.** The resources server edits eight tasks' `tests/test.sh` (or their image's package sources) and, in
+  golden-patch mode, three reference solutions at run time; the Harbor path runs them as published. The table above
+  lists them and what each does on the Harbor path.
+- **Sandbox size and budgets.** The resources server gives every task 4 CPUs, 16 GiB and 30 GiB of disk and the
+  harness's own run limit (10,800 seconds for both harnesses); the Harbor path uses each task's declared resources
+  and agent and verifier timeouts (600 to 12,000 seconds of agent time, median 900). On a slow or shared endpoint
+  more episodes stop at the task's budget on the Harbor path, which lowers its score against the resources server's.
+  `rstan-to-pystan` declares 8 GiB, and its sandbox can be OOM-killed there (a masked or failed sample, not a 0). The
+  [Harbor tutorial](https://docs.nvidia.com/nemo/gym/main/tutorials/evaluation-tutorials/terminal-bench-2-1-harbor)
+  shows the overlay that gives the Harbor path the resources server's sandbox size.
+- **OpenCode harness.** `opencode` runs `opencode_agent` in place of `opencode_sandboxed_agent`; the two adapters ship
+  different defaults, so treat their scores as separate measurements. Both deny `webfetch`, `websearch` and `skill`
+  and keep OpenCode subagents (`task`) enabled. Both bound the whole run at 10,800 seconds; `opencode_sandboxed_agent`
+  also caps each model call at one hour, and `opencode_agent`'s context window is metadata, not an output cap.
+  `opencode_sandboxed_agent` captures token IDs and requests `max_tokens` equal to its 262,144-token
+  window on every call, so an endpoint that serves exactly that window refuses every first call
+  (`context_length_exceeded`) and every rollout scores 0 without a recorded failure. Drop the per-call caps, as
+  [`policy_model_override.yaml`](../nemotron_3.5_super/policy_model_override.yaml) does, when you run
+  `opencode_legacy_agent` against such an endpoint.
+- **Terminus 2 harness.** `terminus_2` runs `terminus_2_agent` (Harbor's Terminus 2 at the Harbor commit its
+  `pyproject.toml` pins) in place of `terminus_2_sandboxed_agent` (Harbor 0.22.0); treat their scores as separate
+  measurements. `terminus_2_agent` samples at temperature 0.7 and caps each model call at 2,400 seconds;
+  `terminus_2_sandboxed_agent` leaves the temperature to the model server and caps each call at 600 seconds. Both
+  summarize proactively at 8,000 tokens and bound the whole run at 10,800 seconds; on Harbor the run limit is the
+  task's agent budget.
+
+### From the resources-server commands
+
+`terminal_bench_2_1/terminus_2` and `terminal_bench_2_1/opencode` keep their names but no longer read the resources
+server's keys, and `++` keys merge without an error, so map them:
+
+- `gym eval prepare --benchmark ...`: `gym dataset pull terminal_bench_2_1` fetches the task folders.
+- Row selection in the prepared `benchmark.jsonl` or `--input`: `--only-tasks` and `--exclude-tasks`.
+- The dataset's `num_repeats`: the preset's eight, or `--num-repeats`.
+- `terminal_bench_2_1_resources_server...sandbox_config.resources` and `.provider_options.resource_requests`:
+  `sandbox_resources_override` and `sandbox_provider_options` under
+  `harbor_environment_server.environment_servers.harbor` (the tutorial's overlay).
+- `...sandbox_config.metadata` (deployment labels such as those in
+  [`sandbox_utils.yaml`](../nemotron_3.5_super/sandbox_utils.yaml)) and `ready_timeout_s` (1,200 seconds there):
+  `sandbox_metadata` and `sandbox_ready_timeout_s` (default 900) in the same block.
+- `++use_absolute_ip=true`: not needed; the harness in the sandbox calls Gym's model server at the address the run's
+  servers listen on, so set `default_host` to one the sandboxes can reach.
+- `gym env start` with `gym eval run --no-serve`, and `gym eval plan`: not available for a Harbor-backed preset.
+- `gym eval submit` and launchers built on it: not yet. A submit benchmark passes only `+key=value` overrides to
+  `gym eval prepare` and `gym eval run`, so it cannot carry `--sandbox`; keep those configs on the `_legacy_agent`
+  names until submit can run a Harbor-backed preset.
+
+The old commands still run under `terminal_bench_2_1/terminus_2_legacy_agent` and `opencode_legacy_agent`.
+
+## The resources-server path (legacy)
+
+The `terminal_bench_2_1` resources server is being retired in favor of the Harbor path above. It still backs
+`nooa`, `inkling_small` and the `*_legacy_agent` recipes. On it, the benchmark prepares task data and owns sandbox
+setup, verification, and cleanup. Pi, Codex, OpenCode, OpenClaw, Copilot, and CrewAI can run their model/tool loops
+in the task sandbox through Gym's Environment Server.
 
 - Integration profile: `custom-gym-verifier`
 - Scorer: `terminal_bench_2_1`
 
-## Prepare data
+### Prepare data
 
 Run from the Gym checkout with the benchmark's preparation dependencies installed:
 
@@ -20,12 +143,18 @@ git -C benchmarks/terminal_bench_2_1/terminal-bench-2-1 \
 python benchmarks/terminal_bench_2_1/prepare.py
 ```
 
+`prepare()` also takes `task_revision`, a full commit of the task repository. It checks that commit out, cloning
+first if the checkout is missing, so two runs read the same tasks. Through the CLI, pass it as
+`++prepare_script_args.task_revision=<commit>` at the top level; in a YAML config it is the top-level
+`prepare_script_args: {task_revision: <commit>}`. Without it the checkout is left as it is, and a fresh
+clone reads the repository's default branch.
+
 Keep task tests and solutions on the host; do not mount the benchmark checkout
 into task containers. Resources uploads verifier assets after the agent closes
 and rejects tasks whose local `tests/test.sh` is missing. Do not enable
 golden-patch mode for model runs.
 
-## Configure a run
+### Configure a run
 
 Compose the Resources, harness, and Environment Server configs. Save this Codex
 example as `run.yaml`:
@@ -66,10 +195,10 @@ The smoke input below wraps the prepared row in `task_id` and `task_input`.
 Its `terminal_bench_2_1` taskset routes directly to `single_agent_turn`.
 Environment Server seeds Resources and the agent, runs the agent, closes it before
 verification, then closes Resources. Resources owns the sandbox throughout.
-Keep one worker for both Resources and the agent because their sessions are
-process-local.
+Both servers accept several workers, because session routing sends each
+session's requests to the worker that holds it.
 
-### Choose a harness
+#### Choose a harness
 
 To use another harness, replace its config import, the entire `codex_agent`
 settings block, and `agent_server.name`. The settings in the last column belong
@@ -83,13 +212,15 @@ the harness for this taskset.
 | [OpenCode](../../responses_api_agents/opencode_agent/README.md) | `responses_api_agents/opencode_agent/configs/opencode_agent.yaml` | `opencode_agent` | `context_window: 32768`, `max_output_tokens: 8192`, `timeout: 600` |
 | [OpenClaw](../../responses_api_agents/openclaw_agent/README.md) | `responses_api_agents/openclaw_agent/configs/openclaw_agent.yaml` | `openclaw_agent` | `context_window: 32768`, `model_timeout_seconds: 600`, `timeout: 600` |
 | [Copilot](../../responses_api_agents/copilot_agent/README.md) | `responses_api_agents/copilot_agent/configs/copilot_agent.yaml` | `copilot_agent` | `context_window: 32768`, `max_output_tokens: 8192`, `timeout: 600` |
+| [CrewAI](../../responses_api_agents/crewai_agent/README.md) (development pairing) | `responses_api_agents/crewai_agent/configs/crewai_agent.yaml` | `crewai_agent` | `context_window_size: 131072`, `shell_timeout_seconds: 300`, `timeout: 900` |
 
-Pi, Codex, OpenCode, and OpenClaw are allowed by this benchmark. Copilot remains experimental pending
-full qualification; use `--allow-unsupported-pairing` to try its smoke settings. These are single-task
-smoke settings; adjust context windows and budgets for your model and evaluation.
+Pi, Codex, OpenCode, and OpenClaw are allowed by this benchmark. Copilot and CrewAI remain
+unsupported development pairings pending full benchmark qualification; add
+`--allow-unsupported-pairing` to both `gym env start` and `gym eval run` when selecting either.
+These are single-task smoke settings; adjust context windows and budgets for your model and evaluation.
 See each harness's README for runtime prerequisites and model requirements.
 
-### Model and sandbox provider
+#### Model and sandbox provider
 
 Save this example for a non-reasoning Chat Completions endpoint as `model-provider.yaml`:
 
@@ -118,7 +249,7 @@ Put `policy_base_url`, `policy_api_key`, and `policy_model_name` in your private
 `env.yaml`. The task container must reach the Gym Model Server; for Docker on a
 reachable host, use `++use_absolute_ip=true` as below.
 
-## Run a smoke task
+### Run a smoke task
 
 Select one prepared task:
 
@@ -156,7 +287,7 @@ evaluation with reward 0 is an infrastructure failure; a completed evaluation
 can score 0 for an incorrect solution. A collector exit alone does not establish
 a successful smoke, and one task does not establish a benchmark baseline.
 
-## Tasks that start services
+### Tasks that start services
 
 The supervisor stops live processes in the harness group before capture or verification.
 On timeout or close, it stops the harness, then kills within the cleanup deadline the group,

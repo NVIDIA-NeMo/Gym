@@ -233,7 +233,7 @@ async def test_run_usage_sums_policy_calls_and_excludes_judges() -> None:
     # Usage covers every policy-model call; judge calls are auxiliary and stay out of the rollout's usage.
     assert result.response.usage.model_dump() == {
         "input_tokens": 2148,
-        "input_tokens_details": {"cached_tokens": 400},
+        "input_tokens_details": {"cached_tokens": 400, "cache_write_tokens": None},
         "output_tokens": 1435,
         "output_tokens_details": {"reasoning_tokens": 1200},
         "total_tokens": 3583,

@@ -96,7 +96,7 @@ Harbor verifier sandboxes and uses only the standard library. Each package's `__
 core functionality. No module in `nemo_gym/` outside `nemo_gym/orchestration/`, and no server, benchmark or script built on it, may import it, except `nemo_gym/cli/main.py`, which wires the
 orchestration entrypoint into the CLI. If another package needs something that lives there, move that code into the
 package that owns it. Deleting `orchestration/` should leave only the CLI wiring to change.
-`tests/unit_tests/test_orchestration_boundary.py` enforces this.
+`tests/unit_tests/test_orchestration_boundary.py` and the import-linter contract "only the CLI entrypoint imports orchestration" in `pyproject.toml` enforce this.
 
 For full architecture and concepts (environments, training approaches, verification), see `fern/versions/latest/pages/about/`.
 
@@ -187,7 +187,7 @@ gym env start \
     --model-type vllm_model
 
 # Run tests for a specific server (creates .venv per server, installs deps, runs pytest)
-# First run is slow. Use skip_venv_if_present config or place a .venv to skip venv creation.
+# First run is slow. Use skip_venv_if_present to reuse a .venv that has the .nemo-gym-setup-complete marker.
 gym env test --resources-server example_single_tool_call
 
 # Run all server tests (slow: one venv per server, so it needs an explicit opt-in)

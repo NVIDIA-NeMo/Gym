@@ -63,9 +63,9 @@ installation is needed. The default is `null`, preserving existing behavior.
 
 ## Offline scientific evaluation with OpenCode or Pi
 
-The plain-named HLE and APEX Shortlist OpenCode presets (`hle/opencode`, `hle/opencode_search`,
-`apex_shortlist/opencode`) run `opencode_agent` sessions instead; this section describes their
-`*_legacy_agent` presets, and the benchmark READMEs list what differs.
+The plain-named HLE and APEX Shortlist presets (`hle/opencode`, `hle/opencode_search`, `hle/pi`, `hle/pi_search`,
+`apex_shortlist/opencode`, `apex_shortlist/pi`) run `opencode_agent` and `pi_agent` sessions instead; this section
+describes their `*_legacy_agent` presets, and the benchmark READMEs list what differs.
 
 The dedicated `opencode_sandboxed_agent` and `pi_sandboxed_agent` run their native
 CLIs inside a provider-managed sandbox. Gym stays on the host: it provisions the
@@ -85,7 +85,7 @@ only per-session Gym MCP headers. See [Tavily search](../../fern/versions/latest
 for exclusions, retry limits, and the source-only search response contract.
 
 ```bash
-gym eval run --benchmark hle/pi_search --model-type vllm_model
+gym eval run --benchmark hle/pi_search_legacy_agent --model-type vllm_model
 ```
 
 The presets use 512 concurrent requests per agent worker, 2 CPUs and 8 GiB per

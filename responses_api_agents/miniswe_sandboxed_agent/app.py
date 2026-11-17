@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from functools import cache
 from pathlib import Path
 from time import monotonic, time
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -23,6 +23,7 @@ from pydantic import Field, field_validator
 from nemo_gym.agents import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
@@ -129,7 +130,6 @@ class MiniSWEEpisodeSession(AgentSessionState):
 
 
 class MiniSWESandboxedConfig(BaseResponsesAPIAgentConfig):
-    num_workers: Literal[1] = 1
     # The resources server the legacy `/run` path seeds and verifies against. Episode sessions
     # (`/v1/agent_sessions`) receive the sandbox from the environment server and need none.
     resources_server: ResourcesServerRef | None = None
@@ -228,6 +228,15 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
     config: MiniSWESandboxedConfig
     # The harness runs inside the task sandbox and calls the model server from there.
     calls_model_from_sandbox: ClassVar[bool] = True
+
+    def multiple_workers_unsupported_reason(self) -> str | None:
+        # Episode sessions are agent sessions, which routing follows by agent_session_id.
+        if self.config.resources_server is None:
+            return None
+        return (
+            "its own /run path replays a retried run from this process's memory, "
+            "keyed by the cookie's session_id and the rollout ID, which agent session routing does not follow"
+        )
 
     def supports_task_tool_context(self) -> bool:
         """mini-SWE reads the task's MCP servers and skills directory from ``task.json`` at its first turn."""
@@ -395,7 +404,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
             if state.original_params is not None:
                 return
             if state.closed:
-                raise HTTPException(409, "Agent session is closed")
+                raise AgentSessionConflictError("Agent session is closed")
             task_context = await _read_task_context(state.sandbox)
             state.seed.instruction = _instruction(body.input)
             state.seed.mcp_servers = task_context.get("mcp_servers") or []
@@ -422,14 +431,14 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
             matches = [key for key in self._sessions if key[0] == owner]
             if rollout_id is None:
                 if len(matches) > 1:
-                    raise HTTPException(
-                        409, "Multiple mini-SWE rollouts for this session; use /ng-rollout/<id>/v1/responses"
+                    raise AgentSessionConflictError(
+                        "Multiple mini-SWE rollouts for this session; use /ng-rollout/<id>/v1/responses"
                     )
                 state = self._sessions.get(matches[0]) if matches else None
             else:
                 state = self._sessions.get((owner, rollout_id))
             if state is None:
-                raise HTTPException(409, "No seeded mini-SWE sandbox for this session")
+                raise AgentSessionConflictError("No seeded mini-SWE sandbox for this session")
         if state.original_params is None:
             try:
                 await self._bind_episode_turn(state, body, rollout_id)
@@ -437,7 +446,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                 # The provider, not the agent: the turn stays unbound for a retry and the episode is masked.
                 raise HTTPException(503, f"mini-SWE infrastructure_error: {exc}") from exc
         if body != state.original_params:
-            raise HTTPException(409, "Agent session is already bound to another request")
+            raise AgentSessionConflictError("Agent session is already bound to another request")
 
         async def execute_message() -> AgentExecutionResult:
             params = body.model_copy(deep=True)
@@ -614,7 +623,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
             self._runs[key] = (payload, worker)
         saved, worker = self._runs[key]
         if saved != payload:
-            raise HTTPException(409, "Rollout identity is already bound to another request")
+            raise AgentSessionConflictError("Rollout identity is already bound to another request")
         # A retried/disconnected collector must never create a second model loop.
         return await asyncio.shield(worker)
 
@@ -667,7 +676,7 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                     provider = create_provider(resolve_provider_config(seed.sandbox_provider))
                     sandbox = await AsyncSandbox.connect(seed.sandbox_descriptor, provider=provider)
                 if key in self._sessions:
-                    raise HTTPException(409, "Agent session already has an active mini-SWE sandbox")
+                    raise AgentSessionConflictError("Agent session already has an active mini-SWE sandbox")
                 state = MiniSWESession(
                     sandbox=sandbox,
                     seed=seed,

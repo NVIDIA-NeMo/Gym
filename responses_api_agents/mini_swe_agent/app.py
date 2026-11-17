@@ -47,6 +47,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -89,6 +90,7 @@ from nemo_gym.server_runtime import (
     MCPToolAccess,
 )
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, SandboxObservation
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.mini_swe_agent.sandbox import (
     MINI_SWE_VERSION,
     SESSION_ROOT,
@@ -759,13 +761,13 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 422, "mini-SWE reaches request tools only through MCP grants; set resources_tool_transports: [mcp]"
             )
         if state.request.episode_id.capture_key != rollout_id:
-            raise HTTPException(409, "Agent-session episode_id does not match the rollout route")
+            raise AgentSessionConflictError("Agent-session episode_id does not match the rollout route")
         if state.task is None:
             # No await until the task and its request binding are installed.
             state.activation_request = body.model_copy(deep=True)
             state.task = asyncio.create_task(self._activate(state, state.activation_request))
         elif body != state.activation_request:
-            raise HTTPException(409, "mini-SWE sessions support one activation; retry the same request")
+            raise AgentSessionConflictError("mini-SWE sessions support one activation; retry the same request")
         # A disconnected waiter must not cancel the shared activation; close owns cancellation.
         return (await asyncio.shield(state.task)).model_copy(deep=True)
 
@@ -913,3 +915,6 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     MiniSWEAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = MiniSWEAgent.run_webserver()  # noqa: F401

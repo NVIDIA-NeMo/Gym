@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Deprecated: retain the local /run relay while migrating to Environment Server agent sessions.
+# Keep the instance name so existing resources bindings and legacy_agent routing can be reused.
+config_paths:
+  - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
+
+opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      entrypoint: legacy_app.py
+
+opencode_agent_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: opencode_agent

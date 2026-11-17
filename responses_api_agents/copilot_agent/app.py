@@ -44,6 +44,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -93,6 +94,7 @@ from nemo_gym.trajectory import (
     SandboxObservation,
     ToolCallObservation,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.copilot_agent.sandbox import CopilotArtifacts, CopilotRuntime, CopilotSandboxSession
 
 
@@ -449,6 +451,7 @@ class CopilotAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: Optional[ModelServerRef] = None
     model: str
     copilot_version: str = COPILOT_VERSION
+    # Per worker: with num_workers > 1, each worker runs this many Copilot invocations at once.
     concurrency: int = Field(default=8, gt=0)
     timeout: int = Field(default=900, gt=0)
     context_window: Optional[int] = Field(
@@ -1091,15 +1094,15 @@ class CopilotAgent(SimpleResponsesAPIAgent):
         state = self._require_agent_session(session_id)
         assert isinstance(state, CopilotSandboxSession)
         if state.request.episode_id.capture_key != request.path_params.get("rollout_id"):
-            raise HTTPException(409, "Copilot activation does not match the seeded session and rollout route")
+            raise AgentSessionConflictError("Copilot activation does not match the seeded session and rollout route")
         if state.session.closing:
-            raise HTTPException(409, "Copilot session is closing")
+            raise AgentSessionConflictError("Copilot session is closing")
         if state.task is None:
             # Bind the request before the first await so retries join one invocation.
             state.activation_request = body.model_copy(deep=True)
             state.task = asyncio.create_task(self._sandbox_response(state, body, prompt=prompt))
         elif body != state.activation_request:
-            raise HTTPException(409, "Copilot sandbox sessions support one activation; retry the same request")
+            raise AgentSessionConflictError("Copilot sandbox sessions support one activation; retry the same request")
         # Session close owns cancellation. Losing an HTTP waiter must not stop the harness.
         try:
             return (await asyncio.shield(state.task)).model_copy(deep=True)
@@ -1139,3 +1142,5 @@ def _events(raw: str) -> list[tuple[float, dict[str, Any]]]:
 
 if __name__ == "__main__":
     CopilotAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = CopilotAgent.run_webserver()  # noqa: F401
