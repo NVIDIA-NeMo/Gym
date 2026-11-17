@@ -101,7 +101,8 @@ _helpers = ModelHelpers()
 # The files an agent session harvests by default: the RTL and testbench sources it may write.
 DEFAULT_HARVEST_GLOBS = ["rtl/**/*.sv", "rtl/**/*.v", "rtl/**/*.vhd", "verif/**/*.sv", "verif/**/*.v"]
 # The harvest command's exit code when the workspace holds none of the harvested paths. GNU tar exits 1 when a
-# file changed while it was read (the archive is complete) and 2 on a fatal error, so this must differ from both.
+# file changed while it was read (the archive is complete) and 2 on a fatal error (an unreadable file, a full disk),
+# after which the archive may be missing files, so this must differ from both.
 _NOTHING_TO_HARVEST_EXIT = 3
 _CATEGORY_RE = re.compile(r"cid\d+")
 
@@ -531,9 +532,10 @@ class CVDPResourcesServer(SimpleResourcesServer):
         """Copy the files the agent wrote out of the task sandbox, then stop the sandbox.
 
         The first verify that harvests stops the sandbox; later ones grade the same files. A workspace with none of
-        the harvested paths, or one tar cannot read, yields no files, and grading falls back to the final message
-        as the legacy agentic path did. Raises ``_HarvestUnavailable`` when the provider fails to run the command or
-        transfer the archive; the sandbox is then kept, so a resent verify can try again and close still stops it.
+        the harvested paths yields no files, and grading falls back to the response text as the legacy agentic path
+        did. Raises ``_HarvestUnavailable`` when the provider fails to run the command or transfer the archive, or
+        when tar fails (exit 2): its archive may be missing files, and a full disk is not the agent's failure. The
+        sandbox is then kept, so a resent verify can try again and close still stops it.
         """
         if session.harvested is None:
             workdir = self.config.agent_workdir.rstrip("/")
@@ -574,9 +576,13 @@ class CVDPResourcesServer(SimpleResourcesServer):
                         raise _HarvestUnavailable(
                             VERIFIER_ERROR, f"The workspace archive could not be read: {error}"
                         ) from error
-            elif result.return_code in (_NOTHING_TO_HARVEST_EXIT, 2):
-                logging.warning("The agent left nothing tar could archive (exit %s): %s", result.return_code, output)
+            elif result.return_code == _NOTHING_TO_HARVEST_EXIT:
+                logging.warning("The agent left none of the harvested paths: %s", output)
                 files = {}
+            elif result.return_code == 2:
+                # Python's tarfile reads an archive cut short at a header as complete, so grading it could silently
+                # drop files. Mask instead.
+                raise _HarvestUnavailable(VERIFIER_ERROR, f"tar failed to archive the workspace: {output[:2000]}")
             else:
                 # Not tar's own outcome: the image lacks tar, or the shell itself failed.
                 raise _HarvestUnavailable(
@@ -636,7 +642,7 @@ class CVDPResourcesServer(SimpleResourcesServer):
                         "failure_reason": str(error),
                     },
                 )
-        # No files falls back to parsing RTL out of the final message, as the legacy agentic path did.
+        # No files falls back to parsing RTL out of the response text, as the legacy agentic path did.
         return await self._grade(body.model_copy(update={"rtl_files": dict(files) or None}))
 
     # ---------------------------------------------------------------- grading

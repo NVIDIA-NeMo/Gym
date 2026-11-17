@@ -3,6 +3,7 @@
 """The agent session lifecycle: the task sandbox is the local sandbox provider in a temporary directory."""
 
 import dataclasses
+import shutil
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -206,7 +207,7 @@ def test_a_target_outside_the_harvested_directories_is_graded(root, graded):
     assert graded == [{"rtl/top.sv": TOP}]
 
 
-def test_an_agent_that_wrote_nothing_is_graded_on_its_final_message(server, root, stopped, graded):
+def test_an_agent_that_wrote_nothing_is_graded_on_its_response_text(server, root, stopped, graded):
     client = TestClient(server.setup_webserver())
     _post_seed(client, _seed())
 
@@ -217,7 +218,9 @@ def test_an_agent_that_wrote_nothing_is_graded_on_its_final_message(server, root
     assert len(stopped) == 1
 
 
-def test_an_empty_final_message_scores_zero_even_with_files(server, root, stopped, graded):
+def test_a_response_with_no_text_scores_zero_even_with_files(server, root, stopped, graded):
+    # output_text joins every message in the trajectory, so this is an agent that never wrote any text, not one
+    # whose last item is a tool call.
     client = TestClient(server.setup_webserver())
     _post_seed(client, _seed())
     _solve(root)
@@ -323,16 +326,33 @@ def test_files_that_changed_while_tar_read_them_still_grade(server, root, stoppe
     assert len(stopped) == 1
 
 
-def test_a_fatal_tar_error_grades_the_final_message(server, root, stopped, graded, monkeypatch):
+@pytest.mark.parametrize(
+    "stderr", ["tar: rtl/top.sv: Cannot open: Permission denied", "tar: rtl/top.sv: Wrote only 4096 of 10240 bytes"]
+)
+def test_a_fatal_tar_error_is_masked_and_keeps_the_sandbox(server, root, stopped, graded, monkeypatch, stderr):
     client = TestClient(server.setup_webserver())
     _post_seed(client, _seed())
     _solve(root)
-    _exec_result(monkeypatch, 2, "tar: rtl/top.sv: Cannot open: Permission denied", run=False)
+    _exec_result(monkeypatch, 2, stderr, run=False)
+
+    verified = _verify(client)
+
+    assert (verified["reward"], verified["mask_sample"], verified["failure_kind"]) == (0.0, True, VERIFIER_ERROR)
+    assert stderr in verified["failure_reason"]
+    assert graded == [], "the archive may be missing files, so it is neither graded nor replaced by the text"
+    assert stopped == [], "a resent verify can harvest again"
+
+
+def test_a_workspace_with_none_of_the_harvested_paths_grades_the_response_text(server, root, stopped, graded):
+    client = TestClient(server.setup_webserver())
+    _post_seed(client, _seed())
+    shutil.rmtree(root / "rtl")
+    shutil.rmtree(root / "verif")
 
     verified = _verify(client)
 
     assert verified["mask_sample"] is False
-    # No files: with one target file, the whole final message is graded as that file.
+    # No files: with one target file, the whole response text is graded as that file.
     assert graded == [{"rtl/top.sv": "I wrote rtl/top.sv."}]
     assert len(stopped) == 1
 
