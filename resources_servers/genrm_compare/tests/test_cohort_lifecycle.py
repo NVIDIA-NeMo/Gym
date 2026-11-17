@@ -23,7 +23,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 import resources_servers.genrm_compare.app as genrm
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, RolloutCoordinates
 from resources_servers.genrm_compare.tests.support import request_with_session
 
 
@@ -40,7 +40,15 @@ def collected_comparisons(scores: list[float]) -> tuple[list[genrm.ComparisonRes
     return results, pairs
 
 
-def member(index, *, group="group", attempt=0, response_id=None):
+def member(index, *, group="group", attempt=0, response_id=None, typed=False):
+    """One cohort member's verify request: with the row's flat coordinates as an Agent's `/run` sends them, or
+    ``typed`` with only the ``rollout_coordinates`` an Environment Server sends."""
+    if typed:
+        flat = member(index, group=group, attempt=attempt, response_id=response_id).model_dump(mode="json")
+        for key in ("_ng_task_index", "_ng_rollout_index", "_ng_group_id", "_ng_group_attempt"):
+            flat.pop(key, None)
+        coordinates = RolloutCoordinates(rollout_index=index, group_id=group, group_attempt=attempt)
+        return genrm.GenRMCompareVerifyRequest.model_validate(flat | {"rollout_coordinates": coordinates})
     return genrm.GenRMCompareVerifyRequest(
         responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "2+2?"}]),
         response=NeMoGymResponse(
@@ -240,3 +248,51 @@ async def test_failed_legacy_group_cannot_mix_replacement_with_delayed_old_membe
     )
     assert [r.reward for r in replacement] == [3.0, 3.0]
     assert [r.response.id for r in replacement] == ["new-0", "new-1"]
+
+
+async def test_typed_coordinates_alone_complete_a_cohort_and_replay_it(server):
+    # Under single_agent_turn the row's _ng_* keys never reach /verify; the typed coordinates must form the cohort.
+    judge = AsyncMock(return_value=comparison_result())
+    server._run_single_comparison = judge
+    first = asyncio.create_task(server.verify(request_with_session(), member(0, typed=True)))
+    await asyncio.sleep(0)
+    assert judge.await_count == 0
+    second = await server.verify(request_with_session(), member(1, typed=True))
+
+    assert [(await first).rollout_index, second.rollout_index] == [0, 1]
+    assert (await first).reward == second.reward == 3.0
+    # A replay from either path reaches the same member of the same cohort without judging again.
+    assert (await server.verify(request_with_session(), member(0, typed=True))).reward == 3.0
+    assert (await server.verify(request_with_session(), member(0))).reward == 3.0
+    assert judge.await_count == 2
+
+
+async def test_typed_coordinates_retry_a_whole_group_under_a_newer_attempt(server):
+    server.config.cohort_collection_timeout_s = 0.02
+    with pytest.raises(HTTPException, match="did not collect"):
+        await server.verify(request_with_session(), member(0, typed=True))
+
+    server._collect_comparisons = AsyncMock(return_value=collected_comparisons([1.0, 2.0]))
+    retried = await asyncio.gather(
+        *(server.verify(request_with_session(), member(i, attempt=1, typed=True)) for i in range(2))
+    )
+
+    assert [(r.group_attempt, r.reward) for r in retried] == [(1, 1.0), (1, 2.0)]
+    with pytest.raises(HTTPException, match="superseded by attempt 1") as stale:
+        await server.verify(request_with_session(), member(1, typed=True))
+    assert stale.value.status_code == 409
+
+
+async def test_typed_coordinates_retry_a_failed_legacy_group_under_a_fresh_group_id(server):
+    server.config.cohort_collection_timeout_s = 0.02
+    with pytest.raises(HTTPException, match="did not collect"):
+        await server.verify(request_with_session(), member(0, group=None, typed=True))
+    with pytest.raises(HTTPException, match="fresh _ng_group_id"):
+        await server.verify(request_with_session(), member(1, group=None, typed=True))
+
+    server._run_single_comparison = AsyncMock(return_value=comparison_result())
+    replacement = await asyncio.gather(
+        *(server.verify(request_with_session(), member(i, group="fresh", typed=True)) for i in range(2))
+    )
+
+    assert [(r.group_id, r.rollout_index, r.reward) for r in replacement] == [("fresh", 0, 3.0), ("fresh", 1, 3.0)]

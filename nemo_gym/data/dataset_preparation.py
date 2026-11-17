@@ -41,6 +41,8 @@ from nemo_gym.config.config_types import (
 )
 from nemo_gym.config.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
+    GROUP_ATTEMPT_KEY_NAME,
+    GROUP_ID_KEY_NAME,
     HF_TOKEN_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -51,7 +53,7 @@ from nemo_gym.config.global_config import (
     get_global_config_dict,
     resolve_dataset_agent,
 )
-from nemo_gym.core.episode_types import TaskId, is_materialized_task_row
+from nemo_gym.core.episode_types import RolloutCoordinates, TaskId, is_materialized_task_row
 from nemo_gym.data.dataset_metrics import (
     DatasetMetricHook,
     DatasetMetricsHookError,
@@ -1324,8 +1326,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
                                 )
                         elif d.taskset is not None:
                             # Keep collector identity outside task_data so shards and retries
-                            # retain their capture keys after materialization, and keep a row's
-                            # request to skip token capture.
+                            # retain their capture keys, group coordinates, and request to skip token capture.
                             identity = {
                                 key: row[key]
                                 for key in (
@@ -1333,10 +1334,26 @@ This could be due to a change in how metrics are calculated, leading to outdated
                                     ROLLOUT_INDEX_KEY_NAME,
                                     ROLLOUT_ID_KEY_NAME,
                                     ATTEMPT_INDEX_KEY_NAME,
+                                    GROUP_ID_KEY_NAME,
+                                    GROUP_ATTEMPT_KEY_NAME,
                                     SKIP_TOKEN_CAPTURE_KEY_NAME,
                                 )
                                 if key in row
                             }
+                            try:
+                                # Only the group keys: the indices were kept unchecked before, as they still are.
+                                RolloutCoordinates.from_row(
+                                    {
+                                        key: identity[key]
+                                        for key in (GROUP_ID_KEY_NAME, GROUP_ATTEMPT_KEY_NAME)
+                                        if key in identity
+                                    }
+                                )
+                            except ValidationError as error:
+                                raise ValueError(
+                                    f"{d.jsonl_fpath} line {row_index // d.num_repeats + 1}: invalid rollout "
+                                    f"group: {error}"
+                                ) from error
                             row = materialize_task(row, taskset=d.taskset, task_index=source_task_index)
                             row.update(identity)
                         target.write(f"{json.dumps(row)}\n")

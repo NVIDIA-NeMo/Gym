@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 from pytest import MonkeyPatch, approx
 
 import resources_servers.genrm_compare.app
@@ -259,6 +260,80 @@ class TestGenRMCompareResourcesServer:
         assert "group attempt zero" in caplog.text
 
         assert request.group_attempt == 0
+
+    def test_verify_request_reads_typed_rollout_coordinates(self):
+        # An Environment Server sends the cohort coordinates typed; the flat _ng_* keys stay out of the task's data.
+        payload = self._verify_request(0).model_dump(mode="json", by_alias=True)
+        for key in ("_ng_task_index", "_ng_rollout_index", "_ng_group_id", GROUP_ATTEMPT_KEY_NAME):
+            payload.pop(key, None)
+        payload["rollout_coordinates"] = {
+            "task_index": 4,
+            "rollout_index": 3,
+            "group_id": "cohort",
+            "group_attempt": 2,
+        }
+
+        request = GenRMCompareVerifyRequest.model_validate(payload)
+
+        assert (request.task_index, request.rollout_index, request.group_id, request.group_attempt) == (
+            4,
+            3,
+            "cohort",
+            2,
+        )
+        # The reply echoes the cohort coordinates under the row's keys, as on the relay, but not the typed field.
+        dumped = request.model_dump(mode="json")
+        assert (dumped["_ng_rollout_index"], dumped["_ng_group_id"], dumped[GROUP_ATTEMPT_KEY_NAME]) == (
+            3,
+            "cohort",
+            2,
+        )
+        assert "rollout_coordinates" not in dumped
+
+    @pytest.mark.parametrize(
+        ("name", "key", "other"),
+        [
+            ("task_index", "_ng_task_index", 5),
+            ("rollout_index", "_ng_rollout_index", 2),
+            ("group_id", "_ng_group_id", "other-cohort"),
+            ("group_attempt", GROUP_ATTEMPT_KEY_NAME, 1),
+        ],
+    )
+    def test_typed_and_flat_coordinates_must_agree(self, name: str, key: str, other: object):
+        payload = self._verify_request(1, task_index=4, group_id="cohort").model_dump(mode="json", by_alias=True)
+
+        agreeing = payload | {
+            "rollout_coordinates": {"task_index": 4, "rollout_index": 1, "group_id": "cohort", "group_attempt": 0}
+        }
+        assert GenRMCompareVerifyRequest.model_validate(agreeing).rollout_index == 1
+        with pytest.raises(ValidationError, match=f"{key}=.* disagrees with rollout_coordinates.{name}="):
+            GenRMCompareVerifyRequest.model_validate(payload | {"rollout_coordinates": {name: other}})
+
+    def test_a_task_data_column_named_like_a_coordinate_does_not_conflict(self):
+        # single_agent_turn spreads the task's data at the top of the verify body. A column with a coordinate's bare
+        # name is task data, not a coordinate: the typed value wins, as the _ng_* alias does on the relay.
+        payload = self._verify_request(1, task_index=4).model_dump(mode="json", by_alias=True)
+        for key in ("_ng_task_index", "_ng_rollout_index"):
+            payload.pop(key)
+        payload |= {"task_index": 9, "rollout_index": 7}
+
+        request = GenRMCompareVerifyRequest.model_validate(
+            payload | {"rollout_coordinates": {"task_index": 4, "rollout_index": 1}}
+        )
+
+        assert (request.task_index, request.rollout_index) == (4, 1)
+
+    def test_typed_group_without_an_attempt_keeps_the_legacy_default(self, caplog):
+        payload = self._verify_request(0, task_index=None).model_dump(mode="json", by_alias=True)
+        payload.pop(GROUP_ATTEMPT_KEY_NAME)
+        payload.pop("_ng_rollout_index")
+        payload["rollout_coordinates"] = {"rollout_index": 0, "group_id": "legacy-group"}
+
+        resources_servers.genrm_compare.app._warn_legacy_attempt.cache_clear()
+        request = GenRMCompareVerifyRequest.model_validate(payload)
+
+        assert "group attempt zero" in caplog.text
+        assert (request.group_id, request.group_attempt) == ("legacy-group", 0)
 
     def test_verify_request_without_group_id_needs_no_group_attempt(self):
         payload = self._verify_request(0, task_index=7).model_dump(by_alias=True)

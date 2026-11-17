@@ -18,10 +18,10 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
-from pydantic import ConfigDict, PrivateAttr
+from pydantic import ConfigDict, PrivateAttr, ValidationError
 
 from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
-from nemo_gym.core.episode_types import EpisodeId, TaskId
+from nemo_gym.core.episode_types import EpisodeId, RolloutCoordinates, TaskId
 from nemo_gym.core.failure_kinds import JUDGE_FAILED, SESSION_EXPIRED, SESSION_LOST
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.metrics.reward_profile import select_measured
@@ -72,6 +72,50 @@ class TestBaseVerifyResponse:
         rescued = response.model_copy(update={"failure_reason": "judge response unparseable after 3 attempts"})
         assert rescued.model_dump()["failure_reason"] == "judge response unparseable after 3 attempts"
         assert rescued.reward == 0.0
+
+
+_VERIFIED_RESPONSE = {
+    "id": "resp-1",
+    "created_at": 0,
+    "model": "model",
+    "object": "response",
+    "output": [],
+    "tool_choice": "auto",
+    "parallel_tool_calls": True,
+    "tools": [],
+}
+
+
+class TestBaseVerifyRequest:
+    def test_rollout_coordinates_are_read_but_never_echoed(self) -> None:
+        """A verifier may read the coordinates; one that builds its reply from the request leaves them out."""
+        body = {
+            "responses_create_params": {"input": "hi"},
+            "response": _VERIFIED_RESPONSE,
+            "rollout_coordinates": {"task_index": 3, "rollout_index": 1, "group_id": "cohort"},
+        }
+
+        request = BaseVerifyRequest.model_validate(body)
+        reply = BaseVerifyResponse(**request.model_dump(), reward=1.0)
+        without = BaseVerifyRequest.model_validate(
+            {key: value for key, value in body.items() if key != "rollout_coordinates"}
+        )
+
+        assert request.rollout_coordinates == RolloutCoordinates(task_index=3, rollout_index=1, group_id="cohort")
+        assert without.rollout_coordinates is None
+        # A server that ignores the coordinates replies exactly as it did without them.
+        assert reply.model_dump() == BaseVerifyResponse(**without.model_dump(), reward=1.0).model_dump()
+        assert "rollout_coordinates" not in reply.model_dump(mode="json")
+
+    def test_malformed_rollout_coordinates_are_refused(self) -> None:
+        with pytest.raises(ValidationError, match="rollout_index"):
+            BaseVerifyRequest.model_validate(
+                {
+                    "responses_create_params": {"input": "hi"},
+                    "response": _VERIFIED_RESPONSE,
+                    "rollout_coordinates": {"rollout_index": "first"},
+                }
+            )
 
 
 class TestBaseMultiRewardVerifyResponse:

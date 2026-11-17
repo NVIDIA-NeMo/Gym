@@ -51,6 +51,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NgFailureEvent,
     RequestFailureLog,
+    RolloutCoordinates,
     model_sampling_path_segment,
     rebuild_failure,
 )
@@ -743,6 +744,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 url_path="/verify",
                 # The session cookie identifies the episode.
                 json=self._verify_body(request, agent_response)
+                | self._rollout_coordinate_fields(request)
                 | verification_failure_fields(agent_response)
                 | (
                     {"ng_trajectory": trajectory.model_dump(mode="json")}
@@ -770,7 +772,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 await raise_boundary_failure(verify_http_response, content=await verify_http_response.read())
                 raise
             await raise_boundary_failure(verify_http_response, content=await verify_http_response.read())
-            return SingleAgentTurnResult.model_validate(payload)
+            return SingleAgentTurnResult.model_validate(self._without_coordinate_echo(request, payload))
         except Exception as error:
             raise dependency_failure(
                 error,
@@ -788,6 +790,36 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         return task_input.task_data | {
             "responses_create_params": task_input.responses_create_params.model_dump(mode="json", exclude_unset=True),
             "response": agent_response.model_dump(mode="json"),
+        }
+
+    @staticmethod
+    def _rollout_coordinate_fields(request: SingleAgentTurnRequest) -> dict[str, Any]:
+        """The rollout's coordinates as the typed `rollout_coordinates` field that `BaseVerifyRequest` reads.
+
+        An Agent's /run forwarded the row's `_ng_*` keys instead; the task's data no longer carries them.
+        Omitted when the caller sent none, so the body stays as before.
+        """
+        if request.rollout_coordinates is None:
+            return {}
+        return {"rollout_coordinates": request.rollout_coordinates.model_dump(mode="json", exclude_none=True)}
+
+    def _without_coordinate_echo(self, request: SingleAgentTurnRequest, payload: Any) -> Any:
+        """Drop the ``_ng_*`` coordinate keys the Resources Server echoed from the coordinates this server sent.
+
+        Rollout collection stamps a rollout's coordinates on its record itself and refuses ``_ng_*`` keys in an
+        episode result, so a verifier that echoes them, such as a GenRM cohort, could not be collected from
+        materialized rows. An echo that contradicts a coordinate this server sent stays, and collection refuses it.
+        """
+        if request.rollout_coordinates is None or not isinstance(payload, dict):
+            return payload
+        sent = request.rollout_coordinates.model_dump()
+        return {
+            key: value
+            for key, value in payload.items()
+            if not any(
+                key == row_key and (sent[name] is None or sent[name] == value)
+                for name, row_key in RolloutCoordinates.row_keys().items()
+            )
         }
 
     @staticmethod

@@ -357,6 +357,10 @@ ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"
 # Otherwise two dispatches would share one capture key.
 # The suffix "-a<N>" is reserved for attempt-qualified ids, so a dataset row's id must not end with it.
 ROLLOUT_ID_KEY_NAME = "_ng_rollout_id"
+# A caller that compares the rollouts of one task as a group, such as a GenRM cohort, names the group and,
+# when it replaces the whole group, the group's attempt. A rollout's own retry counter does not advance it.
+GROUP_ID_KEY_NAME = "_ng_group_id"
+GROUP_ATTEMPT_KEY_NAME = "_ng_group_attempt"
 # Sampling values a training framework sets for one rollout's trained agent; see nemo_gym/core/model_call_sampling.py.
 MODEL_SAMPLING_KEY_NAME = "_ng_model_sampling"
 # A training framework sets it to true on a rollout it does not train on, such as a validation rollout, so none of
