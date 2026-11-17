@@ -46,6 +46,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
@@ -513,7 +514,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         if state.settings is None:
             if state.activations > 0:
                 # A session restored from a checkpoint has no conversation; its episode starts over instead.
-                raise HTTPException(409, "Simple Agent continuation session lost its conversation in a restore")
+                raise AgentSessionConflictError("Simple Agent continuation session lost its conversation in a restore")
             return
         # Every activation runs with the first activation's settings, so a changed one would be silently dropped.
         changed = sorted(

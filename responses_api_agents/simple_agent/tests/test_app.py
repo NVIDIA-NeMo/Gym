@@ -42,6 +42,7 @@ from nemo_gym.agents import (
     AgentCloseSessionRequest,
     AgentOutcome,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     check_agent_seed_rejected,
     raises_agent_failure,
 )
@@ -4150,7 +4151,7 @@ class TestContinuationSessions:
         )
         state.activations = 1
 
-        with pytest.raises(HTTPException) as refused:
+        with pytest.raises(AgentSessionConflictError) as refused:
             server._validate_agent_activation(state, NeMoGymResponseCreateParamsNonStreaming(input="second?"))
 
         assert refused.value.status_code == 409
