@@ -16,7 +16,7 @@ class SaasBenchRunRequest(BaseRunRequest):
 
 class SaasBenchVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
-    scoring_policy: Literal["native_weighted_final_state_v1"] = "native_weighted_final_state_v1"
+    scoring_policy: Literal["native_weighted_final_state_v1"] | None = None
     task_id: str
     category_id: str
     artifacts: str

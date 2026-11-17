@@ -277,3 +277,14 @@ def test_legacy_pass_cannot_claim_partial_credit():
     from saas_bench.opencode.verifier import native_verification_outcome
 
     assert native_verification_outcome({"status": "PASS", "score": 0.25})["mask_sample"] is True
+
+
+def test_legacy_cached_response_is_not_relabelled_with_corrected_policy(tmp_path):
+    from responses_api_agents.saas_bench_agent.schemas import SaasBenchVerifyResponse
+
+    native = {"artifacts": "fixture", "verify": verdict(), "mask_sample": False}
+    response = agent(tmp_path, "opencode")._response(request(), native)
+    data = response.model_dump()
+    data.pop("scoring_policy")
+    assert SaasBenchVerifyResponse.model_validate(data).scoring_policy is None
+    assert response.scoring_policy == "native_weighted_final_state_v1"
