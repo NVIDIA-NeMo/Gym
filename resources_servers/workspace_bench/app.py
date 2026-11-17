@@ -33,6 +33,7 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesSessionConflictError,
     SimpleResourcesServer,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -113,7 +114,7 @@ class WorkspaceBenchResourcesServer(SimpleResourcesServer):
     async def seed_session(self, request: Request, body: WorkspaceBenchRequest) -> WorkspaceBenchSeedResponse:
         session_id = str(request.session[SESSION_ID_KEY])
         if session_id in self._sandboxes or session_id in self._reference_dirs:
-            raise HTTPException(status_code=409, detail="Workspace-Bench session is already active")
+            raise ResourcesSessionConflictError("Workspace-Bench session is already active")
         task_dir = await asyncio.to_thread(resolve_task_path, body.task_dir)
         metadata = json.loads((task_dir / "metadata.json").read_text(encoding="utf-8"))
         sandbox_config = self.config.sandbox_config

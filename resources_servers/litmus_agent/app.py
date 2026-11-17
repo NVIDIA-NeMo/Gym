@@ -82,6 +82,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import math
 import re
 import statistics
@@ -100,12 +101,17 @@ from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
+    BaseSeedSessionRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesSessionLostError,
     SimpleResourcesServer,
+    lost_session_verification,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.verification import judge_failsafe
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +245,8 @@ class _SandboxSession:
 
     sandbox: AsyncSandbox
     cells: List[str] = field(default_factory=list)
+    ready: bool = False
+    startup: asyncio.Task[AsyncSandbox] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -596,7 +604,6 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
     _sessions: Dict[str, _SandboxSession] = PrivateAttr(default_factory=dict)
     _session_locks: Dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
     _registry_lock: Optional[asyncio.Lock] = PrivateAttr(default=None)
-
     # -- tool serving -------------------------------------------------------
 
     def setup_webserver(self) -> FastAPI:
@@ -605,13 +612,6 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
             return app
 
         app.post(f"/{self.config.code_exec_tool_name}")(self.execute_code)
-
-        # Swap the base ``/verify`` route for a session-aware wrapper so a
-        # finished rollout's sandbox is reaped. verify() itself is untouched.
-        app.router.routes = [r for r in app.router.routes if getattr(r, "path", None) != "/verify"]
-        # Re-apply judge_failsafe: replacing the base route would otherwise drop the
-        # JudgeError -> failures-sidecar guarantee SimpleResourcesServer makes globally.
-        app.post("/verify")(judge_failsafe(self._verify_and_cleanup))
 
         # Tear down any sessions still open when the server stops, so a normal
         # shutdown does not leak sandboxes.
@@ -669,11 +669,35 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
 
         async with lock:
             session = self._sessions.get(session_id)
+            if session is not None and session.startup is not None:
+                await self._finish_startup(session)
+            if session is not None and not session.ready:
+                # Startup may have created a container before driver upload and its cleanup failed.
+                # Do not execute in that incomplete container or replace its last ownership record.
+                await session.sandbox.stop()
+                del self._sessions[session_id]
+                session = None
             if session is None:
-                sandbox = await AsyncSandbox(self.config.sandbox_provider, self._build_sandbox_spec()).start()
+                sandbox = AsyncSandbox(self.config.sandbox_provider, self._build_sandbox_spec())
                 session = _SandboxSession(sandbox=sandbox)
                 self._sessions[session_id] = session
+                # A cancelled request must not cancel provider.create before AsyncSandbox receives its handle.
+                session.startup = asyncio.create_task(sandbox.start())
+                await self._finish_startup(session)
         return session, lock
+
+    async def _finish_startup(self, session: _SandboxSession) -> None:
+        startup = session.startup
+        if startup is None:
+            return
+        try:
+            await asyncio.shield(startup)
+        except Exception:
+            session.startup = None
+            raise
+        else:
+            session.startup = None
+            session.ready = True
 
     async def execute_code(self, request: Request) -> PlainTextResponse:
         """Run a code cell in the session's sandbox and return its output.
@@ -682,15 +706,26 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
         suppressed) ahead of the new cell. A clean run appends the cell to the
         session history; a replay-reset clears it.
         """
-        session_id = request.session.get(SESSION_ID_KEY) or "litmus-no-session"
+        # The session middleware always sets the session ID, which keys the session's sandbox.
+        session_id = request.session[SESSION_ID_KEY]
+        if self.session_is_closed(session_id):
+            raise ResourcesSessionLostError(f"litmus_agent session {session_id} is closed")
         try:
             body = await request.json()
         except Exception:
             body = {}
         code = body.get("code", "") if isinstance(body, dict) else ""
 
-        session, lock = await self._acquire_session(session_id)
+        # Publish ownership before close can acknowledge cleanup. A post-exec check alone misses cancellation,
+        # execution failures, or a failed stop after a close that overtook sandbox startup.
+        async with self.session_lock(session_id):
+            if self.session_is_closed(session_id) or self.session_is_verified(session_id):
+                raise ResourcesSessionLostError(f"litmus_agent session {session_id} is closed")
+            session, lock = await self._acquire_session(session_id)
         async with lock:
+            if self._sessions.get(session_id) is not session:
+                # Verify or close stopped the sandbox while this call waited for it.
+                raise ResourcesSessionLostError(f"litmus_agent session {session_id} ended before the tool call ran")
             result = await session.sandbox.exec(
                 f"python3 {_CODE_EXEC_DRIVER_PATH}",
                 env={_CELLS_ENV_VAR: _encode_cells([*session.cells, code])},
@@ -705,42 +740,89 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
         output = "\n".join(part for part in (result.stdout, result.stderr) if part)
         return PlainTextResponse(_truncate_output(output, self.config.code_exec_max_output_chars))
 
-    async def _cleanup_session(self, session_id: Optional[str]) -> None:
-        if not session_id:
-            return
+    async def _cleanup_session(self, session_id: str) -> None:
+        """Stop the session's sandbox; one whose stop fails stays registered, so a later cleanup retries it.
+
+        Waits for the session's lock, so it never stops a sandbox that is still starting or running a cell. A stop
+        during startup would only release the client, and the container that startup then creates would leak.
+        """
         if self._registry_lock is None:
             self._registry_lock = asyncio.Lock()
         async with self._registry_lock:
-            session = self._sessions.pop(session_id, None)
-            self._session_locks.pop(session_id, None)
-        if session is not None:
-            try:
+            # A registered session always has its lock, so no lock means nothing to stop.
+            lock = self._session_locks.get(session_id)
+        if lock is None:
+            return
+        async with lock:
+            session = self._sessions.get(session_id)
+            if session is not None:
+                try:
+                    await self._finish_startup(session)
+                except Exception:
+                    # A failed upload can leave a published handle whose stop still needs to be retried.
+                    logger.warning("Sandbox startup failed before cleanup of session %s", session_id, exc_info=True)
                 await session.sandbox.stop()
-            except Exception:
-                pass
+            async with self._registry_lock:
+                self._sessions.pop(session_id, None)
+                if self._session_locks.get(session_id) is lock:
+                    del self._session_locks[session_id]
 
     async def _shutdown_all_sessions(self) -> None:
-        for session_id in list(self._sessions):
-            await self._cleanup_session(session_id)
+        # Stop concurrently: the server supervisor kills the process about a second after asking it to stop.
+        session_ids = list(self._sessions)
+        results = await asyncio.gather(*map(self._cleanup_session, session_ids), return_exceptions=True)
+        for session_id, result in zip(session_ids, results):
+            if isinstance(result, BaseException):
+                logger.error(
+                    "Could not stop the sandbox of litmus_agent session %s at shutdown", session_id, exc_info=result
+                )
+
+    # -- sessions -----------------------------------------------------------
+
+    def has_session_state(self, session_id: str) -> bool:
+        return session_id in self._sessions
+
+    async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
+        """The sandbox starts on the first tool call; the base releases a prior cookie run."""
+
+    async def release_session_state(self, session_id: str) -> None:
+        """Release the sandbox, retaining its reference if cleanup fails."""
+        await self._cleanup_session(session_id)
 
     # -- verification -------------------------------------------------------
+
+    async def verify(self, body: LitmusAgentVerifyRequest, request: Request = None) -> LitmusAgentVerifyResponse:
+        """Score through the base route, retaining direct ``verify(body)`` calls for request-only grading.
+
+        FastAPI supplies the request for HTTP calls, which also release the session through the shared lifecycle.
+        """
+        if request is None:
+            return await self._score(body)
+        return await self._verify_and_cleanup(request, body)
 
     async def _verify_and_cleanup(
         self,
         request: Request,
         body: LitmusAgentVerifyRequest,
     ) -> LitmusAgentVerifyResponse:
-        """Score, then reap the rollout's sandbox. Active only when tool-serving.
+        """Score, then release the rollout's identity and any lazily created sandbox.
 
         End of a rollout is the natural point to drop the session's sandbox so
-        it does not leak; scoring is delegated unchanged to ``verify``.
+        it does not leak; scoring is delegated unchanged to ``_score``.
         """
-        try:
-            return await self.verify(body)
-        finally:
-            await self._cleanup_session(request.session.get(SESSION_ID_KEY))
+        session_id = request.session[SESSION_ID_KEY]
+        async with self.verifying(session_id, allow_missing=True) as verification:
+            if verification.is_lost:
+                # An Environment Server verifies before it closes, so this verify is out of order; mask it.
+                passthrough = {k: v for k, v in body.model_dump().items() if k not in _RESERVED_RESPONSE_FIELDS}
+                return LitmusAgentVerifyResponse(
+                    **(passthrough | lost_session_verification(f"litmus_agent session {session_id} is closed"))
+                )
+            # The retry request carries the answer and grading data; no sandbox state is required.
+            verification.retain(None)
+            return await self._score(body)
 
-    async def verify(self, body: LitmusAgentVerifyRequest) -> LitmusAgentVerifyResponse:
+    async def _score(self, body: LitmusAgentVerifyRequest) -> LitmusAgentVerifyResponse:
         answer_type = resolve_answer_type(body.answer_type)
 
         text = _extract_last_assistant_text(body)

@@ -19,6 +19,7 @@ import re
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
+from functools import partial
 from time import monotonic, perf_counter, time
 from typing import Any, ClassVar
 from uuid import uuid4
@@ -92,6 +93,8 @@ from nemo_gym.rollouts.health.timeouts import TimeoutEvent
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     SESSION_OWNER_HEADER,
+    TOOL_CALL_ID_HEADER,
+    TOOL_ERROR_HEADER,
     Activation,
     ActivationOutOfOrderError,
     BaseRunRequest,
@@ -603,7 +606,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     forwarded = FailureHeader.decode(error.headers)
                     if forwarded is not None:
                         report = report.merged(forwarded)
-                    reported_kind = MODEL_POLICY_RESPONSE_TIMEOUT if failure is not None else MODEL_REQUEST_ERROR
+                    reported_kind = failure.failure_kind if failure is not None else MODEL_REQUEST_ERROR
                     # Return the cause and partial work; the Environment Server owns grading and retry policy.
                     content = getattr(error, "response_content", b"")
                     detail = content.decode(errors="replace") if isinstance(content, bytes) else str(content)
@@ -745,7 +748,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                             url=f"{_tools_base_url(tool_access, resources_prefix)}/{output_function_call.name}",
                             json=parsed_arguments,
                             cookies=resources_server_cookies,
-                            headers=dict(tool_access.headers),
+                            # The call's ID lets the server join its record to this trajectory and recognize the
+                            # client's resend of a call whose connection dropped.
+                            headers=dict(tool_access.headers) | {TOOL_CALL_ID_HEADER: output_function_call.call_id},
                             _internal=True,
                         )
                     else:
@@ -773,8 +778,11 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     resources_server_cookies.update(_cookies(api_response))
                     if collect_trajectory:
                         completed = 200 <= api_response.status < 400
-                        tool_status = "completed" if completed else "failed"
-                        error_type = None if completed else f"http_{api_response.status}"
+                        error_result = api_response.headers.get(TOOL_ERROR_HEADER) == "true"
+                        tool_status = "completed" if completed and not error_result else "failed"
+                        error_type = (
+                            f"http_{api_response.status}" if not completed else "tool_error" if error_result else None
+                        )
 
                 if collect_trajectory:
                     tool_records.append(
@@ -900,7 +908,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     trajectory,
                     model_server_cookies,
                     resources_server_cookies,
-                ) = await self._create_episode(
+                ) = await (self._create_episode if state is None else partial(self._create_session_episode, state))(
                     body,
                     model_url_path=self.url_path_for_request("/v1/responses", request),
                     resources_server_cookies=state.resources_cookies if state is not None else request.cookies,
@@ -966,6 +974,13 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     else None
                 )
         return model_response
+
+    async def _create_session_episode(
+        self, state: SimpleAgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming, **kwargs: Any
+    ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
+        """Create a session activation's episode. A subclass whose task context lives in its session state, such as
+        a document to put in the request, overrides this; the agent loop stays ``_create_episode``'s."""
+        return await self._create_episode(body, **kwargs)
 
     @staticmethod
     def _saved_reply(loop: SimpleAgentSessionState | _LegacyLoopReply, session_key: str) -> JSONResponse:

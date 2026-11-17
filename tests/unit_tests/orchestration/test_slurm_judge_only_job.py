@@ -18,21 +18,26 @@ from hydra.core.override_parser.overrides_parser import OverridesParser
 
 from nemo_gym.cli import eval as eval_cli
 from nemo_gym.cli import main as cli_main
+from nemo_gym.eval.recovery.decision import RecoveryAction
+from nemo_gym.eval.recovery.evidence import JUDGE_JOB_JOURNAL_NAME
 from nemo_gym.eval.rollout_reverification import RolloutReverificationConfig
 from nemo_gym.orchestration.api import SubmitConfig
-from nemo_gym.orchestration.executors import slurm as sm
 from nemo_gym.orchestration.executors.connection import LocalConnection
-from nemo_gym.orchestration.executors.slurm import READER_SRUN_ENV, SlurmExecutor
-from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
+from nemo_gym.orchestration.executors.slurm import SlurmExecutor
+from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
+from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
+from nemo_gym.orchestration.executors.slurm import judge_job as slurm_judge_job
+from nemo_gym.orchestration.executors.slurm import scheduler as slurm_scheduler
+from nemo_gym.orchestration.executors.slurm.reader import READER_SRUN_ENV
+from nemo_gym.orchestration.executors.slurm.script import build_sbatch_script
 from nemo_gym.orchestration.jobs import MANIFEST_NAME, BenchmarkJob, SubmissionRecord
-from nemo_gym.orchestration.recovery import JUDGE_JOB_JOURNAL_NAME, RecoveryAction
 from nemo_gym.orchestration.submit import inspect_recovery, recover
 from nemo_gym.rollouts.rollout_collection import RolloutAggregationHelper
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
+from tests.unit_tests.eval.recovery.test_eval_recovery_gate import scored
 from tests.unit_tests.eval.test_reverify_saved_results import verifier as verifier  # noqa: F401 - fixture
 from tests.unit_tests.eval.test_reverify_saved_results import verify_transport_masked
-from tests.unit_tests.orchestration.test_eval_recovery_gate import scored
 from tests.unit_tests.orchestration.test_eval_resubmit import _handle
 from tests.unit_tests.orchestration.test_eval_resubmit import (
     _local_index as _local_index,  # noqa: F401 - autouse fixture
@@ -154,7 +159,9 @@ def judge_slurm_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         (bins / stub).chmod(0o755)
     monkeypatch.setenv("PATH", f"{bins}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.delenv(READER_SRUN_ENV, raising=False)
-    monkeypatch.setattr(sm, "installed_gym_commit", lambda: "a" * 40)
+    monkeypatch.setattr(slurm_chain, "installed_gym_commit", lambda: "a" * 40)
+    monkeypatch.setattr(slurm_judge_job, "installed_gym_commit", lambda: "a" * 40)
+    monkeypatch.setattr(slurm_executor, "installed_gym_commit", lambda: "a" * 40)
     return bins
 
 
@@ -256,7 +263,46 @@ def test_recover_queues_a_judge_only_job_on_the_cpu_partition_for_a_model_served
     record = SubmissionRecord.load(json.loads((job_dir.parent / MANIFEST_NAME).read_text()))
     assert record.benchmark_job("bench").job_id == "4242"
     assert "--no-requeue" in (judge_slurm_bin / "sbatch_args").read_text()
-    assert not (job_dir / sm._RESUBMIT_LOCK).exists()
+    assert not (job_dir / slurm_scheduler._RESUBMIT_LOCK).exists()
+
+
+def test_a_served_judge_the_scheduler_refuses_is_not_offered_the_cpu_placement_options(
+    tmp_path, judge_slurm_bin
+) -> None:
+    # A run that serves its judge on a node pool of its own ignores --judge-partition/--judge-qos.
+    job_dir = _model_served_run(tmp_path, judge_pool="judge")
+    (judge_slurm_bin / "sbatch").write_text(
+        "#!/bin/bash\necho 'sbatch: error: Job violates accounting/QOS policy (QOSMinGRES)' >&2\nexit 1\n"
+    )
+
+    out = recover(*_handle(job_dir), judge_partition="cpu", judge_qos="cpu_qos")
+
+    assert out.dispatched is None and out.decision.action == RecoveryAction.STOP
+    assert "QOSMinGRES" in out.unsupported and _journal(job_dir) == []
+    verdict = out.operator_verdict
+    assert verdict["state"] == "needs_action" and "`gym eval submit`" not in verdict["action"]
+    assert "--judge-qos QOS" not in verdict["action"] and "--judge-partition PARTITION" not in verdict["action"]
+    assert "saved node pool" in verdict["action"] and "no recovery option changes it" in verdict["action"]
+
+
+def test_a_cpu_judge_refused_for_a_reason_other_than_placement_is_not_offered_placement_options(
+    tmp_path, judge_slurm_bin
+) -> None:
+    job_dir = _model_served_run(tmp_path)
+    (judge_slurm_bin / "sbatch").write_text(
+        "#!/bin/bash\necho 'sbatch: error: Batch job submission failed: Unable to contact slurm controller "
+        "(connect failure)' >&2\nexit 1\n"
+    )
+
+    out = recover(*_handle(job_dir), judge_partition="cpu", judge_qos="normal")
+
+    assert out.dispatched is None and out.decision.action == RecoveryAction.STOP
+    assert "Unable to contact slurm controller" in out.unsupported and _journal(job_dir) == []
+    verdict = out.operator_verdict
+    assert "--judge-qos QOS" not in verdict["action"] and "--judge-partition PARTITION" not in verdict["action"]
+    assert "`gym eval submit`" not in verdict["action"]
+    assert "wait until the scheduler answers" in verdict["action"]
+    assert "gym eval resubmit gym-job-x bench --recover --judge-partition cpu --judge-qos normal" in verdict["action"]
 
 
 def test_a_saved_cpu_pool_queues_the_judge_only_job_without_an_option(tmp_path, judge_slurm_bin) -> None:
@@ -496,7 +542,9 @@ def test_an_old_pin_model_served_run_is_rejudged_headless_on_the_installed_revis
 ) -> None:
     """No flags: the plan is made on the installed Gym and its judge-only job runs there, journaled as a repin."""
     monkeypatch.setenv("NEMO_GYM_SUBMIT_NO_REF_CHECK", "true")
-    monkeypatch.setattr(sm, "installed_gym_commit", lambda: "b" * 40)
+    monkeypatch.setattr(slurm_chain, "installed_gym_commit", lambda: "b" * 40)
+    monkeypatch.setattr(slurm_judge_job, "installed_gym_commit", lambda: "b" * 40)
+    monkeypatch.setattr(slurm_executor, "installed_gym_commit", lambda: "b" * 40)
     job_dir = _model_served_run(tmp_path)
 
     out = recover(*_handle(job_dir), judge_partition="cpu")
@@ -523,4 +571,131 @@ def test_the_judge_only_job_skips_the_policy_endpoint_readiness_wait(tmp_path, j
     assert line.count("model_endpoint_readiness_timeout_seconds") == 1
     assert line.rstrip().endswith("++model_endpoint_readiness_timeout_seconds=0") or (
         "++model_endpoint_readiness_timeout_seconds=0 " in line
+    )
+
+
+def test_without_a_cpu_partition_the_verdict_names_the_judge_partition_not_a_fresh_submit(
+    tmp_path, judge_slurm_bin
+) -> None:
+    job_dir = _model_served_run(tmp_path)
+
+    refused = recover(*_handle(job_dir))
+
+    assert refused.dispatched is None and refused.decision.action == RecoveryAction.STOP
+    verdict = refused.operator_verdict
+    assert verdict["state"] == "needs_action" and "`gym eval submit`" not in verdict["action"]
+    assert "`gym eval resubmit gym-job-x bench --recover --judge-partition PARTITION`" in verdict["action"]
+    # The option the verdict names queues the judge-only job.
+    assert recover(*_handle(job_dir), judge_partition="cpu").job_id == "4242"
+
+
+def test_a_judge_only_job_the_scheduler_refuses_names_the_judge_qos_not_a_fresh_submit(
+    tmp_path, judge_slurm_bin
+) -> None:
+    job_dir = _model_served_run(tmp_path)
+    (judge_slurm_bin / "sbatch").write_text(
+        "#!/bin/bash\necho 'sbatch: error: Job violates accounting/QOS policy (QOSMinGRES)' >&2\nexit 1\n"
+    )
+
+    out = recover(*_handle(job_dir), judge_partition="cpu")
+
+    assert out.dispatched is None and out.decision.action == RecoveryAction.STOP
+    assert "QOSMinGRES" in out.unsupported and _journal(job_dir) == []
+    verdict = out.operator_verdict
+    assert verdict["state"] == "needs_action" and "`gym eval submit`" not in verdict["action"]
+    assert "--judge-qos QOS" in verdict["action"] and "--judge-partition PARTITION" in verdict["action"]
+
+
+def test_a_local_unsupported_profile_is_not_told_to_wait_for_the_scheduler(tmp_path, judge_slurm_bin) -> None:
+    # A judge on the policy's own nodes has no judge-only profile: decided from the saved config, before any sbatch.
+    job_dir = _model_served_run(tmp_path, judge_pool="gpu")
+
+    out = recover(*_handle(job_dir), judge_partition="cpu", judge_qos="normal")
+
+    assert out.dispatched is None and out.decision.action == RecoveryAction.STOP
+    assert out.decision.judge_refusal == "unsupported_profile"
+    assert not (judge_slurm_bin / "sbatch_args").exists() and _journal(job_dir) == []
+    action = out.operator_verdict["action"]
+    assert "no judge execution profile" in action and "wait until the scheduler" not in action
+    assert "--judge-qos QOS" not in action and "`gym eval submit`" not in action
+
+
+def test_a_definite_refusal_that_is_not_placement_is_not_told_to_wait_for_the_scheduler(
+    tmp_path, judge_slurm_bin
+) -> None:
+    job_dir = _model_served_run(tmp_path)
+    (judge_slurm_bin / "sbatch").write_text(
+        "#!/bin/bash\necho 'sbatch: error: Invalid time limit specification' >&2\nexit 1\n"
+    )
+
+    out = recover(*_handle(job_dir), judge_partition="cpu", judge_qos="normal")
+
+    assert out.dispatched is None and out.decision.action == RecoveryAction.STOP
+    assert out.decision.judge_refusal == "refused" and "Invalid time limit" in out.unsupported
+    assert _journal(job_dir) == []
+    action = out.operator_verdict["action"]
+    assert "definite reason" in action and "wait until the scheduler answers" not in action
+    assert "--judge-qos QOS" not in action and "`gym eval submit`" not in action
+
+
+def _assert_waits_and_keeps_the_guard(out, job_dir, judge_slurm_bin) -> None:
+    assert out.dispatched is None and out.decision.action == RecoveryAction.STOP
+    assert out.decision.judge_refusal == "concurrent", out.decision.reason
+    assert not (judge_slurm_bin / "sbatch_count").exists() and _journal(job_dir) == []
+    action = out.operator_verdict["action"]
+    assert "wait until it ends" in action and "do not remove its lock or cancel its job" in action
+    assert "remove what it names" not in action and "definite reason" not in action
+    assert "--judge-qos QOS" not in action and "`gym eval submit`" not in action
+
+
+def test_a_recovery_lock_held_at_dispatch_is_waited_for_not_called_a_definite_refusal(
+    tmp_path, judge_slurm_bin
+) -> None:
+    job_dir = _model_served_run(tmp_path)
+    lock = job_dir / ".gym_resubmit.lock"
+    lock.write_text("")
+
+    out = recover(*_handle(job_dir), judge_partition="cpu", judge_qos="normal")
+
+    assert "another recovery holds the lock" in out.unsupported
+    _assert_waits_and_keeps_the_guard(out, job_dir, judge_slurm_bin)
+    assert lock.exists()
+
+
+def test_a_job_that_appears_between_inspection_and_dispatch_is_waited_for_not_called_a_definite_refusal(
+    tmp_path, judge_slurm_bin
+) -> None:
+    job_dir = _model_served_run(tmp_path)
+    # The inspection sees no job of the run; the dispatch's recheck, which runs under its lock, sees one.
+    (judge_slurm_bin / "squeue").write_text(
+        '#!/bin/bash\nhere="$(dirname "$0")"\n'
+        'if [[ " $* " == *" -j "* ]]; then cat "$here/squeue_jobs" 2>/dev/null; exit 0; fi\n'
+        'if [ -e .gym_resubmit.lock ]; then echo "$PWD"; fi\nexit 0\n'
+    )
+
+    out = recover(*_handle(job_dir), judge_partition="cpu", judge_qos="normal")
+
+    assert "still pending or running" in out.unsupported
+    _assert_waits_and_keeps_the_guard(out, job_dir, judge_slurm_bin)
+    assert not (job_dir / ".gym_resubmit.lock").exists()
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    [
+        "no scheduler acknowledgement",
+        "sbatch exited 0 with no output",
+        "Error: unknown job identity",
+        "Error: scheduler unknown",
+        "Error: cannot journal the judge-only job",
+    ],
+)
+def test_a_missing_or_unknown_job_acknowledgement_stays_uncertain(diagnostic) -> None:
+    from nemo_gym.orchestration.executors.slurm.judge_profile import placement_refusal
+
+    assert placement_refusal(diagnostic, served=False) == "other"
+    assert placement_refusal(diagnostic, served=True) == "other"
+    assert (
+        placement_refusal("Error: judge allocation not admitted: sbatch: error: Invalid time limit", False)
+        == "refused"
     )
