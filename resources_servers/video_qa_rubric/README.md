@@ -6,7 +6,8 @@ rubric score from 0 to 1. The judge sees the question, the rubric and the final 
 policy's reasoning or a reference answer.
 
 `configs/video_qa_rubric.yaml` runs single-turn rows (`simple_agent`, one model call). The same resources server
-grades agentic rows (`setting: agentic`) when an agent harness is bound to it.
+grades agentic rows (`setting: agentic`) when an agent harness is bound to it; `configs/video_qa_rubric_agentic.yaml`
+runs them with OpenCode in a sandbox that holds the video ([agentic setting](#agentic-setting)).
 
 ## Rows
 
@@ -91,6 +92,27 @@ video_qa_rubric:
 
 A model served with vLLM works through the same `openai_model` server and vLLM's OpenAI-compatible endpoint, as in
 the example rollouts below.
+
+## Agentic setting
+
+`configs/video_qa_rubric_agentic.yaml` runs the stock `opencode_agent` (OpenCode 1.17.11) through a
+`single_agent_turn_legacy` Environment Server, with the agent, sandbox image, video tools and sandbox settings of the
+agentic Video-MME v2, Video-MME and LVBench configs (see video_mcqa's README, "Agentic setting"). Each episode's seed
+lends OpenCode a sandbox that holds the row's video, and the episode's close stops it; the judge then grades the final
+answer as in the single-turn setting. The sandbox reaches only the policy model server's host, so the judge server
+listens on 127.0.0.1.
+
+An agentic row names the video by its path in the sandbox instead of attaching it.
+`task.prepare_agentic(task_id, question, rubric, video_path="/testbed/videos/clip.mp4")` builds the user turn (the
+question and that path, never the rubric), and the row adds the `video_binding` the seed reads:
+
+```json
+"video_binding": {"source": "<host file under video_roots>", "sandbox_path": "videos/clip.mp4", "sha256": "<its SHA-256>"}
+```
+
+The seed refuses a row whose video is not a regular file under `video_roots` or does not have that SHA-256, and puts
+the video at `/testbed/<sandbox_path>`. Set the sandbox image (`VIDEO_MCQA_SANDBOX_IMAGE`), the OpenSandbox provider
+settings (`OPENSANDBOX_DOMAIN`, `OPENSANDBOX_API_KEY`), the judge, and `video_qa_rubric_agentic_video_roots`.
 
 ## Use in RL training
 

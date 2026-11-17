@@ -110,8 +110,10 @@ The agentic configs of the three benchmarks (`videomme_v2_agentic.yaml`,
 Environment Server, as `visual_coding_opencode` does: each episode's seed lends
 OpenCode a sandbox that holds the episode's video, and the episode's close stops
 it. `sandbox.py` implements the lending for the `videomme_v2` and `video_mcqa`
-servers. Like the single-turn configs, these are for evaluation only: the dataset
-terms below still apply.
+servers, and for `video_qa_rubric`, whose agentic config grades open-ended
+answers against a rubric with the same agent, image and sandbox. Like the
+single-turn configs, the three benchmarks' configs are for evaluation only: the
+dataset terms below still apply.
 
 ### Sandbox image
 

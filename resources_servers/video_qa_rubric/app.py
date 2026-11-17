@@ -28,11 +28,9 @@ from nemo_gym.core import (
 )
 from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.server_runtime import (
-    BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     ReverifyMode,
-    SimpleResourcesServer,
     observe_llm_judge_grading,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -45,6 +43,7 @@ from nemo_gym.verification import (
     record_rejected_judge_reply,
 )
 from resources_servers.video_mcqa.app import response_failure
+from resources_servers.video_mcqa.sandbox import VideoSandboxServer, VideoSandboxServerConfig
 from resources_servers.video_mcqa.scoring import final_answer_text
 from resources_servers.video_mcqa.task import Setting
 from resources_servers.video_qa_rubric.rubric import (
@@ -80,8 +79,9 @@ VERIFICATION_FIELDS = frozenset(
 )
 
 
-class VideoQARubricResourcesServerConfig(BaseResourcesServerConfig):
-    """The judge and its retry budget; ``empty_answer_reward`` is a training option."""
+class VideoQARubricResourcesServerConfig(VideoSandboxServerConfig):
+    """The judge and its retry budget; ``empty_answer_reward`` is a training option. The sandbox settings (video_mcqa's
+    sandbox.py) let the agentic setting lend each episode a sandbox that holds the row's video."""
 
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     judge_model_server: ModelServerRef
@@ -150,8 +150,9 @@ def _is_retryable(failure: NgFailureEvent) -> bool:
     return status is None or status in RETRYABLE_JUDGE_STATUSES or status >= 500
 
 
-class VideoQARubricResourcesServer(SimpleResourcesServer):
-    """Rubric grading of final answers; no tools or sessions."""
+class VideoQARubricResourcesServer(VideoSandboxServer):
+    """Rubric grading of final answers. With ``sandbox_provider`` set, each agentic episode's seed lends a sandbox that
+    holds the row's video, as for the video MCQA servers; otherwise the server keeps no sessions."""
 
     config: VideoQARubricResourcesServerConfig
     checkpoint_verify: ClassVar[Literal["replay"]] = "replay"
