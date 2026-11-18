@@ -122,8 +122,10 @@ Apply the checks for the areas the diff touches.
   checks that each value is in the capability taxonomy or domain list. An empty list means none
   applies, which is a claim to check, not a default. New or modified metadata must not leave scaffold
   `TODO` values. For an existing manifest, review the affected declarations
-  without requiring unrelated metadata backfilling. A setup or protocol
-  declares its own selection fields.
+  without requiring unrelated metadata backfilling. A config that runs a
+  benchmark with another harness, or under another prompt, tools or scoring,
+  is listed in the main manifest's `setups` or `protocols`, sets only what
+  differs, and has no manifest of its own.
 - **Agent harnesses (`responses_api_agents/`).** Check multi-turn and
   tool-calling trajectory handling in the Responses API format. Check schema
   presence and drift coverage against the dataset's owner, which is not
