@@ -23,6 +23,7 @@ from nemo_gym.eval.recovery.evidence import JUDGE_JOB_JOURNAL_NAME
 from nemo_gym.eval.rollout_reverification import RolloutReverificationConfig
 from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors.connection import LocalConnection
+from nemo_gym.orchestration.executors.private_environment import private_directory
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
 from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
@@ -38,14 +39,20 @@ from nemo_gym.rollouts.rollout_store import RolloutStore
 from tests.unit_tests.eval.recovery.test_eval_recovery_gate import scored
 from tests.unit_tests.eval.test_reverify_saved_results import verifier as verifier  # noqa: F401 - fixture
 from tests.unit_tests.eval.test_reverify_saved_results import verify_transport_masked
-from tests.unit_tests.orchestration.test_eval_resubmit import _handle
+from tests.unit_tests.orchestration.test_eval_resubmit import _handle, _seed_private_environment
 from tests.unit_tests.orchestration.test_eval_resubmit import (
     _local_index as _local_index,  # noqa: F401 - autouse fixture
 )
 
 
 def _model_served_run(
-    tmp_path: Path, *, cpu_pool: bool = False, judge_pool: str | None = None, run: dict | None = None
+    tmp_path: Path,
+    *,
+    cpu_pool: bool = False,
+    judge_pool: str | None = None,
+    run: dict | None = None,
+    forward_env: list[str] | None = None,
+    otel: dict | None = None,
 ) -> Path:
     """A submitted run with a vLLM policy on a GPU pool, whose managed Store holds one scored row and one result
     masked by a verify call lost in transport, with its chain accounting complete. With ``judge_pool`` it also serves
@@ -72,6 +79,7 @@ def _model_served_run(
                     "type": "slurm",
                     "account": "a",
                     "hostname": None,
+                    "forward_env": forward_env or [],
                     "walltime": "04:00:00",
                     "node_pools": pools,
                     **({"extra_args": {"qos": "gpu_normal"}} if judge_pool is not None else {}),
@@ -89,7 +97,7 @@ def _model_served_run(
                 },
             },
             "job": {"output_path": str(tmp_path)},
-            "otel": {"enabled": False},
+            "otel": otel or {"enabled": False},
         }
     )
     run_dir = tmp_path / "gym-job-x"
@@ -225,9 +233,16 @@ def _queued_reverify_config(script: str) -> RolloutReverificationConfig:
 
 
 def test_recover_queues_a_judge_only_job_on_the_cpu_partition_for_a_model_served_run(
-    tmp_path, judge_slurm_bin
+    tmp_path, judge_slurm_bin, monkeypatch
 ) -> None:
-    job_dir = _model_served_run(tmp_path)
+    credentials = {"JUDGE_API_KEY": "fake judge's key", "JUDGE_OTEL_TOKEN": "fake telemetry token"}
+    otel = {"token_env": "JUDGE_OTEL_TOKEN", "endpoint": "https://otel.example", "service_name": "judge"}
+    job_dir = _model_served_run(tmp_path, forward_env=["JUDGE_API_KEY"], otel=otel)
+    for name in credentials:
+        monkeypatch.setenv(name, "old-value")
+    private_before = _seed_private_environment(job_dir)
+    for name, value in credentials.items():
+        monkeypatch.setenv(name, value)
     before = _accounting(job_dir)
 
     out = recover(*_handle(job_dir), judge_partition="cpu")
@@ -242,8 +257,8 @@ def test_recover_queues_a_judge_only_job_on_the_cpu_partition_for_a_model_served
     assert job["walltime"] == "04:00:00" and job["rows"] == 1 and job["gym_commit"] == "a" * 40
     assert job["receipt"].endswith("receipt.json") and "/reverification/" in job["receipt"]
     script = _queued_script(job_dir)
-    assert "#SBATCH --partition=cpu" in script and "#SBATCH --nodes=1" in script
-    assert "#SBATCH --gpus-per-node=0" in script and "#SBATCH --time=04:00:00" in script
+    assert '#SBATCH --partition="cpu"' in script and "#SBATCH --nodes=1" in script
+    assert "#SBATCH --gpus-per-node=0" in script and '#SBATCH --time="04:00:00"' in script
     assert "#SBATCH --no-requeue" in script and "vllm serve" not in script and "gym eval run" not in script
     assert "afternotok" not in script
     assert "--judge-failed-only" in script and "--settle-into-source" in script and "--settle-receipt" in script
@@ -264,6 +279,15 @@ def test_recover_queues_a_judge_only_job_on_the_cpu_partition_for_a_model_served
     assert record.benchmark_job("bench").job_id == "4242"
     assert "--no-requeue" in (judge_slurm_bin / "sbatch_args").read_text()
     assert not (job_dir / slurm_scheduler._RESUBMIT_LOCK).exists()
+    private_path = private_directory(job_dir) / "environment.json"
+    assert private_path.read_bytes() != private_before
+    payload = json.loads(private_path.read_text())
+    assert {name: payload["forwarded"][name] for name in credentials} == credentials
+    assert payload["roles"]["collector"]["JUDGE_OTEL_TOKEN"] == "runtime:JUDGE_OTEL_TOKEN"
+    assert "driver" in payload["roles"] and "service:policy" not in payload["roles"]
+    scheduler_env = (judge_slurm_bin / "env").read_text()
+    assert all(name not in scheduler_env for name in credentials)
+    assert all(value not in scheduler_env and value not in script for value in credentials.values())
 
 
 def test_a_served_judge_the_scheduler_refuses_is_not_offered_the_cpu_placement_options(
@@ -313,7 +337,7 @@ def test_a_saved_cpu_pool_queues_the_judge_only_job_without_an_option(tmp_path, 
         out.judge_job["partition"] == "cpu_long"
         and out.judge_job["partition_source"] == "the saved node pool 'scorer'"
     )
-    assert "#SBATCH --partition=cpu_long" in _queued_script(job_dir)
+    assert '#SBATCH --partition="cpu_long"' in _queued_script(job_dir)
 
 
 def test_without_a_cpu_partition_the_refusal_names_the_option_and_queues_nothing(tmp_path, judge_slurm_bin) -> None:
@@ -325,9 +349,13 @@ def test_without_a_cpu_partition_the_refusal_names_the_option_and_queues_nothing
     assert out.gate_task["status"] == "FAILED"
 
 
-def test_recover_queues_a_served_judge_job_on_the_runs_judge_pool(tmp_path, judge_slurm_bin) -> None:
+def test_recover_queues_a_served_judge_job_on_the_runs_judge_pool(tmp_path, judge_slurm_bin, monkeypatch) -> None:
     # The launcher's CPU placement comes with every recovery; a run that serves its judge does not use it.
-    job_dir = _model_served_run(tmp_path, judge_pool="judge")
+    credentials = {"JUDGE_API_KEY": "fake served judge key", "JUDGE_OTEL_TOKEN": "fake served telemetry"}
+    for name, value in credentials.items():
+        monkeypatch.setenv(name, value)
+    otel = {"token_env": "JUDGE_OTEL_TOKEN", "endpoint": "https://otel.example", "service_name": "judge"}
+    job_dir = _model_served_run(tmp_path, judge_pool="judge", forward_env=["JUDGE_API_KEY"], otel=otel)
     before = _accounting(job_dir)
 
     out = recover(*_handle(job_dir), judge_partition="cpu", judge_qos="cpu_qos")
@@ -338,9 +366,9 @@ def test_recover_queues_a_served_judge_job_on_the_runs_judge_pool(tmp_path, judg
     assert job["partition"] == "gpu" and job["qos"] == "gpu_normal" and job["rows"] == 1
     assert job["unused"] == "--judge-partition/--judge-qos apply to the CPU judge profile only; not used"
     script = _queued_script(job_dir)
-    assert "#SBATCH --partition=gpu" in script and "#SBATCH --nodes=1" in script
-    assert "#SBATCH --gpus-per-node=8" in script and "#SBATCH --qos=gpu_normal" in script
-    assert "--partition=cpu" not in script and "cpu_qos" not in script and "#SBATCH --no-requeue" in script
+    assert '#SBATCH --partition="gpu"' in script and "#SBATCH --nodes=1" in script
+    assert "#SBATCH --gpus-per-node=8" in script and '#SBATCH --qos="gpu_normal"' in script
+    assert '--partition="cpu"' not in script and "cpu_qos" not in script and "#SBATCH --no-requeue" in script
     # The judge pool's hosts are exported and the judge service is up before the judge-only verifier command.
     (reverify,) = [line for line in script.splitlines() if line.strip().startswith("gym eval reverify")]
     assert script.index("export GYM_POOL_JUDGE_NODES=") < script.index("org/wildguard") < script.index(reverify)
@@ -348,6 +376,13 @@ def test_recover_queues_a_served_judge_job_on_the_runs_judge_pool(tmp_path, judg
     assert _accounting(job_dir) == before
     (entry,) = _journal(job_dir)
     assert entry["kind"] == "served-judge" and entry["services"] == ["wildguard"]
+    payload = json.loads((private_directory(job_dir) / "environment.json").read_text())
+    assert {name: payload["forwarded"][name] for name in credentials} == credentials
+    assert payload["roles"]["collector"]["JUDGE_OTEL_TOKEN"] == "runtime:JUDGE_OTEL_TOKEN"
+    assert "service:wildguard" in payload["roles"] and "service:policy" not in payload["roles"]
+    scheduler_env = (judge_slurm_bin / "env").read_text()
+    assert all(name not in scheduler_env for name in credentials)
+    assert all(value not in scheduler_env and value not in script for value in credentials.values())
 
     (judge_slurm_bin / "squeue_workdirs").write_text(f"{job_dir}\n")
     (judge_slurm_bin / "judge_accounting").write_text("4242|PENDING|0|0:0\n")
@@ -365,9 +400,15 @@ def test_a_judge_service_on_the_policys_pool_is_refused_and_nothing_is_queued(tm
     assert not (judge_slurm_bin / "sbatch_args").exists() and _journal(job_dir) == []
 
 
-def test_a_live_judge_only_job_is_reported_and_never_queued_beside(tmp_path, judge_slurm_bin) -> None:
-    job_dir = _model_served_run(tmp_path)
+def test_a_live_judge_only_job_is_reported_and_never_queued_beside(tmp_path, judge_slurm_bin, monkeypatch) -> None:
+    otel = {"token_env": "JUDGE_OTEL_TOKEN", "endpoint": "https://otel.example", "service_name": "judge"}
+    job_dir = _model_served_run(tmp_path, forward_env=["JUDGE_API_KEY"], otel=otel)
+    monkeypatch.setenv("JUDGE_API_KEY", "old-key")
+    monkeypatch.setenv("JUDGE_OTEL_TOKEN", "old-telemetry")
     assert recover(*_handle(job_dir), judge_partition="cpu").dispatched == "reverify"
+    private_before = (private_directory(job_dir) / "environment.json").read_bytes()
+    monkeypatch.setenv("JUDGE_API_KEY", "new-key")
+    monkeypatch.setenv("JUDGE_OTEL_TOKEN", "new-telemetry")
     (judge_slurm_bin / "squeue_workdirs").write_text(f"{job_dir}\n")
     (judge_slurm_bin / "judge_accounting").write_text("4242|RUNNING|30|0:0\n")
 
@@ -380,6 +421,7 @@ def test_a_live_judge_only_job_is_reported_and_never_queued_beside(tmp_path, jud
 
     again = recover(*_handle(job_dir), judge_partition="cpu")
     assert again.dispatched is None and (judge_slurm_bin / "sbatch_count").read_text().strip() == "1"
+    assert (private_directory(job_dir) / "environment.json").read_bytes() == private_before
 
 
 def test_a_judge_only_job_that_ended_without_a_receipt_is_reported_and_a_second_failure_stops(

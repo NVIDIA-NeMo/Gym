@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import hashlib
+import json
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -15,9 +16,12 @@ from nemo_gym.eval.recovery.evidence import CollectedEvidence
 from nemo_gym.orchestration.api import SubmitConfig
 from nemo_gym.orchestration.executors import slurm as sm
 from nemo_gym.orchestration.executors.connection import LocalConnection
+from nemo_gym.orchestration.executors.private_environment import private_directory
 from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
 from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
 from nemo_gym.orchestration.executors.slurm import judge_job as slurm_judge_job
+from nemo_gym.orchestration.executors.slurm import scheduler as slurm_scheduler
+from tests.unit_tests.orchestration.test_eval_resubmit import _seed_private_environment
 from tests.unit_tests.orchestration.test_slurm_judge_only_job import _rendered_gym_commands, _unrecognized_flags
 
 
@@ -32,7 +36,7 @@ def login_umask():
 
 
 @pytest.mark.parametrize(
-    "case", ["ok", "large", "first_allocation", "exhausted", "unknown", "incomplete", "stale", "live"]
+    "case", ["ok", "large", "first_allocation", "exhausted", "unknown", "incomplete", "stale", "live", "lock"]
 )
 def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case, login_umask):
     from nemo_gym.eval.recovery.markers import NO_ELIGIBLE_RETRY_REASON
@@ -53,6 +57,7 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case, login_umas
                 "test": {
                     "type": "slurm",
                     "account": "test",
+                    "forward_env": ["REJUDGE_API_KEY"],
                     "walltime": "00:05:00",
                     "node_pools": {"cpu": {"partition": "cpu", "gpus_per_node": 0}},
                 }
@@ -68,7 +73,11 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case, login_umas
                 },
             },
             "job": {"output_path": str(tmp_path)},
-            "otel": {"enabled": False},
+            "otel": {
+                "token_env": "REJUDGE_OTEL_TOKEN",
+                "endpoint": "https://otel.example",
+                "service_name": "rejudge",
+            },
         }
     )
     (job.parent / "resolved_config.yaml").write_text("fixture: true\n")
@@ -115,7 +124,7 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case, login_umas
     bins.mkdir()
     for name, body in {
         "squeue": ("echo 10" if case == "live" else "true"),
-        "sbatch": f"echo call >> {tmp_path}/calls; umask > {tmp_path}/sbatch_umask; echo 11",
+        "sbatch": f"echo call >> {tmp_path}/calls; umask > {tmp_path}/sbatch_umask; env > {tmp_path}/scheduler-env; echo 11",
     }.items():
         f = bins / name
         f.write_text("#!/bin/bash\n" + body + "\n")
@@ -140,6 +149,14 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case, login_umas
     import os
 
     monkeypatch.setenv("PATH", str(bins) + ":" + os.environ["PATH"])
+    credentials = {"REJUDGE_API_KEY": "new rejudge's key", "REJUDGE_OTEL_TOKEN": "new rejudge telemetry"}
+    for name in credentials:
+        monkeypatch.setenv(name, "old-value")
+    private_before = _seed_private_environment(job, cfg)
+    for name, value in credentials.items():
+        monkeypatch.setenv(name, value)
+    if case == "lock":
+        (job / slurm_scheduler._RESUBMIT_LOCK).touch()
 
     class Conn(LocalConnection):
         def run(self, commands):
@@ -173,7 +190,7 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case, login_umas
     )
     monkeypatch.setattr(sm.SlurmExecutor, "recovery_evidence", lambda *a: (decision, evidence))
     monkeypatch.setattr(sm.SlurmExecutor, "persist_record", lambda *a: None)
-    if case in ("stale", "live"):
+    if case in ("stale", "live", "lock"):
         with pytest.raises(subprocess.CalledProcessError):
             sm.SlurmExecutor().reverify_judge_failures(record, "judge", decision)
     else:
@@ -194,7 +211,19 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case, login_umas
             output = words[words.index("--output") + 1]
             receipt = words[words.index("--settle-receipt") + 1]
             assert receipt == output.rsplit("/", 1)[0] + "/receipt.json", (output, receipt)
+    private_after = (private_directory(job) / "environment.json").read_bytes()
+    if case != "ok":
+        assert private_after == private_before
+    else:
+        assert private_after != private_before
+        payload = json.loads(private_after)
+        assert {name: payload["forwarded"][name] for name in credentials} == credentials
+        assert payload["roles"]["collector"]["REJUDGE_OTEL_TOKEN"] == "runtime:REJUDGE_OTEL_TOKEN"
+        scheduler_env = (tmp_path / "scheduler-env").read_text()
+        assert all(name not in scheduler_env for name in credentials)
+        assert all(value not in scheduler_env for value in credentials.values())
     assert (tmp_path / "calls").exists() is (case == "ok")
+
     assert (job / ".gym_infra_retries").exists() is not first_allocation
     if not first_allocation:
         assert (job / ".gym_infra_retries").read_text() == "0\n"
@@ -205,7 +234,7 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case, login_umas
         assert "gym eval reverify" in script and "--settle-into-source" in script
         assert "--withdraw-unresolved-admissions" in script  # dispatched only with no allocation of the run live
         assert "gym eval run" not in script and "afternotok" not in script
-        assert "#SBATCH --time=00:05:00" in script
+        assert '#SBATCH --time="00:05:00"' in script
         # Only the staged driver script is owner-only; the job inherits the caller's umask, so what it creates (the
         # reverification folder and its files) stays readable to the run's other readers.
         (script_path,) = job.glob("reverify-*.sh")

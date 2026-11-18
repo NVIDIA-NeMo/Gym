@@ -56,6 +56,7 @@ from nemo_gym.orchestration.executors.slurm.script import (
     _with_default_capture_dir,
     _with_resume_flag,
     build_sbatch_script,
+    task_environments,
 )
 from nemo_gym.orchestration.executors.utils import flatten_run_args as _flatten_run_args
 
@@ -162,7 +163,7 @@ def test_none_value_is_written_as_hydra_null():
 
 def test_render_pool_directives_basic(pool):
     lines = _render_pool_directives({"main": pool})
-    assert "#SBATCH --partition=batch" in lines
+    assert '#SBATCH --partition="batch"' in lines
     assert "#SBATCH --nodes=1" in lines
     assert "#SBATCH --ntasks-per-node=4" in lines
 
@@ -176,7 +177,7 @@ def test_render_pool_directives_gpus(pool):
 def test_render_pool_directives_extra_args(pool):
     pool.extra_args["gres"] = "shard:8"
     lines = _render_pool_directives({"main": pool})
-    assert "#SBATCH --gres=shard:8" in lines
+    assert '#SBATCH --gres="shard:8"' in lines
 
 
 def test_pools_ask_for_the_sum_of_their_nodes_once(pool):
@@ -208,18 +209,18 @@ def test_pools_that_disagree_on_extra_args_are_refused(pool):
 
 def test_render_directives_job_name(compute, bench_dir):
     out = _render_directives(compute, bench_dir, "gsm8k")
-    assert "#SBATCH --job-name=gym-gsm8k" in out
+    assert '#SBATCH --job-name="gym-gsm8k"' in out
 
 
 def test_render_directives_account(compute, bench_dir):
     out = _render_directives(compute, bench_dir, "gsm8k")
-    assert "#SBATCH --account=my-account" in out
+    assert '#SBATCH --account="my-account"' in out
 
 
 def test_render_directives_walltime(compute, bench_dir):
     compute.walltime = "01:00:00"
     out = _render_directives(compute, bench_dir, "gsm8k")
-    assert "#SBATCH --time=01:00:00" in out
+    assert '#SBATCH --time="01:00:00"' in out
 
 
 def test_render_directives_no_walltime(compute, bench_dir):
@@ -230,7 +231,57 @@ def test_render_directives_no_walltime(compute, bench_dir):
 
 def test_render_directives_chdir(compute, bench_dir):
     out = _render_directives(compute, bench_dir, "gsm8k")
-    assert f"#SBATCH --chdir={bench_dir}" in out
+    assert f'#SBATCH --chdir="{bench_dir}"' in out
+
+
+def test_freeform_directives_keep_option_like_values_in_one_argument(compute, bench_dir, pool):
+    value = 'run --get-user-env=1 "quoted" \\tail $literal'
+    compute.account = value
+    compute.walltime = value
+    compute.extra_args = {"comment": value}
+    compute.node_pools = {"main": pool}
+    compute.node_pools["main"].partition = value
+    compute.node_pools["main"].extra_args = {"qos": value}
+    path = bench_dir / value
+    lines = _render_directives(compute, path, value).splitlines()
+    parsed = [shlex.split(line.removeprefix("#SBATCH ")) for line in lines]
+    assert all(len(arguments) == 1 for arguments in parsed)
+    arguments = {argument.split("=", 1)[0]: argument.split("=", 1)[1] for [argument] in parsed}
+    assert arguments["--job-name"] == "gym-" + value
+    assert arguments["--chdir"] == str(path)
+    assert {arguments[name] for name in ("--account", "--time", "--comment", "--partition", "--qos")} == {value}
+
+
+@pytest.mark.parametrize("scope", ["compute", "pool"])
+@pytest.mark.parametrize("key", ["comment --get-user-env", "comment=run", "comment\n--export", "comment\t--export"])
+def test_extra_args_reject_keys_that_are_not_single_options(compute, bench_dir, pool, scope, key):
+    compute.node_pools = {"main": pool}
+    target = compute if scope == "compute" else compute.node_pools["main"]
+    target.extra_args = {key: "value"}
+    with pytest.raises(ValueError, match="single option names"):
+        _render_directives(compute, bench_dir, "benchmark")
+
+
+@pytest.mark.parametrize("field", ["account", "walltime", "comment", "partition", "qos", "job-name", "chdir"])
+@pytest.mark.parametrize("separator", ["\n", "\r"])
+def test_freeform_directives_reject_line_breaks(compute, bench_dir, pool, field, separator):
+    value = "run" + separator + "#SBATCH --get-user-env=1"
+    compute.node_pools = {"main": pool}
+    name = "benchmark"
+    if field in ("account", "walltime"):
+        setattr(compute, field, value)
+    elif field == "partition":
+        compute.node_pools["main"].partition = value
+    elif field == "qos":
+        compute.node_pools["main"].extra_args = {"qos": value}
+    elif field == "comment":
+        compute.extra_args = {"comment": value}
+    elif field == "job-name":
+        name = value
+    else:
+        bench_dir = bench_dir / value
+    with pytest.raises(ValueError, match="directive values must not contain"):
+        _render_directives(compute, bench_dir, name)
 
 
 # ---------------------------------------------------------------------------
@@ -1443,7 +1494,7 @@ def test_build_sbatch_script_resolved_tp_in_vllm_cmd(bench_dir):
     assert "--tensor-parallel-size 8" in script
 
 
-def test_build_sbatch_script_service_env_before_driver_env(bench_dir):
+def test_build_sbatch_script_keeps_service_and_driver_values_out_of_scheduler_script(bench_dir):
     config = SubmitConfig.model_validate(
         {
             "services": {
@@ -1462,15 +1513,12 @@ def test_build_sbatch_script_service_env_before_driver_env(bench_dir):
     benchmark = config.driver.benchmarks["gsm8k"]
     compute = next(iter(config.compute.values()))
     script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
-    svc_env_idx = script.index("SVC_KEY=svc_val")
-    drv_env_idx = script.index("DRV_KEY=drv_val")
     svc_srun_idx = script.index("--container-image=vllm:latest")
     drv_srun_idx = script.index("--container-image=python:3.12")
-    # Service env prefix appears before service srun; driver env prefix appears before driver srun.
-    assert svc_env_idx < svc_srun_idx
-    assert drv_env_idx < drv_srun_idx
-    # Service env prefix appears before driver env prefix.
-    assert svc_env_idx < drv_env_idx
+    assert "svc_val" not in script
+    assert "drv_val" not in script
+    assert svc_srun_idx < script.index("service:vllm_model") < drv_srun_idx
+    assert ' driver "${GYM_CMD[@]}"' in script[drv_srun_idx:]
 
 
 def test_render_service_command_with_env():
@@ -1506,8 +1554,8 @@ def test_build_sbatch_script_service_env(bench_dir):
     benchmark = config.driver.benchmarks["gsm8k"]
     compute = next(iter(config.compute.values()))
     script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
-    assert "HF_TOKEN=hf_test" in script
-    assert "LIT=val" in script
+    assert "hf_test" not in script
+    assert "LIT=val" not in script
 
 
 def test_build_sbatch_script_driver_env(bench_dir):
@@ -1526,7 +1574,7 @@ def test_build_sbatch_script_driver_env(bench_dir):
     benchmark = config.driver.benchmarks["gsm8k"]
     compute = next(iter(config.compute.values()))
     script = build_sbatch_script(config, "gsm8k", benchmark, compute, bench_dir)
-    assert "WANDB_API_KEY=wb_secret" in script
+    assert "wb_secret" not in script
 
 
 # ---------------------------------------------------------------------------
@@ -1647,11 +1695,7 @@ def test_build_sbatch_script_driver_mounts(bench_dir):
     assert "--container-mounts=/lustre/checkpoints:/ckpts" in driver_srun_line
 
 
-def test_build_sbatch_script_no_service_mounts_by_default(submit_config, bench_dir):
-    """Services get no mounts unless configured. The driver and the OTel
-    collector are the exceptions and always mount the job directory, because that
-    is where their artifacts go -- see
-    test_driver_can_write_its_artifacts_into_the_job_directory."""
+def test_build_sbatch_script_mounts_private_values_read_only_for_services(submit_config, bench_dir):
     benchmark = submit_config.driver.benchmarks["gsm8k"]
     compute = next(iter(submit_config.compute.values()))
     script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
@@ -1660,12 +1704,15 @@ def test_build_sbatch_script_no_service_mounts_by_default(submit_config, bench_d
         line
         for line in script.splitlines()
         if "srun" in line
+        and " --output=logs/" in line
         and "--output=logs/driver-$SLURM_JOB_ID.log" not in line
         and "--output=logs/otel_collector-$SLURM_JOB_ID.log" not in line
     ]
     assert service_lines, "expected at least one service srun line"
     for line in service_lines:
-        assert "--container-mounts" not in line
+        directory = private_directory(bench_dir)
+        assert f"--container-mounts={directory}:{directory}:ro" in line
+        assert f"{bench_dir}:{bench_dir}" not in line
 
 
 # ---------------------------------------------------------------------------
@@ -1675,6 +1722,7 @@ def test_build_sbatch_script_no_service_mounts_by_default(submit_config, bench_d
 from unittest.mock import MagicMock
 
 from nemo_gym.orchestration.executors.connection import LocalConnection
+from nemo_gym.orchestration.executors.private_environment import private_directory
 from nemo_gym.orchestration.executors.slurm.executor import _validate_mounts
 
 
@@ -2149,26 +2197,29 @@ def test_a_command_is_told_where_to_write_and_how_to_reach_the_policy(tmp_path):
     # These replace the run arguments the command no longer receives; without them
     # the script has no way to find the served model or the job directory.
     bench_dir = tmp_path / "jobs" / "x" / "osworld"
-    script = _render_command(tmp_path, "harness")
-
-    assert f"NEMO_GYM_BENCH_DIR={bench_dir}" in script
-    assert "NEMO_GYM_POLICY_BASE_URL=http://localhost:8000/v1" in script
-    assert "NEMO_GYM_POLICY_MODEL_NAME=super" in script
-    assert "NEMO_GYM_POLICY_API_KEY=dummy" in script
+    config = _command_config(tmp_path, "harness")
+    environment = task_environments(config, "osworld", config.compute["hsg"], bench_dir)["driver"]
+    assert environment["NEMO_GYM_BENCH_DIR"] == str(bench_dir)
+    assert environment["NEMO_GYM_POLICY_BASE_URL"] == "http://localhost:8000/v1"
+    assert environment["NEMO_GYM_POLICY_MODEL_NAME"] == "super"
+    assert environment["NEMO_GYM_POLICY_API_KEY"] == "dummy"
 
 
 def test_a_command_keeps_the_driver_env_the_config_declared(tmp_path):
     script = _render_command(tmp_path, "harness", env={"AWS_ACCESS_KEY_ID": "lit:AKIAFAKE"})
 
-    assert "AWS_ACCESS_KEY_ID=AKIAFAKE" in script
-    assert "NEMO_GYM_BENCH_DIR=" in script
+    assert "AKIAFAKE" not in script
+    assert " driver bash -c " in script
 
 
 @pytest.mark.parametrize("command", [None, "harness"])
 def test_driver_bench_dir_uses_bound_path_instead_of_host_pwd(tmp_path, command):
+    config = _command_config(tmp_path, command, env={"NEMO_GYM_BENCH_DIR": "runtime:PWD"})
     script = _render_command(tmp_path, command, env={"NEMO_GYM_BENCH_DIR": "runtime:PWD"})
     bench_dir = tmp_path / "jobs" / "x" / "osworld"
-    assert f"NEMO_GYM_BENCH_DIR={bench_dir}" in script
+    assert task_environments(config, "osworld", config.compute["hsg"], bench_dir)["driver"][
+        "NEMO_GYM_BENCH_DIR"
+    ] == str(bench_dir)
     assert "NEMO_GYM_BENCH_DIR=${PWD}" not in script
 
 
@@ -2530,7 +2581,20 @@ def test_a_pd_service_renders_the_three_service_form_it_replaced(per_node):
         Path("/jobs/swebench_pro"),
     )
     fixture = "pd_swebench_pro_server_per_node.sh" if per_node else "pd_swebench_pro_data_parallel.sh"
-    assert script == (Path(__file__).parent / "fixtures" / fixture).read_text()
+    earlier = (Path(__file__).parent / "fixtures" / fixture).read_text()
+
+    def step_arguments(document, name):
+        section = document.split(f"# service: {name}\n", 1)[1].split("\n# ", 1)[0]
+        words = shlex.split(section.rsplit(" &\n", 1)[0])
+        start = words.index("srun") + 1
+        command = next(i for i in range(start, len(words)) if not words[i].startswith("--"))
+        flags = [word for word in words[start:command] if not word.startswith("--container-mounts=")]
+        # The private loader restores env and execs the same service program; its own arguments contain no values.
+        program = command + 5 if words[command : command + 2] == ["python3", "-c"] else command
+        return flags, words[program:]
+
+    for name in ("policy-prefill", "policy-decode", "policy"):
+        assert step_arguments(script, name) == step_arguments(earlier, name)
 
 
 def test_a_pd_service_deploys_as_two_tiers_and_a_router(tmp_path):

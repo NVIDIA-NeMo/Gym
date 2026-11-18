@@ -194,7 +194,7 @@ def test_a_cpu_placement_is_not_used_by_a_served_judge_profile(tmp_path) -> None
     job = judge_job_config(config, "cluster", "bench", profile, "gym eval reverify")
     compute = job.compute["cluster"]
     script = build_sbatch_script(job, "bench", job.driver.benchmarks["bench"], compute, Path("/jobs/bench"))
-    assert "#SBATCH --partition=batch" in script and "#SBATCH --qos=gpu_normal" in script
+    assert '#SBATCH --partition="batch"' in script and '#SBATCH --qos="gpu_normal"' in script
     assert "--partition=cpu" not in script and "--qos=x" not in script
 
 
@@ -208,9 +208,9 @@ def test_the_served_judge_job_starts_the_judge_service_and_never_the_policy(tmp_
     bench = job.driver.benchmarks["bench"]
     compute = job.compute["cluster"]
     script = build_sbatch_script(job, "bench", bench, compute, Path("/jobs/bench"))
-    assert "#SBATCH --partition=batch" in script and "#SBATCH --nodes=1" in script
-    assert "#SBATCH --gpus-per-node=8" in script and "#SBATCH --qos=gpu_normal" in script
-    assert "#SBATCH --exclusive=user" in script and "#SBATCH --nodes=2" not in script
+    assert '#SBATCH --partition="batch"' in script and "#SBATCH --nodes=1" in script
+    assert "#SBATCH --gpus-per-node=8" in script and '#SBATCH --qos="gpu_normal"' in script
+    assert '#SBATCH --exclusive="user"' in script and "#SBATCH --nodes=2" not in script
     # The judge pool's hosts are exported for the judge server, and the judge service starts before the command.
     exported = script.index("export GYM_POOL_JUDGE_NODES=")
     served = script.index("org/wildguard")
@@ -295,8 +295,8 @@ def test_the_judge_job_runs_the_reverify_command_on_one_cpu_node_without_any_ser
     # GPU resources, node-shape directives and the QOS of the original allocation do not follow; the rest does.
     assert compute.extra_args == {"comment": "campaign"}
     script = build_sbatch_script(job, "bench", bench, compute, Path("/jobs/bench"))
-    assert "#SBATCH --partition=cpu" in script and "#SBATCH --nodes=1" in script
-    assert "#SBATCH --gpus-per-node=0" in script and "#SBATCH --time=04:00:00" in script
+    assert '#SBATCH --partition="cpu"' in script and "#SBATCH --nodes=1" in script
+    assert "#SBATCH --gpus-per-node=0" in script and '#SBATCH --time="04:00:00"' in script
     assert "--qos" not in script and "--gres" not in script
     assert "vllm serve" not in script and "gym eval run" not in script and "afternotok" not in script
     assert command in script
@@ -333,7 +333,7 @@ def test_the_runs_gpu_qos_does_not_follow_and_the_reader_placement_names_one(tmp
     assert "--qos=normal" not in script
     assert profile.qos == expected and profile.report()["qos"] == expected
     if expected:
-        assert f"#SBATCH --qos={expected}" in script and "NEMO_GYM_REMOTE_READER_SRUN" in profile.qos_source
+        assert f'#SBATCH --qos="{expected}"' in script and "NEMO_GYM_REMOTE_READER_SRUN" in profile.qos_source
     else:
         assert "--qos" not in script and profile.qos_source == "the partition's default"
 
@@ -371,7 +371,7 @@ def test_an_explicit_judge_qos_wins_over_the_saved_pool_and_the_reader_placement
     job = judge_job_config(config, "cluster", "bench", profile, "gym eval reverify")
     compute = job.compute["cluster"]
     script = build_sbatch_script(job, "bench", job.driver.benchmarks["bench"], compute, Path("/jobs/bench"))
-    assert script.count("--qos=") == 1 and "#SBATCH --qos=cpu_ops" in script
+    assert script.count("--qos=") == 1 and '#SBATCH --qos="cpu_ops"' in script
 
 
 def test_the_cpu_profile_never_drops_the_services_a_run_serves_beside_its_policy(tmp_path) -> None:

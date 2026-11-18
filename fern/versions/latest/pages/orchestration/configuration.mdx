@@ -15,8 +15,8 @@ Fields without a default are required.
 | Prefix | Meaning |
 | --- | --- |
 | `lit:VALUE` | The literal `VALUE`. |
-| `host:VAR` | The value of `VAR` in the shell running `gym eval submit`. The submit fails if `VAR` is unset. The value is baked into the job script. |
-| `runtime:VAR` | Not resolved at submit time. The job script references `$VAR`, so the compute node uses whatever the job's environment holds when the command starts. |
+| `host:VAR` | The value of `VAR` in the shell running `gym eval submit`. The submit fails if `VAR` is unset. The value is stored privately and restored after the task starts. |
+| `runtime:VAR` | Not resolved at submit time. The task loader reads `VAR` from the launched task environment and explicit private overrides before applying role assignments. |
 
 ```yaml
 env:
@@ -105,7 +105,7 @@ A mapping with exactly one entry; its key is a name you choose (the examples use
 | `account` | required | Slurm account (`--account`). |
 | `hostname` | `null` | Login node to submit through over SSH. `null`, or the name of the machine you are on, means run `sbatch` locally with no SSH. |
 | `walltime` | `null` | Job time limit (`--time`). |
-| `forward_env` | `[]` | Environment variable names to forward from the submitting shell to `sbatch`. Missing variables fail submission before staging. Values are sent over SSH stdin and are not stored in job artifacts. |
+| `forward_env` | `[]` | Environment variable names to restore privately inside tasks. Missing variables fail submission before staging. Values are sent over SSH stdin into an owner-only store outside run trees, never into scheduler environments or job scripts. |
 | `node_pools` | `{}` | Named groups of nodes. See below. |
 | `extra_args` | `{}` | Extra job-level `#SBATCH` directives, written without leading dashes: `{comment: my-run}` becomes `#SBATCH --comment=my-run`. |
 
@@ -126,8 +126,7 @@ driver:
 
 Only listed names are forwarded. Leave scheduler-provided values such as
 `CUDA_VISIBLE_DEVICES` out of this list. `--resolve-only` and dry runs do not
-require forwarded values to be set. Slurm must export the submission environment
-to the job; an explicit `--export=NONE` prevents that inheritance.
+require forwarded values to be set. Task values are loaded after `srun`; scheduler environment-import options are rejected. See [Private task environments](slurm-executor#private-task-environments).
 
 #### Node pools
 
@@ -155,6 +154,7 @@ The driver runs the benchmarks against the services.
 | `benchmarks` | required | Mapping from benchmark name to its [run config](#benchmarks). |
 | `env` | `{}` | Environment for the driver. See [env values](#env-values). |
 | `mounts` | `[]` | Extra bind mounts for the driver. The benchmark's own job directory is always mounted at the same path. |
+| `container_env` | `[]` | Host names that take precedence over image defaults. Caller-present nonprotected names are delivered privately to the driver before its runtime aliases; other names keep native Pyxis forwarding from the compute host. |
 
 ### Policy wiring
 
@@ -235,7 +235,7 @@ Submit fills in what only it knows, and the submit config may not set it: `rollo
 | `wandb` | `wandb_name`: `<benchmark>-<gym job id>` |
 | `atif` | `session_id`: `gym-submit-<benchmark>-<submission>`, and `output_dirpath`: `<benchmark dir>/exports/atif`. `agent_version` is yours to set. |
 
-Credentials are not export settings. `resolved-config.yaml` and `--resolve-only` output are meant to be shared, and submit resolves `${oc.env:...}` references before it writes them, so a key given as an export setting would end up in them in plain text. Provide it through the environment instead: put it in `driver.env` as `host:VAR`, which is written back as a reference in the record, while its value goes only into the owner-only job script. The exporters read it from there: `WANDB_API_KEY` for `wandb` (set just `wandb_project` in the export) and `MLFLOW_TRACKING_TOKEN` for `mlflow`. For example, `driver.env: {WANDB_API_KEY: "host:WANDB_API_KEY"}` together with `export.wandb: {wandb_project: p}`.
+Credentials are not export settings. `resolved-config.yaml` and `--resolve-only` output are meant to be shared, and submit resolves `${oc.env:...}` references before it writes them, so a key given as an export setting would end up in them in plain text. Provide it through the environment instead: put it in `driver.env` as `host:VAR`, which is written back as a reference in the record, while its value is restored from the private task store after the driver starts. The exporters read that driver environment: `WANDB_API_KEY` for `wandb` (set just `wandb_project` in the export) and `MLFLOW_TRACKING_TOKEN` for `mlflow`. For example, `driver.env: {WANDB_API_KEY: "host:WANDB_API_KEY"}` together with `export.wandb: {wandb_project: p}`.
 
 **When exports run.** After `gym eval run` finishes with exit code 0. A failed or incomplete run is never exported, and a run that is killed at the time limit leaves its exports for the job that resumes it. Exports never change the job's exit code: the exit code of `gym eval run` is written to `<benchmark dir>/eval.exit` and is the job's own.
 

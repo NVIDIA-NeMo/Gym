@@ -6,6 +6,7 @@ import inspect
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -92,7 +93,9 @@ def fake_slurm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("NEMO_GYM_REMOTE_READER_QUEUE_WAIT_S", "0")
 
     def use(srun: str) -> Path:
-        (bin_dir / "srun").write_text(srun)
+        (bin_dir / "srun").write_text(
+            srun.replace("#!/bin/bash\n", f"#!/bin/bash\nFAKE_LOG={shlex.quote(str(log))}\n", 1)
+        )
         (bin_dir / "srun").chmod(0o755)
         return log
 
@@ -141,6 +144,68 @@ def test_a_started_step_reads_its_payload_on_fd3_and_reports_its_job(fake_slurm,
     assert "PAYLOAD-LINE" in output.splitlines() and "__GYM_READER_RC:0" in output
     assert slurm_reader.reader_placement(output) == ("cpu:4242", None)
     assert (log / "srun").exists() and not (log / "scancel").exists()
+
+
+def test_reader_srun_excludes_exported_credentials_and_keeps_allocation_context(
+    fake_slurm, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    receipt = tmp_path / "scheduler.json"
+    capture = shlex.join(
+        [
+            sys.executable,
+            "-c",
+            "import json,os,sys; from pathlib import Path; "
+            "Path(sys.argv[1]).write_text(json.dumps({'env': dict(os.environ), 'argv': sys.argv[2:]}))",
+            str(receipt),
+        ]
+    )
+    fake_slurm(_STARTED_SRUN.replace('echo "$@" >> "$FAKE_LOG/srun"', capture + ' "$@"'))
+    keep = {"PATH", "HOME", "USER", "FAKE_LOG"}
+    for name in tuple(os.environ):
+        if name not in keep and not name.startswith("NEMO_GYM_REMOTE_READER_"):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("READER_API_KEY", "reader-private-canary")
+    monkeypatch.setenv("SLURM_JOB_ID", "31415")
+    monkeypatch.setenv("SLURM_CLUSTER_NAME", "allocation-test")
+    monkeypatch.setenv("UV_LOCK_TIMEOUT", "2077")
+    token = f"reader-{uuid.uuid4().hex}"
+    context_names = ["SLURM_JOB_ID", "SLURM_CLUSTER_NAME", "UV_LOCK_TIMEOUT", "GYM_READER_TOKEN"]
+    entrypoint = shlex.join(
+        [
+            sys.executable,
+            "-c",
+            "import json,os; print('__READER_CONTEXT:' + "
+            f"json.dumps({{name: os.environ.get(name) for name in {context_names!r}}}))",
+        ]
+    )
+    command = slurm._reader_command(
+        entrypoint, tmp_path, "{}", bound_s=300, factor=1, token=token, step=slurm.reader_step()
+    )
+
+    output = LocalConnection().run(command)
+
+    assert slurm.reader_placement(output) == ("cpu:4242", None)
+    parent = json.loads(receipt.read_text())
+    assert "READER_API_KEY" not in parent["env"]
+    assert all("reader-private-canary" not in value for value in parent["env"].values())
+    assert all("reader-private-canary" not in value for value in parent["argv"])
+    assert {name: parent["env"].get(name) for name in context_names} == {
+        "SLURM_JOB_ID": "31415",
+        "SLURM_CLUSTER_NAME": "allocation-test",
+        "UV_LOCK_TIMEOUT": "2077",
+        "GYM_READER_TOKEN": token,
+    }
+    contexts = [
+        line.removeprefix("__READER_CONTEXT:") for line in output.splitlines() if line.startswith("__READER_CONTEXT:")
+    ]
+    assert [json.loads(context) for context in contexts] == [
+        {
+            "SLURM_JOB_ID": "4242",
+            "SLURM_CLUSTER_NAME": "allocation-test",
+            "UV_LOCK_TIMEOUT": "2077",
+            "GYM_READER_TOKEN": token,
+        }
+    ]
 
 
 def test_a_step_that_does_not_start_is_cancelled_and_read_on_the_login_host(fake_slurm, tmp_path: Path) -> None:

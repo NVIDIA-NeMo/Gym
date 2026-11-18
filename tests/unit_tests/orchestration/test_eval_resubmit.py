@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
@@ -32,9 +33,18 @@ from nemo_gym.orchestration.executors.base import BaseExecutor, UnsupportedOpera
 from nemo_gym.orchestration.executors.connection import LocalConnection
 from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
 from nemo_gym.orchestration.executors.otel import render_collector_config
+from nemo_gym.orchestration.executors.private_environment import (
+    PRIVATE_ENVIRONMENT_MARKER,
+    private_directory,
+    stage_commands,
+)
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.executors.slurm.resume_script import RETRY_FILE_NAME, render_resume_prologue
-from nemo_gym.orchestration.executors.slurm.script import COLLECTOR_LOCAL_DIR_MARKER, build_sbatch_script
+from nemo_gym.orchestration.executors.slurm.script import (
+    COLLECTOR_LOCAL_DIR_MARKER,
+    build_sbatch_script,
+    task_environments,
+)
 from nemo_gym.orchestration.jobs import (
     INDEX_RESTORE_JOURNAL_NAME,
     MANIFEST_NAME,
@@ -51,7 +61,7 @@ from tests.helpers.recovery_store_runs import provider_failures_jsonl
 
 # Rendered by this Gym, so it carries the line a resubmitted job uses to resume.
 _JOB_SH = (
-    "#!/bin/bash\nGYM_CMD=(\n    gym eval run\n)\n"
+    f"#!/bin/bash\n{PRIVATE_ENVIRONMENT_MARKER}\nGYM_CMD=(\n    gym eval run\n)\n"
     "if [ x = 1 ]; then GYM_CMD+=(++resubmit=True ++resume_from_cache=True); fi\n"
 )
 
@@ -136,6 +146,15 @@ def slurm_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def _sbatch_env(slurm_bin: Path) -> dict[str, str]:
     return dict(line.split("=", 1) for line in (slurm_bin / "env").read_text().splitlines() if "=" in line)
+
+
+def _seed_private_environment(job_dir: Path, config: SubmitConfig | None = None) -> bytes:
+    """Stage a prior caller's real payload before a recovery attempt changes credentials."""
+    conn = LocalConnection()
+    config = config or SlurmExecutor._saved_config(conn, job_dir.parent)
+    compute = next(iter(config.compute.values()))
+    conn.run(stage_commands(config, task_environments(config, job_dir.name, compute, job_dir), job_dir))
+    return (private_directory(job_dir) / "environment.json").read_bytes()
 
 
 @pytest.fixture
@@ -230,8 +249,16 @@ def test_recover_on_an_executor_without_a_collector_stops_with_every_recovery_co
     assert not sbatch_env.exists()
 
 
-def test_resubmit_refuses_while_a_job_runs_in_the_job_dir(tmp_path: Path, slurm_bin: Path) -> None:
-    job_dir = _staged_run(tmp_path)
+def test_resubmit_refuses_while_a_job_runs_in_the_job_dir(
+    tmp_path: Path, slurm_bin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    otel = {"token_env": "MY_INGEST_TOKEN", "endpoint": "https://otel.example", "service_name": "s"}
+    job_dir = _staged_run(tmp_path, config=_config(tmp_path, otel=otel, forward_env=["MY_KEY"]))
+    monkeypatch.setenv("MY_KEY", "old-key")
+    monkeypatch.setenv("MY_INGEST_TOKEN", "old-telemetry")
+    private_before = _seed_private_environment(job_dir)
+    monkeypatch.setenv("MY_KEY", "new-key")
+    monkeypatch.setenv("MY_INGEST_TOKEN", "new-telemetry")
     (slurm_bin / "squeue_workdirs").write_text(f"{job_dir}\n")
 
     with pytest.raises(RuntimeError, match="still pending or running"):
@@ -239,6 +266,7 @@ def test_resubmit_refuses_while_a_job_runs_in_the_job_dir(tmp_path: Path, slurm_
 
     assert not (slurm_bin / "cwd").exists()
     assert _record(job_dir).benchmark_job("gsm8k").job_id == "100"
+    assert (private_directory(job_dir) / "environment.json").read_bytes() == private_before
 
 
 def test_resubmit_refuses_while_a_job_runs_in_the_job_dir_in_a_hidden_partition(
@@ -368,8 +396,16 @@ def test_two_concurrent_resubmits_queue_one_job(tmp_path: Path, slurm_bin: Path)
     assert not (job_dir / ".gym_resubmit.lock").exists()
 
 
-def test_held_lock_refuses_a_resubmit_even_when_mkdir_is_not_exclusive(tmp_path: Path, slurm_bin: Path) -> None:
-    job_dir = _staged_run(tmp_path)
+def test_held_lock_refuses_a_resubmit_even_when_mkdir_is_not_exclusive(
+    tmp_path: Path, slurm_bin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    otel = {"token_env": "MY_INGEST_TOKEN", "endpoint": "https://otel.example", "service_name": "s"}
+    job_dir = _staged_run(tmp_path, config=_config(tmp_path, otel=otel, forward_env=["MY_KEY"]))
+    monkeypatch.setenv("MY_KEY", "old-key")
+    monkeypatch.setenv("MY_INGEST_TOKEN", "old-telemetry")
+    private_before = _seed_private_environment(job_dir)
+    monkeypatch.setenv("MY_KEY", "new-key")
+    monkeypatch.setenv("MY_INGEST_TOKEN", "new-telemetry")
     (job_dir / ".gym_resubmit.lock").touch()
     # uutils mkdir (Ubuntu 26.04's default) can report success for a directory another process just created.
     (slurm_bin / "mkdir").write_text("#!/bin/bash\nexit 0\n")
@@ -380,6 +416,7 @@ def test_held_lock_refuses_a_resubmit_even_when_mkdir_is_not_exclusive(tmp_path:
 
     assert not (slurm_bin / "cwd").exists()
     assert (job_dir / ".gym_resubmit.lock").exists()
+    assert (private_directory(job_dir) / "environment.json").read_bytes() == private_before
 
 
 # --- The resubmit only queues; the job resets its own run state ---------------------------------------------
@@ -536,13 +573,116 @@ def test_resubmit_refuses_a_populated_run_whose_job_sh_predates_resubmit(tmp_pat
     rollouts = job_dir / "artifacts" / "rollouts.jsonl"
     rollouts.write_text('{"reward": 1.0}\n')
     # Without the resubmit line, a job.sh with resume off would start fresh and delete the rollouts above.
-    (job_dir / "job.sh").write_text("#!/bin/bash\nGYM_CMD=(\n    gym eval run\n    +resume_from_cache=False\n)\n")
+    (job_dir / "job.sh").write_text(
+        f"#!/bin/bash\n{PRIVATE_ENVIRONMENT_MARKER}\nGYM_CMD=(\n    gym eval run\n    +resume_from_cache=False\n)\n"
+    )
 
     with pytest.raises(RuntimeError, match="predates resubmit"):
         resubmit(*_handle(job_dir))
 
     assert not (slurm_bin / "cwd").exists()
     assert rollouts.read_text() == '{"reward": 1.0}\n'
+
+
+@pytest.mark.parametrize(
+    "private_marker",
+    ["", "# Gym task environments are loaded after srun (v1).", "# Gym task environments are loaded after srun (v2)."],
+)
+def test_resubmit_refuses_a_script_without_private_environment_loading_before_any_staging(
+    tmp_path: Path, slurm_bin: Path, monkeypatch: pytest.MonkeyPatch, private_marker: str
+) -> None:
+    otel = {"token_env": "MY_INGEST_TOKEN", "endpoint": "https://otel.example", "service_name": "s"}
+    job_dir = _staged_run(tmp_path, config=_config(tmp_path, otel=otel, forward_env=["MY_KEY"]))
+    script = _JOB_SH.replace(PRIVATE_ENVIRONMENT_MARKER, private_marker)
+    (job_dir / "job.sh").write_text(script)
+    # A refused attempt must preserve both old outside-root and v2 inside-root payloads.
+    old_store = job_dir.parent.parent.parent / (
+        ".gym-private-" + hashlib.sha256(str(job_dir.parent).encode()).hexdigest()[:16]
+    )
+    old_directory = (
+        private_directory(job_dir)
+        if "(v2)" in private_marker
+        else old_store / hashlib.sha256(str(job_dir).encode()).hexdigest()
+    )
+    old_directory.mkdir(parents=True, mode=0o700)
+    old_payload = old_directory / "environment.json"
+    old_payload.write_text(
+        json.dumps(
+            {
+                "version": 2 if "(v2)" in private_marker else 1,
+                "forwarded": {"MY_KEY": "old-key", "MY_INGEST_TOKEN": "old-telemetry"},
+                "inherited": {},
+                "roles": {},
+            }
+        )
+    )
+    old_payload.chmod(0o600)
+    private_before = old_payload.read_bytes()
+    monkeypatch.setenv("MY_KEY", "new-key")
+    monkeypatch.setenv("MY_INGEST_TOKEN", "new-telemetry")
+
+    with pytest.raises(RuntimeError, match="incompatible private environment contract"):
+        resubmit(*_handle(job_dir))
+
+    assert not (slurm_bin / "cwd").exists()
+    assert not (slurm_bin / "env").exists()
+    if "(v2)" not in private_marker:
+        assert not private_directory(job_dir).exists()
+    assert old_payload.read_bytes() == private_before
+    assert (job_dir / "job.sh").read_text() == script
+
+
+@pytest.mark.parametrize("private_cleanup", [False, True])
+def test_resubmit_requires_original_private_driver_selections_even_after_cleanup(
+    tmp_path: Path, slurm_bin: Path, monkeypatch: pytest.MonkeyPatch, private_cleanup: bool
+) -> None:
+    monkeypatch.setenv("DRIVER_KEY", "fake-original-driver-key")
+    config = _config(tmp_path)
+    config.driver.container_env = ["DRIVER_KEY"]
+    job_dir = _staged_run(tmp_path, config=config)
+    script = build_sbatch_script(
+        config, "gsm8k", config.driver.benchmarks["gsm8k"], config.compute["cluster"], job_dir
+    )
+    (job_dir / "job.sh").write_text(script)
+    private_before = _seed_private_environment(job_dir, config)
+    assert json.loads(private_before)["driver_forwarded"] == {"DRIVER_KEY": "fake-original-driver-key"}
+    assert "fake-original-driver-key" not in script
+    if private_cleanup:
+        shutil.rmtree(private_directory(job_dir))
+    monkeypatch.delenv("DRIVER_KEY")
+
+    with pytest.raises(RuntimeError, match="DRIVER_KEY.*restore those variables or submit a new run") as error:
+        resubmit(*_handle(job_dir))
+
+    assert "fake-original-driver-key" not in str(error.value)
+    assert not (slurm_bin / "cwd").exists() and not (slurm_bin / "env").exists()
+    assert (job_dir / "job.sh").read_text() == script
+    if private_cleanup:
+        assert not private_directory(job_dir).exists()
+    else:
+        assert (private_directory(job_dir) / "environment.json").read_bytes() == private_before
+
+
+def test_resubmit_keeps_native_forwarding_for_an_originally_absent_driver_selection(
+    tmp_path: Path, slurm_bin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("DRIVER_KEY", raising=False)
+    config = _config(tmp_path)
+    config.driver.container_env = ["DRIVER_KEY"]
+    job_dir = _staged_run(tmp_path, config=config)
+    script = build_sbatch_script(
+        config, "gsm8k", config.driver.benchmarks["gsm8k"], config.compute["cluster"], job_dir
+    )
+    (job_dir / "job.sh").write_text(script)
+    assert "--container-env=DRIVER_KEY" in script
+
+    job = resubmit(*_handle(job_dir))
+
+    assert job.job_id == "4242"
+    assert (job_dir / "job.sh").read_text() == script
+    payload = json.loads((private_directory(job_dir) / "environment.json").read_text())
+    assert payload["driver_forwarded"] == {}
+    assert "DRIVER_KEY" not in _sbatch_env(slurm_bin)
 
 
 def test_resubmit_queues_a_populated_command_benchmark(tmp_path: Path, slurm_bin: Path) -> None:
@@ -599,13 +739,20 @@ def test_resubmit_forwards_what_submit_forwards(
 ) -> None:
     otel = {"enabled": True, "token_env": "MY_INGEST_TOKEN", "endpoint": "https://otel.example", "service_name": "s"}
     job_dir = _staged_run(tmp_path, config=_config(tmp_path, otel=otel, forward_env=["MY_KEY"]))
+    monkeypatch.setenv("MY_INGEST_TOKEN", "old-telemetry")
+    monkeypatch.setenv("MY_KEY", "old-key")
+    private_before = _seed_private_environment(job_dir)
     monkeypatch.setenv("MY_INGEST_TOKEN", "s3cret value")
     monkeypatch.setenv("MY_KEY", "k'ey")
 
     assert resubmit(*_handle(job_dir)).job_id == "4242"
 
     env = _sbatch_env(slurm_bin)
-    assert (env["MY_INGEST_TOKEN"], env["MY_KEY"]) == ("s3cret value", "k'ey")
+    assert "MY_INGEST_TOKEN" not in env and "MY_KEY" not in env
+    payload = json.loads((private_directory(job_dir) / "environment.json").read_text())
+    assert (payload["forwarded"]["MY_INGEST_TOKEN"], payload["forwarded"]["MY_KEY"]) == ("s3cret value", "k'ey")
+    assert (private_directory(job_dir) / "environment.json").read_bytes() != private_before
+    assert "s3cret value" not in (slurm_bin / "env").read_text() and "k'ey" not in (slurm_bin / "env").read_text()
 
 
 @pytest.mark.parametrize(
@@ -938,7 +1085,9 @@ def test_resubmit_without_auth_updates_the_collector_and_can_restore_remote_expo
     monkeypatch.setenv("NVAUTH_TOKEN", "new-token")
     assert resubmit(*_handle(job_dir)).job_id == "4242"
     assert "otlp_http/managed" in collector_path.read_text()
-    assert _sbatch_env(slurm_bin)["NVAUTH_TOKEN"] == "new-token"
+    assert "NVAUTH_TOKEN" not in _sbatch_env(slurm_bin)
+    payload = json.loads((private_directory(job_dir) / "environment.json").read_text())
+    assert payload["forwarded"]["NVAUTH_TOKEN"] == "new-token"
 
 
 def test_resubmit_missing_auth_does_not_change_an_active_runs_collector(
@@ -961,10 +1110,10 @@ def test_resubmit_missing_auth_does_not_change_an_active_runs_collector(
 # --- Recovery keeps the spent budget; a plain resubmit starts a fresh one ---------------------------------------
 
 
-def _resumable_run(tmp_path: Path) -> tuple[Path, str, ResumeConfig]:
+def _resumable_run(tmp_path: Path, *, config: SubmitConfig | None = None) -> tuple[Path, str, ResumeConfig]:
     """A staged resumable run whose job.sh is rendered by this Gym, with spent retries, walltime and one missing row."""
     resume = ResumeConfig(max_retries=3, max_walltime="16:00:00")
-    config = _config(tmp_path)
+    config = config or _config(tmp_path)
     config.driver.benchmarks["gsm8k"].resumable = resume
     job_dir = _staged_run(tmp_path, config=config)
     script = build_sbatch_script(
@@ -1247,7 +1396,19 @@ def test_started_worker_waits_for_real_resubmit_wrapper_acknowledgement(tmp_path
 
 
 @pytest.mark.parametrize(
-    "change", ["none", "chain", "claim", "retries", "walltime", "incomplete", "config", "offset", "config_before_lock"]
+    "change",
+    [
+        "none",
+        "chain",
+        "claim",
+        "retries",
+        "walltime",
+        "incomplete",
+        "config",
+        "offset",
+        "config_before_lock",
+        "scheduler_default_before_lock",
+    ],
 )
 def test_recover_revalidates_the_collected_accounting_inside_the_resubmit_lock(
     tmp_path: Path, slurm_bin: Path, monkeypatch: pytest.MonkeyPatch, change: str
@@ -1256,7 +1417,13 @@ def test_recover_revalidates_the_collected_accounting_inside_the_resubmit_lock(
     # so only the accounting files it changed show that the collected decision is stale.
     from nemo_gym.orchestration.submit import recover
 
-    job_dir, _, _ = _resumable_run(tmp_path)
+    otel = {"token_env": "MY_INGEST_TOKEN", "endpoint": "https://otel.example", "service_name": "s"}
+    job_dir, _, _ = _resumable_run(tmp_path, config=_config(tmp_path, otel=otel, forward_env=["MY_KEY"]))
+    monkeypatch.setenv("MY_KEY", "old-key")
+    monkeypatch.setenv("MY_INGEST_TOKEN", "old-telemetry")
+    private_before = _seed_private_environment(job_dir)
+    monkeypatch.setenv("MY_KEY", "new-key")
+    monkeypatch.setenv("MY_INGEST_TOKEN", "new-telemetry")
     collect = SlurmExecutor.recovery_evidence
 
     def collect_then_change(self, *args, **kwargs):
@@ -1287,6 +1454,8 @@ def test_recover_revalidates_the_collected_accounting_inside_the_resubmit_lock(
         if change == "config_before_lock" and any(".gym_resubmit.lock" in command for command in commands):
             resolved = job_dir.parent / RESOLVED_CONFIG_NAME
             resolved.write_text(resolved.read_text().replace("16:00:00", "17:00:00"))
+        if change == "scheduler_default_before_lock" and any(".gym_resubmit.lock" in command for command in commands):
+            monkeypatch.setenv("SBATCH_QOS", "fake-ambient-qos")
         return original_run(self, commands, *args, **kwargs)
 
     monkeypatch.setattr(LocalConnection, "run", run_with_late_config_change)
@@ -1298,12 +1467,27 @@ def test_recover_revalidates_the_collected_accounting_inside_the_resubmit_lock(
         assert out.dispatched == "resubmit" and _sbatch_env(slurm_bin)["GYM_RESUBMIT_KEEP_BUDGET"] == "1"
         # The one eligible submit records the sacct-accounted chain walltime once.
         assert (job_dir / ".gym_accumulated_walltime").read_text() == "7260\n"
+        private_after = (private_directory(job_dir) / "environment.json").read_bytes()
+        assert private_after != private_before
+        assert json.loads(private_after)["forwarded"]["MY_KEY"] == "new-key"
+        assert json.loads(private_after)["forwarded"]["MY_INGEST_TOKEN"] == "new-telemetry"
+        assert "MY_KEY" not in _sbatch_env(slurm_bin) and "MY_INGEST_TOKEN" not in _sbatch_env(slurm_bin)
+        assert "new-key" not in (slurm_bin / "env").read_text()
+        assert "new-telemetry" not in (slurm_bin / "env").read_text()
         return
-    with pytest.raises(RuntimeError, match="changed since the recovery evidence was collected"):
+    message = (
+        "cannot safely inherit scheduler option SBATCH_QOS"
+        if change == "scheduler_default_before_lock"
+        else "changed since the recovery evidence was collected"
+    )
+    with pytest.raises(RuntimeError, match=message) as error:
         recover(*_handle(job_dir))
+    if change == "scheduler_default_before_lock":
+        assert "fake-ambient-qos" not in str(error.value)
     assert not (slurm_bin / "env").exists()
     assert (job_dir / "job.sh").read_text() == job_sh
     assert {name: (job_dir / name).read_bytes() for name in counters} == counters
     assert not (job_dir / ".gym_resubmit.lock").exists()
     assert (job_dir / ".gym_chain_incomplete").exists() == (change == "incomplete")
     assert _record(job_dir).benchmark_job("gsm8k").job_id == "100"
+    assert (private_directory(job_dir) / "environment.json").read_bytes() == private_before

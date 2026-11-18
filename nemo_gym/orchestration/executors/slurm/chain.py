@@ -81,6 +81,14 @@ from nemo_gym.orchestration.executors.otel import (
     collector_config_path,
     otel_active,
     render_collector_config,
+    resolve_token,
+    validate_destination,
+)
+from nemo_gym.orchestration.executors.private_environment import (
+    PRIVATE_ENVIRONMENT_MARKER,
+    driver_selection_check,
+    scheduler_environment_check,
+    stage_commands,
 )
 from nemo_gym.orchestration.executors.slurm.reader import (
     COLLECTOR_NOT_RUN,
@@ -114,11 +122,11 @@ from nemo_gym.orchestration.executors.slurm.scheduler import (
     _partition_time_limit,
     _sbatch_command,
     _slurm_duration,
-    _submission_exports,
 )
 from nemo_gym.orchestration.executors.slurm.script import (
     COLLECTOR_LOCAL_DIR_MARKER,
     build_sbatch_script,
+    task_environments,
 )
 from nemo_gym.orchestration.jobs import (
     ARTIFACTS_DIRNAME,
@@ -718,7 +726,8 @@ class ChainRecovery:
                 or server_spinup_timeout_seconds is not None
                 else ([], {})
             )
-            exports = _submission_exports(config)
+            resolve_token(config)
+            validate_destination(config)
             # A resubmit can lose access to the remote token. Refresh only this benchmark's
             # collector config, inside the lock and after refusing any active job in its dir.
             collector_update = []
@@ -794,8 +803,7 @@ class ChainRecovery:
             # budget (see RESUBMIT_ENV and KEEP_BUDGET_ENV).
             results = _parse_sbatch_results(
                 output := conn.run(
-                    exports
-                    + [
+                    [
                         'fail() { echo "Error: $*" >&2; exit 1; }',
                         f"cd {shlex.quote(str(job_dir))} || fail 'cannot enter the job dir'",
                         # bash's noclobber creates the lock with O_EXCL, which is atomic on shared filesystems
@@ -821,8 +829,12 @@ class ChainRecovery:
                         'fail "A job of this run is still pending or running in $PWD."; done',
                         # Before any job.sh, collector, counter or sbatch change, under the same lock.
                         *snapshot_check,
+                        scheduler_environment_check(),
                         # The checks below then read the re-rendered job.sh; the exit trap restores it unless queued.
                         *repin_commands,
+                        f"grep -qxF -- {shlex.quote(PRIVATE_ENVIRONMENT_MARKER)} job.sh || fail "
+                        "'job.sh uses an incompatible private environment contract; submit a new run with this launcher'",
+                        *driver_selection_check(config, job_dir / "job.sh"),
                         *(
                             [
                                 f"grep -qxF -- {shlex.quote(RETRY_EXTENSION_MARKER)} job.sh || fail "
@@ -872,6 +884,11 @@ class ChainRecovery:
                         "sed -i 's/GYM_CMD+=(++resubmit=True)/GYM_CMD+=(++resubmit=True ++resume_from_cache=True)/g' "
                         "job.sh || fail 'cannot normalize resubmit flags in job.sh'; fi",
                         *collector_update,
+                        *stage_commands(
+                            config,
+                            task_environments(config, benchmark, config.compute[record.cluster], job_dir),
+                            job_dir,
+                        ),
                         *(
                             [
                                 f"if {{ grep -qxF -- {shlex.quote(PROLOGUE_MARKER)} job.sh "

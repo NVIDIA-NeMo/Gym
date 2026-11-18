@@ -253,7 +253,12 @@ def _checked_holding_input(cmd: list[str], *, input: str, context: str = "") -> 
     return output.get("stdout", "")
 
 
+def is_local_hostname(hostname: str | None) -> bool:
+    """Whether Connection will execute directly on this exact host."""
+    return hostname is None or hostname == socket.gethostname()
+
+
 def get_connection(hostname: str | None) -> Connection:
-    if hostname is None or hostname == socket.gethostname():
+    if is_local_hostname(hostname):
         return LocalConnection()
     return SSHConnection(hostname)

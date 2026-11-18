@@ -80,7 +80,7 @@ def test_a_raise_above_the_partition_max_time_runs_max_time_segments_under_the_r
         "note": "--max-walltime 12:00:00 exceeds partition batch MaxTime 4:00:00: each segment requests 04:00:00 "
         "and the chain continues under the 12:00:00 cap",
     }
-    assert "#SBATCH --time=04:00:00" in (job_dir / "job.sh").read_text()
+    assert '#SBATCH --time="04:00:00"' in (job_dir / "job.sh").read_text()
     saved = yaml.safe_load((run_dir / "resolved-config.yaml").read_text())
     assert saved["compute"]["cluster"]["walltime"] == "04:00:00"
     assert saved["driver"]["benchmarks"]["gsm8k"]["resumable"]["max_walltime"] == "12:00:00"
@@ -104,7 +104,7 @@ def test_a_raise_on_a_run_without_a_chain_cap_sets_the_cap_to_the_raise(tmp_path
     assert out.decision.reason.endswith("; walltime cap set to 12:00:00 for this plan (the run had none)")
     plan = out.walltime_plan
     assert (plan["segment"], plan["max_walltime_from"], plan["max_walltime_to"]) == (segment, None, "12:00:00")
-    assert f"#SBATCH --time={segment}" in (job_dir / "job.sh").read_text()
+    assert f'#SBATCH --time="{segment}"' in (job_dir / "job.sh").read_text()
     saved = yaml.safe_load((run_dir / "resolved-config.yaml").read_text())
     assert saved["driver"]["benchmarks"]["gsm8k"]["resumable"]["max_walltime"] == "12:00:00"
     assert saved["compute"]["cluster"]["walltime"] == segment
@@ -124,7 +124,7 @@ def test_a_raise_the_partition_takes_renders_as_before(tmp_path, slurm_bin):
         None,
         None,
     )
-    assert "#SBATCH --time=12:00:00" in (job_dir / "job.sh").read_text()
+    assert '#SBATCH --time="12:00:00"' in (job_dir / "job.sh").read_text()
 
 
 def test_an_unknown_max_time_keeps_the_whole_raise_and_says_so(tmp_path, slurm_bin):
@@ -136,7 +136,7 @@ def test_an_unknown_max_time_keeps_the_whole_raise_and_says_so(tmp_path, slurm_b
     assert out.walltime_plan["segment"] == "12:00:00" and out.walltime_plan["max_time"] is None
     assert out.walltime_plan["note"].startswith("partition (default) MaxTime unknown (")
     assert out.walltime_plan["note"].endswith("each segment requests the whole --max-walltime 12:00:00 as before")
-    assert "#SBATCH --time=12:00:00" in (job_dir / "job.sh").read_text()
+    assert '#SBATCH --time="12:00:00"' in (job_dir / "job.sh").read_text()
 
 
 def test_a_partition_too_short_for_one_segment_is_refused_before_the_evidence_read(tmp_path, slurm_bin, monkeypatch):
