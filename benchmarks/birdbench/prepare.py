@@ -48,7 +48,7 @@ from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql, ensure_bi
 
 BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
-DIALECTS = ("sqlite", "spark", "postgres")
+DIALECTS = ("sqlite", "spark", "postgres", "snowflake")
 SPLITS = ("dev", "train")
 
 VERIFIED_TRAIN_URL = "https://raw.githubusercontent.com/uiuc-kang-lab/ReViSQL/main/data/bird-verified-train.json"
@@ -159,8 +159,8 @@ def prepare(
             the default, matching this benchmark's original pre-``dscp`` behavior). E.g.
             ``"name,col_dscp"`` uses both fields, name first. Blank fields are dropped. See
             ``build_db_values._combine_description``.
-        dialect: SQL dialect the ``sql_context`` is rendered for: ``sqlite`` (default), ``spark`` or ``postgres``. Each dialect
-            writes its own file, see ``output_fpath_for``.
+        dialect: SQL dialect the ``sql_context`` is rendered for: ``sqlite`` (default), ``spark``, ``postgres`` or
+            ``snowflake``. Each dialect writes its own file, see ``output_fpath_for``.
         split: ``dev`` (default; the 1534-task benchmark) or ``train`` (the uberset, see module docstring).
         train_dir: ``split="train"`` only: extracted BIRD ``train/`` directory holding ``train.json`` and
             ``train_databases/``. Default: downloaded by ``ensure_bird_train()``.

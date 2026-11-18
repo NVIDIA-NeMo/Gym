@@ -4,7 +4,7 @@ Execution-based text-to-SQL on BIRD, bound to the `bird_sql` resource server. Tw
 
 | Choice | Values | What it controls |
 |---|---|---|
-| **dialect** | `sqlite` (default), `spark`, `postgres` | the SQL the model writes, the prompt, and the engine that runs it |
+| **dialect** | `sqlite` (default), `spark`, `postgres`, `snowflake` | the SQL the model writes, the prompt, and the engine that runs it |
 | **split** | `dev` (default), `train` | the questions and databases: `dev` is the 1534-task benchmark, `train` is BIRD's train split (not an evaluation set) |
 
 Reward is binary: unordered result-set equality between the model's query and BIRD's gold query. Metrics are overall
@@ -30,9 +30,10 @@ Python dependencies are declared and locked, so there is nothing to `pip install
   `uv run --project benchmarks/birdbench` (see [Preparing data](#preparing-data)).
 - **The server** runs in `resources_servers/bird_sql`'s locked environment, which `gym` builds on first start. It
   includes `pyspark` and `sqlglot` for the Spark dialect (`pyspark` runs the model's SQL, `sqlglot` checks that it is a
-  single `SELECT`/`WITH`), and `psycopg` and `psycopg_pool` for the PostgreSQL dialect; the SQLite dialect never
-  imports them. The preparation project also has `psycopg`: `prepare --dialect postgres` renders the column types the
-  loader will create, without connecting.
+  single `SELECT`/`WITH`), `psycopg` and `psycopg_pool` for the PostgreSQL dialect, and `fakesnow` (pinned to 0.12.1)
+  and `snowflake-connector-python` for the Snowflake dialect; the SQLite dialect never imports them. The preparation
+  project also has `psycopg`: `prepare --dialect postgres` renders the column types the loader will create, without
+  connecting.
 
 What is left is outside Python:
 
@@ -62,13 +63,17 @@ export BIRD_PG_ADMIN_DSN=postgresql://bird:<admin password>@127.0.0.1:5432/bird
 export BIRD_PG_DSN=postgresql://bird_reader:<reader password>@127.0.0.1:5432/bird
 ```
 
+**Snowflake dialect** needs no account and no server: by default the model's SQL runs on a local stand-in, `fakesnow`
+(Snowflake SQL transpiled by `sqlglot` and run on DuckDB), which the server builds on first start (dev takes about
+16 s). See the Snowflake bullet below for what that stand-in gets wrong.
+
 ## Dialects and splits
 
-| | sqlite | spark | postgres |
-|---|---|---|---|
-| Prompt | `prompts/default_sqlite.yaml` | `prompts/default_spark.yaml` | `prompts/default_postgres.yaml` |
-| `sql_context` rendered as | SQLite schema | Spark schema: `` `db_id`.`table` `` names, backtick-quoted identifiers, Spark column types | PostgreSQL schema: `"db_id"."table"` names, double-quoted identifiers, column names in lower case as loaded, the loaded column types |
-| Model's SQL runs on | the SQLite databases | a local PySpark copy (Parquet under `resources_servers/bird_sql/.bird_sql/spark_warehouse[_train]/`, built on first start) | a PostgreSQL server you provide (one schema per `db_id`, loaded on first start when `BIRD_PG_ADMIN_DSN` is set) |
+| | sqlite | spark | postgres | snowflake |
+|---|---|---|---|---|
+| Prompt | `prompts/default_sqlite.yaml` | `prompts/default_spark.yaml` | `prompts/default_postgres.yaml` | `prompts/default_snowflake.yaml` |
+| `sql_context` rendered as | SQLite schema | Spark schema: `` `db_id`.`table` `` names, backtick-quoted identifiers, Spark column types | PostgreSQL schema: `"db_id"."table"` names, double-quoted identifiers, column names in lower case as loaded, the loaded column types | Snowflake schema: `"db_id"."table"` names, double-quoted identifiers in BIRD's case, Snowflake column types |
+| Model's SQL runs on | the SQLite databases | a local PySpark copy (Parquet under `resources_servers/bird_sql/.bird_sql/spark_warehouse[_train]/`, built on first start) | a PostgreSQL server you provide (one schema per `db_id`, loaded on first start when `BIRD_PG_ADMIN_DSN` is set) | a local, read-only stand-in (`fakesnow` on DuckDB, under `resources_servers/bird_sql/.bird_sql/snowflake[_train]/`, built on first start); no Snowflake account |
 
 | | dev | train |
 |---|---|---|
@@ -94,9 +99,48 @@ export BIRD_PG_DSN=postgresql://bird_reader:<reader password>@127.0.0.1:5432/bir
   their original case: a model that copies such a name inside double quotes names a column that doesn't exist (61 of
   1,534 dev questions quote one, or name one that needs quotes anyway). `postgres_gold_check.py` grades sqlglot transpiles of
   the golds: 91% match after three mechanical fixes (identifier case, double-quoted strings, `REAL`).
+- **Snowflake execution, on a local stand-in.** Nothing here has run on a real Snowflake account. One schema per
+  `db_id` in a read-only DuckDB file, queried through `fakesnow`, single-threaded (a parallel float `SUM` changes from
+  run to run), with DuckDB's file and network access off. Tables and columns keep BIRD's names, created quoted, so a
+  model must double-quote mixed- and lower-case names exactly, as it would on Snowflake. Before the query runs, a
+  static check refuses what Snowflake would refuse but DuckDB would run: more than one statement or a non-query,
+  identifiers that don't resolve under Snowflake's rules (unquoted means upper case), and a few SQLite-only spellings
+  (a list not yet checked against an account). Known stand-in differences: `DATEADD`/`DATE_TRUNC` on a date return a
+  timestamp, `TO_CHAR` can drop its format, date functions on the `VARCHAR` date columns fail without an explicit
+  `TO_DATE`, DuckDB refuses implicit text-to-number conversion where Snowflake casts, DuckDB-only functions run, and
+  division by zero returns `inf`. `snowflake_gold_check.py` grades sqlglot transpiles of the golds: 93% (1,430 of
+  1,534) match after one mechanical fix, identifier case (a second, double-quoted names to strings, fires on no dev
+  gold); its failure classes show where the stand-in, not the model, decides the score. The server's
+  `snowflake_engine: snowflake` points the same grader at a real, already-loaded account (`snowflake_connection_name`
+  in the connector's `connections.toml`); a calibration run against an account is planned.
 - **Caveat.** Because the gold is the answer under SQLite semantics, a correct Spark query can differ from it when the
   gold relies on SQLite behavior (bare `GROUP BY` columns, integer division, case-insensitive `LIKE`, loose
   text/number comparison). `spark_gold_check.py` estimates about 8% of dev (121 of 1534) are affected.
+
+### If you use the Snowflake dialect to validate generated training SQL
+
+A query that passes on the stand-in is not proven to pass on Snowflake, and a correct one can fail. Read a pass or a
+failure there as a filter with known holes, not as a label:
+
+- **Always go through the grader** (`bird_sql`'s verify, or `eval_utils.execute_and_compare_snowflake`), never fakesnow
+  directly. The grader's static check is what refuses unquoted or miscased names, SQLite-only spellings and non-queries;
+  DuckDB alone accepts them.
+- **Correct Snowflake SQL that can fail on the stand-in:**
+  - Date functions (`YEAR`, `EXTRACT`, `DATE_PART`, `DATEDIFF`) on BIRD's `VARCHAR` date columns fail; an explicit
+    `TO_DATE(...)` or `::DATE` works. Snowflake likely casts the string implicitly (to confirm on a real account).
+    Probably the largest class for model SQL: 181 of 1,534 dev golds use date functions. Filtering on the stand-in
+    keeps only date SQL with explicit casts, which also runs on Snowflake.
+  - `DATEADD`/`DATE_TRUNC` on a date return a timestamp (the value gains `00:00:00`), and `TO_CHAR` can drop its format.
+  - DuckDB refuses implicit text-to-number conversion (`'2026' - '1990'`, `varchar_col > 0`) where Snowflake casts.
+- **Wrong Snowflake SQL that can pass:** functions DuckDB has and Snowflake doesn't (for example `regexp_matches`,
+  `strptime`, `epoch_ms`, `list_value`) run, because only a short SQLite-only list is refused; division by zero
+  returns `inf` instead of failing.
+- **Leave out the questions the stand-in can't confirm.** Translated golds fail on 104 of 1,534 dev questions;
+  `snowflake_gold_check.py` writes their ids by class to `failures_by_class.json` (the `id` in the prepared file). That
+  count only covers the gold's own translation: sqlglot adds explicit date casts, so the date gaps above barely show in
+  it, although model SQL hits them often. For train, run `snowflake_gold_check.py --split train` first to get its
+  exclusion list; it has only been run on a small sample, so its build time and size for the full train split are not
+  yet measured.
 
 ## Preparing data
 
@@ -107,6 +151,7 @@ databases first if needed:
 uv run --project benchmarks/birdbench python -m benchmarks.birdbench.prepare                                  # dev,   sqlite (the defaults)
 uv run --project benchmarks/birdbench python -m benchmarks.birdbench.prepare --dialect spark                  # dev,   spark
 uv run --project benchmarks/birdbench python -m benchmarks.birdbench.prepare --dialect postgres               # dev,   postgres (no server needed)
+uv run --project benchmarks/birdbench python -m benchmarks.birdbench.prepare --dialect snowflake              # dev,   snowflake
 uv run --project benchmarks/birdbench python -m benchmarks.birdbench.prepare --split train                    # train, sqlite
 uv run --project benchmarks/birdbench python -m benchmarks.birdbench.prepare --split train --dialect spark    # train, spark
 ```
@@ -152,6 +197,7 @@ model, `--model-url` its base URL (e.g. `http://localhost:8000/v1`) and `--model
 ./benchmarks/birdbench/eval.sh --model <name>                                 # dev,   sqlite (the defaults)
 ./benchmarks/birdbench/eval.sh --model <name> --dialect spark                 # dev,   spark
 ./benchmarks/birdbench/eval.sh --model <name> --dialect postgres              # dev,   postgres
+./benchmarks/birdbench/eval.sh --model <name> --dialect snowflake             # dev,   snowflake (local stand-in)
 ./benchmarks/birdbench/eval.sh --model <name> --split train                   # train, sqlite
 ./benchmarks/birdbench/eval.sh --model <name> --split train --dialect spark   # train, spark
 ```

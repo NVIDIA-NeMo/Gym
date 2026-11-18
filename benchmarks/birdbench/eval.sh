@@ -29,7 +29,7 @@
 #                                         config that defines `policy_model`, referenced by
 #                                         birdbench_bird_sql_simple_agent's model_server field --
 #                                         required, same as `gym env start --model-type ...`)
-#   --dialect sqlite|spark|postgres       Default: sqlite. The SQL dialect the model writes. Selects the prepared
+#   --dialect sqlite|spark|postgres|snowflake  Default: sqlite. The SQL dialect the model writes. Selects the prepared
 #                                           file (data/birdbench_<dialect>_<split>.jsonl), the prompt
 #                                           (prompts/default_<dialect>.yaml), what
 #                                           `prepare` renders, and the engine the server runs the model's SQL on.
@@ -37,6 +37,8 @@
 #                                           resources_servers/bird_sql/.venv -- see the "Installation" section of
 #                                           README.md. `postgres` needs a PostgreSQL server: BIRD_PG_DSN is the
 #                                           grader's (read-only) DSN, and BIRD_PG_ADMIN_DSN, if set, loads the data.
+#                                           `snowflake` runs on a local stand-in (fakesnow, a dependency of the
+#                                           bird_sql server; no Snowflake account), built on first start.
 #   --split dev|train                      Default: dev. Which BIRD split's questions and databases to use. `train` is the
 #                                            ReViSQL-verified "uberset" of BIRD train (~9 GB download on first use; see
 #                                            README.md, "Dialects and splits") and is meant for generating training
@@ -159,8 +161,9 @@ case "${DIALECT}" in
             exit 1
         fi
         ;;
+    snowflake) ;;
     *)
-        echo "Unsupported --dialect '${DIALECT}'; expected sqlite, spark or postgres." >&2
+        echo "Unsupported --dialect '${DIALECT}'; expected sqlite, spark, postgres or snowflake." >&2
         exit 1
         ;;
 esac
@@ -179,8 +182,9 @@ if [[ "${DIALECT}" != "sqlite" || "${SPLIT}" != "dev" ]]; then
         fi
     fi
     if [[ "${SPLIT}" != "dev" ]]; then
-        # Train has its own db_ids: keep its Spark warehouse apart from dev's.
+        # Train has its own db_ids: keep its Spark warehouse and Snowflake stand-in apart from dev's.
         DIALECT_ARGS+=("+birdbench_bird_sql_resources_server.resources_servers.bird_sql.spark_warehouse_dir=resources_servers/bird_sql/.bird_sql/spark_warehouse_${SPLIT}")
+        DIALECT_ARGS+=("+birdbench_bird_sql_resources_server.resources_servers.bird_sql.snowflake_db_dir=resources_servers/bird_sql/.bird_sql/snowflake_${SPLIT}")
     fi
 fi
 mkdir -p "${OUTPUT_DIR}"
