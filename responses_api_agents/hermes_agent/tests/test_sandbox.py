@@ -1404,7 +1404,9 @@ async def test_context_limit_keeps_partial_work_verifiable(agent, state, capture
 
     # The ladder reports a context limit as incomplete without a failure kind; main left a stale model_context_limit.
     assert episode.response.status == "incomplete"
-    assert episode.response.error.message.startswith("Context length exceeded")
+    # A graded response carries no error; Hermes's own error text stays in its metadata.
+    assert episode.response.error is None
+    assert episode.response.metadata["hermes_error"].startswith("Context length exceeded")
     assert episode.response.output[-1].content[0].text == "Partial answer"
     assert "ng_agent_outcome" not in episode.response.metadata
     assert episode.response.metadata["ng_agent_stop_reason"] == "context_limit"
@@ -2100,3 +2102,22 @@ async def test_invalid_images_fail_before_execution(agent, state, role, image, m
     )
     assert recovered.status == "completed"
     (agent._run_sandbox_episode if sandbox else agent._create_response).assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "error",
+    ["First response truncated due to output length limit", "Response truncated due to output length limit"],
+)
+@pytest.mark.parametrize("messages", [_ASKED, _REPLIED], ids=["before-a-reply", "after-a-reply"])
+async def test_each_hermes_truncation_error_is_an_output_limit(agent, state, error, messages):
+    state.execute = AsyncMock(return_value={"result": {"failed": True, "error": error, "messages": messages}})
+
+    episode = await agent._run_sandbox_episode(
+        body=NeMoGymResponseCreateParamsNonStreaming(input="task"), agent_session_id="session", state=state
+    )
+
+    assert episode.response.status == "incomplete"
+    assert episode.response.metadata["ng_agent_stop_reason"] == "output_limit"
+    assert episode.response.incomplete_details.reason == "max_output_tokens"
+    assert "ng_agent_outcome" not in episode.response.metadata
+    assert agent_outcome_policy(episode.response) == OutcomeAction.VERIFY

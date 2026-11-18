@@ -34,6 +34,7 @@ from nemo_gym.server_runtime import DirectHTTPToolAccess
 from responses_api_agents.stirrup_agent.app import StirrupAgentWrapper, StirrupAgentWrapperConfig, _observations
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent, NeMoUserMessage
 from responses_api_agents.stirrup_agent.nemo_client import DynamicMaxTokensChatCompletionsClient
+from responses_api_agents.stirrup_agent.sandbox import StirrupSessionState
 from responses_api_agents.stirrup_agent.stirrup_utils import convert_stirrup_history_to_output_items
 
 
@@ -661,3 +662,42 @@ class TestObservations:
 
         assert bundle.records == []
         assert [gap.code for gap in bundle.gaps] == ["observation_capture_failed"]
+
+
+_OUTPUT_ABSENT = SimpleNamespace(return_code=0, stdout="absent\n", error_type=None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "receipt,probe,expected,probed",
+    [
+        # The runner was killed or exited nonzero on its own, and the sandbox confirms there is no output.
+        ({"return_code": 137}, _OUTPUT_ABSENT, 137, True),
+        ({"return_code": 3}, _OUTPUT_ABSENT, 3, True),
+        # The probe found the output, or could not tell: the missing output stays a failure.
+        ({"return_code": 137}, SimpleNamespace(return_code=0, stdout="present\n", error_type=None), None, True),
+        ({"return_code": 137}, SimpleNamespace(return_code=-1, stdout=None, error_type="timeout"), None, True),
+        ({"return_code": 137}, SimpleNamespace(return_code=2, stdout="", error_type=None), None, True),
+        ({"return_code": 137}, ConnectionError("provider unavailable"), None, True),
+        # A clean exit, a runner that never started, the deadline, a supervisor error or no receipt: no probe.
+        ({"return_code": 0}, _OUTPUT_ABSENT, None, False),
+        ({"return_code": None}, _OUTPUT_ABSENT, None, False),
+        ({"return_code": 127}, _OUTPUT_ABSENT, None, False),
+        ({"return_code": 137, "timed_out": True}, _OUTPUT_ABSENT, None, False),
+        ({"return_code": 1, "error": "supervisor failed"}, _OUTPUT_ABSENT, None, False),
+        (None, _OUTPUT_ABSENT, None, False),
+    ],
+)
+async def test_missing_output_is_a_run_without_a_result_only_after_the_runner_ended_on_its_own(
+    receipt, probe, expected, probed
+) -> None:
+    sandbox = SimpleNamespace(exec=AsyncMock())
+    if isinstance(probe, Exception):
+        sandbox.exec.side_effect = probe
+    else:
+        sandbox.exec.return_value = probe
+    cleanup = None if receipt is None else {"cleanup_confirmed": True, "error": None, "timed_out": False, **receipt}
+    state = SimpleNamespace(session=SimpleNamespace(cleanup=cleanup, sandbox=sandbox))
+
+    assert await StirrupSessionState._exit_without_output(state, "/tmp/session/output.json") == expected
+    assert sandbox.exec.await_count == (1 if probed else 0)

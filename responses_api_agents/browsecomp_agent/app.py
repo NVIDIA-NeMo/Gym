@@ -27,9 +27,11 @@ from uuid import uuid4
 
 import aiohttp
 from fastapi import HTTPException, Request, Response
+from openai.types.responses import ResponseError
 from pydantic import ConfigDict, Field, JsonValue, ValidationError
 
 from nemo_gym.agents import (
+    HARNESS_STEP_LIMIT_METADATA_KEY,
     AgentCloseSessionResponse,
     AgentOutcome,
     AgentSeedRejectedError,
@@ -656,7 +658,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     else AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
                 )
                 failed = failure.response.model_copy(
-                    update={"error": {"code": "server_error", "message": _model_error_message(error)}}
+                    update={"error": ResponseError(code="server_error", message=_model_error_message(error))}
                 )
                 evidence = RunEvidence(
                     has_result=False, timed_out=False, model_replied=replied or failure.replied, error=outcome
@@ -665,12 +667,25 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             timed_out = bool(getattr(model_response, "timed_out", False))
             answer = re.sub(r"<think>.*?</think>", "", self._last_message_text(model_response), flags=re.DOTALL)
             if answer.strip() or timed_out or attempt == attempts - 1:
+                # The loop records why it ended (``_responses_impl``): a length cut is ``max_output_tokens`` when the
+                # model used its whole output budget and ``context_full`` when the context window filled first.
+                loop_stop = None if timed_out else getattr(model_response, "stop_reason", None)
+                model_limit = "output" if loop_stop == "max_output_tokens" else None
+                if loop_stop == "max_steps" and not answer.strip():
+                    model_limit = "turns"
+                elif loop_stop == "max_steps":
+                    # An answer at the step limit (the last reply's text, or the progress board's recovered answer)
+                    # is graded as the run's result; the mark says the limit was reached.
+                    model_response.metadata = {
+                        **(model_response.metadata or {}),
+                        HARNESS_STEP_LIMIT_METADATA_KEY: "true",
+                    }
                 evidence = RunEvidence(
-                    has_result=True,
+                    has_result=model_limit != "turns",
                     timed_out=timed_out,
                     model_replied=replied or bool(model_response.output),
-                    # The final reply stopped at the model's output limit.
-                    model_limit="output" if model_response.status == "incomplete" and not timed_out else None,
+                    context_limit=loop_stop == "context_full",
+                    model_limit=model_limit,
                 )
                 return self.finish_response(model_response, evidence)
             replied = True

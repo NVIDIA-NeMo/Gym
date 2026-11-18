@@ -620,7 +620,8 @@ def test_a_context_overflow_the_model_server_propagates_answers_incomplete(agent
     assert response.metadata["ng_agent_stop_reason"] == "context_limit"
     assert "ng_agent_outcome" not in response.metadata
     assert agent_outcome_policy(response) == OutcomeAction.VERIFY
-    assert "context_length_exceeded" in response.error.message
+    # A graded response carries no error (finish_response clears it).
+    assert response.error is None
 
 
 class _FakeSandbox:

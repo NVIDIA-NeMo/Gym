@@ -334,7 +334,80 @@ def test_a_context_overflow_is_incomplete_and_graded(replied: bool, monkeypatch:
     assert agent_outcome_policy(response) == OutcomeAction.VERIFY
     # The trajectory before the overflow is kept for grading.
     assert [item.type for item in response.output] == (["function_call", "function_call_output"] if replied else [])
-    assert "context_length_exceeded" in response.error.message
+    # A graded response carries no error (finish_response clears it).
+    assert response.error is None
+
+
+def _length_cut(output_tokens: int, budget: int) -> dict:
+    """A length-cut reply; below its output budget it is how the model server answers a context overflow."""
+    reply = _model_response()
+    reply.update(status="incomplete", incomplete_details={"reason": "max_output_tokens"}, max_output_tokens=budget)
+    reply["usage"] = {
+        "input_tokens": 10,
+        "input_tokens_details": {"cached_tokens": 0},
+        "output_tokens": output_tokens,
+        "output_tokens_details": {"reasoning_tokens": 0},
+        "total_tokens": 10 + output_tokens,
+    }
+    return reply
+
+
+@pytest.mark.parametrize(
+    "replies,config,loop_stop,status,stop_reason",
+    [
+        (
+            [_model_response(_tool_call("ls")), _length_cut(100, 100)],
+            {},
+            "max_output_tokens",
+            "incomplete",
+            "output_limit",
+        ),
+        ([_model_response(_tool_call("ls")), _length_cut(0, 100)], {}, "context_full", "incomplete", "context_limit"),
+        ([_model_response(_tool_call("ls"))] * 2, {"max_steps": 2}, "max_steps", "incomplete", "agent_limit"),
+        (
+            [_model_response(_tool_call("ls")), _model_response(_message("Answer: 42"), _tool_call("ls"))],
+            {"max_steps": 2},
+            "max_steps",
+            "completed",
+            "completed",
+        ),
+        ([_model_response(_tool_call("ls"))], {"rollout_timeout_s": 0.0}, "timeout", "incomplete", "timeout"),
+    ],
+    ids=["max_output_tokens", "context_full", "max_steps", "max_steps-with-an-answer", "deadline"],
+)
+def test_each_loop_end_reaches_its_outcome_ladder_row(
+    replies: list, config: dict, loop_stop: str, status: str, stop_reason: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, _, _ = _agent(list(replies), monkeypatch, **config)
+    assert client.post("/v1/agent_sessions", json=_seed().model_dump(mode="json")).status_code == 200
+
+    reply = client.post(ROUTE, json=QUESTION)
+
+    assert reply.status_code == 200, reply.text
+    response = NeMoGymResponse.model_validate(reply.json())
+    assert response.model_extra["stop_reason"] == loop_stop
+    assert (response.status, response.metadata["ng_agent_stop_reason"]) == (status, stop_reason)
+    assert "ng_agent_outcome" not in response.metadata
+    assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+    # Only an answer given at the step limit carries the step-limit mark; the environment decides whether it counts.
+    assert ("harness_step_limit_reached" in response.metadata) == (stop_reason == "completed")
+    if stop_reason == "output_limit":
+        assert response.incomplete_details.reason == "max_output_tokens"
+
+
+def test_a_400_after_an_empty_answer_retry_counts_the_earlier_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The retried attempt's own trajectory is empty, but the model already replied: not a rejected first request."""
+    client, server_client, _ = _agent(
+        [_model_response(_message("<think>no answer</think>")), 400], monkeypatch, max_run_retries=2
+    )
+    assert client.post("/v1/agent_sessions", json=_seed().model_dump(mode="json")).status_code == 200
+
+    response = NeMoGymResponse.model_validate(client.post(ROUTE, json=QUESTION).json())
+
+    assert server_client.post.await_count == 2
+    assert response.status == "failed"
+    assert response.metadata["ng_agent_outcome"] == '{"failure_kind":"model_request_error","status_code":400}'
+    assert agent_outcome_policy(response) == OutcomeAction.VERIFY
 
 
 def test_a_model_transport_error_keeps_the_trajectory_and_is_retried(monkeypatch: pytest.MonkeyPatch) -> None:

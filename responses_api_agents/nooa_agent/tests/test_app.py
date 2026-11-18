@@ -319,6 +319,9 @@ async def test_policy_termination_remains_a_gradable_response(
     else:
         assert response.status == "incomplete"
         assert response.error is None
+        # NOOA's own limits name their ladder row: the output budget, or its turn/step limits.
+        output_limit = reason is NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED
+        assert response.metadata["ng_agent_stop_reason"] == ("output_limit" if output_limit else "agent_limit")
     assert agent_outcome_policy(response) == OutcomeAction.VERIFY
     assert response.output == partial.episode.response.output
     assert "_ng_failure_class" not in response.model_dump(mode="json")
