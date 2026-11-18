@@ -909,12 +909,25 @@ class _UnavailableTaskImage(Exception):
 def _fetch_image(url: str) -> Any:
     from PIL import Image
 
-    response = httpx.get(url, timeout=60, follow_redirects=True)
-    if response.status_code in (404, 410):
-        raise _UnavailableTaskImage(f"Candidate image is absent: HTTP {response.status_code}")
-    response.raise_for_status()
+    if url.lower().startswith("data:"):
+        # Lazy-loaded pages also contain inline placeholders. Decode inline
+        # bitmaps locally; unsupported image bytes follow the same absence
+        # path as an undecodable HTTP image rather than masking the rollout.
+        try:
+            header, payload = url.split(",", 1)
+            content = urllib.parse.unquote_to_bytes(payload)
+            if header.lower().endswith(";base64"):
+                content = base64.b64decode(content, validate=True)
+        except ValueError as exc:
+            raise _UnavailableTaskImage("Candidate response is not a decodable image") from exc
+    else:
+        response = httpx.get(url, timeout=60, follow_redirects=True)
+        if response.status_code in (404, 410):
+            raise _UnavailableTaskImage(f"Candidate image is absent: HTTP {response.status_code}")
+        response.raise_for_status()
+        content = response.content
     try:
-        return Image.open(io.BytesIO(response.content)).convert("RGB")
+        return Image.open(io.BytesIO(content)).convert("RGB")
     except (OSError, ValueError) as exc:
         raise _UnavailableTaskImage("Candidate response is not a decodable image") from exc
 
