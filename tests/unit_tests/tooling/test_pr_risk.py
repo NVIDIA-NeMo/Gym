@@ -141,5 +141,23 @@ def test_cli_prints_the_tier_on_stdout(tmp_path: Path) -> None:
     assert result.stderr == "150 changed lines in 1 non-doc files\n"
 
 
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs FIFOs")
+def test_special_file_initializer_does_not_block(tmp_path: Path) -> None:
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    base, head = worktrees(tmp_path, {}, {"scripts/a.py": "x\n"})
+    (head / "nemo_gym/extra").mkdir()
+    (head / "nemo_gym/extra/__init__.py").symlink_to(fifo)
+    commit(head, {})
+    result = subprocess.run(
+        [sys.executable, SCRIPT, "--base", base, "--head", head],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    assert result.stdout == "low\n"
+
+
 def test_repository_public_surface_is_discovered() -> None:
     assert "nemo_gym/core/__init__.py" in pr_risk.public_surface(ROOT)
