@@ -128,7 +128,7 @@ The crops and plots that OpenCode's `read` returns are images added between mode
 
 <Note>
 
-Under NeMo RL, the sandbox can reach Gym's head server. NeMo RL sets the head server's host to the node address, which is the policy host whose every port `model_only` opens. The head server's `/global_config_dict_yaml` returns the merged config, including any key passed literally. Other environments' servers in an RL blend that do not set `127.0.0.1` get the node address too. Allowing only the model server's port needs a change in Gym's core.
+Under NeMo RL, the sandbox can reach Gym's head server. NeMo RL sets the head server's host to the node address, which is the policy host whose every port `model_only` opens. The head server's `/global_config_dict_yaml` returns the merged config with credential values masked (see `head_server_serve_credentials` in the [configuration reference](/main/reference/configuration)), so a key passed literally is not served, but every other setting is. Other environments' servers in an RL blend that do not set `127.0.0.1` get the node address too. Allowing only the model server's port needs a change in Gym's core.
 
 </Note>
 

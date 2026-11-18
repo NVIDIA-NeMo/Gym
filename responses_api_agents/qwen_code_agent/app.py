@@ -24,6 +24,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -534,15 +535,17 @@ class QwenCodeAgent(SimpleResponsesAPIAgent):
         if not isinstance(state, QwenSession):
             raise TypeError("Expected QwenSession")
         if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
-            raise HTTPException(409, "Qwen Code activation must use its seeded rollout route")
+            raise AgentSessionConflictError("Qwen Code activation must use its seeded rollout route")
         if state.session.closing:
-            raise HTTPException(409, "Qwen Code session is closing")
+            raise AgentSessionConflictError("Qwen Code session is closing")
         self._conversation(body)
         if state.task is None:
             state.activation_request = body.model_copy(deep=True)
             state.task = asyncio.create_task(self._activate(state, state.activation_request))
         elif body != state.activation_request:
-            raise HTTPException(409, "Qwen Code sessions support one activation; retries must repeat the same request")
+            raise AgentSessionConflictError(
+                "Qwen Code sessions support one activation; retries must repeat the same request"
+            )
         return (await asyncio.shield(state.task)).model_copy(deep=True)
 
     async def run(self, body: BaseRunRequest = Body()) -> BaseVerifyResponse:

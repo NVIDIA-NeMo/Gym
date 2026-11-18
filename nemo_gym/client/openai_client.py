@@ -20,8 +20,10 @@ The Responses API and Chat Completions types it sends and receives live in `nemo
 import asyncio
 import json
 import logging
+import os
 import random
 import re
+import time
 import uuid
 from asyncio import sleep
 from collections.abc import Mapping
@@ -396,6 +398,43 @@ def _rollout_request_id(headers: Mapping[str, str]) -> Optional[str]:
     if not rollout_id:
         return None
     return f"{rollout_id}-{uuid.uuid4().hex[:8]}"
+
+
+API_COST_LOG_ENV_VAR_NAME = "NEMO_GYM_API_COST_LOG"
+
+
+def log_api_cost(endpoint: str, request: Dict[str, Any], headers: Any, body: Any) -> None:
+    """Append one line per successful upstream call to $NEMO_GYM_API_COST_LOG (unset: nothing): the endpoint's
+    billed-cost headers (LiteLLM's x-litellm-response-cost*), the usage, the model and the prompt_cache_key (Codex's
+    per-conversation id), for pricing a run per call. Never request or response content, never auth headers."""
+    path = os.environ.get(API_COST_LOG_ENV_VAR_NAME)
+    if not path:
+        return
+    try:
+        cost = {
+            k.lower(): v for k, v in dict(headers or {}).items() if k.lower().startswith("x-litellm-response-cost")
+        }
+        record = {
+            "ts": time.time(),
+            "pid": os.getpid(),
+            "endpoint": endpoint,
+            "model": request.get("model"),
+            "prompt_cache_key": request.get("prompt_cache_key"),
+            "cost": cost,
+            "usage": body.get("usage") if isinstance(body, dict) else None,
+        }
+        with open(path, "a") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception:  # accounting must never fail a model call
+        logging.getLogger(__name__).warning("could not write %s", path, exc_info=True)
+
+
+async def alog_api_cost(endpoint: str, request: Dict[str, Any], headers: Any, body: Any) -> None:
+    """``log_api_cost`` off the event loop: nothing when the log is off, else the append runs in a worker thread so
+    a slow (e.g. shared) filesystem never stalls other requests."""
+    if not os.environ.get(API_COST_LOG_ENV_VAR_NAME):
+        return
+    await asyncio.to_thread(log_api_cost, endpoint, request, headers, body)
 
 
 class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
@@ -862,7 +901,9 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        return await self._read_response_json(response)
+        body = await self._read_response_json(response)
+        await alog_api_cost("/chat/completions", kwargs, getattr(response, "headers", None), body)
+        return body
 
     async def create_completion(self, **kwargs):
         request_kwargs = dict(
@@ -882,7 +923,9 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        return await self._read_response_json(response)
+        body = await self._read_response_json(response)
+        await alog_api_cost("/responses", kwargs, getattr(response, "headers", None), body)
+        return body
 
     async def create_tokenize(self, **kwargs):
         base_url = self.base_url.removesuffix("/v1")

@@ -1021,7 +1021,7 @@ async def test_run_verify_reaches_registered_route_with_rollout_identity(fixture
         report_for_current_request,
         rollout_context,
     )
-    from nemo_gym.orchestration.recovery import _policy_evidence
+    from nemo_gym.eval.recovery.policy import _policy_evidence
 
     f = fixture
     if graded in {"cleanup_unconfirmed", "limit_then_cleanup"}:
@@ -1212,7 +1212,10 @@ async def test_real_harness_cleanup_failure_reaches_verify_and_recovery(
         NeMoGymResponseCreateParamsNonStreaming,
         rollout_context,
     )
-    from nemo_gym.orchestration.recovery import _policy_evidence, _policy_replay_is_unsupported
+    from nemo_gym.eval.recovery.policy import (
+        _policy_evidence,
+        _policy_replay_is_unsupported,
+    )
     from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext, MiniSWEConfig
 
     f = fixture
@@ -1311,7 +1314,7 @@ async def test_real_harness_cleanup_failure_reaches_verify_and_recovery(
     body = f.body.model_copy(update={"capture_rollout_id": "rollout-1", "capture_model_calls": True})
     with rollout_context(f.agent.rollout_id_from_run(body)):
         result = await f.agent.run(f.request, body)
-    from tests.unit_tests.orchestration.test_recovery_saved_generation import persist_producer_result
+    from tests.unit_tests.eval.recovery.test_recovery_saved_generation import persist_producer_result
 
     decision, store, projected = await persist_producer_result(
         tmp_path / "persisted", monkeypatch, result.model_dump(mode="json")
@@ -1362,12 +1365,8 @@ async def test_a_storage_eviction_found_by_process_cleanup_is_a_settled_zero_thr
         NgFailureEvent,
         report_for_current_request,
     )
-    from nemo_gym.orchestration.recovery import (
-        COLLECT_SCRIPT,
-        CollectedEvidence,
-        decide_from_collected,
-        select_managed_evidence,
-    )
+    from nemo_gym.eval.recovery.evidence import COLLECT_SCRIPT, CollectedEvidence, select_managed_evidence
+    from nemo_gym.eval.recovery.planner import decide_from_collected
     from nemo_gym.rollouts import (
         IncompleteEvaluationError,
         RolloutCollectionConfig,
