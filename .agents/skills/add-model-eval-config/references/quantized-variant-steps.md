@@ -1,6 +1,6 @@
 # A quantized variant: the six steps
 
-Moved from section 9 of [SKILL.md](../SKILL.md), unchanged. Section 9 there keeps the rule and the smoke check.
+Moved from section 9 of [SKILL.md](../SKILL.md), with semicolons replaced by commas or periods and no other change. Section 9 there keeps the rule and the smoke check.
 
 1. Check that the export came from the BF16 checkpoint before you write anything: `config.json` matches
    the BF16 one outside `quantization_config`, and a few tensors the export keeps unquantized

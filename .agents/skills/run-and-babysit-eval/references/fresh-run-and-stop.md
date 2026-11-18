@@ -1,6 +1,6 @@
 # Fresh run, and stopping a chain
 
-Moved from section 8 of [SKILL.md](../SKILL.md), unchanged.
+Moved from section 8 of [SKILL.md](../SKILL.md), with semicolons replaced by commas or periods and no other change.
 
 A segment that ended before the task inventory was written has nothing to resume: recovery answers
 `fresh-restart` and names the command, which restarts in the same directory with fresh budgets (saved
@@ -16,7 +16,7 @@ run to a new location: a fresh `gym eval run` at an existing output path replace
 
 To stop a chain: `scancel` the running job, its successor (in `.gym_followup_queued.<job id>`) and the
 sentinels (`.gym_followup_sentinel.<job id>`, and the one its predecessor queued for it, which becomes
-eligible when you cancel the job, and `squeue --me -o '%i %j %T %E'` shows it by its dependency). A successor
+eligible when you cancel the job. `squeue --me -o '%i %j %T %E'` shows it by its dependency). A successor
 left to start sees `CANCELLED`, writes the stop to `.gym_chain_incomplete` and exits (it ends `FAILED`,
 exit 1, by design: that is the stop, not a fault), after it got an
 allocation. Cancelling the successor and the sentinels saves that allocation and leaves no stop record
