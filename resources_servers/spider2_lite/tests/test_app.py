@@ -34,6 +34,10 @@ from resources_servers.spider2_lite.eval_utils import (
 from resources_servers.text_to_sql.app import extract_sql_from_response
 
 
+# A recursive query with no end: only a timeout stops it.
+_ENDLESS_QUERY = "WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM r) SELECT count(*) FROM r"
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -154,6 +158,23 @@ class TestEvalUtils:
             execute_sqlite_async(tiny_db, "SELECT id FROM items ORDER BY id", sem)
         )
         assert rows == [(1,), (2,)]
+
+    def test_execute_sqlite_timeout_raises(self, tiny_db):
+        with pytest.raises(TimeoutError):
+            execute_sqlite(tiny_db, _ENDLESS_QUERY, timeout_s=0.2)
+
+    def test_execute_sqlite_timeout_leaves_the_next_query_unaffected(self, tiny_db):
+        with pytest.raises(TimeoutError):
+            execute_sqlite(tiny_db, _ENDLESS_QUERY, timeout_s=0.2)
+        assert execute_sqlite(tiny_db, "SELECT id FROM items ORDER BY id", timeout_s=5.0) == [(1,), (2,)]
+
+    def test_execute_sqlite_async_timeout_returns_none(self, tiny_db):
+        sem = asyncio.Semaphore(1)
+        rows = asyncio.get_event_loop().run_until_complete(
+            execute_sqlite_async(tiny_db, _ENDLESS_QUERY, sem, timeout_s=0.2)
+        )
+        assert rows is None
+        assert sem._value == 1
 
     def test_compare_result_sets_exact(self):
         gold = [(1, "a"), (2, "b")]

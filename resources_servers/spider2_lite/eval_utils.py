@@ -5,15 +5,19 @@
 import asyncio
 import math
 import sqlite3
-import sys
+import time
 from pathlib import Path
 from typing import Any, Optional
-
-import ray
 
 
 ResultRow = tuple[Any, ...]
 ResultSet = list[ResultRow]
+
+
+# Extra time the outer ``wait_for`` allows beyond ``timeout_s``; see ``execute_sqlite_async``.
+_OUTER_TIMEOUT_BUFFER_S = 10.0
+# How many SQLite VM instructions run between progress-handler checks.
+_PROGRESS_HANDLER_INTERVAL = 1000
 
 
 def _normalize(v: Any) -> Any:
@@ -43,11 +47,21 @@ def _coerce(v: Any) -> Any:
         return v
 
 
-def execute_sqlite(db_path: Path, sql: str) -> Optional[ResultSet]:
+def execute_sqlite(db_path: Path, sql: str, timeout_s: Optional[float] = None) -> Optional[ResultSet]:
     """Execute SQL against a SQLite database file and return all rows.
 
     Copies db to in-memory connection before querying (matches official eval).
+
+    Returns ``None`` if execution raises (syntax error, missing table, etc.).
+
+    When ``timeout_s`` is given, a SQLite progress handler aborts the query from *inside* SQLite once the call
+    has been running that long, and ``TimeoutError`` is raised (distinct from the ``None`` returned for query
+    errors). The clock starts when this function starts executing in its thread, so time spent queued for a
+    worker does not count, but the copy of the database does. An outer ``asyncio.wait_for`` alone only stops
+    *waiting*: the blocking call keeps running and keeps occupying a thread-pool worker.
     """
+    start = time.monotonic()
+    timed_out = False
     conn = sqlite3.connect(str(db_path))
     mem = sqlite3.connect(":memory:")
     try:
@@ -55,25 +69,24 @@ def execute_sqlite(db_path: Path, sql: str) -> Optional[ResultSet]:
     finally:
         conn.close()
     try:
+        if timeout_s is not None:
+
+            def abort_if_timed_out() -> int:
+                nonlocal timed_out
+                timed_out = time.monotonic() - start > timeout_s
+                return int(timed_out)
+
+            mem.set_progress_handler(abort_if_timed_out, _PROGRESS_HANDLER_INTERVAL)
         cur = mem.cursor()
         cur.execute(sql)
         return cur.fetchall()
     # We try/except only the actual code execution.
-    except:
+    except Exception:
+        if timed_out:
+            raise TimeoutError(f"SQLite query exceeded {timeout_s}s") from None
         return None
     finally:
         mem.close()
-
-
-@ray.remote(
-    num_cpus=1,
-    scheduling_strategy="SPREAD",
-    runtime_env={
-        "py_executable": sys.executable,
-    },
-)
-def execute_sqlite_remote(*args, **kwargs):
-    return execute_sqlite(*args, **kwargs)
 
 
 async def execute_sqlite_async(
@@ -82,18 +95,23 @@ async def execute_sqlite_async(
     semaphore: asyncio.Semaphore,
     timeout_s: float = 30.0,
 ) -> Optional[ResultSet]:
-    """Execute SQL asynchronously via thread executor, bounded by semaphore."""
+    """Execute SQL asynchronously in a worker thread, bounded by semaphore.
+
+    Returns ``None`` on timeout or query exception.
+
+    ``timeout_s`` is enforced inside the query by ``execute_sqlite`` so a timed-out query frees its thread
+    before the semaphore is released. The outer ``wait_for`` is only a backstop with an extra
+    ``_OUTER_TIMEOUT_BUFFER_S``: the progress handler checks elapsed time periodically and may fire slightly
+    after the deadline, and the inner timeout must win so that no query is left running in the background.
+    """
     async with semaphore:
-        task = execute_sqlite_remote.remote(db_path, sql)
-        fut: asyncio.Future = asyncio.wrap_future(task.future())
-
-        _, in_progress = await asyncio.wait([fut], timeout=timeout_s)
-
-        if in_progress:
-            ray.cancel(task)
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(execute_sqlite, db_path, sql, timeout_s),
+                timeout=timeout_s + _OUTER_TIMEOUT_BUFFER_S,
+            )
+        except TimeoutError:
             return None
-        else:
-            return ray.get(task)
 
 
 def _col_vector(rows: ResultSet, col_idx: int) -> list[Any]:
