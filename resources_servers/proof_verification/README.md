@@ -48,6 +48,9 @@ The converter expects JSONL rows with `problem`, `proof`,
 
 - The judge can run either through a Gym-managed model server or through an
   external OpenAI-compatible endpoint via `JUDGE_SERVER_ARGS`.
+- With `JUDGE_SERVER_ARGS`, the first verification waits for the judge server to accept connections, without limit
+  by default. Set `external_judge_wait_timeout_seconds` to make that verification fail with a `TimeoutError` instead.
+  `external_judge_request_timeout_seconds` is the time limit for each request to the judge (4 hours by default).
 - Long proofs and long verification outputs are rejected by length guards in
   the server.
 

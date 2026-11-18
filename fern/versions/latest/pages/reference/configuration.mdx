@@ -243,6 +243,31 @@ A call that sets its own limit uses that limit and not the budget. Set the budge
 without a time limit, as before. Model connection retries are separate: `connection_retry_timeout_s`
 on a model client stays unset by default.
 
+### Optional Limits on Waits
+
+These settings each bound one wait that has no limit by default. They are off until set, so a run that does not set
+them behaves as before. Set a limit above the longest time the wait can legitimately take, because a limit that is too
+short ends good work and changes what a run measures.
+
+| Setting | Where | What it bounds |
+|---|---|---|
+| `request_timeout_seconds`, `max_connection_retries`, `connection_retry_timeout_s` | `base_model`, `inference_provider` and `switchyard_model` configs (`vllm_model` and `openai_model` have their own) | Each HTTP attempt to the endpoint, the number of connection-error retries, and the time spent on them. A timed-out attempt is retried like any transport error. |
+| `verify_timeout_seconds` | `gym eval reverify` config | Each `/verify` and `/aggregate_metrics` call, including its retries. A call that runs out fails the pass, as a lost outcome does, and is not resent. |
+| `runner_timeout_seconds` | `harness_exa_search` config | The harness command in its sandbox. |
+| `external_judge_wait_timeout_seconds`, `external_judge_request_timeout_seconds` | `proof_judge` and `proof_verification` configs | The wait for an external judge server (`JUDGE_SERVER_ARGS`), and each request to it (4 hours by default, as before). |
+| `server_ready_timeout_seconds` | `local_vllm_model` config | Startup, while the launched vLLM server is not yet answering. |
+| `model_server_wait_timeout_seconds` | `local_vllm_model_proxy` config | Startup, while the referenced `local_vllm_model` server is not up, and its config request. |
+| `prepare_timeout_seconds` | `gym eval prepare` config | Installing a dataset's `prepare_dependencies`, and each prepare script that runs in an isolated environment (`prepare_project`). A prepare script that runs in the Gym process itself cannot be interrupted. |
+
+Commands that Gym runs on a Slurm login host over SSH take four environment variables, read when the connection
+opens. Each is a positive whole number, and a bad value is an error:
+
+- `NEMO_GYM_SSH_CONNECT_TIMEOUT_S` is `ssh -o ConnectTimeout`, the limit on the connect and the handshake.
+- `NEMO_GYM_SSH_SERVER_ALIVE_INTERVAL_S` and `NEMO_GYM_SSH_SERVER_ALIVE_COUNT_MAX` make ssh probe a quiet link and
+  drop it after that many unanswered probes.
+- `NEMO_GYM_SSH_COMMAND_TIMEOUT_S` limits each ssh or rsync command from start to finish. Set it above the longest copy
+  you expect.
+
 ### Listen Backlog
 
 `uvicorn_backlog` sets how many new connections the kernel queues for each Gym server before the server accepts them

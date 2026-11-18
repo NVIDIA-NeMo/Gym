@@ -16,11 +16,11 @@
 This responses_api_models server is only used to proxy to an existing LocalVLLMModel server so we don't need to duplicate GPU resources.
 """
 
-from time import sleep
-from typing import List, Union
+from time import monotonic, sleep
+from typing import List, Optional, Union
 
 import requests
-from pydantic import Field
+from pydantic import Field, PositiveFloat
 
 from nemo_gym.config import ModelServerRef, get_first_server_config_dict
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
@@ -35,6 +35,10 @@ class LocalVLLMModelProxyServerConfig(VLLMModelConfig):
 
     model_server: ModelServerRef
 
+    # Wait for the referenced LocalVLLMModel server at startup, and for its answer to the config request. None (default)
+    # waits without limit. A number of seconds makes startup fail with a TimeoutError if the server is not up by then.
+    model_server_wait_timeout_seconds: Optional[PositiveFloat] = None
+
 
 class LocalVLLMModelProxyServer(VLLMModel):
     config: LocalVLLMModelProxyServerConfig
@@ -44,7 +48,11 @@ class LocalVLLMModelProxyServer(VLLMModel):
 
         print(f"Waiting for LocalVLLMModelServer `{model_server_name}` spinup")
 
+        timeout_s = self.config.model_server_wait_timeout_seconds
+        deadline = None if timeout_s is None else monotonic() + timeout_s
         while self.server_client.poll_for_status(model_server_name) != "success":
+            if deadline is not None and monotonic() >= deadline:
+                raise TimeoutError(f"LocalVLLMModelServer `{model_server_name}` was not up within {timeout_s} s")
             # Sleep for 10s by default
             sleep(10)
 
@@ -54,6 +62,7 @@ class LocalVLLMModelProxyServer(VLLMModel):
         model_server_base_url = self.server_client._build_server_base_url(model_server_config_dict)
         response = requests.get(
             f"{model_server_base_url}/get_inner_vllm_config",
+            timeout=timeout_s,
         )
         assert response.ok
 

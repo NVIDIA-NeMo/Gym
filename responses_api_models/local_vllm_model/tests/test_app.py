@@ -286,3 +286,99 @@ class TestApp:
             get_cache_dir = LocalVLLMModel.get_cache_dir
 
         LocalVLLMModel._configure_vllm_serve(DummyLocalVLLMModel())
+
+
+class TestAwaitServerReady:
+    """`await_server_ready` waits for the launched vLLM server, for as long as its actor is alive unless limited."""
+
+    def _server(self, monkeypatch, *, timeout_s, answers: list):
+        """A stand-in server. `answers` is what each poll of `/models` does: an exception to raise, or a reply."""
+        import requests
+
+        module = responses_api_models.local_vllm_model.app
+        now = [0.0]
+        monkeypatch.setattr(module, "monotonic", lambda: now[0])
+        monkeypatch.setattr(module, "sleep", lambda seconds: now.__setitem__(0, now[0] + seconds))
+        monkeypatch.setattr(module.ray, "get", lambda _: True)  # the actor is alive
+        calls: list = []
+
+        def get(url, **kwargs):
+            calls.append(kwargs)
+            answer = answers[min(len(calls), len(answers)) - 1]
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        monkeypatch.setattr(module.requests, "get", get)
+
+        class Server:
+            config = MagicMock(server_ready_timeout_seconds=timeout_s, base_url=["http://engine/v1"])
+            _local_vllm_model_actor = MagicMock()
+
+        Server.config.name = "model"
+        return Server, calls, requests
+
+    def test_the_limit_is_off_by_default_and_must_be_positive(self) -> None:
+        assert LocalVLLMModelConfig.model_fields["server_ready_timeout_seconds"].default is None
+        with pytest.raises(ValueError):
+            LocalVLLMModelConfig(
+                host="",
+                port=0,
+                entrypoint="",
+                name="test name",
+                model="test model",
+                return_token_id_information=False,
+                uses_reasoning_parser=False,
+                vllm_serve_env_vars={},
+                vllm_serve_kwargs={},
+                server_ready_timeout_seconds=0,
+            )
+
+    def test_a_server_that_is_not_ready_in_time_fails_startup(self, monkeypatch) -> None:
+        import requests
+
+        # Refuses 10 polls (30 s on the fake clock) and would answer on the 11th, so a limit that is ignored returns
+        # normally and fails the raises below.
+        server, calls, _ = self._server(
+            monkeypatch, timeout_s=10, answers=[requests.exceptions.ConnectionError()] * 10 + [MagicMock()]
+        )
+
+        with pytest.raises(TimeoutError, match="was not ready within 10"):
+            LocalVLLMModel.await_server_ready(server)
+
+        assert len(calls) < 10
+
+    def test_a_server_that_accepts_but_never_answers_is_polled_with_a_time_limit(self, monkeypatch) -> None:
+        import requests
+
+        server, calls, _ = self._server(
+            monkeypatch, timeout_s=10, answers=[requests.exceptions.ReadTimeout()] * 10 + [MagicMock()]
+        )
+
+        with pytest.raises(TimeoutError):
+            LocalVLLMModel.await_server_ready(server)
+
+        assert all(0 < call["timeout"] <= 10 for call in calls)
+
+    def test_a_server_that_is_ready_in_time_ends_the_wait(self, monkeypatch) -> None:
+        import requests
+
+        server, calls, _ = self._server(
+            monkeypatch, timeout_s=60, answers=[requests.exceptions.ConnectionError(), MagicMock()]
+        )
+
+        LocalVLLMModel.await_server_ready(server)
+
+        assert len(calls) == 2
+
+    def test_without_a_limit_the_wait_has_no_time_limit_on_a_poll_and_goes_on_until_ready(self, monkeypatch) -> None:
+        import requests
+
+        server, calls, _ = self._server(
+            monkeypatch, timeout_s=None, answers=[requests.exceptions.ConnectionError()] * 40 + [MagicMock()]
+        )
+
+        LocalVLLMModel.await_server_ready(server)
+
+        assert len(calls) == 41
+        assert all("timeout" not in call for call in calls)

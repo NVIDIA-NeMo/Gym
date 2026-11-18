@@ -43,6 +43,7 @@ responses_api_agents:
 | `sandbox_spec` | Sandbox lifetime, resources, workdir, environment, and provider options. |
 | `sandbox_model_base_url` | Optional model URL directly reachable from the sandbox. When omitted, endpoint-capable sandbox providers relay requests through the configured Gym model server. |
 | `exa_api_key` | Exa credential passed only to the sandboxed runner for MCP configuration. |
+| `runner_timeout_seconds` | Optional time limit for the harness command in the sandbox. A harness that runs past it ends the rollout as a failed sandboxed harness. Unset (default) sets no limit; `sandbox_spec.ttl_s` then bounds the sandbox's lifetime. |
 
 For Claude Code, `agent_kwargs` are fields from `ClaudeCodeAgentConfig`.
 `model` selects the hosted model, `max_turns` and `timeout` bound execution,

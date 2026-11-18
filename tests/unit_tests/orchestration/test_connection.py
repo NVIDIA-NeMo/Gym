@@ -13,13 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import shutil
 import subprocess
+import time
 from pathlib import Path
 
+import pytest
 from pytest import MonkeyPatch
 
 from nemo_gym.orchestration.executors import connection as connection_module
-from nemo_gym.orchestration.executors.connection import LocalConnection, SSHConnection
+from nemo_gym.orchestration.executors.connection import (
+    SSH_COMMAND_TIMEOUT_ENV,
+    SSH_CONNECT_TIMEOUT_ENV,
+    SSH_SERVER_ALIVE_COUNT_ENV,
+    SSH_SERVER_ALIVE_INTERVAL_ENV,
+    LocalConnection,
+    SSHConnection,
+)
 from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord
 
 
@@ -59,7 +69,7 @@ def _script_for(monkeypatch: MonkeyPatch, remote: Path, content: str, **kwargs) 
     """The bash `SSHConnection.write_text` would send, without opening a socket."""
     captured = {}
 
-    def fake_checked(cmd, *, input=None, context=""):
+    def fake_checked(cmd, *, input=None, context="", timeout_s=None):
         captured["cmd"] = cmd
         captured["input"] = input
         return ""
@@ -133,3 +143,94 @@ def test_ssh_connection_writes_a_private_file_owner_only(monkeypatch: MonkeyPatc
 
     assert oct(target.stat().st_mode & 0o777) == oct(0o600)
     assert target.read_text() == "secret: x\n"
+
+
+_SSH_BOUND_ENV = (
+    SSH_CONNECT_TIMEOUT_ENV,
+    SSH_SERVER_ALIVE_INTERVAL_ENV,
+    SSH_SERVER_ALIVE_COUNT_ENV,
+    SSH_COMMAND_TIMEOUT_ENV,
+)
+
+
+@pytest.fixture
+def no_ssh_bounds(monkeypatch: MonkeyPatch) -> None:
+    for name in _SSH_BOUND_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_ssh_is_not_bounded_unless_the_environment_asks_for_it(no_ssh_bounds):
+    connection = SSHConnection("login-01")
+
+    options = " ".join(connection._ssh_opts())
+    assert "ConnectTimeout" not in options and "ServerAlive" not in options
+    assert connection._command_timeout_s is None
+
+
+def test_ssh_options_follow_the_environment(no_ssh_bounds, monkeypatch: MonkeyPatch):
+    monkeypatch.setenv(SSH_CONNECT_TIMEOUT_ENV, "20")
+    monkeypatch.setenv(SSH_SERVER_ALIVE_INTERVAL_ENV, "15")
+    monkeypatch.setenv(SSH_SERVER_ALIVE_COUNT_ENV, "4")
+    monkeypatch.setenv(SSH_COMMAND_TIMEOUT_ENV, "600")
+
+    connection = SSHConnection("login-01")
+
+    options = connection._ssh_opts()
+    for option in ("ConnectTimeout=20", "ServerAliveInterval=15", "ServerAliveCountMax=4"):
+        assert ["-o", option] == options[options.index(option) - 1 : options.index(option) + 1]
+    assert connection._command_timeout_s == 600
+
+
+@pytest.mark.skipif(shutil.which("ssh") is None, reason="needs the ssh client")
+def test_ssh_accepts_the_options_it_is_given(no_ssh_bounds, monkeypatch: MonkeyPatch):
+    monkeypatch.setenv(SSH_CONNECT_TIMEOUT_ENV, "20")
+    monkeypatch.setenv(SSH_SERVER_ALIVE_INTERVAL_ENV, "15")
+    monkeypatch.setenv(SSH_SERVER_ALIVE_COUNT_ENV, "4")
+    options = SSHConnection("login-01")._ssh_opts()
+
+    resolved = subprocess.run(["ssh", "-G", *options, "login-01"], capture_output=True, text=True, check=True).stdout
+
+    assert "connecttimeout 20" in resolved
+    assert "serveraliveinterval 15" in resolved
+    assert "serveralivecountmax 4" in resolved
+
+
+@pytest.mark.parametrize("env_name", _SSH_BOUND_ENV)
+@pytest.mark.parametrize("bad_value", ["0", "-5", "soon", "1.5"])
+def test_a_bad_ssh_bound_is_an_error_not_silently_ignored(
+    no_ssh_bounds, monkeypatch: MonkeyPatch, env_name, bad_value
+):
+    monkeypatch.setenv(env_name, bad_value)
+
+    with pytest.raises(ValueError, match=env_name):
+        SSHConnection("login-01")
+
+
+def test_the_command_time_limit_reaches_every_ssh_command(no_ssh_bounds, monkeypatch: MonkeyPatch, tmp_path):
+    monkeypatch.setenv(SSH_COMMAND_TIMEOUT_ENV, "45")
+    seen = []
+
+    def fake_checked(cmd, *, input=None, context="", timeout_s=None):
+        seen.append(timeout_s)
+        return ""
+
+    monkeypatch.setattr(connection_module, "_checked", fake_checked)
+    connection = SSHConnection("login-01")
+
+    connection.write_text(tmp_path / "f", "x")
+    connection.run(["true"])
+    connection.copy(tmp_path, tmp_path / "dest")
+
+    assert seen == [45, 45, 45, 45]  # write_text, run, then copy's mkdir and rsync
+
+
+def test_a_command_that_outlasts_its_time_limit_raises(no_ssh_bounds):
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match=r"timed out after 1 s \(slow thing\)"):
+        connection_module._checked(["sleep", "30"], context="slow thing", timeout_s=1)
+
+    assert time.monotonic() - started < 10
+
+
+def test_a_command_without_a_time_limit_is_not_cut_short(no_ssh_bounds):
+    assert connection_module._checked(["bash", "-c", "sleep 1; echo done"]) == "done\n"

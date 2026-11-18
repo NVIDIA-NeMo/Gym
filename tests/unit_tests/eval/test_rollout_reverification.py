@@ -14,6 +14,8 @@
 # limitations under the License.
 import asyncio
 import json
+import sys
+import time
 from asyncio import Semaphore
 from collections import defaultdict
 from copy import deepcopy
@@ -111,6 +113,13 @@ class TestRolloutReverificationConfig:
         """Omitting the field (None) means unbounded/no-limit; a positive value is kept."""
         assert getattr(RolloutReverificationConfig(**self._kwargs()), field) is None
         assert getattr(RolloutReverificationConfig(**self._kwargs(**{field: 4})), field) == 4
+
+    def test_verify_timeout_seconds_is_off_by_default_and_must_be_positive(self) -> None:
+        assert RolloutReverificationConfig(**self._kwargs()).verify_timeout_seconds is None
+        assert RolloutReverificationConfig(**self._kwargs(verify_timeout_seconds=90)).verify_timeout_seconds == 90
+        for bad_value in (0, -1):
+            with pytest.raises(ValidationError):
+                RolloutReverificationConfig(**self._kwargs(verify_timeout_seconds=bad_value))
 
     def test_resume_from_cache_defaults_to_false(self) -> None:
         """resume_from_cache is opt-in: default runs start fresh."""
@@ -1593,6 +1602,61 @@ class TestRunVerificationPayloads:
             results.append(await fut)
         return results
 
+    @staticmethod
+    def _post_answering_after(seconds: float):
+        async def post(*args, **kwargs) -> MagicMock:
+            await asyncio.sleep(seconds)
+            return MagicMock(headers={})
+
+        return post
+
+    async def test_a_verify_that_outlasts_the_time_limit_fails_the_pass_without_a_resend(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock_client = MagicMock(global_config_dict={})
+        # Answers after 3 s, so a limit that is ignored returns a result and fails the pytest.raises below.
+        mock_client.post = AsyncMock(side_effect=self._post_answering_after(3))
+        self._patch(monkeypatch, mock_client, {"agent_a": "rs_a"}, response_json={"reward": 1.0})
+
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            await self._collect(_run_verification_payloads([self._make_row("agent_a")], timeout_s=0.2))
+
+        assert time.monotonic() - started < 2
+        assert mock_client.post.await_count == 1
+
+    async def test_the_time_limit_covers_reading_the_response(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        mock_client = MagicMock(global_config_dict={})
+        mock_client.post = AsyncMock(return_value=MagicMock(headers={}))
+        self._patch(monkeypatch, mock_client, {"agent_a": "rs_a"})
+
+        async def slow_body(_res) -> dict:
+            await asyncio.sleep(3)
+            return {"reward": 1.0}
+
+        monkeypatch.setattr("nemo_gym.eval.rollout_reverification.get_response_json", slow_body)
+
+        with pytest.raises(TimeoutError):
+            await self._collect(_run_verification_payloads([self._make_row("agent_a")], timeout_s=0.2))
+
+    async def test_without_a_time_limit_a_slow_verify_still_completes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        mock_client = MagicMock(global_config_dict={})
+        mock_client.post = AsyncMock(side_effect=self._post_answering_after(0.3))
+        self._patch(monkeypatch, mock_client, {"agent_a": "rs_a"}, response_json={"reward": 1.0})
+
+        [(_, result)] = await self._collect(_run_verification_payloads([self._make_row("agent_a")]))
+
+        assert result == {"reward": 1.0}
+
+    async def test_a_verify_inside_the_time_limit_completes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        mock_client = MagicMock(global_config_dict={})
+        mock_client.post = AsyncMock(side_effect=self._post_answering_after(0.1))
+        self._patch(monkeypatch, mock_client, {"agent_a": "rs_a"}, response_json={"reward": 1.0})
+
+        [(_, result)] = await self._collect(_run_verification_payloads([self._make_row("agent_a")], timeout_s=5))
+
+        assert result == {"reward": 1.0}
+
     async def test_identity_stamps_stay_on_the_row_and_out_of_the_verify_request(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2148,6 +2212,40 @@ class TestCallAggregateMetrics:
         )
         return mock_client
 
+    async def test_an_aggregate_call_that_outlasts_the_time_limit_raises(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        rows = [{AGENT_REF_KEY_NAME: {"name": "agent_a"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}]
+        results = [{"reward": 1.0, TASK_INDEX_KEY_NAME: 0}]
+
+        async def slow_post(*args, **kwargs):
+            await asyncio.sleep(3)  # a limit that is ignored lets this return and fails the pytest.raises below
+            return MagicMock()
+
+        self._patch(monkeypatch, {"agent_a": "rs_a"}, post_side_effect=slow_post)
+
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            await _call_aggregate_metrics(results, rows, tmp_path / "rollouts.jsonl", timeout_s=0.2)
+
+        assert time.monotonic() - started < 2
+
+    async def test_without_a_time_limit_a_slow_aggregate_call_still_completes(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        rows = [{AGENT_REF_KEY_NAME: {"name": "agent_a"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}]
+        results = [{"reward": 1.0, TASK_INDEX_KEY_NAME: 0}]
+
+        async def slow_post(*args, **kwargs):
+            await asyncio.sleep(0.3)
+            return MagicMock()
+
+        self._patch(monkeypatch, {"agent_a": "rs_a"}, post_side_effect=slow_post)
+
+        written = await _call_aggregate_metrics(results, rows, tmp_path / "rollouts.jsonl")
+
+        assert written is not None and written.exists()
+
     async def test_each_agent_sent_to_its_own_resource_server_with_only_its_results(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -2508,6 +2606,7 @@ class TestRolloutReverificationRunFromConfig:
         *,
         disable_aggregation: bool = False,
         num_samples_in_parallel: int | None = None,
+        verify_timeout_seconds: float | None = None,
     ) -> RolloutReverificationConfig:
         return RolloutReverificationConfig(
             materialized_inputs_jsonl_fpath=str(tmp_path / "inputs.jsonl"),
@@ -2515,6 +2614,7 @@ class TestRolloutReverificationRunFromConfig:
             output_jsonl_fpath=str(tmp_path / "output.jsonl"),
             disable_aggregation=disable_aggregation,
             num_samples_in_parallel=num_samples_in_parallel,
+            verify_timeout_seconds=verify_timeout_seconds,
         )
 
     def _make_row(self, agent: str, task: int, rollout: int = 0, *, skills: bool = False) -> dict:
@@ -2841,7 +2941,7 @@ class TestRolloutReverificationRunFromConfig:
         pairs = [(self._make_row("agent_a", task=0), {"reward": 1.0})]
         captured_semaphore: list = []
 
-        def capturing_run_verification(payloads, semaphore):
+        def capturing_run_verification(payloads, semaphore, timeout_s=None):
             captured_semaphore.append(semaphore)
             return []
 
@@ -2864,7 +2964,7 @@ class TestRolloutReverificationRunFromConfig:
         pairs = [(self._make_row("agent_a", task=0), {"reward": 1.0})]
         captured_semaphore: list = []
 
-        def capturing_run_verification(payloads, semaphore):
+        def capturing_run_verification(payloads, semaphore, timeout_s=None):
             captured_semaphore.append(semaphore)
             return []
 
@@ -2897,6 +2997,27 @@ class TestRolloutReverificationRunFromConfig:
         # results are still returned even though aggregation was skipped
         assert len(returned) == 1
         assert returned[0][TASK_INDEX_KEY_NAME] == 0
+
+    async def test_verify_timeout_seconds_reaches_both_the_verify_and_the_aggregate_calls(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        pairs = [(self._make_row("agent_a", task=0), {"reward": 1.0})]
+        self._patch_common(monkeypatch, pairs)
+        verify_inner = sys.modules["nemo_gym.eval.rollout_reverification"]._run_verification_payloads
+        seen: dict = {}
+
+        def spy(payloads, semaphore=None, timeout_s=None):
+            seen["verify"] = timeout_s
+            return verify_inner(payloads, semaphore)
+
+        monkeypatch.setattr("nemo_gym.eval.rollout_reverification._run_verification_payloads", spy)
+        agg_mock = AsyncMock(return_value=None)
+        monkeypatch.setattr("nemo_gym.eval.rollout_reverification._call_aggregate_metrics", agg_mock)
+
+        await RolloutReverificationHelper().run_from_config(self._make_config(tmp_path, verify_timeout_seconds=42))
+
+        assert seen["verify"] == 42
+        assert agg_mock.await_args.kwargs["timeout_s"] == 42
 
     async def test_multi_agent_multi_rs_routing_end_to_end(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -3090,7 +3211,7 @@ class TestRunFromConfigResumeFromCache:
         )
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification._resolve_under_cwd_or_install", lambda p: Path(p))
 
-        def fake_run(payloads, semaphore=None):
+        def fake_run(payloads, semaphore=None, timeout_s=None):
             dispatched.extend(payloads)
 
             async def fut(p: dict) -> tuple[dict, dict]:
@@ -3343,7 +3464,7 @@ class TestResumeOfOutputCachedWithoutIdentityStamps:
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification._guard_reverify_mode", AsyncMock(return_value=None))
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification.get_exporters", list)
 
-        def fake_run(payloads, semaphore=None):
+        def fake_run(payloads, semaphore=None, timeout_s=None):
             dispatched.extend(p[TASK_INDEX_KEY_NAME] for p in payloads)
 
             async def fut(p: dict) -> tuple[dict, dict]:
@@ -3568,7 +3689,7 @@ class TestRunFromConfigJudgeFailedOnly:
         result (so a test can make some rows re-fail on a first pass)."""
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification._resolve_under_cwd_or_install", lambda p: Path(p))
 
-        def fake_run(payloads, semaphore=None):
+        def fake_run(payloads, semaphore=None, timeout_s=None):
             dispatched.extend(payloads)
 
             async def fut(p: dict) -> tuple[dict, dict]:

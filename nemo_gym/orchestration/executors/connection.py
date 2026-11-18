@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import shlex
 import shutil
 import socket
@@ -71,8 +72,35 @@ class LocalConnection(Connection):
         remote.write_text(content, encoding="utf-8")
 
 
+# Optional bounds on the SSH layer, read when a connection is created. Each is a positive number of seconds (the count
+# is a number of probes), and unset, as by default, leaves the matching limit to ssh and the operating system.
+SSH_CONNECT_TIMEOUT_ENV = "NEMO_GYM_SSH_CONNECT_TIMEOUT_S"  # ssh -o ConnectTimeout: the TCP connect and the handshake
+SSH_SERVER_ALIVE_INTERVAL_ENV = (
+    "NEMO_GYM_SSH_SERVER_ALIVE_INTERVAL_S"  # ssh -o ServerAliveInterval: probe a quiet link
+)
+SSH_SERVER_ALIVE_COUNT_ENV = "NEMO_GYM_SSH_SERVER_ALIVE_COUNT_MAX"  # ssh -o ServerAliveCountMax: unanswered probes
+SSH_COMMAND_TIMEOUT_ENV = "NEMO_GYM_SSH_COMMAND_TIMEOUT_S"  # each ssh or rsync command Gym runs, start to finish
+
+
+def _positive_int_from_env(name: str) -> int | None:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive whole number, got {raw!r}")
+    return value
+
+
 class SSHConnection(Connection):
-    """Single SSH master connection; copy and all commands reuse the same socket."""
+    """Single SSH master connection; copy and all commands reuse the same socket.
+
+    The environment variables above bound a connection that hangs: a login host that never answers the connect, a link
+    that goes quiet, or a command that never finishes. A command that runs out of its time raises RuntimeError.
+    """
 
     _OPTS = ["-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes"]
     _MASTER_TIMEOUT = 10  # seconds to wait for the control socket to appear
@@ -81,6 +109,16 @@ class SSHConnection(Connection):
 
     def __init__(self, hostname: str) -> None:
         self._hostname = hostname
+        self._opts = list(self._OPTS)
+        for env_name, option in (
+            (SSH_CONNECT_TIMEOUT_ENV, "ConnectTimeout"),
+            (SSH_SERVER_ALIVE_INTERVAL_ENV, "ServerAliveInterval"),
+            (SSH_SERVER_ALIVE_COUNT_ENV, "ServerAliveCountMax"),
+        ):
+            value = _positive_int_from_env(env_name)
+            if value is not None:
+                self._opts += ["-o", f"{option}={value}"]
+        self._command_timeout_s = _positive_int_from_env(SSH_COMMAND_TIMEOUT_ENV)
         self._socket = Path(tempfile.mktemp(prefix="gym-ssh-", suffix=".sock"))
         self._master: subprocess.Popen | None = None
 
@@ -90,7 +128,7 @@ class SSHConnection(Connection):
         self._master = subprocess.Popen(
             [
                 "ssh",
-                *self._OPTS,
+                *self._opts,
                 "-o",
                 "ControlMaster=yes",
                 "-o",
@@ -126,12 +164,13 @@ class SSHConnection(Connection):
         )
 
     def _ssh_opts(self) -> list[str]:
-        return [*self._OPTS, "-o", "ControlMaster=no", "-o", f"ControlPath={self._socket}"]
+        return [*self._opts, "-o", "ControlMaster=no", "-o", f"ControlPath={self._socket}"]
 
     def copy(self, local: Path, remote: Path) -> None:
         _checked(
             ["ssh", *self._ssh_opts(), self._hostname, "mkdir", "-p", str(remote)],
             context=f"mkdir -p {self._hostname}:{remote}",
+            timeout_s=self._command_timeout_s,
         )
         _checked(
             [
@@ -144,6 +183,7 @@ class SSHConnection(Connection):
                 f"{self._hostname}:{remote}",
             ],
             context=f"rsync to {self._hostname}:{remote}",
+            timeout_s=self._command_timeout_s,
         )
 
     def run(self, commands: list[str]) -> str:
@@ -154,6 +194,7 @@ class SSHConnection(Connection):
             ["ssh", *self._ssh_opts(), self._hostname, "bash", "-s"],
             input=script,
             context=f"ssh commands on {self._hostname}",
+            timeout_s=self._command_timeout_s,
         )
 
     def run_with_input_held(self, commands: list[str]) -> str:
@@ -177,24 +218,37 @@ class SSHConnection(Connection):
             ["ssh", *self._ssh_opts(), self._hostname, "bash", "-s"],
             input=script,
             context=f"writing {remote} on {self._hostname}",
+            timeout_s=self._command_timeout_s,
         )
 
     def close(self) -> None:
-        subprocess.run(
-            ["ssh", *self._ssh_opts(), "-O", "exit", self._hostname],
-            capture_output=True,
-        )
+        try:
+            subprocess.run(
+                ["ssh", *self._ssh_opts(), "-O", "exit", self._hostname],
+                capture_output=True,
+                timeout=self._command_timeout_s,
+            )
+        except subprocess.TimeoutExpired:
+            pass  # The master is stopped below.
         self._socket.unlink(missing_ok=True)
         if self._master:
             # The master detaches into the background once it is up; a foreground ssh still running was stopped
             # before that, and would detach later with nothing left to close it.
             if self._master.poll() is None:
                 self._master.terminate()
-            self._master.wait()
+            try:
+                self._master.wait(timeout=self._command_timeout_s)
+            except subprocess.TimeoutExpired:
+                self._master.kill()
+                self._master.wait()
 
 
-def _checked(cmd: list[str], *, input: str | None = None, context: str = "") -> str:
-    result = subprocess.run(cmd, input=input, text=True, capture_output=True)
+def _checked(cmd: list[str], *, input: str | None = None, context: str = "", timeout_s: float | None = None) -> str:
+    try:
+        result = subprocess.run(cmd, input=input, text=True, capture_output=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        label = f" ({context})" if context else ""
+        raise RuntimeError(f"Command timed out after {timeout_s} s{label}:\n  {' '.join(cmd)}") from exc
     if result.returncode != 0:
         label = f" ({context})" if context else ""
         raise RuntimeError(

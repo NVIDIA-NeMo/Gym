@@ -24,6 +24,11 @@ python responses_api_agents/simple_agent/client.py
 ```
 
 
+# Bounding startup
+By default startup waits for the launched vLLM server for as long as its actor stays alive. Set
+`server_ready_timeout_seconds` on the config to make startup fail with a `TimeoutError` if the server is not answering
+`/models` by then.
+
 # E2E sanity testing
 See the following scripts:
 - 1 node

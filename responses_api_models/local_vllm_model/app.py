@@ -15,7 +15,7 @@
 import os
 from argparse import Namespace
 from pathlib import Path
-from time import sleep
+from time import monotonic, sleep
 from typing import ClassVar, Dict, Tuple
 
 import ray
@@ -23,7 +23,7 @@ import requests
 from ray import available_resources, cluster_resources
 from ray.util.placement_group import PlacementGroup
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-from requests.exceptions import ConnectionError
+from requests.exceptions import ConnectionError, Timeout
 
 
 try:
@@ -237,15 +237,29 @@ Total Ray cluster resources: {cluster_resources()}""")
         self.await_server_ready()
 
     def await_server_ready(self) -> None:
+        timeout_s = self.config.server_ready_timeout_seconds
+        deadline = None if timeout_s is None else monotonic() + timeout_s
         poll_count = 0
         while True:
             is_alive = ray.get(self._local_vllm_model_actor.is_alive.remote())
             assert is_alive, f"{self.config.name} LocalVLLMModel server spinup failed, see the error logs above!"
 
             try:
-                requests.get(url=f"{self.config.base_url[0]}/models")
+                if deadline is None:
+                    requests.get(url=f"{self.config.base_url[0]}/models")
+                else:
+                    # Each poll gets a time limit too, so a server that accepts the connection and never answers
+                    # cannot outlast the deadline.
+                    requests.get(
+                        url=f"{self.config.base_url[0]}/models", timeout=max(0.1, min(10.0, deadline - monotonic()))
+                    )
                 return
-            except ConnectionError:
+            except (ConnectionError, Timeout):
+                if deadline is not None and monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"{self.config.name} LocalVLLMModel server was not ready within {timeout_s} s"
+                    ) from None
+
                 if poll_count % 10 == 0:  # Print every 30s
                     print(f"Waiting for {self.config.name} LocalVLLMModel server to spinup...")
 
