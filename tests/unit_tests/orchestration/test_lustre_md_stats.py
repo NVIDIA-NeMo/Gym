@@ -164,7 +164,9 @@ def test_the_json_maps_each_file_to_its_report(tmp_path, capsys):
     path = _write(tmp_path / "logs" / "lustre-md-stats-12.tsv", _ONE_NODE)
     print_lustre_md_stats(tmp_path, json_output=True)
 
-    output = json.loads(capsys.readouterr().out)
+    captured = capsys.readouterr()
+    assert "is experimental" in captured.err
+    output = json.loads(captured.out)
     assert list(output) == [str(path)]
     assert output[str(path)]["nodes"] == ["n1"]
     assert set(output[str(path)]["intervals"][0]) == {

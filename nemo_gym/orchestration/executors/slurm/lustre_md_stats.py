@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from nemo_gym.orchestration.jobs import LOGS_DIRNAME
+from nemo_gym.utils.decorators import experimental
 
 
 START = "start"
@@ -229,6 +230,7 @@ def format_report(path: Path, report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+@experimental
 def print_lustre_md_stats(target: Path, *, json_output: bool = False) -> None:
     """Print the report of every stats file under `target`; with `json_output`, a mapping from file to report."""
     reports = {path: analyze(path) for path in stats_files(target)}
