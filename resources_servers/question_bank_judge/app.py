@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Grade the final boxed answer for non-math STEM questions."""
+"""Compare the final boxed answer with the reference for eligible non-math question-bank rows."""
 
 import asyncio
 import json
@@ -162,7 +162,7 @@ class QuestionBankJudgeResourcesServer(SimpleResourcesServer):
         final = raw_final.strip()
         evaluations: list[JudgeEvaluation] = []
         provenance: dict[str, Any] = {
-            "verifier_revision": "question-bank-stem-v4",
+            "verifier_revision": "question-bank-semantic-v5",
             "grading_profile": profile,
             "grading_config_sha256": hash_text(cfg.model_dump_json()),
             "candidate_sha256": hash_text(raw_final),

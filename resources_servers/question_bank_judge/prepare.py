@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Materialize question-bank evaluation rows for Gym math and non-math STEM grading.
+"""Materialize question-bank evaluation rows for Gym math and semantic answer comparison.
 
 The selected dataset and a version-bound triage inventory supply routing metadata;
 no per-question grading contract is required. Rubric/construction and native-test
@@ -25,7 +25,7 @@ from resources_servers.question_bank_judge.prompts import (
 from resources_servers.question_bank_judge.routing import canonical_domain, grading_route
 
 
-ADAPTER_REVISION = "question-bank-stem-routes-v3"
+ADAPTER_REVISION = "question-bank-routes-v4"
 SPLIT_SEED = "stem-judge-family-split-v1"
 
 

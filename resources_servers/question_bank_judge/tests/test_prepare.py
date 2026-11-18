@@ -98,9 +98,10 @@ def test_routes_answers_without_per_row_contracts_and_keeps_exclusions(tmp_path:
         _row("math"),
         _row("semantic", domain="Biology"),
         _row("humanities", domain="Humanities / Social Sciences"),
-        _row("unknown", domain="Other / Unlabeled"),
-        _row("rubric"),
-        _row("native", reference={"kind": "native_grader"}, expected_answer=None),
+        _row("unlabeled", domain="Other / Unlabeled"),
+        _row("unknown", domain="unrecognized domain"),
+        _row("rubric", domain="Humanities / Social Sciences"),
+        _row("native", domain="Other / Unlabeled", reference={"kind": "native_grader"}, expected_answer=None),
         _row("chemistry_native", domain="Chemistry / materials"),
     ]
     source = _dataset(tmp_path, rows)
@@ -115,25 +116,28 @@ def test_routes_answers_without_per_row_contracts_and_keeps_exclusions(tmp_path:
     output = tmp_path / "prepared"
     receipt = prepare(source, output, development_ids={r["id"] for r in rows}, inventory_path=inventory)
     assert receipt["counts"] == {
-        "evaluation_candidate": 2,
-        "excluded_unsupported_domain": 2,
+        "evaluation_candidate": 4,
+        "excluded_unsupported_domain": 1,
         "excluded_rubric": 1,
         "excluded_native_pending_runner": 2,
     }
-    assert receipt["route_counts"] == {"math": 1, "semantic": 1}
+    assert receipt["route_counts"] == {"math": 1, "semantic": 3}
     assert receipt["training_admitted"] == 0
     ledger = _lines(output / "ledger.jsonl")
     assert len(ledger) == len(rows)
     assert not any(row["training_admitted"] for row in ledger)
     emitted = _lines(output / "development.gym.jsonl")
-    assert [r["agent_ref"]["name"] for r in emitted] == [
-        "question_bank_math_simple_agent",
-        "question_bank_semantic_simple_agent",
-    ]
+    assert {row["id"]: row["agent_ref"]["name"] for row in emitted} == {
+        "math": "question_bank_math_simple_agent",
+        "semantic": "question_bank_semantic_simple_agent",
+        "humanities": "question_bank_semantic_simple_agent",
+        "unlabeled": "question_bank_semantic_simple_agent",
+    }
     config_path = Path(__file__).resolve().parents[1] / "configs/question_bank.yaml"
     config = OmegaConf.load(config_path)
-    for row, component in zip(emitted, ["math_with_judge", "question_bank_judge"], strict=True):
+    for row in emitted:
         agent = config[row["agent_ref"]["name"]].responses_api_agents.simple_agent
+        component = "math_with_judge" if row["id"] == "math" else "question_bank_judge"
         assert list(config[agent.resources_server.name].resources_servers) == [component]
     assert config.question_bank_math.resources_servers.math_with_judge.should_use_judge is True
     assert all("task_contract" not in row for row in emitted)

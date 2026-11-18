@@ -5,11 +5,13 @@
 from typing import Literal
 
 
-_STEM_DOMAINS = {
+_SEMANTIC_DOMAINS = {
     "biology",
     "chemistry / materials",
     "engineering / computer science",
+    "humanities / social sciences",
     "medicine / health",
+    "other / unlabeled",
     "physics",
 }
 _DOMAIN_ALIASES = {"phys": "physics", "bio": "biology", "chem": "chemistry / materials", "math": "mathematics"}
@@ -25,6 +27,6 @@ def grading_route(domain: object) -> Literal["math", "semantic"] | None:
     label = canonical_domain(domain) if isinstance(domain, str) else ""
     if label == "mathematics":
         return "math"
-    if label in _STEM_DOMAINS:
+    if label in _SEMANTIC_DOMAINS:
         return "semantic"
     return None

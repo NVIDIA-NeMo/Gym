@@ -97,7 +97,7 @@ async def test_shared_prompt_default_and_replay_override_are_recorded(
     system = call.await_args.kwargs["json"].input[0].content
 
     assert system == path.read_text().strip()
-    assert result.grading_provenance["verifier_revision"] == "question-bank-stem-v4"
+    assert result.grading_provenance["verifier_revision"] == "question-bank-semantic-v5"
     payload = call.await_args.kwargs["json"].input[-1].content
     assert result.grading_provenance["prompt_sha256"] == hash_text(system + "\n" + payload)
 
@@ -278,10 +278,28 @@ def test_custom_resource_rejects_math_profile() -> None:
 
 
 @mark.asyncio
-@mark.parametrize("domain", ["Mathematics", "math", "humanities / social sciences", "other / unlabeled", None])
-async def test_misrouted_row_is_masked_without_calling_stem_judge(monkeypatch, domain):
+@mark.parametrize("domain", ["Mathematics", "math", "competitive coding", "unrecognized domain", None])
+async def test_misrouted_row_is_masked_without_calling_semantic_judge(monkeypatch, domain):
     call, _ = judge(monkeypatch)
     result = await server().verify(shared_request(metadata={"domain": domain} if domain else None))
     assert result.verdict == "unresolved" and result.grading_status == "unsupported_domain"
     assert result.mask_sample and not result.evaluation_completed
     call.assert_not_awaited()
+
+
+@mark.asyncio
+@mark.parametrize("domain", ["humanities / social sciences", "other / unlabeled"])
+async def test_semantic_judge_accepts_additional_answer_comparison_domains(monkeypatch, domain):
+    call, _ = judge(monkeypatch)
+    body = shared_request(
+        r"\boxed{first person}",
+        question="A narrator uses 'I' to tell their own story. What is the narrative point of view?",
+        expected="first-person narration",
+        metadata={"domain": domain, "review_group": "answer_comparison_review"},
+    )
+    result = await server().verify(body)
+    call.assert_awaited_once()
+    payload = json.loads(call.await_args.kwargs["json"].input[-1].content)
+    assert payload["candidate"] == "first person" and payload["reference"] == body.expected_answer
+    assert result.grading_provenance["route"] == "semantic_judge"
+    assert result.verdict == "correct" and result.reward == 1 and not result.mask_sample

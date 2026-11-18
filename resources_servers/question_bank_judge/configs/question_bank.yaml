@@ -18,8 +18,8 @@ question_bank_semantic:
       judge_source_instructions: {}
       domain: knowledge
       verified: false
-      description: Non-math STEM final answers graded with the question-bank science prompt
-      value: Grade non-math STEM answers and flag inconclusive judgments
+      description: Final-answer comparison for science, humanities/social sciences and other/unlabeled questions
+      value: Compare boxed answers with their reference and flag inconclusive judgments
 question_bank_math:
   resources_servers:
     math_with_judge:
