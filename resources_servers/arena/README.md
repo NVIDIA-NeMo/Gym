@@ -89,7 +89,7 @@ Each JSONL row contains:
 
 | Metric | Meaning |
 |---|---|
-| `mean/reward` | Arithmetic mean of rewards returned by Arena verification; empty responses receive zero; a failed judge call, or a judge game with no verdict (output cut at its token cap, filtered, empty or without a label), returns a masked `judge_failed` response containing the existing answer, rather than a zero-valued game. `[[BB]]` is assigned a 0.5 reward. No bootstrap is applied. |
+| `mean/reward` | Arithmetic mean of rewards returned by Arena verification; empty responses receive zero; a failed judge call, or a judge game with no verdict (output cut at its token cap, empty or without a label), returns a masked `judge_failed` response containing the existing answer, rather than a zero-valued game. `[[BB]]` is assigned a 0.5 reward. No bootstrap is applied. |
 | `win_rate_no_SC` | Raw judge score computed from valid judgments, excluding failures. |
 | `win_rate` | Style-controlled win rate. |
 | `*_ci95_lower`, `*_ci95_upper` | Bootstrap 95% confidence interval, resampling individual judge games. |
@@ -101,6 +101,8 @@ Each JSONL row contains:
 | `arena/*`, `taxonomy-language/*`, `taxonomy-task-type/*` | Prompt count and ON/OFF scores for slices with at least 50 prompts. |
 
 Each benchmark config also sets `health_check_max_not_final_failure_fraction` and `health_check_max_final_failure_fraction` to the same limit; an outage counts as final once its retries are used up. When judge outages exceed that share of expected rollouts, the run health check reports the run as unhealthy, but the score is still published. Withholding the score of an unhealthy run is a separate shared-health follow-up; these limits do not yet replace Arena's aggregation-time protection.
+
+A judge game blocked by the judge provider's content filter is a terminal outcome, not a judge failure: the row is kept in the main output with `mask_sample: true`, `failure_kind: arena:judge_content_filtered` and both games, and it is not retried. It is excluded from every score and counted in `coverage/masked_rollouts`, so a complete run can still finish. This server sets no limit on how many rows this happens to: each evaluation leaf should gate the fraction of rows with this `failure_kind`.
 
 `lmarena_v3` keeps the judge score when `0.5 < response length / reference length < 1.75`; otherwise it assigns zero. The reference length is the median length from reference models. For short references (at most 100 tokens), responses from 0 to 175 tokens are accepted.
 

@@ -50,6 +50,8 @@ from resources_servers.arena.taxonomy import get_prompt_slices
 
 logger = logging.getLogger(__name__)
 
+JUDGE_CONTENT_FILTERED = "arena:judge_content_filtered"
+
 
 class ArenaResourcesServerConfig(BaseResourcesServerConfig):
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
@@ -279,9 +281,27 @@ class ArenaResourcesServer(SimpleResourcesServer):
                 await asyncio.gather(*orderings, return_exceptions=True)
                 raise
 
-            # A game without a verdict is a judge fault (output cut at its token cap, filtered, empty or without
-            # a label), not a policy loss: fail the row so judge_failsafe types it judge_failed, masks it and
-            # leaves its saved answer to be judged again.
+            # The judge provider's content filter blocks the same game on every retry: keep the row as a terminal
+            # masked outcome (no _ng_failure_class), excluded from the score but not left for re-judging.
+            if filtered := [
+                f"game {index}"
+                for index, game in enumerate((game1, game2), start=1)
+                if game.response.incomplete_details and game.response.incomplete_details.reason == "content_filter"
+            ]:
+                return ArenaVerifyResponse(
+                    **body.model_dump(),
+                    reward=0.0,
+                    mask_sample=True,
+                    failure_kind=JUDGE_CONTENT_FILTERED,
+                    failure_reason="The judge's content filter blocked " + " and ".join(filtered),
+                    policy_answer=policy_answer,
+                    policy_reasoning=policy_reasoning,
+                    games=[game1, game2],
+                )
+
+            # A game without a verdict is a judge fault (output cut at its token cap, empty or without a label),
+            # not a policy loss: fail the row so judge_failsafe types it judge_failed, masks it and leaves its
+            # saved answer to be judged again.
             if missing := [
                 f"game {index} ({self._describe_missing_verdict(game.response)})"
                 for index, game in enumerate((game1, game2), start=1)

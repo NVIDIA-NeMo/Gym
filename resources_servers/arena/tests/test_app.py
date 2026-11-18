@@ -26,7 +26,7 @@ from pydantic import ValidationError
 from pytest import approx, fixture, mark, raises
 
 from nemo_gym.client import ServerClient
-from nemo_gym.config import ModelServerRef
+from nemo_gym.config import AggregateMetricsRequest, ModelServerRef
 from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -37,9 +37,11 @@ from nemo_gym.core import (
 )
 from nemo_gym.verification import JudgeError, judge_failsafe
 from resources_servers.arena.app import (
+    JUDGE_CONTENT_FILTERED,
     ArenaResourcesServer,
     ArenaResourcesServerConfig,
     ArenaVerifyRequest,
+    ArenaVerifyResponse,
 )
 from resources_servers.arena.arena import (
     _ALL_VERDICT_LABELS,
@@ -827,7 +829,7 @@ class TestArenaResourcesServer:
                 [None, "max_output_tokens"],
                 "game 2 (judge output incomplete: max_output_tokens)",
             ),
-            (["", "[[B>A]]"], ["content_filter", None], "game 1 (judge output incomplete: content_filter)"),
+            (["", "[[B>A]]"], None, "game 1 (no verdict label in the judge output)"),
         ],
     )
     async def test_verify_a_game_without_verdict_is_a_judge_failure_not_a_loss(
@@ -853,6 +855,56 @@ class TestArenaResourcesServer:
         assert data["reward"] == 0.0
         assert "game 2 (judge output incomplete: max_output_tokens)" in data["failure_reason"]
         assert data["response"] == request.response.model_dump(mode="json")  # kept for re-judging
+
+    @mark.parametrize(
+        "texts,reasons,filtered",
+        [
+            (["", "[[B>A]]"], ["content_filter", None], "game 1"),
+            (["[[A>B]]", "Partial judge output"], [None, "content_filter"], "game 2"),
+            (["", ""], ["content_filter", "content_filter"], "game 1 and game 2"),
+            (["", "cut off mid-sentence"], ["content_filter", "max_output_tokens"], "game 1"),
+        ],
+    )
+    async def test_verify_a_content_filtered_game_is_a_terminal_masked_outcome(
+        self, server: ArenaResourcesServer, texts, reasons, filtered
+    ):
+        request = self._make_verify_request("Answer.")
+        self._setup_judge_texts(server, texts, reasons)
+
+        result = await judge_failsafe(server.verify)(body=request)
+
+        # A verify response kept in the main output, not a judge_failed row for the failures sidecar.
+        assert isinstance(result, ArenaVerifyResponse)
+        assert "_ng_failure_class" not in result.model_dump()
+        assert result.mask_sample is True
+        assert result.failure_kind == JUDGE_CONTENT_FILTERED
+        assert result.failure_reason == f"The judge's content filter blocked {filtered}"
+        assert result.reward == 0.0
+        assert [game.verdict for game in result.games] == [_extract_verdict(text) for text in texts]
+        assert [
+            game.response.incomplete_details.reason if game.response.incomplete_details else None
+            for game in result.games
+        ] == reasons
+        assert result.policy_answer == "Answer."
+        assert result.response == request.response
+
+    async def test_a_content_filtered_row_is_left_out_of_the_aggregate_score(self, server: ArenaResourcesServer):
+        self._setup_judge_texts(server, ["", "[[B>A]]"], ["content_filter", None])
+        filtered = (await server.verify(self._make_verify_request("Answer."))).model_dump(mode="json")
+        scored = self._rollout("[[A>B]]", "[[B>A]]", reward=1.0)
+        rows = [
+            filtered | {"_ng_task_index": 0, "_ng_rollout_index": 0},
+            scored | {"_ng_task_index": 1, "_ng_rollout_index": 0},
+        ]
+
+        # Were the filtered row scored, its missing verdict would exceed max_rollout_failure_rate and raise.
+        metrics = (await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))).agent_metrics
+
+        assert metrics["coverage/masked_rollouts"] == 1
+        assert metrics["coverage/measured_rollouts"] == 1
+        assert metrics["rollout_failure_rate"] == 0.0
+        assert metrics["parse_failure_rate"] == 0.0
+        assert metrics["mean/reward"] == approx(1.0)
 
     @mark.parametrize(
         "texts,reward",
