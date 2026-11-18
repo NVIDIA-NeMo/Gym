@@ -80,6 +80,22 @@ my_claude_agent:
 
 With `model_server` set, model calls go through Gym and can be recorded by [model-call capture](/model-server/model-call-capture). Direct Anthropic or `anthropic_base_url` runs bypass Gym capture.
 
+## PDF tool results
+
+The default Messages conversion skips PDF `document` blocks inside tool results. It preserves
+the tool result's call ID and any accompanying text or images; a PDF-only result becomes empty.
+Plain-text documents are passed through as text.
+
+To opt into PDF text extraction, install `pypdf>=5.1.0` in the **model server's Python environment**
+and set `anthropic_pdf_to_text: true` on that model server instance. For example, add
+`+policy_model.responses_api_models.vllm_model.anthropic_pdf_to_text=true` to the `gym env start` command above. Installing pypdf
+in the Claude Code agent's environment alone is insufficient. Gym does not install it automatically.
+
+If extraction is enabled but pypdf is missing, PDFs are still skipped and the server logs a warning.
+Unreadable PDFs produce a short error note. Text extraction loses images and layout, and scanned
+pages without embedded text can yield empty output; this changes the model's observations and can
+affect evaluation results. Direct calls to a native Anthropic endpoint keep that endpoint's PDF handling.
+
 ## Call Anthropic (or another Messages endpoint) directly
 
 If you want Claude Code to hit Anthropic's API — or any other host that already speaks `/v1/messages` — omit `model_server` and set the Anthropic credentials instead:

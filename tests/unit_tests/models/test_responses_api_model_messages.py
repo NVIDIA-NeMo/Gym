@@ -105,6 +105,54 @@ def _client(model_cls) -> TestClient:
 
 
 class TestDefaultMessagesRoute:
+    @pytest.mark.parametrize("extract_pdf_text", [False, True])
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_pdf_tool_result_uses_model_server_opt_in(self, extract_pdf_text: bool, stream: bool) -> None:
+        if extract_pdf_text:
+            pytest.importorskip("pypdf")
+        client, server = _client(_BodyOnlyModel)
+        server.config.anthropic_pdf_to_text = extract_pdf_text
+
+        result = client.post(
+            "/v1/messages",
+            json={
+                "model": "synthetic",
+                "max_tokens": 8,
+                "stream": stream,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "pdf-read",
+                                "content": [
+                                    {
+                                        "type": "document",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": "application/pdf",
+                                            "data": "bm90IGEgcGRm",
+                                        },
+                                    },
+                                    {"type": "text", "text": "other output"},
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+
+        assert result.status_code == 200
+        assert server.last_params.input[0].call_id == "pdf-read"
+        output = server.last_params.input[0].output
+        if extract_pdf_text:
+            assert output.startswith("[document: could not read PDF")
+            assert output.endswith("\nother output")
+        else:
+            assert output == "other output"
+
     @pytest.mark.parametrize("stream", [False, True])
     @pytest.mark.parametrize("output_config", [None, {"effort": None}, {"effort": "max"}])
     def test_output_config_effort_remains_ignored(self, output_config: object, stream: bool) -> None:
