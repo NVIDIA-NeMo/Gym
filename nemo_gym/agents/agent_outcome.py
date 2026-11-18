@@ -30,7 +30,7 @@ from nemo_gym.core.failure_kinds import (
     FailureClassificationConfig,
     classify_failure,
 )
-from nemo_gym.core.failure_records import FailureBoundary, FailureReport, ModelFailureDetails
+from nemo_gym.core.failure_records import FailureBoundary, FailureEvent, FailureReport, ModelFailureDetails
 from nemo_gym.core.failure_transport import FailureHeader
 
 # Compatibility imports for existing agent/environment policy consumers.
@@ -112,6 +112,29 @@ def reject_unanswered_request(
     ):
         return AgentOutcome(failure_kind=MODEL_REQUEST_REJECTED)
     return outcome
+
+
+def report_rejected_request(report: FailureReport) -> FailureReport:
+    """``report`` selecting a ``model_request_rejected`` failure caused by the HTTP 400 it selected, else ``report``.
+
+    ``reject_unanswered_request`` changes only the outcome, and an Environment Server fails a reply whose selected
+    failure disagrees with its outcome, whatever its policy. So a report that selects that model request error gains
+    an agent-boundary rejection caused by it, and selects the rejection. Every original event keeps its id; a report
+    that selects nothing, or something else, is unchanged.
+    """
+    selected = report.events.get(report.failure_id) if report.failure_id is not None else None
+    if selected is None or selected.failure_kind != MODEL_REQUEST_ERROR or selected.http_status != 400:
+        return report
+    rejection = FailureEvent(
+        boundary=FailureBoundary.AGENT,
+        failure_kind=MODEL_REQUEST_REJECTED,
+        failure_reason="The model endpoint refused the request before the model answered",
+        stage=selected.stage,
+        cause_id=selected.event_id,
+    )
+    return FailureReport(
+        failure_id=rejection.event_id, events={**report.events, rejection.event_id: rejection}, omitted=report.omitted
+    )
 
 
 class AgentOutcomePolicyConfig(OutcomePolicyConfig):

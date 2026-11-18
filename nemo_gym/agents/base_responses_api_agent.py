@@ -54,6 +54,7 @@ from nemo_gym.agents.agent_outcome import (
     AgentOutcome,
     policy_timeout_failure,
     reject_unanswered_request,
+    report_rejected_request,
 )
 from nemo_gym.agents.utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
 from nemo_gym.agents.utils.sandbox_session import ExpiryUnsupportedError, SandboxSession
@@ -78,8 +79,8 @@ from nemo_gym.core.episode_context import (
     skips_token_capture,
 )
 from nemo_gym.core.episode_types import EpisodeId, TaskId
-from nemo_gym.core.failure_kinds import FailureStage
-from nemo_gym.core.failure_records import FailureBoundary
+from nemo_gym.core.failure_kinds import MODEL_REQUEST_REJECTED, FailureStage
+from nemo_gym.core.failure_records import FailureBoundary, FailureReport
 from nemo_gym.core.model_call_sampling import (
     MODEL_SAMPLING_NULL,
     current_model_sampling_segment,
@@ -1659,14 +1660,23 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             model_answered=model_answered,
             error_message=message or "",
         )
-        return response.model_copy(
-            update={
-                "metadata": {
-                    **(response.metadata or {}),
-                    AGENT_OUTCOME_METADATA_KEY: outcome.model_dump_json(exclude_none=True),
-                }
+        update: dict[str, Any] = {
+            "metadata": {
+                **(response.metadata or {}),
+                AGENT_OUTCOME_METADATA_KEY: outcome.model_dump_json(exclude_none=True),
             }
-        )
+        }
+        report = (response.model_extra or {}).get("failure_report")
+        if outcome.failure_kind == MODEL_REQUEST_REJECTED and report is not None:
+            # A malformed report stays as it is: the Environment Server fails it closed.
+            try:
+                parsed = FailureReport.model_validate(report)
+            except ValidationError:
+                parsed = None
+            rejected = report_rejected_request(parsed) if parsed is not None else None
+            if rejected is not None and rejected is not parsed:
+                update["failure_report"] = rejected.model_dump(mode="json")
+        return response.model_copy(update=update)
 
     def report_rollout_stop(self, response: NeMoGymResponse, session: SandboxSession) -> NeMoGymResponse:
         """Mark the response of a run that ``POST /rollouts/{rollout_id}/stop`` ended.

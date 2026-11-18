@@ -12,10 +12,12 @@ from nemo_gym.agents.agent_outcome import (
     AgentOutcome,
     AgentOutcomePolicyConfig,
     agent_outcome_policy,
+    report_rejected_request,
 )
 from nemo_gym.agents.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.failure_kinds import FAILURE_KINDS, MODEL_REQUEST_ERROR, MODEL_REQUEST_REJECTED
+from nemo_gym.core.failure_records import FailureBoundary, FailureEvent, FailureReport
 from nemo_gym.core.responses_api_types import NeMoGymResponse
 
 
@@ -143,7 +145,14 @@ class _StatusAgent(SimpleResponsesAPIAgent):
         return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=native_result["status"])
 
 
-def _report(status: int, message: str, *, model_answered: bool | None, error_as_dict: bool = False):
+def _report(
+    status: int,
+    message: str,
+    *,
+    model_answered: bool | None,
+    error_as_dict: bool = False,
+    failure_report: object = None,
+):
     agent = _StatusAgent(
         config=BaseResponsesAPIAgentConfig(host="", port=0, entrypoint="", name=""),
         server_client=MagicMock(spec=ServerClient),
@@ -164,6 +173,9 @@ def _report(status: int, message: str, *, model_answered: bool | None, error_as_
     if error_as_dict:
         # model_copy(update=...) keeps the error a dict, unvalidated, as Simple Strands sets it.
         response = response.model_copy(update={"error": error})
+    if failure_report is not None:
+        # An agent forwards the Model Server's report as an extra field of its reply.
+        response = response.model_copy(update={"failure_report": failure_report})
     return agent.report_outcome(response, {"status": status}, model_answered=model_answered)
 
 
@@ -205,6 +217,71 @@ def test_a_400_before_any_model_answer_is_reported_as_a_rejected_request(
     reported = _report(status, message, model_answered=model_answered, error_as_dict=error_as_dict)
     assert json.loads(reported.metadata[AGENT_OUTCOME_METADATA_KEY]) == expected
     assert agent_outcome_policy(reported) == action
+
+
+def _model_error_report(http_status: int = 400) -> FailureReport:
+    """The Model Server's report of a refused request, selecting that request's failure."""
+    event = FailureEvent(
+        event_id="model-attempt",
+        boundary=FailureBoundary.MODEL,
+        failure_kind=MODEL_REQUEST_ERROR,
+        failure_reason="max_tokens is too large",
+        operation="model_request",
+        operation_id="model-operation",
+        attempt_id="model-operation-1",
+        http_status=http_status,
+    )
+    return FailureReport(failure_id=event.event_id, events={event.event_id: event})
+
+
+def test_a_rejection_is_selected_in_the_report_and_caused_by_the_400_it_reclassifies():
+    original = _model_error_report()
+    reported = _report(
+        400, OUTPUT_CAP_REJECTION, model_answered=False, failure_report=original.model_dump(mode="json")
+    )
+    report = FailureReport.model_validate(reported.model_extra["failure_report"])
+    selected = report.events[report.failure_id]
+    assert selected.failure_kind == MODEL_REQUEST_REJECTED and selected.boundary == FailureBoundary.AGENT
+    assert selected.http_status is None and selected.cause_id == "model-attempt"
+    # The upstream evidence keeps its id and every field.
+    assert report.events["model-attempt"] == original.events["model-attempt"]
+    assert report.events.keys() == {"model-attempt", report.failure_id}
+    # A second pass finds the rejection already selected.
+    assert report_rejected_request(report) == report
+
+
+@pytest.mark.parametrize(
+    ("model_answered", "failure_report"),
+    [
+        # A 400 after an answer stays a request error, and its report keeps selecting it.
+        (True, _model_error_report().model_dump(mode="json")),
+        # A report that selects nothing already leaves the decision to the outcome policy.
+        (False, {"failure_id": None, "events": {}}),
+        # A malformed report stays as it is, so the Environment Server still fails it closed.
+        (False, {"failure_id": "missing", "events": {}}),
+    ],
+)
+def test_a_report_that_selects_no_reclassified_400_is_unchanged(model_answered, failure_report):
+    reported = _report(400, OUTPUT_CAP_REJECTION, model_answered=model_answered, failure_report=failure_report)
+    assert reported.model_extra["failure_report"] == failure_report
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        _model_error_report(500),
+        FailureReport(events=_model_error_report().events),
+        FailureReport(failure_id="model-attempt", events=_model_error_report().events, omitted=True),
+    ],
+    ids=["selects-a-500", "selects-nothing", "omitted"],
+)
+def test_report_rejected_request_selects_a_rejection_only_for_a_selected_400(report):
+    rejected = report_rejected_request(report)
+    if report.failure_id is not None and report.events[report.failure_id].http_status == 400:
+        # An omitted report keeps saying so, so an Environment Server still fails it closed.
+        assert rejected.omitted and rejected.events[rejected.failure_id].failure_kind == MODEL_REQUEST_REJECTED
+    else:
+        assert rejected == report
 
 
 def test_a_rejected_request_follows_its_kind_rule_not_the_status_rules():

@@ -54,6 +54,7 @@ from nemo_gym.agents import (
     confirmed_policy_response_timeout,
     failure_outcome_policy,
     reject_unanswered_request,
+    report_rejected_request,
 )
 from nemo_gym.agents.agent_outcome import POLICY_TIMEOUT_OPERATION, policy_timeout_failure
 from nemo_gym.client import get_response_json, raise_for_status, rollout_path_prefix
@@ -69,6 +70,7 @@ from nemo_gym.core import (
     AGENT_RUN_ERROR,
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
+    MODEL_REQUEST_REJECTED,
     TOOL_OUTPUT_IMAGES_KEY,
     EpisodeId,
     FailureBoundary,
@@ -176,6 +178,10 @@ class SimpleAgentSessionState(AgentSessionState):
     resources_cookies: dict[str, str] | None
     observations: AgentObservationBundle | None = None
     activations: int = 0
+    # A model call of this session returned a response, in any activation. Assistant items in the seeded input are
+    # history, not answers of this session. None is unknown: a session restored, after an activation started, from a
+    # checkpoint that did not record it.
+    model_answered: bool | None = False
     # With checkpointing, the last activation that finished and the reply it gave:
     # an environment server restored from a checkpoint before that reply invokes it again and gets the same reply.
     # The saved reply's response is kept as the object the activation returned,
@@ -410,6 +416,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             "observations": state.observations.model_dump(mode="json") if state.observations is not None else None,
             # Activations started so far, so a restored session neither reuses an invocation ID nor renames one.
             "activations": state.activations,
+            "model_answered": state.model_answered,
             "completed_activation": state.completed_activation,
             "completed_reply": _dump_reply(state.completed_reply),
         }
@@ -433,6 +440,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             observations = session.session.get("observations")
             state.observations = AgentObservationBundle.model_validate(observations) if observations else None
             state.activations = session.session["activations"]
+            state.model_answered = session.session.get(
+                "model_answered",
+                None if session.session["activations"] > 0 else False,
+            )
             state.completed_activation = session.session["completed_activation"]
             state.completed_reply = session.session["completed_reply"]
             restored[session.session_key] = state
@@ -468,6 +479,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         rollout_id: str = "unscoped",
         collect_trajectory: bool = False,
         activation: Activation | None = None,
+        session: SimpleAgentSessionState | None = None,
     ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
         tool_records: list[TrajectoryToolCall] = []
         model_calls: list[ModelCallRef] = []
@@ -617,10 +629,15 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                             failure_kind=reported_kind,
                             status_code=error.status if reported_kind == MODEL_REQUEST_ERROR else None,
                         ),
-                        # Each step makes one model call, so a later step follows an answered one.
-                        model_answered=step > 1,
+                        # Each step makes one model call, so a later step follows an answered one; a session also
+                        # counts the answers of its earlier activations.
+                        model_answered=True
+                        if step > 1
+                        else (session.model_answered if session is not None else False),
                         error_message=message,
                     )
+                    if outcome.failure_kind == MODEL_REQUEST_REJECTED:
+                        report = report_rejected_request(report)
                     invocation_status = "failed"
                     invocation_error_type = reported_kind
                     model_response = NeMoGymResponse(
@@ -650,6 +667,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     raise RuntimeError(
                         f"Received an invalid response from model server: {json.dumps(model_response_json)}"
                     ) from e
+                if session is not None:
+                    session.model_answered = True
 
                 output = model_response.output
                 new_outputs.extend(output)
@@ -985,7 +1004,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
     ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
         """Create a session activation's episode. A subclass whose task context lives in its session state, such as
         a document to put in the request, overrides this; the agent loop stays ``_create_episode``'s."""
-        return await self._create_episode(body, **kwargs)
+        return await self._create_episode(body, session=state, **kwargs)
 
     @staticmethod
     def _saved_reply(loop: SimpleAgentSessionState | _LegacyLoopReply, session_key: str) -> JSONResponse:

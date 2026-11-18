@@ -3757,6 +3757,119 @@ async def test_a_400_after_a_model_answer_stays_a_graded_request_error(monkeypat
     assert agent_outcome_policy(response) == "verify"
 
 
+def _answering_session(observability_enabled: bool, replies: list[MagicMock]) -> tuple[SimpleAgent, TestClient]:
+    """An agent whose seeded session answers its activations with ``replies``, one model call each."""
+    server, server_client = _make_agent(observability_enabled)
+    server_client.post = AsyncMock(side_effect=replies)
+    client = TestClient(server.setup_webserver())
+    seed = client.post(
+        "/v1/agent_sessions",
+        json=AgentSeedSessionRequest(
+            agent_session_id="agent-session",
+            episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+            task_id=TaskId(taskset="example", task_id="0"),
+        ).model_dump(mode="json"),
+    )
+    assert seed.status_code == 200
+    return server, client
+
+
+def _outcome(reply: dict) -> AgentOutcome:
+    return AgentOutcome.model_validate_json(reply["metadata"][AGENT_OUTCOME_METADATA_KEY])
+
+
+@pytest.mark.parametrize("observability_enabled", [False, True])
+@pytest.mark.parametrize(
+    "restored",
+    [
+        pytest.param(None, id="same-server"),
+        pytest.param("recorded", id="restored"),
+        # A checkpoint from before sessions recorded answers: unknown, so the 400 stays graded.
+        pytest.param("unrecorded", id="restored-from-an-older-checkpoint"),
+    ],
+)
+async def test_a_400_on_a_later_activation_s_first_call_stays_a_graded_request_error(
+    observability_enabled: bool, restored: str | None
+) -> None:
+    """An earlier activation's answer counts, so the 400 that opens a later one is not a rejected request."""
+    server, client = _answering_session(
+        observability_enabled, [_message_response("resp-1"), *([] if restored else [_model_http_error(400)])]
+    )
+    assert client.post("/ng-rollout/rollout/v1/responses", json={"input": "first?"}).status_code == 200
+    if not restored:
+        reply = client.post("/ng-rollout/rollout/v1/responses", json={"input": "second?"}).json()
+    else:
+        session = (await server.export_agent_sessions(["agent-session"], checkpoint_id="c"))["agent-session"]
+        assert session["model_answered"] is True
+        if restored == "unrecorded":
+            del session["model_answered"]
+        server, server_client = _make_agent(observability_enabled)
+        participant = AgentSessionParticipant(server)
+        server._checkpoint_participant = participant
+        await participant.install(
+            [
+                AgentSessionRecord(
+                    session_key="agent-session", episode_id=EpisodeId(rollout_id="rollout"), session=session
+                )
+            ],
+            [EpisodeId(rollout_id="rollout")],
+        )
+        server_client.post = AsyncMock(return_value=_model_http_error(400))
+        request = MagicMock(cookies={}, session={AGENT_SESSION_COOKIE_KEY: "agent-session"}, headers={})
+        request.path_params = {"rollout_id": "rollout-a1"}
+        response = await server.responses(
+            request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="second?")
+        )
+        reply = json.loads(response.body) if isinstance(response, JSONResponse) else response.model_dump(mode="json")
+
+    assert reply["status"] == "failed"
+    assert _outcome(reply) == AgentOutcome(failure_kind="model_request_error", status_code=400)
+    assert agent_outcome_policy(NeMoGymResponse.model_validate(reply)) == "verify"
+
+
+async def test_assistant_history_in_the_seeded_input_is_not_an_answer_of_the_session() -> None:
+    """Assistant turns the task brings are history: a 400 on the session's first model call is still rejected."""
+    _, client = _answering_session(False, [_model_http_error(400)])
+    history = [
+        {"role": "user", "content": "earlier question"},
+        {"role": "assistant", "content": "earlier answer"},
+        {"role": "user", "content": "next question"},
+    ]
+    reply = client.post("/ng-rollout/rollout/v1/responses", json={"input": history}).json()
+
+    assert reply["status"] == "failed"
+    assert _outcome(reply) == AgentOutcome(failure_kind="model_request_rejected")
+    assert agent_outcome_policy(NeMoGymResponse.model_validate(reply)) == "fail"
+
+
+async def test_a_rejected_request_s_report_selects_the_rejection_and_keeps_the_model_server_s_events() -> None:
+    model_error = FailureEvent(
+        event_id="model-attempt",
+        boundary=FailureBoundary.MODEL,
+        failure_kind="model_request_error",
+        failure_reason="max_tokens is too large",
+        operation="model_request",
+        operation_id="model-operation",
+        attempt_id="model-operation-1",
+        http_status=400,
+    )
+    forwarded = FailureReport(failure_id=model_error.event_id, events={model_error.event_id: model_error})
+    refused = _model_http_error(400)
+    refused.raise_for_status.side_effect.headers = FailureHeader.encode(forwarded)
+    _, client = _answering_session(False, [refused])
+
+    reply = client.post("/ng-rollout/rollout/v1/responses", json={"input": "first?"}).json()
+
+    assert _outcome(reply) == AgentOutcome(failure_kind="model_request_rejected")
+    report = FailureReport.model_validate(reply["failure_report"])
+    selected = report.events[report.failure_id]
+    assert selected.failure_kind == "model_request_rejected" and selected.http_status is None
+    # The rejection is caused by a refused 400, and the Model Server's own event survives with its id.
+    cause = report.events[selected.cause_id]
+    assert cause.failure_kind == "model_request_error" and cause.http_status == 400
+    assert report.events["model-attempt"] == model_error
+
+
 def _body_failure_report(http_status: int) -> FailureReport:
     attempt = FailureEvent(
         boundary=FailureBoundary.MODEL,

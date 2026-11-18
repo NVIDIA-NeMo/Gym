@@ -797,8 +797,12 @@ because the endpoint refused the run's own request before the model answered, un
 error message names the context window (`context_length_exceeded`, "context length",
 "context window", "context size", "maximum model length" or "prompt is too long"): a
 prompt over the window is the model's own limit and stays graded. With `True` or `None`
-(unknown), the 400 stays `model_request_error`. A harness that writes the outcome itself
-applies the same rule with `reject_unanswered_request`.
+(unknown), the 400 stays `model_request_error`. When the reply carries the Model Server's
+`failure_report`, `report_outcome` also adds a selected `model_request_rejected` event caused by
+that 400 and keeps every original event, because an Environment Server fails a reply whose
+selected failure disagrees with its outcome. A harness that writes the outcome itself
+applies the same rule with `reject_unanswered_request`, and its report with
+`report_rejected_request`.
 
 `AgentOutcome.failure_kind` accepts names registered in `nemo_gym/core/failure_kinds.py`
 or `unknown`; unregistered names are rejected. The shared names describe causes,
