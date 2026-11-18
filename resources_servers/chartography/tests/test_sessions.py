@@ -47,9 +47,9 @@ def stopped(monkeypatch) -> list[AsyncSandbox]:
     stopped: list[AsyncSandbox] = []
     real_stop = AsyncSandbox.stop
 
-    async def stop(self: AsyncSandbox) -> None:
+    async def stop(self: AsyncSandbox, **kwargs: object) -> None:
         stopped.append(self)
-        await real_stop(self)
+        await real_stop(self, **kwargs)
 
     monkeypatch.setattr(AsyncSandbox, "stop", stop)
     return stopped
@@ -198,11 +198,11 @@ def test_a_failed_stop_before_the_judge_keeps_the_grade_and_is_retried(
     attempts: list[AsyncSandbox] = []
     recording_stop = AsyncSandbox.stop
 
-    async def stop(self: AsyncSandbox) -> None:
+    async def stop(self: AsyncSandbox, **kwargs: object) -> None:
         attempts.append(self)
         if len(attempts) <= failed_stops:
             raise RuntimeError("the provider refused the stop")
-        await recording_stop(self)
+        await recording_stop(self, **kwargs)
 
     monkeypatch.setattr(AsyncSandbox, "stop", stop)
 

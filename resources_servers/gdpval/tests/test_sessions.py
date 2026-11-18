@@ -45,9 +45,9 @@ def stopped(monkeypatch) -> list[AsyncSandbox]:
     stopped: list[AsyncSandbox] = []
     real_stop = AsyncSandbox.stop
 
-    async def stop(self: AsyncSandbox) -> None:
+    async def stop(self: AsyncSandbox, **kwargs: object) -> None:
         stopped.append(self)
-        await real_stop(self)
+        await real_stop(self, **kwargs)
 
     monkeypatch.setattr(AsyncSandbox, "stop", stop)
     return stopped
@@ -784,9 +784,9 @@ def failing_stop(monkeypatch) -> list[AsyncSandbox]:
     attempted: list[AsyncSandbox] = []
     real_stop = AsyncSandbox.stop
 
-    async def stop(self: AsyncSandbox) -> None:
+    async def stop(self: AsyncSandbox, **kwargs: object) -> None:
         attempted.append(self)
-        await real_stop(self)
+        await real_stop(self, **kwargs)
         raise OSError("stop failed")
 
     monkeypatch.setattr(AsyncSandbox, "stop", stop)
