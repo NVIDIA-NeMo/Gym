@@ -60,6 +60,7 @@ _INSTANCE_ID = "owner/repo-1"
 async def _verify(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, keep: bool) -> Path:
     """Run one golden-patch verify with results under ``tmp_path``; return the log folder the verifier wrote to."""
     monkeypatch.setattr(runtime_files, "maybe_get_global_config_dict", lambda: {RESULTS_DIR_KEY_NAME: str(tmp_path)})
+    monkeypatch.setattr(swe_next_app, "get_global_config_dict", lambda: {})
     config = SWENextResourcesServerConfig(
         host="0.0.0.0",
         port=8080,
@@ -72,7 +73,7 @@ async def _verify(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, keep: bool
     )
     server = SWENextResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
     monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=MagicMock()))
-    monkeypatch.setattr(server, "_stop_sandbox", AsyncMock())
+    monkeypatch.setattr(server, "_stop_verifier_sandbox", AsyncMock())
     log_dirs: list[Path] = []
 
     async def verify(*, log_dir: Path, **kwargs: object) -> VerificationResult:
