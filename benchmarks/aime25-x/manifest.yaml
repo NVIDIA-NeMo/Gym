@@ -1,0 +1,30 @@
+name: aime25-x
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: math
+description: OpenMathReasoning math dataset with math-verify and LLM-as-a-judge
+modality: text
+licensing: unknown
+authors:
+- wedu-nvidia
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: math_with_judge
+agent_server: simple_agent
+datasets:
+- name: aime25-x
+  type: benchmark
+  jsonl_fpath: benchmarks/aime25-x/data/aime25-x_benchmark.jsonl
+  prepare_script: benchmarks/aime25-x/prepare.py
+  prompt_config: benchmarks/prompts/generic/default.yaml
+  num_repeats: 32
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/prompts/generic/default.yaml
+lifecycle: active

@@ -20,8 +20,9 @@ from typing import Any, Dict, Optional
 from fastapi import HTTPException
 from pydantic import Field
 
-from nemo_gym.base_resources_server import BaseResourcesServerConfig
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
+from nemo_gym.server_runtime import BaseResourcesServerConfig
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.grl_sokoban.sokoban_env import SokobanEnv
 from resources_servers.gymnasium import GymnasiumServer, extract_text
 
@@ -63,7 +64,7 @@ class GrlSokobanResourcesServer(GymnasiumServer):
         if session_id is None:
             raise HTTPException(status_code=400, detail="Missing session id.")
 
-        self._close_env(session_id)
+        self._cleanup_session(session_id)
 
         env = SokobanEnv(self._env_config_from_metadata(metadata))
         observation = env.reset(seed=metadata.get("seed"))
@@ -116,8 +117,9 @@ class GrlSokobanResourcesServer(GymnasiumServer):
                 env_config[key] = metadata[key]
         return env_config
 
-    def _close_env(self, session_id: str) -> None:
+    def _cleanup_session(self, session_id: Optional[str]) -> None:
         session_state = self.session_id_to_state.pop(session_id, None)
+        super()._cleanup_session(session_id)
         if session_state is None:
             return
         try:
@@ -158,3 +160,6 @@ class GrlSokobanResourcesServer(GymnasiumServer):
 
 if __name__ == "__main__":
     GrlSokobanResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = GrlSokobanResourcesServer.run_webserver()  # noqa: F401

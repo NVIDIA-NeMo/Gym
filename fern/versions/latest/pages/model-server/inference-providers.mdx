@@ -58,6 +58,7 @@ policy_base_url: https://your-provider.com/v1
 | `uses_reasoning_parser` | `bool` | `false` | Parse `<think>` tags and `reasoning_content` fields from thinking models. |
 | `num_concurrent_requests` | `int` | `1000` | Maximum concurrent requests to the provider. Reduce if your provider has a lower rate limit. |
 | `extra_body` | `dict` | `{}` | Additional parameters merged into every request body. |
+| `correlate_via_user_field` | `bool` | `false` | Forward the current rollout id as the outbound OpenAI `user` field, so a downstream provider that inspects it can correlate per-turn calls back to the same rollout. Requires `observability_enabled: true` (otherwise no rollout id is available to forward). Never overrides an explicit `user` already on the request. |
 
 <Note>
 **The model is fixed by configuration.** This server always sends the configured `model` (from `policy_model_name`) to the provider. If an incoming request carries its own `model` field — as standard OpenAI-compatible clients and SDKs do — that value is **overwritten**, so you cannot switch models on a per-request basis. To run a different model, change the config and start a new server.

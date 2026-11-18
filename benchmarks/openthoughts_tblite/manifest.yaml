@@ -1,0 +1,31 @@
+name: openthoughts_tblite
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: external-agent-loop
+domain: coding
+description: OpenThoughts-TBLite (Terminal-Bench Lite), 100 Harbor-format terminal tasks run by Harbor's Terminus-2
+  with each task's own time limits and tests.
+modality: text
+licensing: Apache-2.0
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: config.yaml
+agent_server: harbor_agent_general
+datasets:
+- name: openthoughts_tblite
+  type: benchmark
+  jsonl_fpath: benchmarks/openthoughts_tblite/data/benchmark.jsonl
+  prepare_script: benchmarks/openthoughts_tblite/prepare.py
+  num_repeats: 3
+resources_server: null
+model_server: null
+canonical_split: benchmark
+prompt_source: agent
+lifecycle: active

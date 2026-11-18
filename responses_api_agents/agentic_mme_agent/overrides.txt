@@ -1,0 +1,4 @@
+# Gym's root pyproject drops opencv-python-headless from every server venv (codec
+# licensing); the atomic image tools need it for denoise/Canny/Sobel, so re-enable it
+# here at the version docker/install_codec_deps.sh pins.
+opencv-python-headless==5.0.0.93

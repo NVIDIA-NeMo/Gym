@@ -1,0 +1,117 @@
+[
+ {
+  "reward": 0.0,
+  "f1": 0.0,
+  "parse_failed": true,
+  "predicted_nodes": [],
+  "expected_answer": "[\"8ce72432c3\", \"cc1d70ad9d\"]",
+  "problem_type": "parents",
+  "response": {
+   "object": "response",
+   "id": "resp-parse_failed",
+   "status": "incomplete",
+   "output": [
+    {
+     "type": "message",
+     "role": "assistant",
+     "status": "completed",
+     "content": [
+      {
+       "type": "output_text",
+       "text": ""
+      }
+     ]
+    }
+   ]
+  },
+  "_class": "parse_failed"
+ },
+ {
+  "reward": 1.0,
+  "f1": 1.0,
+  "parse_failed": false,
+  "predicted_nodes": [
+   "ac1dd209cb"
+  ],
+  "expected_answer": "[\"ac1dd209cb\"]",
+  "problem_type": "parents",
+  "response": {
+   "object": "response",
+   "id": "resp-full",
+   "status": "completed",
+   "output": [
+    {
+     "type": "message",
+     "role": "assistant",
+     "status": "completed",
+     "content": [
+      {
+       "type": "output_text",
+       "text": "4.  No other edges found where `f73b76ce89` is the target.\nThe only parent node is `ac1dd209cb`.\nFinal Answer: [ac1dd209cb]"
+      }
+     ]
+    }
+   ]
+  },
+  "_class": "full"
+ },
+ {
+  "reward": 0.8,
+  "f1": 0.8,
+  "parse_failed": false,
+  "predicted_nodes": [
+   "93db85ed90",
+   "98dce83da5"
+  ],
+  "expected_answer": "[\"091d584fce\", \"93db85ed90\", \"98dce83da5\"]",
+  "problem_type": "parents",
+  "response": {
+   "object": "response",
+   "id": "resp-partial",
+   "status": "completed",
+   "output": [
+    {
+     "type": "message",
+     "role": "assistant",
+     "status": "completed",
+     "content": [
+      {
+       "type": "output_text",
+       "text": "No other edges point to `84d9ee44e4`.\nThe parents are `93db85ed90` and `98dce83da5`.\nFinal Answer: [93db85ed90, 98dce83da5]"
+      }
+     ]
+    }
+   ]
+  },
+  "_class": "partial"
+ },
+ {
+  "reward": 0.0,
+  "f1": 0.0,
+  "parse_failed": false,
+  "predicted_nodes": [
+   "55b34fd737"
+  ],
+  "expected_answer": "[]",
+  "problem_type": "parents",
+  "response": {
+   "object": "response",
+   "id": "resp-zero",
+   "status": "completed",
+   "output": [
+    {
+     "type": "message",
+     "role": "assistant",
+     "status": "completed",
+     "content": [
+      {
+       "type": "output_text",
+       "text": "4.  No other edges found where `a992995ef4` is the target.\nThe only parent node found is `55b34fd737`.\nFinal Answer: [55b34fd737]"
+      }
+     ]
+    }
+   ]
+  },
+  "_class": "zero"
+ }
+]

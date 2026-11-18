@@ -14,7 +14,7 @@ All environments can be used for training. A benchmark is the evaluation-configu
 
 ## How Benchmarks Relate to Environments
 
-The same resources server powers both. For example, `math_with_judge` is used for RL training via the `code_gen` environment **and** as the verifier for benchmarks like `aime24`, `aime25`, and `gsm8k`. The benchmark config chains to the resources server via `config_paths` and adds a `type: benchmark` dataset with its own `prepare_script` and `num_repeats`.
+The same resources server powers both. For example, `resources_servers/math_with_judge/configs/math_with_judge.yaml` provides the OpenMathReasoning training dataset **and** uses `math_with_judge` as the verifier for benchmarks like `aime24`, `aime25`, and `gsm8k`. The benchmark config chains to the resources server via `config_paths` and adds a `type: benchmark` dataset with its own `prepare_script` and `num_repeats`.
 
 ```yaml
 # benchmarks/aime24/config.yaml
@@ -81,13 +81,57 @@ Function completion (HumanEval, MBPP), competitive programming, text-to-SQL (BIR
 Graduate-level science (GPQA Diamond), MMLU variants, HLE, multi-hop QA (HotPotQA), factual recall (SimpleQA, OmniScience), and abstract reasoning (ARC-AGI).
 
 **Agentic / Tool Use**
-Multi-step tool calling, web search (BrowseComp), calendar scheduling, financial analysis, text-adventure games (AlfWorld, ScienceWorld), and function-calling datasets.
+Multi-step tool calling, web search (BrowseComp, MM-BrowseComp), calendar scheduling, financial analysis, text-adventure games (AlfWorld, ScienceWorld), and function-calling datasets.
+
+MM-BrowseComp is the multimodal version of BrowseComp: 400 web-research questions, 243 of them with question images. Prepare it with `gym eval prepare --benchmark mm_browsecomp`, then run it with a vision-capable policy as its [README](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/mm_browsecomp/README.md#run) shows. The policy sees the question images, but search and browse return text only. Gym scores answers with the BrowseComp answer judge, not the official MM-BrowseComp checklist judge.
 
 **Instruction Following & Safety**
 IFEval, IFBench, inverse instruction following, VerifIF, jailbreak resistance, over-refusal calibration (XSTest), and structured output validation.
 
 **Other**
 ASR (LibriSpeech, WER), machine translation (WMT, FLORES-200), VLM benchmarks, Arena Hard pairwise judging, and speculative-decoding throughput.
+
+## HealthBench and HealthBench Professional
+
+These clinical-response benchmarks use the shared HealthBench rubric verifier and an independent judge model. They are experimental integrations. See the [HealthBench README](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/healthbench/README.md) and [HealthBench Professional README](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/healthbench_professional/README.md) for dataset provenance, judge settings, and scoring details.
+
+Prepare each dataset before running it. The smoke config routes Nemotron Lightning policy calls and independent judge calls through the NVIDIA inference gateway. It selects GPT-4.1 for HealthBench; Professional selects GPT-5.4 with low judge reasoning effort in its benchmark config. Set `NVIDIA_API_KEY` for this example, or provide your own model and judge settings with `++judge_base_url`, `++judge_api_key`, and `++judge_model_name`.
+
+```bash
+gym eval prepare --benchmark healthbench
+gym eval prepare --benchmark healthbench_professional
+
+gym eval run --benchmark healthbench \
+  --config benchmarks/healthbench/configs/nemotron-lightning-smoke.yaml \
+  --split benchmark --output results/healthbench/rollouts.jsonl
+
+gym eval run --benchmark healthbench_professional \
+  --config benchmarks/healthbench/configs/nemotron-lightning-smoke.yaml \
+  --split benchmark --output results/healthbench_professional/rollouts.jsonl \
+  ++smoke_judge_model_name=azure/openai/gpt-5.4
+```
+
+HealthBench Full is the default. Pass `--config benchmarks/healthbench/configs/consensus.yaml` or `--config benchmarks/healthbench/configs/hard.yaml` to both prepare and run for the corresponding subset. The headline aggregate metric is `overall_score` for HealthBench and `overall_score_length_adjusted` for Professional. `mean/reward` is a bounded Gym reward, not the published benchmark score. Judge failures are masked and reduce scored coverage; report that coverage with every score.
+
+## Benchmarks Whose Data You Stage
+
+A few benchmarks declare a protocol over a dataset that cannot ship with Gym. Their `prepare_script` copies a file you stage yourself and fails when you have not given it one, so a run never scores a partial or stale set.
+
+**AgentArena** (`benchmarks/agent_arena`) is one. It runs the 433-turn Arena validation split at four repeats over the [`agentic_turn_simulation`](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/agentic_turn_simulation) environment, which scores a whole agent turn against simulated tools. The rows carry the agent harness's own system prompt and conversation history, so the benchmark sets no `prompt_config` of its own. The split is held out from the Arena RL training rows, is NVIDIA internal use only and is not redistributable: obtain it from the dataset's owners. Its row format is the environment's own, described in [the environment's data guide](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/agentic_turn_simulation/docs/data.md).
+
+Stage the file, then prepare and run. The simulator and the judge are the environment's judge model server, so every run names it:
+
+```bash
+AGENT_ARENA_TURNS_JSONL=/path/to/arena_turns.jsonl \
+  gym eval prepare --benchmark agent_arena
+
+gym eval run --benchmark agent_arena \
+  --model-type vllm_model --model-url http://MODEL_HOST:8000/v1 --model MODEL_NAME \
+  --output results/agent_arena/rollouts.jsonl \
+  ++judge_base_url="$JUDGE_URL" ++judge_api_key="$JUDGE_KEY" ++judge_model_name="$JUDGE_MODEL"
+```
+
+`++judge_base_url` takes one URL or a list of replicas. `++prepare_script_args.source_jsonl=<path>` names the staged file instead of the environment variable, and `++prepare_script_args.limit=<n>` prepares only the first `n` turns for a smoke run. A subset is not the benchmark's score: the protocol is all 433 turns at four repeats.
 
 ## Interpreting Results
 
@@ -128,3 +172,28 @@ Contribution checklist for adding a new benchmark to Gym.
 </Card>
 
 </Cards>
+
+
+## Experimental skill-opening benchmark
+
+The [skill-opening benchmark](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/skill_trigger)
+uses five Harbor agent profiles to measure whether successful tool results return
+skill instructions. It measures skill opening, not task completion. The canonical
+110-case selection is positive-only; separate negative controls measure unnecessary
+task-specific opening, with documented session-start meta-skill reads reported
+separately. Nine cases remain blocked by unresolved source terms, and preparation
+enforces that boundary. Missing or inconclusive evidence remains unscored and must
+be reported alongside each rate. See the linked measurement contract for release
+versions, exclusions, and the supported `gym eval run --split benchmark` workflow.
+
+The release 0.2.1 pilot includes inspected CLI fixtures for all five profiles, a
+180-attempt positive sample (133 scored, 47 unscored), and 90 separate negative
+controls (82 scored, eight unscored). The [validation tables](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/skill_trigger/README.md#release-021-validation)
+identify the exact sampled tasks, source exclusions, model/runtime, and every
+denominator. These bounded observations do not reproduce the deleted historical
+experiment or establish harness rankings.
+
+Six pilot openings are conclusively observed before later execution errors; all errors remain reported.
+The generic Harbor agent preserves failed-result bytes before invalidating resume.
+A verified opening counts even if later work times out; applying the instructions
+or completing the task is not part of the positive metric.

@@ -52,7 +52,12 @@ $miniforge_dir/bin/python -m pip install -q 'packaging==26.0'
 # Install jq as a static binary (avoid conda solver changing other package versions)
 if [ ! -f "$miniforge_dir/bin/jq" ]; then
     echo "Installing jq static binary..."
-    curl -fsSL https://github.com/jqlang/jq/releases/download/jq-1.8.1/jq-linux-amd64 -o "$miniforge_dir/bin/jq"
+    case "$(uname -m)" in
+        x86_64|amd64) jq_arch=amd64 ;;
+        aarch64|arm64) jq_arch=arm64 ;;
+        *) echo "No static jq binary for architecture $(uname -m)" >&2; exit 1 ;;
+    esac
+    curl -fsSL "https://github.com/jqlang/jq/releases/download/jq-1.8.1/jq-linux-${jq_arch}" -o "$miniforge_dir/bin/jq"
     chmod +x "$miniforge_dir/bin/jq"
 fi
 
@@ -104,11 +109,15 @@ export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v '\.venv' | tr '\n' ':' | sed 
 # Configure poetry to create virtualenv in the project directory (so it's mounted in container)
 export POETRY_VIRTUALENVS_IN_PROJECT=true
 
-# Retry `make build` with a timeout guard on the first attempt.
-# The timeout is env-overridable for hosts where a healthy build takes longer.
+# Retry `make build` with a timeout guard on every attempt, so a hang can't block
+# indefinitely. The final attempt gets its own, longer timeout: it has no retry left
+# to fall back on, and a healthy build can take 5-10 minutes on some hosts (see the
+# "Building OpenHands" log line above). Both are env-overridable.
 MAX_MAKE_BUILD_ATTEMPTS=2
 MAKE_BUILD_TIMEOUT_SECONDS="${MAKE_BUILD_TIMEOUT_SECONDS:-$((2 * 60))}"
 MAKE_BUILD_TIMEOUT_MINUTES=$((MAKE_BUILD_TIMEOUT_SECONDS / 60))
+MAKE_BUILD_FINAL_TIMEOUT_SECONDS="${MAKE_BUILD_FINAL_TIMEOUT_SECONDS:-$((30 * 60))}"
+MAKE_BUILD_FINAL_TIMEOUT_MINUTES=$((MAKE_BUILD_FINAL_TIMEOUT_SECONDS / 60))
 
 attempt=1
 while [ "$attempt" -le "$MAX_MAKE_BUILD_ATTEMPTS" ]; do
@@ -135,14 +144,18 @@ while [ "$attempt" -le "$MAX_MAKE_BUILD_ATTEMPTS" ]; do
         continue
     fi
 
-    if make build; then
+    if timeout "$MAKE_BUILD_FINAL_TIMEOUT_SECONDS" make build; then
         echo "make build completed successfully."
         break
     else
         exit_code=$?
     fi
 
-    echo "make build failed on the final attempt with exit code $exit_code."
+    if [ "$exit_code" -eq 124 ]; then
+        echo "make build timed out after $MAKE_BUILD_FINAL_TIMEOUT_MINUTES minutes on the final attempt."
+    else
+        echo "make build failed on the final attempt with exit code $exit_code."
+    fi
     exit "$exit_code"
 done
 

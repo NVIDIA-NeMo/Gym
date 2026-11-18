@@ -28,8 +28,9 @@ resources server on externally generated SDG data, so there is no
 ## Setup
 
 Everything goes in `env.yaml` at the repo root, which is gitignored. Nothing is
-hardcoded in the committed configs, and only the policy endpoint is required for a
-run: a tool key left unset registers its tool as unavailable instead of failing
+hardcoded in the committed configs. A run needs the policy endpoint and
+`sec_api_key`, since the benchmark runs `edgar_search` against sec-api.io. Any
+other tool key left unset registers its tool as unavailable instead of failing
 startup.
 
 The judge is a **separate** server from the policy on purpose. If the policy graded
@@ -76,7 +77,7 @@ gym eval prepare --benchmark finance_agent_v2
 
 # 2. Evaluate against it (auto-serves the resources server + agent).
 gym eval run --benchmark finance_agent_v2 \
-  -c responses_api_models/openai_model/configs/openai_model.yaml \
+  --config responses_api_models/openai_model/configs/openai_model.yaml \
   --output results/finance_agent_v2_27q.jsonl --concurrency 4
 ```
 
@@ -97,7 +98,7 @@ component name:
 ```bash
 # Terminal 1 — serve
 gym env start --benchmark finance_agent_v2 \
-  -c responses_api_models/openai_model/configs/openai_model.yaml
+  --config responses_api_models/openai_model/configs/openai_model.yaml
 
 # Terminal 2 — collect (repeat as needed against the same servers)
 gym eval run --no-serve --agent finance_agent_v2_benchmark_agent \

@@ -1,0 +1,939 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Tests for the SWE-rebench-V2 resources server's grading and script construction.
+
+These cover the parts that decide whether a task counts as resolved. The sandbox lifecycle
+itself is exercised by the golden-patch run, which needs a live OpenSandbox endpoint.
+"""
+
+import re
+import signal
+import subprocess
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from resources_servers.swe_rebench.verification import (
+    TEST_OUTPUT_BEGIN,
+    TEST_OUTPUT_END,
+    TEST_PATCH_FAILED,
+    VerificationInputs,
+    as_command_list,
+    build_eval_script,
+    drop_test_patch_files,
+    grade,
+    normalize_test_name,
+    repo_directory,
+    run_verification,
+    slice_test_output,
+    verification_files,
+)
+
+
+def _inputs(**overrides) -> VerificationInputs:
+    base = dict(
+        instance_id="elastic__synthetics-316",
+        repo="elastic/synthetics",
+        base_commit="f52f0bf",
+        patch="diff --git a/a b/a\n",
+        test_patch="diff --git a/t b/t\n",
+        install=["npm ci --quiet"],
+        test_cmd=["npm run test:unit"],
+        log_parser="parse_log_js_4",
+        fail_to_pass=["run journey - failed on beforeAll"],
+        pass_to_pass=["log to specified fd"],
+    )
+    base.update(overrides)
+    return VerificationInputs(**base)
+
+
+class TestRepoDirectory:
+    def test_uses_the_repo_name_not_the_owner(self) -> None:
+        # The images check out at /<repo-name>; using the owner would cd into a missing path
+        # and every task would fail identically.
+        assert repo_directory("elastic/synthetics") == "/synthetics"
+
+    def test_tolerates_a_bare_repo_name(self) -> None:
+        assert repo_directory("synthetics") == "/synthetics"
+
+
+class TestCommandList:
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            ("npm test", ["npm test"]),
+            (["a", "b"], ["a", "b"]),
+            (None, []),
+            ("", []),
+        ],
+    )
+    def test_accepts_both_dataset_spellings(self, value, expected) -> None:
+        """install/test_cmd are a string in some rows and a list in others."""
+        assert as_command_list(value) == expected
+
+
+class TestNormalizeTestName:
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("suite > case [123 ms]", "suite > case"),
+            ("suite > case (1.5 s)", "suite > case"),
+            ("test_thing in 2.0 sec", "test_thing"),
+            ("plain name", "plain name"),
+        ],
+    )
+    def test_strips_per_run_timings(self, raw, expected) -> None:
+        """The expectation and the observed name otherwise differ only by a duration."""
+        assert normalize_test_name(raw) == expected
+
+
+class TestSliceTestOutput:
+    def test_keeps_only_the_graded_region(self) -> None:
+        log = f"installing deps\nFAILED bogus\n{TEST_OUTPUT_BEGIN}\nPASSED real\n{TEST_OUTPUT_END}\ncleanup"
+        sliced = slice_test_output(log)
+        assert "PASSED real" in sliced
+        # Install noise must not reach the parser: several parsers would read that FAILED line
+        # as a test result and grade a healthy run as broken.
+        assert "FAILED bogus" not in sliced
+        assert "cleanup" not in sliced
+
+    def test_falls_back_to_the_whole_log_when_markers_are_absent(self) -> None:
+        assert slice_test_output("PASSED a") == "PASSED a"
+
+
+class TestGrade:
+    def test_resolves_only_when_every_required_test_passes(self) -> None:
+        report = grade({"f2p": "PASSED", "p2p": "PASSED"}, ["f2p"], ["p2p"])
+        assert report["resolved"] is True
+
+    def test_a_failing_fail_to_pass_does_not_resolve(self) -> None:
+        report = grade({"f2p": "FAILED", "p2p": "PASSED"}, ["f2p"], ["p2p"])
+        assert report["resolved"] is False
+        assert report["FAIL_TO_PASS"]["failure"] == ["f2p"]
+
+    def test_a_regressed_pass_to_pass_does_not_resolve(self) -> None:
+        report = grade({"f2p": "PASSED", "p2p": "FAILED"}, ["f2p"], ["p2p"])
+        assert report["resolved"] is False
+
+    def test_a_missing_test_counts_as_not_passing(self) -> None:
+        """The important one: a broken test command reports nothing, and 'absent' must never
+        read as success or every such row scores as resolved."""
+        report = grade({}, ["f2p"], ["p2p"])
+        assert report["resolved"] is False
+        assert report["FAIL_TO_PASS"]["failure"] == ["f2p"]
+        assert report["tests_observed"] == 0
+
+    def test_timing_suffixes_do_not_break_matching(self) -> None:
+        report = grade({"case [12 ms]": "PASSED"}, ["case"], [])
+        assert report["resolved"] is True
+
+    def test_skipped_is_not_passed(self) -> None:
+        assert grade({"f2p": "SKIPPED"}, ["f2p"], [])["resolved"] is False
+
+
+class TestBuildEvalScript:
+    def test_runs_in_the_repo_directory_and_signals_a_missing_one(self) -> None:
+        script = build_eval_script(_inputs())
+        # shlex.quote leaves a plain path bare, so assert the behaviour rather than the quoting.
+        assert "exit 97" in script
+        assert any(line.startswith("cd ") and "/synthetics" in line for line in script.splitlines())
+
+    def test_applies_both_patches_before_testing(self) -> None:
+        script = build_eval_script(_inputs())
+        patch_at = script.index("nemo_gym_patch.diff")
+        test_patch_at = script.index("nemo_gym_test_patch.diff")
+        test_at = script.index("npm run test:unit")
+        assert patch_at < test_at and test_patch_at < test_at
+
+    def test_flags_a_test_patch_that_fails_to_apply(self) -> None:
+        script = build_eval_script(_inputs())
+        assert f"grep -q '^error: ' /tmp/nemo_gym_test_patch.log && echo {TEST_PATCH_FAILED}" in script
+
+    def test_omits_the_patch_step_when_there_is_no_patch(self) -> None:
+        """An empty model patch must not produce a `git apply` of a nonexistent file."""
+        script = build_eval_script(_inputs(patch=""))
+        assert "nemo_gym_patch.diff" not in script
+        assert "nemo_gym_test_patch.diff" in script
+
+    def test_brackets_the_test_command_with_markers(self) -> None:
+        script = build_eval_script(_inputs())
+        assert script.index(TEST_OUTPUT_BEGIN) < script.index("npm run test:unit") < script.index(TEST_OUTPUT_END)
+
+    def test_propagates_the_test_exit_code_not_the_install_one(self) -> None:
+        script = build_eval_script(_inputs())
+        assert "__test_exit=$?" in script and "exit $__test_exit" in script
+
+
+class TestVerificationFiles:
+    def test_ships_the_script_and_only_the_patches_that_exist(self) -> None:
+        files = verification_files(_inputs(patch=""))
+        assert "/tmp/nemo_gym_eval.sh" in files
+        assert "/tmp/nemo_gym_patch.diff" not in files
+        assert "/tmp/nemo_gym_test_patch.diff" in files
+
+
+class TestDropTestPatchFiles:
+    def test_drops_the_model_sections_for_files_the_test_patch_touches(self) -> None:
+        patch = (
+            "diff --git a/src/calc.py b/src/calc.py\n--- a/src/calc.py\n+++ b/src/calc.py\n@@ -1 +1 @@\n-a\n+b\n"
+            "diff --git a/tests/test_calc.py b/tests/test_calc.py\n--- a/tests/test_calc.py\n+++ b/tests/test_calc.py\n"
+            "@@ -1 +1 @@\n-x\n+mine\n"
+            "diff --git a/tests/test_new.py b/tests/test_new.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_new.py\n"
+            "@@ -0,0 +1 @@\n+mine\n"
+            "diff --git a/tests/test_mine.py b/tests/test_mine.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_mine.py\n"
+            "@@ -0,0 +1 @@\n+mine\n"
+        )
+        test_patch = (
+            "diff --git a/tests/test_calc.py b/tests/test_calc.py\n--- a/tests/test_calc.py\n+++ b/tests/test_calc.py\n"
+            "@@ -1 +1 @@\n-x\n+hidden\n"
+            "diff --git a/tests/test_new.py b/tests/test_new.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_new.py\n"
+            "@@ -0,0 +1 @@\n+hidden\n"
+        )
+        kept = drop_test_patch_files(patch, test_patch)
+        assert "a/src/calc.py" in kept and "b/tests/test_mine.py" in kept
+        assert "tests/test_calc.py" not in kept and "tests/test_new.py" not in kept
+
+    def test_keeps_the_patch_when_there_is_no_test_patch(self) -> None:
+        patch = "diff --git a/tests/test_calc.py b/tests/test_calc.py\n--- a/tests/test_calc.py\n+++ b/tests/test_calc.py\n"
+        assert drop_test_patch_files(patch, "") == patch
+
+
+class _FakeSandbox:
+    def __init__(self, stdout: str, return_code: int = 0) -> None:
+        self._result = SimpleNamespace(stdout=stdout, stderr="", error_type=None, return_code=return_code)
+        self.commands: list[str] = []
+
+    async def exec(self, command: str, timeout_s=None):
+        self.commands.append(command)
+        return self._result
+
+
+class TestRunVerification:
+    @pytest.mark.asyncio
+    async def test_grades_a_passing_run(self) -> None:
+        log = f"{TEST_OUTPUT_BEGIN}\nirrelevant\n{TEST_OUTPUT_END}"
+        sandbox = _FakeSandbox(log)
+        result = await run_verification(
+            sandbox=sandbox,
+            inputs=_inputs(fail_to_pass=["a"], pass_to_pass=[]),
+            parser=lambda _log: {"a": "PASSED"},
+        )
+        assert result.completed and result.resolved
+        assert sandbox.commands == ["bash /tmp/nemo_gym_eval.sh"]
+
+    @pytest.mark.asyncio
+    async def test_signal_interruption_does_not_grade_partial_passing_output(self) -> None:
+        process = subprocess.run(
+            ["bash", "-c", 'printf "%s\\n" "$1" "a PASSED"; kill -KILL $$', "bash", TEST_OUTPUT_BEGIN],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert process.returncode == -signal.SIGKILL
+        assert "a PASSED" in process.stdout and TEST_OUTPUT_END not in process.stdout
+        parsed: list[str] = []
+
+        def parse(log: str) -> dict[str, str]:
+            parsed.append(log)
+            return {"a": "PASSED"} if "a PASSED" in log.splitlines() else {}
+
+        result = await run_verification(
+            sandbox=_FakeSandbox(process.stdout, return_code=process.returncode),
+            inputs=_inputs(fail_to_pass=["a"], pass_to_pass=[]),
+            parser=parse,
+        )
+        assert result.completed is False and result.resolved is False
+        assert result.test_results["tests_observed"] == 1
+        assert result.test_results["resolved"] is False
+        assert parsed == ["\na PASSED\n"]
+        assert result.test_output == process.stdout
+        assert "return code -9" in result.error
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "return_code,end_marker,error_type,completed,resolved",
+        [
+            (-1, False, None, False, False),  # OpenSandbox signal death without a known cause.
+            (-1, True, None, True, True),  # The complete test section remains gradeable.
+            (-9, True, None, True, True),
+            (124, False, None, True, True),  # Preserve the non-signal exit-code policy.
+            (128, False, None, True, True),
+            (129, False, None, False, False),  # Shells encode signal exits as 128 + signal.
+            (137, False, None, False, False),  # Docker reports SIGKILL as 137.
+            (143, False, None, False, False),
+            (137, True, None, True, True),
+            (-1, False, "timeout", True, False),  # Preserve the explicit timeout policy.
+            (137, False, "timeout", True, False),
+            (-1, False, "sandbox", False, False),
+        ],
+    )
+    async def test_interruption_guard_preserves_known_outcomes(
+        self, return_code: int, end_marker: bool, error_type: str | None, completed: bool, resolved: bool
+    ) -> None:
+        output = f"{TEST_OUTPUT_BEGIN}\na PASSED\n" + (TEST_OUTPUT_END if end_marker else "")
+        sandbox = _FakeSandbox(output, return_code=return_code)
+        sandbox._result.error_type = error_type
+        parsed: list[str] = []
+
+        def parse(log: str) -> dict[str, str]:
+            parsed.append(log)
+            return {"a": "PASSED"} if "a PASSED" in log.splitlines() else {}
+
+        result = await run_verification(
+            sandbox=sandbox, inputs=_inputs(fail_to_pass=["a"], pass_to_pass=[]), parser=parse
+        )
+        assert result.completed is completed and result.resolved is resolved
+        assert bool(parsed) is (error_type is None)
+        assert result.test_output == output
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "statuses,completed",
+        [
+            ({"a [123 ms]": "FAILED"}, True),  # A normalized FAIL_TO_PASS name explicitly failed.
+            ({"b in 1 sec": "FAILED"}, True),  # PASS_TO_PASS failures also establish a zero.
+            ({"unrelated": "FAILED"}, False),
+            ({"a": "PASSED", "b": "PASSED"}, False),
+            ({}, False),  # Malformed/truncated log with no recognized tests.
+            ({"a": "ERROR"}, False),  # Do not infer an explicit FAILED status from another parser label.
+        ],
+    )
+    @pytest.mark.parametrize("return_code", [-1, 137])
+    async def test_interrupted_output_retains_only_conclusive_required_failures(
+        self, statuses: dict[str, str], completed: bool, return_code: int
+    ) -> None:
+        output = f"{TEST_OUTPUT_BEGIN}\n" + "\n".join(f"{name}: {status}" for name, status in statuses.items())
+        result = await run_verification(
+            sandbox=_FakeSandbox(output, return_code=return_code),
+            inputs=_inputs(fail_to_pass=["a"], pass_to_pass=["b"]),
+            parser=lambda log: dict(line.rsplit(": ", 1) for line in log.splitlines() if ": " in line),
+        )
+        assert result.completed is completed and result.resolved is False
+        assert (result.error is None) is completed
+        assert result.test_output == output
+
+    @pytest.mark.asyncio
+    async def test_interrupted_install_failure_is_not_a_test_verdict(self) -> None:
+        def parse(log: str) -> dict[str, str]:
+            pytest.fail("The interrupted install output must not reach the test parser")
+
+        result = await run_verification(
+            sandbox=_FakeSandbox("a: FAILED\n", return_code=-1),
+            inputs=_inputs(fail_to_pass=["a"], pass_to_pass=[]),
+            parser=parse,
+        )
+        assert result.completed is False and result.resolved is False
+        assert result.test_results["tests_observed"] == 0
+        assert result.patch_applied is False
+
+    @pytest.mark.asyncio
+    async def test_interrupted_log_parser_failure_is_incomplete(self) -> None:
+        def parse(log: str) -> dict[str, str]:
+            raise ValueError("truncated test result")
+
+        result = await run_verification(
+            sandbox=_FakeSandbox(f"{TEST_OUTPUT_BEGIN}\na: FAILED", return_code=-1),
+            inputs=_inputs(fail_to_pass=["a"], pass_to_pass=[]),
+            parser=parse,
+        )
+        assert result.completed is False and result.resolved is False
+        assert result.test_results is None
+        assert "truncated test result" in result.error
+
+    @pytest.mark.asyncio
+    async def test_interrupted_failure_after_a_failed_test_patch_is_incomplete(self) -> None:
+        """A required FAILED is not a verdict when the held-out tests never applied."""
+        result = await run_verification(
+            sandbox=_FakeSandbox(f"{TEST_PATCH_FAILED}\n{TEST_OUTPUT_BEGIN}\na: FAILED", return_code=-1),
+            inputs=_inputs(fail_to_pass=["a"], pass_to_pass=[]),
+            parser=lambda log: dict(line.rsplit(": ", 1) for line in log.splitlines() if ": " in line),
+        )
+        assert result.completed is False and result.resolved is False
+        assert result.test_patch_failed is True and result.patch_applied is True
+        assert result.error.startswith("held-out test patch did not apply")
+        assert "return code -1" in result.error
+
+    @pytest.mark.asyncio
+    async def test_interrupted_output_ignores_appended_stderr(self) -> None:
+        """Without the end marker, stderr (install output included) must not supply the verdict."""
+        sandbox = _FakeSandbox(f"{TEST_OUTPUT_BEGIN}\na: PASSED", return_code=-1)
+        sandbox._result.stderr = "a: FAILED"
+        parsed: list[str] = []
+
+        def parse(log: str) -> dict[str, str]:
+            parsed.append(log)
+            return dict(line.rsplit(": ", 1) for line in log.splitlines() if ": " in line)
+
+        result = await run_verification(
+            sandbox=sandbox, inputs=_inputs(fail_to_pass=["a"], pass_to_pass=[]), parser=parse
+        )
+        assert parsed == ["\na: PASSED"]
+        assert result.completed is False and result.resolved is False
+        assert result.test_results["resolved"] is False
+        assert result.test_output.endswith("\na: FAILED")
+
+    @pytest.mark.asyncio
+    async def test_a_test_patch_that_does_not_apply_is_incomplete(self) -> None:
+        result = await run_verification(
+            sandbox=_FakeSandbox(f"{TEST_PATCH_FAILED}\n" + f"{TEST_OUTPUT_BEGIN}\nirrelevant\n{TEST_OUTPUT_END}"),
+            inputs=_inputs(fail_to_pass=["a"], pass_to_pass=[]),
+            parser=lambda _log: {"a": "PASSED"},
+        )
+        assert result.completed is False
+        assert result.resolved is False
+        assert result.test_patch_failed is True
+
+    @pytest.mark.asyncio
+    async def test_missing_repo_directory_is_incomplete_not_a_zero(self) -> None:
+        """Exit 97 means the image lacks the checkout — an infrastructure fault. Reporting it
+        as a completed, unresolved run would make a broken image look like a hard task."""
+        result = await run_verification(
+            sandbox=_FakeSandbox("", return_code=97),
+            inputs=_inputs(),
+            parser=lambda _log: {},
+        )
+        assert result.completed is False
+        assert result.resolved is False
+        assert "not present in the image" in result.error
+
+    @pytest.mark.asyncio
+    async def test_a_parser_crash_is_reported_rather_than_scored_zero(self) -> None:
+        def boom(_log: str) -> dict[str, str]:
+            raise ValueError("bad log")
+
+        result = await run_verification(sandbox=_FakeSandbox("x"), inputs=_inputs(), parser=boom)
+        assert result.completed is False
+        assert "raised" in result.error
+
+    @pytest.mark.asyncio
+    async def test_only_the_marked_region_reaches_the_parser(self) -> None:
+        seen: list[str] = []
+
+        def capture(log: str) -> dict[str, str]:
+            seen.append(log)
+            return {}
+
+        log = f"install FAILED noise\n{TEST_OUTPUT_BEGIN}\nreal output\n{TEST_OUTPUT_END}\ntrailing"
+        await run_verification(sandbox=_FakeSandbox(log), inputs=_inputs(), parser=capture)
+        assert "real output" in seen[0]
+        assert "install FAILED noise" not in seen[0]
+
+
+class TestVerifyResponseShape:
+    """BaseVerifyResponse extends BaseVerifyRequest, so the request fields are REQUIRED on the
+    way out. Building the response from scratch drops them, and the resulting ValidationError
+    surfaces to the caller as a bare JSON string rather than a result object — which is how a
+    fully successful verification (reward 1.0, tests parsed) still failed the whole sweep."""
+
+    @staticmethod
+    def _body() -> dict:
+        return {
+            "instance_id": "elastic__synthetics-316",
+            "repo": "elastic/synthetics",
+            "base_commit": "f52f0bf",
+            "image_name": "docker.io/swerebenchv2/elastic-synthetics:316-f52f0bf",
+            "language": "ts",
+            "install_config": {"test_cmd": "npm test", "log_parser": "parse_log_js_4"},
+            "FAIL_TO_PASS": [],
+            "PASS_TO_PASS": [],
+            "responses_create_params": {"input": []},
+            "response": {
+                "output": [],
+                "id": "",
+                "created_at": 0,
+                "model": "",
+                "object": "response",
+                "parallel_tool_calls": False,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+        }
+
+    def test_spreading_the_request_body_satisfies_the_response_model(self) -> None:
+        from resources_servers.swe_rebench.app import SWERebenchVerifyResponse
+
+        response = SWERebenchVerifyResponse.model_validate(
+            self._body()
+            | {
+                "reward": 1.0,
+                "evaluation_completed": True,
+                "resolved": True,
+                "patch_applied": True,
+                "test_results": {"resolved": True},
+                "test_output": "",
+                "error": None,
+                "eval_sandbox_start_time_taken": 1.0,
+                "patch_verification_time_taken": 2.0,
+            }
+        )
+        assert response.reward == 1.0 and response.resolved
+
+    def test_omitting_the_request_fields_is_rejected(self) -> None:
+        """Pins the actual failure: without the echoed request fields, validation fails."""
+        import pydantic
+
+        from resources_servers.swe_rebench.app import SWERebenchVerifyResponse
+
+        with pytest.raises(pydantic.ValidationError, match="responses_create_params|response"):
+            SWERebenchVerifyResponse.model_validate(
+                {
+                    "reward": 1.0,
+                    "evaluation_completed": True,
+                    "resolved": True,
+                    "patch_applied": True,
+                    "instance_id": "i",
+                    "language": "ts",
+                    "test_results": None,
+                    "test_output": "",
+                    "error": None,
+                    "eval_sandbox_start_time_taken": 0.0,
+                    "patch_verification_time_taken": 0.0,
+                }
+            )
+
+
+class TestSandboxCpuCap:
+    """Build tools size their worker pools from the HOST core count, not the cgroup quota, so
+    without these caps a 4-CPU sandbox on a 96-core node runs ~96 compilers and CFS-throttles.
+    This set is the compile-heaviest in the repo, so it is the one that most needs them."""
+
+    def test_cpu_cap_env_is_derived_from_the_cpu_limit(self) -> None:
+        from nemo_gym.sandbox import cpu_cap_env
+
+        env = cpu_cap_env(4)
+        assert env["OMP_NUM_THREADS"] == "4"
+        assert env["GOMAXPROCS"] == "4"
+        assert env["CARGO_BUILD_JOBS"] == "4"
+
+    def test_the_server_applies_them_and_explicit_env_still_wins(self) -> None:
+        from nemo_gym.sandbox import cpu_cap_env
+
+        # Mirrors the precedence in _create_sandbox: derived caps first, explicit env over them.
+        derived = cpu_cap_env(4)
+        explicit = {"GOMAXPROCS": "1", "MY_VAR": "x"}
+        merged = derived | explicit
+        assert merged["GOMAXPROCS"] == "1", "an explicit override must not be clobbered"
+        assert merged["OMP_NUM_THREADS"] == "4"
+        assert merged["MY_VAR"] == "x"
+
+    def test_the_app_wires_cpu_cap_env_into_the_spec(self) -> None:
+        """Source pin: the call is easy to drop in a refactor and its absence is invisible —
+        tasks still pass, just far slower, which reads as 'these languages are slow'."""
+        from pathlib import Path
+
+        source = (Path(__file__).resolve().parent.parent / "app.py").read_text()
+        assert "cpu_cap_env(sandbox_resources.cpu)" in source
+        assert "env=env," in source, "the derived env must reach SandboxSpec"
+
+
+class TestGoldenPatchAggregation:
+    """The 3x repeat only means something if 'failed once' and 'had no verdict once' are kept
+    apart: the first is a flaky test, the second is an image pull or provider fault that says
+    nothing about the row."""
+
+    @staticmethod
+    def _obs(completed: bool, resolved: bool) -> dict:
+        return {"evaluation_completed": completed, "resolved": resolved}
+
+    def test_resolved_in_every_pass_is_supported(self) -> None:
+        from resources_servers.swe_rebench.aggregate_golden_patch import classify
+
+        assert classify([self._obs(True, True)] * 3, 3) == "supported"
+
+    def test_resolved_in_some_passes_is_flaky(self) -> None:
+        from resources_servers.swe_rebench.aggregate_golden_patch import classify
+
+        observations = [self._obs(True, True), self._obs(True, False), self._obs(True, True)]
+        assert classify(observations, 3) == "flaky"
+
+    def test_never_resolved_is_broken_not_flaky(self) -> None:
+        from resources_servers.swe_rebench.aggregate_golden_patch import classify
+
+        assert classify([self._obs(True, False)] * 3, 3) == "broken"
+
+    def test_a_missing_verdict_is_inconclusive_not_broken(self) -> None:
+        """The important one: an infrastructure fault must not delete a row that resolved
+        cleanly every time it was actually measured."""
+        from resources_servers.swe_rebench.aggregate_golden_patch import classify
+
+        observations = [self._obs(True, True), self._obs(True, True), self._obs(False, False)]
+        assert classify(observations, 3) == "inconclusive"
+
+    def test_a_row_missing_a_pass_entirely_is_inconclusive(self) -> None:
+        from resources_servers.swe_rebench.aggregate_golden_patch import classify
+
+        assert classify([self._obs(True, True), self._obs(True, True)], 3) == "inconclusive"
+
+
+class TestAntiCheating:
+    """seed_session must scrub the sandbox's git history before an agent gets control of it. See
+    resources_servers/swebench/anti_cheat.py."""
+
+    @staticmethod
+    def _source() -> str:
+        from pathlib import Path
+
+        return (Path(__file__).resolve().parent.parent / "app.py").read_text()
+
+    def test_seed_session_calls_the_shared_anti_cheat_helper(self) -> None:
+        source = self._source()
+        assert "from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup" in source
+        assert "apply_anti_cheat_setup(" in source
+
+    def test_config_enables_it_by_default(self) -> None:
+        from resources_servers.swe_rebench.app import SWERebenchResourcesServerConfig
+
+        assert SWERebenchResourcesServerConfig.model_fields["apply_anti_cheating"].default is True
+
+    def test_agent_facing_config_turns_it_on(self) -> None:
+        from pathlib import Path
+
+        import yaml
+
+        config = yaml.safe_load(
+            (Path(__file__).resolve().parent.parent / "configs" / "swe_rebench_legacy_agent.yaml").read_text()
+        )
+        assert (
+            config["swe_rebench_resources_server"]["resources_servers"]["swe_rebench"]["apply_anti_cheating"] is True
+        )
+
+
+class TestMultiWorkerEntrypoint:
+    """num_workers > 1 makes uvicorn re-import this entrypoint by path in each forked child.
+
+    Without a module-level `app` every child exits and uvicorn stops the parent, so the server
+    never binds. The symptom is not an ImportError but a flood of connection errors from clients
+    talking to a dead port -- which is exactly how it presented: 715k ClientOSError and zero rows.
+    """
+
+    @staticmethod
+    def _source() -> str:
+        from pathlib import Path
+
+        return (Path(__file__).resolve().parent.parent / "app.py").read_text()
+
+    def test_exposes_a_module_level_app_for_forked_workers(self) -> None:
+        source = self._source()
+        assert "is_nemo_gym_fastapi_entrypoint(__file__)" in source
+        assert "app = SWERebenchResourcesServer.run_webserver()" in source
+
+    def test_the_config_that_needs_it_still_sets_num_workers(self) -> None:
+        """Pins the pair: if num_workers is configured, the entrypoint branch must exist."""
+        from pathlib import Path
+
+        import yaml
+
+        config = yaml.safe_load(
+            (Path(__file__).resolve().parent.parent / "configs" / "swe_rebench_legacy_agent.yaml").read_text()
+        )
+        for name, block in config.items():
+            workers = block["resources_servers"]["swe_rebench"].get("num_workers")
+            if workers and workers > 1:
+                assert "is_nemo_gym_fastapi_entrypoint(__file__)" in self._source(), (
+                    f"{name} sets num_workers={workers} but the entrypoint has no module-level app"
+                )
+
+
+class TestFailureDiagnosis:
+    """A resource failure and a broken row both end as resolved=False with a parsed log, so the
+    two are only separable by evidence in the output. Getting this wrong in either direction is
+    costly: miss it and good rows get marked broken; over-claim it and real failures get excused
+    by raising limits that were never the problem."""
+
+    def test_detects_an_oom_kill(self) -> None:
+        from resources_servers.swe_rebench.diagnose_failures import classify_output
+
+        assert classify_output("java.lang.OutOfMemoryError: Java heap space") == "oom"
+        assert classify_output("fatal error: runtime: out of memory") == "oom"
+
+    def test_detects_a_full_disk(self) -> None:
+        from resources_servers.swe_rebench.diagnose_failures import classify_output
+
+        assert classify_output("write error: No space left on device") == "disk_full"
+
+    def test_disk_is_reported_ahead_of_a_bare_kill(self) -> None:
+        """Ordering matters: a disk-full run often also prints 'Killed', and the actionable
+        cause is the disk, not the signal."""
+        from resources_servers.swe_rebench.diagnose_failures import classify_output
+
+        assert classify_output("No space left on device\nKilled") == "disk_full"
+
+    def test_an_ordinary_test_failure_is_not_a_resource_problem(self) -> None:
+        from resources_servers.swe_rebench.diagnose_failures import classify_output
+
+        assert classify_output("FAILED tests/test_x.py::test_y - AssertionError: 1 != 2") is None
+
+    def test_network_faults_are_separated_from_row_failures(self) -> None:
+        """Sandboxes are network restricted, so a dependency fetch escaping the image is an
+        environment problem, not evidence that the golden patch is wrong."""
+        from resources_servers.swe_rebench.diagnose_failures import classify_output
+
+        assert classify_output("npm ERR! could not resolve host registry.npmjs.org") == "network"
+
+
+class TestMavenMirror:
+    """Every JVM failure in the 200-row pass was `repo.maven.apache.org ... Network is
+    unreachable`, while crates.io, proxy.golang.org, npmjs and packagist all fetched fine from
+    the same sandboxes. So egress works and Maven Central specifically does not; the fix is to
+    point Maven and Gradle at the Google-hosted read-through mirror."""
+
+    def test_mirror_configs_are_shipped_to_every_sandbox(self) -> None:
+        from resources_servers.swe_rebench.verification import (
+            GRADLE_INIT_PATH,
+            MAVEN_SETTINGS_PATH,
+            verification_files,
+        )
+
+        files = verification_files(_inputs())
+        assert MAVEN_SETTINGS_PATH in files, "Maven reads ~/.m2/settings.xml by default"
+        assert GRADLE_INIT_PATH in files, "Gradle auto-loads $GRADLE_USER_HOME/init.d/*.gradle"
+        assert "maven-central.storage-download.googleapis.com" in files[MAVEN_SETTINGS_PATH]
+
+    def test_maven_settings_can_be_left_to_the_provider(self) -> None:
+        """Some providers mount their own read-only ~/.m2/settings.xml that already mirrors Central, so
+        writing ours fails sandbox creation; the Gradle script is unaffected."""
+        from resources_servers.swe_rebench.verification import (
+            GRADLE_INIT_PATH,
+            MAVEN_SETTINGS_PATH,
+            verification_files,
+        )
+
+        files = verification_files(_inputs(), overwrite_maven_settings=False)
+        assert MAVEN_SETTINGS_PATH not in files
+        assert GRADLE_INIT_PATH in files
+
+    def test_gradle_home_is_set_or_the_init_script_is_never_read(self) -> None:
+        """Shipping init.gradle is useless on its own: Gradle only scans init.d under
+        GRADLE_USER_HOME, so without this the file sits there unread."""
+        from resources_servers.swe_rebench.app import JVM_MIRROR_ENV
+        from resources_servers.swe_rebench.verification import GRADLE_INIT_PATH
+
+        assert JVM_MIRROR_ENV["GRADLE_USER_HOME"] == "/root/.gradle"
+        assert GRADLE_INIT_PATH.startswith(JVM_MIRROR_ENV["GRADLE_USER_HOME"] + "/init.d/")
+
+    def test_the_mirror_only_redirects_central(self) -> None:
+        """mirrorOf must stay `central`, not `*`: a project's own snapshot or internal repos
+        have to keep resolving from their real URLs or unrelated rows start failing."""
+        from resources_servers.swe_rebench.verification import MAVEN_SETTINGS_PATH, verification_files
+
+        settings = verification_files(_inputs())[MAVEN_SETTINGS_PATH]
+        assert "<mirrorOf>central</mirrorOf>" in settings
+        assert "<mirrorOf>*</mirrorOf>" not in settings
+
+    def test_explicit_config_env_still_wins(self) -> None:
+        from resources_servers.swe_rebench.app import JVM_MIRROR_ENV
+
+        merged = JVM_MIRROR_ENV | {"GRADLE_USER_HOME": "/custom"}
+        assert merged["GRADLE_USER_HOME"] == "/custom"
+
+
+class _RecordingAsyncSandbox:
+    def __init__(self, provider_config) -> None:
+        self.spec = None
+        self.setup = None
+
+    async def start(self, spec) -> None:
+        self.spec = spec
+
+    async def start_with_setup(self, spec, setup) -> None:
+        self.spec = spec
+        self.setup = setup
+
+
+class TestSweAgentsContainerSetup:
+    """sandbox_config.legacy_container_setup gives the agent's and the evaluator's sandbox the
+    toolchain setup the Apptainer swe_agents harness applied to both of its containers."""
+
+    @staticmethod
+    async def _create(
+        monkeypatch,
+        sandbox_config: dict,
+        files: dict[str, str] | None = None,
+        *,
+        overwrite_maven_settings: bool = True,
+    ):
+        import resources_servers.swe_rebench.app as app
+
+        monkeypatch.setattr(app, "AsyncSandbox", _RecordingAsyncSandbox)
+        monkeypatch.setattr(app, "get_global_config_dict", lambda: {})
+        monkeypatch.setattr(app, "resolve_provider_config", lambda *_: {})
+        monkeypatch.setattr(app, "resolve_provider_metadata", lambda *_: {})
+        server = SimpleNamespace(
+            config=app.SWERebenchResourcesServerConfig(
+                host="127.0.0.1",
+                port=8000,
+                entrypoint="resources_servers/swe_rebench",
+                sandbox_config=sandbox_config,
+                sandbox_provider="sandbox",
+                name="swe_rebench",
+                overwrite_maven_settings=overwrite_maven_settings,
+            )
+        )
+        body = app.SWERebenchInstanceRequest(instance_id="o__r-1", repo="o/r", base_commit="abc", image_name="img")
+        return await app.SWERebenchResourcesServer._create_sandbox(server, body, files=files)
+
+    async def test_off_by_default(self, monkeypatch) -> None:
+        from resources_servers.swebench.swe_agents_container_setup import CHROME_WRAPPER_PATH
+
+        sandbox = await self._create(monkeypatch, {})
+        assert "CHROME_BIN" not in sandbox.spec.env and "_JAVA_OPTIONS" not in sandbox.spec.env
+        assert CHROME_WRAPPER_PATH not in sandbox.spec.files
+        assert sandbox.setup is None
+
+    async def test_agent_sandbox_gets_the_env_files_and_setup(self, monkeypatch) -> None:
+        from resources_servers.swebench.swe_agents_container_setup import (
+            SWE_AGENTS_CONTAINER_ENV,
+            apply_swe_agents_container_setup,
+            swe_agents_container_files,
+        )
+
+        sandbox = await self._create(monkeypatch, {"legacy_container_setup": True})
+        assert SWE_AGENTS_CONTAINER_ENV.items() <= sandbox.spec.env.items()
+        assert sandbox.spec.files == swe_agents_container_files()
+        assert sandbox.setup is apply_swe_agents_container_setup
+
+    async def test_eval_sandbox_keeps_its_verification_files(self, monkeypatch) -> None:
+        from resources_servers.swebench.swe_agents_container_setup import CHROME_WRAPPER_PATH
+
+        files = verification_files(_inputs())
+        sandbox = await self._create(monkeypatch, {"legacy_container_setup": True}, files=files)
+        assert files.items() <= sandbox.spec.files.items()
+        assert CHROME_WRAPPER_PATH in sandbox.spec.files
+
+    async def test_explicit_config_env_still_wins(self, monkeypatch) -> None:
+        sandbox = await self._create(monkeypatch, {"legacy_container_setup": True, "env": {"CHROME_BIN": "/custom"}})
+        assert sandbox.spec.env["CHROME_BIN"] == "/custom"
+
+    async def test_maven_settings_stay_with_the_provider_when_not_overwritten(self, monkeypatch) -> None:
+        """overwrite_maven_settings: false must hold for the agent sandbox too, or the swe_agents files
+        would write the settings.xml the provider mounts read-only."""
+        from resources_servers.swebench.swe_agents_container_setup import GRADLE_INIT_PATH, MAVEN_SETTINGS_PATH
+
+        sandbox = await self._create(monkeypatch, {"legacy_container_setup": True}, overwrite_maven_settings=False)
+        assert MAVEN_SETTINGS_PATH not in sandbox.spec.files
+        assert GRADLE_INIT_PATH in sandbox.spec.files
+
+    def test_one_mirror_copy_per_eval_sandbox(self) -> None:
+        """Both ship the same files to the same paths; a second Gradle init script under another
+        name would add the mirror repository twice."""
+        from resources_servers.swe_rebench.verification import _mirror_files
+        from resources_servers.swebench.swe_agents_container_setup import swe_agents_container_files
+
+        assert _mirror_files().items() <= swe_agents_container_files().items()
+
+
+class TestLogParserPin:
+    """Graded results must not move when SWE-rebench-V2 changes upstream.
+
+    A parser cache filled from another commit must not stand in for the pinned one.
+    """
+
+    @staticmethod
+    def _fake_git(calls: list, fail_on: str | None = None):
+        def run(args, cwd=None, check=False, capture_output=False):
+            command = args[1]
+            calls.append(args)
+            if command == fail_on:
+                raise subprocess.CalledProcessError(128, args, stderr=b"fatal: remote error: not our ref")
+            if command == "init":
+                Path(args[-1]).mkdir(parents=True)
+            elif command in ("clone", "checkout"):
+                # Nothing in log_parsers calls `git clone`.
+                # A clone here puts main's parsers in the destination before the pin is fetched.
+                # The visibility test relies on this to fail for code that clones into place.
+                root = Path(args[-1]) if command == "clone" else Path(cwd)
+                parser = root / "lib" / "agent" / "log_parsers.py"
+                parser.parent.mkdir(parents=True, exist_ok=True)
+                parser.write_text(f"NAME_TO_PARSER = {{{command!r}: lambda log: {{}}}}\n")
+
+        return run
+
+    def test_pinned_to_a_full_commit(self) -> None:
+        from resources_servers.swe_rebench import log_parsers
+
+        assert re.fullmatch(r"[0-9a-f]{40}", log_parsers.UPSTREAM_COMMIT)
+        assert log_parsers._repo_dir_name() == f"SWE-rebench-V2-{log_parsers.UPSTREAM_COMMIT[:12]}"
+
+    def test_a_cached_clone_of_main_is_not_reused(self, monkeypatch, tmp_path) -> None:
+        from resources_servers.swe_rebench import log_parsers
+
+        stale = tmp_path / "SWE-rebench-V2" / "lib" / "agent" / "log_parsers.py"
+        stale.parent.mkdir(parents=True)
+        stale.write_text("NAME_TO_PARSER = {'stale': lambda log: {}}\n")
+        calls: list = []
+        monkeypatch.setattr(log_parsers.subprocess, "run", self._fake_git(calls))
+        monkeypatch.setattr(log_parsers, "_MODULE", None)
+        module = log_parsers.load_parsers(tmp_path)
+        assert [args[1] for args in calls] == ["init", "fetch", "checkout"]
+        assert calls[1][-1] == log_parsers.UPSTREAM_COMMIT
+        assert set(module.NAME_TO_PARSER) == {"checkout"}
+
+    def test_the_tree_is_visible_only_once_the_pin_is_checked_out(self, monkeypatch, tmp_path) -> None:
+        """A worker waiting on the clone lock returns as soon as a parser file exists.
+
+        No parser file may appear under the destination before the pinned checkout is complete.
+        """
+        from resources_servers.swe_rebench import log_parsers
+
+        destination = tmp_path / log_parsers._repo_dir_name()
+        seen: list = []
+        fake = self._fake_git([])
+
+        def run(args, **kwargs):
+            fake(args, **kwargs)
+            seen.append((args[1], log_parsers._parser_path(destination)))
+
+        monkeypatch.setattr(log_parsers.subprocess, "run", run)
+        log_parsers._clone_locked(destination)
+        assert [command for command, _ in seen] == ["init", "fetch", "checkout"]
+        assert all(path is None for _, path in seen), seen
+        assert log_parsers._parser_path(destination) is not None
+        assert [p.name for p in tmp_path.iterdir()] == [destination.name]
+
+    def test_a_killed_workers_lock_is_named_and_its_staging_tree_removed_once_cleared(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """A worker killed mid-fetch skips its cleanup, so it leaves both its staging tree and the lock."""
+        from resources_servers.swe_rebench import log_parsers
+
+        destination = tmp_path / log_parsers._repo_dir_name()
+        lock_path = tmp_path / f".{destination.name}.clone.lockdir"
+        lock_path.mkdir()
+        orphan = tmp_path / f".{destination.name}.tmp-999999"
+        orphan.mkdir()
+        (orphan / "partial").write_text("left by a worker killed mid-fetch")
+        calls: list = []
+        monkeypatch.setattr(log_parsers.subprocess, "run", self._fake_git(calls))
+        monkeypatch.setattr(log_parsers.time, "sleep", lambda seconds: None)
+
+        with pytest.raises(TimeoutError, match=re.escape(str(lock_path))):
+            log_parsers._clone_locked(destination, timeout_s=0)
+        assert calls == []
+
+        lock_path.rmdir()
+        log_parsers._clone_locked(destination)
+        assert [p.name for p in tmp_path.iterdir()] == [destination.name]
+
+    @pytest.mark.parametrize("step", ["fetch", "checkout"])
+    def test_a_failed_git_step_leaves_no_tree_behind(self, monkeypatch, tmp_path, step: str) -> None:
+        from resources_servers.swe_rebench import log_parsers
+
+        destination = tmp_path / log_parsers._repo_dir_name()
+        monkeypatch.setattr(log_parsers.subprocess, "run", self._fake_git([], fail_on=step))
+        with pytest.raises(RuntimeError, match=f"git {step} .* failed: fatal: remote error: not our ref"):
+            log_parsers._clone_locked(destination)
+        assert list(tmp_path.iterdir()) == [], f"no clone, staging tree, or lock may survive a failed {step}"

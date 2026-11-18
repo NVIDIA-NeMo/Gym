@@ -15,31 +15,39 @@
 
 import asyncio
 import json
+import os
 from functools import partial
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
-from fastapi import Request
+from fastapi import HTTPException, Request
 from omegaconf import OmegaConf
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.cline_agent.app import (
     ClineAgent,
     ClineAgentConfig,
+    ClineAgentRunRequest,
     _extract_instruction,
     parse_cline_events,
     quote_prompt,
 )
+
+
+@pytest.fixture(autouse=True)
+def _installed_cline(monkeypatch):
+    """Host calls install Cline on first use; these tests drive the subprocesses themselves."""
+    monkeypatch.setattr("responses_api_agents.cline_agent.app.ensure_cline", MagicMock())
 
 
 def _config(**kwargs) -> ClineAgentConfig:
@@ -54,10 +62,7 @@ def _config(**kwargs) -> ClineAgentConfig:
 
 
 def _make_agent(**kwargs) -> ClineAgent:
-    with patch("responses_api_agents.cline_agent.app.ClineAgent.model_post_init"):
-        agent = ClineAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
-    agent.sem = asyncio.Semaphore(agent.config.concurrency)
-    return agent
+    return ClineAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
 
 
 def _make_model_server_agent(**kwargs) -> ClineAgent:
@@ -127,17 +132,19 @@ def _tool_end(name: str, call_id: str, output=None, error: str | None = None) ->
     return _agent_event(event)
 
 
-def _usage(total_in: int, total_out: int, reasoning: int = 0) -> dict:
-    return _agent_event(
-        {
-            "type": "usage",
-            "inputTokens": total_in,
-            "outputTokens": total_out,
-            "totalInputTokens": total_in,
-            "totalOutputTokens": total_out,
-            "totalReasoningTokens": reasoning,
-        }
-    )
+def _usage(total_in: int, total_out: int, reasoning: int = 0, cache_read: int | None = None) -> dict:
+    event = {
+        "type": "usage",
+        "inputTokens": total_in,
+        "outputTokens": total_out,
+        "totalInputTokens": total_in,
+        "totalOutputTokens": total_out,
+        "totalReasoningTokens": reasoning,
+    }
+    if cache_read is not None:
+        event["cacheReadTokens"] = cache_read
+        event["totalCacheReadTokens"] = cache_read
+    return _agent_event(event)
 
 
 def _run_result(**kwargs) -> dict:
@@ -197,7 +204,13 @@ class TestParseClineEvents:
     def test_empty_stream(self) -> None:
         items, metadata = parse_cline_events("")
         assert items == []
-        assert metadata == {"input_tokens": 0, "output_tokens": 0, "reasoning_tokens": 0}
+        # Nothing reported, so every count stays unknown rather than zero.
+        assert metadata == {
+            "input_tokens": None,
+            "output_tokens": None,
+            "reasoning_tokens": None,
+            "cached_tokens": None,
+        }
 
     def test_malformed_lines_skipped(self) -> None:
         stream = "not json\n" + _lines(_text_end("answer is 4")) + "\n{ broken"
@@ -324,7 +337,7 @@ class TestParseClineEvents:
 
     def test_usage_from_run_result_aggregate(self) -> None:
         stream = _lines(
-            _usage(50, 10, 2),
+            _usage(50, 10, 2, cache_read=5),
             _run_result(
                 aggregateUsage={
                     "inputTokens": 100,
@@ -335,9 +348,26 @@ class TestParseClineEvents:
             ),
         )
         _, metadata = parse_cline_events(stream)
-        assert metadata["input_tokens"] == 105
+        # openai-compatible's inputTokens already include the cache reads.
+        assert metadata["input_tokens"] == 100
         assert metadata["output_tokens"] == 20
         assert metadata["reasoning_tokens"] == 7
+        assert metadata["cached_tokens"] == 5
+
+    @pytest.mark.parametrize(("cache_read", "expected"), [(5, 105), (0, 100), (None, None)])
+    def test_cache_reads_are_added_for_providers_that_report_them_separately(self, cache_read, expected) -> None:
+        usage = {"inputTokens": 100, "outputTokens": 20}
+        if cache_read is not None:
+            usage["cacheReadTokens"] = cache_read
+        _, metadata = parse_cline_events(_lines(_run_result(aggregateUsage=usage)), cache_reads_in_input=False)
+        assert metadata["input_tokens"] == expected
+
+    def test_counts_cline_does_not_report_stay_unknown(self) -> None:
+        _, metadata = parse_cline_events(_lines(_run_result(aggregateUsage={"cacheReadTokens": 3})))
+        assert metadata["input_tokens"] is None
+        assert metadata["output_tokens"] is None
+        assert metadata["reasoning_tokens"] is None
+        assert metadata["cached_tokens"] == 3
 
     def test_usage_falls_back_to_events_without_run_result(self) -> None:
         # A killed run never prints run_result; the per-turn totals are what remains.
@@ -345,6 +375,36 @@ class TestParseClineEvents:
         assert metadata["input_tokens"] == 50
         assert metadata["output_tokens"] == 10
         assert metadata["reasoning_tokens"] == 3
+        # These usage events carry no cache-read total, so cache reads stay unknown.
+        assert metadata["cached_tokens"] is None
+
+    @pytest.mark.parametrize(("cache_read", "expected"), [(0, 0), (5, 5), (None, None)])
+    def test_cached_tokens_are_reported_only_when_cline_reports_them(self, cache_read, expected) -> None:
+        usage = {"inputTokens": 10, "outputTokens": 2}
+        if cache_read is not None:
+            usage["cacheReadTokens"] = cache_read
+        _, metadata = parse_cline_events(_lines(_run_result(aggregateUsage=usage)))
+        assert metadata["cached_tokens"] == expected
+
+    @pytest.mark.parametrize(
+        ("per_call", "expected"),
+        [
+            ([17920, 18944, 19456], 56320),
+            ([None, 17920, 18944, None, 19456], None),  # Cline counts the two unreported calls as 0
+            ([None], None),
+            ([0, 0], 0),
+        ],
+    )
+    def test_the_aggregate_cache_reads_count_only_when_every_call_reported_them(self, per_call, expected) -> None:
+        total = sum(value or 0 for value in per_call)
+        events = [_usage(10, 2, cache_read=value) for value in per_call]
+        aggregate = {"inputTokens": 100, "outputTokens": 20, "cacheReadTokens": total}
+        _, metadata = parse_cline_events(_lines(*events, _run_result(aggregateUsage=aggregate)))
+        assert metadata["cached_tokens"] == expected
+        _, separate = parse_cline_events(
+            _lines(*events, _run_result(aggregateUsage=aggregate)), cache_reads_in_input=False
+        )
+        assert separate["input_tokens"] == (None if expected is None else 100 + expected)
 
     def test_reasoning_usage_falls_back_to_output_details(self) -> None:
         _, metadata = parse_cline_events(
@@ -455,6 +515,18 @@ class TestEnv:
         assert env["CLINE_DATA_DIR"] == str(tmp_path)
         assert env["CLINE_PROVIDER_SETTINGS_PATH"] == str(tmp_path / "settings" / "providers.json")
 
+    def test_auto_update_disabled(self, tmp_path, monkeypatch) -> None:
+        # Cline's self-update would replace the pinned cline_version mid-collection; an ambient
+        # value must not re-enable it, and the server's own environment is left untouched.
+        monkeypatch.setenv("CLINE_NO_AUTO_UPDATE", "0")
+        assert _make_agent()._env(tmp_path)["CLINE_NO_AUTO_UPDATE"] == "1"
+        assert os.environ["CLINE_NO_AUTO_UPDATE"] == "0"
+
+    def test_config_env_can_reenable_auto_update(self, tmp_path) -> None:
+        # config.env is applied last, like for every other key, so an explicit opt-in still wins.
+        env = _make_agent(env={"CLINE_NO_AUTO_UPDATE": "0"})._env(tmp_path)
+        assert env["CLINE_NO_AUTO_UPDATE"] == "0"
+
     def test_command_permissions_serialized(self, tmp_path) -> None:
         agent = _make_agent(command_permissions={"allow": ["python3 *"], "deny": ["sudo *"]})
         env = agent._env(tmp_path)
@@ -517,6 +589,18 @@ class TestModelServer:
         assert expected in auth_argv
         assert "--json" in run_argv
         assert spawn.call_args_list[1].kwargs["env"]["OPENAI_BASE_URL"] == expected
+
+    def test_run_cline_subprocesses_disable_auto_update(self, tmp_path) -> None:
+        # Both `cline auth` and the task arm the updater on exit, so both must carry the opt-out.
+        agent = _make_model_server_agent(model="m", repo_dir=str(tmp_path), workspace_root=str(tmp_path / "ws"))
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+        with patch("responses_api_agents.cline_agent.app.asyncio.create_subprocess_exec") as spawn:
+            spawn.return_value = proc
+            asyncio.run(agent._run_cline("fix it", None, "task0-rollout1"))
+        assert spawn.call_count == 2
+        assert [call.kwargs["env"]["CLINE_NO_AUTO_UPDATE"] for call in spawn.call_args_list] == ["1", "1"]
 
     def test_run_cline_skips_auth_without_model_server(self, tmp_path) -> None:
         agent = _make_agent(repo_dir=str(tmp_path), workspace_root=str(tmp_path / "ws"))
@@ -592,6 +676,71 @@ class TestModelServer:
         response = asyncio.run(agent.responses(request=request, body=body))
         assert response.usage.output_tokens_details.reasoning_tokens == 6
         assert response.usage.total_tokens == 20
+        # Cline reported no cache reads, so the response does not claim zero.
+        assert response.usage.input_tokens_details.cached_tokens is None
+
+    def test_response_propagates_reported_cached_tokens(self) -> None:
+        agent = _make_agent()
+        agent._run_cline = AsyncMock(
+            return_value=([], {"input_tokens": 11, "output_tokens": 9, "reasoning_tokens": 6, "cached_tokens": 4}, "m")
+        )
+        body = NeMoGymResponseCreateParamsNonStreaming(input="solve this", model="model")
+        request = Request({"type": "http", "path_params": {}})
+        response = asyncio.run(agent.responses(request=request, body=body))
+        assert response.usage.input_tokens_details.cached_tokens == 4
+
+    def test_response_keeps_unreported_reasoning_unknown(self) -> None:
+        agent = _make_agent()
+        agent._run_cline = AsyncMock(
+            return_value=([], {"input_tokens": 11, "output_tokens": 9, "reasoning_tokens": None}, "m")
+        )
+        body = NeMoGymResponseCreateParamsNonStreaming(input="solve this", model="model")
+        request = Request({"type": "http", "path_params": {}})
+        response = asyncio.run(agent.responses(request=request, body=body))
+        assert response.usage.output_tokens_details.reasoning_tokens is None
+
+    def test_response_usage_is_unknown_without_token_counts(self) -> None:
+        agent = _make_agent()
+        agent._run_cline = AsyncMock(return_value=([], {"input_tokens": None, "output_tokens": None}, "m"))
+        body = NeMoGymResponseCreateParamsNonStreaming(input="solve this", model="model")
+        request = Request({"type": "http", "path_params": {}})
+        response = asyncio.run(agent.responses(request=request, body=body))
+        assert response.usage is None
+
+    def test_host_budget_refusal_precedes_cli_setup_and_corrected_request_runs(self, tmp_path) -> None:
+        workspace = tmp_path / "ws"
+        agent = _make_model_server_agent(repo_dir=str(tmp_path), workspace_root=str(workspace))
+        request = Request({"type": "http", "session": {}, "path_params": {"rollout_id": "rollout"}})
+        body = NeMoGymResponseCreateParamsNonStreaming(input="solve this", max_output_tokens=32)
+        process = MagicMock(returncode=0)
+        process.communicate = AsyncMock(return_value=(_lines(_text_end("done"), _run_result()).encode(), b""))
+        with patch(
+            "responses_api_agents.cline_agent.app.asyncio.create_subprocess_exec", return_value=process
+        ) as spawn:
+            with pytest.raises(HTTPException, match="max_output_tokens") as refused:
+                asyncio.run(agent.responses(request, body))
+            assert refused.value.status_code == 422
+            spawn.assert_not_called()
+            assert agent._local_setup_task is None and not workspace.exists()
+
+            response = asyncio.run(agent.responses(request, body.model_copy(update={"max_output_tokens": None})))
+
+        assert response.output_text == "done"
+        assert spawn.call_count == 2  # Actual host path: auth, then the CLI activation.
+        assert "auth" in spawn.call_args_list[0].args and "--json" in spawn.call_args_list[1].args
+        assert not list(workspace.iterdir())
+
+    def test_run_budget_refusal_precedes_resources_seed(self) -> None:
+        agent = _make_agent()
+        agent.server_client.post = AsyncMock()
+        body = ClineAgentRunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="solve this", max_output_tokens=32)
+        )
+        request = Request({"type": "http", "session": {}, "path_params": {}})
+        with pytest.raises(HTTPException, match="max_output_tokens") as refused:
+            asyncio.run(agent.run(request, body))
+        assert refused.value.status_code == 422
+        agent.server_client.post.assert_not_awaited()
 
 
 class TestConfigYaml:
@@ -599,8 +748,21 @@ class TestConfigYaml:
         app_path = Path(__file__).resolve().parent.parent / "app.py"
         compile(app_path.read_text(), str(app_path), "exec")
 
-    def test_config_yaml_parses(self) -> None:
+    def test_session_config_yaml_parses(self) -> None:
+        # The Environment Server supplies the benchmark and its sandbox, so the session config binds neither.
         cfg_path = Path(__file__).resolve().parent.parent / "configs" / "cline_agent.yaml"
+        inner = yaml.safe_load(cfg_path.read_text())["cline_agent"]["responses_api_agents"]["cline_agent"]
+        assert inner["resources_server"] is None
+        assert inner["num_workers"] == 1
+        assert inner["model_server"] == {"type": "responses_api_models", "name": "policy_model"}
+        assert set(inner) <= set(ClineAgentConfig.model_fields)
+        # Sessions install this version only with checksums the adapter pins for it.
+        from responses_api_agents.cline_agent.sandbox import CLINE_RUNTIME_SHA512
+
+        assert inner["cline_version"] in CLINE_RUNTIME_SHA512
+
+    def test_config_yaml_parses(self) -> None:
+        cfg_path = Path(__file__).resolve().parent.parent / "configs" / "cline_local_agent.yaml"
         data = yaml.safe_load(cfg_path.read_text())
         assert "cline_agent" in data
         inner = data["cline_agent"]["responses_api_agents"]["cline_agent"]

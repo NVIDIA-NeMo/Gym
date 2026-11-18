@@ -32,11 +32,13 @@ from resources_servers.arena.taxonomy import (
 
 
 BENCHMARK_CONFIGS = {
+    "vision_arena_v1": Path("resources_servers/arena/configs/vision_arena_v1.yaml"),
     "lmarena_v2": Path("resources_servers/arena/configs/lmarena_v2.yaml"),
     "lmarena_v3": Path("resources_servers/arena/configs/lmarena_v3.yaml"),
 }
 # LMArena prompts provide taxonomy metadata used for slice reporting.
 PROMPT_PATHS = {
+    "vision_arena_v1": Path("benchmarks/vision_arena_v1/data/vision_arena_v1_validation.jsonl"),
     "lmarena_v2": Path("benchmarks/lmarena_v2/data/lmarena_v2_validation.jsonl"),
     "lmarena_v3": Path("benchmarks/lmarena_v3/data/lmarena_v3_validation.jsonl"),
 }
@@ -203,7 +205,7 @@ def main() -> None:
         "any_both_bad_rate",
         "any_tie_rate",
     ]
-    if args.benchmark == "lmarena_v3":
+    if args.benchmark in {"lmarena_v3", "vision_arena_v1"}:
         diagnostic_names.insert(0, "context_window_exceeded_rate")
         diagnostic_names.insert(0, "max_token_reached_rate")
     for name in diagnostic_names:

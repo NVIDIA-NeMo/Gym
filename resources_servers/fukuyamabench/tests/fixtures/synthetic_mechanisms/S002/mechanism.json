@@ -1,0 +1,80 @@
+{
+    "reactions": [
+        {
+            "reaction_id": "1",
+            "reactants": [
+                {
+                    "smiles": "CCBr",
+                    "label": "substrate",
+                    "electron_number": 0,
+                    "charge": 0
+                },
+                {
+                    "smiles": "[OH-]",
+                    "label": "substrate",
+                    "electron_number": 0,
+                    "charge": 0
+                }
+            ],
+            "products": [
+                {
+                    "smiles": "CCO",
+                    "label": "product",
+                    "electron_number": 0,
+                    "charge": 0
+                },
+                {
+                    "smiles": "[Br-]",
+                    "label": "product",
+                    "electron_number": 0,
+                    "charge": 0
+                }
+            ],
+            "conditions": [
+                {
+                    "role": "reagent",
+                    "text": "NaOH",
+                    "reaction_step": "1"
+                },
+                {
+                    "role": "solvent",
+                    "text": "DMSO",
+                    "reaction_step": "1"
+                }
+            ]
+        }
+    ],
+    "mechanism": [
+        {
+            "mechanism_id": "1",
+            "reactants": [
+                {
+                    "smiles": "CCBr",
+                    "label": "substrate",
+                    "electron_number": 0,
+                    "charge": 0
+                },
+                {
+                    "smiles": "[OH-]",
+                    "label": "substrate",
+                    "electron_number": 0,
+                    "charge": 0
+                }
+            ],
+            "products": [
+                {
+                    "smiles": "CCO",
+                    "label": "product",
+                    "electron_number": 0,
+                    "charge": 0
+                },
+                {
+                    "smiles": "[Br-]",
+                    "label": "product",
+                    "electron_number": 0,
+                    "charge": 0
+                }
+            ]
+        }
+    ]
+}

@@ -41,14 +41,15 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.core import NeMoGymResponse
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 PROMPT = """\
@@ -237,12 +238,12 @@ class SpartqaRunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
 
     # ``target`` is the single gold CO label; ``options`` are the two story
-    # objects offered by the question. ``target`` (a scalar) survives the
-    # nemo-evaluator ``gym://...protocol=native`` driver, which forwards a row's
-    # top-level scalar fields onto ``/verify`` but DROPS list/dict fields
-    # (``options`` never arrives that way). The options therefore also ride in
-    # ``verifier_metadata``, which the driver forwards intact; verify() falls
-    # back to it so the full candidate set is always available.
+    # objects offered by the question. ``target`` (a scalar) survives an
+    # external runner that forwards a row's top-level scalar fields onto
+    # ``/verify`` but DROPS list/dict fields (``options`` never arrives that
+    # way). The options therefore also ride in ``verifier_metadata``, which is
+    # forwarded intact; verify() falls back to it so the full candidate set is
+    # always available.
     target: str = ""
     options: List[str] = Field(default_factory=list)
     verifier_metadata: Optional[Dict[str, Any]] = None
@@ -321,3 +322,6 @@ class SpartqaResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     SpartqaResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SpartqaResourcesServer.run_webserver()  # noqa: F401

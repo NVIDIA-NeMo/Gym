@@ -24,12 +24,24 @@ services:
       timeout_seconds: 1200
     mounts:
       - /lustre/datasets:/data
+    # env values are resolved with one of three prefixes (a bare value is an implicit `lit:`):
+    #   lit:VALUE   - literal value, used as-is.
+    #   host:VAR    - read from VAR in the shell running `gym eval submit` (this machine).
+    #   runtime:VAR - left unresolved until the job actually runs; the compute node picks up
+    #                 whatever value VAR has in the job's own environment at that point.
+    env:
+      HF_TOKEN: host:HF_TOKEN
+      TRUST_REMOTE_CODE: lit:1
+      NEL_INVOCATION_ID: runtime:NEL_INVOCATION_ID      
+      CUDA_VISIBLE_DEVICES: runtime:CUDA_VISIBLE_DEVICES
 
 driver:
   policy_model: vllm_model
   container: python:3.12
   gym_install:
     ref: main
+  env:
+    HF_TOKEN: host:HF_TOKEN
   benchmarks:
     gpqa:
       run:

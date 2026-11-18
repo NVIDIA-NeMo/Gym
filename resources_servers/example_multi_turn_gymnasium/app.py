@@ -24,7 +24,8 @@ from typing import Dict, Optional
 
 from pydantic import Field
 
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.gymnasium import GymnasiumServer, extract_text
 
 
@@ -33,6 +34,7 @@ class ExampleMultiTurnEnv(GymnasiumServer):
 
     async def reset(self, metadata: dict, session_id: Optional[str] = None) -> tuple[Optional[str], dict]:
         """Returns (observation, info)."""
+        self._cleanup_session(session_id)
         self.session_turns[session_id] = 0
         return None, {}
 
@@ -52,6 +54,13 @@ class ExampleMultiTurnEnv(GymnasiumServer):
         reward = 1.0 if expected and expected.lower() in text.lower() else 0.0
         return None, reward, True, False, {}
 
+    def _cleanup_session(self, session_id: Optional[str]) -> None:
+        self.session_turns.pop(session_id, None)
+        super()._cleanup_session(session_id)
+
 
 if __name__ == "__main__":
     ExampleMultiTurnEnv.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = ExampleMultiTurnEnv.run_webserver()  # noqa: F401

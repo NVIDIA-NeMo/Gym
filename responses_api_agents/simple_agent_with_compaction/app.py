@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import json
+import logging
 from collections.abc import Mapping
 from time import perf_counter, time
 from typing import Any, List
@@ -20,20 +21,14 @@ from typing import Any, List
 from fastapi import Request, Response
 from pydantic import ConfigDict, Field, ValidationError
 
-from nemo_gym.base_resources_server import (
-    AggregateMetrics,
-    AggregateMetricsRequest,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import SESSION_ID_KEY, get_response_json, raise_for_status
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -42,7 +37,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     accumulate_response_usage,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.trajectory import (
     AgentInvocation,
     ModelCallRef,
     ObservationGap,
@@ -50,7 +46,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryToolCall,
     TrajectoryTurn,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.simple_agent_with_compaction.compaction import (
     ContextCompactedResponse,
     ContextCompactedTransportResponse,
@@ -62,6 +58,8 @@ from responses_api_agents.simple_agent_with_compaction.compaction import (
     build_transport_response,
 )
 
+
+LOG = logging.getLogger(__name__)
 
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 _CONTEXT_COMPACTION_SEED_COUNT_COOKIE = "_nemo_gym_cc_seed_obs_count"
@@ -313,7 +311,32 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
             all_output_messages: List[NeMoGymResponseOutputMessage] = [
                 o for o in output if o.type == "message" and o.role == "assistant"
             ]
-            if not all_fn_calls and all_output_messages:
+            if not all_fn_calls:
+                if not all_output_messages:
+                    invocation_status = "incomplete"
+                    termination_message = (
+                        "Ending trajectory: model returned no assistant message or tool calls "
+                        "(reasoning-only or empty output) without reported truncation. "
+                        "This is the stop-token case (finish_reason='stop'), not length truncation "
+                        "(finish_reason='length', handled separately via incomplete_details). "
+                        "This indicates either a badly trained model requiring training-level fixes "
+                        "or a bug in the inference engine."
+                    )
+                    termination_reason = "incomplete_reasoning" if output else "empty_output"
+                    model_response.status = "incomplete"
+                    model_response.metadata = {
+                        **(model_response.metadata or {}),
+                        "ng_termination_reason": termination_reason,
+                        "ng_termination_message": termination_message,
+                    }
+                    LOG.warning(
+                        "%s model_server=%s response_id=%s rollout_id=%s step=%s",
+                        termination_message,
+                        self.config.model_server.name,
+                        model_response.id,
+                        rollout_id,
+                        step,
+                    )
                 break
 
             for output_function_call in all_fn_calls:
@@ -621,3 +644,6 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     SimpleAgentWithCompaction.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SimpleAgentWithCompaction.run_webserver()  # noqa: F401

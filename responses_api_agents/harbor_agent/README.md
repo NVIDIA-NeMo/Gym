@@ -1,5 +1,15 @@
 # Harbor Agent for NeMo Gym
 
+> [!warning]
+> **Deprecated.** This agent is superseded by the Harbor task format, where Harbor tasks run through the Harbor
+> environment server with NeMo Gym's own sandboxed harnesses and the `harbor_oracle` agent, with no Harbor
+> dependency. The built-in benchmarks that still run through this agent (biomnibench_da, biomysterybench,
+> bixbench_hypothesis, genebench_pro, labbench2_pdf, legal_agent_bench, openthoughts_tblite and skillsbench) will be
+> migrated to the
+> [`harbor` environment server](https://github.com/NVIDIA-NeMo/Gym/tree/main/environment_servers/harbor); no action is
+> needed from you yet, and they keep working as they are. New work should use the `harbor` environment server, whose
+> README links to its documentation.
+
 This agent integrates [Harbor](https://github.com/laude-institute/harbor) into NeMo Gym.
 It runs Harbor agents (e.g., `terminus-2`) in Harbor-managed environments and returns NeMo Gym-compatible outputs.
 
@@ -85,7 +95,7 @@ tar -xzf responses_api_agents/harbor_agent/data/nemotron_terminal_synthetic_task
 
 ### 2) Set up dependencies and task images
 
-- Install `git` (required because `requirements.txt` installs Harbor from a Git URL)
+- Install `git` (required because `pyproject.toml` installs Harbor from a Git URL)
   and Apptainer/Singularity (required when running Harbor tasks on HPC clusters
   with the Singularity environment).
 
@@ -306,10 +316,15 @@ harbor_agent_kwargs:
     output_cost_per_token: 0.0
 ```
 
-Before running, export Daytona credentials:
+Before running, follow the [Daytona access prerequisites](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox/daytona-access)
+for an organization key, sandbox permissions, and quota. This example uses Harbor's
+Daytona environment and its configuration.
+
+Set the key in the host environment using your secret manager. The example below
+uses a placeholder:
 
 ```bash
-export DAYTONA_API_KEY=<your-daytona-api-key>
+export DAYTONA_API_KEY="<your-daytona-api-key>"
 ```
 
 Then add the policy model server settings to repo-root `env.yaml`, using the
@@ -369,7 +384,7 @@ with five trials, zero errors, and mean reward `1.000`.
 To regenerate the Harbor-side smoke evidence:
 
 ```bash
-export DAYTONA_API_KEY=<your-daytona-api-key>
+export DAYTONA_API_KEY="<your-daytona-api-key>"
 
 harbor run --dataset terminal-bench@2.0 \
   --n-tasks 5 \
@@ -387,7 +402,7 @@ For an environment-only smoke that does not require a model provider key, run th
 Terminal-Bench 2.0 `fix-git` task through Harbor's Oracle agent on Daytona:
 
 ```bash
-export DAYTONA_API_KEY=<your-daytona-api-key>
+export DAYTONA_API_KEY="<your-daytona-api-key>"
 
 harbor run --dataset terminal-bench@2.0 \
   --task-name fix-git \

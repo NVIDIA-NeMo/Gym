@@ -47,3 +47,11 @@ prime_agent_math_agent:
       - name: example
         type: example
         jsonl_fpath: environments/prime_agent_math/data/example.jsonl
+
+prime_agent_math_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: prime_agent_math_agent

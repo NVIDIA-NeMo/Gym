@@ -14,11 +14,13 @@
 # limitations under the License.
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from fastapi.testclient import TestClient
 from openai import AsyncAzureOpenAI
 from pytest import MonkeyPatch
 
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionMessage,
     NeMoGymChoice,
@@ -26,7 +28,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.server_utils import ServerClient
 from responses_api_models.azure_openai_model.app import (
     AzureOpenAIModelServer,
     AzureOpenAIModelServerConfig,
@@ -45,6 +46,42 @@ class FakeUUID:
 
 
 class TestApp:
+    @pytest.mark.parametrize(
+        ("provider_tier", "request_tier", "expected_tier"),
+        [
+            ("on-demand", None, "on-demand"),
+            ("on-demand", "default", "on-demand"),
+            (None, "priority", "priority"),
+            (None, None, None),
+        ],
+    )
+    async def test_responses_service_tier(
+        self, provider_tier: str | None, request_tier: str | None, expected_tier: str | None
+    ) -> None:
+        server = self._setup_server()
+        client = TestClient(server.setup_webserver())
+        completion = NeMoGymChatCompletion(
+            id="chatcmpl-tier",
+            created=FIXED_TIME,
+            model="dummy_model",
+            object="chat.completion",
+            service_tier=provider_tier,
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=NeMoGymChatCompletionMessage(role="assistant", content="hi"),
+                )
+            ],
+        )
+        server._client = MagicMock(spec=AsyncAzureOpenAI)
+        server._client.chat.completions.create = AsyncMock(return_value=completion)
+
+        response = client.post("/v1/responses", json={"input": "hello", "service_tier": request_tier})
+
+        assert response.status_code == 200
+        assert response.json()["service_tier"] == expected_tier
+
     def _setup_server(self, monkeypatch=None):
         config = AzureOpenAIModelServerConfig(
             host="0.0.0.0",
@@ -123,7 +160,7 @@ class TestApp:
 
         monkeypatch.setattr("responses_api_models.azure_openai_model.app.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("responses_api_models.azure_openai_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         mock_response_data = NeMoGymChatCompletion(
             id="chtcmpl-123",

@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+*
+!docker/
+docker/*
+!docker/labbench2-pdf-runtime.Dockerfile
+!docker/runtime-requirements.txt

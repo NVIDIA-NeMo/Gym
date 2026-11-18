@@ -15,7 +15,7 @@
 """Part A: the judge grades only the LAST assistant message item, not the concatenation
 of every assistant message (the old Response.output_text behavior, wrong ~49% of the time)."""
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseFunctionToolCall,
