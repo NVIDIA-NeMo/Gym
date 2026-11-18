@@ -138,6 +138,7 @@ def test_external_staging_resolves_served_reasoning_history(
         lineage_store=ledger,
         external_staging=True,
         token_capture_enabled=True,
+        record_last_output_item=True,
     )
     try:
         with TestClient(app) as client:
@@ -161,6 +162,14 @@ def test_external_staging_resolves_served_reasoning_history(
                 assert "prompt_token_ids" not in response.text
                 served = response.json()
                 assert manifest["records"][-1]["response_id"] == served["id"]
+                if endpoint != "messages":
+                    # A Chat reply's think block is lifted, so both routes record the Responses route's last item.
+                    answer = {
+                        "type": "message",
+                        "content": [{} if reasoning_field == "refusal" else {"text": f"answer {index}"}],
+                    }
+                    expected_item = {"type": "function_call"} if tool_call else answer
+                    assert manifest["records"][-1]["last_output_item"] == expected_item
                 if endpoint == "responses":
                     output = served["output"]
                 elif endpoint == "messages":

@@ -1122,6 +1122,25 @@ def test_record_last_output_item_requires_external_staging():
         TokenCaptureConfig.model_validate(_block(record_last_output_item=True))
 
 
+@pytest.mark.parametrize("record_last_output_item", [False, True])
+def test_record_last_output_item_reaches_each_call_capture_context(tmp_path, monkeypatch, record_last_output_item):
+    monkeypatch.setenv("NEMO_GYM_TOKEN_CAPTURE_CONTROL_TOKEN", "control-token")
+    seen = []
+
+    class _Peek(_CapturingModel):
+        async def responses(self, request: Request, body=Body()) -> NeMoGymResponse:
+            seen.append(current_capture_context().record_last_output_item)
+            return _training_response("hi")
+
+    config = _block(dir=str(tmp_path), external_staging=True, record_last_output_item=record_last_output_item)
+    client = TestClient(_server(config, model_cls=_Peek).setup_webserver())
+
+    response = client.post("/ng-rollout/r0/training-token-capture/v1/responses", json={"input": "hi"})
+
+    assert response.status_code == 200
+    assert seen == [record_last_output_item]
+
+
 @pytest.mark.parametrize("setting", [{"parent_resolution": "unsupported"}, {"framework_owned_context": True}])
 def test_invalid_or_obsolete_parent_resolution_is_rejected(setting):
     with pytest.raises(ValidationError):

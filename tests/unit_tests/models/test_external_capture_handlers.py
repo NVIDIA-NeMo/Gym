@@ -317,6 +317,38 @@ async def test_record_last_output_item_persists_only_the_last_item_in_fingerprin
         await store.close()
 
 
+@HANDLER_CLASSES
+async def test_chat_think_block_is_not_recorded_as_answer_text(handler_cls, tmp_path):
+    store = FileLineageStore(tmp_path)
+    context = _root_context(store)
+    context.record_last_output_item = True
+    handler = handler_cls()
+    token = set_token_sink(context)
+    try:
+        handler.prepare_response({"ng_commit_coords": _staged_coords()})
+        await handler.finalize_response(
+            {
+                "id": "chatcmpl-1",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "<think>private reasoning</think>answer"},
+                    }
+                ],
+            }
+        )
+        assert context.committed
+        await store.close()
+        reopened = FileLineageStore(tmp_path)
+        row = (await reopened.manifest(context.capture_key))["records"][0]
+        assert row["last_output_item"] == {"type": "message", "content": [{"text": "answer"}]}
+        await reopened.close()
+    finally:
+        reset_token_sink(token)
+        await store.close()
+
+
 @dataclass(frozen=True)
 class _FinalizeCase:
     """One worker-acknowledgement scenario, run against every handler backend.

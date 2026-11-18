@@ -14,6 +14,7 @@ from typing import Any, Protocol
 from nemo_gym.models.token_capture.completion import (
     completion_items,
     completion_metadata,
+    detector_items,
     output_item_fingerprint,
     output_validation_item,
 )
@@ -373,7 +374,7 @@ class _BaseExternalCaptureHandler(ABC):
         evidence_items = completion_items(served_payload) if context.parent_resolution_mode == "source_history" else []
         # A framework that runs its own output detectors asks for the last item in every mode.
         validation_items = evidence_items or (
-            completion_items(served_payload) if context.record_last_output_item else []
+            detector_items(served_payload) if context.record_last_output_item else []
         )
         # Content-witness keys, hashed while the response is still
         # server-side: this call's own output, and request + output (the
