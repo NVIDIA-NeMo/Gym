@@ -191,6 +191,10 @@ HTTP_CONNECTION_POOL_CONNECT_OUTCOME_ATTRIBUTE = "nemo.gym.http.connection_pool.
 HTTP_CONNECTION_POOL_QUEUE_CONSTRAINT_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_constraint"
 HTTP_CONNECTION_POOL_QUEUE_OUTCOME_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_outcome"
 HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE = "nemo.gym.http.destination.server.name"
+HTTP_TRANSPORT_RESEND_INSTRUMENT = "gym.http.transport_resend_total"
+HTTP_TIMEOUT_INSTRUMENT = "gym.http.timeout_total"
+# Why the previous attempt failed: server_disconnected, client_os_error, timeout or other.
+HTTP_RESEND_REASON_ATTRIBUTE = "nemo.gym.http.resend_reason"
 RUN_METRIC_PREFIX = "gym.run."
 RUN_ID_ATTRIBUTE = "nemo.gym.run.id"
 RUN_INFO_INSTRUMENT = "gym.run.info"
@@ -504,6 +508,24 @@ def record_http_connection_pool_connect_duration(duration_ms: float, *, outcome:
         duration_ms,
         {HTTP_CONNECTION_POOL_CONNECT_OUTCOME_ATTRIBUTE: outcome, HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE: server_name},
         boundaries=HTTP_CONNECTION_POOL_QUEUE_DURATION_BOUNDARIES_MS,
+    )
+
+
+def record_transport_resend(*, reason: str, server_name: str) -> None:
+    """Count one transport resend, as the next attempt starts, by why the previous attempt failed."""
+    _record_counter(
+        HTTP_TRANSPORT_RESEND_INSTRUMENT,
+        "HTTP request attempts the client sent again after a transport failure, counted when the next attempt starts.",
+        {HTTP_RESEND_REASON_ATTRIBUTE: reason, HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE: server_name},
+    )
+
+
+def record_http_timeout(*, server_name: str) -> None:
+    """Count one HTTP request attempt that timed out, whether or not it is sent again."""
+    _record_counter(
+        HTTP_TIMEOUT_INSTRUMENT,
+        "HTTP request attempts that timed out, sent again or not.",
+        {HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE: server_name},
     )
 
 

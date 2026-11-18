@@ -389,6 +389,24 @@ These pool metrics require telemetry initialization before client construction. 
 collection does not initialize telemetry automatically, so missing metrics do not mean no
 queueing. See [HTTP Connection Pool](/reference/configuration#http-connection-pool) for process coverage.
 
+### HTTP Transport Resends
+
+Gym's HTTP client sends a request again after a dropped connection, an OS-level connection error, a timeout, or
+another transport failure. Two counters show how often, labelled with the same `nemo.gym.http.destination.server.name`
+as the pool metrics. A model client's retries of 429 and 5xx replies and rollout retries are not counted here.
+
+| Metric | Attributes | Meaning |
+| --- | --- | --- |
+| `gym.http.transport_resend_total` | `nemo.gym.http.resend_reason`, destination | One attempt sent again, counted when the next attempt starts, so a request that gives up adds nothing for its last failure. The reason is why the previous attempt failed: `server_disconnected`, `client_os_error`, `timeout` or `other`. |
+| `gym.http.timeout_total` | destination | One attempt that timed out, whether it was sent again or not. |
+
+A timeout includes an OS-level connect or socket timeout that aiohttp reports as a connection error. The client sees
+attempts only until `request()` returns: a timeout while the caller reads the body afterwards is not counted.
+
+With traces exported, each request's CLIENT span also carries `nemo.gym.http.transport_resend_count`: the resends that
+request made itself (0 when it succeeded first time), not those of the servers it called. The counters run only on
+failure paths, so a request that succeeds first time records nothing.
+
 ### A Note on `gym.server.request_duration_ms`
 
 `nemo-lens` declares a `gym.server.request_duration_ms` histogram. NeMo Gym does not use
