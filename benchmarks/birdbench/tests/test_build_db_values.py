@@ -471,6 +471,36 @@ class TestDbHandlePostgres:
         assert '- "school"."grades"."studentid" = "school"."Students".' in context
 
 
+@pytest.mark.skipif(
+    not all(importlib.util.find_spec(m) for m in ("bm25s", "nltk", "pandas")),
+    reason="requires bm25s, nltk and pandas",
+)
+class TestDbHandleSnowflake:
+    def test_sql_context_is_qualified_double_quoted_and_uses_bird_names_and_snowflake_types(self, tmp_path):
+        db_path = tmp_path / "school" / "school.sqlite"
+        db_path.parent.mkdir()
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("CREATE TABLE Students (StudentID INTEGER PRIMARY KEY, Name TEXT, `Free Meal (K-12)` REAL)")
+        conn.execute(
+            "CREATE TABLE notes (StudentID INTEGER, dirty INTEGER, FOREIGN KEY (StudentID) REFERENCES Students(StudentID))"
+        )
+        conn.execute("INSERT INTO Students VALUES (1, 'Alice', 1.5)")
+        conn.execute("INSERT INTO notes VALUES (1, 'oops')")  # non-numeric data in an INTEGER column
+        conn.commit()
+
+        handle = build_db_values.DbHandle(conn.cursor(), tmp_path, dialect="snowflake", db_id="school")
+        context = handle.sql_context_for_question("What is Alice's meal count?")
+        conn.close()
+
+        # Tables and columns keep BIRD's names, as loaded (quoted, so case-sensitive on Snowflake).
+        assert '- "school"."Students":' in context and '- "school"."notes":' in context
+        assert '  - "StudentID":\n      data_type: NUMBER(38,0) (primary key)' in context
+        assert '  - "Name":\n      data_type: VARCHAR' in context
+        assert '  - "Free Meal (K-12)":\n      data_type: FLOAT' in context
+        assert '  - "dirty":\n      data_type: VARCHAR' in context  # fell back to string when loaded
+        assert '- "school"."notes"."StudentID" = "school"."Students"."StudentID"' in context
+
+
 def test_collect_column_values_limit_per_column_caps_the_scan(tmp_path):
     conn = sqlite3.connect(str(tmp_path / "t.sqlite"))
     conn.execute("CREATE TABLE t (name TEXT)")
