@@ -101,12 +101,13 @@ from responses_api_agents.hermes_agent.sandbox import HarnessProcessInfo, Hermes
 MODEL_REJECTION_STATUSES = frozenset({400, 413, 422})
 _HTTP_STATUS = re.compile(r"\b(?:HTTP |Error code: )([45]\d{2})\b")
 _TRUNCATION_ERROR = "First response truncated due to output length limit"
-# Every error Hermes 26bb847a returns when a run ends because the model's output reached max_tokens (run_agent.py).
+# Upstream truncation exits, including the previous pin's three-attempt limit.
 _OUTPUT_LIMIT_ERRORS = frozenset(
     {
         _TRUNCATION_ERROR,
         "Response truncated due to output length limit",
         "Response remained truncated after 3 continuation attempts",
+        "Response remained truncated after 4 continuation attempts",
         "Model used all output tokens on reasoning with none left for the response. "
         "Try lowering reasoning effort or increasing max_tokens.",
     }
@@ -114,7 +115,7 @@ _OUTPUT_LIMIT_ERRORS = frozenset(
 
 
 def _is_limit_result(result: Mapping[str, Any]) -> bool:
-    """Recognize explicit Hermes limit results; tested on Hermes 26bb847a.
+    """Recognize explicit Hermes budget and output-limit results.
 
     `partial` alone also covers invalid model output, so require a Hermes limit reason.
     """
@@ -377,9 +378,12 @@ class HermesAgentVerifyResponse(BaseVerifyResponse):
 
 class HermesAgent(SimpleResponsesAPIAgent):
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """Read Hermes 26bb847a native result flags and API errors; tested on that pin."""
+        """Map native Hermes result flags and errors to Gym outcome kinds."""
         error = str(native_result.get("error") or "")
-        if native_result.get("partial") and error.startswith("Context length exceeded"):
+        if native_result.get("partial") and (
+            error.startswith("Context length exceeded")
+            or re.fullmatch(r"Prompt used [0-9]+ of [0-9]+ context tokens; no room to answer", error)
+        ):
             return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
         if _is_limit_result(native_result):
             return AgentOutcome(failure_kind=AGENT_LIMIT)

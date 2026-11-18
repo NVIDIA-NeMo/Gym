@@ -1291,6 +1291,7 @@ async def test_context_limit_keeps_partial_work_verifiable(agent, state, capture
     [
         "Response truncated due to output length limit",
         "Response remained truncated after 3 continuation attempts",
+        "Response remained truncated after 4 continuation attempts",
         "Model used all output tokens on reasoning with none left for the response. "
         "Try lowering reasoning effort or increasing max_tokens.",
     ],
@@ -1766,6 +1767,11 @@ async def test_seed_allows_loopback_model_url_on_local_docker(agent, state, monk
         ({"failed": True, "error": "First response truncated due to output length limit"}, "agent_limit"),
         ({"partial": True, "error": "Response truncated due to output length limit"}, "agent_limit"),
         ({"partial": True, "error": "Response remained truncated after 3 continuation attempts"}, "agent_limit"),
+        ({"partial": True, "error": "Response remained truncated after 4 continuation attempts"}, "agent_limit"),
+        (
+            {"partial": True, "error": "Prompt used 4080 of 4096 context tokens; no room to answer"},
+            "model_context_limit",
+        ),
         (
             {
                 "partial": True,

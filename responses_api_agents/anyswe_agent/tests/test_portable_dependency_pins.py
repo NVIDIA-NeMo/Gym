@@ -126,6 +126,7 @@ def test_hermes_portable_builder_uses_target_and_optional_source(tmp_path, scrip
         "python",
         "gym",
         "run",
+        "--isolated",
         "--no-dev",
         "--locked",
         "--directory",

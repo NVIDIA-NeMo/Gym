@@ -17,4 +17,4 @@ args=(--prefix "$DEPS_DIR" --target "$ARCH")
 if [[ -n "${HERMES_SPEC:-}" ]]; then
     args+=(--source "$HERMES_SPEC")
 fi
-uv run --no-dev --locked --directory "$NEMO_GYM_ROOT" python -m responses_api_agents.hermes_agent.scripts.prepare_portable "${args[@]}"
+uv run --isolated --no-dev --locked --directory "$NEMO_GYM_ROOT" python -m responses_api_agents.hermes_agent.scripts.prepare_portable "${args[@]}"
