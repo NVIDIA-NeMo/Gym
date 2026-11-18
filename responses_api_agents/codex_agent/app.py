@@ -572,7 +572,9 @@ def _model_endpoint_error(events: list[tuple[float, dict[str, Any]]]) -> Optiona
     return None
 
 
-def _deadline_model_fault(attempts: list[dict[str, Any]] | None, *, started: int | None) -> NgFailureEvent | None:
+def _deadline_model_fault(
+    attempts: list[dict[str, Any]] | None, *, started: int | None, stream_failure: str | None = None
+) -> NgFailureEvent | None:
     """The model endpoint fault a timed-out run's last forwarded model attempt recorded, or ``None``.
 
     The sandbox forwarder records the start and the result of every upstream attempt of Codex's model calls. When the
@@ -581,10 +583,21 @@ def _deadline_model_fault(attempts: list[dict[str, Any]] | None, *, started: int
     endpoint rather than by the model, so the ladder retries the run. An attempt still in flight at the deadline (a
     start without a result, such as a retry after a 429) and an earlier failure that a later attempt recovered from
     leave the deadline to the model. ``started`` is the number of recorded starts.
+
+    A reply Codex hung up on is recorded as a cancelled 200. It is the endpoint's fault only with ``stream_failure``,
+    the endpoint failure Codex reported after its last model output (a stream that went idle or broke): Codex also
+    hangs up when the deadline kills it mid-reply.
     """
     if not attempts or (started is not None and started > len(attempts)):
         return None
     last = attempts[-1]
+    if last.get("cancelled") and stream_failure is not None:
+        # Codex gave up on a reply that stalled or broke and had not started its retry when the deadline came.
+        return NgFailureEvent(
+            boundary=FailureBoundary.MODEL,
+            failure_kind=MODEL_TRANSPORT_ERROR,
+            failure_reason=f"Codex's last model stream before the deadline failed: {stream_failure}",
+        )
     status = last.get("status")
     if status is None or "transport_error" in last:
         reason = last.get("transport_error") or last.get("error") or "the upstream connection failed"
@@ -1279,7 +1292,13 @@ class CodexAgent(SimpleResponsesAPIAgent):
             ),
             model_limit="output" if output_limited else None,
             error=self.classify_outcome(terminal) if reported_model_error else None,
-            infra_fault=_deadline_model_fault(attempts, started=state.model_attempts_started) if timed_out else None,
+            infra_fault=(
+                _deadline_model_fault(
+                    attempts, started=state.model_attempts_started, stream_failure=_model_endpoint_error(events)
+                )
+                if timed_out
+                else None
+            ),
         )
         status = decide_outcome(evidence).status
         # A reported provider failure keeps its classified outcome, so the Environment Server decides it. A run

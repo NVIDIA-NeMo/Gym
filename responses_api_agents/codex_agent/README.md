@@ -139,9 +139,9 @@ supplied order before all prompt text, uses `detail: high` regardless of the req
 over 2048 px on a side or 2,500 tiles of 32 px. For example, a 2400x2400 PNG becomes 1600x1600. GIF is re-encoded
 as PNG. These native processing limits cannot be disabled. Image-only prompts are supported in sessions;
 local execution rejects images with HTTP 422. Exported conversations retain images as data URIs. When the native
-transcript shows fewer images than supplied, completed and output-limit runs fail with HTTP 502 instead of
-scoring an answer made without all prompt images. Wall-time limits and reported model failures keep their
-existing outcomes.
+transcript shows fewer images than supplied, a run the outcome ladder would grade (completed, or an output or context
+limit) fails with a typed HTTP 500 (`agent_route_failed`, retried) instead of scoring an answer made without all
+prompt images. A deadline and a run that already failed keep their own outcomes.
 
 Request `max_output_tokens`, `temperature`, `top_p`, reasoning controls, and unsupported tool
 policies are rejected rather than ignored. Codex cannot enforce these request-level controls

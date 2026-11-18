@@ -3850,6 +3850,26 @@ def test_deadline_fault_is_the_last_forwarded_attempt_that_failed(attempts, star
         assert fault.boundary == "model"
 
 
+@pytest.mark.parametrize(
+    "attempts,started,stream_failure,expected",
+    [
+        # Codex hung up on a stalled reply and reported it; the deadline came before its retry started.
+        ([{"status": 200, "cancelled": True}], 1, "idle timeout waiting for sse", ("model_transport_error", None)),
+        # The retry was in flight: the deadline is the model's.
+        ([{"status": 200, "cancelled": True}], 2, "idle timeout waiting for sse", None),
+        # The deadline killed Codex mid-reply: a hang-up without a reported endpoint failure.
+        ([{"status": 200, "cancelled": True}], 1, None, None),
+        # A whole reply is no stream failure, whatever Codex reported earlier.
+        ([{"status": 200}], 1, "idle timeout waiting for sse", None),
+    ],
+)
+def test_deadline_fault_of_a_reply_codex_hung_up_on(attempts, started, stream_failure, expected):
+    fault = _deadline_model_fault(attempts, started=started, stream_failure=stream_failure)
+    assert (fault and (fault.failure_kind, fault.http_status)) == expected
+    if fault is not None:
+        assert fault.boundary == "model"
+
+
 TIMED_OUT = {"timed_out": True, "return_code": 128 + signal.SIGKILL}
 STARTED = {"type": "turn.started"}
 # The forwarder's record of an upstream attempt it started; its result follows in a separate record.
@@ -3898,6 +3918,15 @@ STARTED_ATTEMPT = {"started": True}
             None,
             OutcomeAction.VERIFY,
             id="deadline_after_reply_retry_in_flight",
+        ),
+        pytest.param(
+            [STARTED, MODEL_OUTPUT, retry_notice(IDLE), retry_notice(IDLE, 2)],
+            TIMED_OUT,
+            [STARTED_ATTEMPT, {"status": 200}, STARTED_ATTEMPT, {"status": 200, "cancelled": True}],
+            "failed",
+            {"failure_kind": "model_transport_error"},
+            OutcomeAction.RETRY,
+            id="deadline_after_stalled_stream",
         ),
         pytest.param(
             [STARTED],
