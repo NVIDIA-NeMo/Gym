@@ -1593,8 +1593,9 @@ def allow_privileged_from_overrides(overrides: list[str], sandbox: str | None) -
     """Whether the ``sandbox:`` block allows privileged sandboxes, for checking a Compose service's ``privileged:
     true`` at prepare: its one provider's ``allow_privileged`` (``PRIVILEGED_SETTING``), read from the ``--sandbox``
     provider file and the configuration the command names. ``None`` when the block names no single provider (the
-    adapter then decides at seed); otherwise whether the setting is ``true``, as the provider reads it. A value that
-    is not a boolean raises ``ValueError`` naming the key, as the provider would refuse it."""
+    adapter then decides at seed); otherwise whether the setting is ``true``, as the provider reads it, ``False`` when
+    absent. A configured value that is not a boolean, ``null`` included, raises ``ValueError`` naming the key, as the
+    provider would refuse it."""
     return _block_allow_privileged(overrides, sandbox, SANDBOX_BLOCK_KEY)
 
 
@@ -1615,11 +1616,12 @@ def _block_allow_privileged(overrides: list[str], sandbox: str | None, block: st
         return None
     files = [resolve_sandbox_config(sandbox)] if sandbox is not None else []
     key = f"{block}.{provider}.{PRIVILEGED_SETTING}"
-    value = _block_from_overrides(overrides, key, config_files=files)
-    # The provider rejects anything but a boolean, so a quoted "true" is a configuration error, not a refusal.
-    if value is not None and not isinstance(value, bool):
+    value = _block_from_overrides(overrides, key, config_files=files, default=False)
+    # Absent is off. The provider rejects anything but a boolean, so a configured null or a quoted "true" is a
+    # configuration error, not a refusal.
+    if not isinstance(value, bool):
         raise ValueError(f"`{key}` must be true or false; got {value!r}")
-    return value is True
+    return value
 
 
 def _patterns(args: argparse.Namespace, name: str) -> list[str]:
