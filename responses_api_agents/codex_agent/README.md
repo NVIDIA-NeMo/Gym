@@ -429,9 +429,11 @@ instead of installing, and refuses the seed with a 422 when it does not. `sandbo
 sandbox too: it is checked there in the same way, and a borrowed sandbox is never stopped.
 
 A borrowed sandbox that its owner restricted (a Harbor task's `network_mode`) is created with the hosts Codex declares
-in its session capabilities (`sandbox_egress`): the Gym model server's host, and the installer's download hosts
+in its session capabilities (`sandbox_egress`): the Gym model server's host, the installer's download hosts
 `nodejs.org`, `unofficial-builds.nodejs.org`, `registry.npmjs.org` and `dl-cdn.alpinelinux.org` (none with
-`sandbox_runtime_dir`). The installer's `apt-get`/`apk` fallback for a missing `curl`, `tar`, `gzip`, `sha256sum`,
+`sandbox_runtime_dir`), and the host of each MCP grant in its configured `tool_accesses` that it writes into
+`config.toml` (not a direct HTTP grant, nor a name Codex cannot use). The owner opens the hosts of the grants it sends
+itself. The installer's `apt-get`/`apk` fallback for a missing `curl`, `tar`, `gzip`, `sha256sum`,
 `awk` or CA bundle reaches the image's package mirrors, which are not declared, so such an image needs those tools.
 
 Under `model_only`, a required MCP grant is refused at seed with a 422, since the policy would block its host; under

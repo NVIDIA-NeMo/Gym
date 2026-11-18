@@ -158,6 +158,7 @@ async def test_capabilities_declare_the_model_host_and_pypi_for_a_restricted_bor
     assert capabilities.sandbox_egress.model_dump() == {
         "model_hosts": ["gym-model"],
         "install_hosts": ["pypi.org", "files.pythonhosted.org"],
+        "tool_hosts": [],
     }
     f.agent.config = module.MiniSWESandboxedConfig.model_validate(
         f.agent.config.model_dump() | {"sandbox_model_base_url": "https://sandbox-model:8443/gym/v1/"}

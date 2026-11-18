@@ -255,6 +255,10 @@ class AgentSandboxEgress(BaseModel):
     model_hosts: list[str] = Field(default_factory=list)
     # Where the session seed downloads the harness runtime from inside the sandbox; empty when it downloads nothing.
     install_hosts: list[str] = Field(default_factory=list)
+    # The hosts of the tool servers the harness's own configuration connects it to from inside the sandbox, such as
+    # its configured MCP grants. The tool servers an environment server grants it, or hands it in the task's context,
+    # are that server's to open.
+    tool_hosts: list[str] = Field(default_factory=list)
 
 
 class AgentSessionCapabilitiesResponse(BaseModel):
@@ -1028,8 +1032,9 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         )
 
     def sandbox_egress(self) -> AgentSandboxEgress | None:
-        """The hosts this harness reaches from inside a task sandbox it borrows: its model endpoint and where its
-        session seed downloads its runtime. An environment server that restricts the sandbox's network opens them.
+        """The hosts this harness reaches from inside a task sandbox it borrows: its model endpoint, where its session
+        seed downloads its runtime and the tool servers its own configuration connects it to. An environment server
+        that restricts the sandbox's network opens them.
 
         ``None``, the default, declares nothing; such a server then refuses a restricted task for this harness
         instead of guessing. Override it in an adapter that runs in a borrowed sandbox, with every host the seed and

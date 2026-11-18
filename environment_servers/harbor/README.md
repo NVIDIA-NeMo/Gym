@@ -54,9 +54,10 @@ Harbor's own runtime; they are not this path.
 A task that restricts the agent's network (`network_mode` in `[environment]`, `[agent]` or `[steps.agent]`) gets an
 agent sandbox created under that egress policy, on OpenSandbox only, for the sandbox's whole life (`_seed` and
 `_agent_network_policy` in `app.py`). The policy also allows the hosts the harness declares in its session
-capabilities (`sandbox_egress`: its model endpoint and where its setup downloads its runtime) and the hosts of the
-MCP servers `task_mcp_grants` grants, so the agent can reach those hosts beyond what the task asked for. The extra
-hosts and the refusals are listed under "Network restrictions" in
+capabilities (`sandbox_egress`: its model endpoint, where its setup downloads its runtime and the tool servers its own
+configuration connects it to) and the hosts of the task's MCP servers it connects to (`_task_tool_hosts`: every `url`
+entry for a harness that reads the task's context, else those `task_mcp_grants` grants), so the agent can reach those
+hosts beyond what the task asked for. The extra hosts and the refusals are listed under "Network restrictions" in
 [`fern/versions/latest/pages/agent-interactions/harbor.mdx`](../../fern/versions/latest/pages/agent-interactions/harbor.mdx).
 
 ## Run it

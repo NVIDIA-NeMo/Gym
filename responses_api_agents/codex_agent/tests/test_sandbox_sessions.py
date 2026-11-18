@@ -244,6 +244,7 @@ def test_sandbox_egress_declares_the_model_server_and_the_installers_hosts(setup
             "registry.npmjs.org",
             "dl-cdn.alpinelinux.org",
         ],
+        "tool_hosts": [],
     }
     # A runtime baked into the image downloads nothing.
     agent.config.sandbox_runtime_dir = "/opt/codex-runtime"
@@ -498,6 +499,30 @@ def mcp_grant(name="gdpval_resources_server", *, required=True, url="http://reso
         "required": required,
         "connection": {"url": url, "headers": {"X-NeMo-Gym-Session-Token": f"token-{name}"}},
     }
+
+
+def test_sandbox_egress_declares_the_configured_mcp_grants_codex_connects_to(setup):
+    """A restricted borrowed sandbox must reach the MCP servers of Codex's own configured grants, which it writes
+    into config.toml (a required one that cannot connect fails the activation), and nothing it leaves out: a direct
+    HTTP grant or a name Codex cannot use. The environment server's own grants are its own to open."""
+    agent, _ = setup
+    agent.config = CodexAgentConfig(
+        **(
+            agent.config.model_dump()
+            | {
+                "tool_accesses": [
+                    mcp_grant("tools", url="http://tools.example:9000/mcp"),
+                    mcp_grant("search-tools", required=False, url="http://Search.Example:7100/mcp"),
+                    mcp_grant("search.v2", required=False, url="http://skipped-name.example/mcp"),
+                    {"kind": "direct_http", "name": "direct", "base_url": "http://direct.example", "required": False},
+                ],
+            }
+        )
+    )
+    reply = TestClient(agent.setup_webserver()).get("/v1/agent_sessions/capabilities")
+    egress = reply.json()["sandbox_egress"]
+    assert egress["tool_hosts"] == ["tools.example", "search.example"]
+    assert egress["model_hosts"] == ["model.example"]
 
 
 def test_mcp_grants_reach_the_sandbox_codex_config(setup):

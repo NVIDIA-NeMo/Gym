@@ -486,7 +486,7 @@ def sandbox_egress(self) -> AgentSandboxEgress | None:
 - `model_hosts` names the host of every model endpoint the harness calls from the sandbox. `install_hosts` names every host the session seed downloads from inside the sandbox; leave it empty when the runtime is uploaded or baked into the image.
 - List exactly what the seed and the harness reach, and nothing else: the server opens each host on every port, and a missing one fails the install or the model calls under the restriction.
 - The default, `None`, declares nothing, and the server refuses a restricted task for the harness rather than guess. Return `None` too for a configuration that cannot run in a borrowed sandbox.
-- Hosts of the tool servers the Environment Server grants are its own to open; list a tool server here only if the adapter's own configuration grants it.
+- `tool_hosts` names the host of every tool server the adapter's own configuration connects the harness to from the sandbox, such as its configured MCP grants, and nothing it leaves out. The tool servers the Environment Server grants or hands over in the task's context are its own to open. A URL whose host the adapter cannot read (an unexpanded `${VAR}`) goes in whole, so the server refuses the task by name instead of blocking the tool.
 
 ## Build the adapter with `nemo_gym.agents.utils`
 

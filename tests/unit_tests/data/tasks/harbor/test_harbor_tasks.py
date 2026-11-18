@@ -2739,6 +2739,44 @@ def test_every_steps_agent_must_resolve_to_one_network(tmp_path):
         load_task(root)
 
 
+def test_phase_networks_compare_ip_literals_in_their_canonical_spelling(tmp_path):
+    """Two spellings of one IP address are one egress rule (the policy builder writes an IP literal canonically), so
+    the phases that must agree on a network agree on them: a shared verifier and the agent, and every step's agent. A
+    different address still differs."""
+    allowlist = 'network_mode = "allowlist"\nallowed_hosts = [{}]\n'
+    agent = HELLO_TOML.replace("[agent]\n", "[agent]\n" + allowlist.format('"2001:db8:0::1", "2001:DB8::0:1"'))
+    shared = agent.replace("[verifier]\n", "[verifier]\n" + allowlist.format('"2001:db8::1"'))
+    task = load_task(write_task(tmp_path / "shared", toml=shared))
+    assert task.config.is_shared_verifier
+    assert task.config.agent_network() == task.config.verifier_network(separate=False)
+    assert task.config.agent_network().allowed_hosts == ("2001:db8::1",)
+    other = agent.replace("[verifier]\n", "[verifier]\n" + allowlist.format('"2001:db8::2"'))
+    with pytest.raises(HarborTaskError, match=re.escape(SHARED_MISMATCH)):
+        load_task(write_task(tmp_path / "other", toml=other))
+
+    root = write_multi_step_task(tmp_path / "steps")
+    separate = (
+        (root / "task.toml")
+        .read_text()
+        .replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n')
+        .replace("[agent]\n", '[verifier.environment]\ndocker_image = "org/verifier:1"\n\n[agent]\n')
+        .replace("[agent]\n", "[agent]\n" + allowlist.format('"2001:db8:0::1"'))
+    )
+    # 01_plan's agent names the address its own way; 02_implement's takes the task's [agent] spelling.
+    (root / "task.toml").write_text(
+        separate.replace("[steps.agent]\n", "[steps.agent]\n" + allowlist.format('"2001:db8::1"'))
+    )
+    task = load_task(root)
+    assert {task.config.agent_network(step) for step in task.config.steps} == {
+        PhaseNetwork("allowlist", ("2001:db8::1",))
+    }
+    (root / "task.toml").write_text(
+        separate.replace("[steps.agent]\n", "[steps.agent]\n" + allowlist.format('"2001:db8::2"'))
+    )
+    with pytest.raises(HarborTaskError, match="the steps' agents ask for different networks"):
+        load_task(root)
+
+
 @pytest.mark.parametrize("policy", ['network_mode = "no-network"', 'network_mode = "public"', ""])
 def test_loader_refuses_verifier_allowed_hosts_without_an_allowlist(tmp_path, policy):
     toml = SEPARATE_VERIFIER_TOML.replace(

@@ -638,7 +638,11 @@ class HarborVerificationMixin:
         artifacts, then the rest of the group is stopped.
         """
         task = session.task
-        settings = task.config.verifier
+        # `[verifier]` as it is, but for the network: reported as the one this verification runs under, which a
+        # separate verifier without a policy of its own takes from its environment (see `_verifier_network_policy`).
+        settings = task.config.verifier.model_copy(
+            update={"network_mode": task.config.verifier_network(separate=True).mode}
+        )
         started = asyncio.get_running_loop().time()
         try:
             logs_dir = self._reserve_logs_dir()

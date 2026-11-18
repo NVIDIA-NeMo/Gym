@@ -247,7 +247,8 @@ The task cannot name what the harness needs in the sandbox, so the policy also a
 | --- | --- |
 | The model endpoint the harness calls, usually the Model Server's address | The harness runs in the sandbox and calls the model from there. Harbor adds the inference host the same way. |
 | Where the harness's session setup downloads its runtime | `codex_agent`: `nodejs.org`, `unofficial-builds.nodejs.org`, `registry.npmjs.org` and `dl-cdn.alpinelinux.org`, none with `sandbox_runtime_dir`. `miniswe_sandboxed_agent`: `pypi.org` and `files.pythonhosted.org`, where `uv pip install` gets mini-SWE (uv and Python are uploaded from the Agent Server). `claude_code_agent` and `harbor_oracle_agent`: none (Claude Code's binary is uploaded from the Agent Server). |
-| The host of each MCP server that `task_mcp_grants` grants | The harness connects to the server from the sandbox. |
+| The host of each task MCP server the harness connects to | A harness that reads `/tmp/.nemo-gym/task.json` (`supports_task_tool_context`, such as `miniswe_sandboxed_agent`) connects to every `url` entry there, `sse` included, whatever `task_mcp_grants` grants. Any other harness reaches only the `streamable-http` servers that `task_mcp_grants` grants. A `stdio` server runs in the sandbox and adds no host. |
+| The host of each tool server the harness's own configuration connects it to | `codex_agent`: the MCP servers of its configured `tool_accesses` (not a direct HTTP grant, nor a name Codex cannot use). `claude_code_agent`: the `http` and `sse` servers of its `mcp_config` (a `stdio` server adds none). |
 
 The agent can therefore reach more than the task asked for: these hosts, and any other Gym server that listens on the
 Model Server's address. Each harness declares its hosts in its session capabilities (`sandbox_egress`); a harness
@@ -256,10 +257,11 @@ that declares none is refused for such a task rather than guessed at. Today `cod
 reaches the image's package mirrors, which are not allowed: the image must already have it (for Codex `curl`, `tar`,
 `gzip`, `sha256sum`, `awk` and CA certificates; for Claude Code `bash`).
 
-The episode also fails at seed, without a retry, for a Compose task, and for a deny-by-default
-`sandbox_provider_options.network_policy` that the policy would widen. The server logs each policy it creates at
-`INFO` (`<task>: the agent's sandbox egress policy is ...`). The policy is only as strong as the OpenSandbox egress
-mode; see [Network Policy](/main/infrastructure/sandbox/opensandbox#network-policy).
+The episode also fails at seed, without a retry, for a Compose task, for a host that names the sandbox itself (a
+loopback address) or that the policy cannot express (such as a tool server URL whose host cannot be read, like an
+unexpanded `${VAR}`), and for a deny-by-default `sandbox_provider_options.network_policy` that the policy would widen.
+The server logs each policy it creates at `INFO` (`<task>: the agent's sandbox egress policy is ...`). The policy is
+only as strong as the OpenSandbox egress mode; see [Network Policy](/main/infrastructure/sandbox/opensandbox#network-policy).
 
 ## What the server writes
 

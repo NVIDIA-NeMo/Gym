@@ -151,14 +151,15 @@ def test_the_capabilities_route_declares_the_hosts_a_borrowed_sandbox_must_reach
     """An environment server that restricts the agent's sandbox opens what the harness declares it reaches there;
     an adapter that overrides nothing declares nothing (``None``), which such a server refuses rather than guesses."""
 
+    declared = AgentSandboxEgress(
+        model_hosts=["10.1.2.3"], install_hosts=["registry.npmjs.org"], tool_hosts=["tools.example"]
+    )
+
     class _Declares(_Agent):
         def sandbox_egress(self) -> AgentSandboxEgress:
-            return AgentSandboxEgress(model_hosts=["10.1.2.3"], install_hosts=["registry.npmjs.org"])
+            return declared
 
-    for agent_cls, expected in (
-        (_Agent, None),
-        (_Declares, AgentSandboxEgress(model_hosts=["10.1.2.3"], install_hosts=["registry.npmjs.org"])),
-    ):
+    for agent_cls, expected in ((_Agent, None), (_Declares, declared)):
         agent = agent_cls.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
         reply = TestClient(agent.setup_webserver()).get("/v1/agent_sessions/capabilities")
         assert reply.status_code == 200

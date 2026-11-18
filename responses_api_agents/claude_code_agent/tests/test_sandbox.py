@@ -179,7 +179,43 @@ def test_sandbox_egress_declares_the_endpoint_the_cli_calls_and_no_install_host(
     instance.server_client.global_config_dict["policy_model"] = {"responses_api_models": {"vllm_model": {}}}
     instance.server_client._build_server_base_url = MagicMock(return_value="http://gym-model.example:8000")
     reply = TestClient(instance.setup_webserver()).get("/v1/agent_sessions/capabilities")
-    assert reply.json()["sandbox_egress"] == {"model_hosts": [model_host], "install_hosts": []}
+    assert reply.json()["sandbox_egress"] == {"model_hosts": [model_host], "install_hosts": [], "tool_hosts": []}
+
+
+def test_sandbox_egress_declares_the_remote_servers_of_its_mcp_config(tmp_path):
+    """Claude stages its mcp_config into a borrowed sandbox and connects to each remote server from there, so a
+    restricting server must open those hosts; a stdio server runs in the sandbox (its arguments name no host to
+    open), an entry without a remote type is not one Claude connects to, and its tool grants add nothing."""
+    servers = {
+        "tools": {"type": "http", "url": "http://Tools.Example:9000/mcp", "headers": {"X-Token": "t"}},
+        "events": {"type": "sse", "url": "https://events.example/sse"},
+        "local": {"command": "npx", "args": ["-y", "mcp-remote", "http://stdio-arg.example/mcp"]},
+        "typed-local": {"type": "stdio", "command": "uvx", "args": ["--url", "http://stdio-typed.example"]},
+        "untyped": {"url": "http://untyped.example/mcp"},
+    }
+    config = tmp_path / "mcp.json"
+    config.write_text(json.dumps({"mcpServers": servers}))
+    grant = {"kind": "mcp", "name": "g", "required": False, "connection": {"url": "http://grant.example/mcp"}}
+    instance = agent(
+        anthropic_api_key="sk-test", mcp_config=str(config), tool_accesses=[grant]
+    )  # pragma: allowlist secret
+    reply = TestClient(instance.setup_webserver()).get("/v1/agent_sessions/capabilities")
+    assert reply.json()["sandbox_egress"] == {
+        "model_hosts": ["api.anthropic.com"],
+        "install_hosts": [],
+        "tool_hosts": ["tools.example", "events.example"],
+    }
+    # A URL whose host the Agent Server cannot read is declared whole, for the restricting server to refuse by name.
+    config.write_text(json.dumps({"mcpServers": {"api": {"type": "http", "url": "${API_URL}/mcp"}}}))
+    assert agent(mcp_config=str(config)).sandbox_egress().tool_hosts == ["${API_URL}/mcp"]
+    # A stdio-only configuration keeps working under a restriction: it adds no host.
+    config.write_text(json.dumps({"mcpServers": {"local": servers["local"]}}))
+    assert agent(mcp_config=str(config)).sandbox_egress().tool_hosts == []
+    # A configuration that cannot be read, or a URL that cannot be parsed, declares nothing, so a restricted task is
+    # refused rather than run blind.
+    assert agent(mcp_config=str(tmp_path / "missing.json")).sandbox_egress() is None
+    config.write_text(json.dumps({"mcpServers": {"api": {"type": "http", "url": "http://[::1/mcp"}}}))
+    assert agent(mcp_config=str(config)).sandbox_egress() is None
 
 
 @pytest.mark.asyncio

@@ -242,7 +242,7 @@ def test_oracle_declares_that_it_reaches_no_host_from_the_sandbox(monkeypatch):
     agent, _, _ = make_agent(monkeypatch)
     reply = TestClient(agent.setup_webserver()).get("/v1/agent_sessions/capabilities")
     assert reply.status_code == 200
-    assert reply.json()["sandbox_egress"] == {"model_hosts": [], "install_hosts": []}
+    assert reply.json()["sandbox_egress"] == {"model_hosts": [], "install_hosts": [], "tool_hosts": []}
 
 
 def test_task_without_solution_is_unvalidated_not_failed(monkeypatch):

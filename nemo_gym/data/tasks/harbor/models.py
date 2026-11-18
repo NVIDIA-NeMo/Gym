@@ -9,6 +9,7 @@ is accepted and dropped, as Harbor drops it. Keys this mirror does not know are 
 them; :meth:`HarborSettings.unknown_keys` lists them so the loader can say so.
 """
 
+import ipaddress
 import re
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -98,15 +99,24 @@ NetworkMode = Literal["public", "no-network", "allowlist"]
 @dataclass(frozen=True, eq=False)
 class PhaseNetwork:
     """The network one phase runs under once Harbor's settings are resolved: a ``network_mode`` and, for an
-    ``allowlist``, the ``allowed_hosts`` it opens, in the order written, lower-cased, without a trailing dot and
-    without repeats. Two networks are equal when they open the same hosts, in whatever order or spelling."""
+    ``allowlist``, the ``allowed_hosts`` it opens, in the order written, without repeats, each in the form its egress
+    rule takes: an IP literal in its canonical spelling, anything else lower-cased and without a trailing dot. Two
+    networks are equal when they open the same hosts, in whatever order or spelling. An entry no rule can express is
+    kept, for the policy builder to refuse."""
 
     mode: NetworkMode
     allowed_hosts: tuple[str, ...] = ()
 
     @classmethod
     def of(cls, mode: NetworkMode, allowed_hosts: list[str] | None) -> "PhaseNetwork":
-        return cls(mode, tuple(dict.fromkeys(str(host).strip().rstrip(".").lower() for host in allowed_hosts or ())))
+        def normalize(host: str) -> str:
+            target = str(host).strip()
+            try:
+                return str(ipaddress.ip_address(target))
+            except ValueError:
+                return target.rstrip(".").lower()
+
+        return cls(mode, tuple(dict.fromkeys(normalize(host) for host in allowed_hosts or ())))
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, PhaseNetwork):

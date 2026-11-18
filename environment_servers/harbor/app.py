@@ -1395,8 +1395,9 @@ class HarborEnvironmentServer(
         the policy holds from creation on: the seed (Dockerfile ``RUN`` lines, entrypoint, health check), the
         harness's setup, every step and a shared verifier run under it. It is the task's policy opened to what the
         harness needs in the sandbox, which the task cannot know: the hosts the agent server declares
-        (``sandbox_egress``: the model endpoint it calls and where its seed downloads its runtime) and the hosts of
-        the MCP servers this server grants it. That is looser than the task asked, by exactly those hosts.
+        (``sandbox_egress``: the model endpoint it calls, where its seed downloads its runtime and the tool servers
+        its own configuration connects it to) and the hosts of the task's MCP servers it connects to
+        (:meth:`_task_tool_hosts`). That is looser than the task asked, by exactly those hosts.
 
         Refused with HTTP 422 before anything is provisioned, as a retry would fail the same way: a provider other
         than OpenSandbox, a Compose group, a harness that declares nothing, a host the policy cannot express or the
@@ -1431,34 +1432,42 @@ class HarborEnvironmentServer(
                 "inside the task's sandbox (sandbox_egress in its session capabilities), so the sandbox cannot be "
                 "restricted around them; run the task with a harness that declares them",
             )
-        tool_hosts = self._granted_tool_hosts(task)
         try:
-            policy = with_harness_hosts(policy, [*egress.model_hosts, *egress.install_hosts, *tool_hosts])
+            task_tool_hosts = self._task_tool_hosts(task, reads_task_context=capabilities.supports_task_tool_context)
+            policy = with_harness_hosts(
+                policy, [*egress.model_hosts, *egress.install_hosts, *egress.tool_hosts, *task_tool_hosts]
+            )
             self._refuse_widening_the_deployment(policy, sandbox="the agent")
         except ValueError as exc:
             raise HTTPException(422, f"{where}: {exc}") from exc
         LOGGER.info(
-            "%s: the agent's sandbox egress policy is %s (task: %s; harness model hosts %s, install hosts %s; granted "
-            "tool hosts %s)",
+            "%s: the agent's sandbox egress policy is %s (task: %s; harness model hosts %s, install hosts %s, tool "
+            "hosts %s; task tool hosts %s)",
             task.task_id,
             json.dumps(policy),
             network,
             egress.model_hosts,
             egress.install_hosts,
-            tool_hosts,
+            egress.tool_hosts,
+            task_tool_hosts,
         )
         return policy
 
-    def _granted_tool_hosts(self, task: HarborTask) -> list[str]:
-        """The hosts of the MCP servers :meth:`_task_tool_accesses` grants the agent for ``task``: its streamable-http
-        URL entries, when ``task_mcp_grants`` grants any. Entries that are not granted are not opened."""
-        if self.config.task_mcp_grants == "off":
-            return []
-        return [
-            urlsplit(server.url).hostname or ""
-            for server in self._task_mcp_servers(task)
-            if server.transport == "streamable-http" and server.url
-        ]
+    def _task_tool_hosts(self, task: HarborTask, *, reads_task_context: bool) -> list[str]:
+        """The hosts of the task's MCP servers (:meth:`_task_mcp_servers`) the harness connects to from the sandbox.
+
+        A harness that reads ``/tmp/.nemo-gym/task.json`` (``supports_task_tool_context``, such as mini-SWE) connects
+        to every URL entry written there, ``sse`` included, whatever ``task_mcp_grants`` grants. Any other harness
+        reaches only the streamable-http entries :meth:`_task_tool_accesses` grants it, none when grants are off. A
+        stdio entry runs in the sandbox and opens nothing; its command and arguments are never read as hosts. A URL
+        whose host cannot be read is returned whole, so the policy refuses it by name.
+        """
+        servers = [server for server in self._task_mcp_servers(task) if server.transport != "stdio" and server.url]
+        if not reads_task_context:
+            if self.config.task_mcp_grants == "off":
+                return []
+            servers = [server for server in servers if server.transport == "streamable-http"]
+        return [urlsplit(server.url).hostname or server.url for server in servers]
 
     async def _require_turn_continuation(self) -> None:
         """Refuse a ``turn_sessions: continue`` run before any sandbox when the harness cannot continue a session.

@@ -775,15 +775,24 @@ class CodexAgent(SimpleResponsesAPIAgent):
     _local_setup_task: asyncio.Task[None] | None = PrivateAttr(default=None)
 
     def sandbox_egress(self) -> AgentSandboxEgress | None:
-        """In a borrowed sandbox Codex calls the Gym Model Server, and its seed downloads Node and the CLI
-        (:data:`CODEX_INSTALL_HOSTS`) unless ``sandbox_runtime_dir`` holds them. Without a ``model_server`` it
-        cannot run in a borrowed sandbox at all (the seed refuses it), so it declares nothing."""
+        """In a borrowed sandbox Codex calls the Gym Model Server, its seed downloads Node and the CLI
+        (:data:`CODEX_INSTALL_HOSTS`) unless ``sandbox_runtime_dir`` holds them, and it connects to the MCP servers of
+        its configured ``tool_accesses`` it writes into ``config.toml`` (:meth:`_granted_mcp_servers`, which leaves out
+        a direct HTTP grant and a name Codex cannot use). The environment server opens the hosts of its own grants; a
+        configured grant that one of them replaces by name is still declared, as this is asked before any episode.
+        Without a ``model_server`` Codex cannot run in a borrowed sandbox at all (the seed refuses it), so it
+        declares nothing."""
         if self.config.model_server is None:
             return None
         model_url = self.resolve_model_base_url(self.config.model_server.name, trace_context=False)
         return AgentSandboxEgress(
             model_hosts=[urlsplit(model_url).hostname or ""],
             install_hosts=[] if self.config.sandbox_runtime_dir else list(CODEX_INSTALL_HOSTS),
+            tool_hosts=[
+                urlsplit(str(access.connection.url)).hostname or ""
+                for access in self.config.tool_accesses
+                if isinstance(access, MCPToolAccess) and _codex_mcp_server_name(access.name)
+            ],
         )
 
     def _session_marker(self, request: Request) -> Optional[str]:

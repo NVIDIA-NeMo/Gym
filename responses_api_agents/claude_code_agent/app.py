@@ -189,13 +189,29 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
 
-    def sandbox_egress(self) -> AgentSandboxEgress:
+    def sandbox_egress(self) -> AgentSandboxEgress | None:
         """In a borrowed sandbox Claude Code calls its model endpoint: the Gym Model Server, else
-        ``anthropic_base_url``, else Anthropic's API. Its binary is downloaded on the Agent Server host and uploaded,
-        so the sandbox downloads nothing (an image without ``bash`` still needs its package mirror, which is not
-        listed)."""
+        ``anthropic_base_url``, else Anthropic's API. It also connects to each remote server of its ``mcp_config``
+        (one with a ``type`` such as ``http`` or ``sse`` and a ``url``); a stdio server runs in the sandbox and adds no
+        host, its command and arguments never read as one. A URL whose host cannot be read (an unexpanded
+        ``${VAR}``) is declared whole, so a restricting server refuses it by name; an ``mcp_config`` that cannot be
+        read, or a URL that cannot be parsed, declares nothing. Tool grants add no host: Claude uses none. Its binary
+        is downloaded on the Agent Server host and uploaded, so the sandbox downloads nothing (an image without
+        ``bash`` still needs its package mirror, which is not listed)."""
+        try:
+            tool_hosts = [
+                urlsplit(server["url"]).hostname or server["url"]
+                for server in self._get_static_mcp_config()["mcpServers"].values()
+                if isinstance(server, dict)
+                and server.get("type") not in (None, "stdio")
+                and isinstance(server.get("url"), str)
+            ]
+        except (OSError, ValueError) as error:
+            LOG.warning("Claude Code cannot declare the hosts its mcp_config reaches: %s", error)
+            return None
         return AgentSandboxEgress(
-            model_hosts=[urlsplit(self._resolve_base_url() or "https://api.anthropic.com").hostname or ""]
+            model_hosts=[urlsplit(self._resolve_base_url() or "https://api.anthropic.com").hostname or ""],
+            tool_hosts=tool_hosts,
         )
 
     async def _ensure_local_runtime(self) -> None:

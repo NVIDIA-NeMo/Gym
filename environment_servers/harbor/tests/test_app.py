@@ -5650,17 +5650,51 @@ class TestVerifierNetwork:
         spec = server._sandbox_spec(task, None, image="org/verifier:1", role="verifier", network_policy=None)
         assert "network_policy" not in spec.provider_options
 
-    def test_a_separate_verifier_without_an_environment_inherits_the_environments_network(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize(
+        ("environment", "verifier", "own_environment", "network", "policy"),
+        [
+            ('network_mode = "no-network"', "", False, "no-network", {"defaultAction": "deny", "egress": []}),
+            (
+                'network_mode = "allowlist"\nallowed_hosts = ["Example.com"]',
+                "",
+                False,
+                "allowlist",
+                {"defaultAction": "deny", "egress": [{"action": "allow", "target": "example.com"}]},
+            ),
+            ('network_mode = "no-network"', "", True, "public", None),
+            (
+                'network_mode = "no-network"',
+                'network_mode = "allowlist"\nallowed_hosts = ["pypi.org"]',
+                False,
+                "allowlist",
+                {"defaultAction": "deny", "egress": [{"action": "allow", "target": "pypi.org"}]},
+            ),
+        ],
+        ids=["inherited-no-network", "inherited-allowlist", "own-environment", "explicit-verifier-policy"],
+    )
+    async def test_a_separate_verifier_runs_under_and_reports_the_network_it_resolves_to(
+        self, tmp_path, monkeypatch, environment, verifier, own_environment, network, policy
+    ):
         """Harbor's separate verifier without a ``[verifier.environment]`` runs a copy of ``[environment]``, network
-        included; one with its own environment runs under that environment's (public) network."""
-        inherited = TASK_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n').replace(
-            "[environment]\n", '[environment]\ndocker_image = "ubuntu:24.04"\nnetwork_mode = "no-network"\n'
+        included, even when the agent's own policy is public; one with its own environment runs under that
+        environment's (public) network, and a ``[verifier]`` policy overrides either. The verifier sandbox is created
+        under that network and the result reports it."""
+        toml = (
+            TASK_TOML.replace("[verifier]\n", f'[verifier]\nenvironment_mode = "separate"\n{verifier}\n')
+            .replace("[agent]\n", '[agent]\nnetwork_mode = "public"\n')
+            .replace("[environment]\n", f'[environment]\ndocker_image = "ubuntu:24.04"\n{environment}\n')
         )
-        server, task, _, _, _, _ = self.prepared(tmp_path, monkeypatch, toml=inherited)
-        assert server._verifier_network_policy(task) == {"defaultAction": "deny", "egress": []}
-        own = inherited + '\n[verifier.environment]\ndocker_image = "org/verifier:1"\n'
-        server, task, _, _, _, _ = self.prepared(tmp_path / "own", monkeypatch, toml=own)
-        assert server._verifier_network_policy(task) is None
+        if own_environment:
+            toml += '\n[verifier.environment]\ndocker_image = "org/verifier:1"\n'
+        server, task, agent, _, specs, _ = self.prepared(tmp_path, monkeypatch, toml=toml)
+        response = await run_episode(server, task)
+        result = response.result
+        assert result is not None, response.failure
+        assert (result.verifier_mode, result.verifier_network) == ("separate", network)
+        (spec,) = specs
+        assert spec.provider_options.get("network_policy") == policy
+        # The agent's own sandbox runs under the agent's (public) network.
+        assert agent.network_policy is None
 
 
 class TestAgentNetwork:
@@ -5677,6 +5711,11 @@ class TestAgentNetwork:
     MCP_TOML = NO_NETWORK_TOML + (
         '\n[[environment.mcp_servers]]\nname = "search"\ntransport = "streamable-http"\n'
         'url = "http://tools.internal:9000/mcp"\n'
+    )
+    SSE_AND_STDIO = (
+        '\n[[environment.mcp_servers]]\nname = "events"\ntransport = "sse"\nurl = "http://Events.Internal:9100/sse"\n'
+        '\n[[environment.mcp_servers]]\nname = "local"\ntransport = "stdio"\ncommand = "npx"\n'
+        'args = ["mcp-remote", "http://stdio-arg.example/mcp"]\n'
     )
 
     def prepared(self, tmp_path, monkeypatch, *, toml, provider="opensandbox", egress=EGRESS, **config):
@@ -5784,9 +5823,10 @@ class TestAgentNetwork:
         assert response.result is None and failure.stage == "seed" and not failure.terminal and created == []
         assert "could not ask the agent server which hosts it reaches" in failure.failure_reason
 
-    @pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "0.0.0.0", "::1", "", "[::1]"])
-    async def test_a_host_the_sandbox_cannot_reach_is_refused_at_seed(self, tmp_path, monkeypatch, host):
-        egress = {"model_hosts": [host]}
+    @pytest.mark.parametrize("field", ["model_hosts", "tool_hosts"])
+    @pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "0.0.0.0", "::1", "", "[::1]", "${API_URL}/mcp"])
+    async def test_a_host_the_sandbox_cannot_reach_is_refused_at_seed(self, tmp_path, monkeypatch, host, field):
+        egress = {field: [host]}
         server, task, _, created = self.prepared(tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML, egress=egress)
         response = await run_episode(server, task)
         failure = response.failure
@@ -5794,14 +5834,72 @@ class TestAgentNetwork:
         assert "host the harness needs" in failure.failure_reason
 
     @pytest.mark.parametrize(("grants", "opened"), [("off", False), ("optional", True), ("required", True)])
-    async def test_granted_tool_servers_are_opened(self, tmp_path, monkeypatch, grants, opened):
+    async def test_a_harness_without_the_task_context_gets_only_the_granted_tool_servers(
+        self, tmp_path, monkeypatch, grants, opened
+    ):
+        """A harness that does not read task.json reaches the task's MCP servers only through the grants."""
+        server, task, _, _ = self.prepared(
+            tmp_path, monkeypatch, toml=self.MCP_TOML + self.SSE_AND_STDIO, egress={}, task_mcp_grants=grants
+        )
+        server.server_client.supports_task_tool_context = False
+        expected = [{"action": "allow", "target": "tools.internal"}] if opened else []
+        assert await server._agent_network_policy(task) == {"defaultAction": "deny", "egress": expected}
+
+    @pytest.mark.parametrize("grants", ["off", "optional", "required"])
+    async def test_a_harness_that_reads_the_task_context_gets_every_remote_task_tool_server(
+        self, tmp_path, monkeypatch, grants
+    ):
+        """mini-SWE reads the task's MCP servers from task.json and connects to each at setup, whatever
+        task_mcp_grants grants: every URL entry is opened, ``sse`` included (it cannot be granted), and a stdio
+        entry, which runs in the sandbox, opens nothing (its arguments are never read as hosts)."""
         server, task, sandbox, _ = self.prepared(
-            tmp_path, monkeypatch, toml=self.MCP_TOML, egress={}, task_mcp_grants=grants
+            tmp_path, monkeypatch, toml=self.MCP_TOML + self.SSE_AND_STDIO, egress={}, task_mcp_grants=grants
         )
         response = await run_episode(server, task)
         assert response.result is not None, response.failure
-        expected = [{"action": "allow", "target": "tools.internal"}] if opened else []
-        assert sandbox.network_policy == {"defaultAction": "deny", "egress": expected}
+        assert sandbox.network_policy == {
+            "defaultAction": "deny",
+            "egress": [{"action": "allow", "target": target} for target in ("tools.internal", "events.internal")],
+        }
+
+    async def test_a_task_tool_server_url_that_cannot_be_parsed_is_refused_at_seed(self, tmp_path, monkeypatch):
+        toml = self.MCP_TOML.replace("http://tools.internal:9000/mcp", "http://[::1/mcp")
+        server, task, _, created = self.prepared(tmp_path, monkeypatch, toml=toml, egress={})
+        response = await run_episode(server, task)
+        failure = response.failure
+        assert response.result is None and failure.stage == "seed" and failure.terminal and created == []
+        assert "Task 'hello' agent network (no-network)" in failure.failure_reason
+
+    async def test_the_tool_servers_the_harness_configures_are_opened(self, tmp_path, monkeypatch, caplog):
+        """A harness's own configured tool server (a Codex MCP grant, a Claude Code mcp_config server) is reached from
+        the sandbox, so the host it declares is opened, after the task's own hosts and with no task MCP server."""
+        egress = {"model_hosts": ["10.1.2.3"], "tool_hosts": ["tools.example"]}
+        server, task, sandbox, _ = self.prepared(tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML, egress=egress)
+        with caplog.at_level("INFO", logger="environment_servers.harbor.app"):
+            response = await run_episode(server, task)
+        assert response.result is not None, response.failure
+        assert sandbox.network_policy == {
+            "defaultAction": "deny",
+            "egress": [{"action": "allow", "target": target} for target in ("10.1.2.3", "tools.example")],
+        }
+        assert "tool hosts ['tools.example']; task tool hosts []" in caplog.text
+
+    async def test_equivalent_ip_spellings_are_one_policy_for_the_agent_and_a_shared_verifier(
+        self, tmp_path, monkeypatch
+    ):
+        """The agent and a shared verifier that name one IPv6 address in two spellings ask for one network: the task
+        loads and the sandbox gets one canonical rule."""
+        toml = TASK_TOML.replace(
+            "[agent]\n", '[agent]\nnetwork_mode = "allowlist"\nallowed_hosts = ["2001:db8:0::1"]\n'
+        ).replace("[verifier]\n", '[verifier]\nnetwork_mode = "allowlist"\nallowed_hosts = ["2001:db8::1"]\n')
+        server, task, sandbox, _ = self.prepared(tmp_path, monkeypatch, toml=toml, egress={})
+        response = await run_episode(server, task)
+        assert response.result is not None, response.failure
+        assert response.result.verifier_network == "allowlist"
+        assert sandbox.network_policy == {
+            "defaultAction": "deny",
+            "egress": [{"action": "allow", "target": "2001:db8::1"}],
+        }
 
     async def test_a_deny_by_default_deployment_is_not_widened(self, tmp_path, monkeypatch):
         deny = {"defaultAction": "deny", "egress": [{"action": "allow", "target": "10.1.2.3"}]}
