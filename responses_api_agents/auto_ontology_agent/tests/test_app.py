@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
+import urllib.error
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -40,6 +42,7 @@ from responses_api_agents.auto_ontology_agent.app import (
     SANDBOX_RUNNER,
     AutoOntologyAgent,
     AutoOntologyAgentConfig,
+    AutoOntologyEpisodeError,
     AutoOntologySessionState,
     answer_message,
 )
@@ -321,6 +324,15 @@ async def test_the_activation_runs_one_episode_and_answers_with_its_query(activa
             "POSTGRES_PORT": "34567",
         },
     }
+
+
+async def test_an_episode_that_raised_fails_the_activation_with_its_error(activate) -> None:  # noqa: ANN001
+    agent = _agent()
+    activate(agent, _FakeSession({"error": "KeyError: 'No source database 'alien''"}))
+    body = NeMoGymResponseCreateParamsNonStreaming(input="ignored: the agent writes its own prompts")
+
+    with pytest.raises(AutoOntologyEpisodeError, match="No source database"):
+        await agent.responses(_request(), body)
 
 
 async def test_a_different_second_activation_is_refused(activate) -> None:  # noqa: ANN001
@@ -707,3 +719,38 @@ def test_a_tool_reply_is_a_json_strings_text_or_the_json(
     assert json.loads(sent["data"]) == {"question": "What is active?"}
     assert sent["headers"]["Authorization"] == "Bearer t"
     assert sent["headers"]["Cookie"] == "s=1"
+
+
+@pytest.mark.parametrize(
+    ("error", "reply"),
+    [
+        (
+            urllib.error.HTTPError("http://env/submit_sql", 500, "Internal Server Error", {}, io.BytesIO(b"boom")),
+            "The tool call failed with HTTP 500: boom",
+        ),
+        (urllib.error.URLError("connection refused"), "The tool call failed: <urlopen error connection refused>"),
+        (TimeoutError("timed out"), "The tool call failed: timed out"),
+    ],
+)
+def test_a_failed_tool_call_replies_with_its_error(
+    monkeypatch: pytest.MonkeyPatch, error: Exception, reply: str
+) -> None:
+    def urlopen(request, timeout):  # noqa: ANN001, ANN202
+        raise error
+
+    monkeypatch.setattr(episode_runner.urllib.request, "urlopen", urlopen)
+
+    # The model reads the error as the tool's result, and the episode goes on.
+    assert episode_runner.call_tool({"url": "http://env/submit_sql"}, {"sql": "SELECT 1"}) == reply
+
+
+def test_an_episode_that_raises_writes_its_error(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # noqa: ANN001
+    def run(task: dict[str, Any]) -> dict[str, Any]:
+        raise KeyError(f"No source database {task['database']!r}")
+
+    monkeypatch.setattr(episode_runner, "run", run)
+    task, result = tmp_path / "task.json", tmp_path / "result.json"
+    task.write_text(json.dumps({"database": "alien"}))
+
+    assert episode_runner.main([str(task), str(result)]) == 1
+    assert json.loads(result.read_text()) == {"error": "KeyError: \"No source database 'alien'\""}

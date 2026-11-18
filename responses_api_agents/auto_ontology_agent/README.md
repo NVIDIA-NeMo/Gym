@@ -49,7 +49,9 @@ Environment Server (bird_interact, c_interact)
   carries the visible knowledge, the user's earlier answers and the earlier queries, with the server's reply to the
   last. A turn that ends without an accepted query submits nothing.
 - **The sandbox calls the Environment Server's tools**, so the grant's URL must be reachable from the sandbox, as the
-  Model Server's must.
+  Model Server's must. A call the server fails or refuses replies with its error, which the model reads as the tool's
+  result; the episode goes on.
+- **An episode that raises** writes its error to the result file, and the activation fails with that error.
 
 ## The sandbox's network
 
