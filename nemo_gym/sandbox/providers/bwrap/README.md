@@ -65,10 +65,16 @@ A full annotated config is in [`configs/bwrap.yaml`](configs/bwrap.yaml).
   so host paths a caller hands to sandboxed code resolve inside, unless that path
   lies under the sandbox's `/tmp`, home or workdir (the default `base_dir` is under
   the host's `/tmp`). bwrap would create that mount point in sandbox-writable space.
-- **Stop and execs in flight.** An exec waiting for an `exec_concurrency` slot
-  re-checks the closing marker after it gets one, and `close` waits (bounded by
-  `kill_timeout_s`) for this instance's execs that are about to spawn, so no exec
-  starts after `close` returns.
+- **Stop and execs in flight.** An exec is *pending* from its start until its bwrap
+  process is registered: queued on `exec_concurrency` or about to spawn. It records
+  that in `run/` (`pending-*`, with its owner's pid and start time), so every provider
+  instance sees it: `exec_processes_terminated()` is False while a live owner has one,
+  and `close` waits (bounded by `kill_timeout_s`) for them before its final kill pass.
+  A queued exec re-checks the closing marker after it gets its slot, so no exec starts
+  after `close` returns. A dead owner's record is ignored and removed.
+- **Own directories.** `/tmp`, `home_path` and the workdir (including a
+  `SandboxSpec.workdir` override) must be disjoint: nested, a later bind would hide an
+  earlier one from commands while transfers still resolve to it.
 - **Process proof.** `exec_processes_terminated()` (`AsyncSandbox.exec_processes_terminated()`,
   protocol `SupportsSandboxExecScopedProcesses`) is True only when no exec of the
   sandbox is queued, starting or running, and no recorded bwrap process or
@@ -79,7 +85,11 @@ A full annotated config is in [`configs/bwrap.yaml`](configs/bwrap.yaml).
   - `workdir` and, when it is bound, the workspace's host path → `workspace/`;
   - `/tmp` → `tmp/`;
   - `home_path` → `home/`;
-  - extra mounts → their `src`. Read-only mounts are download-only.
+  - extra mounts → their `src`. Read-only mounts are download-only. A regular-file
+    mount is addressed only at its exact destination.
+
+  The table follows bind order: a later mount at or above an earlier one's
+  destination hides it, and transfers resolve to the mount a command sees.
 
   Relative paths are relative to the workdir. Paths with `..`, paths outside those
   prefixes, and paths whose components are symlinks are refused (`BwrapPathError`).
@@ -106,10 +116,12 @@ A full annotated config is in [`configs/bwrap.yaml`](configs/bwrap.yaml).
 - the `base_dir` differs from the connecting provider's own;
 - the id is malformed;
 - the directory is missing or closing;
-- the state file is missing or does not match the descriptor.
+- the state file is missing or does not match the descriptor (`sandbox_id`, `network`).
 
-The sandbox's `SandboxSpec.env` and per-sandbox mounts come from the state file, not
-from the descriptor. Like apptainer's, the descriptor is a trusted control-plane
+The sandbox's workspace bind (`workdir` in the state file), `SandboxSpec.env` and
+per-sandbox mounts come from the state file, not from the descriptor. The
+descriptor's `workdir` is only the facade's current default cwd, which
+`set_default_workdir` may have moved. Like apptainer's, the descriptor is a trusted control-plane
 handle, not a lease: either side can stop the sandbox. A borrower should
 `disconnect()`; the creator stops it.
 

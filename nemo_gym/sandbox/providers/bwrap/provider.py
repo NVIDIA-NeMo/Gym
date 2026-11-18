@@ -72,6 +72,8 @@ HOME_DIR = "home"
 RUN_DIR = "run"
 # ``run/<bwrap pid>.init``: "<host pid of the exec's namespace init> <its start time>".
 INIT_RECORD_SUFFIX = ".init"
+# run/ entry of an exec that is queued or about to spawn: "<owner pid> <owner start time>".
+PENDING_RECORD_PREFIX = "pending-"
 # Whether /proc reports process start times (Linux); without it records carry no start time.
 _HAVE_PROC = os.path.exists("/proc/self/stat")
 DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -441,6 +443,7 @@ class BwrapProvider:
         )
         self._check_target(self._config.workdir, label="workdir")
         self._check_target(self._config.home_path, label="home_path")
+        self._check_own_dirs(self._config.workdir)
         for mount in self._config.mounts:
             if not os.path.exists(mount.src):
                 raise FileNotFoundError(f"bwrap mount source {mount.src!r} does not exist")
@@ -449,10 +452,6 @@ class BwrapProvider:
         self._semaphore = (
             asyncio.Semaphore(self._config.exec_concurrency) if self._config.exec_concurrency is not None else None
         )
-        # sandbox_id -> execs of this instance from entry until their bwrap process is registered or they return
-        # without one: queued on exec_concurrency, or between the closing check and the spawn. close() waits for
-        # them, and exec_processes_terminated() is False while there are any.
-        self._pending_execs: dict[str, int] = {}
         # sandbox_id -> {pid: process} for bwrap processes this instance started.
         self._processes: dict[str, dict[int, asyncio.subprocess.Process]] = {}
         # Sandboxes with an exec whose namespace init could not be recorded (see _record_init).
@@ -475,6 +474,21 @@ class BwrapProvider:
 
     def _sandbox_writable_dirs(self, workdir: str) -> tuple[str, ...]:
         return ("/tmp", posixpath.normpath(self._config.home_path), posixpath.normpath(workdir))
+
+    def _check_own_dirs(self, workdir: str) -> None:
+        """Refuse a workdir that equals, contains or lies inside /tmp or home_path (or vice versa).
+
+        Each of the three is a separate bind; nested, a later bind hides an earlier one from commands while
+        transfers still resolve to it, and a mount point inside /tmp or home is created in sandbox-writable space.
+        """
+        own = {"/tmp": "/tmp", "home_path": posixpath.normpath(self._config.home_path)}
+        own["workdir"] = posixpath.normpath(workdir)
+        names = list(own)
+        for i, first in enumerate(names):
+            for second in names[i + 1 :]:
+                a, b = own[first], own[second]
+                if a == b or a.startswith(b.rstrip("/") + "/") or b.startswith(a.rstrip("/") + "/"):
+                    raise ValueError(f"bwrap {first} {a!r} and {second} {b!r} overlap; they must be disjoint")
 
     def _check_mount_dst(self, target: str, *, workdir: str) -> None:
         """Refuse an extra mount at, above or inside the sandbox's own /tmp, home or workdir.
@@ -755,8 +769,10 @@ class BwrapProvider:
         for mount in mounts:
             if not os.path.exists(mount.src):
                 raise BwrapCreateError(f"bwrap mount source {mount.src!r} does not exist")
-        if workdir == self._config.home_path:
-            raise BwrapCreateError("bwrap workdir cannot equal home_path")
+        try:
+            self._check_own_dirs(workdir)
+        except ValueError as error:
+            raise BwrapCreateError(str(error)) from error
 
         sandbox_id = SANDBOX_ID_PREFIX + uuid.uuid4().hex
         try:
@@ -819,8 +835,12 @@ class BwrapProvider:
         argv = self.bwrap_argv(inst, command, cwd=cwd)
         process_env = self._environment(inst, env)
         timeout = timeout_s if timeout_s is not None else self._config.default_timeout_s
-        pending = [True]  # cleared by _run once the bwrap process is registered
-        self._pending_execs[inst.sandbox_id] = self._pending_execs.get(inst.sandbox_id, 0) + 1
+        # From here until its bwrap process is registered (or it returns without one), the exec is pending: queued
+        # on exec_concurrency or about to spawn. The record in run/ makes that visible to every provider instance:
+        # exec_processes_terminated() is False and close() waits while any live owner has one.
+        pending = self._add_pending(inst)
+        if pending is None:
+            return self._stopped_result(inst)
         try:
             async with self._semaphore if self._semaphore is not None else contextlib.nullcontext():
                 # A stop may have run while this exec waited for its slot: never start after it.
@@ -828,8 +848,7 @@ class BwrapProvider:
                     return self._stopped_result(inst)
                 return await self._run(inst, argv, process_env, timeout, pending=pending)
         finally:
-            if pending:
-                self._release_pending(inst)
+            self._remove_pending(pending)
 
     @staticmethod
     def _stopped(inst: _BwrapSandbox) -> bool:
@@ -844,12 +863,40 @@ class BwrapProvider:
             error_type="sandbox",
         )
 
-    def _release_pending(self, inst: _BwrapSandbox) -> None:
-        count = self._pending_execs.get(inst.sandbox_id, 0) - 1
-        if count > 0:
-            self._pending_execs[inst.sandbox_id] = count
-        else:
-            self._pending_execs.pop(inst.sandbox_id, None)
+    @staticmethod
+    def _add_pending(inst: _BwrapSandbox) -> Path | None:
+        """Record a pending exec in run/ (owner pid and its start time); None when the sandbox is gone."""
+        path = inst.run_dir / f"{PENDING_RECORD_PREFIX}{uuid.uuid4().hex}"
+        try:
+            path.write_text(f"{os.getpid()} {_process_start_time(os.getpid()) or ''}")
+        except OSError:
+            return None
+        return path
+
+    @staticmethod
+    def _remove_pending(path: Path | None) -> None:
+        if path is not None:
+            with contextlib.suppress(OSError):
+                path.unlink()
+
+    @staticmethod
+    def _live_pending(inst: _BwrapSandbox) -> list[Path] | None:
+        """Pending-exec records whose owner may still run (records of dead owners are removed); None if unreadable."""
+        try:
+            entries = [entry for entry in inst.run_dir.iterdir() if entry.name.startswith(PENDING_RECORD_PREFIX)]
+        except FileNotFoundError:
+            return []
+        except OSError:
+            return None
+        live = []
+        for entry in entries:
+            record = _read_init_record(entry)
+            if record is None or _pid_may_run(*record):
+                live.append(entry)  # unreadable counts as live: it may be a record still being written
+            else:
+                with contextlib.suppress(OSError):
+                    entry.unlink()
+        return live
 
     async def _run(
         self,
@@ -858,7 +905,7 @@ class BwrapProvider:
         env: dict[str, str],
         timeout: float | None,
         *,
-        pending: list[bool] | None = None,
+        pending: Path | None = None,
     ) -> SandboxExecResult:
         # bwrap writes {"child-pid": <host pid of the namespace init>, ...} to --info-fd.
         info_read, info_write = os.pipe()
@@ -888,9 +935,9 @@ class BwrapProvider:
         finally:
             os.close(info_write)
         self._register(inst, process)
-        if pending:
-            pending.clear()
-            self._release_pending(inst)
+        if pending is not None:
+            # Registered before the record goes: a concurrent close() or proof never sees neither.
+            self._remove_pending(pending)
         info_task = asyncio.create_task(self._watch_info(inst, process.pid, info_read))
         try:
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
@@ -948,11 +995,14 @@ class BwrapProvider:
             with contextlib.suppress(OSError):
                 (inst.root / CLOSING_MARKER).touch()
             await self._kill_recorded(inst)
-            # Execs of this instance that passed their closing check but have not registered a process yet: they
-            # re-check after their slot and register right after spawning, so wait them out (bounded), then kill.
+            # Pending execs of any provider instance: queued ones re-check the marker after their slot, and the
+            # others register right after spawning, so wait them out (bounded), then kill.
             loop = asyncio.get_running_loop()
             deadline = loop.time() + self._config.kill_timeout_s
-            while self._pending_execs.get(inst.sandbox_id) and loop.time() < deadline:
+            while loop.time() < deadline:
+                live = await asyncio.to_thread(self._live_pending, inst)
+                if live == []:
+                    break
                 await asyncio.sleep(0.02)
             # A second pass catches an exec that started while the marker was being written.
             await self._kill_recorded(inst)
@@ -979,8 +1029,7 @@ class BwrapProvider:
         an unreadable record or an init this instance failed to record, is False.
         """
         inst: _BwrapSandbox = handle.raw
-        if inst.sandbox_id in self._untracked_inits or self._pending_execs.get(inst.sandbox_id):
-            # An exec of this instance is queued or about to spawn: a process may yet run.
+        if inst.sandbox_id in self._untracked_inits:
             return False
         if any(process.returncode is None for process in self._processes.get(inst.sandbox_id, {}).values()):
             return False
@@ -1003,6 +1052,15 @@ class BwrapProvider:
             return None
         live: list[str] = []
         for entry in entries:
+            if entry.name.startswith(PENDING_RECORD_PREFIX):
+                # An exec of some provider instance is queued or about to spawn: a process may yet run.
+                record = _read_init_record(entry)
+                if record is None or _pid_may_run(*record):
+                    live.append(entry.name)  # unreadable counts as live: it may be a record still being written
+                else:
+                    with contextlib.suppress(OSError):
+                        entry.unlink()
+                continue
             if entry.name.endswith(INIT_RECORD_SUFFIX):
                 record = _read_init_record(entry)
                 if record is None:
@@ -1062,7 +1120,9 @@ class BwrapProvider:
             raise ValueError(f"bwrap sandbox {sandbox_id} has no readable state file") from error
         if state.get("sandbox_id") != sandbox_id:
             raise ValueError(f"bwrap sandbox {sandbox_id} state file does not match its directory")
-        for key in ("workdir", "network"):
+        # The descriptor's workdir is the facade's current default cwd (set_default_workdir may move it); the
+        # workspace bind destination comes from the host-only state file below.
+        for key in ("network",):
             if key in descriptor and descriptor[key] is not None and descriptor[key] != state.get(key):
                 raise ValueError(f"bwrap descriptor {key} {descriptor[key]!r} does not match the sandbox's")
         inst = _BwrapSandbox(
@@ -1078,16 +1138,32 @@ class BwrapProvider:
     # ------------------------------------------------------------------ files
 
     def _mount_table(self, inst: _BwrapSandbox) -> list[tuple[str, Path, bool]]:
-        """(sandbox prefix, host directory, writable), most specific prefix first."""
+        """(sandbox prefix, host path, writable) of the binds a command sees, most specific prefix first.
+
+        Built in bind order (as ``bwrap_argv`` applies them): a later bind at or above an earlier one's prefix
+        hides it, so its entry is dropped and transfers resolve to the visible bind. A regular-file mount's host
+        path is the resolved file.
+        """
         table = [
-            (inst.workdir, inst.workspace, True),
             ("/tmp", inst.tmp, True),
-            (self._config.home_path, inst.home, True),
+            (posixpath.normpath(self._config.home_path), inst.home, True),
+            (inst.workdir, inst.workspace, True),
         ]
         if self._binds_workspace_host_path(inst):
             table.append((str(inst.workspace), inst.workspace, True))
-        table += [(posixpath.normpath(m.dst), Path(m.src), not m.ro) for m in [*self._config.mounts, *inst.mounts]]
-        return sorted(table, key=lambda entry: len(entry[0]), reverse=True)
+        for mount in [*self._config.mounts, *inst.mounts]:
+            src = Path(os.path.realpath(mount.src)) if os.path.isfile(mount.src) else Path(mount.src)
+            table.append((posixpath.normpath(mount.dst), src, not mount.ro))
+        effective: list[tuple[str, Path, bool]] = []
+        for entry in table:
+            prefix = entry[0]
+            effective = [
+                previous
+                for previous in effective
+                if not (previous[0] == prefix or previous[0].startswith(prefix.rstrip("/") + "/"))
+            ]
+            effective.append(entry)
+        return sorted(effective, key=lambda entry: len(entry[0]), reverse=True)
 
     def host_path(self, inst: _BwrapSandbox, path: str, *, write: bool) -> tuple[Path, tuple[str, ...]]:
         """Map a sandbox path to (host root, relative parts) under one of its writable mounts.
@@ -1107,6 +1183,11 @@ class BwrapProvider:
             if normalized == prefix or normalized.startswith(prefix.rstrip("/") + "/"):
                 if write and not writable:
                     raise BwrapPathError(f"sandbox path {path!r} is on a read-only mount")
+                if root.is_file():
+                    # A regular-file mount: only its exact destination addresses it.
+                    if normalized != prefix:
+                        raise BwrapPathError(f"sandbox path {path!r} is below a file mount")
+                    return root.parent, (root.name,)
                 relative = normalized[len(prefix) :].strip("/")
                 return root, tuple(part for part in relative.split("/") if part)
         raise BwrapPathError(f"sandbox path {path!r} is outside the sandbox's workspace, /tmp, home and mounts")
