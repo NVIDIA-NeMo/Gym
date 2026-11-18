@@ -1,182 +1,108 @@
 # example_session_state_mgmt
 
-<p align="center">
-  <img src="graphics/weight-room.svg" alt="The resources server stores the counter. The agent calls tools. The model only picks the next tool." width="960"/>
-</p>
-
-<p align="center">
-  <strong>In-memory session state</strong> for a NeMo Gym resources server<br/>
-  <sub>session id → counter · Apache 2.0 · <a href="https://docs.nvidia.com/nemo/gym/main/environment-tutorials/stateful-environment">tutorial</a></sub>
-</p>
-
-A tiny environment with a counter. The **server** remembers the number. The
-**model** does not. Each episode gets a session id (an HTTP cookie). That id
-maps to one integer. Tools add to it; `/verify` checks it.
-
-Think of it like a gym locker: the cookie is your tag, the counter is what
-you stored. Someone else’s tag cannot open your locker.
+A counter environment that keeps per-episode state on the resources server. Each episode gets a session ID, the
+server maps that ID to one integer, tools change it, and `/verify` scores the stored value. The model never holds
+the count.
 
 ```text
-cookie  →  request.session[SESSION_ID_KEY]  →  session_id_to_counter[session_id]  →  int
+cookie -> request.session[SESSION_ID_KEY] -> session_id_to_counter[session_id] -> int
 ```
 
-## Contents
-
-- [What it demonstrates](#what-it-demonstrates)
-- [Demos](#demos)
-- [How it works](#how-it-works)
-- [When to use this pattern](#when-to-use-this-pattern)
-- [Code walkthrough](#code-walkthrough)
-- [How to run it](#how-to-run-it)
-- [How to test it](#how-to-test-it)
-- [Further reading](#further-reading)
+For the annotated walkthrough and a rollout transcript, see the
+[Stateful Environment](https://docs.nvidia.com/nemo/gym/main/environment-tutorials/stateful-environment) tutorial.
+This README covers what is in this folder and how to run it.
 
 ## What it demonstrates
 
-Session state basics: the environment keeps memory **between tool calls** in
-one episode.
-
 | Idea | In this example |
 |---|---|
-| Several tools, one user message | `increment_counter`, then `get_counter_value` |
-| Memory per episode | `session_id_to_counter: dict[str, int]` |
-| Episodes do not mix | Different cookies → different counters |
-| Scoring uses that memory | `reward = 1.0` if the stored count equals `expected_count` |
+| Several tool calls in one episode | `increment_counter`, then `get_counter_value` |
+| State per episode | `session_id_to_counter: Dict[str, int]` |
+| Episodes stay separate | Different session IDs get different counters |
+| Reward reads server state | `reward = 1.0` only if the stored count equals `expected_count` |
+| Checkpoints | `checkpoint_mode = "exported"`: the counters can be saved and restored |
 
-Without that dict, “add 4” would not change what “get the count” returns.
+The reward comes from the stored counter, not from the model's answer: if the model says "7" but the counter is 5,
+the reward is `0.0`.
 
-Earlier examples (tools, no session store):
-[single-step](https://docs.nvidia.com/nemo/gym/main/environment-tutorials/single-step-environment),
-[multi-step](https://docs.nvidia.com/nemo/gym/main/environment-tutorials/multi-step-environment).
-
-## Demos
-
-This counter is the toy. Same session idea, bigger rooms in this repo:
-
-| Demo | What the session holds |
-|------|------------------------|
-| [Workplace Assistant](../workplace_assistant/README.md) | Five office DBs (email, calendar, CRM, …). Used to GRPO-train [Nemotron Nano 9B v2](https://docs.nvidia.com/nemo/gym/tutorials/training-tutorials/nemo-rl-grpo/about-workplace-assistant). Dataset: [`nvidia/Nemotron-RL-agent-workplace_assistant`](https://huggingface.co/datasets/nvidia/Nemotron-RL-agent-workplace_assistant) |
-| [ToolSandbox](../toolsandbox/README.md) | Contacts, messages, reminders, device settings. Port of [Apple ToolSandbox](https://github.com/apple/ToolSandbox) |
-| [Calendar](../calendar/README.md) | The event list itself. Prompts from [`nvidia/Nemotron-Personas-USA`](https://huggingface.co/datasets/nvidia/Nemotron-Personas-USA) |
-| [ns_tools](../ns_tools/README.md) | A live Python interpreter (NeMo Skills), kept for the whole rollout |
-| [Harbor agent](../../responses_api_agents/harbor_agent/README.md) | A real terminal. Tasks from [`Nemotron-Terminal-Synthetic-Tasks`](https://huggingface.co/datasets/nvidia/Nemotron-Terminal-Synthetic-Tasks) |
-
-Each rollout still gets its own locker. The payload is just no longer one integer.
-
-## How it works
-
-**Session ID → counter.** One dictionary, one integer per session.
-
-Gym’s session middleware (`nemo_gym/server_utils.py`, installed by
-`SimpleResourcesServer`) puts a UUID on the cookie. This folder does not
-create ids. Every handler reads the same key:
-
-```python
-session_id = request.session[SESSION_ID_KEY]
-```
-
-Send the cookie again → same counter. Leave it off → new session, counter
-starts fresh. That is how two rollouts on one server stay separate.
-
-<p align="center">
-  <img src="graphics/loading-the-bar.svg" alt="One session: start 0, add 4, add 3, verify 7 gives reward 1.0." width="960"/>
-</p>
-
-`client.py` (start at 0, expect 7):
+One episode from `client.py`:
 
 | Step | Request | Counter after |
 |---|---|---|
-| Start | `POST /seed_session` `{"initial_count": 0}` | `0` |
-| Add | `POST /increment_counter` `{"count": 4}` | `4` |
-| Add | `POST /increment_counter` `{"count": 3}` | `7` |
-| Read | `POST /get_counter_value` | `{"count": 7}` |
+| Seed | `POST /seed_session` `{"initial_count": 0}` | `0` |
+| Tool | `POST /increment_counter` `{"count": 4}` | `4` |
+| Tool | `POST /increment_counter` `{"count": 3}` | `7` |
+| Tool | `POST /get_counter_value` | returns `{"count": 7}` |
 | Score | `POST /verify` `{"expected_count": 7}` | `reward = 1.0` |
 
-Example data can start at a non-zero value. First row of `data/example.jsonl`:
-`initial_count = 3`, user says “add 1 then add 2”, `expected_count = 6`.
+## Files
 
-```mermaid
-sequenceDiagram
-    participant Agent
-    participant RS as Resources server
-    Agent->>RS: POST /seed_session {initial_count: 0}
-    Note over RS: session A → 0
-    Agent->>RS: POST /increment_counter {count: 4}
-    Note over RS: session A → 4
-    Agent->>RS: POST /increment_counter {count: 3}
-    Note over RS: session A → 7
-    Agent->>RS: POST /get_counter_value
-    RS-->>Agent: {count: 7}
-    Agent->>RS: POST /verify {expected_count: 7}
-    RS-->>Agent: reward 1.0
-```
-
-Reward uses the **stored** number. If the model says “7” but the counter is
-5, reward is still `0.0`.
-
-<p align="center">
-  <img src="graphics/two-benches.svg" alt="Same server, two cookies: A is 2, B is 7, they are not equal." width="960"/>
-</p>
-
-Same server, two keys:
-
-```text
-session_id_to_counter = {"<id-A>": 2, "<id-B>": 7}
-```
-
-Cookie A always sees 2. Cookie B always sees 7. No cookie → a third session.
-`tests/test_app.py` checks exactly that.
-
-## When to use this pattern
-
-**In-memory state:** a Python `dict` on this process. Simple and fast. Gone
-when the server stops.
-
-<p align="center">
-  <img src="graphics/lights-out.svg" alt="Stop the process and session_id_to_counter is an empty dict. Nothing is saved to disk." width="960"/>
-</p>
-
-| Use it | Don’t use it |
+| File | Purpose |
 |---|---|
-| Small state (a counter, a few flags) | Large or long-lived world state |
-| One resources-server process | Several replicas that must share state |
-| Tutorials, unit tests, local eval | Restarts must not lose the episode |
+| [`app.py`](app.py) | `StatefulCounterResourcesServer`: the counter store, tools, seed, verify, and checkpoint hooks |
+| [`nooa_app.py`](nooa_app.py) | `NOOAStatefulCounterResourcesServer`: the same counter behind typed resource sessions |
+| [`task_data.py`](task_data.py) | Row fields `initial_count` and `expected_count` |
+| [`configs/example_session_state_mgmt.yaml`](configs/example_session_state_mgmt.yaml) | This server with `simple_agent` |
+| [`configs/example_session_state_mgmt_nooa.yaml`](configs/example_session_state_mgmt_nooa.yaml) | `nooa_app.py` with the NOOA agent, routed as `nooa-counter` |
+| [`data/example.jsonl`](data/example.jsonl) | Five example tasks, written by [`create_examples.py`](create_examples.py) |
+| [`data/example_nooa_tasks.jsonl`](data/example_nooa_tasks.jsonl) | The same tasks as NOOA task rows |
+| [`client.py`](client.py) | One live episode against running servers |
+| [`tests/`](tests/) | Session isolation, checkpoint export, and NOOA session tests; no model needed |
 
-For shared or durable state, use a database or sandbox disk. Do not keep the
-count only in the model’s text.
+## How it works
 
-## Code walkthrough
+### Session state in `app.py`
 
-| File | What it is |
-|------|------|
-| [`app.py`](app.py) | Server: tools, dict, seed, verify |
-| [`task_data.py`](task_data.py) | Required row fields: `initial_count`, `expected_count` |
-| [`configs/example_session_state_mgmt.yaml`](configs/example_session_state_mgmt.yaml) | Wires this server + `simple_agent` + datasets |
-| [`data/example.jsonl`](data/example.jsonl) | Five example tasks |
-| [`create_examples.py`](create_examples.py) | Writes `example.jsonl` |
-| [`client.py`](client.py) | One live run (`expected_count`: 7) |
-| [`tests/test_app.py`](tests/test_app.py) | Two sessions, no model |
-| [`graphics/`](graphics/) | Diagrams + [`gym.html`](graphics/gym.html) |
+`SimpleResourcesServer` installs Gym's session middleware, which gives each episode a session ID. Every handler
+reads it with `request.session[SESSION_ID_KEY]`:
 
-In `app.py` (`StatefulCounterResourcesServer`):
+1. `setup_webserver` adds `/increment_counter` and `/get_counter_value` to the inherited `/seed_session` and `/verify`.
+2. `seed_session` stores `initial_count` with `setdefault`, so a second seed of the same session keeps the old value.
+   The tutorial recommends direct assignment for new environments.
+3. `increment_counter` and `get_counter_value` fall back to `0` for an unseeded session.
+4. `verify` returns `reward = 1.0` only if the session exists and its counter equals `expected_count`.
 
-1. **`setup_webserver`** — parent class adds `/seed_session`, `/verify`, and cookies. This class adds `/increment_counter` and `/get_counter_value`.
-2. **Every handler** — `session_id = request.session[SESSION_ID_KEY]`.
-3. **`seed_session`** — `setdefault(session_id, initial_count)`. A second seed on the same session does **not** overwrite.
-4. **`increment_counter`** — start at `0` if missing, then add `body.count`.
-5. **`get_counter_value`** — return the stored int (or `0`).
-6. **`verify`** — `reward = 1.0` only if this session is in the dict **and** the int equals `expected_count`.
+### Checkpoints
 
-`gym eval run --agent` uses the name `example_session_state_mgmt_simple_agent`
-from the YAML.
+The server declares `checkpoint_mode = "exported"` and implements three hooks:
+
+- `export_session_states` returns `{"count": ...}` for each requested session it still holds and leaves out the rest.
+- `restore_session_states` validates each saved state and loads it back into `session_id_to_counter`.
+- `retire_session_state` drops a retired attempt's counter, so a later restore of the same ID still works.
+
+### Several workers
+
+With `num_workers > 1`, each worker has its own `session_id_to_counter`. Gym routes every request to the worker that
+created the session, so an episode keeps seeing its own counter. The module-level `app` at the bottom of `app.py`
+is what each uvicorn worker serves.
+
+### NOOA resource sessions
+
+`nooa_app.py` uses the typed `/seed_session` and `/close_session` that the NOOA agent and Environment Server call:
+
+- The seed names its session with `resources_session_id`. Retrying it with the same body is safe; different task data
+  gets a conflict.
+- Close removes the counter and refuses reuse of that ID for `session_close_retry_window_seconds`.
+- The tool routes refuse a session that was never seeded or is already closed.
+
+## When to use in-memory state
+
+The counters are a Python dict in the server process. A stop or crash loses them unless a checkpoint exported them
+first.
+
+| Fits | Use something else |
+|---|---|
+| Small state (a counter, a few flags) | Large world state, such as databases or file systems |
+| Tutorials, unit tests, local evaluation | State that several separate servers must share |
+
+Larger environments keep richer per-session state the same way, for example
+[Workplace Assistant](../workplace_assistant/README.md), [ToolSandbox](../toolsandbox/README.md),
+[Calendar](../calendar/README.md), and [ns_tools](../ns_tools/README.md).
 
 ## How to run it
 
-From the **Gym repo root**. Set `policy_base_url`, `policy_api_key`, and
-`policy_model_name` in `env.yaml`
-([quickstart](https://docs.nvidia.com/nemo/gym/main/get-started)).
-
-This starts three servers: resources, agent, and model.
+From the Gym repository root, with `policy_base_url`, `policy_api_key`, and `policy_model_name` set in `env.yaml`
+(see the [quickstart](https://docs.nvidia.com/nemo/gym/main/get-started)):
 
 ```bash
 gym env start \
@@ -184,7 +110,7 @@ gym env start \
     --model-type openai_model
 ```
 
-Second terminal — run the example tasks:
+In a second terminal:
 
 ```bash
 source .venv/bin/activate
@@ -194,41 +120,22 @@ gym eval run --no-serve \
     --output results/session_state_rollouts.jsonl
 ```
 
-`--no-serve` means servers are already running. Check `reward` in the output
-under `results/`.
-
-Optional — rebuild example rows:
+To run the NOOA variant end to end with a real model, set `POLICY_BASE_URL`, `POLICY_API_KEY`, and
+`POLICY_MODEL_NAME`, then run:
 
 ```bash
-python resources_servers/example_session_state_mgmt/create_examples.py
+bash responses_api_agents/nooa_agent/smoke/run_stateful_e2e.sh
 ```
 
 ## How to test it
-
-No model needed.
-
-```bash
-pytest resources_servers/example_session_state_mgmt/tests/test_app.py
-```
 
 ```bash
 gym env test --resources-server example_session_state_mgmt
 ```
 
-The test turns off automatic cookies, then:
-
-1. Session A: get count `0`, add `2`, get count `2`. Save A’s cookie.
-2. Session B (no cookie): add `4`, then `3`, get count `7`.
-3. Use A’s cookie again: still `2`.
-
-If step 3 returned `7`, sessions would be leaking. That is what the test
-guards against.
-
-## Further reading
-
-- [Stateful Environment tutorial](https://docs.nvidia.com/nemo/gym/main/environment-tutorials/stateful-environment)
-- [Getting started](https://docs.nvidia.com/nemo/gym/main/get-started)
-- [`graphics/gym.html`](graphics/gym.html)
+`tests/test_app.py` turns off automatic cookie handling, then checks that two sessions on one server keep separate
+counters (`2` and `7`) and that a checkpoint export leaves out a session the server no longer holds.
+`tests/test_nooa_app.py` covers seed retries, close fencing, and tool routes refusing unseeded sessions.
 
 # Licensing information
 Code: Apache 2.0
