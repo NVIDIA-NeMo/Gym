@@ -18,6 +18,9 @@ import json
 import logging
 import os
 import socket
+import subprocess
+import sys
+import textwrap
 import time
 from contextlib import nullcontext
 from copy import deepcopy
@@ -8975,7 +8978,9 @@ class TestUnrepresentableRequestFields:
     BODY = {"input": "hi", "include": ["reasoning.encrypted_content"]}
 
     @staticmethod
-    def _client(monkeypatch: MonkeyPatch, *, drop: bool) -> tuple[TestClient, dict[str, Any]]:
+    def _client(
+        monkeypatch: MonkeyPatch, *, drop: bool, inline_tool_output_images: bool = False
+    ) -> tuple[TestClient, dict[str, Any]]:
         """A test client for a model server, plus the dict that records the converted chat params."""
         config = VLLMModelConfig(
             host="0.0.0.0",
@@ -8988,6 +8993,7 @@ class TestUnrepresentableRequestFields:
             return_token_id_information=False,
             uses_reasoning_parser=False,
             drop_unrepresentable_request_fields=drop,
+            inline_tool_output_images=inline_tool_output_images,
         )
         server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
         captured: dict[str, Any] = {}
@@ -9035,6 +9041,37 @@ class TestUnrepresentableRequestFields:
         assert response.headers["content-type"].startswith("text/event-stream")
         assert "event: response.completed" in response.text
         assert "include" not in captured["value"].model_dump(exclude_unset=True)
+
+    IMAGE_OUTPUT_BODY = {
+        "input": [
+            {"type": "function_call", "call_id": "c1", "name": "view_image", "arguments": '{"path":"a.png"}'},
+            {
+                "type": "function_call_output",
+                "call_id": "c1",
+                "output": [{"type": "input_image", "image_url": "data:image/png;base64,YWJj"}],
+            },
+        ]
+    }
+
+    @mark.parametrize("stream", [False, True])
+    @mark.parametrize(
+        ("drop", "inline_tool_output_images", "expected_part"),
+        [
+            (True, False, {"type": "text", "text": "[image omitted from tool output]"}),
+            (False, True, {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj", "detail": "auto"}}),
+            (True, True, {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj", "detail": "auto"}}),
+        ],
+        ids=["placeholder", "image", "image_wins_over_placeholder"],
+    )
+    def test_tool_output_image(
+        self, monkeypatch: MonkeyPatch, stream: bool, drop: bool, inline_tool_output_images: bool, expected_part: dict
+    ) -> None:
+        # `inline_tool_output_images` passes Codex's `view_image` output to the backend as an image part
+        # of the tool message; without it the image becomes the placeholder.
+        client, captured = self._client(monkeypatch, drop=drop, inline_tool_output_images=inline_tool_output_images)
+
+        assert client.post("/v1/responses", json={**self.IMAGE_OUTPUT_BODY, "stream": stream}).status_code == 200
+        assert captured["value"].messages[-1] == {"role": "tool", "tool_call_id": "c1", "content": [expected_part]}
 
 
 class TestPreserveEnvelopeIdFollowsCaptureContext:
@@ -9545,6 +9582,50 @@ class TestCodexRequests:
         "call_id": "call_img",
         "output": [{"type": "input_image", "image_url": PNG_URL, "detail": "high"}],
     }
+
+    THINKING_BLOCKS = [{"type": "thinking", "thinking": "Read the test first.", "signature": "EqQBCkgIBhAB-sig"}]
+
+    def test_preserve_thinking_blocks_needs_the_chat_path(self) -> None:
+        with raises(ValueError, match="requires is_responses_native=false"):
+            self._server(preserve_thinking_blocks=True, is_responses_native=True)
+        with raises(ValueError, match="requires use_completions_api=false"):
+            self._server(preserve_thinking_blocks=True, use_completions_api=True)
+
+    def test_preserve_thinking_blocks_round_trips_through_the_server(self) -> None:
+        # An Anthropic model behind LiteLLM: signed thinking blocks on the answer must come back, verbatim, on the
+        # assistant message of the next turn, or the provider rejects the tool-call continuation.
+        server, client = self._server(**self.CODEX_FIELDS, preserve_thinking_blocks=True)
+        call = {
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "shell_command", "arguments": json.dumps({"command": "ls"})},
+        }
+        answer = {
+            "role": "assistant",
+            "content": None,
+            "reasoning": self.REASONING_TEXT,
+            "provider_specific_fields": {"thinking_blocks": self.THINKING_BLOCKS},
+            "tool_calls": [call],
+        }
+        client.create_chat_completion = AsyncMock(return_value=self._completion(answer))
+        app = server.setup_webserver()
+
+        first = TestClient(app).post("/v1/responses", json=self._codex_body([self.USER]))
+        assert first.status_code == 200
+        items = [event["item"] for event in self._events(first.text) if event["type"] == "response.output_item.done"]
+        reasoning = next(item for item in items if item["type"] == "reasoning")
+        assert reasoning["encrypted_content"]
+
+        client.create_chat_completion.reset_mock()
+        tool_output = {"type": "function_call_output", "call_id": "call_1", "output": "a.py"}
+        second = TestClient(app).post("/v1/responses", json=self._codex_body([self.USER, *items, tool_output]))
+        assert second.status_code == 200
+        messages = [
+            message if isinstance(message, dict) else dict(message)
+            for message in client.create_chat_completion.await_args.kwargs["messages"]
+        ]
+        assistant = next(message for message in messages if message["role"] == "assistant")
+        assert assistant["thinking_blocks"] == self.THINKING_BLOCKS
 
     def test_inline_tool_output_images_needs_the_chat_path(self) -> None:
         with raises(ValueError, match="requires is_responses_native=false"):
@@ -10632,3 +10713,31 @@ def test_messages_repetition_capture_does_not_invent_a_bound_response(tmp_path: 
     digest = _health_for_messages_call(tmp_path, call, bound=False)
     assert digest.responses is None
     assert "model_call_runaway_generation" in digest.unobserved
+
+
+@mark.parametrize(
+    ("old_name", "new_name"),
+    [
+        ("VLLMConverter", "ChatCompletionsConverter"),
+        ("VLLMConverterResponsesToChatCompletionsState", "ChatCompletionsConverterState"),
+    ],
+)
+def test_converter_aliases_resolve_from_this_module_with_a_warning(old_name: str, new_name: str) -> None:
+    # In a fresh interpreter: each old path warns only on its first use in a process.
+    code = textwrap.dedent(
+        f"""
+        import warnings
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            from responses_api_models.vllm_model.app import {old_name} as old
+        from nemo_gym.models.chat_completions_converter import {new_name} as new
+        assert old is new, (old, new)
+        messages = [str(w.message) for w in caught if w.category is DeprecationWarning and "{old_name}`" in str(w.message)]
+        assert len(messages) == 1, messages
+        (message,) = messages
+        assert "chat_completions_converter.{new_name}`" in message, message
+        assert "removed in nemo_gym 0.10.0" in message, message
+        """
+    )
+    # The repository root puts responses_api_models on the path, wherever pytest was started.
+    subprocess.run([sys.executable, "-c", code], check=True, cwd=PARENT_DIR)

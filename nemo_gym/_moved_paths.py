@@ -190,6 +190,10 @@ MOVED_MODULES: dict[str, MovedPath] = {
 }
 
 
+# `RunHelper` shipped in nemo_gym.cli.env, and through it in nemo_gym.cli and nemo_gym.cli.eval.
+_RUN_HELPER = MovedPath(new="nemo_gym.server_runtime.supervisor.server_supervisor:ServerSupervisor", since="0.8.0")
+
+
 def _names(new: str, since: str, names: str) -> dict[str, MovedPath]:
     """Entries for `MOVED_NAMES`: each whitespace-separated name in `names` moved to the module `new`."""
     return {name: MovedPath(new=new, since=since) for name in names.split()}
@@ -689,6 +693,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
     "nemo_gym.comparison.runner": {
         **_names("nemo_gym.eval.comparison.loading", "0.8.0", "resolve_agent_selections"),
     },
+    "nemo_gym.cli": {"RunHelper": _RUN_HELPER},
     "nemo_gym.cli.eval": {
         # Split out of eval. The helpers lost their leading underscore because other modules call them now.
         "_datasets_to_prepare": MovedPath(
@@ -716,6 +721,8 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         ),
         **_names("nemo_gym.eval.eval_plan", "0.8.0", "PlanBenchmark PlanGym build_eval_plan"),
         **_names("nemo_gym.utils.gym_commit", "0.8.0", "installed_gym_commit"),
+        # Moved and renamed.
+        "RunHelper": _RUN_HELPER,
     },
     "nemo_gym.orchestration.jobs": {
         **_names("nemo_gym.utils.gym_commit", "0.8.0", "installed_gym_commit"),
@@ -748,7 +755,9 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             """,
         ),
         # Moved, and still imported by env for its own use.
-        **_names("nemo_gym.server_runtime.supervisor.server_supervisor", "0.8.0", "RunHelper _resolve_server_dir"),
+        **_names("nemo_gym.server_runtime.supervisor.server_supervisor", "0.8.0", "_resolve_server_dir"),
+        # Moved and renamed.
+        "RunHelper": _RUN_HELPER,
         # env imported these for code that moved out of it.
         **_names("nemo_gym.client.server_client", "0.8.0", "ServerClient ServerStatus"),
         **_names(
@@ -1143,16 +1152,27 @@ assert "_LOCAL_NEMO_GYM_REQUIREMENT_RE" not in _listed
 _listed["_LOCAL_NEMO_GYM_REQUIREMENT_RE"] = MovedPath(new=f"{_SERVER_VENV}:_NEMO_GYM_REQUIREMENT_RE", since="0.8.0")
 
 # ResponsesConverter renamed ChatCompletionsConverter: AnthropicConverter also converts to and from the Responses API.
+# The VLLMConverter aliases go with it: the LiteLLM and Azure OpenAI model servers use the converter too.
 # The chat_completions_converter entries also serve its old module path, nemo_gym.responses_converter.
 _CONVERTER = "nemo_gym.models.chat_completions_converter"
+_VLLM_CONVERTER_ALIASES = {
+    "VLLMConverter": MovedPath(new=f"{_CONVERTER}:ChatCompletionsConverter", since="0.8.0"),
+    "VLLMConverterResponsesToChatCompletionsState": MovedPath(
+        new=f"{_CONVERTER}:ChatCompletionsConverterState", since="0.8.0"
+    ),
+}
 _RENAMED_CONVERTER_NAMES: dict[str, dict[str, MovedPath]] = {
     _CONVERTER: {
         "ResponsesConverter": MovedPath(new=f"{_CONVERTER}:ChatCompletionsConverter", since="0.8.0"),
         "ResponsesConverterState": MovedPath(new=f"{_CONVERTER}:ChatCompletionsConverterState", since="0.8.0"),
+        **_VLLM_CONVERTER_ALIASES,
     },
     "nemo_gym.models": {
         "ResponsesConverter": MovedPath(new=f"{_CONVERTER}:ChatCompletionsConverter", since="0.8.0"),
+        **_VLLM_CONVERTER_ALIASES,
     },
+    # Servers imported the aliases from the vLLM model server, which re-exported them.
+    "responses_api_models.vllm_model.app": _VLLM_CONVERTER_ALIASES,
     "nemo_gym.models.token_capture.completion": {
         "ResponsesConverter": MovedPath(new=f"{_CONVERTER}:ChatCompletionsConverter", since="0.8.0"),
     },
