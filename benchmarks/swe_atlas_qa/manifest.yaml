@@ -1,0 +1,54 @@
+name: swe_atlas_qa
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: coding
+description: SWE Atlas Codebase Q&A, questions about real open-source repositories
+  answered by exploring the repository in a sandbox, graded against per-task rubrics
+  by an LLM judge.
+modality: text
+licensing: Apache-2.0
+authors:
+- NVIDIA NeMo Gym contributors
+maintainers:
+- cmunley1
+capabilities:
+- coding
+- coding/code_understanding
+- coding/repository_coding
+- tool_and_computer_use
+- tool_and_computer_use/terminal_and_cli_use
+- tool_and_computer_use/multi_step_tool_use
+- retrieval_and_grounding
+- retrieval_and_grounding/evidence_synthesis
+- writing_and_editing
+- writing_and_editing/general_qa
+domains:
+- computer_science
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: public
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: swe_atlas_qa
+agent_server: harness_agent
+datasets:
+- name: swe_atlas_qa
+  type: benchmark
+  jsonl_fpath: resources_servers/swe_atlas_qa/data/benchmark.jsonl
+  prepare_script: resources_servers/swe_atlas_qa/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: full
+prompt_source: prepared
+adopted_from:
+  source: https://github.com/scaleapi/SWE-Atlas
+  ref: c6673fe259c3493a2f834266abf63247a5d1507c  # pragma: allowlist secret
+  reconciled: '2026-10-24'
+lifecycle: active

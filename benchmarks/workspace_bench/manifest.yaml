@@ -1,0 +1,54 @@
+name: workspace_bench
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: other
+description: Workspace-Bench-Lite English workspace tasks in which an agent turns
+  source files into deliverables, graded against each task's rubrics by the upstream
+  agent-as-a-judge.
+modality: text
+licensing: unknown
+authors:
+- NVIDIA NeMo Gym contributors
+maintainers:
+- cmunley1
+capabilities:
+- tool_and_computer_use
+- tool_and_computer_use/file_operations
+- tool_and_computer_use/terminal_and_cli_use
+- tool_and_computer_use/multi_step_tool_use
+- planning_and_autonomy
+- planning_and_autonomy/task_planning
+- planning_and_autonomy/long_horizon_execution
+- multimodal_generation_and_editing
+- multimodal_generation_and_editing/artifact_composition
+domains:
+- general
+primary_metric: mean/reward
+requirements:
+  gpu: false
+  network: public
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: claude_code.yaml
+resources_server: null
+agent_server: claude_code_agent
+datasets:
+- name: workspace_bench_lite
+  type: benchmark
+  jsonl_fpath: benchmarks/workspace_bench/data/workspace_bench_lite.jsonl
+  prepare_script: benchmarks/workspace_bench/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: task_lite_clean_en
+prompt_source: prepared
+adopted_from:
+  source: https://huggingface.co/datasets/Workspace-Bench/Workspace-Bench-Lite
+  ref: 60b08b1cc2e8054afbc3ca2160d37876b4f0765c  # pragma: allowlist secret
+  reconciled: '2026-09-23'
+lifecycle: active

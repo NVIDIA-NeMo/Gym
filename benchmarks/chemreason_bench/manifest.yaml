@@ -1,0 +1,54 @@
+name: chemreason_bench
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: knowledge
+description: ChemReason-Bench chemical procedure reasoning in six task families built
+  from curated experimental procedures, scored against gold answers and macro-averaged
+  into Primary-Overall.
+modality: text
+licensing: CC-BY-4.0
+authors:
+- NVIDIA NeMo Gym contributors
+maintainers:
+- lilithgrigoryan
+capabilities:
+- knowledge
+- knowledge/expert_knowledge
+- knowledge/procedural_knowledge
+- reasoning
+- reasoning/causal_reasoning
+- reasoning/spatial_temporal_reasoning
+- reasoning/deductive_reasoning
+- instruction_and_format_following
+- instruction_and_format_following/structured_output
+domains:
+- chemistry
+primary_metric: primary_overall
+requirements:
+  gpu: false
+  network: no-network
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: chemreason_bench
+agent_server: simple_agent
+datasets:
+- name: chemreason_bench
+  type: benchmark
+  jsonl_fpath: benchmarks/chemreason_bench/data/chemreason_bench_benchmark.jsonl
+  prepare_script: benchmarks/chemreason_bench/prepare.py
+  prompt_config: benchmarks/prompts/eval/chemreason_bench/paper.yaml
+  num_repeats: 1
+model_server: policy_model
+canonical_split: test
+standard_prompt_config: benchmarks/prompts/eval/chemreason_bench/paper.yaml
+adopted_from:
+  source: https://github.com/Khadaz/ChemReason-Bench
+  ref: c0b9ac2933708fcca47b1795492952cbf280e194  # pragma: allowlist secret
+  reconciled: '2026-10-06'
+lifecycle: active
