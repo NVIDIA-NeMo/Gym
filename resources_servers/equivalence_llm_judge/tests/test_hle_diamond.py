@@ -44,7 +44,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.data import fill_prompt, load_prompt_config
+from nemo_gym.data import build_image_input, fill_prompt, load_prompt_config
 from nemo_gym.environment import BENCHMARKS_DIR, BenchmarkConfig, load_manifest, resolve_manifest_config_path
 from nemo_gym.environment.benchmarks import _benchmark_config_name, _benchmark_config_paths
 from nemo_gym.environment.discovery import _parse_no_environment_tolerating_unset_values
@@ -416,6 +416,12 @@ LISTED_BENCHMARKS = {
         "benchmarks/hle_diamond/prompts/opencode.yaml",
     ),
     "hle_diamond/opencode_full": ("hle_diamond_opencode_full", "hle_diamond_opencode_full_agent", None),
+    # The session preset over the full set declares the dataset too, so it is listed unlike opencode_hle_tools.
+    "hle_diamond/opencode_hle_tools_full": (
+        "hle_diamond_opencode_full",
+        "hle_diamond_opencode_reference_agent",
+        None,
+    ),
 }
 FULL_OPENCODE_DATASET = {
     "name": "hle_diamond_opencode_full",
@@ -594,6 +600,11 @@ class TestConfigs:
             prompt = load_prompt_config(str(HLE_DIAMOND_PROMPTS / prompt_file))
             params = NeMoGymResponseCreateParamsNonStreaming(input=fill_prompt(prompt, {"question": question}))
             assert _extract_question_text(params, regex) == question, prompt_file
+        # opencode_hle_tools_full inherits the regex over the materialized full set, whose image rows carry the
+        # same user text as an input_text part next to the input_image block.
+        materialized = build_image_input(load_prompt_config(str(HLE_DIAMOND_PROMPTS / "opencode.yaml")), question, "x")
+        assert [part["type"] for part in materialized[0]["content"]] == ["input_text", "input_image"]
+        assert _extract_question_text(NeMoGymResponseCreateParamsNonStreaming(input=materialized), regex) == question
         # The other presets keep the judge's defaults (the whole last user message, no output cap).
         reference = get_first_server_config_dict(_resolve("opencode_reference.yaml"), JUDGE_SERVER)
         assert reference["question_extract_regex"] is None
@@ -604,9 +615,9 @@ class TestConfigs:
         [("opencode_full.yaml", False), ("opencode_search_full.yaml", True)],
     )
     def test_full_presets_swap_only_the_dataset_of_the_opencode_agent(self, config_file, with_search):
-        """The 1000-row variants keep opencode_sandboxed_agent (no session preset covers the image questions yet)
-        with the relay presets' effort, tools and network policy over the OpenCode-prompted full set with no
-        rollout-time prompt; only opencode_full declares the dataset."""
+        """The deprecated 1000-row variants keep opencode_sandboxed_agent (the session preset over the full set is
+        opencode_hle_tools_full, below) with the relay presets' effort, tools and network policy over the
+        OpenCode-prompted full set with no rollout-time prompt; only opencode_full declares the dataset."""
         resolved = _resolve(config_file)
         agent = get_first_server_config_dict(resolved, FULL_AGENT)
 
@@ -648,6 +659,53 @@ class TestConfigs:
         )
         assert "hle_diamond_opencode_agent" not in resolved
 
+    def test_hle_tools_full_preset_swaps_only_the_dataset_of_the_reference_agent(self, monkeypatch):
+        """opencode_hle_tools_full: opencode_hle_tools over the OpenCode-prompted full set (all 1000 rows, the image
+        rows with their input_image block, no rollout-time prompt) on the same session agent, for the denominator
+        of the published numbers. Everything but the dataset is opencode_hle_tools': the agent (image, egress,
+        tools, note), the judge as upstream runs it, the tool server and the environment server; declaring the
+        dataset makes the preset listed."""
+        monkeypatch.delenv("OPENCODE_REFERENCE_SANDBOX_IMAGE", raising=False)
+        resolved, base = _resolve("opencode_hle_tools_full.yaml"), _resolve("opencode_hle_tools.yaml")
+        agent = get_first_server_config_dict(resolved, REFERENCE_AGENT)
+        assert [dict(dataset) for dataset in agent["datasets"]] == [FULL_OPENCODE_DATASET]
+
+        def settings(server):  # host and port are assigned per resolve
+            return {key: value for key, value in OmegaConf.to_container(server).items() if key not in ("host", "port")}
+
+        agent_dict, base_dict = settings(agent), settings(get_first_server_config_dict(base, REFERENCE_AGENT))
+        differing = {key for key in set(agent_dict) | set(base_dict) if agent_dict.get(key) != base_dict.get(key)}
+        assert differing == {"datasets"}
+        for instance in (JUDGE_SERVER, "hle_tools", "hle_diamond_equivalence_llm_judge_environment_server"):
+            assert settings(get_first_server_config_dict(resolved, instance)) == settings(
+                get_first_server_config_dict(base, instance)
+            ), instance
+        assert resolved["tavily"] is None and resolved["hle_diamond_opencode_agent"] is None
+        # sandbox_docker_local.yaml addresses the agent by name, so the acknowledged Docker composition is the
+        # same as opencode_hle_tools' apart from the dataset (the refusal without the acknowledgement is held by
+        # TestReferencePreset over this preset too).
+        monkeypatch.setenv(ACK_ENV, "egress-not-restricted")
+        docker = get_first_server_config_dict(
+            _resolve("opencode_hle_tools_full.yaml", "sandbox_docker_local.yaml"), REFERENCE_AGENT
+        )
+        docker_agent = settings(docker)
+        docker_base = settings(
+            get_first_server_config_dict(
+                _resolve("opencode_hle_tools.yaml", "sandbox_docker_local.yaml"), REFERENCE_AGENT
+            )
+        )
+        assert {
+            key for key in set(docker_agent) | set(docker_base) if docker_agent.get(key) != docker_base.get(key)
+        } == {"datasets"}
+        assert (docker["sandbox_provider"], docker["network_access"]) == ("sandbox_docker", "inherit")
+        benchmark = BenchmarkConfig.from_config_path(HLE_DIAMOND_DIR / "opencode_hle_tools_full.yaml", strict=False)
+        assert (benchmark.name, benchmark.agent_name, benchmark.dataset.prompt_config, benchmark.num_repeats) == (
+            "hle_diamond_opencode_full",
+            REFERENCE_AGENT,
+            None,
+            1,
+        )
+
     @pytest.mark.parametrize(
         "config_file",
         [
@@ -664,6 +722,7 @@ class TestConfigs:
             "pi_legacy_agent.yaml",
             "pi_search_legacy_agent.yaml",
             "opencode_hle_tools.yaml",
+            "opencode_hle_tools_full.yaml",
         ],
     )
     def test_every_preset_shares_the_hle_judge_prompt_labels_and_partition_slices(self, config_file):
@@ -783,6 +842,7 @@ SESSION_PRESETS = [
     ("opencode.yaml", "hle_diamond_opencode_agent", "opencode_agent"),
     ("opencode_search.yaml", "hle_diamond_opencode_agent", "opencode_agent"),
     ("opencode_hle_tools.yaml", REFERENCE_AGENT, "opencode_agent"),
+    ("opencode_hle_tools_full.yaml", REFERENCE_AGENT, "opencode_agent"),
     ("opencode_reference.yaml", REFERENCE_AGENT, "opencode_agent"),
     ("pi.yaml", "hle_diamond_pi_agent", "pi_agent"),
     ("pi_search.yaml", "hle_diamond_pi_agent", "pi_agent"),
@@ -1008,6 +1068,7 @@ class TestLocalDockerOverride:
             "pi_legacy_agent.yaml",
             "opencode_reference_legacy_agent.yaml",
             "opencode_full.yaml",
+            "opencode_hle_tools_full.yaml",
         }
 
 
@@ -1021,8 +1082,8 @@ class TestReferencePreset:
     """opencode_reference.yaml: opencode_search.yaml on the reference image under upstream's egress policy
     (docs/evaluation-with-tools.md), which sandbox_docker_local.yaml may lift only when acknowledged."""
 
-    # Both presets on the reference agent: the Tavily tools and upstream's hle_tools.
-    PRESETS = ["opencode_reference.yaml", "opencode_hle_tools.yaml"]
+    # The presets on the reference agent: the Tavily tools, upstream's hle_tools, and hle_tools over the full set.
+    PRESETS = ["opencode_reference.yaml", "opencode_hle_tools.yaml", "opencode_hle_tools_full.yaml"]
 
     @staticmethod
     def _agents(monkeypatch, *files: str, preset: str = "opencode_reference.yaml"):

@@ -239,9 +239,11 @@ resource removed and this server granted instead. Its Environment Server seeds t
 episode with the task row and grants `web_search` and `web_fetch` to the agent over MCP from the agent's
 `tool_servers` (OpenCode shows them to the model as `hle_tools_web_search` and `hle_tools_web_fetch`);
 the sandbox reaches the server by address, while the preset pins the judge servers to loopback so the
-sandbox reaches exactly the model server and this one. Live runs of that preset need `TAVILY_API_KEY` in
-the environment of the process that starts the servers; see that benchmark's README, whose Upstream web
-tools section carries the fidelity table against upstream's protocol.
+sandbox reaches exactly the model server and this one. `benchmarks/hle_diamond/opencode_hle_tools_full.yaml`
+is the same preset over all 1000 HLE-Diamond questions, the 272 image questions included (the dataset is
+the only difference; it needs a vision-capable policy model). Live runs of either preset need
+`TAVILY_API_KEY` in the environment of the process that starts the servers; see that benchmark's README,
+whose Upstream web tools section carries the fidelity table against upstream's protocol.
 
 ## Example data
 

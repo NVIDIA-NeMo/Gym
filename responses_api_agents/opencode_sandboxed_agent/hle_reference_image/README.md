@@ -4,8 +4,9 @@ The code sandbox that upstream's with-tools protocol prescribes, with OpenCode a
 Python 3.11.16, a shell, the twelve pinned packages of upstream's `requirements-tools.txt`, the
 OpenCode binary, and nothing else. It replaces the
 [offline scientific image](../offline_science_image/README.md) (Python 3.13, SageMath, Lean/Mathlib,
-solvers, OCR) for `benchmarks/hle_diamond/opencode_reference.yaml` (Tavily tools) and
-`benchmarks/hle_diamond/opencode_hle_tools.yaml` (upstream's `web_search` and `web_fetch`), whose README
+solvers, OCR) for `benchmarks/hle_diamond/opencode_reference.yaml` (Tavily tools),
+`benchmarks/hle_diamond/opencode_hle_tools.yaml` (upstream's `web_search` and `web_fetch`, 728 text rows) and
+`benchmarks/hle_diamond/opencode_hle_tools_full.yaml` (the same tools over all 1000 rows), whose README
 carries the fidelity table of what the presets match and still do not reproduce.
 
 **Protocol source.** [`centerforaisafety/hle`](https://github.com/centerforaisafety/hle) at commit
