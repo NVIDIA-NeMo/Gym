@@ -130,6 +130,7 @@ Servers communicate via `ServerClient`, which wraps aiohttp with retry logic (3 
 - **Propagate session cookies** through all downstream calls (`cookies=request.cookies`) for stateful environments.
 - Use `asyncio.Semaphore` to bound concurrent subprocess/external calls
 - For Ray remote tasks in async code: `result = await future` (Ray futures are directly awaitable). Never call `ray.get()` directly in async context.
+- Ray is optional. A server that uses Ray must declare `ray_enabled = True` on the class its entrypoint runs and request `nemo-gym[ray]` in its own `pyproject.toml`; otherwise Gym doesn't start Ray for it and Ray calls fail with "Ray has not been started yet". For isolated code execution, use the Sandbox API instead of Ray.
 - Decode all subprocess output with `errors="replace"` to handle non-UTF8
 - Guard optional nested fields: `(body.field or {}).get("key", default)`
 
