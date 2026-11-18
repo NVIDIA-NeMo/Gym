@@ -147,7 +147,7 @@ def _validate_mounts(config: SubmitConfig, conn: Connection) -> None:
         raise ValueError(f"Mount src paths do not exist:\n{details}")
 
 
-class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor, Resubmittable, Inspectable, Terminable, LogReadable):
+class SlurmExecutor(ChainRecovery, JudgeJobs, BaseExecutor, Resubmittable, Terminable, LogReadable, Inspectable):
     """Slurm executor for Pyxis-enabled clusters (https://github.com/NVIDIA/pyxis).
 
     Every service and the driver are launched via `srun --container-image` so they
