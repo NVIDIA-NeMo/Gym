@@ -18,7 +18,8 @@ permissions under `opencode_agent.responses_api_agents.opencode_agent.opencode_c
 These command filters are not network or filesystem isolation.
 They are adapted from Gym's benchmark runner restrictions, not OpenCode defaults,
 and apply to local calls too. The profile also denies the `webfetch`, `websearch` and
-`skill` tools. Subagents (`task`) are intentionally enabled for this
+`skill` tools; only a Harbor task that declares `skills_dir` gets the `skill` tool back
+(see [Harbor task skills](#harbor-task-skills)). Subagents (`task`) are intentionally enabled for this
 general-purpose integration; the separate `opencode_sandboxed_agent` benchmark
 profile still disables them. Use explicit `permission` overrides when comparing scores.
 The command filters were written for SWE-style repositories: they also deny Git history
@@ -252,6 +253,21 @@ scientific-tools system prompt and subagents denied, and binds only the model se
 HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: their judges serve no tools, so their
 Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
 benchmark whose Resources server serves its tools over direct HTTP does not pair with it.
+
+### Harbor task skills
+
+A Harbor task that declares `skills_dir` is taken in a task sandbox, and the seed response declares
+`supports_task_skills`. At seed the adapter reads `skills_dir` from `/tmp/.nemo-gym/task.json` inside the sandbox and
+copies that folder to the session's `XDG_CONFIG_HOME/opencode/skills`, a skills folder of OpenCode's configuration
+directory, so OpenCode lists the skills to the model and loads one with its `skill` tool. That session's runs allow the
+`skill` tool with a last `permission` rule, `skill: allow`, which overrides the default profile's `skill: deny`; every
+task that declares no `skills_dir` keeps the profile's rule. With the tool allowed, OpenCode also offers its built-in
+`customize-opencode` skill and any `.claude/skills` or `.agents/skills` folders between the working directory and the
+repository root. The server makes a relative `skills_dir` absolute; a `skills_dir` only a shell resolves (starting
+with `~` or containing `$`) or one that is not a folder in the sandbox fails the seed with a terminal message. The
+task's MCP servers stay with grants (`task_mcp_grants: required` on the `harbor` Environment Server), judged
+separately from its skills. OpenCode 2 discovers skills elsewhere: with an OpenCode 2 `opencode_version` the seed
+declares no `supports_task_skills`, and the server refuses a task that declares `skills_dir`.
 
 ## Configuration compatibility
 

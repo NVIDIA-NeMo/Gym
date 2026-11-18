@@ -58,6 +58,7 @@ from nemo_gym.agents import (
     SimpleResponsesAPIAgent,
     resolve_agent_timeout,
     restrict_sandbox_network,
+    stage_task_skills,
     verification_failure_fields,
 )
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
@@ -292,6 +293,18 @@ def _without_empty_tools(opencode_config: dict[str, Any]) -> dict[str, Any]:
     OpenCode 1.17.11 turns ``tools`` into base permission rules and merges ``permission`` on top.
     """
     return {key: value for key, value in opencode_config.items() if key != "tools" or value}
+
+
+def _allow_skill_tool(permission: Mapping[str, Any] | str | None) -> dict[str, Any]:
+    """``permission`` with OpenCode's ``skill`` tool allowed, for a session whose task declares ``skills_dir``.
+
+    The default permission profile denies the tool. OpenCode applies the last matching rule, so the ``skill`` rule
+    moves after every other one, ``"*"`` included. A bare action is OpenCode's rule for every tool.
+    """
+    if isinstance(permission, str):
+        permission = {"*": permission}
+    rules = {key: copy.deepcopy(value) for key, value in (permission or {}).items() if key != "skill"}
+    return {**rules, "skill": "allow"}
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -600,6 +613,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             return opencode_major(self.config.opencode_version) >= 2
         except (AttributeError, ValueError):
             return False
+
+    def supports_task_skills(self) -> bool:
+        """OpenCode 1 copies the task's ``skills_dir`` into ``<XDG_CONFIG_HOME>/opencode/skills`` at seed and allows
+        its ``skill`` tool for that session. OpenCode 2 discovers skills elsewhere and is not staged."""
+        return not self._opencode2
 
     async def _ensure_local_runtime(self) -> str | None:
         """Install the local runtime once; for OpenCode 2, return the pinned release binary to run."""
@@ -1253,6 +1271,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     await sandbox.upload(
                         ASSISTANT_MESSAGE_PLUGIN_SOURCE, f"{directory}/{ASSISTANT_MESSAGE_PLUGIN_FILE}"
                     )
+            if not owns_sandbox and self.supports_task_skills():
+                # A task sandbox seeded by an Environment Server names the task's skills in task.json. OpenCode 1 finds
+                # skills in a skills folder of its configuration directory, XDG_CONFIG_HOME/opencode.
+                state.task_skills = await stage_task_skills(
+                    sandbox, f"{state.persistent_directory}/config/opencode/skills"
+                )
             if self.config.session_import_path is not None:
                 await self._import_session(state)
         except BaseException as error:
@@ -1813,6 +1837,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             # the shared configuration.
             **copy.deepcopy(_without_empty_tools(self.config.opencode_config)),
         }
+        if state.task_skills is not None:
+            # Only a task that declares skills gets the skill tool; every other task keeps the profile's rule.
+            config["permission"] = _allow_skill_tool(config.get("permission"))
         sampling = {name: value for name in ("temperature", "top_p") if (value := getattr(body, name)) is not None}
         if sampling:
             # Merged into each agent, so a configured agent.build.steps stays.
