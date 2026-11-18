@@ -18,6 +18,7 @@ import logging
 import os
 import shutil
 import stat
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -69,13 +70,19 @@ def remove_tree(path: str | Path) -> bool:
     return not os.path.lexists(path)
 
 
-def copy_tree(src: Path, dest: Path) -> Path:
+class CopyStopped(Exception):
+    """Raised by :func:`copy_tree` when its ``stop`` event was set before the copy finished."""
+
+
+def copy_tree(src: Path, dest: Path, *, stop: threading.Event | None = None) -> Path:
     """Copy the files under ``src`` into the new folder ``dest``.
 
     Folders are created afresh, so they take the user's usual permissions rather than the source's, and files are
     copied by content: no permission, time or extended-attribute copies, each a metadata operation on shared
     storage. Symlinks are copied as symlinks, and sockets, pipes and other special files are skipped. An entry that
     cannot be read is skipped, so the rest is kept; a failure to write fails the copy, which removes what it copied.
+    Setting ``stop`` from another thread ends the copy before its next entry: it removes what it copied and raises
+    :class:`CopyStopped`.
     """
     unread: list[str] = []
     created = False
@@ -86,6 +93,8 @@ def copy_tree(src: Path, dest: Path) -> Path:
         for root, dirs, files in os.walk(src, onerror=lambda error: unread.append(str(error.filename))):
             target = dest / os.path.relpath(root, src)
             for entry in [*dirs, *files]:
+                if stop is not None and stop.is_set():
+                    raise CopyStopped(f"Stopped copying {src} to {dest}")
                 source = os.path.join(root, entry)
                 try:
                     mode = os.lstat(source).st_mode
@@ -104,6 +113,11 @@ def copy_tree(src: Path, dest: Path) -> Path:
                     (target / entry).mkdir()
                 else:
                     logger.debug("Not copying %s: it is not a regular file, a folder or a symlink.", source)
+    except CopyStopped:
+        logger.info("Stopped copying %s to %s before it finished; removing what was copied.", src, dest)
+        if created:
+            remove_tree(dest)
+        raise
     except BaseException:
         # Logged here, since a caller that was cancelled while waiting no longer receives the error.
         logger.warning("Could not copy %s to %s", src, dest, exc_info=True)
