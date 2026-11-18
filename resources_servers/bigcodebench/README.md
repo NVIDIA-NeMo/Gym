@@ -12,7 +12,7 @@ suite. Each task ships its own `unittest.TestCase` class plus an
 BigCodeBench tests import 70+ third-party libraries with versions pinned
 in [`Requirements/requirements-eval.txt`](https://raw.githubusercontent.com/bigcode-project/bigcodebench/main/Requirements/requirements-eval.txt)
 (`numpy==1.21.2`, `keras==2.11.0`, `tensorflow==2.11.0`, ...). Most of
-those pins are 3.10-only, while NeMo Gym ships Python 3.12. On startup
+those pins are 3.10-only and won't install on the newer Python that NeMo Gym runs on. On startup
 the server uses `uv` to build a Python 3.10 venv at `.bcb_venv/` and
 installs `bigcodebench` + `requirements-eval.txt` into it. Each
 `/verify` shells out to `bcb_runner.py` running under that venv's
