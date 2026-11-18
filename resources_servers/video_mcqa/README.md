@@ -215,14 +215,15 @@ server, which applies it to every call:
 `++policy_model.responses_api_models.vllm_model.chat_template_kwargs.enable_thinking=true`.
 Sessions run with a fixed title and without compaction. As in our agentic video
 training data, the model is offered OpenCode's own tools besides the video
-tools, and the shell tool runs commands with `sh` (`SHELL` in the resources
-server's `sandbox_config.env`). Every call is a call of OpenCode's build agent,
-except those of a subagent that a `task` call starts in an OpenCode session of
-its own. As in that training data, a model response that calls a tool a third
-time in a row with identical input ends the run without an answer: the
-configs keep OpenCode's `doom_loop` permission at `ask`, and `opencode run`
-rejects every request that would ask. The same call repeated across separate
-responses does not end the run.
+tools, except `webfetch`: the sandbox reaches only the model server, so its
+calls could only fail. The shell tool runs commands with `sh` (`SHELL` in the
+resources server's `sandbox_config.env`). Every call is a call of OpenCode's
+build agent, except those of a subagent that a `task` call starts in an
+OpenCode session of its own. As in that training data, a model response that
+calls a tool a third time in a row with identical input ends the run without an
+answer: the configs keep OpenCode's `doom_loop` permission at `ask`, and
+`opencode run` rejects every request that would ask. The same call repeated
+across separate responses does not end the run.
 
 ## Verification and metrics
 

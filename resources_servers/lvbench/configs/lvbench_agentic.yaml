@@ -90,10 +90,12 @@ lvbench_agentic_opencode:
       # each start, and an offline start waits about 70 s before its first model call.
       sandbox_plugin_dependencies_path: /opt/opencode/opencode-1.17.11-plugin-dependencies.tar.gz
       sandbox_plugin_dependencies_sha256: 77b03eba45c8d7fe3d0a58bfc215f6fb99a1db4dd18a7e3d91fd29981fddafb1  # pragma: allowlist secret
-      # The model is offered OpenCode's own tools, as in our agentic video training data: webfetch fails in a sandbox
-      # that reaches only the model server, OpenCode 1.17.11 offers websearch only with a search provider enabled, and
-      # a task call runs its subagent in an OpenCode session of its own.
+      # The model is offered OpenCode's own tools as in our agentic video training data, except webfetch: the sandbox
+      # reaches only the model server, so every webfetch call fails. OpenCode 1.17.11 offers websearch only with a
+      # search provider enabled, and a task call runs its subagent in an OpenCode session of its own.
       opencode_config:
+        tools:
+          webfetch: false
         permission:
           bash: allow
           edit: allow
