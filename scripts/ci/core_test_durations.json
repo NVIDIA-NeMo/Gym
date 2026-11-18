@@ -147,6 +147,7 @@
     "tests/unit_tests/cli/test_cli_resources_servers.py": 10.19,
     "tests/unit_tests/server_runtime/supervisor/test_cli_server_launch.py": 0.95,
     "tests/unit_tests/server_runtime/supervisor/test_cli_server_shutdown.py": 0.86,
+    "tests/unit_tests/server_runtime/supervisor/test_server_config_file.py": 4.84,
     "tests/unit_tests/server_runtime/supervisor/test_server_venv.py": 2.14,
     "tests/unit_tests/cli/test_cli_utils.py": 0.05,
     "tests/unit_tests/tooling/test_collect_downstream_junit.py": 0.15,

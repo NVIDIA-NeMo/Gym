@@ -25,6 +25,7 @@ from math import isfinite
 from pathlib import Path
 from signal import SIGINT, SIGKILL
 from subprocess import PIPE, Popen, TimeoutExpired
+from tempfile import mkstemp
 from threading import Lock, Thread
 from time import monotonic, sleep, time
 from typing import IO, Dict, Iterator, List, NamedTuple, Optional, Tuple
@@ -41,8 +42,10 @@ from nemo_gym.config.global_config import (
     DEFAULT_SERVER_SPINUP_TIMEOUT_SECONDS,
     DRY_RUN_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
+    MAX_CONFIG_DICT_ENV_BYTES,
     MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
+    NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_LOG_DIR_KEY_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
@@ -633,6 +636,8 @@ class ServerSupervisor:  # pragma: no cover
     # Created by `_start`, so its clock starts with the startup it measures.
     _startup: Optional[SupervisorStartup] = None
     _server_shutdown_timeout_seconds: float = _GRACEFUL_SHUTDOWN_TIMEOUT_SEC
+    # The file that holds a config too long for an environment variable, until shutdown.
+    _config_dict_file: Path | None = None
 
     def start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
         """Start the head server and every configured server, and wait until all of them are ready.
@@ -739,7 +744,7 @@ class ServerSupervisor:  # pragma: no cover
                 self._startup.mark("start_h2_ping_sidecar")
 
         # Assume Nemo Gym Run is for a single agent.
-        config_dict_yaml_str = OmegaConf.to_yaml(global_config_dict)
+        config_dict_env = self._config_dict_env(OmegaConf.to_yaml(global_config_dict))
 
         # We always run the head server in this `run` command.
         self._head_server, self._head_server_thread, self._head_server_instance = HeadServer.run_webserver()
@@ -762,10 +767,7 @@ class ServerSupervisor:  # pragma: no cover
             print(f"Starting `{top_level_path}` from venv {get_venv_path(dir_path, global_config_dict)}")
             command = _server_launch_command(dir_path, global_config_dict, top_level_path, entrypoint_fpath)
 
-            extra_env = {
-                NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: config_dict_yaml_str,
-                NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME: top_level_path,
-            }
+            extra_env = config_dict_env | {NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME: top_level_path}
             if top_level_path not in ray_server_names:
                 # A server that uses Ray without declaring it then fails on its first Ray call, rather than
                 # starting a private cluster in each of its processes.
@@ -835,6 +837,25 @@ class ServerSupervisor:  # pragma: no cover
             self.wait_for_dry_run_spinup()
         else:
             self.wait_for_server_readiness(global_config_dict)
+
+    def _config_dict_env(self, config_dict_yaml_str: str) -> Dict[str, str]:
+        """The environment variables that give a server the config: the config itself, or a file that holds it.
+
+        A config can outgrow what the operating system accepts in one environment variable, for example a
+        Harbor taskset's hash for each of tens of thousands of tasks. Both variables are always set, one of them
+        empty, so a server never reads a variable inherited from this process's own environment.
+        """
+        if len(config_dict_yaml_str.encode()) <= MAX_CONFIG_DICT_ENV_BYTES:
+            return {
+                NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: config_dict_yaml_str,
+                NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME: "",
+            }
+        # The config holds API keys: mkstemp makes the file readable by this user only.
+        descriptor, path = mkstemp(prefix="nemo-gym-config-", suffix=".yaml")
+        self._config_dict_file = Path(path)
+        with open(descriptor, "w", encoding="utf-8") as file:
+            file.write(config_dict_yaml_str)
+        return {NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: "", NEMO_GYM_CONFIG_DICT_FILE_ENV_VAR_NAME: path}
 
     def _spawn_server(
         self,
@@ -1121,6 +1142,9 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
                 "they may remain as zombies until this process exits."
             )
         self._processes = dict()
+        if self._config_dict_file is not None:
+            self._config_dict_file.unlink(missing_ok=True)
+            self._config_dict_file = None
 
         # After the servers, so requests they were still finishing can drain through it. It gets its
         # own, longer grace period (`sidecar.shutdown_grace`).

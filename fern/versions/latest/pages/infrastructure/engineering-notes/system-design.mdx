@@ -92,7 +92,9 @@ flowchart TB
 2. **Server Subprocesses**: Each configured server is spawned as an independent OS process:
    - Each server has its own Python virtual environment in order to isolate dependencies.
    - Each runs uvicorn with a FastAPI application listening on `http://{host}:{port}`.
-   - The global config is passed via environment variable `NEMO_GYM_CONFIG_DICT`.
+   - The global config is passed via environment variable `NEMO_GYM_CONFIG_DICT`. A config over 120 KiB, near the
+     length Linux refuses in one environment variable, is written to a file that only the user can read, and
+     `NEMO_GYM_CONFIG_DICT_FILE` names it.
    - The specific server identity is passed via `NEMO_GYM_CONFIG_PATH`.
    - Server URLs are registered in the global config, allowing other servers to discover and call them.
 
