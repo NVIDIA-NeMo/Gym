@@ -1012,6 +1012,20 @@ class TestSaveDir:
         assert await save_dir(self._logs(tmp_path), server_name="swebench", name="verification") is None
         assert (existing / "earlier.log").exists()
 
+    async def test_a_copy_never_replaces_an_empty_folder_already_at_its_destination(
+        self, set_global_config, tmp_path: Path, monkeypatch
+    ) -> None:
+        # A rename onto an empty folder would replace it, so the copy must refuse before it starts.
+        set_global_config({"results_dir": str(tmp_path / "results")})
+        existing = tmp_path / "results" / "swebench" / "verification" / "no-rollout" / "taken"
+        existing.mkdir(parents=True)
+        inode = existing.stat().st_ino
+        monkeypatch.setattr(runtime_files, "_kept_dir", lambda *args: existing)
+
+        assert await save_dir(self._logs(tmp_path), server_name="swebench", name="verification") is None
+        assert existing.stat().st_ino == inode and not any(existing.iterdir())
+        assert sorted(path.name for path in existing.parent.iterdir()) == ["taken"]
+
     async def test_a_copy_that_fails_after_its_request_is_cancelled_is_logged(
         self, set_global_config, tmp_path: Path, monkeypatch, caplog
     ) -> None:
