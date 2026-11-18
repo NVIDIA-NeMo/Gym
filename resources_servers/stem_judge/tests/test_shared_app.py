@@ -6,11 +6,11 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-from pytest import mark
+from pytest import MonkeyPatch, mark
 
 from resources_servers.stem_judge.contracts import hash_text
 from resources_servers.stem_judge.tests.test_app import _msg, _request, _response, _split
-from resources_servers.stem_judge.tests.test_contract_app import contract, judge, server
+from resources_servers.stem_judge.tests.test_contract_app import SERVER_DIR, contract, judge, server
 
 
 def shared_request(answer: str = r"\boxed{2}", *, expected: str = "2", **overrides):
@@ -39,6 +39,61 @@ async def test_semantic_profile_accepts_row_without_per_row_contract(monkeypatch
     assert result.verdict == "correct" and result.correctness is True
     assert result.evaluation_completed and not result.mask_sample
     call.assert_awaited_once()
+
+
+@mark.asyncio
+@mark.parametrize("verdict", ["correct", "incorrect", "unresolved"])
+async def test_completed_judge_generation_preserves_correctness_and_masking(
+    monkeypatch: MonkeyPatch, verdict: str
+) -> None:
+    _, response = judge(
+        monkeypatch,
+        text=json.dumps(
+            {
+                "verdict": verdict,
+                "reason_code": "reference_conflict",
+                "evidence": "Reference uses a different parameter.",
+            }
+            if verdict == "unresolved"
+            else {"verdict": verdict, "reason_code": "reviewed", "evidence": "Compared the requested quantity."}
+        ),
+    )
+    assert response.status == "completed"
+
+    result = await server(grading_profile="semantic").verify(shared_request())
+
+    unresolved = verdict == "unresolved"
+    assert result.verdict == verdict
+    assert result.correctness is (None if unresolved else verdict == "correct")
+    assert result.reward == float(verdict == "correct")
+    assert result.evaluation_completed is not unresolved
+    assert result.mask_sample is unresolved
+    if unresolved:
+        assert result.grading_status == "judge_unresolved"
+        assert "reference_conflict" in result.failure_reason
+        assert "different parameter" in result.failure_reason
+        assert result.model_dump()["instance_config"]["mask_sample"] is True
+        assert result.model_dump()["_ng_failure_class"] == "judge_failed"
+    else:
+        assert result.failure_reason is None
+        assert not result.model_dump().get("instance_config", {}).get("mask_sample", False)
+
+
+@mark.asyncio
+@mark.parametrize("template", [None, "shared_answer_v1.txt"])
+async def test_shared_prompt_default_and_replay_override_are_recorded(
+    monkeypatch: MonkeyPatch, template: str | None
+) -> None:
+    call, _ = judge(monkeypatch)
+    path = SERVER_DIR / "prompt_templates" / (template or "shared_answer_v2.txt")
+    overrides = {"shared_prompt_template_fpath": str(path)} if template else {}
+    result = await server(grading_profile="semantic", **overrides).verify(shared_request())
+    system = call.await_args.kwargs["json"].input[0].content
+
+    assert system == path.read_text().strip()
+    assert result.grading_provenance["verifier_revision"] == "stem-shared-v3"
+    payload = call.await_args.kwargs["json"].input[-1].content
+    assert result.grading_provenance["prompt_sha256"] == hash_text(system + "\n" + payload)
 
 
 @mark.asyncio

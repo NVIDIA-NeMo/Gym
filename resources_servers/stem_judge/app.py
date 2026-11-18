@@ -142,7 +142,7 @@ class StemJudgeConfig(BaseResourcesServerConfig):
     library_verifier_max_concurrency: int = Field(default=8, gt=0)
     judge_domain_instructions: dict[str, str] = Field(default_factory=dict)
     judge_source_instructions: dict[str, str] = Field(default_factory=dict)
-    shared_prompt_template_fpath: str = str(Path(__file__).parent / "prompt_templates/shared_answer_v1.txt")
+    shared_prompt_template_fpath: str = str(Path(__file__).parent / "prompt_templates/shared_answer_v2.txt")
     judge_model_revision: Optional[str] = None
     # None preserves the model server's deadline policy for long judge responses.
     judge_timeout_seconds: Optional[float] = Field(default=300.0, gt=0, le=300, allow_inf_nan=False)
@@ -501,7 +501,7 @@ class StemJudgeResourcesServer(SimpleResourcesServer):
         answer_format = "boxed" if profile else (contract.answer_format if contract else "free")
         evaluations: list[JudgeEvaluation] = []
         provenance: dict[str, Any] = {
-            "verifier_revision": "stem-shared-v2" if profile else "stem-contract-v1",
+            "verifier_revision": "stem-shared-v3" if profile else "stem-contract-v1",
             "grading_profile": profile,
             "grading_config_sha256": hash_text(cfg.model_dump_json()),
             "contract_sha256": hash_text(contract.model_dump_json()) if contract else None,

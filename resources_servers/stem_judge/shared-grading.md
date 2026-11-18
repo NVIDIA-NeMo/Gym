@@ -35,6 +35,74 @@ Unresolved grades carry `mask_sample: true`, `evaluation_completed: false`,
 that a particular NeMoRL version excludes failures from all losses and group
 statistics; that integration still requires a real rollout/training test.
 
+`unresolved` means verification did not establish correctness. It includes an
+inconclusive semantic judgment (ambiguous task, conflicting reference, or missing
+evidence), an unsupported verification requirement, and an operational failure
+(transport, incomplete judge output, or invalid output schema). A judge can finish
+generating a valid `unresolved` JSON object while `evaluation_completed` remains
+false: that field describes the correctness measurement, not generation completion.
+The numeric `reward=0` on these records is a transport placeholder and must be
+excluded using the mask. A completed `incorrect` judgment has `correctness=false`,
+`evaluation_completed=true`, and `mask_sample=false`; it remains a negative example.
+`grading_status` distinguishes `judge_unresolved`, `judge_incomplete`,
+`judge_unparsed`, and other causes. The recorded judge response and `failure_reason`
+retain the semantic explanation. Judge failures also use Gym's `judge_failed`
+sidecar classification and the nested `instance_config.mask_sample` compatibility
+flag. Sample exclusion can lead a consuming trainer to discard a whole prompt group.
+
+## Shared scientific guidelines
+
+The default shared prompt is `prompt_templates/shared_answer_v2.txt`. It uses
+`question`, `reference`, and `candidate`; it does not require a `policy_input` field
+to interpret the task. Effective policy input is still recorded for provenance.
+`shared_answer_v1.txt` remains available through `shared_prompt_template_fpath`
+for paired replay. Provenance records `stem-shared-v3` and the actual prompt hash.
+
+The science guidance adapts Jiacheng Xu's
+[`stem_v11.txt` at `fbe250878cc317e893392a641070bb448fbd7fd9`](https://github.com/NVIDIA-NeMo/Gym/blob/fbe250878cc317e893392a641070bb448fbd7fd9/resources_servers/stem_judge/prompt_templates/stem_v11.txt)
+from this Apache-2.0 repository: required parts and alternatives, physical units and
+conventions, chemical identity/stoichiometry/equilibrium, and biological entities,
+sequences, inheritance, and regulation. The shared route retains its strict JSON
+verdict schema and final-box input. It does not adopt the binary `Judgement` parser,
+the exact-match shortcut, or rules that recover information from an unseen derivation.
+The separate answer/rubric and contract interfaces keep their existing prompts.
+
+Reference conflicts, genuinely ambiguous interpretations, precision absent from
+the question, and required unavailable checks produce `unresolved`, with concrete
+evidence required. Candidate assertions of ambiguity alone are insufficient.
+Known unsupported task metadata is still rejected before judging. These prompt
+rules apply when the LLM runs; a Math-Verify success can still return before that
+call. They do not independently validate references on the library-acceptance path.
+
+### Validation of the science prompt
+
+On 2026-11-18, a paired replay of 20 fixed synthetic answers through the actual
+shared verifier and Gym VLLM model adapter used
+`nvidia/deepseek-ai/deepseek-v4.1-flash-1017`, temperature 0, and an 8192-token output
+budget. The local resource-to-model HTTP hop was replaced by an in-process bridge;
+model inference, response conversion, parsing, reward, and mask handling were real.
+The [cases and recorded outcomes](tests/fixtures/shared-science-smoke.json) contain
+no original dataset questions or policy traces. Expected verdicts were specified
+before the calls. This is a prompt smoke test, not a dataset accuracy estimate,
+a judge-variance study, or an end-to-end NeMoRL masking test.
+
+The final v2 prompt matched 20/20 expected verdicts; v1 matched 18/20. V1 treated
+an incorrect reference as authoritative (`2x` at `x=3`, reference `8`, candidate
+`6`) and accepted a reference-identical answer to an undefined-parameter question.
+V2 marked both unresolved. Both prompts handled the tested scientific equivalences,
+wrong answers, missing vector direction, and candidate instruction injection.
+The initial v2 draft incorrectly rejected a boxed formula on a proof task; the
+final prompt explicitly gives unsupported verification scope precedence over the
+missing-component rule, and the full paired replay was rerun. Unresolved records
+had `evaluation_completed=false`, reward 0, and the exclusion mask in that replay.
+The 251 STEM-judge unit tests also passed, including completed-generation versus
+completed-evaluation semantics and replay of either prompt with provenance.
+
+The longer prompt increases judge input tokens. Before a training rollout, replay
+saved answers using the intended serving configuration and measure false grades,
+unresolved rate, repeatability, and latency; this gateway smoke does not establish
+behavior for a differently pinned serving model or trainer.
+
 `judge_timeout_seconds` defaults to 300 seconds per HTTP attempt. Set it to
 `null` to remove the resource server's deadline when the judge's serving policy
 must govern long responses. Numeric timeouts must remain positive, finite, and
