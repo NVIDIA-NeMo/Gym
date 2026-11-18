@@ -44,10 +44,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from time import monotonic
-from typing import Any, Awaitable, Callable, TypeVar
+from typing import Any, Awaitable, Callable, ClassVar, TypeVar
 
 from nemo_gym.sandbox.attribution import AttributionConfig
 from nemo_gym.sandbox.providers.base import (
+    SandboxCapabilities,
     SandboxCreateError,
     SandboxEndpoint,
     SandboxExecResult,
@@ -280,6 +281,8 @@ class E2BOperationConfig:
 
 class E2BProvider:
     """Provider backed by the E2B Python SDK."""
+
+    capabilities: ClassVar[SandboxCapabilities] = SandboxCapabilities()
 
     name = "e2b"
 

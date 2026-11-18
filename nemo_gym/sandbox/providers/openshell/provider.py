@@ -39,10 +39,11 @@ from collections.abc import Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from nemo_gym.sandbox.attribution import PROCESS_KEY, AttributionConfig, resolve_process_id, sanitize_label_value
 from nemo_gym.sandbox.providers.base import (
+    SandboxCapabilities,
     SandboxCreateError,
     SandboxCreateVerificationError,
     SandboxExecResult,
@@ -564,6 +565,8 @@ def _wait_deleted(client: Any, inst: _OpenShellSandbox, operations: OpenShellOpe
 
 class OpenShellProvider:
     """Sandbox provider backed by an OpenShell gateway's gRPC control plane."""
+
+    capabilities: ClassVar[SandboxCapabilities] = SandboxCapabilities()
 
     name = "openshell"
 

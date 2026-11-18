@@ -295,6 +295,8 @@ class SimpleServer(BaseServer):
     # so that with several uvicorn workers a session's requests must reach the worker that created it.
     # See nemo_gym.server_runtime.request_handling.session_routing.
     routes_sessions_to_owner: ClassVar[bool] = False
+    # Whether this server lends sandboxes it owns to agents, so startup refuses a provider that never reconnects.
+    lends_sandboxes: ClassVar[bool] = False
     # The sandboxes this server owns, one OwnedSandboxes per provider field, created on first use.
     _owned_sandboxes: dict[str, "OwnedSandboxes"] = PrivateAttr(default_factory=dict)
     # Set when the shutdown sweep begins: no instance is built after it, so none is left that nothing closes.
@@ -355,6 +357,45 @@ class SimpleServer(BaseServer):
                 await self.aclose_sandboxes()
 
         app.router.lifespan_context = lifespan
+
+    def check_sandbox_provider(self) -> None:
+        """Refuse at startup what the server's ``sandbox_provider`` cannot do for the sandboxes its config declares.
+
+        A server that sets ``lends_sandboxes`` is checked for lending. When ``sandbox_provider`` is the server's only
+        provider field, each typed ``SandboxConfig`` field of the config is checked for its network rule, and the
+        model and tool servers the rule allows are resolved to hosts a sandbox reaches. With several provider fields a
+        block's provider shows only where the server uses it, so its instance's first ``spec()`` checks it instead.
+        The provider's class is checked, so no provider is created here.
+
+        Raises:
+            ValueError: Naming the first need the provider cannot meet, or a server the rule cannot reach.
+        """
+        reference = getattr(self.config, "sandbox_provider", None)
+        if reference is None:
+            return
+        from nemo_gym.sandbox import SandboxConfig, get_provider_class, resolve_provider_config
+        from nemo_gym.sandbox.providers.base import NETWORK_RULES
+        from nemo_gym.server_runtime.owned_sandboxes import check_provider, rule_hosts
+
+        provider_fields = [
+            name
+            for name in type(self.config).model_fields
+            if name.endswith("sandbox_provider") and getattr(self.config, name) is not None
+        ]
+        blocks = []
+        if provider_fields == ["sandbox_provider"]:
+            blocks = [
+                value
+                for name in type(self.config).model_fields
+                if isinstance(value := getattr(self.config, name), SandboxConfig) and value.network in NETWORK_RULES
+            ]
+        # Nothing to check, so a server whose blocks set no typed rule does not even load its provider's module.
+        if not blocks and not self.lends_sandboxes:
+            return
+        (provider_name,) = resolve_provider_config(reference, self._global_config())
+        check_provider(get_provider_class(provider_name), configs=blocks, lends=self.lends_sandboxes)
+        for block in blocks:
+            rule_hosts(block, self._global_config())
 
     async def aclose_sandboxes(self) -> None:
         """Stop every sandbox of every ``OwnedSandboxes`` this server created; see ``OwnedSandboxes.aclose``.
@@ -634,6 +675,7 @@ repr(e): {repr(e)}"""
         observe_app_event_loop(app, "server")
         server.setup_checkpoint_participant(app)
         server.setup_owned_sandboxes(app)
+        server.check_sandbox_provider()
         # After the app is fully built so subclass routes are present. Only resources servers expose tools over MCP,
         # so gating the lazy import on their config keeps the MCP SDK out of agent/model processes that never need it.
         mcp_token_routing = {}

@@ -25,12 +25,14 @@ import shlex
 import shutil
 import signal
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from nemo_gym.sandbox.providers.base import (
+    NetworkRule,
+    SandboxCapabilities,
     SandboxCreateError,
     SandboxCreateVerificationError,
     SandboxEndpoint,
@@ -293,7 +295,41 @@ def _user_flag(user: str | int) -> str:
 class DockerProvider:
     """Sandbox provider backed by the local Docker CLI / daemon."""
 
+    capabilities: ClassVar[SandboxCapabilities] = SandboxCapabilities(
+        network_rules=frozenset({"inherit", "no_network"}), reconnect="same_host"
+    )
+
     name = "docker"
+
+    def network_options(
+        self, rule: NetworkRule, hosts: Sequence[str], provider_options: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """``provider_options`` with ``rule`` applied: ``no_network`` runs the container with ``--network none``.
+
+        A provider config that already runs every container with ``network: none`` applies ``no_network`` itself, so the
+        options are left as they are.
+
+        Raises:
+            ValueError: For a rule that allows hosts, which Docker cannot express per container, for ``no_network``
+                when the provider config already puts every container on another network, or when the sandbox's own
+                ``run_args`` pick a network.
+        """
+        if rule == "inherit":
+            return dict(provider_options)
+        if rule != "no_network":
+            raise ValueError(f"the Docker provider cannot restrict egress to a list of hosts ({rule!r})")
+        run_args = _coerce_str_list(provider_options.get("run_args"), "run_args")
+        if any(arg in ("--network", "--net") or arg.startswith(("--network=", "--net=")) for arg in run_args):
+            raise ValueError("the sandbox's run_args pick a network themselves; set only network: no_network")
+        if self._create_config.network == "none":
+            return dict(provider_options)
+        if self._create_config.network is not None:
+            raise ValueError(
+                f"the Docker provider puts every container on network {self._create_config.network!r}, "
+                "so it cannot also start one with no network"
+            )
+        return {**provider_options, "run_args": [*run_args, "--network", "none"]}
+
     # Compose service options this provider applies, each as the matching ``docker run`` flag.
     SERVICE_OPTION_FIELDS = frozenset({"tmpfs", "ulimits", "sysctls", "security_opt"})
 

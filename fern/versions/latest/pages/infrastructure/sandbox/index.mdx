@@ -200,6 +200,28 @@ Inline single-key mappings are also accepted when a caller does not use Hydra co
 provider_config = {"opensandbox": {"connection": {"domain": "sandbox.example"}}}
 ```
 
+## Network Rule
+
+A server that owns its sandboxes through `self.sandboxes` declares each sandbox's egress in its typed `SandboxConfig` block, and `self.sandboxes.spec(config, ...)` turns the rule into the provider's own options before the sandbox starts:
+
+```yaml
+sandbox_config:
+  ttl_s: 7200
+  network: model_only
+  model_server: policy_model
+```
+
+| Field | Values | Meaning |
+| --- | --- | --- |
+| `network` | `inherit`, `no_network`, `model_only`, `model_and_tools`, `hosts_only` | The egress rule the sandbox starts with. `inherit` keeps the provider's default. |
+| `model_server` | a server name | The model server `model_only` and `model_and_tools` allow. Required exactly for those two rules. |
+| `tool_servers` | server names | The servers `model_and_tools` also allows. Required exactly for that rule. |
+| `allowed_hosts` | host names | Further hosts any restricted rule allows, such as a dependency proxy. `hosts_only` allows only these. |
+
+A provider that cannot apply a rule refuses it at server startup, so no sandbox starts with open egress in place of the rule: OpenSandbox applies all five, Docker `inherit` and `no_network`, and the other providers `inherit`. A block that sets `network` and also `provider_options.network_policy` is refused. `SandboxConfig.spec()` on its own refuses a restricted rule, since only the owner's `spec()` applies it.
+
+A block without `network` keeps today's behavior, the provider's default or its `provider_options.network_policy`, and the server logs a deprecation warning naming the rule to switch to. A later release requires `network`.
+
 ## Lifecycle
 
 `AsyncSandbox` and `Sandbox` are lifecycle objects. Construct one with a provider config and optional `SandboxSpec`, call `start()`, run commands or transfer files, then call `stop()`. Context managers close the provider on exit, but they do not start the sandbox automatically.
