@@ -26,6 +26,7 @@ import time
 from collections import Counter
 from contextlib import ExitStack
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -797,16 +798,31 @@ class TestSession:
             )
             time.sleep(0.05)
             assert lifetimes.holds("abandoned")
+            verification_recorded = Event()
+            served = lifetimes.served
+
+            def record_served(session_id: str, scope: dict, status: int | None) -> None:
+                served(session_id, scope, status)
+                if session_id == "abandoned" and scope["path"] == "/verify":
+                    verification_recorded.set()
+
+            monkeypatch.setattr(lifetimes, "served", record_served)
             assert b.post("/verify", json=verify_body).json()["failure_kind"] == "session_expired"
-            # The idle routing sweep can release the owner once the record no longer affects verification.
-            deadline = server._expired_session_ids["abandoned"]
-            monkeypatch.setattr(
-                "nemo_gym.server_runtime.request_handling.session_routing.monotonic", lambda: deadline + 1
-            )
-            for session_id in lifetimes.sweep():
-                owners.release(session_id)
-            assert owners.owner("abandoned") is None
-            assert lifetimes.holds("fresh")
+            # A forwarded reply can arrive before the owner records the request's lifetime.
+            assert verification_recorded.wait(timeout=10)
+
+            def expire_ownership() -> None:
+                # Run on the owner's loop, after request cleanup, so neither it nor the idle sweep races us.
+                deadline = server._expired_session_ids["abandoned"]
+                monkeypatch.setattr(
+                    "nemo_gym.server_runtime.request_handling.session_routing.monotonic", lambda: deadline + 1
+                )
+                for session_id in lifetimes.sweep():
+                    owners.release(session_id)
+                assert owners.owner("abandoned") is None
+                assert lifetimes.holds("fresh")
+
+            a.portal.call(expire_ownership)
 
     @pytest.mark.asyncio
     async def test_seed_discards_sessions_older_than_ttl(self) -> None:

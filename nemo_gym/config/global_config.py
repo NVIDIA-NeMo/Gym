@@ -241,6 +241,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "copilot_agent",
         "crewai_agent",
         "droid_agent",
+        "finance_agent",
         "goose_agent",
         "harbor_oracle_agent",
         "hermes_agent",
