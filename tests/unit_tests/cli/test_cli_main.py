@@ -2493,6 +2493,35 @@ def test_eval_status_missing_artifact_is_actionable(tmp_path, monkeypatch, capsy
     assert "No batch_status.json or Gym job record found" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("json_output", [False, True])
+def test_eval_lustre_stats_reads_the_stats_of_a_benchmark_dir(tmp_path, monkeypatch, capsys, json_output):
+    stats = tmp_path / "logs" / "lustre-md-stats-5.tsv"
+    stats.parent.mkdir()
+    stats.write_text("start\t10\tn1\tMDT000b\tclose\t1\nend\t20\tn1\tMDT000b\tclose\t41\n")
+    argv = ["gym", "eval", "lustre-stats", str(tmp_path), *(["--json"] if json_output else [])]
+    monkeypatch.setattr(sys, "argv", argv)
+    cli_main.main()
+    output = capsys.readouterr().out
+    if json_output:
+        [total] = json.loads(output)[str(stats)]["intervals"]
+        assert (total["interval"], total["requests"], total["requests_per_second"]) == ("total", 40, 4.0)
+    else:
+        assert "MDT000b 4.0/s" in output
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [([], "Slurm compute sets lustre_md_stats: true"), (["+x=1"], "does not accept Hydra overrides")],
+    ids=["no_stats", "override"],
+)
+def test_eval_lustre_stats_usage_errors(tmp_path, monkeypatch, capsys, extra, message):
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "lustre-stats", str(tmp_path), *extra])
+    with pytest.raises(SystemExit) as error:
+        cli_main.main()
+    assert error.value.code == 2
+    assert message in capsys.readouterr().err
+
+
 def test_review_eval_status_lists_stem_files_and_expected_aggregation(tmp_path, monkeypatch, capsys):
     member = {
         "expected_rollout_count": 3,
