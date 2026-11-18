@@ -2379,3 +2379,24 @@ def test_clamp_resource_requests_caps_each_request_at_the_declared_limit() -> No
     )
     with pytest.raises(ValueError, match="Unknown sandbox resource keys"):
         clamp_resource_requests({"memory_gib": 2}, limits)
+
+
+class _FailingUploadAndCloseProvider(FailingUploadProvider):
+    async def close(self, handle: SandboxHandle) -> None:
+        raise RuntimeError("provider unreachable")
+
+
+@pytest.mark.parametrize("start", ["start", "start_with_setup"])
+def test_a_start_whose_rollback_stop_fails_raises_the_starts_own_error(start: str) -> None:
+    async def run() -> None:
+        sandbox = AsyncSandbox(_FailingUploadAndCloseProvider())
+        spec = SandboxSpec(image="image:tag", files={"/tmp/bootstrap.txt": "hello"})
+        with pytest.raises(RuntimeError, match="upload failed") as raised:
+            if start == "start":
+                await sandbox.start(spec)
+            else:
+                await sandbox.start_with_setup(spec, lambda _: asyncio.sleep(0))
+
+        assert str(raised.value.__context__) == "provider unreachable", "the failed stop rides along as context"
+
+    asyncio.run(run())

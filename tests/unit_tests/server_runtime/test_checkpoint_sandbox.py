@@ -893,7 +893,7 @@ async def test_restore_rolls_back_when_one_sandbox_cannot_be_rebuilt(state_dir: 
     # Forks are sb-5 and sb-6 (sb-1, sb-2 are originals; snap-3, snap-4 their snapshots). One of them fails.
     provider.fail[("create", "sb-6")] = RuntimeError("quota")
 
-    fresh = make_checkpointer(state_dir, provider, parallelism=1)
+    fresh = make_checkpointer(state_dir, provider, max_concurrent_starts=1)
     with pytest.raises(SandboxCheckpointError, match="could not be re-created"):
         await fresh.restore(states)
 
@@ -1004,7 +1004,7 @@ async def test_a_restore_cancelled_after_a_fork_completed_stops_that_fork(state_
 
     provider.create_from_snapshot = fork_then_hang  # type: ignore[method-assign]
 
-    fresh = make_checkpointer(state_dir, provider, parallelism=1)
+    fresh = make_checkpointer(state_dir, provider, max_concurrent_starts=1)
     restore = asyncio.create_task(fresh.restore(states))
     await asyncio.wait_for(second_started.wait(), timeout=5)
     assert provider.boxes["sb-5"]["state"] == "running", "the first fork is complete; the second is in flight"
@@ -1042,7 +1042,7 @@ async def test_a_fork_of_a_cancelled_restore_whose_stop_fails_stays_tracked_unti
     provider.create_from_snapshot = fork_then_hang  # type: ignore[method-assign]
     provider.fail[("close", "sb-5")] = RuntimeError("HTTP 503")
 
-    fresh = make_checkpointer(state_dir, provider, parallelism=1)
+    fresh = make_checkpointer(state_dir, provider, max_concurrent_starts=1)
     restore = asyncio.create_task(fresh.restore(states))
     await asyncio.wait_for(second_started.wait(), timeout=5)
     restore.cancel()
@@ -1069,7 +1069,7 @@ async def test_a_fork_whose_rollback_stop_failed_is_logged_and_stopped_by_the_ne
     provider.fail[("create", "sb-6")] = RuntimeError("quota")
     provider.fail[("close", "sb-5")] = RuntimeError("HTTP 503")
 
-    fresh = make_checkpointer(state_dir, provider, parallelism=1)
+    fresh = make_checkpointer(state_dir, provider, max_concurrent_starts=1)
     with caplog.at_level(logging.WARNING, logger=checkpoint_sandbox.__name__):
         with pytest.raises(SandboxCheckpointError, match="could not be re-created.*quota"):
             await fresh.restore(states)
@@ -1090,7 +1090,7 @@ async def failed_restore_with_an_unstopped_fork(state_dir: Path, provider: FakeS
     states = await (await seeded(provider, state_dir, "s1", "s2")).export(["s1", "s2"], checkpoint_id="c1")
     provider.fail[("create", "sb-6")] = RuntimeError("quota")
     provider.fail[("close", "sb-5")] = RuntimeError("HTTP 503")
-    fresh = make_checkpointer(state_dir, provider, parallelism=1)
+    fresh = make_checkpointer(state_dir, provider, max_concurrent_starts=1)
     with pytest.raises(SandboxCheckpointError, match="quota"):
         await fresh.restore(states)
     assert provider.boxes["sb-5"]["state"] == "running"
@@ -1142,7 +1142,7 @@ async def test_a_rollback_cancelled_while_it_stops_a_fork_keeps_the_fork_tracked
         await close(handle)
 
     provider.close = close_that_hangs  # type: ignore[method-assign]
-    fresh = make_checkpointer(state_dir, provider, parallelism=1)
+    fresh = make_checkpointer(state_dir, provider, max_concurrent_starts=1)
     restore = asyncio.create_task(fresh.restore(states))
     await asyncio.wait_for(stopping.wait(), timeout=5)
     restore.cancel()
@@ -1231,7 +1231,7 @@ async def test_aclose_waits_for_a_running_restore_and_stops_the_forks_it_install
         return await original_fork(snapshot_id, spec)
 
     provider.create_from_snapshot = fork_then_wait  # type: ignore[method-assign]
-    fresh = make_checkpointer(state_dir, provider, parallelism=1)
+    fresh = make_checkpointer(state_dir, provider, max_concurrent_starts=1)
     restore = asyncio.create_task(fresh.restore(states))
     await asyncio.wait_for(second_started.wait(), timeout=5)
 

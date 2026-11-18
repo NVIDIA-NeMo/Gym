@@ -676,8 +676,8 @@ class AsyncSandbox:
                         else:
                             source_path.write_text(contents, encoding="utf-8")
                         await self.upload(source_path, target_path)
-        except BaseException:
-            await self.stop()
+        except BaseException as error:
+            await self._stop_after_failure(error)
             raise
 
         return self
@@ -695,8 +695,8 @@ class AsyncSandbox:
         await self.start(spec)
         try:
             await setup(self)
-        except BaseException:
-            await self.stop()
+        except BaseException as error:
+            await self._stop_after_failure(error)
             raise
         return self
 
@@ -807,6 +807,17 @@ class AsyncSandbox:
     def default_workdir(self) -> str | None:
         """The directory an exec runs in when it names none: ``SandboxSpec.workdir``, else the provider's own."""
         return self._spec.workdir if self._spec is not None else None
+
+    async def _stop_after_failure(self, error: BaseException) -> None:
+        """Stop the sandbox a failed start leaves; if that stop fails too, the start's ``error`` is still raised.
+
+        The stop's error becomes the context of ``error``, so the caller acts on why the start failed and still sees
+        that the sandbox may be running.
+        """
+        try:
+            await self.stop()
+        except Exception:
+            raise error
 
     def set_default_user(self, user: str | int | None) -> None:
         """Change the default exec user of a running sandbox.

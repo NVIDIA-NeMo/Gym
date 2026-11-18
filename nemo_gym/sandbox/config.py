@@ -50,7 +50,7 @@ the provider's shared storage root, that stands in for it when a Compose group s
 from collections.abc import Mapping
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec
 
@@ -58,7 +58,10 @@ from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec
 # Reserved keys inside a sandbox block that are not the provider config.
 SANDBOX_BLOCK_DEFAULT_METADATA_KEY = "default_metadata"
 SANDBOX_BLOCK_VOLUME_SOURCES_KEY = "volume_sources"
-SANDBOX_BLOCK_RESERVED_KEYS = frozenset({SANDBOX_BLOCK_DEFAULT_METADATA_KEY, SANDBOX_BLOCK_VOLUME_SOURCES_KEY})
+SANDBOX_BLOCK_OWNER_CONCURRENCY_KEY = "owner_concurrency"
+SANDBOX_BLOCK_RESERVED_KEYS = frozenset(
+    {SANDBOX_BLOCK_DEFAULT_METADATA_KEY, SANDBOX_BLOCK_VOLUME_SOURCES_KEY, SANDBOX_BLOCK_OWNER_CONCURRENCY_KEY}
+)
 
 
 def _to_plain_dict(value: Any) -> Any:
@@ -179,6 +182,41 @@ def resolve_provider_metadata(
             f"Sandbox '{SANDBOX_BLOCK_DEFAULT_METADATA_KEY}' from {source} must be a mapping, got: {metadata!r}"
         )
     return dict(metadata)
+
+
+class OwnerConcurrency(BaseModel):
+    """How many sandboxes one owner starts, and stops, at once on a provider: a block's ``owner_concurrency``.
+
+    Unset is unbounded, so a server that seeds hundreds of episodes at once starts all of their sandboxes at once.
+    Starts and stops have separate limits, so a stop never waits behind starts.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    starts: int | None = Field(default=None, ge=1)
+    stops: int | None = Field(default=None, ge=1)
+
+
+def resolve_provider_owner_concurrency(
+    sandbox_provider: str | Mapping[str, Any],
+    named_configs: Mapping[str, Any] | None = None,
+) -> OwnerConcurrency:
+    """Return a sandbox block's ``owner_concurrency``, unbounded when the block sets none.
+
+    See :func:`resolve_provider_config` for argument semantics.
+
+    Raises:
+        ValueError: If the block or its ``owner_concurrency`` is invalid.
+    """
+    block, source = _resolve_block(sandbox_provider, named_configs)
+    if not isinstance(block, Mapping):
+        raise ValueError(f"Sandbox provider config from {source} must be a mapping, got: {block!r}")
+    try:
+        return OwnerConcurrency.model_validate(block.get(SANDBOX_BLOCK_OWNER_CONCURRENCY_KEY) or {})
+    except ValidationError as error:
+        raise ValueError(
+            f"Sandbox '{SANDBOX_BLOCK_OWNER_CONCURRENCY_KEY}' from {source} is invalid: {error}"
+        ) from error
 
 
 def resolve_provider_volume_sources(
