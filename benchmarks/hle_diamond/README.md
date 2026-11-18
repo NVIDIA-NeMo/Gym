@@ -511,7 +511,9 @@ gym list benchmarks | grep hle_diamond          # hle_diamond, hle_diamond/text,
 ```
 
 `gym eval prepare --benchmark hle_diamond/opencode_hle_tools_full` prepares the same
-`hle_diamond_benchmark_opencode_full.jsonl` (same `prepare_script`); it has not been run as such yet.
+`hle_diamond_benchmark_opencode_full.jsonl` (same `prepare_script`); the 2026-11-18 pilot below ran the
+same composition through a dataset override before this file existed (Upstream web tools > Acknowledged Docker
+pilot, 2026-11-18).
 
 `cais/hle-diamond` is gated: request access on the dataset page and put the token in `env.yaml` as
 `hf_token`. When that key is absent, `prepare.py` passes `token=None` and `datasets` falls back to the
@@ -1147,11 +1149,11 @@ the dataset's `detail: high` is never read (upstream's `run_model_predictions.py
 `detail` either), and the judge sees the bare question because `question_extract_regex` applies to the
 joined text parts of the multimodal turn. The placement is not upstream's: OpenCode's Read tool puts two
 synthetic text parts, the image and the staged `/tmp/nemo-gym-media/<sha256>.<ext>` path ahead of the
-question text, where upstream sends one `[text, image_url]` user message (fidelity table, harness analogue). The dataset swap is verified in configuration and code only: no
-run of this preset exists yet, and the first one should confirm in the model-call capture that the first
-policy call of an image row carries one `image_url` part with the dataset's bytes and no `detail` key,
-as the 2026-10-26 relay run did for 272/272 rows (Sandboxed presets on a local Docker host). Report
-rows evaluated / 1000 next to the number as for every full run (Reporting a full run).
+question text, where upstream sends one `[text, image_url]` user message (fidelity table, harness analogue). The 2026-11-18
+acknowledged Docker pilot below ran this composition over the 272 image rows and confirmed in every one of
+the 272 model-call captures that the first policy call carries one `image_url` part with the dataset's
+bytes and no `detail` key, as the 2026-10-26 relay run had for 272/272 rows (Sandboxed presets on a local
+Docker host). Report rows evaluated / 1000 next to the number as for every full run (Reporting a full run).
 
 A reproduction-grade run needs the OpenSandbox provider, which enforces the egress policy, in egress
 mode `dns+nft` (preflight: confirm the deployment's mode, and inside a sandbox that
@@ -1196,7 +1198,7 @@ all at upstream commit `22ed3074b1e7b134bcbc09028d0ba320839b0655`: <!-- pragma: 
 | `[response]` is the model's whole completion | harness analogue | The last assistant message of the OpenCode session (upstream does not say what text was judged for the CLI harnesses). |
 | Confidence extracted by the judge; calibration error reported | cannot match | Not computed; `reward` is the accuracy only. |
 | Accuracy over every question (`n` = all rows; a failed call counts as wrong); Wald 95 % half-width | matched (denominator) / own interval | The documented run line passes `++count_missing_rollouts_as_zero=true` (add `'++count_failure_classes_as_zero=[agent_run_error]'` with `++route_failures_to_sidecar=true`) and reports `coverage/imputed`; Gym's reward profile emits its own confidence interval, not upstream's Wald half-width. |
-| HLE-Diamond: 1,000 questions, 272 with an image | harness analogue (`opencode_hle_tools_full`, unrun) / cannot match (`opencode_hle_tools`) | `opencode_hle_tools_full` runs all 1000 rows on this agent with the dataset's bytes and no `detail`, but not with upstream's `[text, image_url]` content: OpenCode routes the staged file through its Read tool, so the model's first message carries two synthetic text parts, the image and the staged path ahead of the question text (Image questions through OpenCode). A vision-capable policy model is required, and no run exists yet. `opencode_hle_tools` runs the 728 text rows: report 728/1000 next to every number from it. |
+| HLE-Diamond: 1,000 questions, 272 with an image | harness analogue (`opencode_hle_tools_full`, run 2026-11-18 on local Docker) / cannot match (`opencode_hle_tools`) | `opencode_hle_tools_full` runs all 1000 rows on this agent with the dataset's bytes and no `detail`, but not with upstream's `[text, image_url]` content: OpenCode routes the staged file through its Read tool, so the model's first message carries two synthetic text parts, the image and the staged path ahead of the question text (Image questions through OpenCode). A vision-capable policy model is required. `opencode_hle_tools` runs the 728 text rows: report 728/1000 next to every number from it. |
 | No temperature sent | matched | The preset and its chain set none; OpenCode forwards one only when the request carries it. On `vllm_model`, confirm `sampling_overrides` carry none. |
 | Output budget (no with-tools figure; `>= 8192` recommended for reasoning models) | matched where stated | 32,768 output tokens per call in a 229,376 context, 14,400 s run budget, OpenCode's default step cap and compaction. |
 | "All models are evaluated with reasoning high" | matched (OpenAI-style) / cannot assert (Claude via gateway) | `++policy_model.responses_api_models.<model>.extra_body.reasoning_effort=high` on the run line, verified in the model-call capture; Claude models through this gateway ignore the parameter. |
@@ -1242,8 +1244,27 @@ as `family=question_span rule='8 consecutive words of the question' where=query 
 manual `web_fetch` of a Hugging Face dataset page was refused as a blocked site. The server-side
 checks hold on the session harness (the server's tests cover the episode seed and the MCP grant), but
 that pilot ran another harness on another image with open egress, so its 3/5 says nothing about this
-preset: no with-tools number is quoted for it until a pilot runs on it as it now is (session harness,
-reference image, OpenSandbox).
+preset. The pilot below ran it as it now is on the session harness and the reference image, on local Docker
+with open egress; no OpenSandbox run exists.
+
+**Acknowledged Docker pilot, 2026-11-18** (the acknowledged command of Sandboxed presets on a local Docker
+host with `--model-type litellm_model`, GPT-6 Astra `azure/openai/gpt-6-astra` with `reasoning_effort: high`
+in the model server's `extra_body`, judge `azure/openai/o3-mini` through `judge_openai.yaml`, Docker
+`network: host`, run timeout 2,400 s and 120 OpenCode steps per row, one repeat, concurrency 16; label:
+local Docker; egress not restricted; comparison infrastructure only). `hle_diamond/opencode_hle_tools`
+over the 728 text rows: **624/728 = 85.7 %** (knowledge 325/381, reasoning 299/347), 728/728 scored, two
+rows at the timeout. The 272 image rows through the same composition with the dataset swapped for the
+`has_image` rows of the full set (what `opencode_hle_tools_full` declares): **203/272 = 74.6 %**
+(reasoning 125/153, knowledge 78/119), 272/272 scored after one `--resume` for a row whose OpenCode
+process exited; every first policy call carried the image as described above. Composed over all 1,000
+questions, two runs of one configuration: **827/1000 = 82.7 %** against the published 82.9 % for GPT-6
+Astra with tools (knowledge 403/500 = 80.6 %, reasoning 424/500 = 84.8 %). Captured tool calls were
+`hle_tools_web_search` and `hle_tools_web_fetch` plus OpenCode's native tools, no other web tool; the
+reference note was in every request, SageMath, Lean and `/opt/science` in none. 48 of the 1,000 rows end
+with the agent asking the user a question instead of an `Answer:` line, as an interactive coding agent
+does when it cannot verify; upstream's protocol adds no nudge and neither does this preset. One run, one
+repeat, no confidence interval, open egress: a comparison, not a reproduction (Reference preset >
+OpenSandbox gate).
 
 ### Search exclusions
 

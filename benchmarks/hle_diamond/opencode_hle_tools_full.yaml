@@ -15,7 +15,8 @@
 # file cannot serve this harness (it bakes the instruction as a system message; opencode_agent folds a system
 # message into OpenCode's instructions, not into the user turn). Needs a vision-capable policy model.
 #
-# How an image row reaches the model, verified in code (no run of this preset is recorded yet):
+# How an image row reaches the model, verified in code and in the 2026-11-18 local Docker pilot of this composition
+# (README > Upstream web tools; every first policy call of the 272 image rows carried the image, no `detail`):
 # - the collector applies a prompt_config only when the dataset sets one (nemo_gym/rollouts/rollout_collection.py,
 #   the `if prompt_cfg is not None` block), so a materialized row's responses_create_params travel untouched; the
 #   Environment Server posts them as the agent's request (environment_servers/single_agent_turn/app.py,
