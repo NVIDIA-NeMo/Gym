@@ -11,13 +11,10 @@ output_container_fpath: null
 
 python_executable: /opt/ray_venvs/nemo_rl.models.generation.vllm.vllm_worker_async.VllmAsyncGenerationWorker/bin/python
 
-vllm_router:
-  branch: bxyu/nemo-rl-pd
-
 # Use the output as CONTAINER in the RL launcher. Warm up and serve through RL:
 # Gym's serving stages would launch outside the vLLM actor environment.
 
-vllm: null
+vllm_router: null
 mooncake: null
 flashinfer: null
 warmup: null
