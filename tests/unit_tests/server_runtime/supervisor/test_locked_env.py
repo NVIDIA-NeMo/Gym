@@ -490,3 +490,39 @@ def test_imported_components_retain_managed_dependency_contracts(component, extr
             assert locked_version.split(".")[0] == version
     if extra == "sandbox":
         assert {"tenacity", "opensandbox", "daytona", "e2b", "boto3"} <= packages.keys()
+
+
+def test_mirror_sync_installs_index_pinned_packages_from_their_index(tmp_path: Path, monkeypatch) -> None:
+    index = "https://download.pytorch.org/whl/cpu"
+    (tmp_path / "pyproject.toml").write_text(
+        f'[project]\nname="p"\nversion="0"\n[[tool.uv.index]]\nname="cpu"\nurl="{index}"\nexplicit=true\n'
+    )
+    (tmp_path / "uv.lock").write_text(
+        f'[[package]]\nname = "torch"\nversion = "2.6.0+cpu"\nsource = {{ registry = "{index}" }}\n'
+        '[[package]]\nname = "six"\nversion = "1"\nsource = { registry = "https://pypi.org/simple" }\n'
+    )
+    exported = (
+        "six==1 \\\n    --hash=sha256:aa\n    # via torch\ntorch==2.6.0+cpu \\\n    --hash=sha256:bb\n    # via p\n"
+    )
+    installed = []
+
+    def run(command, **kwargs):
+        if command[1] == "export":
+            Path(command[command.index("--output-file") + 1]).write_text(exported)
+        elif command[1:3] == ["pip", "install"]:
+            if "--default-index" in command:
+                assert "UV_EXTRA_INDEX_URL" not in kwargs["env"]
+            installed.append(
+                (
+                    command[command.index("--default-index") + 1] if "--default-index" in command else None,
+                    Path(command[-1]).read_text(),
+                )
+            )
+
+    monkeypatch.setattr(_locked_env.subprocess, "run", run)
+    command = ["uv", "sync", "--python", "3.12", "--no-dev"]
+    _locked_env._sync_from_mirror(command, tmp_path, tmp_path / "venv", {"UV_EXTRA_INDEX_URL": "https://mirror"})
+    assert installed == [
+        (None, "six==1 \\\n    --hash=sha256:aa\n    # via torch\n"),
+        (index, exported.split("    # via torch\n")[1]),
+    ]
