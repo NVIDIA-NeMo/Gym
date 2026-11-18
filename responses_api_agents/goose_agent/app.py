@@ -26,6 +26,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -299,7 +300,8 @@ class GooseAgent(SimpleResponsesAPIAgent):
             "GOOSE_PATH_ROOT": state.root,
             "GOOSE_PROVIDER": "openai",
             "GOOSE_MODEL": self.config.model,
-            # The environment outranks a provider or model the policy passes to `delegate`.
+            # The environment outranks the `delegate` tool's arguments. A recipe's own provider or model settings still
+            # outrank it.
             "GOOSE_SUBAGENT_PROVIDER": "openai",
             "GOOSE_SUBAGENT_MODEL": self.config.model,
             # Headless runs cannot answer approval prompts.
@@ -350,6 +352,15 @@ class GooseAgent(SimpleResponsesAPIAgent):
             "child_invocations_unavailable",
         ]
         gaps += ["optional_tool_grant_skipped" for _ in self.effective_tool_accesses(state.request)]
+        gap_records = [ObservationGap(code=code) for code in sorted(set(gaps))]
+        if self.config.delegate:
+            gap_records.append(
+                ObservationGap(
+                    code="model_call_ownership_unavailable",
+                    detail="Delegates share the root's session header, so their model and compaction calls are "
+                    "credited to the root invocation.",
+                )
+            )
         return AgentObservationBundle(
             source="goose",
             records=[
@@ -372,7 +383,7 @@ class GooseAgent(SimpleResponsesAPIAgent):
                     error_type=error_type,
                 ),
             ],
-            gaps=[ObservationGap(code=code) for code in sorted(set(gaps))],
+            gaps=gap_records,
         )
 
     async def _activate(self, state: GooseSession, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
@@ -400,9 +411,12 @@ class GooseAgent(SimpleResponsesAPIAgent):
             raise RuntimeError(f"Goose did not start (runner exit {return_code}): {artifacts.stderr[-4096:]}")
         if artifacts.sessions is None and not timed_out:
             raise RuntimeError(f"Goose left no session store: {artifacts.stderr[-4096:]}")
-        failed_extensions = re.findall(r"Failed to start extension '([^']+)'", artifacts.stderr)
+        # Goose prints "Failed to start extension '<name>'" for one extension and an unlabeled
+        # "Failed to start extensions (<error>)" when it cannot add them at all (empty name).
+        failed_extensions = set(re.findall(r"Failed to start extension(?:s \(| '([^']+)')", artifacts.stderr))
         if failed_extensions:
-            raise RuntimeError(f"Goose extensions could not start: {', '.join(sorted(set(failed_extensions)))}")
+            names = "all" if "" in failed_extensions else ", ".join(sorted(failed_extensions))
+            raise RuntimeError(f"Goose extensions could not start: {names}")
         sessions = await asyncio.to_thread(self._read_sessions, artifacts.sessions) if artifacts.sessions else []
         roots = [session for session in sessions if not session.get("parent_session_id")]
         if len(roots) > 1 or (not roots and not timed_out):
@@ -475,15 +489,17 @@ class GooseAgent(SimpleResponsesAPIAgent):
         if not isinstance(state, GooseSession):
             raise TypeError("Expected GooseSession")
         if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
-            raise HTTPException(409, "Goose activation must use its seeded rollout route")
+            raise AgentSessionConflictError("Goose activation must use its seeded rollout route")
         if state.session.closing:
-            raise HTTPException(409, "Goose session is closing")
+            raise AgentSessionConflictError("Goose session is closing")
         self._conversation(body)
         if state.task is None:
             state.activation_request = body.model_copy(deep=True)
             state.task = asyncio.create_task(self._activate(state, state.activation_request))
         elif body != state.activation_request:
-            raise HTTPException(409, "Goose sessions support one activation; retries must repeat the same request")
+            raise AgentSessionConflictError(
+                "Goose sessions support one activation; retries must repeat the same request"
+            )
         return (await asyncio.shield(state.task)).model_copy(deep=True)
 
 

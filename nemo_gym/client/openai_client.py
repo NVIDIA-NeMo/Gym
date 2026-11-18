@@ -17,8 +17,13 @@
 The Responses API and Chat Completions types it sends and receives live in `nemo_gym.core.responses_api_types`.
 """
 
+import asyncio
 import json
+import logging
+import os
 import random
+import re
+import time
 import uuid
 from asyncio import sleep
 from collections.abc import Mapping
@@ -123,6 +128,62 @@ def _timed_out_waiting_for_response(error: BaseException) -> bool:
     return False
 
 
+_LOG = logging.getLogger(__name__)
+
+# How long a timed-out attempt waits to read the server's queue metrics before it is recorded without them.
+_QUEUE_METRICS_TIMEOUT_S = 2.0
+
+# One sample line of the two queue gauges: the exact name, optional labels, a value, an optional timestamp.
+_QUEUE_METRIC_LINE = re.compile(
+    r"(?P<name>vllm:num_requests_(?:waiting|running))(?:\{[^}]*\})?[ ]+(?P<value>\S+)(?:[ ]+-?\d+)?[ ]*$"
+)
+
+
+def _vllm_queue_counts(metrics_text: str) -> tuple[int, int] | None:
+    """Requests waiting and running in a vLLM server's Prometheus metrics, summed over its engines, or None.
+
+    Only the exact metric names count, bare or with labels. Labelled variants such as
+    ``vllm:num_requests_waiting_by_reason`` are other series and are not summed in.
+    """
+    waiting = running = None
+    for line in metrics_text.splitlines():
+        match = _QUEUE_METRIC_LINE.match(line)
+        if match is None:
+            continue
+        if match["name"] == "vllm:num_requests_waiting":
+            waiting = (waiting or 0.0) + float(match["value"])
+        else:
+            running = (running or 0.0) + float(match["value"])
+    if waiting is None or running is None:
+        return None
+    return int(waiting), int(running)
+
+
+async def _server_queue(metrics_url: str) -> tuple[int, int] | None:
+    """The server's queue as its metrics report it now, or None when they cannot be read in time.
+
+    The read goes through the shared HTTP client, so on a heavily loaded client it can itself wait for a connection
+    and time out. The timeout then keeps its ordinary handling, and the missing reading is logged at debug level.
+    """
+    response = None
+    try:
+        response = await request(
+            "GET", metrics_url, _max_num_tries=1, timeout=ClientTimeout(total=_QUEUE_METRICS_TIMEOUT_S)
+        )
+        if response.status != 200:
+            _LOG.debug("Server queue not read: %s answered HTTP %s", metrics_url, response.status)
+            return None
+        return _vllm_queue_counts(await response.text())
+    except Exception as error:
+        _LOG.debug("Server queue not read from %s: %s", metrics_url, type(error).__name__)
+        return None
+    finally:
+        # An unread or partly read body would keep its connection acquired in the shared pool, so every exit
+        # (non-200, read error, timeout, cancellation) closes the response. After a full read this is a no-op.
+        if response is not None:
+            response.close()
+
+
 def _model_attempt_failure(
     reason: str,
     *,
@@ -131,6 +192,7 @@ def _model_attempt_failure(
     http_status: Optional[int] = None,
     foreign_error: Optional[SdkErrorDetails] = None,
     request_upload_complete: bool | None = None,
+    server_queue: tuple[int, int] | None = None,
 ) -> NgFailureEvent:
     """The model boundary's failure for one HTTP attempt of a model call (``operation_id``)."""
     return NgFailureEvent(
@@ -141,7 +203,11 @@ def _model_attempt_failure(
         operation_id=operation_id,
         attempt_id=attempt_id,
         http_status=http_status,
-        details=ModelFailureDetails(request_upload_complete=request_upload_complete),
+        details=ModelFailureDetails(
+            request_upload_complete=request_upload_complete,
+            server_requests_waiting=server_queue[0] if server_queue is not None else None,
+            server_requests_running=server_queue[1] if server_queue is not None else None,
+        ),
         foreign_error=foreign_error,
     )
 
@@ -334,6 +400,43 @@ def _rollout_request_id(headers: Mapping[str, str]) -> Optional[str]:
     return f"{rollout_id}-{uuid.uuid4().hex[:8]}"
 
 
+API_COST_LOG_ENV_VAR_NAME = "NEMO_GYM_API_COST_LOG"
+
+
+def log_api_cost(endpoint: str, request: Dict[str, Any], headers: Any, body: Any) -> None:
+    """Append one line per successful upstream call to $NEMO_GYM_API_COST_LOG (unset: nothing): the endpoint's
+    billed-cost headers (LiteLLM's x-litellm-response-cost*), the usage, the model and the prompt_cache_key (Codex's
+    per-conversation id), for pricing a run per call. Never request or response content, never auth headers."""
+    path = os.environ.get(API_COST_LOG_ENV_VAR_NAME)
+    if not path:
+        return
+    try:
+        cost = {
+            k.lower(): v for k, v in dict(headers or {}).items() if k.lower().startswith("x-litellm-response-cost")
+        }
+        record = {
+            "ts": time.time(),
+            "pid": os.getpid(),
+            "endpoint": endpoint,
+            "model": request.get("model"),
+            "prompt_cache_key": request.get("prompt_cache_key"),
+            "cost": cost,
+            "usage": body.get("usage") if isinstance(body, dict) else None,
+        }
+        with open(path, "a") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception:  # accounting must never fail a model call
+        logging.getLogger(__name__).warning("could not write %s", path, exc_info=True)
+
+
+async def alog_api_cost(endpoint: str, request: Dict[str, Any], headers: Any, body: Any) -> None:
+    """``log_api_cost`` off the event loop: nothing when the log is off, else the append runs in a worker thread so
+    a slow (e.g. shared) filesystem never stalls other requests."""
+    if not os.environ.get(API_COST_LOG_ENV_VAR_NAME):
+        return
+    await asyncio.to_thread(log_api_cost, endpoint, request, headers, body)
+
+
 class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     """This is just a stub class that wraps around aiohttp"""
 
@@ -419,6 +522,14 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             "Time limit for each HTTP attempt to obtain a connection, including "
             "waiting for a free aiohttp connection-pool slot (ClientTimeout.connect). "
             "Requires request_timeout_seconds."
+        ),
+    )
+
+    record_server_queue: bool = Field(
+        default=False,
+        description=(
+            "When an attempt times out waiting for the response, read the server's vLLM queue metrics "
+            "(requests waiting and running, from /metrics beside the API) and record them on the attempt's failure."
         ),
     )
 
@@ -522,6 +633,9 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         operation_id = uuid.uuid4().hex
         transport_failures = 0
         last_transport_failure: tuple[Exception, NgFailureEvent] | None = None
+        # Response timeouts whose server queue is being read; each is recorded once its read returns.
+        queue_reads: list[tuple[Exception, str, asyncio.Task]] = []
+        latest_transport_error: Exception | None = None
 
         def observe_terminal(*, operation_id, outcome, final_attempt_id, failure_id=None) -> None:
             # HTTP retry-loop observations, including time spent waiting; not inferred token usage.
@@ -537,8 +651,17 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             )
 
         def observe_transport_failure(error: Exception, upload_complete: bool | None) -> None:
-            nonlocal transport_failures, last_transport_failure
+            nonlocal transport_failures, last_transport_failure, latest_transport_error
             transport_failures += 1
+            latest_transport_error = error
+            if self.record_server_queue and upload_complete is True and _timed_out_waiting_for_response(error):
+                # The queue is read now, at the timeout, and the attempt is recorded once the read returns.
+                # The metrics page is assumed to sit beside ``/v1``, on the host that serves the request. Behind a
+                # router or load balancer it reaches one replica, which may not be the one that timed out.
+                metrics_url = re.sub(r"/v1/?$", "", self.base_url.rstrip("/")) + "/metrics"
+                read = asyncio.get_running_loop().create_task(_server_queue(metrics_url))
+                queue_reads.append((error, f"{operation_id}-transport-{transport_failures}", read))
+                return
             failure = _model_attempt_failure(
                 MODEL_RESPONSE_TIMEOUT_REASON
                 if upload_complete is True and _timed_out_waiting_for_response(error)
@@ -551,6 +674,22 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             )
             last_transport_failure = (error, failure)
             observe_failure(failure)
+
+        async def record_queue_reads() -> None:
+            nonlocal last_transport_failure
+            while queue_reads:
+                error, attempt_id, read = queue_reads.pop(0)
+                failure = _model_attempt_failure(
+                    MODEL_RESPONSE_TIMEOUT_REASON,
+                    operation_id=operation_id,
+                    attempt_id=attempt_id,
+                    request_upload_complete=True,
+                    foreign_error=sdk_error_details(error),
+                    server_queue=await read,
+                )
+                if error is latest_transport_error:
+                    last_transport_failure = (error, failure)
+                observe_failure(failure)
 
         def observe_http_failure(response: ClientResponse) -> Optional[NgFailureEvent]:
             # A Gym server's reply already forwards its own record; it is not recorded twice.
@@ -574,7 +713,12 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             tries += 1
             try:
                 response = await request(_on_transport_failure=observe_transport_failure, **request_kwargs)
-            except Exception as error:
+            except BaseException as error:
+                if not isinstance(error, Exception):
+                    for _, _, read in queue_reads:
+                        read.cancel()
+                    raise
+                await record_queue_reads()
                 # As in _raise_exhausted, the raised error's explicit cause is the attempt it ended on.
                 if last_transport_failure is not None and last_transport_failure[0] is error:
                     failed = last_transport_failure[1]
@@ -586,6 +730,9 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                     )
                     raise error from failed
                 raise
+
+            # A response timeout the transport recovered from is recorded like any other.
+            await record_queue_reads()
 
             # The body is consumed by the public API method after headers arrive. Keep
             # that read attached to this attempt, without replaying a delivered request.
@@ -754,7 +901,9 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        return await self._read_response_json(response)
+        body = await self._read_response_json(response)
+        await alog_api_cost("/chat/completions", kwargs, getattr(response, "headers", None), body)
+        return body
 
     async def create_completion(self, **kwargs):
         request_kwargs = dict(
@@ -774,7 +923,9 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        return await self._read_response_json(response)
+        body = await self._read_response_json(response)
+        await alog_api_cost("/responses", kwargs, getattr(response, "headers", None), body)
+        return body
 
     async def create_tokenize(self, **kwargs):
         base_url = self.base_url.removesuffix("/v1")
