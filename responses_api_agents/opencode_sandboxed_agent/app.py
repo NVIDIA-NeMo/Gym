@@ -975,10 +975,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     "options": {
                         "baseURL": base_url,
                         "apiKey": "dummy_key",  # pragma: allowlist secret
-                        "chunkTimeout": int(self.config.sandbox_timeout * 1000),
-                        "timeout": self.config.opencode_model_call_timeout
-                        if self.config.opencode_model_call_timeout is not None
-                        else False,  # milliseconds
+                        # Experiment: the provider limits used before the 1 h call timeout became the default.
+                        "chunkTimeout": 600000,  # milliseconds, 10 min between streamed chunks
+                        "timeout": False,  # no limit on a call's total time
                     },
                     "models": {
                         "dummy_model": {
