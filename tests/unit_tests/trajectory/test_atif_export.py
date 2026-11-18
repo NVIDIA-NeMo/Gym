@@ -1930,6 +1930,26 @@ def test_transcript_to_atif_reports_cached_input_tokens() -> None:
     assert encoded["final_metrics"]["total_cached_tokens"] == 80
 
 
+def test_transcript_to_atif_keeps_a_reported_zero_cached_count_apart_from_a_missing_one() -> None:
+    """A reported 0 means no prompt token came from the cache; a missing count means the model did not say."""
+    base_usage: dict[str, Any] = {"input_tokens": 100, "output_tokens": 5, "total_tokens": 105}
+    reported_zero = _transcript(
+        [{"role": "user", "content": "hi"}],
+        [_assistant_message("m1", "ok")],
+        usage={**base_usage, "input_tokens_details": {"cached_tokens": 0}},
+    )
+    not_reported = _transcript(
+        [{"role": "user", "content": "hi"}],
+        [_assistant_message("m1", "ok")],
+        usage={**base_usage, "input_tokens_details": {}},
+    )
+
+    assert reported_zero.final_metrics.total_cached_tokens == 0
+    assert json.loads(encode_atif_trajectory(reported_zero))["final_metrics"]["total_cached_tokens"] == 0
+    assert not_reported.final_metrics.total_cached_tokens is None
+    assert "total_cached_tokens" not in json.loads(encode_atif_trajectory(not_reported))["final_metrics"]
+
+
 @pytest.mark.parametrize(
     "details",
     [
