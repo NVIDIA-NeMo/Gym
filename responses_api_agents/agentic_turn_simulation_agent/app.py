@@ -96,6 +96,10 @@ _TOOL_NAME = re.compile(TOOL_NAME_PATTERN)
 # Replies of an environment server that refuse the call itself, not a failure to answer it: no such tool (404), or
 # arguments it does not take (422).
 _REFUSED_CALL_STATUSES = (404, 422)
+# Replies that refuse the grant itself: no valid episode token (401), a token for another episode or a path outside its
+# tools (403), an episode that is not running there (410). A setup or protocol fault, not a failure to simulate: no
+# retry would pass, and masked as a simulator failure it would hide the fault in the failed rate, so the turn fails.
+_GRANT_REFUSED_STATUSES = (401, 403, 410)
 _PROMPT_TOKENS = (
     re.compile(r"\((\d+) in the messages"),
     re.compile(r"prompt contains (\d+) input tokens"),
@@ -685,6 +689,8 @@ class AgenticTurnSimulationAgent(SimpleAgent):
                 output = await get_response_json(http)
                 return (output if isinstance(output, str) else json.dumps(output, ensure_ascii=False)), http.status
             detail = (await http.content.read()).decode(errors="replace")
+            if http.status in _GRANT_REFUSED_STATUSES:
+                raise RuntimeError(f"The tool grant was refused for {call.name!r}: HTTP {http.status}: {detail[:300]}")
             if http.status in _REFUSED_CALL_STATUSES:
                 reason = (
                     "its arguments were refused" if http.status == 422 else f"there is no tool named {call.name!r}"

@@ -1005,6 +1005,16 @@ class TestAgentSessions:
         response, *_ = await _granted_episode(agent, grant)
         assert len(grant.calls) == 2 and response.output[1].output == simulator_failure("HTTP 503: busy")
 
+    @pytest.mark.parametrize("status", [401, 403, 410])
+    async def test_a_refused_grant_fails_the_turn_unretried(self, status: int, sleep: AsyncMock) -> None:
+        # A bad token or an ended episode is the setup's fault: not a simulator failure the scoring would mask.
+        agent, script = _agent(_model(_fc("bash", "c1")), _model(_msg("done")))
+        grant = GrantScript(_http({"detail": "refused"}, status=status))
+        with pytest.raises(RuntimeError, match=f"tool grant was refused for 'bash': HTTP {status}"):
+            await _granted_episode(agent, grant)
+        assert len(grant.calls) == 1 and len(script.model_calls) == 1
+        sleep.assert_not_awaited()
+
     async def test_a_session_without_a_grant_is_refused_before_any_call(self) -> None:
         agent, _ = _agent()
         with pytest.raises(RuntimeError, match="needs a direct HTTP tool access"):
