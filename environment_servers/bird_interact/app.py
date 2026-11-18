@@ -253,6 +253,8 @@ class BirdInteractResult(BaseModel):
     mask_sample: bool = False
     failure_kind: str | None = None
     failure_reason: str | None = None
+    # One entry for each submission graded against a solution SQL that does not run, which fails that submission.
+    solution_errors: list[str] = Field(default_factory=list)
 
 
 class BirdInteractFailure(EpisodeFailure):
@@ -342,8 +344,8 @@ class BirdInteractEpisode:
     # Set when an infrastructure failure disrupted the episode, so its sample is masked.
     failure_kind: str | None = None
     failure_reason: str | None = None
-    # Set when the task's own solution SQL failed, which fails the episode.
-    solution_error: str | None = None
+    # The task's own solution SQL failed when these submissions were graded, which failed them.
+    solution_errors: list[str] = field(default_factory=list)
     toolset: EpisodeToolset | None = None
     # Set when ``run`` ends. A sandbox replaced after that would start during the episode's cleanup, which runs its
     # entries in reverse and would never stop it.
@@ -705,11 +707,6 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
                     failure_reason=(error.message if error else f"Agent reported failure in turn {turn}")[:2000],
                     terminal=action == OutcomeAction.FAIL,
                 )
-            if episode.solution_error is not None:
-                # Another attempt would grade against the same broken solution.
-                raise handled_episode_failure(
-                    stage="verification", operation="episode", failure_reason=episode.solution_error, terminal=True
-                )
             message = self._next_message(episode)
             if isinstance(message, _Stop):
                 return message.reason
@@ -834,6 +831,7 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
                 mask_sample=episode.failure_kind is not None,
                 failure_kind=episode.failure_kind,
                 failure_reason=episode.failure_reason,
+                solution_errors=list(episode.solution_errors),
             ),
         )
 
@@ -859,9 +857,9 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
         """Grade a submission for the current phase and move the protocol on, as the ADK's grader does.
 
         In c-Interact a pass on the phase's first submission earns its ``first_attempt`` reward, and a later one its
-        ``after_debug`` reward; a-Interact always earns ``first_attempt``. Raises ``SandboxCommandError`` when the
-        sandbox cannot grade it, and ``ValueError`` when the task's own solution fails, which also records it on the
-        episode.
+        ``after_debug`` reward; a-Interact always earns ``first_attempt``. A solution SQL that does not run fails the
+        submission, as the ADK's ``ex_base`` returns 0 for it, and is recorded on the episode. Raises
+        ``SandboxCommandError`` when the sandbox cannot grade it.
         """
         task, phase = episode.task, episode.phase
         current = task if phase == 1 else task.follow_up
@@ -882,8 +880,10 @@ class BirdInteractEnvironmentServer(BaseEnvironmentServerWithTools[BirdInteractR
             },
         )
         if "solution_error" in result:
-            episode.solution_error = f"Task {task.instance_id}: {result['solution_error']}"[:2000]
-            raise ValueError(episode.solution_error)
+            error = f"Task {task.instance_id}, phase {phase}: {result['solution_error']}"[:2000]
+            LOGGER.warning(error)
+            episode.solution_errors.append(error)
+            result = {"passed": False, "timed_out": False, "execution_error": None}
         if not result["passed"]:
             if result["timed_out"]:
                 message = EXECUTION_TIMEOUT

@@ -125,8 +125,9 @@ places (decimals half-up), dates and timestamps as `YYYY-MM-DD`, JSON values and
 when `conditions.order` is set and as sets otherwise. Each query keeps the rows of its last statement, at most 10,000
 when it starts with `SELECT` or `WITH`, and each query times out after `sql_timeout_seconds` (default 60), however
 many statements it holds. If the solution fails after the submission ran, it runs again on the episode's database: a
-submission that broke the state the solution needs is wrong, as in the ADK, and only a solution that fails there too
-is bad task data, which fails the episode.
+submission that broke the state the solution needs is wrong, as in the ADK. A solution that fails there too is bad
+task data: the ADK's `ex_base` returns 0 for it, so the submission is wrong, the episode goes on, and the rollout's
+`solution_errors` lists the error. `benchmarks/bird_interact/README.md` lists the Lite tasks this affects.
 
 Nothing that grading or an exploratory query runs stays in the database. SQLite runs it on a scratch copy and refuses
 `ATTACH`, which could open the episode's file. PostgreSQL runs it on a copy of the episode's database, as the ADK

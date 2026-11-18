@@ -1331,20 +1331,35 @@ class TestAgentSession:
         assert response.failure.agent_observations.source == "test" and client.closes == 1
 
     @pytest.mark.parametrize(("mode", "tool"), [("c_interact", "submit_sql"), ("a_interact", "submit")])
-    async def test_a_broken_solution_fails_the_episode_for_good_and_keeps_the_turns(
-        self, mode: str, tool: str
-    ) -> None:
+    async def test_a_broken_solution_fails_the_submission_as_the_adk_grades_it(self, mode: str, tool: str) -> None:
         async def submit(tools: _Tools) -> str:
-            assert (await tools.call(tool, sql=CORRECT_1)).status_code == 500
+            assert (await tools.call(tool, sql=CORRECT_1)).status_code == 200
             return "Submitted."
 
-        server, _ = _server(mode, turns=[submit])
+        server, _ = _server(mode, turns=[submit, submit])
 
         response = await _run(server, sol_sql=["SELECT missing_column FROM sales"])
 
-        assert (response.failure.stage, response.failure.terminal) == ("verification", True)
-        assert "missing_column" in response.failure.failure_reason
-        assert [turn.turn for turn in response.failure.turns] == [1]
+        # The ADK's ex_base returns 0 when the solution does not run: the phase fails, and the episode goes on.
+        assert response.failure is None
+        assert (response.result.reward, response.result.mask_sample) == (0.0, False)
+        assert response.result.solution_errors
+        assert all("bookshop_1, phase 1" in e and "missing_column" in e for e in response.result.solution_errors)
+
+    async def test_a_broken_follow_up_solution_keeps_phase_1_s_reward(self) -> None:
+        replies: list[str] = []
+        server, client = _server(
+            turns=[_submit(PHASE_1_OF_3, replies), _submit(PHASE_2_OF_3, replies), _submit(PHASE_2_OF_3, replies)]
+        )
+        follow_up = TASKS["bookshop_3"]["follow_up"] | {"sol_sql": ["SELECT missing_column FROM sales"]}
+
+        response = await _run(server, "bookshop_3", follow_up=follow_up)
+
+        assert replies[1:] == ["SQL failed Phase 2. Your SQL is not correct.\nBudget remaining: 0 bird-coins"] * 2
+        assert _opening(client, 3) == DEBUG_WRONG_RESULT_MESSAGE
+        assert (response.result.reward, response.result.stop_reason) == (pytest.approx(0.7), "failed")
+        assert [(phase["phase"], phase["passed"]) for phase in _phases(response)] == [(1, True), (2, False)]
+        assert [e.split(":")[0] for e in response.result.solution_errors] == ["Task bookshop_3, phase 2"] * 2
 
     async def test_a_failed_close_fails_the_episode_at_cleanup(self) -> None:
         server, client = _server(turns=[_submit(CORRECT_1)])
