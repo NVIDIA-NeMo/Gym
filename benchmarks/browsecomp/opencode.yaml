@@ -1,0 +1,85 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# BrowseComp with OpenCode in place of browsecomp_agent: the same tasks, prompts, Resources Server and judge as
+# config.yaml. OpenCode runs in a sandbox it creates and reaches search, browse and bash_command over MCP, so the
+# search keys stay on the Resources Server. The rows are prepare.py's without the tool list
+# (prepare_harness_neutral.py). See "Run another harness" in README.md.
+config_paths:
+- benchmarks/browsecomp/config.yaml
+
+# OpenCode's sandbox reaches the model and the Resources Server's MCP endpoint by address; the agent stays on loopback,
+# since a request without a session runs OpenCode on the Gym host.
+absolute_ip_server_types: [responses_api_models, resources_servers]
+
+# Drop browsecomp_agent; the environment server below runs OpenCode instead.
+browsecomp_benchmark_agent: null
+
+browsecomp_benchmark_resources_server:
+  resources_servers:
+    browsecomp_advanced_harness:
+      allowed_agents: [opencode_agent]
+      # Serves search, browse and bash_command with the descriptions and parameters the rows give browsecomp_agent.
+      expose_tools_over_mcp: true
+
+browsecomp_opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      entrypoint: app.py
+      description: BrowseComp web research with OpenCode in place of browsecomp_agent
+      num_workers: 1
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      opencode_version: 1.17.11
+      # Concurrent OpenCode runs in this worker. Keep this equal to max_concurrent_episodes below so episodes
+      # wait for admission before seeding sandboxes and starting their deadlines.
+      concurrency: 32
+      # Use the served context length minus max_output_tokens (262,144 - 65,536 for this preset).
+      # OpenCode compacts 20,000 tokens below context_window and requests max_output_tokens on every call.
+      context_window: 196608
+      # Per model call. Reaching this cap ends the entire run with incomplete_reason=max_output_tokens.
+      max_output_tokens: 65536
+      # browsecomp_agent's activation cap (sandbox_runner_timeout_seconds), inside the environment server's
+      # default_episode_timeout_seconds.
+      timeout: 3600
+      session_close_timeout_seconds: 90
+      # MCP connection and SDK request timeout. Bun's fetch still limits a call to about 300 seconds,
+      # which can interrupt a search or browse waiting out provider rate limits.
+      mcp_tool_timeout_seconds: 900
+      sandbox_provider: sandbox
+      # Docker has no network policy. With a provider that has one, such as OpenSandbox, set
+      # network_access: model_and_tools so the sandbox reaches only the model and the Resources Server. This
+      # requires an image with the pinned runtime and plugin dependencies preinstalled, plus
+      # sandbox_executable_path/sandbox_executable_sha256; python:3.13-slim cannot install them with restricted egress.
+      # See responses_api_agents/opencode_agent/README.md, "Offline sandbox runtimes and native model identity".
+      sandbox_config:
+        image: python:3.13-slim
+        workdir: /workspace
+        ttl_s: 7200
+      opencode_config:
+        # Only the BrowseComp tools, as browsecomp_agent offers. OpenCode's own shell and file tools would run in its
+        # sandbox, which holds none of the pages search and browse save, and its web tools would skip the Resources
+        # Server's domain exclusions. The model sees the MCP tools as <grant>_<tool>; the grant is named after the
+        # Resources Server instance.
+        permission:
+          "*": deny
+          browsecomp_benchmark_resources_server_*: allow
+      datasets:
+      - name: browsecomp
+        type: benchmark
+        jsonl_fpath: benchmarks/browsecomp/data/browsecomp_benchmark_harness_neutral.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/browsecomp/prepare_harness_neutral.py
+        num_repeats: 1
+
+browsecomp_benchmark_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server:
+        type: responses_api_agents
+        name: browsecomp_opencode_agent
+      resources_tool_transports: [mcp]
+      # Match the agent's concurrency; admission waits before sandbox setup and the episode deadline.
+      max_concurrent_episodes: 32
+      queue_timeout_seconds: 86400

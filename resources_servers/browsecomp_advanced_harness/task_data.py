@@ -4,8 +4,9 @@
 
 This server reuses the tavily_search lineage: its app.py redeclares ``TavilySearchRunRequest``
 with the identical two required fields (question, ground_truth), so the task schema is imported
-from tavily_search rather than redefined. Rows additionally carry tools inside
-``responses_create_params`` (framework-owned, not typed here). verify() branches on server
+from tavily_search rather than redefined. Rows from ``prepare.py`` additionally carry tools inside
+``responses_create_params`` (framework-owned, not typed here). Rows from ``prepare_harness_neutral.py`` omit
+that tool list because session harnesses obtain the tools over MCP. verify() branches on server
 config.use_judge — LLM judge against ground_truth, or (when use_judge=false) exact string
 equality between ground_truth and the span extracted from the last assistant message by a fixed
 "Answer: ... Confidence:" pattern; ground_truth is never interpreted as a regex.

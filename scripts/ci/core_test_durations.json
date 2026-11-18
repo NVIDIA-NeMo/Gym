@@ -22,6 +22,7 @@
     "tests/unit_tests/artifacts/test_resolved_config.py": 0.08,
     "tests/unit_tests/artifacts/test_run_artifacts.py": 0.01,
     "tests/unit_tests/artifacts/test_run_exporters.py": 0.03,
+    "tests/unit_tests/benchmarks/test_browsecomp_prepare.py": 0.01,
     "tests/unit_tests/client/test_http_client.py": 8.16,
     "tests/unit_tests/client/test_openai_client.py": 0.61,
     "tests/unit_tests/client/test_server_client.py": 0.13,
