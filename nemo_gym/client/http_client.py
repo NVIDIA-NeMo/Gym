@@ -422,6 +422,7 @@ async def request(
     _read_body: bool = False,
     _retry_other_errors: bool = True,
     *,
+    _refuse_redirects: bool = False,
     _connection_retry_window: Optional["ConnectionRetryWindow"] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
@@ -438,6 +439,10 @@ async def request(
     ``ServerClient`` server name, ``remote_agent_service`` for the remote agent's external
     service, or ``None`` for the fallback label ``external``. It is retained across retries
     and redirects and is not forwarded to aiohttp.
+
+    ``_refuse_redirects=True`` disables redirect following and rejects received redirect statuses for an explicitly
+    opted-in mutating ServerClient call. A retry cap alone does not opt in, and callers using
+    ``allow_redirects=False`` otherwise retain their own response-status handling.
 
     ``_max_num_tries`` caps this call's total attempts on every exception path. It replaces the
     default generic-error limit (``MAX_NUM_TRIES`` attempts for external calls, the internal retry budget for
@@ -504,6 +509,7 @@ async def request(
             _on_transport_failure=_on_transport_failure,
             _read_body=_read_body,
             _retry_other_errors=_retry_other_errors,
+            _refuse_redirects=_refuse_redirects,
             _connection_retry_window=_connection_retry_window,
             **kwargs,
         )
@@ -526,6 +532,7 @@ async def request(
             _on_transport_failure=_on_transport_failure,
             _read_body=_read_body,
             _retry_other_errors=_retry_other_errors,
+            _refuse_redirects=_refuse_redirects,
             _connection_retry_window=_connection_retry_window,
             **kwargs,
         )
@@ -550,6 +557,7 @@ async def _traced_request(
     _read_body: bool = False,
     _retry_other_errors: bool = True,
     *,
+    _refuse_redirects: bool = False,
     _connection_retry_window: Optional["ConnectionRetryWindow"] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
@@ -597,6 +605,7 @@ async def _traced_request(
             _on_transport_failure=_on_transport_failure,
             _read_body=_read_body,
             _retry_other_errors=_retry_other_errors,
+            _refuse_redirects=_refuse_redirects,
             _connection_retry_window=_connection_retry_window,
             **kwargs,
         )
@@ -743,9 +752,13 @@ async def _request_with_retries(
     _read_body: bool = False,
     _retry_other_errors: bool = True,
     *,
+    _refuse_redirects: bool = False,
     _connection_retry_window: Optional["ConnectionRetryWindow"] = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
+    if _refuse_redirects:
+        # Redirects can replay a mutation outside this loop's attempt counter.
+        kwargs["allow_redirects"] = False
     client = get_global_aiohttp_control_client() if _control else get_global_aiohttp_client()
     # Initialization stays inside the client span and sets the metrics flag before it is read.
     token = set_server_name(_server_name or "external") if _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY else None
@@ -777,6 +790,15 @@ async def _request_with_retries(
                 attempt_kwargs["timeout"] = window.bound_connect(kwargs.get("timeout") or client.timeout)
             try:
                 response = await client.request(method=method, url=url, **attempt_kwargs)
+                if _refuse_redirects and response.status in {301, 302, 303, 307, 308}:
+                    response.release()
+                    raise ClientResponseError(
+                        response.request_info,
+                        response.history,
+                        status=response.status,
+                        message="Redirect refused for a single-attempt mutating request",
+                        headers=response.headers,
+                    )
                 if window is not None:
                     window.close()
                 if (

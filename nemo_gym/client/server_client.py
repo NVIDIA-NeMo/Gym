@@ -198,9 +198,18 @@ class ServerClient(BaseModel):
         *,
         _control: bool = False,
         _resend_after_disconnect: bool = True,
+        _max_num_tries: Optional[int] = None,
         **kwargs: Unpack[_RequestOptions],
     ) -> ClientResponse:
-        """Call another server. ``_control`` sends the call over the reserved control pool."""
+        """Call another server, optionally using the reserved control pool.
+
+        Boolean ``single_attempt_mutating_requests: true`` limits Gym's shared loop
+        to one client invocation for mutations. HTTP-library-internal replay of
+        idempotent methods remains outside that cap; read and logical retries are unchanged.
+        """
+        single_attempt = self.global_config_dict.get("single_attempt_mutating_requests", False) is True and (
+            method.upper() not in {"GET", "HEAD", "OPTIONS", "TRACE"}
+        )
         model_server_name = getenv(NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME)
         model_server_base_url = getenv(NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME)
         if model_server_base_url and server_name == model_server_name:
@@ -262,12 +271,15 @@ class ServerClient(BaseModel):
             _internal=True,
             _server_name=server_name,
             _control=_control,
+            _max_num_tries=1 if single_attempt else _max_num_tries,
+            _refuse_redirects=single_attempt,
             # A /run starts an episode attempt, so with checkpointing it is never sent twice.
             # A dropped connection usually means the server's worker died mid-episode.
             # Sending it again would run the attempt a second time,
             # and the first run's sessions on other servers would never be released: the second run replies,
             # so the controller never retires the attempt.
             _resend_after_disconnect=_resend_after_disconnect
+            and not single_attempt
             and not (self.checkpoint_enabled() and url_path == "/run"),
             # Collection reads the whole /run reply, so a reply cut off mid-body counts as a failed attempt.
             _read_body=url_path == "/run",
