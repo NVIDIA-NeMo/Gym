@@ -302,6 +302,25 @@ def _plugin_log_on_the_row(plugin_log: str) -> str:
     return plugin_log[:end] + gap + plugin_log[-end:]
 
 
+def _plugin_log_read_command(plugin_log_path: str) -> str:
+    """The sh command that reads the plugin log at plugin_log_path (see _read_plugin_log).
+
+    It prints what it found instead of a file it would read, or "file:" and at most _PLUGIN_LOG_MAX_BYTES + 1 bytes of
+    the file in base64, and then _PLUGIN_LOG_READ_END. A pipeline's status is its last command's, and sh has no
+    pipefail, so head's own exit status goes out on fd 4, which the command substitution captures, while base64
+    writes to fd 3, the command's output: the command exits 1 when head or base64 fails, or is missing, rather than
+    print a shorter log.
+    """
+    path = shlex.quote(plugin_log_path)
+    return (
+        f"if test -L {path}; then printf symlink; elif ! test -e {path}; then printf absent; "
+        f"elif ! test -f {path}; then printf not_regular; elif ! test -r {path}; then printf unreadable; "
+        f"else printf file: && {{ s=$( {{ {{ head -c {_PLUGIN_LOG_MAX_BYTES + 1} -- {path} 2>/dev/null; "
+        f'echo $? >&4; }} | base64 >&3; }} 4>&1 ) && test "$s" = 0 || exit 1; }} 3>&1; fi; '
+        f"printf {_PLUGIN_LOG_READ_END}"
+    )
+
+
 class SearchResourcesServerConfig(BaseResourcesServerConfig):
     # ---- Exa response cache -------------------------------------------------------------------
     # Shared by every shard and every sandbox: the store is a directory on Lustre, so it outlives
@@ -1272,23 +1291,18 @@ class SearchResourcesServer(SimpleResourcesServer):
 
         A read that fails raises a sandbox failure with a provider failure kind, and the server answers 500, which an
         Environment Server treats as retryable: the episode fails ungraded and runs again on resume, as a relay run
-        whose output could not be captured does. A row masked instead would stay in the results with a reward that
-        measured nothing, and lower a score that counts masked rows. What the read found in place of a file it would
-        read, and a file over the cap, are no failure of the read: _plugin_log_fault scores such an episode 0.
+        whose output could not be captured does. The read fails when head, base64 or sh fails or is missing
+        (_plugin_log_read_command), so a head that read nothing or stopped early is never taken for an empty or shorter
+        log, which would score the episode 0 as the model's or grade it without its ending. A row masked instead would
+        stay in the results with a reward that measured nothing, and lower a score that counts masked rows. What the
+        read found in place of a file it would read, and a file over the cap, are no failure of the read:
+        _plugin_log_fault scores such an episode 0.
         """
         sandbox = None if self._lent_sandboxes is None else self._lent_sandboxes.get(session_id)
         if self.config.plugin_log_path is None or sandbox is None:
             return None
-        path = shlex.quote(self.config.plugin_log_path)
         # From /, which exists whatever the harness did to its workdir. Each test runs before anything opens the path.
-        result = await sandbox.exec(
-            f"if test -L {path}; then printf symlink; elif ! test -e {path}; then printf absent; "
-            f"elif ! test -f {path}; then printf not_regular; elif ! test -r {path}; then printf unreadable; "
-            f"else printf file: && head -c {_PLUGIN_LOG_MAX_BYTES + 1} -- {path} 2>/dev/null | base64 || exit 1; fi; "
-            f"printf {_PLUGIN_LOG_READ_END}",
-            cwd="/",
-            timeout_s=60,
-        )
+        result = await sandbox.exec(_plugin_log_read_command(self.config.plugin_log_path), cwd="/", timeout_s=60)
         if result.return_code != 0 or result.error_type is not None:
             raise self._plugin_log_read_failure(
                 sandbox,

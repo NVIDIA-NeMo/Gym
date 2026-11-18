@@ -193,12 +193,14 @@ a crash an episode starts over from its input.
   A log that cannot be read answers 500, which an Environment Server treats as retryable. Its failure
   kind is `provider_io_timeout` when the read timed out; `provider_request_failed` when it exited
   non-zero, reported another error type, or printed output cut short or malformed; or the provider's own
-  kind when `exec` raised a typed failure. An untyped exception from `exec` carries no kind. An
+  kind when `exec` raised a typed failure. An untyped exception from `exec` carries no kind. The read
+  exits non-zero when `head` or `base64` fails: `sh` has no `pipefail`, so it checks `head`'s own exit
+  status, and a `head` that read nothing or stopped early is never taken for an empty or shorter log. An
   Environment Server records these kinds as the cause of the failed episode, in the failure row's
-  `_ng_failure_events`. The model can still cause such a 500: by putting a FIFO at the path between the
-  read's checks and its read, which holds the read until its timeout, or by removing `base64` or `sh` as
-  root. Without `plugin_log_path`, verify reads nothing and scores nothing 0 for it, so a harness that
-  brings no OpenCode plugins is graded on its answer alone.
+  `_ng_failure_events`. The model can still cause such a 500: by putting at the path, between the read's
+  checks and its read, a FIFO, which holds the read until its timeout, or anything else `head` cannot
+  read; or by removing `head`, `base64` or `sh` as root. Without `plugin_log_path`, verify reads nothing
+  and scores nothing 0 for it, so a harness that brings no OpenCode plugins is graded on its answer alone.
 * **Export copy.** With `episode_export_copy_dir` set, an episode's verify copies the session exports to
   this host after the plugin log read and before the sandbox stops, within 300 s. It copies the regular
   files directly in `episode_export_dir`, where the harness writes them (`opencode_agent`'s `export_dir`),

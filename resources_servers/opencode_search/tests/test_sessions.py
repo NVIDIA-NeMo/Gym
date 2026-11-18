@@ -1142,6 +1142,51 @@ def test_a_plugin_log_that_cannot_be_read_names_its_failure_kind(
         _scored_0_for_its_plugin_log(verified, PLUGIN_LOG_MISSING)
 
 
+@pytest.mark.parametrize("shell", ["/bin/sh", "/bin/bash"], ids=["sh", "bash"])
+@pytest.mark.parametrize(
+    "head",
+    ["exit 1", f"printf '%s' {shlex.quote(SENTINEL)}; exit 1"],
+    ids=["reads_nothing", "fails_after_a_line"],
+)
+def test_a_plugin_log_read_whose_head_fails_fails_the_verify_for_a_retry(
+    workdir, tmp_path, started, stopped, monkeypatch, shell, head
+) -> None:
+    """A head that fails, as on an I/O error or when the image lacks it, cannot say so through the pipe into base64:
+    sh has no pipefail. The read checks head's own exit status, so the verify answers 500 and the episode runs again,
+    rather than an empty log scoring it 0 as the model's, or the lines read before the failure grading it without the
+    rest."""
+    named_configs = {
+        "sandbox": {
+            "local": {"workspace_root": str(tmp_path / "agent-runs"), "shell": shell},
+            "default_metadata": {"sandbox-api": "local"},
+        }
+    }
+    monkeypatch.setattr("nemo_gym.server_runtime.sandbox_lending.get_global_config_dict", lambda: named_configs)
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    (stubs / "head").write_text(f"#!/bin/sh\n{head}\n")
+    (stubs / "head").chmod(0o755)
+    log = tmp_path / "plugins.log"
+    log.write_text(SENTINEL + TURN_CAP)
+    env = {"PATH": f"{stubs}{os.pathsep}{os.environ['PATH']}"}
+    server = _server(workdir, _sandbox_config(env=env), plugin_log_path=str(log))
+    app = server.setup_webserver()
+    server.setup_exception_middleware(app)
+    client = TestClient(app, raise_server_exceptions=False)
+    assert client.post("/seed_session", json=_seed()).status_code == 200
+    judge = _mock_judge(server, CORRECT)
+
+    failed = client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY)
+
+    # The read raised its failure, and nothing was graded or scored 0.
+    assert failed.status_code == 500, failed.text
+    assert _failure_kinds(failed) == ["provider_request_failed"]
+    assert judge.await_count == 0 and stopped == [started[0][0]]
+    # Nothing was kept from the attempt, so the same verify again is masked rather than graded without the log.
+    retried = client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY)
+    assert _graded(retried) == (0.0, True, "session_lost", False)
+
+
 def test_a_plugin_log_returned_as_messages_joined_by_newlines_keeps_its_lines(workdir, tmp_path, monkeypatch) -> None:
     """A provider may return a command's output as messages joined by newlines. A message boundary inside a plugin line
     must not split it: the sentinel would read as missing, and the turn cap would go unmasked. Nor one inside the status
