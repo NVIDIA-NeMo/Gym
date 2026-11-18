@@ -1024,41 +1024,41 @@ class TestMcpGrants:
             ("memory", "sse", "http://memory:9000/sse"),
         ]
         (seed,) = server.server_client.seed_bodies()
-        # One grant list, every grant required: the task's streamable-http entry and the overlay's; the sse entry
-        # cannot be granted.
-        assert [(a["name"], a["required"], a["connection"]["url"]) for a in seed["tool_accesses"]] == [
-            ("user-server", True, "http://user-server:8000/mcp"),
-            ("legacy", True, "http://legacy:9000/mcp"),
+        # One grant list, every grant required and over its entry's own transport: the task's and the overlay's.
+        assert [
+            (a["name"], a["required"], a["connection"]["transport"], a["connection"]["url"])
+            for a in seed["tool_accesses"]
+        ] == [
+            ("user-server", True, "streamable_http", "http://user-server:8000/mcp"),
+            ("legacy", True, "streamable_http", "http://legacy:9000/mcp"),
+            ("memory", True, "sse", "http://memory:9000/sse"),
         ]
 
     async def test_an_overlay_entry_that_cannot_be_granted_is_warned_about_once_per_run(
         self, tmp_path, monkeypatch, caplog
     ):
-        """A job-level `sse` entry (the memory team's Redis stack is `sse` by design) is the operator's choice for the
-        whole run: one warning per entry per run, not one per turn of every episode. The task's own `sse` entry keeps
-        its warning at every seed, the task author's signal. Both still reach the harness in task.json."""
+        """A job-level entry the grant schema rejects is the operator's choice for the whole run: one warning per
+        entry per run, not one per turn of every episode. The task's own such entry keeps its warning at every seed,
+        the task author's signal. Both still reach the harness in task.json."""
         overlay = HarborComposeOverlay(
-            mcp_servers=[{"name": "redis-memory", "transport": "sse", "url": "http://mcp:9000/sse"}]
+            mcp_servers=[{"name": "redis memory", "transport": "sse", "url": "http://mcp:9000/sse"}]
         )
-        server, task, sandbox, _, _ = overlay_server(tmp_path, monkeypatch, toml=TASK_TOML + MCP_TOML, overlay=overlay)
+        toml = TASK_TOML + MCP_TOML.replace('name = "legacy"', 'name = "legacy tools"')
+        server, task, sandbox, _, _ = overlay_server(tmp_path, monkeypatch, toml=toml, overlay=overlay)
         caplog.set_level("WARNING", logger="environment_servers.harbor.app")
 
         for rollout in ("r1", "r2", "r3"):
             assert (await run_episode(server, task, rollout=rollout)).failure is None
 
         warnings = [record.getMessage() for record in caplog.records if "cannot be granted" in record.getMessage()]
-        assert (
-            warnings.count("hello: MCP server 'legacy' (sse) cannot be granted; only streamable-http URL entries can")
-            == 3
-        )
-        assert (
-            warnings.count(
-                "compose_overlay: MCP server 'redis-memory' (sse) cannot be granted; only streamable-http URL entries can; "
-                "it reaches the harness in /tmp/.nemo-gym/task.json (said once per run)"
-            )
-            == 1
-        )
-        assert len(warnings) == 4
+        task_warnings = [
+            w for w in warnings if w.startswith("hello: MCP server 'legacy tools' (sse) cannot be granted")
+        ]
+        overlay_warnings = [
+            w for w in warnings if w.startswith("compose_overlay: MCP server 'redis memory' (sse) cannot be granted")
+        ]
+        assert len(task_warnings) == 3 and len(overlay_warnings) == 1 and len(warnings) == 4
+        assert overlay_warnings[0].endswith("it reaches the harness in /tmp/.nemo-gym/task.json (said once per run)")
         for seed in server.server_client.seed_bodies():
             assert [a["name"] for a in seed["tool_accesses"]] == ["user-server"]
         writes = [c["command"] for c in sandbox.execs if "/tmp/.nemo-gym/task.json" in c["command"]]
@@ -1067,8 +1067,8 @@ class TestMcpGrants:
     async def test_an_overlay_entry_the_grant_schema_rejects_is_warned_about_once_per_run_and_left_ungranted(
         self, tmp_path, monkeypatch, caplog
     ):
-        """A job-level `streamable-http` entry whose URL has no scheme cannot be granted, like an `sse` one: one warning
-        per run with the schema's reason, no grant, and the harness that reads task.json still takes the task."""
+        """A job-level `streamable-http` entry whose URL has no scheme cannot be granted: one warning per run with the
+        schema's reason, no grant, and the harness that reads task.json still takes the task."""
         overlay = HarborComposeOverlay(
             mcp_servers=[{"name": "memory", "transport": "streamable-http", "url": "memory:9000/mcp"}]
         )
@@ -1089,10 +1089,10 @@ class TestMcpGrants:
         assert len(writes) == 2 and all("memory:9000/mcp" in w for w in writes)
 
     async def test_overlay_entries_alone_make_the_task_one_with_tools(self, tmp_path, monkeypatch):
-        """An overlay entry counts as the task's own: with only an `sse` one, a harness that cannot read task.json is
-        refused exactly as for a task's own entry, and one that declares support gets it there."""
+        """An overlay entry counts as the task's own: with only one that cannot be granted, a harness that cannot read
+        task.json is refused exactly as for a task's own entry, and one that declares support gets it there."""
         overlay = HarborComposeOverlay(
-            mcp_servers=[{"name": "redis-memory", "transport": "sse", "url": "http://mcp:9000/sse"}]
+            mcp_servers=[{"name": "redis-memory", "transport": "sse", "url": "mcp:9000/sse"}]
         )
         server, task, sandbox, _, _ = overlay_server(tmp_path, monkeypatch, overlay=overlay)
         assert not task.config.environment.mcp_servers
@@ -1110,7 +1110,7 @@ class TestMcpGrants:
         response = await run_episode(server, task, rollout="r2")
         assert response.failure is None
         context_write = next(c for c in sandbox.execs if "/tmp/.nemo-gym/task.json" in c["command"])
-        assert "http://mcp:9000/sse" in context_write["command"]
+        assert "mcp:9000/sse" in context_write["command"]
 
     async def test_a_streamable_http_overlay_entry_is_granted_to_any_harness(self, tmp_path, monkeypatch):
         """The overlay's entries are granted with the task's, as required, whether or not the harness reads task.json."""

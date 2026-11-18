@@ -147,6 +147,9 @@ from nemo_gym.server_runtime import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
     CleanupContext,
+    MCPConnection,
+    MCPSSEConnection,
+    MCPStdioConnection,
     MCPStreamableHTTPConnection,
     MCPToolAccess,
     SingleAgentTurnFailure,
@@ -555,8 +558,8 @@ class HarborEnvironmentServer(
         self._verifier_images_without_tests: set[str] = set()
         # Task digests whose Compose sidecars without deploy.resources were warned about once (`_warn_unsized_sidecars`).
         self._unsized_sidecars_warned: set[str] = set()
-        # Job-level `compose_overlay.mcp_servers` entries that cannot be granted (an `sse` entry), each warned about
-        # once per run rather than once per turn of every episode.
+        # Job-level `compose_overlay.mcp_servers` entries that cannot be granted (one the grant schema rejects), each
+        # warned about once per run rather than once per turn of every episode.
         self._ungrantable_overlay_servers: set[str] = set()
         self._pull_retry_gate = asyncio.Semaphore(PULL_RETRY_CONCURRENCY)
         self._shutting_down = False
@@ -1688,39 +1691,42 @@ class HarborEnvironmentServer(
     def _task_tool_accesses(self, task: HarborTask, mcp_servers: list[HarborMCPServer]) -> list[ToolAccess]:
         """``mcp_servers`` (the task's, the job-level overlay's merged in by name) as required agent tool grants:
         one grant list, as Harbor hands its agent one ``mcp_servers`` list. A harness that cannot connect to a
-        granted server fails its seed or its first turn, and one that cannot take required grants refuses the seed,
-        so a task's tools never go missing without a failure.
+        granted server fails its seed or its first turn, and one that cannot take required grants, or whose MCP
+        client lacks a granted server's transport, refuses the seed, so a task's tools never go missing without a
+        failure.
 
-        Only URL entries reached over streamable HTTP, with a name and an absolute http(s) URL the tool-access schema
-        accepts, can be granted; a Compose sidecar's URL names its service host, which resolves inside the task's
-        sandbox group, where the harness runs. An entry that cannot be granted still reaches the harness in
-        ``/tmp/.nemo-gym/task.json``; a task's own such entry is warned about at every seed (the task author's
-        signal), the job-level overlay's once per run, by name (the operator's choice, the memory team's Redis stack
-        being ``sse`` by design, which would otherwise print one line per turn of every episode of the run).
+        Each transport is granted as Harbor hands it to its agents: a ``stdio`` entry as its ``command`` and
+        ``args``, which the harness's MCP client starts inside the task's sandbox, where the harness runs, as the
+        user the harness runs as; an ``sse`` or ``streamable-http`` entry as its URL (a Compose sidecar's URL names
+        its service host, which resolves inside the task's sandbox group). Harbor's entry has no environment or
+        header field, so the grant carries none. An entry the grant schema rejects (a name an agent session cannot
+        address, a URL that is not absolute http(s)) still reaches the harness in ``/tmp/.nemo-gym/task.json``; a
+        task's own such entry is warned about at every seed (the task author's signal), the job-level overlay's
+        once per run, by name (the operator's choice, which would otherwise print one line per turn of every
+        episode of the run).
         """
         overlay = self.config.compose_overlay
         job_entries = {server.name for server in overlay.mcp_servers} if overlay is not None else set()
         accesses: list[ToolAccess] = []
         for server in mcp_servers:
-            if server.transport != "streamable-http" or not server.url:
-                reason = "only streamable-http URL entries can"
-            else:
-                try:
-                    access = MCPToolAccess(
-                        name=server.name,
-                        required=True,
-                        connection=MCPStreamableHTTPConnection(url=server.url),
-                    )
-                except ValidationError as error:
-                    # Harbor takes any name and any URL string, the grant schema only a name an agent session can
-                    # address and an absolute http(s) URL. Such an entry is treated as an SSE one is: it stays in
-                    # task.json and a harness that cannot read it is refused, while the oracle and the harnesses
-                    # that read it still take the task.
-                    problems = "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in error.errors())
-                    reason = f"the tool grant schema rejects it ({problems})"
+            try:
+                connection: MCPConnection
+                if server.transport == "stdio":
+                    connection = MCPStdioConnection(command=server.command, args=server.args)
+                elif server.transport == "sse":
+                    connection = MCPSSEConnection(url=server.url)
                 else:
-                    accesses.append(access)
-                    continue
+                    connection = MCPStreamableHTTPConnection(url=server.url)
+                access = MCPToolAccess(name=server.name, required=True, connection=connection)
+            except ValidationError as error:
+                # Harbor takes any name and any URL string, the grant schema only a name an agent session can address
+                # and an absolute http(s) URL. Such an entry stays in task.json: a harness that cannot read it is
+                # refused, while the oracle and the harnesses that read it still take the task.
+                problems = "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in error.errors())
+                reason = f"the tool grant schema rejects it ({problems})"
+            else:
+                accesses.append(access)
+                continue
             if server.name not in job_entries:
                 LOGGER.warning(
                     f"{task.task_id}: MCP server {server.name!r} ({server.transport}) cannot be granted; {reason}"

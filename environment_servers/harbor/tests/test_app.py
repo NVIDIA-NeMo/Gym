@@ -1180,6 +1180,8 @@ TASK_TOOL_CONTEXT_DECLARATIONS = {
     ),
     "skills_dir": 'skills_dir = "/app/.skills"\n',
 }
+# The declarations no grant covers: the harness reaches them only through task.json.
+UNGRANTED_TASK_TOOL_DECLARATIONS = ["mcp_server_name_with_a_space", "mcp_server_url_without_a_scheme", "skills_dir"]
 # A Compose sidecar's MCP server, the kind the server grants to the agent (SWE-Interact's simulated user).
 GRANTABLE_MCP_SERVER = (
     '[[environment.mcp_servers]]\nname = "user-server"\ntransport = "streamable-http"\n'
@@ -1201,11 +1203,11 @@ def task_tool_context_toml(declaration: str) -> str:
 
 
 class TestAgentStage:
-    @pytest.mark.parametrize("declaration", sorted(TASK_TOOL_CONTEXT_DECLARATIONS))
+    @pytest.mark.parametrize("declaration", UNGRANTED_TASK_TOOL_DECLARATIONS)
     async def test_task_tool_context_is_refused_to_a_harness_that_did_not_declare_support(
         self, tmp_path, monkeypatch, declaration
     ):
-        """Terminus 2 never sees the task's MCP servers or skills: the run would score a silent zero."""
+        """Terminus 2 never sees the task's ungranted MCP servers or skills: the run would score a silent zero."""
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=task_tool_context_toml(declaration))
         server.server_client.supports_task_tool_context = False
 
@@ -1260,13 +1262,58 @@ class TestAgentStage:
         assert any("test.sh" in call["command"] for call in sandbox.execs)
 
     @pytest.mark.parametrize("supports_task_tool_context", [True, False])
-    async def test_a_streamable_http_mcp_server_is_granted_to_every_harness_as_required(
-        self, tmp_path, monkeypatch, supports_task_tool_context
+    @pytest.mark.parametrize(
+        ("declaration", "grant"),
+        [
+            (
+                GRANTABLE_MCP_SERVER,
+                {
+                    "name": "user-server",
+                    "connection": {
+                        "transport": "streamable_http",
+                        "url": "http://user-server:8000/mcp",
+                        "headers": {},
+                    },
+                },
+            ),
+            (
+                TASK_TOOL_CONTEXT_DECLARATIONS["mcp_servers"],
+                {
+                    "name": "playwright",
+                    "connection": {"transport": "sse", "url": "http://api:3080/sse", "headers": {}},
+                },
+            ),
+            # SSE is Harbor's default transport for an entry that names none.
+            (
+                '[[environment.mcp_servers]]\nname = "memory"\nurl = "http://memory:9000/sse"\n',
+                {
+                    "name": "memory",
+                    "connection": {"transport": "sse", "url": "http://memory:9000/sse", "headers": {}},
+                },
+            ),
+            (
+                TASK_TOOL_CONTEXT_DECLARATIONS["stdio_mcp_server"],
+                {
+                    "name": "hello-tools",
+                    "connection": {
+                        "transport": "stdio",
+                        "command": "python",
+                        "args": ["/opt/hello-tools/server.py"],
+                        "env": {},
+                    },
+                },
+            ),
+        ],
+        ids=["streamable-http", "sse", "default-sse", "stdio"],
+    )
+    async def test_an_mcp_server_is_granted_to_every_harness_as_required(
+        self, tmp_path, monkeypatch, supports_task_tool_context, declaration, grant
     ):
         """The grant does not depend on the harness reading task.json or on any server setting: a task that declares
-        an MCP server hands it to the agent, and an agent that cannot connect fails instead of running without it.
-        Hermes or Pi read no task.json, so they take such a task through the grant alone."""
-        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=TASK_TOML + GRANTABLE_MCP_SERVER)
+        an MCP server hands it to the agent over its own transport, a stdio one as the command the harness's MCP
+        client starts in the sandbox, and an agent that cannot use it fails instead of running without it. Hermes or
+        Pi read no task.json, so they take such a task through the grant alone."""
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=TASK_TOML + declaration)
         server.server_client.supports_task_tool_context = supports_task_tool_context
 
         response = await run_episode(server, task)
@@ -1275,14 +1322,7 @@ class TestAgentStage:
         assert response.result.reward == 1.0
         assert any("test.sh" in call["command"] for call in sandbox.execs)
         (seed,) = server.server_client.seed_bodies()
-        assert seed["tool_accesses"] == [
-            {
-                "kind": "mcp",
-                "name": "user-server",
-                "required": True,
-                "connection": {"transport": "streamable_http", "url": "http://user-server:8000/mcp", "headers": {}},
-            }
-        ]
+        assert seed["tool_accesses"] == [{"kind": "mcp", "required": True, **grant}]
 
     @pytest.mark.parametrize(
         ("declaration", "problem"),
@@ -1316,10 +1356,7 @@ class TestAgentStage:
     @pytest.mark.parametrize(
         ("declaration", "unreached"),
         [
-            # Only streamable-http entries can be granted; an SSE or stdio server still needs task.json.
-            ("mcp_servers", "MCP server 'playwright'"),
-            ("stdio_mcp_server", "MCP server 'hello-tools'"),
-            # A streamable-http entry the tool-access schema rejects cannot be granted either.
+            # An entry the tool-access schema rejects cannot be granted.
             ("mcp_server_name_with_a_space", "MCP server 'user server'"),
             ("mcp_server_url_without_a_scheme", "MCP server 'tools'"),
             # A skills directory has no grant at all.

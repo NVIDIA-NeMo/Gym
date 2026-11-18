@@ -21,7 +21,7 @@ that Terminus uses (`exec` and `is_dir`) to `AsyncSandbox`; task state therefore
 remains owned by the resources server.
 
 Terminus 2 drives only its terminal. An episode session whose seed carries a required tool grant, such as the
-`streamable-http` MCP servers a Harbor task declares (the `harbor` environment server grants them as required), is
+MCP servers a Harbor task declares (the `harbor` environment server grants them as required), is
 refused with a terminal 422 that names the grants, instead of running the task without its tools. Use a harness that
 takes MCP tool grants, such as `codex_agent`, for those tasks.
 

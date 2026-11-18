@@ -45,13 +45,14 @@ included, so this server seeds the sandbox from the folder and runs the task's o
 and `gym dataset validate` load the folders with `nemo_gym.data.tasks.harbor`, write one row per task and a run
 configuration with a per-taskset instance of this server, and bind it to a harness: the one `gym eval run` names
 with `--agent`, or `harbor_oracle_agent` for `gym dataset validate`. The harness must accept a sandbox in its
-session seed and leave the sandbox to the server when the session closes. The server grants every `streamable-http`
-MCP server of the task, and of the job-level `compose_overlay`, to the agent as a required tool grant: an agent that
-cannot connect fails its seed or first turn, and one that cannot take a required grant refuses the seed with a
-terminal `stage: agent` failure. A task with a `skills_dir`, or with an MCP server that cannot be granted (`stdio`,
-`sse`, or a `streamable-http` entry whose name or URL the grant rejects), also needs a harness that reports
-`supports_task_tool_context`, or it fails terminally at `stage: agent`; `turn_sessions: continue` needs one that
-declares multi-turn continuation. `harbor_agent` and `harbor_agent_general` are separate Agent Servers that run
+session seed and leave the sandbox to the server when the session closes. The server grants every MCP server of the
+task, and of the job-level `compose_overlay`, to the agent as a required tool grant over its own transport: a `stdio`
+server as the command the harness's MCP client starts in the task's sandbox, an `sse` or `streamable-http` server as
+its URL. An agent that cannot start or connect to a granted server fails its seed or first turn, and one that cannot
+take a required grant, or whose MCP client lacks its transport, refuses the seed with a terminal `stage: agent`
+failure. A task with a `skills_dir`, or with an MCP server that cannot be granted (an entry whose name or URL the
+grant rejects), also needs a harness that reports `supports_task_tool_context`, or it fails terminally at
+`stage: agent`; `turn_sessions: continue` needs one that declares multi-turn continuation. `harbor_agent` and `harbor_agent_general` are separate Agent Servers that run
 Harbor's own runtime; they are not this path.
 
 ## Run it
