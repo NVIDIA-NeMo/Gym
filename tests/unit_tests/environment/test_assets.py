@@ -3,6 +3,7 @@
 """`--benchmark` and `--environment` select what the catalog lists under a name, across search roots."""
 
 import logging
+import shutil
 from pathlib import Path
 
 import pytest
@@ -12,12 +13,16 @@ from nemo_gym.environment.registry import RegistryError, resolve_catalog_entry
 from tests.unit_tests.environment.test_registry import _manifest, _write_manifest
 
 
+def _use_roots(monkeypatch: pytest.MonkeyPatch, *roots: Path) -> None:
+    for module in ("nemo_gym.environment.assets", "nemo_gym.environment.registry"):
+        monkeypatch.setattr(f"{module}.component_search_roots", lambda: list(roots))
+
+
 @pytest.fixture
 def roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
     """An earlier and a later search root, as `--search-dir` and the Gym checkout would be."""
     earlier, later = tmp_path / "earlier", tmp_path / "later"
-    for module in ("nemo_gym.environment.assets", "nemo_gym.environment.registry"):
-        monkeypatch.setattr(f"{module}.component_search_roots", lambda: [earlier, later])
+    _use_roots(monkeypatch, earlier, later)
     return earlier, later
 
 
@@ -70,6 +75,76 @@ def test_an_old_folder_path_still_selects_when_no_entry_has_that_name(roots: tup
     assert _selected("suite/v1") == config.resolve()
     with pytest.raises(RegistryError, match="Unknown catalog entry"):
         _listed("suite/v1")
+
+
+def test_a_shadowed_manifests_folder_does_not_take_that_name_from_a_later_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The middle root's folder `moved` holds a `demo` that the first root shadows; the last root declares `moved`.
+    first, middle, last = tmp_path / "first", tmp_path / "middle", tmp_path / "last"
+    _use_roots(monkeypatch, first, middle, last)
+    _write_manifest(first, "environments", "demo", _manifest("demo"))
+    _write_manifest(middle, "environments", "moved", _manifest("demo"))
+    target = _write_manifest(last, "environments", "target", _manifest("moved"))
+
+    assert _selected("moved") == _listed("moved") == target.with_name("config.yaml").resolve()
+
+
+def test_a_flavor_path_in_an_earlier_root_does_not_shadow_a_declared_name(roots: tuple[Path, Path]) -> None:
+    # The catalog lists no environment flavor file, so `suite/fast` here is a path, not a catalog entry.
+    earlier, later = roots
+    flavor = earlier / "environments/suite/fast.yaml"
+    flavor.parent.mkdir(parents=True)
+    flavor.write_text("{}\n", encoding="utf-8")
+    declared = _write_manifest(later, "environments", "moved", _manifest("suite/fast"))
+
+    assert _selected("suite/fast") == _listed("suite/fast") == declared.with_name("config.yaml").resolve()
+    shutil.rmtree(declared.parent)
+    assert _selected("suite/fast") == flavor.resolve()
+
+
+def test_a_nested_benchmark_path_in_an_earlier_root_does_not_shadow_a_declared_name(roots: tuple[Path, Path]) -> None:
+    # The catalog lists the earlier root's config as `suite/v1/config`; `suite/v1` reaches it only as a path.
+    earlier, later = roots
+    config = earlier / "benchmarks/suite/v1/config.yaml"
+    config.parent.mkdir(parents=True)
+    config.write_text("agent:\n  datasets:\n  - {type: benchmark}\n", encoding="utf-8")
+    declared = _write_manifest(later, "benchmarks", "moved", _manifest("suite/v1", "benchmark"))
+
+    def selected(name: str) -> Path:
+        return Path(asset_config_path("benchmark", name))
+
+    def listed(name: str) -> Path:
+        return resolve_catalog_entry(name, "benchmark").config_path.resolve()
+
+    assert selected("suite/v1") == listed("suite/v1") == declared.with_name("config.yaml").resolve()
+    assert selected("suite/v1/config") == listed("suite/v1/config") == config.resolve()
+    shutil.rmtree(declared.parent)
+    assert selected("suite/v1") == config.resolve()
+
+
+@pytest.mark.parametrize("excluded", ["harbor/dataset/task", ".staging/task"])
+def test_a_manifest_discovery_skips_does_not_shadow_a_declared_name(roots: tuple[Path, Path], excluded: str) -> None:
+    # Discovery stops at a pulled Harbor dataset (its `manifest.toml`) and skips hidden folders.
+    earlier, later = roots
+    skipped = _write_manifest(earlier, "environments", excluded, _manifest(excluded))
+    if excluded.startswith("harbor/"):
+        skipped.parent.parent.joinpath("manifest.toml").write_text("", encoding="utf-8")
+    declared = _write_manifest(later, "environments", "moved", _manifest(excluded))
+
+    assert _selected(excluded) == _listed(excluded) == declared.with_name("config.yaml").resolve()
+
+
+def test_typo_suggestions_include_environment_flavors(roots: tuple[Path, Path]) -> None:
+    earlier, _ = roots
+    folder = earlier / "environments/demo"
+    folder.mkdir(parents=True)
+    for name in ("config.yaml", "fast.yaml"):
+        folder.joinpath(name).write_text("{}\n", encoding="utf-8")
+
+    assert _selected("demo/fast") == folder.joinpath("fast.yaml").resolve()
+    with pytest.raises(ValueError, match=r"Did you mean `demo/fast`\?"):
+        asset_config_path("environment", "demo/fats")
 
 
 @pytest.mark.parametrize("kind", ["benchmark", "environment"])
