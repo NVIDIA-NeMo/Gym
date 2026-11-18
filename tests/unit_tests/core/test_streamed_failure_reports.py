@@ -19,7 +19,6 @@ from tests.unit_tests.models.test_chat_completions_streaming import _EchoChatMod
 from tests.unit_tests.models.test_responses_api_model_streaming import _EchoModel
 
 
-_BACKEND_S = 0.04
 _KEEPALIVE_S = 0.005
 
 
@@ -42,7 +41,9 @@ class _LateResponses(_EchoModel):
     fail: bool = False
 
     async def responses(self, body=Body()):
-        await asyncio.sleep(_BACKEND_S)
+        if (keepalive_sent := getattr(self, "_keepalive_sent", None)) is not None:
+            async with asyncio.timeout(30):
+                await keepalive_sent.wait()
         observe_failure(RECOVERED)
         if self.fail:
             raise FINAL
@@ -53,14 +54,16 @@ class _LateChat(_EchoChatModel):
     fail: bool = False
 
     async def chat_completions(self, body=Body()):
-        await asyncio.sleep(_BACKEND_S)
+        if (keepalive_sent := getattr(self, "_keepalive_sent", None)) is not None:
+            async with asyncio.timeout(30):
+                await keepalive_sent.wait()
         observe_failure(RECOVERED)
         if self.fail:
             raise FINAL
         return await super().chat_completions(body)
 
 
-def _client(model_cls, *, fail: bool, **config) -> TestClient:
+def _client(model_cls, *, fail: bool, wait_for_keepalive: bool = False, **config) -> TestClient:
     server = model_cls(
         config=BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name="", **config),
         server_client=MagicMock(spec=ServerClient, global_config_dict={}),
@@ -68,7 +71,25 @@ def _client(model_cls, *, fail: bool, **config) -> TestClient:
     object.__setattr__(server, "fail", fail)
     app = server.setup_webserver()
     server.setup_exception_middleware(app)
-    return TestClient(app)
+    if not wait_for_keepalive:
+        return TestClient(app)
+
+    keepalive_sent = asyncio.Event()
+    object.__setattr__(server, "_keepalive_sent", keepalive_sent)
+
+    async def gated_app(scope, receive, send):
+        async def send_and_release(message):
+            await send(message)
+            # Sleeping cannot order backend completion after headers on a loaded runner.
+            # Release only after the real stream has sent its first keepalive.
+            if message["type"] == "http.response.body":
+                body = message.get("body", b"")
+                if b"response.in_progress" in body or body.startswith(b": keep-alive"):
+                    keepalive_sent.set()
+
+        await app(scope, receive, send_and_release)
+
+    return TestClient(gated_app)
 
 
 def _payloads(text: str) -> list[dict]:
@@ -89,7 +110,7 @@ def _assert_report(payload: dict, *, final: bool) -> None:
 
 @pytest.mark.parametrize("fail", [False, True])
 def test_a_keepalive_responses_stream_reports_late_failures_on_its_terminal_event(fail: bool) -> None:
-    client = _client(_LateResponses, fail=fail, stream_keepalive_s=_KEEPALIVE_S)
+    client = _client(_LateResponses, fail=fail, wait_for_keepalive=True, stream_keepalive_s=_KEEPALIVE_S)
     reply = client.post("/v1/responses", json={"stream": True, "input": [{"role": "user", "content": "hi"}]})
     assert reply.status_code == 200
     events = _payloads(reply.text)
@@ -105,7 +126,7 @@ def test_a_keepalive_responses_stream_reports_late_failures_on_its_terminal_even
 @pytest.mark.parametrize("fail", [False, True])
 def test_a_keepalive_chat_stream_reports_late_failures_on_its_last_event(monkeypatch, fail: bool) -> None:
     monkeypatch.setattr("nemo_gym.models.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", _KEEPALIVE_S)
-    client = _client(_LateChat, fail=fail)
+    client = _client(_LateChat, fail=fail, wait_for_keepalive=True)
     reply = client.post("/v1/chat/completions", json={"stream": True, "messages": [{"role": "user", "content": "hi"}]})
     assert reply.status_code == 200
     assert reply.text.startswith(": keep-alive\n\n"), "a keepalive went out before the backend finished"
@@ -139,7 +160,7 @@ async def test_the_codex_relay_observes_the_report_a_keepalive_stream_ends_with(
     from nemo_gym.core.failure_transport import RequestFailureLog
     from responses_api_agents.codex_agent.transport import rate_limit_proxy
 
-    produced = _client(_LateResponses, fail=fail, stream_keepalive_s=_KEEPALIVE_S).post(
+    produced = _client(_LateResponses, fail=fail, wait_for_keepalive=True, stream_keepalive_s=_KEEPALIVE_S).post(
         "/v1/responses", json={"stream": True, "input": [{"role": "user", "content": "hi"}]}
     )
     body = produced.content
