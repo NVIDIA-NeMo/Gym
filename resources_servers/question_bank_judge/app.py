@@ -159,7 +159,7 @@ class QuestionBankJudgeResourcesServer(SimpleResourcesServer):
         final = raw_final.strip()
         evaluations: list[JudgeEvaluation] = []
         provenance: dict[str, Any] = {
-            "verifier_revision": "question-bank-semantic-v5",
+            "verifier_revision": "question-bank-semantic-v6",
             "grading_profile": profile,
             "grading_config_sha256": hash_text(cfg.model_dump_json()),
             "candidate_sha256": hash_text(raw_final),

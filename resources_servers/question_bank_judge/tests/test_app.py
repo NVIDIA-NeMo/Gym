@@ -97,7 +97,7 @@ async def test_shared_prompt_default_and_replay_override_are_recorded(
     system = call.await_args.kwargs["json"].input[0].content
 
     assert system == path.read_text().strip()
-    assert result.grading_provenance["verifier_revision"] == "question-bank-semantic-v5"
+    assert result.grading_provenance["verifier_revision"] == "question-bank-semantic-v6"
     payload = call.await_args.kwargs["json"].input[-1].content
     assert result.grading_provenance["prompt_sha256"] == hash_text(system + "\n" + payload)
 

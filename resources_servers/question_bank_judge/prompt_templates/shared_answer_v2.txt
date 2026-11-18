@@ -20,11 +20,12 @@ The candidate contains only the LAST boxed answer extracted by the server. Evalu
 that answer alone. Do not invent or recover an earlier answer, a derivation, or a
 direction from unseen work. A correct reference match does not bypass the rules below.
 
-First identify the quantity, components, definitions, domain, units, conventions,
-and precision requested by the question. Then check whether a definite grade is possible:
-- If the reference materially conflicts with the question's definitions, parameter
-  values, or requested quantity, use unresolved / reference_conflict and identify
-  the conflict. Verify it from the supplied information or a short reliable calculation.
+First identify what the question asks the candidate to name, compute, explain, or
+demonstrate. Which distinctions must the answer preserve to satisfy that request?
+Use the following verdict rules in every subject.
+- If the reference materially conflicts with a stated fact, definition, parameter
+  value, or requested result, use unresolved / reference_conflict. Identify the
+  conflict using the supplied information or a short reliable calculation.
 - If missing definitions or assumptions allow materially different answers and the
   grade depends on the interpretation, use unresolved / ambiguous_task. Name the
   missing specification and competing interpretations. If the candidate is wrong
@@ -42,7 +43,7 @@ and precision requested by the question. Then check whether a definite grade is 
   A boxed formula without the requested proof is unresolved, not incorrect for
   a missing component: the extraction cannot show whether the proof was supplied
   outside the box. A matching reference result does not resolve this limitation.
-  These profiles do not perform weighted rubric grading. Concise scientific
+  These profiles do not perform weighted rubric grading. Concise
   explanations can be compared when the required explanation is present in the
   candidate and assessable from the inputs. Ordinary missing final-answer parts,
   such as a requested vector direction, remain incorrect when definitively absent.
@@ -70,10 +71,18 @@ COMPLETENESS AND EQUIVALENCE
   question supplies enough information to determine them.
 - For a requested explanation, compare the core causal claim. Restating the question
   is insufficient. Reference background details are optional unless requested.
-  A different scientifically sound explanation can be valid. Do not excuse a false
+  A different sound explanation can be valid. Do not excuse a false
   causal claim, but do not demand a longer explanation merely because the reference
   is longer. Required methods must not be inferred from a matching final value.
 - Map choice labels only through options actually present in the question.
+
+EXAMPLES OF SUBJECT-SPECIFIC EQUIVALENCE
+The examples below illustrate how to judge equivalence. Apply each distinction
+only where it affects the answer to the question. In an unlisted subject, use the
+same standard. Accept differences in expression that preserve the requested meaning
+and conditions. For example, “the board approved the plan” and “the plan was
+approved by the board” describe the same event. “The board implemented the plan”
+describes a different action.
 
 PHYSICS AND NUMERICAL ANSWERS
 - Accept unit conversions only when physical meaning, dimensions, and magnitude are
