@@ -53,25 +53,24 @@ single_agent_turn_legacy:
       resources_tool_transports: []
 ```
 
-- **Runtime.** Session setup installs a private Node.js 22.23.2 and the `prime-agent-0.7.0.tgz`
-  release package with npm (`--ignore-scripts`) under `/tmp/nemo-gym-prime-runtime-0.7.0-node-22.23.2`,
-  checks the version it reports, and reuses a ready runtime. The agent server downloads the official
-  Node.js build and the four Prime Agent v0.7.0 GitHub release archives (`prime-agent`, `prime-agent-ai`,
-  `prime-agent-core` and `prime-agent-tui`) once into its asset cache and checks the SHA-256 values pinned in
-  `sandbox.py`. The `prime-agent` and `prime-agent-core` manifests fetch their Prime dependencies from a
-  separate release host, so the agent server rewrites only those URLs to the uploaded archives and refuses an
-  archive that still names a remote dependency. The sandbox checks Node.js and the kernel's Python against
-  their pinned values, and each uploaded Prime archive against the SHA-256 the agent server computed for the
-  rewritten copy, before npm runs. The kernel's uv archive has no pinned checksum. Prime Agent runs as that
-  Node with the package's CLI, so the task's Node and `PATH` are untouched. The sandbox needs a glibc image,
-  bash, `sha256sum`, `tar`, `gzip`, `flock`, `mktemp` and network access to the npm registry for the
-  remaining dependencies, which npm resolves from the manifests' version ranges.
-- **Kernel.** Prime Agent's only built-in tool is an IPython kernel. Setup also installs a private
-  Python (the mini-SWE bootstrap build, uploaded with its uv) under the runtime's `kernel` directory,
-  with the packages Prime Agent's own kernel bootstrap installs, pinned in `install_prime_runtime.sh`,
-  and the package's `prime-agent-runtime`, then points `PRIME_AGENT_KERNEL_PYTHON` at it. uv installs
-  them from the package index, so the sandbox also needs network access to PyPI. The kernel takes about
-  440 MB. IPython and Jupyter may write their state under the task's `HOME`.
+- **Runtime.** Session setup installs private Node.js 22.23.2 and Prime Agent 0.7.0 under
+  `/tmp/nemo-gym-prime-runtime-0.7.0-node-22.23.2`. It reuses a runtime only when its recipe fingerprint,
+  reported version and kernel import checks match. The fingerprint covers the dependency locks, installer,
+  staging helper and pinned runtime identities, so an older unlocked cache is rebuilt.
+  The agent server checks the official Node, Python, uv 0.10.12 and four Prime release archive SHA-256 values.
+  It localizes the Prime release dependencies to those verified uploads. npm uses
+  `ci --install-strategy=shallow --ignore-scripts`, preserving the SDK's nested import paths; every registry
+  artifact has an exact version and SHA512 integrity in `runtime/package-lock.json`. The local archive
+  integrities are bound to the verified, rewritten uploads. The sandbox checks every uploaded input before
+  installation and preserves Node's bundled npm and corepack. Prime runs with its private Node, keeping the
+  task's Node and `PATH` intact. Setup needs a glibc image, bash, `sha256sum`, `tar`, `gzip`, `flock`, `mktemp`,
+  `cmp`, and access to the npm registry for the locked artifacts.
+- **Kernel.** Prime Agent's only built-in tool is an IPython kernel. Setup installs a private Python under
+  the runtime's `kernel` directory and the verified release's `prime-agent-runtime`, then sets
+  `PRIME_AGENT_KERNEL_PYTHON`. `runtime/python-constraints.txt` fixes runtime dependency versions and
+  `runtime/python-build-constraints.txt` fixes the isolated build dependencies. uv applies both files;
+  Python package artifacts still come from the index and are not individually hash-locked. The sandbox
+  needs access to PyPI. The kernel takes about 440 MB. IPython and Jupyter may write under the task's `HOME`.
 - **Network.** A sandbox the agent creates keeps the provider's egress: `network_access` accepts only
   `inherit`, since setup needs the npm registry and PyPI. The Prime Agent release archives come from
   GitHub through the agent server, not the sandbox. A borrowed sandbox keeps its lender's network.
@@ -102,7 +101,7 @@ The implementation calls the public SDK; it does not vendor Prime's source. See
 [the pinned SDK](https://github.com/PrimeIntellect-ai/prime-agent/blob/be9e2fa0714e7cd1c6bd9bdb1b554d2cc6550387/packages/coding-agent/src/core/sdk.ts).
 The child reuses `PrimeAgent`'s seeded-session validation, activation joining, stop and
 close lifecycle, with `PrimeSession.install` and `PrimeSession.stage`. Resources owns
-repository preparation and borrows the sandbox through `LentSandboxes`; the agent
+repository preparation and lends the sandbox through `LentSandboxes`; the agent
 releases its connection, while Resources stops the sandbox after verification.
 The SDK-specific code is limited to its recording parent, execution hooks and capture.
 
@@ -134,12 +133,13 @@ The pinned SDK uses thinking off, and supervised rollout stops follow the shared
 Prime lifecycle. Session files stay outside the task repository and are removed at
 close; the runtime cache lives until the Resources-owned sandbox is destroyed.
 
-Reusing the installer does not establish full reproducibility. Its Node, Python and primary
-Prime release archives and the configured task wheels are checksum-pinned. The
-shared bootstrap's uv archive has a fixed version URL but no checksum, and remaining
-npm/Python transitives, the setup package manager and the mutable task-image tag
-are not a fully locked environment. This entrypoint remains experimental; capability/import checks
-prove the required interfaces work, not that every future installation is identical.
+The shared installer integrity-locks npm artifacts, constrains Python runtime and isolated
+build dependency versions, and checksum-checks Node, Python, uv and the primary Prime release
+archives. Task wheels also retain their exact versions and hashes. These controls address
+observed npm version drift; they do not establish bit-for-bit reproducibility of an entire
+task environment. Python wheel/build artifacts are version-constrained without individual
+hashes, and task setup package-manager state and an unpinned task-image tag can still vary.
+Keep this entrypoint experimental and record the resolved image and installed inventories.
 
 All model requests use Gym's rollout-prefixed model URL. Until the parent receives
 a report, the runtime forces the registered IPython tool; after delivery it allows
@@ -159,7 +159,7 @@ SWE-bench smoke described above exercises a different execution path and does no
 satisfy the SDK child's second-pairing requirement. The capability probe checks the
 installed SDK and `agent-message` interfaces, while regression tests cover provider
 credential filtering and the shared session lifecycle. These checks do not establish
-a real-model second pairing or eliminate the dependency and image drift described
+a real-model second pairing or eliminate the remaining artifact and image limits described
 above; retain this warning until those results are recorded for the tested revision.
 
 Session close exports the native SDK conversation as Gym observations. Kernel errors remain failed tool
