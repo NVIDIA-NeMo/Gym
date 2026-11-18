@@ -23,7 +23,7 @@ from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Set,
 
 import rich
 from omegaconf import DictConfig, OmegaConf
-from omegaconf.errors import InterpolationResolutionError
+from omegaconf.errors import OmegaConfBaseException
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -844,6 +844,63 @@ ServerInstanceConfig = Union[
 ServerInstanceConfigTypeAdapter = TypeAdapter(ServerInstanceConfig)
 
 
+def _container_with_resolved_datasets(server_type_config_dict: DictConfig) -> Dict[str, Any]:
+    """Resolve dataset entries in their rooted config while leaving other server fields unresolved.
+
+    Typed dataset consumers need concrete paths and repeat counts. A dataset list that cannot
+    resolve yet stays unresolved, so unused datasets can depend on values supplied later.
+    Preserve independently resolvable benchmark paths even when another dataset field is deferred.
+    """
+    from nemo_gym.config.global_config import SERVER_TYPE_KEYS
+
+    server_values = OmegaConf.to_container(server_type_config_dict)
+    for server_kind, instances in server_type_config_dict.items_ex(resolve=False):
+        if server_kind not in SERVER_TYPE_KEYS or not isinstance(instances, DictConfig):
+            continue
+        for instance_name, instance in instances.items_ex(resolve=False):
+            if not isinstance(instance, DictConfig):
+                continue
+            try:
+                datasets = instance.get("datasets")
+            except OmegaConfBaseException:
+                continue
+            if not OmegaConf.is_config(datasets):
+                continue
+            try:
+                server_values[server_kind][instance_name]["datasets"] = OmegaConf.to_container(datasets, resolve=True)
+                continue
+            except OmegaConfBaseException:
+                pass
+            # Benchmark Path fields must still resolve individually when an unrelated
+            # entry cannot resolve. Do not mutate the original interpolation nodes.
+            raw_datasets = server_values[server_kind][instance_name]["datasets"]
+            if not isinstance(raw_datasets, list):
+                continue
+            for index, raw_dataset in enumerate(raw_datasets):
+                try:
+                    dataset = datasets[index]
+                except OmegaConfBaseException:
+                    continue
+                try:
+                    if not OmegaConf.is_config(dataset):
+                        continue
+                    raw_datasets[index] = OmegaConf.to_container(dataset, resolve=True)
+                    continue
+                except OmegaConfBaseException:
+                    pass
+                if isinstance(raw_dataset, dict) and raw_dataset.get("type") == "benchmark":
+                    for field in ("jsonl_fpath", "prepare_script", "prompt_config", "prepare_project"):
+                        if field not in dataset:
+                            continue
+                        try:
+                            resolved = dataset[field]
+                        except OmegaConfBaseException:
+                            # Unused datasets may depend on variables supplied only at evaluation time.
+                            continue
+                        server_values[server_kind][instance_name]["datasets"][index][field] = resolved
+    return server_values
+
+
 def maybe_get_server_instance_config(
     name: str, server_type_config_dict: Any
 ) -> Tuple[Optional[ServerInstanceConfig], Optional[ValidationError]]:
@@ -851,33 +908,10 @@ def maybe_get_server_instance_config(
     if not isinstance(server_type_config_dict, DictConfig):
         return None, None
 
-    from nemo_gym.config.global_config import SERVER_TYPE_KEYS
-
-    server_values = OmegaConf.to_container(server_type_config_dict)
-    # Benchmark metadata uses Path fields. Resolve those in their original rooted
-    # context before Pydantic turns an interpolation into a literal Path filename.
-    # Keep other server fields unresolved: composition may still supply their values.
-    for server_kind, instances in server_type_config_dict.items_ex(resolve=False):
-        if server_kind not in SERVER_TYPE_KEYS or not isinstance(instances, DictConfig):
-            continue
-        for instance_name, instance in instances.items_ex(resolve=False):
-            if not isinstance(instance, DictConfig):
-                continue
-            for index, dataset in enumerate(instance.get("datasets") or []):
-                if isinstance(dataset, DictConfig) and dataset.get("type") == "benchmark":
-                    for field in ("jsonl_fpath", "prepare_script", "prompt_config", "prepare_project"):
-                        if field not in dataset:
-                            continue
-                        try:
-                            resolved = dataset[field]
-                        except InterpolationResolutionError:
-                            # Unused datasets may depend on variables supplied only at evaluation time.
-                            continue
-                        server_values[server_kind][instance_name]["datasets"][index][field] = resolved
     maybe_server_instance_config_dict = {
         "name": name,
         "server_type_config_dict": server_type_config_dict,
-        **server_values,
+        **_container_with_resolved_datasets(server_type_config_dict),
     }
     try:
         config = ServerInstanceConfigTypeAdapter.validate_python(maybe_server_instance_config_dict)
