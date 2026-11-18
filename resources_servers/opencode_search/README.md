@@ -197,8 +197,9 @@ a crash an episode starts over from its input.
   kind is `provider_io_timeout` when the read timed out; `provider_request_failed` when it exited
   non-zero, reported another error type, or printed output cut short or malformed; or the provider's own
   kind when `exec` raised a typed failure. An untyped exception from `exec` carries no kind. The read
-  exits non-zero when `head` or `base64` fails: `sh` has no `pipefail`, so it checks `head`'s own exit
-  status, and a `head` that read nothing or stopped early is never taken for an empty or shorter log. An
+  exits non-zero when `head` or `base64` fails, and its failure reason gives both exit statuses: `sh`
+  cannot be relied on to have `pipefail` (dash has none), so it checks `head`'s own exit status, and a
+  `head` that read nothing or stopped early is never taken for an empty or shorter log. An
   Environment Server records these kinds as the cause of the failed episode, in the failure row's
   `_ng_failure_events`. The model can still cause such a 500: by putting at the path, between the read's
   checks and its read, a FIFO, which holds the read until its timeout, or anything else `head` cannot

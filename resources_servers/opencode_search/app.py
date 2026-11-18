@@ -306,18 +306,20 @@ def _plugin_log_read_command(plugin_log_path: str) -> str:
     """The sh command that reads the plugin log at plugin_log_path (see _read_plugin_log).
 
     It prints what it found instead of a file it would read, or "file:" and at most _PLUGIN_LOG_MAX_BYTES + 1 bytes of
-    the file in base64, and then _PLUGIN_LOG_READ_END. A pipeline's status is its last command's, and sh has no
-    pipefail, so head's own exit status goes out on fd 4, which the command substitution captures, while base64
-    writes to fd 3, the command's output: the command exits 1 when head or base64 fails, or is missing, rather than
-    print a shorter log.
+    the file in base64, and then _PLUGIN_LOG_READ_END. A pipeline's status is its last command's, and sh cannot be
+    relied on to have pipefail (dash has none), so head's own exit status goes out on fd 4, which the command
+    substitution captures, while base64 writes to fd 3, the command's output. When head or base64 fails or is
+    missing, the command prints both exit statuses on stderr and exits 1 without printing the end, so what head read
+    before it failed is never taken for the log.
     """
     path = shlex.quote(plugin_log_path)
     return (
         f"if test -L {path}; then printf symlink; elif ! test -e {path}; then printf absent; "
         f"elif ! test -f {path}; then printf not_regular; elif ! test -r {path}; then printf unreadable; "
         f"else printf file: && {{ s=$( {{ {{ head -c {_PLUGIN_LOG_MAX_BYTES + 1} -- {path} 2>/dev/null; "
-        f'echo $? >&4; }} | base64 >&3; }} 4>&1 ) && test "$s" = 0 || exit 1; }} 3>&1; fi; '
-        f"printf {_PLUGIN_LOG_READ_END}"
+        f'echo $? >&4; }} | base64 >&3; }} 4>&1 ); b=$?; test "$s" = 0 && test "$b" = 0 || '
+        f'{{ echo "plugin log read failed: head status ${{s:-unknown}}, base64 status $b" >&2; exit 1; }}; }} 3>&1; '
+        f"fi; printf {_PLUGIN_LOG_READ_END}"
     )
 
 

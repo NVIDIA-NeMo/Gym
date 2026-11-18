@@ -1145,17 +1145,18 @@ def test_a_plugin_log_that_cannot_be_read_names_its_failure_kind(
 
 @pytest.mark.parametrize("shell", ["/bin/sh", "/bin/bash"], ids=["sh", "bash"])
 @pytest.mark.parametrize(
-    "head",
-    ["exit 1", f"printf '%s' {shlex.quote(SENTINEL)}; exit 1"],
-    ids=["reads_nothing", "fails_after_a_line"],
+    ("head", "status"),
+    [("exit 1", 1), (f"printf '%s' {shlex.quote(SENTINEL)}; exit 1", 1), ("kill -KILL $$", 137)],
+    ids=["reads_nothing", "fails_after_a_line", "killed"],
 )
 def test_a_plugin_log_read_whose_head_fails_fails_the_verify_for_a_retry(
-    workdir, tmp_path, started, stopped, monkeypatch, shell, head
+    workdir, tmp_path, started, stopped, monkeypatch, shell, head, status
 ) -> None:
     """A head that fails, as on an I/O error or when the image lacks it, cannot say so through the pipe into base64:
-    sh has no pipefail. The read checks head's own exit status, so the verify answers 500 and the episode runs again,
-    rather than an empty log scoring it 0 as the model's, or the lines read before the failure grading it without the
-    rest."""
+    sh cannot be relied on to have pipefail (dash has none). The read checks head's own exit status, so the verify
+    answers 500 and the episode runs again, rather than an empty log scoring it 0 as the model's, or the lines read
+    before the failure grading it without the rest. The failure reason gives head's exit status, which tells a head
+    that failed from one that was killed or is missing."""
     named_configs = {
         "sandbox": {
             "local": {"workspace_root": str(tmp_path / "agent-runs"), "shell": shell},
@@ -1182,6 +1183,8 @@ def test_a_plugin_log_read_whose_head_fails_fails_the_verify_for_a_retry(
     # The read raised its failure, and nothing was graded or scored 0.
     assert failed.status_code == 500, failed.text
     assert _failure_kinds(failed) == ["provider_request_failed"]
+    (event,) = FailureHeader.decode(failed.headers).events.values()
+    assert f"plugin log read failed: head status {status}, base64 status 0" in event.failure_reason
     assert judge.await_count == 0 and stopped == [started[0][0]]
     # Nothing was kept from the attempt, so the same verify again is masked rather than graded without the log.
     retried = client.post("/verify", json=_verify_body(), headers=EPISODE_VERIFY)
