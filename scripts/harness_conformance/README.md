@@ -252,7 +252,7 @@ report that their native-deadline fixture is unsupported until configured and
 qualified. Configure other adapters here instead of adding harness branches to the
 shared timeout checks.
 
-The native scenario verdict uses only initialization, model reach/protocol, and
+The native scenario verdict uses only initialization, model reach, and
 the native-timeout failure requirements. Capture, token, verifier, and other
 ancillary checks remain in `scenario_result.json` under `diagnostic_checks` and
 in the report's ancillary diagnostics section; they do not require a failed

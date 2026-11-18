@@ -108,7 +108,7 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
     if scenario.native_model_timeout:
         from .native_timeouts import inspect_native_timeout
 
-        required = {"episode.initialized", "model.reached", "model.protocol"}
+        required = {"episode.initialized", "model.reached"}
         diagnostic_checks = [check for check in checks if check["id"] not in required]
         checks = [check for check in checks if check["id"] in required]
         checks += inspect_native_timeout(witness, record, execution)

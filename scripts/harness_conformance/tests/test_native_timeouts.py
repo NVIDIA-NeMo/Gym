@@ -193,6 +193,7 @@ def test_full_episode_verdict_uses_native_requirements_not_unavailable_capture(t
     assert result["p0_verdict"] == "fulfilled"
     diagnostics = {check["id"]: check for check in result["diagnostic_checks"]}
     assert diagnostics["model_calls.present"]["status"] == "fail"
+    assert diagnostics["model.protocol"]["status"] == "pass"
     for key in (
         "model.finished",
         "verifier.outcome",
@@ -202,8 +203,7 @@ def test_full_episode_verdict_uses_native_requirements_not_unavailable_capture(t
     ):
         assert diagnostics[key]["status"] == "not_applicable"
     assert all(
-        check["id"].startswith("native_timeout.")
-        or check["id"] in {"episode.initialized", "model.reached", "model.protocol"}
+        check["id"].startswith("native_timeout.") or check["id"] in {"episode.initialized", "model.reached"}
         for check in result["checks"]
     )
 
