@@ -53,7 +53,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxStatus,
     SandboxUsageSample,
 )
-from nemo_gym.sandbox.providers.usage import ProcessTreeState, ProcfsUsageReader
+from nemo_gym.sandbox.providers.usage import ProcessTreeState, ProcfsUsageReader, sampling_enabled
 from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
 from nemo_gym.sandbox.providers.utils import kill_cancelled_command, require_shell_text
 from nemo_gym.sandbox.providers.utils import path_under_mount as _path_under_mount
@@ -265,6 +265,12 @@ class _EnrootInstance:
     start_pgid: int | None = None  # process group of the detached `enroot start`
     proc: Any = None  # asyncio subprocess handle for the detached start
     usage_state: ProcessTreeState = field(default_factory=ProcessTreeState)
+    # Whether exec() measures each command's CPU: only on the creator's handle, once it is verified, with sampling
+    # on. A handle rebuilt with connect() is not measured: its creator measures the sandbox.
+    measure_exec_cpu: bool = False
+    # Set by serialize_handle(): a borrower in another process may run commands this handle never sees, so this
+    # handle's exec CPU would be a part reported as the whole.
+    lent: bool = False
     exec_cpu_usec: int = 0  # CPU of exec'd commands that ran to completion, from their reaped process trees
     exec_count: int = 0
 
@@ -412,6 +418,8 @@ class EnrootProvider:
                     timeout=timeout_s,
                 )
             except asyncio.CancelledError:
+                # A cancelled caller (an episode deadline, say) must not leave the command running, nor its exec
+                # wrapper writing a CPU report after the caller removed it.
                 await kill_cancelled_command(proc)
                 raise
             except asyncio.TimeoutError as e:
@@ -580,6 +588,8 @@ class EnrootProvider:
         try:
             instance.container_pid = await self._await_container_pid(instance, err_f)
             await self._verify_created_handle(handle)
+            # After verification, so its readiness probes are not counted as the workload's commands.
+            instance.measure_exec_cpu = sampling_enabled()
         except Exception:
             await self._cleanup_failed_create_handle(handle)
             raise
@@ -757,6 +767,7 @@ class EnrootProvider:
         instance = handle.raw
         if instance.container_pid is None or not self._pid_has_container_marker(instance.container_pid, instance.name):
             raise RuntimeError(f"Enroot sandbox {instance.name!r} is no longer running")
+        instance.lent, instance.measure_exec_cpu = True, False
         return {
             "provider": self.name,
             "sandbox_id": instance.name,
@@ -890,13 +901,14 @@ class EnrootProvider:
         # CPU accounting is best effort: without a report file (no space or inodes) the command runs unwrapped.
         report_path: str | None = None
         run_argv = argv
-        try:
-            descriptor, report_path = tempfile.mkstemp(prefix="nemo-gym-exec-cpu-")
-        except OSError:
-            pass
-        else:
-            os.close(descriptor)
-            run_argv = ["/bin/sh", "-c", EXEC_TIMES_SCRIPT, "sh", report_path, *argv]
+        if instance.measure_exec_cpu:
+            try:
+                descriptor, report_path = tempfile.mkstemp(prefix="nemo-gym-exec-cpu-")
+            except OSError:
+                pass
+            else:
+                os.close(descriptor)
+                run_argv = ["/bin/sh", "-c", EXEC_TIMES_SCRIPT, "sh", report_path, *argv]
         cpu_usec = None
         try:
             code, out, err = await self._run(run_argv, timeout_s=effective_timeout, stdin=stdin)
@@ -1054,8 +1066,10 @@ class EnrootProvider:
 
         Enroot creates no cgroup per container, so every sandbox of this Gym process (and Gym itself) runs in
         one cgroup: its totals are labelled ``shared_step``, never one sandbox's usage. ``exec_rusage`` is exact
-        for the commands that ``exec`` ran to completion through this provider instance and excludes processes they
-        left running; it overlaps the process tree, so the two are separate measurements, never added together.
+        for the commands that ``exec`` ran to completion through this handle, including the ``enroot exec``
+        launcher's own CPU, and excludes processes they left running; it overlaps the process tree, so the two are
+        separate measurements, never added together. A lent sandbox (``serialize_handle()``) reports no
+        ``exec_rusage``: its borrower's commands never pass through this handle.
         """
         instance = handle.raw
         samples: tuple[SandboxUsageSample, ...] = ()
@@ -1064,14 +1078,13 @@ class EnrootProvider:
             samples = await asyncio.to_thread(
                 self._usage_reader.host_process_usage, pid, instance.usage_state, own_cgroup_scope="shared_step"
             )
-        if instance.exec_count:
+        if instance.exec_count and not instance.lent:
             exec_sample = SandboxUsageSample(
                 source="exec_rusage",
                 scope="process_tree",
                 sampled_at=time.time(),
                 cpu_usage_usec_total=instance.exec_cpu_usec,
                 cpu_kind="counter",
-                process_count=instance.exec_count,
             )
             samples = (*samples, exec_sample)
         return samples

@@ -467,9 +467,12 @@ Other providers, including OpenSandbox, report no usage yet.
   cache and kernel memory but counts a page shared by several processes once per process, so it is not a bound
   of the container's memory, and its `sampled_lower_bound` peak bounds only that sum's own peak.
 - `exec_rusage` (Enroot) is the CPU of the commands `exec` ran to completion in the process that created the
-  sandbox, read from the kernel's accounting of each command's reaped process tree. It is exact for those commands,
-  so it counts short commands the process-tree samples miss, but it leaves out processes a command left running.
-  It overlaps the process tree, so the two are separate measurements and are never added together.
+  sandbox, read from the kernel's accounting of each command's reaped process tree, including the `enroot exec`
+  launcher's own CPU. It is exact for those commands, so it counts short commands the process-tree samples miss,
+  but it leaves out processes a command left running. It overlaps the process tree, so the two are separate
+  measurements and are never added together: the larger of `exec_rusage` and the `procfs_*` CPU is the
+  recommended reading. A sandbox lent through `serialize()` reports no `exec_rusage`, since its borrower's
+  commands run in another process; its `procfs_*` measurement still covers them.
 - `shared_step` is a cgroup the sandbox shares with Gym and its sibling sandboxes, such as a Slurm job step.
   Its `cpu_usage_usec_delta` is everything in that cgroup while the sandbox lived; never one sandbox's cost.
 
@@ -485,7 +488,7 @@ These lifetime summaries are separate from the live resource records OpenSandbox
 
 | | Usage summaries (`SupportsSandboxUsage`) | Resource telemetry (`ResourceProvider`) |
 | --- | --- | --- |
-| Providers | Docker | OpenSandbox |
+| Providers | Docker, Enroot, Apptainer | OpenSandbox |
 | Mechanism | Lifetime accounting: cumulative CPU and peak memory, read after create and before close | Allocation plus instantaneous CPU % and memory in use, every `NEMO_GYM_OTEL_SANDBOX_RESOURCE_SAMPLE_INTERVAL_SECONDS` |
 | Output | `sandbox.resource_usage`, `gym.sandbox.stop` span attributes and `SandboxObservation.resource_usage` | `gym.sandbox.resource.*` spans and `gym.sandbox.*` gauges |
 | Needs an OTel exporter | No | Yes |

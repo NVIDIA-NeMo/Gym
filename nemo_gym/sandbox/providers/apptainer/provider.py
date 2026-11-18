@@ -349,6 +349,7 @@ class ApptainerProvider:
         self._binary = _require_apptainer(bin_path)
         self._subprocess_env = _apptainer_subprocess_env(bin_path)
         self._semaphore = asyncio.Semaphore(self._exec_config.concurrency)
+        self._usage_reader = ProcfsUsageReader()
 
     async def _run(
         self,
@@ -910,9 +911,8 @@ class ApptainerProvider:
             if started is None:
                 return ()
             inst.init_pid, inst.init_start_time = pids[0], started
-        reader = ProcfsUsageReader()
         samples = await asyncio.to_thread(
-            reader.host_process_usage, inst.init_pid, inst.usage_state, own_cgroup_scope="container"
+            self._usage_reader.host_process_usage, inst.init_pid, inst.usage_state, own_cgroup_scope="container"
         )
         # Read again after the sample, so a PID reused while it was taken never becomes this instance's usage.
         return samples if process_start_time(inst.init_pid) == inst.init_start_time else ()

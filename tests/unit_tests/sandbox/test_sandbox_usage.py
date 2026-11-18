@@ -796,7 +796,7 @@ async def test_an_unmeasured_or_failed_stop_tells_no_listener(monkeypatch: pytes
 
 @pytest.mark.sandbox
 @pytest.mark.skipif(not Path("/bin/sh").exists(), reason="no /bin/sh")
-@pytest.mark.parametrize("runtime", ["docker", "apptainer"])
+@pytest.mark.parametrize("runtime", ["docker", "apptainer", "enroot"])
 async def test_a_cancelled_cli_call_kills_its_process_group(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, runtime: str
 ) -> None:
@@ -807,11 +807,16 @@ async def test_a_cancelled_cli_call_kills_its_process_group(
 
         monkeypatch.setattr(module, "_require_docker", lambda: "/usr/bin/docker")
         provider = module.DockerProvider()
-    else:
+    elif runtime == "apptainer":
         from nemo_gym.sandbox.providers.apptainer import provider as module
 
         monkeypatch.setattr(module, "_require_apptainer", lambda _bin_path=None: "/usr/bin/apptainer")
         provider = module.ApptainerProvider()
+    else:
+        from nemo_gym.sandbox.providers.enroot import provider as module
+
+        monkeypatch.setattr(module, "_require_enroot", lambda *args, **kwargs: "/usr/bin/enroot")
+        provider = module.EnrootProvider(create={"base_dir": str(tmp_path / "home")})
     pid_file = tmp_path / "pid"
     # A stalled CLI (such as `docker inspect`) whose child would outlive a leaked parent.
     command = ["/bin/sh", "-c", f"sleep 30 & echo $! > {pid_file}; wait"]

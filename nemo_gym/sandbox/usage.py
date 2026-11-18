@@ -76,10 +76,6 @@ class SandboxUsageSummary:
     unavailable_reason: str | None = None
 
 
-def sampling_enabled() -> bool:
-    return os.getenv("NEMO_GYM_SANDBOX_USAGE", "1").strip().lower() not in ("0", "false", "off", "no")
-
-
 def usage_sample_interval() -> float:
     try:
         value = float(os.getenv("NEMO_GYM_SANDBOX_USAGE_SAMPLE_INTERVAL_SECONDS", DEFAULT_SAMPLE_INTERVAL_S))

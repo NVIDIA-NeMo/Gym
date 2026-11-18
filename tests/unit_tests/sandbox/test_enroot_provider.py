@@ -132,6 +132,7 @@ def _make_handle(
     env: dict[str, str] | None = None,
     container_pid: int | None = FAKE_PID,
     start_pgid: int | None = None,
+    measure_exec_cpu: bool = False,
 ) -> SandboxHandle:
     inst = enroot_provider._EnrootInstance(
         name=name,
@@ -143,6 +144,7 @@ def _make_handle(
         container_pid=container_pid,
         start_pgid=start_pgid,
         proc=None,
+        measure_exec_cpu=measure_exec_cpu,
     )
     return SandboxHandle(sandbox_id=name, provider_name="enroot", raw=inst)
 
@@ -385,6 +387,8 @@ async def test_create_builds_argv_and_runs_probe(
     assert handle.raw.container_pid == FAKE_PID
     assert handle.raw.start_pgid == FAKE_PID
     assert handle.raw.env == {"FOO": "bar"}
+    # The readiness probe ran unwrapped; the workload's commands are measured from here on.
+    assert all(call["argv"][0] != "/bin/sh" for call in rec.calls) and handle.raw.measure_exec_cpu
 
     # create rootfs
     create_argv = next(c["argv"] for c in rec.calls if "create" in c["argv"])
@@ -597,7 +601,7 @@ async def test_ensure_image_import_timeout_raises(
 # --------------------------------------------------------------------------- #
 async def test_exec_normal_with_cwd_and_env(fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     provider, rec, _sr = _make_provider(monkeypatch, lambda argv: (0, "hello", ""), tmp_path)
-    handle = _make_handle(tmp_path)
+    handle = _make_handle(tmp_path, measure_exec_cpu=True)
 
     result = await provider.exec(handle, "echo hi", cwd="/work", env={"A": "b"})
 
@@ -1234,13 +1238,14 @@ async def test_exec_cpu_is_read_from_the_report_file_and_stderr_is_never_touched
     reports = []
 
     def responder(argv: list[str]) -> tuple[int, str, str]:
+        assert argv[:3] == ["/bin/sh", "-c", enroot_provider.EXEC_TIMES_SCRIPT], "a measured exec is wrapped"
         Path(argv[4]).write_text(report)
         reports.append(Path(argv[4]))
         return 3, "out", "warn"
 
     provider, _rec, _sr = _make_provider(monkeypatch, responder, tmp_path)
     monkeypatch.setattr(provider._usage_reader, "host_process_usage", lambda *args, **kwargs: ())
-    handle = _make_handle(tmp_path)
+    handle = _make_handle(tmp_path, measure_exec_cpu=True)
 
     result = await provider.exec(handle, "true")
     await provider.exec(handle, "true")
@@ -1253,7 +1258,8 @@ async def test_exec_cpu_is_read_from_the_report_file_and_stderr_is_never_touched
     else:
         (sample,) = samples
         assert (sample.source, sample.scope, sample.cpu_kind) == ("exec_rusage", "process_tree", "counter")
-        assert (sample.cpu_usage_usec_total, sample.process_count) == (2 * cpu_usec, 2)
+        # The count of completed execs is not a process count, so the sample reports none.
+        assert (sample.cpu_usage_usec_total, sample.process_count) == (2 * cpu_usec, None)
 
 
 async def test_an_exec_runs_unwrapped_when_no_report_file_can_be_made(
@@ -1261,7 +1267,7 @@ async def test_an_exec_runs_unwrapped_when_no_report_file_can_be_made(
 ) -> None:
     provider, rec, _sr = _make_provider(monkeypatch, lambda argv: (3, "out", "warn"), tmp_path)
     monkeypatch.setattr(provider._usage_reader, "host_process_usage", lambda *args, **kwargs: ())
-    handle = _make_handle(tmp_path)
+    handle = _make_handle(tmp_path, measure_exec_cpu=True)
 
     def no_space(*args, **kwargs):
         raise OSError(28, "No space left on device")
@@ -1317,7 +1323,7 @@ async def test_a_timed_out_exec_counts_no_cpu(
 
     provider, _rec, _sr = _make_provider(monkeypatch, responder, tmp_path)
     monkeypatch.setattr(provider._usage_reader, "host_process_usage", lambda *args, **kwargs: ())
-    handle = _make_handle(tmp_path)
+    handle = _make_handle(tmp_path, measure_exec_cpu=True)
 
     result = await provider.exec(handle, "sleep 100", timeout_s=1)
 
@@ -1351,3 +1357,30 @@ async def test_an_unwritable_report_loses_the_sample_not_the_command_output_or_s
     )
 
     assert (code, out, err) == (4, "out", "partial") and not report.exists()
+
+
+async def test_only_a_measured_handle_wraps_its_execs_and_a_lent_one_reports_no_exec_cpu(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        if argv[0] == "/bin/sh":
+            Path(argv[4]).write_text("0m0.00s 0m0.00s\n0m1.00s 0m0.00s\n")
+        return 0, "", ""
+
+    provider, rec, _sr = _make_provider(monkeypatch, responder, tmp_path)
+    monkeypatch.setattr(provider._usage_reader, "host_process_usage", lambda *args, **kwargs: ())
+    monkeypatch.setattr(provider, "_pid_has_container_marker", lambda pid, name: True)
+
+    # A handle rebuilt with connect(), or one made with sampling off, never wraps an exec.
+    unmeasured = _make_handle(tmp_path)
+    await provider.exec(unmeasured, "true")
+    assert rec.calls[-1]["argv"][:2] == [FAKE_BINARY, "exec"] and await provider.usage(unmeasured) == ()
+
+    # The creator's setup commands are measured until it lends the sandbox; from then on its own exec CPU would be
+    # a part reported as the whole, so it reports none, and stops measuring.
+    creator = _make_handle(tmp_path, measure_exec_cpu=True)
+    await provider.exec(creator, "chmod +x setup.sh")
+    assert [sample.source for sample in await provider.usage(creator)] == ["exec_rusage"]
+    await provider.serialize_handle(creator)
+    await provider.exec(creator, "git diff")
+    assert rec.calls[-1]["argv"][:2] == [FAKE_BINARY, "exec"] and await provider.usage(creator) == ()

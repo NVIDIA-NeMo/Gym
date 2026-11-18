@@ -19,6 +19,11 @@ from pathlib import Path
 from nemo_gym.sandbox.providers.base import SandboxUsageSample, SandboxUsageScope, SandboxUsageUnavailable
 
 
+def sampling_enabled() -> bool:
+    """Whether sandbox usage is measured at all; ``NEMO_GYM_SANDBOX_USAGE=0`` turns it off."""
+    return os.getenv("NEMO_GYM_SANDBOX_USAGE", "1").strip().lower() not in ("0", "false", "off", "no")
+
+
 CGROUP_FILES = ("cpu.stat", "memory.current", "memory.peak", "memory.stat")
 # How long one scan of /proc serves every sandbox in this process; bounds scans to one per second however many
 # sandboxes sample.
@@ -164,7 +169,6 @@ class ProcfsUsageReader:
         self.proc_root = proc_root
         self.cgroup_root = cgroup_root
         self.clock_ticks = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
-        self.page_size = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 4096
 
     def _namespace(self, pid: int | str, kind: str) -> str | None:
         try:

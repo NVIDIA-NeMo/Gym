@@ -62,6 +62,7 @@ from nemo_gym.sandbox.providers import (
     create_provider,
 )
 from nemo_gym.sandbox.providers.base import SupportsSandboxExecScopedProcesses
+from nemo_gym.sandbox.providers.usage import sampling_enabled
 from nemo_gym.sandbox.resource_telemetry import (
     ResourceProvider,
     ResourceSampler,
@@ -72,7 +73,6 @@ from nemo_gym.sandbox.resource_telemetry import (
 from nemo_gym.sandbox.usage import (
     SandboxUsageSummary,
     SandboxUsageTracker,
-    sampling_enabled,
     usage_sample_interval,
     usage_span_attributes,
 )
