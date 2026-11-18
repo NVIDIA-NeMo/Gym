@@ -370,7 +370,7 @@ class StringMatchResourcesServer(SimpleResourcesServer):
             reward = _answers_match(extracted, body.expected_answer, body.case_sensitive)
 
         return StringMatchVerifyResponse(
-            **body.model_dump(exclude={"expected_answer", "extracted_answer"}),
+            **body.model_dump(exclude={"expected_answer", "extracted_answer"}, by_alias=True),
             reward=reward,
             expected_answer=body.expected_answer,
             extracted_answer=extracted,
