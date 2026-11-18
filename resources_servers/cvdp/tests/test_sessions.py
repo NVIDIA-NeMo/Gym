@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """The agent session lifecycle: the task sandbox is the local sandbox provider in a temporary directory."""
 
+import asyncio
 import dataclasses
+import io
 import shutil
+import tarfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -327,9 +330,13 @@ def test_files_that_changed_while_tar_read_them_still_grade(server, root, stoppe
 
 
 @pytest.mark.parametrize(
-    "stderr", ["tar: rtl/top.sv: Cannot open: Permission denied", "tar: rtl/top.sv: Wrote only 4096 of 10240 bytes"]
+    "stderr",
+    [
+        "tar: /code/.cvdp-harvest-0.tar: Wrote only 4096 of 10240 bytes",
+        "tar: /code/.cvdp-harvest-0.tar: Cannot write: No space left on device",
+    ],
 )
-def test_a_fatal_tar_error_is_masked_and_keeps_the_sandbox(server, root, stopped, graded, monkeypatch, stderr):
+def test_a_failed_archive_write_is_masked_and_keeps_the_sandbox(server, root, stopped, graded, monkeypatch, stderr):
     client = TestClient(server.setup_webserver())
     _post_seed(client, _seed())
     _solve(root)
@@ -341,6 +348,62 @@ def test_a_fatal_tar_error_is_masked_and_keeps_the_sandbox(server, root, stopped
     assert stderr in verified["failure_reason"]
     assert graded == [], "the archive may be missing files, so it is neither graded nor replaced by the text"
     assert stopped == [], "a resent verify can harvest again"
+
+
+def test_files_the_agent_made_unreadable_neither_fail_nor_mask_the_harvest(server, root, stopped, graded):
+    client = TestClient(server.setup_webserver())
+    _post_seed(client, _seed())
+    _solve(root)
+    (root / "rtl" / "scratch.bin").write_bytes(b"\0")
+    (root / "rtl" / "sub").mkdir()
+    (root / "rtl" / "sub" / "extra.sv").write_text("module extra; endmodule\n")
+    for path in ("rtl/scratch.bin", "rtl/top.sv", "rtl/sub"):
+        (root / path).chmod(0)
+
+    verified = _verify(client)
+
+    assert (verified["reward"], verified["mask_sample"]) == (1.0, False)
+    # The harvest makes them readable again, so even the unreadable target is graded.
+    assert graded == [
+        {
+            "rtl/sub/extra.sv": "module extra; endmodule\n",
+            "rtl/top.sv": TOP,
+            "verif/tb.sv": TESTBENCH + "// more checks\n",
+        }
+    ]
+    assert len(stopped) == 1
+
+
+def test_a_target_tar_stores_as_a_hard_link_is_graded(root, graded):
+    server = _server(root)
+    client = TestClient(server.setup_webserver())
+    metadata = _metadata() | {"target_files": ["top.sv"]}
+    _post_seed(client, _seed(task_data={"verifier_metadata": metadata}))
+    _solve(root)
+    # Archived after rtl/, so tar stores it as a hard link to rtl/top.sv.
+    (root / "top.sv").hardlink_to(root / "rtl" / "top.sv")
+
+    _verify(client, _verify_body() | {"verifier_metadata": metadata})
+
+    assert graded[0]["top.sv"] == graded[0]["rtl/top.sv"] == TOP
+
+
+def test_the_harvest_keeps_hard_links_only_to_files_it_extracts(tmp_path):
+    archive = tmp_path / "workspace.tar"
+    with tarfile.open(archive, "w") as tar:
+        top = tarfile.TarInfo("rtl/top.sv")
+        top.size = len(TOP)
+        tar.addfile(top, io.BytesIO(TOP.encode()))
+        for name, target in (("top.sv", "rtl/top.sv"), ("out.sv", "../outside.sv"), ("abs.sv", "/etc/hostname")):
+            link = tarfile.TarInfo(name)
+            link.type, link.linkname = tarfile.LNKTYPE, target
+            tar.addfile(link)
+
+    files = app_module._collect_harvest(
+        archive, tmp_path / "workspace", ["rtl/**/*.sv"], {}, ["top.sv", "out.sv", "abs.sv"]
+    )
+
+    assert files == {"rtl/top.sv": TOP, "top.sv": TOP}
 
 
 def test_a_workspace_with_none_of_the_harvested_paths_grades_the_response_text(server, root, stopped, graded):
@@ -427,6 +490,48 @@ def test_a_stop_that_fails_after_the_harvest_still_grades_and_close_stops_the_sa
     assert server._sessions == {}
 
 
+def test_ownership_outlives_a_verify_only_while_the_sandbox_is_unreleased(server, root, stopped, monkeypatch):
+    """Checkpoint and worker ownership end at verify unless the session still holds a sandbox to stop."""
+    client = TestClient(server.setup_webserver())
+    seed = _seed()
+    _post_seed(client, seed)
+    _solve(root)
+    assert server.owned_session_routing()["session_release_pending"] == server.session_release_pending
+    real_exec = AsyncSandbox.exec
+
+    _exec_result(monkeypatch, 2, "tar: /code/.cvdp-harvest-0.tar: Wrote only 4096 of 10240 bytes", run=False)
+    assert _verify(client)["mask_sample"] is True
+    assert server.session_release_pending("session"), "a failed harvest keeps the sandbox for a resent verify"
+
+    monkeypatch.setattr(AsyncSandbox, "exec", real_exec)
+    assert _verify(client)["mask_sample"] is False
+    assert not server.session_release_pending("session"), "a stopped sandbox leaves nothing to release"
+    assert not server.session_release_pending("unknown")
+
+
+def test_retirement_stops_a_sandbox_whose_stop_failed_at_verify(server, root, graded, monkeypatch):
+    client = TestClient(server.setup_webserver())
+    _post_seed(client, _seed())
+    _solve(root)
+    real_stop = AsyncSandbox.stop
+    monkeypatch.setattr(AsyncSandbox, "stop", AsyncMock(side_effect=OSError("stop failed")))
+    assert _verify(client)["reward"] == 1.0
+    assert server.session_release_pending("session")
+
+    stopped: list[AsyncSandbox] = []
+
+    async def stop(self: AsyncSandbox) -> None:
+        stopped.append(self)
+        await real_stop(self)
+
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    asyncio.run(server.retire_session_state("session"))
+
+    assert len(stopped) == 1
+    assert server._sessions == {}
+    assert not server.session_release_pending("session")
+
+
 def test_seeding_again_is_idempotent_for_its_episode_and_refused_for_another(server, root, stopped):
     client = TestClient(server.setup_webserver())
     seed = _seed()
@@ -469,6 +574,43 @@ def test_a_failed_start_stops_the_sandbox_and_keeps_nothing(server, root, stoppe
 
     assert len(stopped) == 1
     assert server._sessions == {}
+
+
+def test_a_seed_resent_after_failed_setup_and_cleanup_stops_the_old_sandbox_first(server, root, monkeypatch):
+    events: list[tuple[str, AsyncSandbox]] = []
+    real_start, real_stop = AsyncSandbox.start, AsyncSandbox.stop
+    stop_failures = [OSError("stop failed"), OSError("stop failed again")]
+
+    async def start(self, spec):
+        events.append(("start", self))
+        await real_start(self, spec)
+
+    async def stop(self):
+        events.append(("stop", self))
+        if stop_failures:
+            raise stop_failures.pop(0)
+        await real_stop(self)
+
+    monkeypatch.setattr(AsyncSandbox, "start", start)
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    monkeypatch.setattr(AsyncSandbox, "serialize", AsyncMock(side_effect=[OSError("serialize"), {"sandbox_id": "x"}]))
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    seed = _seed()
+
+    assert _post_seed(client, seed).status_code == 500
+    original = server._sessions["session"].sandbox
+    assert original is not None and not server._sessions["session"].ready
+
+    # The stop fails again: a retryable error, the original still owned, and nothing new started.
+    assert _post_seed(client, seed).status_code == 500
+    assert server._sessions["session"].sandbox is original
+    assert [kind for kind, _ in events] == ["start", "stop", "stop"]
+
+    resent = _post_seed(client, seed)
+    assert resent.status_code == 200, resent.text
+    assert events[3:] == [("stop", original), ("start", server._sessions["session"].sandbox)]
+    assert server._sessions["session"].ready
+    assert _post_seed(client, _seed(rollout_id="1-0")).status_code == 409, "another episode is still refused"
 
 
 def test_shutdown_stops_the_sandboxes_of_open_sessions(server, root, stopped):

@@ -101,8 +101,8 @@ _helpers = ModelHelpers()
 # The files an agent session harvests by default: the RTL and testbench sources it may write.
 DEFAULT_HARVEST_GLOBS = ["rtl/**/*.sv", "rtl/**/*.v", "rtl/**/*.vhd", "verif/**/*.sv", "verif/**/*.v"]
 # The harvest command's exit code when the workspace holds none of the harvested paths. GNU tar exits 1 when a
-# file changed while it was read (the archive is complete) and 2 on a fatal error (an unreadable file, a full disk),
-# after which the archive may be missing files, so this must differ from both.
+# file changed while it was read (the archive is complete) and 2 on a fatal error (a full disk), after which the
+# archive may be missing files, so this must differ from both.
 _NOTHING_TO_HARVEST_EXIT = 3
 _CATEGORY_RE = re.compile(r"cid\d+")
 
@@ -274,13 +274,22 @@ def _harvest_roots(globs: List[str], target_files: List[str]) -> List[str]:
 
 
 def _harvest_command(workdir: str, roots: List[str], archive: str) -> str:
-    """Archive whichever roots exist; exit ``_NOTHING_TO_HARVEST_EXIT`` when none do."""
+    """Archive whichever roots exist; exit ``_NOTHING_TO_HARVEST_EXIT`` when none do.
+
+    The agent decides which files are readable, so an unreadable file must not fail the archive: tar exit 2 masks
+    the sample. The command first makes the agent's files readable again (it runs as their owner, or as root), and
+    GNU tar then leaves out whatever still is not with a warning. A target left out is graded as missing, a failure
+    of the model; write failures, such as a full disk, still exit 2.
+    """
     candidates = " ".join(shlex.quote(root) for root in roots)
     return (
         f"cd {shlex.quote(workdir)} || exit {_NOTHING_TO_HARVEST_EXIT}; set --; "
         f'for p in {candidates}; do if [ -e "$p" ]; then set -- "$@" "$p"; fi; done; '
         f'if [ "$#" -eq 0 ]; then exit {_NOTHING_TO_HARVEST_EXIT}; fi; '
-        f'tar -cf {shlex.quote(archive)} -- "$@"'
+        'chmod -R u+rX -- "$@" 2>/dev/null; '
+        # Only GNU tar has the flag; others exit 1 on an unreadable file, which grades too.
+        'if tar --version 2>/dev/null | grep -q GNU; then set -- --ignore-failed-read -- "$@"; else set -- -- "$@"; fi; '
+        f'tar -cf {shlex.quote(archive)} "$@"'
     )
 
 
@@ -293,7 +302,13 @@ def _collect_harvest(
     the agent's work; a declared target file counts whenever it exists. Files that are not UTF-8 text are skipped.
     """
     with tarfile.open(archive) as tar:
-        members = [m for m in tar.getmembers() if m.isreg() and _safe_rel(m.name)]
+        regular = {m.name for m in tar.getmembers() if m.isreg() and _safe_rel(m.name)}
+        # tar stores a second path to an archived file as a hard link to the first; keep it when that one is kept.
+        members = [
+            m
+            for m in tar.getmembers()
+            if m.name in regular or (m.islnk() and _safe_rel(m.name) and m.linkname in regular)
+        ]
         tar.extractall(dest, members=members, filter="data")
 
     def read(path: Path) -> Optional[str]:
@@ -424,12 +439,17 @@ class CVDPResourcesServer(SimpleResourcesServer):
                     raise ResourcesSessionConflictError(
                         "resources_session_id is already bound to another episode or task"
                     )
-                if not session.ready or session.harvested is not None or session.sandbox is None:
-                    raise ResourcesSessionConflictError(
-                        "The task sandbox is not available for seeding (setup incomplete or already harvested)"
-                    )
-                request.session[SESSION_ID_KEY] = session_id
-                return await self._seed_response(session_id, session)
+                if session.ready:
+                    if session.harvested is not None or session.sandbox is None:
+                        raise ResourcesSessionConflictError(
+                            "The task sandbox is not available for seeding (already harvested)"
+                        )
+                    request.session[SESSION_ID_KEY] = session_id
+                    return await self._seed_response(session_id, session)
+                # A failed setup whose cleanup failed too: stop that sandbox before starting another. A stop that
+                # fails again raises a retryable error and keeps the session owned.
+                await self._release_sandbox(session)
+                del self._sessions[session_id]
             try:
                 meta = CVDPVerifierMetadata.model_validate(body.task_data.get("verifier_metadata"))
                 if len(meta.categories) < 2 or not _CATEGORY_RE.fullmatch(meta.categories[0]):
@@ -512,6 +532,15 @@ class CVDPResourcesServer(SimpleResourcesServer):
                 del self._sessions[session_id]
                 self._fences.fence(session_id, session.episode_id)
 
+    def session_release_pending(self, session_id: str) -> bool:
+        """Whether the session still holds a sandbox to stop.
+
+        Verify keeps it when the harvest fails or the stop after it does. Checkpoint and worker ownership then
+        outlive the verify, so a lost close still leaves retirement a session to release.
+        """
+        session = self._sessions.get(session_id)
+        return session is not None and session.sandbox is not None
+
     @staticmethod
     async def _release_sandbox(session: _AgentSession) -> None:
         if session.sandbox is not None:
@@ -534,8 +563,9 @@ class CVDPResourcesServer(SimpleResourcesServer):
         The first verify that harvests stops the sandbox; later ones grade the same files. A workspace with none of
         the harvested paths yields no files, and grading falls back to the response text as the legacy agentic path
         did. Raises ``_HarvestUnavailable`` when the provider fails to run the command or transfer the archive, or
-        when tar fails (exit 2): its archive may be missing files, and a full disk is not the agent's failure. The
-        sandbox is then kept, so a resent verify can try again and close still stops it.
+        when tar fails (exit 2): its archive may be missing files, and a full disk is not the agent's failure. Files
+        the agent made unreadable do not fail it (``_harvest_command``). The sandbox is then kept, so a resent verify
+        can try again and close still stops it.
         """
         if session.harvested is None:
             workdir = self.config.agent_workdir.rstrip("/")
@@ -555,7 +585,8 @@ class CVDPResourcesServer(SimpleResourcesServer):
                 )
             if result.return_code in (0, 1):
                 if result.return_code == 1:
-                    # A process the agent left running wrote to a file while tar read it. The archive is complete.
+                    # A process the agent left running wrote to a file while tar read it, or a non-GNU tar skipped
+                    # a file it could not read. The archive is complete.
                     logging.warning("tar reported files that changed while it read them: %s", output)
                 with tempfile.TemporaryDirectory(prefix="cvdp-harvest-") as scratch:
                     local = Path(scratch) / "workspace.tar"
@@ -580,8 +611,8 @@ class CVDPResourcesServer(SimpleResourcesServer):
                 logging.warning("The agent left none of the harvested paths: %s", output)
                 files = {}
             elif result.return_code == 2:
-                # Python's tarfile reads an archive cut short at a header as complete, so grading it could silently
-                # drop files. Mask instead.
+                # Not an unreadable file (the command tolerates those) but a failed write. Python's tarfile reads an
+                # archive cut short at a header as complete, so grading it could silently drop files. Mask instead.
                 raise _HarvestUnavailable(VERIFIER_ERROR, f"tar failed to archive the workspace: {output[:2000]}")
             else:
                 # Not tar's own outcome: the image lacks tar, or the shell itself failed.

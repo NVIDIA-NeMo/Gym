@@ -67,8 +67,10 @@ with a real harness agent (`hermes_agent`, `opencode_agent` or `claude_code_agen
 3. `verify` archives `rtl/` and `verif/` (and any target file outside them), copies the archive out, stops the
    sandbox, and grades the RTL and testbench sources that differ from what was staged, plus the target files, in the
    task's harness as before. An agent that wrote nothing is graded on the text of its response, as the legacy agentic
-   flavor is, and a response with no text at all still scores 0. A verify whose session is gone, whose harvest the
-   provider failed, or whose tar failed (exit 2: an unreadable file, a full disk) is a masked sample instead of a 0.
+   flavor is, and a response with no text at all still scores 0. Files the agent made unreadable are made readable
+   again before archiving, and GNU tar skips any that still are not, so they cannot mask the sample. A verify whose
+   session is gone, whose harvest the provider failed, or whose tar failed to write the archive (exit 2, such as a
+   full disk) is a masked sample instead of a 0.
 4. `close_session` stops a sandbox that verify has not.
 
 Apptainer reattaches a sandbox only on the host and as the user that started it, so the resources server and the
