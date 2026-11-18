@@ -337,7 +337,7 @@ async def test_provider_spec_stages_as_root_and_lends_selected_view(server, monk
         "egress": [{"action": "allow", "target": "10.2.3.4"}],
     }
     assert "volumes" not in spec.provider_options
-    assert spec.provider_options["resource_requests"] == {"cpu": 0.75, "memory_mib": 2048, "disk_gib": 10}
+    assert spec.provider_options["resource_requests"] == {"cpu": 0.75, "memory_mib": 2048, "disk_gib": 24}
     assert spec.files and spec.env["OPENCODE_CONFIG"] == "/opt/cli/opencode-model.json"
     assert sandbox.exec.await_args.kwargs["user"] == 0
     sandbox.set_default_user.assert_called_once_with(65534)

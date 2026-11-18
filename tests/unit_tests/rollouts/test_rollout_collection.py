@@ -3126,8 +3126,10 @@ class TestRolloutCollection:
 
         # Read the actual persisted rows as the recovery/health gate does. A policy zero remains measured and
         # settled despite evaluation_completed=False; a policy FAIL remains terminal and outside the score.
-        from nemo_gym.orchestration.recovery import decide_from_collected, metric_coverage, trial_faults
-        from tests.unit_tests.orchestration.test_evaluation_health import _run
+        from nemo_gym.eval.recovery.gate import metric_coverage
+        from nemo_gym.eval.recovery.planner import decide_from_collected
+        from nemo_gym.eval.recovery.trials import trial_faults
+        from tests.helpers.recovery_health import _run
 
         collected = _run(2).model_copy(update={"results": persisted, "failures": failures})
         decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
