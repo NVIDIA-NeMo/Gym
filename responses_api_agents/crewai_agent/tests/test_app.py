@@ -36,7 +36,7 @@ from nemo_gym.sandbox import (
     SandboxAccess,
     SandboxSpec,
 )
-from nemo_gym.server_runtime import BaseRunRequest, DirectHTTPToolAccess
+from nemo_gym.server_runtime import BaseRunRequest, DirectHTTPToolAccess, MCPToolAccess
 from responses_api_agents.crewai_agent import app
 from responses_api_agents.crewai_agent.app import CrewAIAgent, CrewAIAgentConfig
 from responses_api_agents.crewai_agent.sandbox_runner import configure_crewai
@@ -118,7 +118,23 @@ def test_crewai_runs_with_a_private_home_and_sends_nothing_to_crewai_services(tm
                 sandbox_access=_access(),
                 tool_accesses=[DirectHTTPToolAccess(name="task", required=True, base_url="http://r", cookies={})],
             ),
-            "only MCP tool grants",
+            "only streamable HTTP MCP tool grants",
+        ),
+        (
+            _seed(
+                sandbox_access=_access(),
+                tool_accesses=[
+                    MCPToolAccess(
+                        name="magic",
+                        required=True,
+                        connection={"transport": "stdio", "command": "python3", "args": ["/opt/magic/server.py"]},
+                    ),
+                    MCPToolAccess(
+                        name="memory", required=True, connection={"transport": "sse", "url": "http://memory:9000/sse"}
+                    ),
+                ],
+            ),
+            "required grants it cannot use: magic \\(stdio\\), memory \\(sse\\)",
         ),
         (_seed(), "lends none and the agent has no sandbox_provider"),
         (_seed(sandbox_access=_access(user="agent")), "SandboxAccess user override"),

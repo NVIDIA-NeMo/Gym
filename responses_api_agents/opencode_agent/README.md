@@ -189,8 +189,12 @@ text of each message, so they do not contain the images. Request `temperature` a
 limit for each model call, as `simple_agent` does, and NeMo RL sets it on every row. It passes when
 it is at least the configured `max_output_tokens`, OpenCode's limit for each call; a smaller value
 returns 422. As in `simple_agent`, nothing limits the sum of output tokens over a session's calls. Other controls, history replay and
-required direct-HTTP tool grants are rejected. MCP tool grants become OpenCode `remote` MCP servers, and the model sees
-their tools as `<grant>_<tool>`. `mcp_tool_timeout_seconds` sets their connection and per-call
+required direct-HTTP tool grants are rejected. Streamable HTTP and SSE MCP tool grants become OpenCode `remote` MCP
+servers, which OpenCode 1 tries over streamable HTTP and then SSE, and a `stdio` grant, such as a Harbor task's own
+stdio MCP server, becomes a `local` server whose command OpenCode starts inside the sandbox, as the user it runs as,
+with the grant's `env` over OpenCode's own environment. OpenCode 2 sessions take streamable HTTP grants only: a
+required `sse` or `stdio` grant is refused at seed with a 422 that names it, and an optional one is left out. The
+model sees each grant's tools as `<grant>_<tool>`. `mcp_tool_timeout_seconds` sets their connection and per-call
 timeout; without it, OpenCode allows 30 seconds to connect and 60 seconds per call. A call still
 fails after about 300 seconds, Bun's default `fetch` timeout. Before the first model call,
 `required_mcp.mjs` checks

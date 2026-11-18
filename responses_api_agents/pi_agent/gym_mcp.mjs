@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { Writable } from "node:stream";
 
@@ -36,8 +37,15 @@ function originOf(url) {
   }
 }
 
-// Gym's MCP server uses stateless Streamable HTTP with JSON responses. This
-// adapter deliberately does not implement arbitrary MCP transports or SSE.
+// Where a server is, for an error message: a URL's origin, or a stdio server's command without its arguments.
+function locationOf(server) {
+  return server.command !== undefined ? `stdio command ${quoted(server.command)}` : originOf(server.url);
+}
+
+// A `url` server is reached over stateless Streamable HTTP with JSON responses, as Gym's MCP server answers. A
+// `command` server is started with its `args` and `env` (over Pi's environment) as a child process that speaks MCP
+// over stdio, one JSON-RPC message per line, as a task's own stdio server does; it lives as long as Pi, or until its
+// discovery fails. This adapter deliberately does not implement SSE.
 // A server marked `required: false` is skipped when its discovery fails; any other
 // failure registers no tools. A tool listed in any server's `terminal_tools` is a finish
 // tool: Pi ends the run after a turn whose calls were all successful finish calls. Each
@@ -59,49 +67,209 @@ export async function registerGymTools(pi, servers, { emit = emitEvent, replyCut
       // A lost diagnostic must not fail a session that can run without this server.
     }
   };
-  for (const [serverName, server] of enabled) {
-    let tools, toolNames;
-    try {
-      ({ tools, toolNames } = await discoverTools(serverName, server, names, terminal, replyCutOff));
-    } catch (error) {
-      const cause = `${describe(error)} at ${originOf(server.url)}`;
-      if (server.required !== false) throw new GymMcpError(`${serverName}: ${cause}`);
-      skip(serverName, cause);
-      continue;
+  // A discovered server not kept is stopped, and every discovered one when setup fails.
+  try {
+    for (const [serverName, server] of enabled) {
+      let tools, toolNames, connection;
+      try {
+        ({ tools, toolNames, connection } = await discoverTools(serverName, server, names, terminal, replyCutOff));
+      } catch (error) {
+        const cause = `${describe(error)} at ${locationOf(server)}`;
+        if (server.required !== false) throw new GymMcpError(`${serverName}: ${cause}`);
+        skip(serverName, cause);
+        continue;
+      }
+      for (const tool of tools) names.add(tool.name);
+      const finishTools = toolNames.filter((name) => terminal.has(name));
+      discovered.push({ serverName, required: server.required !== false, tools, finishTools, connection });
     }
-    for (const tool of tools) names.add(tool.name);
-    const finishTools = toolNames.filter((name) => terminal.has(name));
-    discovered.push({ serverName, required: server.required !== false, tools, finishTools });
+    // Another server's tool of the same name would end the run too.
+    const sharing = (entry) =>
+      discovered.filter((other) => other !== entry && other.finishTools.some((name) => entry.finishTools.includes(name)));
+    const kept = [];
+    for (const entry of discovered) {
+      const others = sharing(entry).map((other) => other.serverName);
+      if (entry.required || !others.length) kept.push(entry);
+      else {
+        skip(entry.serverName, `it shares finish tools with ${others.join(", ")}`);
+        entry.connection.close();
+      }
+    }
+    const clashing = kept.filter((entry) => entry.required && sharing(entry).some((other) => other.required));
+    if (clashing.length) {
+      const clashed = clashing.map((entry) => entry.serverName).join(", ");
+      throw new GymMcpError(`The required Gym MCP servers ${clashed} offer the same finish tools`);
+    }
+    const offered = new Set(kept.flatMap((entry) => entry.finishTools));
+    const missing = [...terminal].filter((name) => !offered.has(name));
+    if (missing.length) {
+      // Without its finish tool a run never ends on submission, so the server offering it is required.
+      const note = skipped.length ? ` (skipped optional servers: ${skipped.join(", ")})` : "";
+      throw new GymMcpError(`No Gym MCP server offers the finish tools ${missing.join(", ")}${note}`);
+    }
+    // A failed discovery must not leave a partially registered tool set.
+    for (const entry of kept) for (const tool of entry.tools) pi.registerTool(tool);
+  } catch (error) {
+    for (const entry of discovered) entry.connection.close();
+    throw error;
   }
-  // Another server's tool of the same name would end the run too.
-  const sharing = (entry) =>
-    discovered.filter((other) => other !== entry && other.finishTools.some((name) => entry.finishTools.includes(name)));
-  const kept = [];
-  for (const entry of discovered) {
-    const others = sharing(entry).map((other) => other.serverName);
-    if (entry.required || !others.length) kept.push(entry);
-    else skip(entry.serverName, `it shares finish tools with ${others.join(", ")}`);
-  }
-  const clashing = kept.filter((entry) => entry.required && sharing(entry).some((other) => other.required));
-  if (clashing.length) {
-    const clashed = clashing.map((entry) => entry.serverName).join(", ");
-    throw new GymMcpError(`The required Gym MCP servers ${clashed} offer the same finish tools`);
-  }
-  const offered = new Set(kept.flatMap((entry) => entry.finishTools));
-  const missing = [...terminal].filter((name) => !offered.has(name));
-  if (missing.length) {
-    // Without its finish tool a run never ends on submission, so the server offering it is required.
-    const note = skipped.length ? ` (skipped optional servers: ${skipped.join(", ")})` : "";
-    throw new GymMcpError(`No Gym MCP server offers the finish tools ${missing.join(", ")}${note}`);
-  }
-  // A failed discovery must not leave a partially registered tool set.
-  for (const entry of kept) for (const tool of entry.tools) pi.registerTool(tool);
 }
 
+// Stateless Streamable HTTP: one POST per message, answered with JSON.
+function httpConnection(server) {
+  return {
+    async send(message, signal, protocolVersion) {
+      const response = await fetch(server.url, {
+        method: "POST",
+        redirect: "error",
+        headers: {
+          ...server.headers,
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          "MCP-Protocol-Version": protocolVersion,
+        },
+        body: JSON.stringify(message),
+        signal,
+      });
+      if (!response.ok) {
+        await response.body?.cancel();
+        throw new GymMcpError(`Gym MCP ${message.method}: HTTP ${response.status}`);
+      }
+      if (message.id === undefined) {
+        await response.body?.cancel();
+        return;
+      }
+      if (!response.headers.get("content-type")?.includes("application/json")) {
+        await response.body?.cancel();
+        throw new GymMcpError("Gym MCP requires stateless JSON responses");
+      }
+      try {
+        return await response.json();
+      } catch (error) {
+        // The deadline or a cancellation can also end the body read; report that, not the JSON.
+        if (signal.aborted) throw error;
+        throw new GymMcpError(`Gym MCP ${message.method}: unreadable JSON response`);
+      }
+    },
+    close() {},
+  };
+}
+
+// MCP's stdio transport: the server is a child process that reads messages on its standard input and writes them on
+// its standard output, one JSON object per line; its standard error is Pi's. A request from the server is answered
+// (an empty result for `ping`, "method not found" otherwise) and its notifications are ignored.
+function stdioConnection(server) {
+  const child = spawn(server.command, server.args ?? [], {
+    env: { ...process.env, ...server.env },
+    stdio: ["pipe", "pipe", "inherit"],
+  });
+  const pending = new Map();
+  // The server holds Pi's event loop only while a request waits for its answer, so it never keeps Pi from exiting.
+  const hold = () => {
+    for (const handle of [child, child.stdout]) {
+      if (pending.size) handle.ref();
+      else handle.unref();
+    }
+  };
+  hold();
+  let ended;
+  const end = (error) => {
+    ended ??= error;
+    for (const { reject } of pending.values()) reject(ended);
+    pending.clear();
+    hold();
+  };
+  child.on("error", (error) => end(new GymMcpError(`stdio server did not start${error.code ? ` (${error.code})` : ""}`)));
+  child.on("exit", (code, signal) => end(new GymMcpError(`stdio server exited (${signal ?? `status ${code}`})`)));
+  // Writing to a server that exited fails with EPIPE; the exit itself is the error reported.
+  child.stdin.on("error", () => {});
+  const write = (message) => child.stdin.write(JSON.stringify(message) + "\n");
+  let buffered = "";
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    buffered += chunk;
+    let newline;
+    while ((newline = buffered.indexOf("\n")) >= 0) {
+      const line = buffered.slice(0, newline).trim();
+      buffered = buffered.slice(newline + 1);
+      let message;
+      try {
+        message = JSON.parse(line);
+      } catch {
+        continue; // Not a message: a blank line, or output the server should have written to stderr.
+      }
+      if (typeof message?.method === "string") {
+        if (message.id !== undefined) {
+          write(
+            message.method === "ping"
+              ? { jsonrpc: "2.0", id: message.id, result: {} }
+              : { jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "Method not found" } },
+          );
+        }
+        continue;
+      }
+      const waiting = pending.get(message?.id);
+      if (waiting) {
+        pending.delete(message.id);
+        hold();
+        waiting.resolve(message);
+      }
+    }
+  });
+  // The server must not outlive Pi, which ends without waiting for it.
+  const stop = () => child.kill();
+  process.once("exit", stop);
+  return {
+    async send(message, signal) {
+      if (ended) throw ended;
+      if (message.id === undefined) {
+        write(message);
+        return;
+      }
+      signal.throwIfAborted();
+      return await new Promise((resolve, reject) => {
+        const abort = () => {
+          pending.delete(message.id);
+          hold();
+          reject(signal.reason);
+        };
+        signal.addEventListener("abort", abort, { once: true });
+        pending.set(message.id, {
+          resolve: (value) => {
+            signal.removeEventListener("abort", abort);
+            resolve(value);
+          },
+          reject: (error) => {
+            signal.removeEventListener("abort", abort);
+            reject(error);
+          },
+        });
+        hold();
+        write(message);
+      });
+    },
+    close() {
+      process.removeListener("exit", stop);
+      if (child.exitCode === null && child.signalCode === null) child.kill();
+    },
+  };
+}
+
+// Connects to one server and lists its tools; a server whose discovery fails is disconnected (a stdio one stopped).
 async function discoverTools(serverName, server, registered, terminal, replyCutOff) {
   if (!/^[A-Za-z0-9_-]+$/.test(serverName)) {
     throw new GymMcpError("Invalid Gym MCP server name");
   }
+  const connection = server.command !== undefined ? stdioConnection(server) : httpConnection(server);
+  try {
+    return await listTools(connection, serverName, server, registered, terminal, replyCutOff);
+  } catch (error) {
+    connection.close();
+    throw error;
+  }
+}
+
+async function listTools(connection, serverName, server, registered, terminal, replyCutOff) {
   const names = new Set(registered);
   const pending = [];
   const toolNames = [];
@@ -111,38 +279,12 @@ async function discoverTools(serverName, server, registered, terminal, replyCutO
     const id = ++requestId;
     const timeout = method === "tools/call" ? server.timeout : Math.min(server.timeout, 30000);
     const deadline = AbortSignal.timeout(timeout);
-    const response = await fetch(server.url, {
-      method: "POST",
-      redirect: "error",
-      headers: {
-        ...server.headers,
-        "Content-Type": "application/json",
-        Accept: "application/json, text/event-stream",
-        "MCP-Protocol-Version": protocolVersion,
-      },
-      body: JSON.stringify({ jsonrpc: "2.0", ...(notification ? {} : { id }), method, params }),
-      signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
-    });
-    if (!response.ok) {
-      await response.body?.cancel();
-      throw new GymMcpError(`Gym MCP ${method}: HTTP ${response.status}`);
-    }
-    if (notification) {
-      await response.body?.cancel();
-      return;
-    }
-    if (!response.headers.get("content-type")?.includes("application/json")) {
-      await response.body?.cancel();
-      throw new GymMcpError("Gym MCP requires stateless JSON responses");
-    }
-    let message;
-    try {
-      message = await response.json();
-    } catch (error) {
-      // The deadline or a cancellation can also end the body read; report that, not the JSON.
-      if (deadline.aborted || signal?.aborted) throw error;
-      throw new GymMcpError(`Gym MCP ${method}: unreadable JSON response`);
-    }
+    const message = await connection.send(
+      { jsonrpc: "2.0", ...(notification ? {} : { id }), method, params },
+      signal ? AbortSignal.any([signal, deadline]) : deadline,
+      protocolVersion,
+    );
+    if (notification) return;
     if (message.jsonrpc !== "2.0" || message.id !== id || message.error || !message.result) {
       // Do not include response bodies or authentication headers in diagnostics.
       throw new GymMcpError(`Gym MCP ${method}: invalid or unsuccessful response`);
@@ -206,7 +348,7 @@ async function discoverTools(serverName, server, registered, terminal, replyCutO
     if (cursor && cursors.has(cursor)) throw new GymMcpError("Repeated Gym MCP tools/list cursor");
     cursors.add(cursor);
   } while (cursor);
-  return { tools: pending, toolNames };
+  return { tools: pending, toolNames, connection };
 }
 
 export default function (pi) {

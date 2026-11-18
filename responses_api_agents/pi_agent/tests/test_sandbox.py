@@ -248,6 +248,16 @@ def mcp_grant(name, *, required=True):
     }
 
 
+def stdio_grant(name, *, required=True):
+    connection = {"transport": "stdio", "command": "python3", "args": ["/opt/magic/server.py"], "env": {"A": "1"}}
+    return {"kind": "mcp", "name": name, "required": required, "connection": connection}
+
+
+def sse_grant(name, *, required=True):
+    connection = {"transport": "sse", "url": "http://memory.example:9000/sse"}
+    return {"kind": "mcp", "name": name, "required": required, "connection": connection}
+
+
 def seed_with_tools(*accesses):
     return AgentSeedSessionRequest.model_validate({**seed().model_dump(mode="json"), "tool_accesses": list(accesses)})
 
@@ -668,6 +678,7 @@ def test_unsupported_seed_rejected_before_connection(setup, option):
 # gym_mcp.mjs builds tool names from the grant name and allows at most 64 characters.
 _UNUSABLE_NAME = "its name is not 1 to 62 letters, digits, '-' and '_'"
 _OVERLAP = "its tools could not be told apart from those of grant"
+_NO_SSE = "gym_mcp.mjs speaks stdio and streamable HTTP, not SSE"
 
 
 @pytest.mark.parametrize(
@@ -675,6 +686,7 @@ _OVERLAP = "its tools could not be told apart from those of grant"
     [
         ([mcp_grant("resources.mcp")], f"Pi cannot use these required MCP grants: resources.mcp ({_UNUSABLE_NAME})"),
         ([mcp_grant("r" * 63)], f"Pi cannot use these required MCP grants: {'r' * 63} ({_UNUSABLE_NAME})"),
+        ([sse_grant("memory")], f"Pi cannot use these required MCP grants: memory ({_NO_SSE})"),
         (
             # `resources_v2_finish` could be either grant's tool.
             [mcp_grant("resources"), mcp_grant("resources_v2")],
@@ -888,6 +900,7 @@ async def test_mcp_grants_reach_pi_through_the_gym_extension(setup, enable_tools
         ),
         # Only a `_` joins a grant name to its tool names, so `web-extra_search` cannot be a tool of `web`.
         ([mcp_grant("web"), mcp_grant("web-extra", required=False)], {}),
+        ([mcp_grant("resources"), sse_grant("memory", required=False)], {"memory": _NO_SSE}),
     ],
 )
 async def test_optional_mcp_grant_that_pi_cannot_use_is_left_out(setup, grants, left_out):
@@ -899,6 +912,25 @@ async def test_optional_mcp_grant_that_pi_cannot_use_is_left_out(setup, grants, 
     close = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     gaps = [(gap.code, gap.detail) for gap in close.agent_observations.gaps if gap.code == "mcp_server_skipped"]
     assert gaps == [("mcp_server_skipped", f"{name}: {problem}") for name, problem in left_out.items()]
+
+
+async def test_a_stdio_grant_is_a_command_server_gym_mcp_starts(setup):
+    """gym_mcp.mjs starts a stdio grant's command in the sandbox, with the grant's arguments and environment."""
+    agent, sandbox = setup
+    request, session_id, task = await activate(agent, sandbox, seed_with_tools(stdio_grant("magic")))
+    assert (await task).status == "completed"
+    servers = json.loads(sandbox.files[f"{sandbox.directory}/mcp-servers.json"])
+    assert servers == {
+        "magic": {
+            "command": "python3",
+            "args": ["/opt/magic/server.py"],
+            "env": {"A": "1"},
+            "timeout": 300000,
+            "required": True,
+            "terminal_tools": [],
+        }
+    }
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
 
 
 async def test_no_mcp_grant_stages_no_tool_extension(setup):
@@ -2749,7 +2781,8 @@ async def test_tool_egress_leaves_out_the_mcp_grants_pi_skips(setup):
     sandbox.start = AsyncMock()
     skipped = mcp_grant("resources.mcp", required=False)
     skipped["connection"]["url"] = "http://127.0.0.1:7000/mcp"
-    body = seed_with_tools(mcp_grant("resources"), skipped)
+    # A stdio server runs in the sandbox beside Pi and opens no host; an optional SSE grant is left out.
+    body = seed_with_tools(mcp_grant("resources"), skipped, stdio_grant("magic"), sse_grant("memory", required=False))
     body.sandbox_access = None
     module = "responses_api_agents.pi_agent.app"
     with (

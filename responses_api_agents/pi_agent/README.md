@@ -132,9 +132,14 @@ files may still be read by Pi.
 Pi provides its own sandbox tools. It can also use the Resources server's tools through MCP tool grants:
 
 - Set `expose_tools_over_mcp: true` on the Resources server and `resources_tool_transports: [mcp]` on the
-  Environment Server. Pi speaks only the stateless JSON MCP endpoint that Gym's Resources servers expose,
+  Environment Server. Pi speaks the stateless JSON MCP endpoint that Gym's Resources servers expose,
   and the sandbox must reach the grant's URL, as it must reach the model server; both go through any HTTP
   proxy the sandbox environment sets.
+- A `stdio` grant, such as a Harbor task's own stdio MCP server, is a command `gym_mcp.mjs` starts inside the
+  sandbox, as the user Pi runs as, with the grant's `args` and its `env` over Pi's environment, and reaches over its
+  standard input and output. The server's standard error goes to Pi's. It runs as long as Pi does, and is stopped
+  when its setup fails. `gym_mcp.mjs` has no SSE client: a required `sse` grant is refused at seed with a 422 that
+  names it, and an optional one is left out and recorded as an `mcp_server_skipped` gap.
 - `gym_mcp.mjs` names each tool `<grant name>_<tool name>`, at most 64 letters, digits, `-` or `_`. Seeding
   refuses a required grant whose name is not 1 to 62 of these characters, and two required grants whose names
   differ by a `_<suffix>` (such as `web` and `web_v2`), since their tools could not be told apart. An optional
@@ -144,8 +149,8 @@ Pi provides its own sandbox tools. It can also use the Resources server's tools 
   `sandbox_mcp_timeout_seconds` (default 300); a call that times out keeps running on the server, so set
   it above the slowest call the server makes. Tool errors from the server reach the model.
 - A required grant that Pi cannot set up stops Pi before the first model call. The error and an
-  `mcp_setup_failed` gap give the cause, naming the grant and the server's scheme, host and port when a grant
-  failed. An optional one is skipped and recorded as an `mcp_server_skipped` gap.
+  `mcp_setup_failed` gap give the cause, naming the grant and the server's scheme, host and port (or a `stdio`
+  server's command, without its arguments) when a grant failed. An optional one is skipped and recorded as an `mcp_server_skipped` gap.
 - A successful call of a tool in `finish_tool_names` (its name on the server, such as `finish`) ends the run
   when every tool call of that turn is such a call; a turn that also ran another tool continues. The response
   and observations then count the run as completed. Pi may still make one compaction call after that turn.

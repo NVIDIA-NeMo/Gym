@@ -67,7 +67,7 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
-from nemo_gym.server_runtime import MCPToolAccess
+from nemo_gym.server_runtime import mcp_grants_over, unusable_required_grants
 from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
@@ -81,6 +81,8 @@ from responses_api_agents.crewai_agent.sandbox import SESSION_ROOT, CrewAISessio
 
 
 LOG = logging.getLogger(__name__)
+# The MCP transport of the sandbox runner's client (mcp_client.py).
+CREWAI_MCP_TRANSPORTS = frozenset({"streamable_http"})
 
 
 OBSERVATION_SOURCE = "crewai_agent"
@@ -275,12 +277,11 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> CrewAISessionState:
         accesses = self.effective_tool_accesses(body)
-        unusable = sorted(
-            access.name for access in accesses if access.required and not isinstance(access, MCPToolAccess)
-        )
+        unusable = unusable_required_grants(accesses, CREWAI_MCP_TRANSPORTS)
         if unusable:
             raise AgentSeedRejectedError(
-                f"CrewAI consumes only MCP tool grants; required grants it cannot use: {', '.join(unusable)}"
+                "CrewAI consumes only streamable HTTP MCP tool grants; required grants it cannot use: "
+                + ", ".join(unusable)
             )
         access = body.sandbox_access
         spec = None
@@ -320,6 +321,7 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
             provider = create_provider(provider_config)
         except (TypeError, ValueError) as error:
             raise AgentSeedRejectedError(str(error)) from error
+        # An optional grant over another transport is left out.
         grants = [
             {
                 "name": grant.name,
@@ -327,8 +329,7 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
                 "headers": dict(grant.connection.headers),
                 "required": grant.required,
             }
-            for grant in accesses
-            if isinstance(grant, MCPToolAccess)
+            for grant in mcp_grants_over(accesses, CREWAI_MCP_TRANSPORTS)
         ]
 
         try:

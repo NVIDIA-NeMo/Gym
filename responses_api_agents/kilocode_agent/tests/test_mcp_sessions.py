@@ -16,7 +16,13 @@ from fastapi import HTTPException
 from nemo_gym.agents import HARNESS_RUNNER_FAILED, SUPERVISOR_FILE, AgentSessionSetupError, SandboxSession
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
-from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
+from nemo_gym.server_runtime import (
+    DirectHTTPToolAccess,
+    MCPSSEConnection,
+    MCPStdioConnection,
+    MCPStreamableHTTPConnection,
+    MCPToolAccess,
+)
 from responses_api_agents.kilocode_agent.sandbox import KiloArtifacts, KiloSandboxSession
 from responses_api_agents.kilocode_agent.tests.test_app import _make_model_server_agent
 from responses_api_agents.kilocode_agent.tests.test_sandbox import APP, TEXT, TRANSPORT, receipt, seed, state
@@ -54,6 +60,35 @@ def test_mcp_config_preserves_static_servers_and_uses_session_credentials() -> N
     assert "/ng-rollout/rollout-1-a2/v1" in config["provider"]["nemo"]["options"]["baseURL"]
     assert agent.config.kilo_config == original
     assert agent.config.tool_accesses[0].connection.headers["Authorization"] == "Bearer old-token"
+
+
+@pytest.mark.parametrize(
+    ("connection", "unusable"),
+    [
+        (MCPStdioConnection(command="python3", args=["/opt/magic/server.py"]), "magic (stdio)"),
+        (MCPSSEConnection(url="http://memory:9000/sse"), "magic (sse)"),
+    ],
+)
+async def test_a_required_stdio_or_sse_grant_is_refused_before_allocating_sandbox(connection, unusable) -> None:
+    """The adapter configures Kilo with remote streamable HTTP servers only."""
+    agent = _make_model_server_agent(kilo_version="7.4.15")
+    body = seed()
+    body.tool_accesses = [MCPToolAccess(name="magic", required=True, connection=connection)]
+    with patch(f"{APP}.create_provider") as create, pytest.raises(HTTPException) as error:
+        await agent._seed_agent_session_state(body)
+    assert error.value.status_code == 422
+    assert error.value.detail == (
+        "Kilo supports only streamable HTTP MCP tool grants; unsupported required grants: " + unusable
+    )
+    create.assert_not_called()
+
+
+def test_an_optional_stdio_grant_is_left_out() -> None:
+    agent = _make_model_server_agent()
+    session = state()
+    stdio = MCPStdioConnection(command="python3", args=["/opt/magic/server.py"])
+    session.request.tool_accesses = [mcp(), MCPToolAccess(name="magic", required=False, connection=stdio)]
+    assert set(agent._sandbox_config(session, rollout_id="rollout-1-a2")["mcp"]) == {"task.tools"}
 
 
 def test_null_static_mcp_is_treated_as_empty_when_grants_are_added() -> None:

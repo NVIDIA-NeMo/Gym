@@ -181,7 +181,8 @@ Tool results reach the model whole, the shell's within `shell_max_output_bytes`:
 `use_better_compaction`, which would move a large result to a temporary file and give the model an extra tool to read
 it.
 
-Seeds the adapter cannot serve answer 422: a required grant other than `mcp`, no lent sandbox and no
+Seeds the adapter cannot serve answer 422: a required grant other than a streamable HTTP `mcp` one (the runner's MCP
+client has no `sse` or `stdio` transport; an optional such grant is left out), no lent sandbox and no
 `sandbox_provider`, a sandbox connection other than `direct`, a relative `workdir` (lent or in `sandbox_config`), a
 `SandboxAccess.user` override, and a loopback model URL for a remote sandbox provider.
 Activations that ask for tools the grants cannot provide answer 422: tool names that collide (with `shell` or with each

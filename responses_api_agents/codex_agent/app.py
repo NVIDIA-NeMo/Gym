@@ -89,7 +89,16 @@ from nemo_gym.sandbox import (
     media_path,
     resolve_provider_config,
 )
-from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse, MCPToolAccess
+from nemo_gym.server_runtime import (
+    NEMO_GYM_MCP_METADATA_KEY,
+    BaseRunRequest,
+    BaseVerifyResponse,
+    MCPStdioConnection,
+    MCPToolAccess,
+    mcp_grants_over,
+    mcp_server_urls,
+    unusable_required_grants,
+)
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, ToolCallObservation
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.codex_agent.observability import (
@@ -113,6 +122,8 @@ _OUTPUT_LIMIT_ERROR = "stream disconnected before completion: Incomplete respons
 _STDERR_TAIL_CHARS = 2000
 # Codex 0.144.4 rejects MCP server names with other characters.
 _CODEX_MCP_SERVER_NAME = re.compile(r"[A-Za-z0-9_-]+")
+# The MCP transports Codex's client speaks (stdio and streamable HTTP; it has no SSE client).
+CODEX_MCP_TRANSPORTS = frozenset({"stdio", "streamable_http"})
 _COMPACTION_ADVISORY = (
     "Heads up: Long threads and multiple compactions can cause the model to be less accurate. "
     "Start a new thread when possible to keep threads small and targeted."
@@ -276,6 +287,12 @@ def _redact(text: str, values: list[str]) -> str:
 def _codex_mcp_server_name(name: str) -> bool:
     """Whether Codex accepts ``name`` as an MCP server name."""
     return _CODEX_MCP_SERVER_NAME.fullmatch(name) is not None
+
+
+def _mcp_grant_secrets(access: MCPToolAccess) -> list[str]:
+    """The values of ``access`` that may carry credentials: a network grant's headers, a stdio grant's environment."""
+    connection = access.connection
+    return list((connection.env if isinstance(connection, MCPStdioConnection) else connection.headers).values())
 
 
 def _toml_key(key: str) -> str:
@@ -821,20 +838,17 @@ class CodexAgent(SimpleResponsesAPIAgent):
         if normalized_workdir == PurePosixPath("/tmp") or str(normalized_workdir).startswith("/tmp/nemo-gym-codex"):
             raise HTTPException(422, "Codex runtime/session files must be outside SandboxAccess.workdir")
         tool_accesses = self.effective_tool_accesses(body)
-        unsupported = [
-            access.name for access in tool_accesses if access.required and not isinstance(access, MCPToolAccess)
-        ]
+        unsupported = unusable_required_grants(tool_accesses, CODEX_MCP_TRANSPORTS)
         if unsupported:
-            raise HTTPException(
-                422,
-                "Codex in the task sandbox supports only MCP tool grants; required grants it cannot use: "
-                + ", ".join(sorted(unsupported)),
+            raise AgentSeedRejectedError(
+                "Codex in the task sandbox supports only stdio and streamable HTTP MCP tool grants (Codex has no SSE "
+                "MCP client); required grants it cannot use: " + ", ".join(unsupported)
             )
         # Codex cannot start an MCP server whose name has other characters; _granted_mcp_servers skips optional ones.
         invalid = [
             access.name
-            for access in tool_accesses
-            if isinstance(access, MCPToolAccess) and access.required and not _codex_mcp_server_name(access.name)
+            for access in mcp_grants_over(tool_accesses, CODEX_MCP_TRANSPORTS)
+            if access.required and not _codex_mcp_server_name(access.name)
         ]
         if invalid:
             raise HTTPException(
@@ -873,18 +887,17 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     network_access=self.config.network_access,
                     provider=provider,
                     model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
-                    tool_urls=[
-                        # Only the grants Codex writes into config.toml; it leaves out optional ones it cannot name.
-                        str(access.connection.url)
-                        for access in tool_accesses
-                        if isinstance(access, MCPToolAccess) and _codex_mcp_server_name(access.name)
-                    ],
+                    # Only the grants Codex writes into config.toml; it leaves out optional ones it cannot name or
+                    # reach. A stdio server runs in the sandbox beside Codex, so it needs no host.
+                    tool_urls=mcp_server_urls(
+                        access
+                        for access in mcp_grants_over(tool_accesses, CODEX_MCP_TRANSPORTS)
+                        if _codex_mcp_server_name(access.name)
+                    ),
                     # model_only blocks these hosts, so a required grant is refused before the sandbox exists.
-                    required_tool_urls=[
-                        str(access.connection.url)
-                        for access in tool_accesses
-                        if isinstance(access, MCPToolAccess) and access.required
-                    ],
+                    required_tool_urls=mcp_server_urls(
+                        access for access in mcp_grants_over(tool_accesses, CODEX_MCP_TRANSPORTS) if access.required
+                    ),
                 )
             except BaseException:
                 await provider.aclose()
@@ -1257,10 +1270,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
             *(ObservationGap(code="model_metadata_fallback", detail=warning) for warning in startup_warnings),
             *(ObservationGap(code="compaction_accuracy_advisory", detail=warning) for warning in compaction_warnings),
             *(
-                ObservationGap(
-                    code="mcp_server_skipped", detail=f"{name}: its name is not letters, digits, '-' and '_'"
-                )
-                for name in skipped_grants
+                ObservationGap(code="mcp_server_skipped", detail=f"{name}: {reason}")
+                for name, reason in skipped_grants
             ),
         ]
         for count, code in (
@@ -1469,7 +1480,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             str(value)
             for access in self.effective_tool_accesses(state.request)
             if isinstance(access, MCPToolAccess)
-            for value in access.connection.headers.values()
+            for value in _mcp_grant_secrets(access)
             if value
         ]
         stderr = _redact(stderr, values)
@@ -1767,26 +1778,40 @@ class CodexAgent(SimpleResponsesAPIAgent):
         url = f"{self._resources_server_base_url().rstrip('/')}/{url_path.lstrip('/')}"
         return {server_name: self._mcp_server_entry(url, headers)}
 
-    def _granted_mcp_servers(self, request: AgentSeedSessionRequest) -> tuple[dict[str, Any], list[str]]:
-        """``mcp_servers`` config.toml entries for a session's MCP tool grants, and the optional grants left out.
+    def _granted_mcp_servers(self, request: AgentSeedSessionRequest) -> tuple[dict[str, Any], list[tuple[str, str]]]:
+        """``mcp_servers`` config.toml entries for a session's MCP tool grants, and the optional grants left out,
+        each with the reason.
 
-        Codex connects when the activation starts. A required server that does not connect fails the
-        activation before the first model call; an optional one is left out of the tool list.
-        Codex runs no other tool while an MCP call is in flight, and a call that times out keeps running on the
-        server, so ``mcp_tool_timeout_seconds`` should exceed the slowest call the server can make.
+        Codex connects when the activation starts, and starts a stdio grant's command in the sandbox as the user it
+        runs as. A required server that does not connect fails the activation before the first model call; an
+        optional one is left out of the tool list. Codex runs no other tool while an MCP call is in flight, and a
+        call that times out keeps running on the server, so ``mcp_tool_timeout_seconds`` should exceed the slowest
+        call the server can make.
         """
         servers = {}
         skipped = []
         for access in self.effective_tool_accesses(request):
             if not isinstance(access, MCPToolAccess):
                 continue
-            if not _codex_mcp_server_name(access.name):
-                # Seeding rejects such a name when the grant is required.
-                skipped.append(access.name)
+            # Seeding refuses a required grant Codex cannot use.
+            if access.connection.transport not in CODEX_MCP_TRANSPORTS:
+                skipped.append((access.name, "Codex has no SSE MCP client"))
                 continue
-            servers[access.name] = self._mcp_server_entry(
-                str(access.connection.url), access.connection.headers, required=access.required
-            )
+            if not _codex_mcp_server_name(access.name):
+                skipped.append((access.name, "its name is not letters, digits, '-' and '_'"))
+                continue
+            connection = access.connection
+            if isinstance(connection, MCPStdioConnection):
+                entry: dict[str, Any] = {"command": connection.command, "args": list(connection.args)}
+                if connection.env:
+                    entry["env"] = dict(connection.env)
+                if access.required:
+                    entry["required"] = True
+                if self.config.mcp_tool_timeout_seconds is not None:
+                    entry["tool_timeout_sec"] = float(self.config.mcp_tool_timeout_seconds)
+            else:
+                entry = self._mcp_server_entry(str(connection.url), connection.headers, required=access.required)
+            servers[access.name] = entry
         return servers, skipped
 
     def _mcp_server_entry(

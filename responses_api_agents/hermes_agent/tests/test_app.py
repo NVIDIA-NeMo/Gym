@@ -45,7 +45,13 @@ from nemo_gym.core import (
     TaskId,
 )
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess, SandboxExecResult, SandboxSpec
-from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
+from nemo_gym.server_runtime import (
+    DirectHTTPToolAccess,
+    MCPSSEConnection,
+    MCPStdioConnection,
+    MCPStreamableHTTPConnection,
+    MCPToolAccess,
+)
 from nemo_gym.trajectory import AgentEpisode, AgentObservationBundle
 from responses_api_agents.hermes_agent.app import (
     HermesAgent,
@@ -390,11 +396,41 @@ class TestSanity:
         )
         hermes._initialize_agent_session_state = AsyncMock()
 
-        with pytest.raises(HTTPException, match="supports only MCP tool grants.*required-tools") as error:
+        with pytest.raises(
+            HTTPException, match="supports only stdio and streamable HTTP MCP.*required-tools"
+        ) as error:
             await hermes.seed_agent_session(SimpleNamespace(session={}), body)
 
         assert error.value.status_code == 422
         hermes._initialize_agent_session_state.assert_not_awaited()
+
+    async def test_seed_refuses_a_required_sse_grant_and_accepts_a_stdio_one(self) -> None:
+        """The pinned Hermes MCP client speaks stdio and streamable HTTP, not SSE."""
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        hermes._initialize_agent_session_state = AsyncMock()
+
+        def seed(name: str, connection) -> AgentSeedSessionRequest:
+            return AgentSeedSessionRequest(
+                agent_session_id=f"session-{name}",
+                episode_id=EpisodeId(rollout_id=f"rollout-{name}"),
+                task_id=TaskId(taskset="test", task_id="task"),
+                tool_accesses=[MCPToolAccess(name=name, required=True, connection=connection)],
+            )
+
+        with pytest.raises(HTTPException) as error:
+            await hermes.seed_agent_session(
+                SimpleNamespace(session={}), seed("memory", MCPSSEConnection(url="http://memory:9000/sse"))
+            )
+        assert error.value.status_code == 422
+        assert error.value.detail == (
+            "Hermes Agent supports only stdio and streamable HTTP MCP tool grants (its MCP client has no SSE "
+            "transport); required grants it cannot use: memory (sse)"
+        )
+        hermes._initialize_agent_session_state.assert_not_awaited()
+        await hermes.seed_agent_session(
+            SimpleNamespace(session={}), seed("magic", MCPStdioConnection(command="python3", args=["/opt/s.py"]))
+        )
+        hermes._initialize_agent_session_state.assert_awaited_once()
 
     async def test_seed_accepts_required_mcp_grants_and_rejects_toolset_names(self) -> None:
         hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
@@ -414,6 +450,35 @@ class TestSanity:
         # Hermes exposes an MCP server as a toolset of the same name, so it cannot shadow a built-in toolset.
         with pytest.raises(ValueError, match="collide with Hermes toolsets: terminal"):
             await hermes.seed_agent_session(SimpleNamespace(session={}), seed("terminal"))
+
+    async def test_seed_ignores_a_toolset_name_on_an_optional_grant_it_will_skip(self) -> None:
+        """An optional SSE grant is left out at activation, so its name cannot shadow a Hermes toolset and must not
+        refuse an otherwise valid seed; a usable grant with the same name still does."""
+        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        hermes._initialize_agent_session_state = AsyncMock()
+        skipped = MCPToolAccess(
+            name="terminal", required=False, connection=MCPSSEConnection(url="http://memory:9000/sse")
+        )
+        body = AgentSeedSessionRequest(
+            agent_session_id="session-optional-sse",
+            episode_id=EpisodeId(rollout_id="rollout-optional-sse"),
+            task_id=TaskId(taskset="test", task_id="task"),
+            tool_accesses=[skipped],
+        )
+
+        await hermes.seed_agent_session(SimpleNamespace(session={}), body)
+
+        hermes._initialize_agent_session_state.assert_awaited_once()
+        usable = body.model_copy(
+            update={
+                "agent_session_id": "session-optional-stdio",
+                "tool_accesses": [
+                    MCPToolAccess(name="terminal", required=False, connection=MCPStdioConnection(command="python3"))
+                ],
+            }
+        )
+        with pytest.raises(ValueError, match="collide with Hermes toolsets: terminal"):
+            await hermes.seed_agent_session(SimpleNamespace(session={}), usable)
 
     @pytest.mark.parametrize(
         ("unsupported", "reason"),
@@ -544,11 +609,18 @@ class TestSanity:
                 Path(local_path).write_text(json.dumps(output))
 
         sandbox = _Sandbox()
+        stdio = MCPStdioConnection(command="python3", args=["/opt/magic/server.py"], env={"MAGIC_LOG": "/tmp/m.log"})
         hermes, request, _seed = self._sandbox_session(
             monkeypatch,
             sandbox,
             config=_config(enabled_toolsets=["terminal"]),
-            tool_accesses=[_mcp_access("weather"), _mcp_access("search", required=False)],
+            tool_accesses=[
+                _mcp_access("weather"),
+                _mcp_access("search", required=False),
+                MCPToolAccess(name="magic", required=True, connection=stdio),
+                # Hermes has no SSE client, so an optional SSE grant is left out.
+                MCPToolAccess(name="memory", required=False, connection=MCPSSEConnection(url="http://m:9000/sse")),
+            ],
         )
 
         response = await hermes.responses(
@@ -556,15 +628,23 @@ class TestSanity:
         )
 
         runner_input = json.loads(sandbox.uploaded["/session/input.json"])
-        assert runner_input["mcp_servers"] == ["weather", "search"]
-        assert runner_input["required_mcp_servers"] == ["weather"]
-        assert runner_input["enabled_toolsets"] == ["terminal", "weather", "search"]
+        assert runner_input["mcp_servers"] == ["weather", "search", "magic"]
+        assert runner_input["required_mcp_servers"] == ["weather", "magic"]
+        assert runner_input["enabled_toolsets"] == ["terminal", "weather", "search", "magic"]
         mcp_servers = yaml.safe_load(runner_input["config_yaml"])["mcp_servers"]
         assert mcp_servers["weather"] == {
             "url": "http://resources:8000/mcp",
             "headers": {"X-NeMo-Gym-Session-Token": "token-weather"},
             "tools": {"resources": False, "prompts": False},
         }
+        # Hermes starts a stdio grant's command itself, in the sandbox.
+        assert mcp_servers["magic"] == {
+            "command": "python3",
+            "args": ["/opt/magic/server.py"],
+            "env": {"MAGIC_LOG": "/tmp/m.log"},
+            "tools": {"resources": False, "prompts": False},
+        }
+        assert set(mcp_servers) == {"weather", "search", "magic"}
         # Verifiers see Gym's MCP naming, not Hermes'.
         assert [item.name for item in response.output if item.type == "function_call"] == ["mcp__weather__get_weather"]
 

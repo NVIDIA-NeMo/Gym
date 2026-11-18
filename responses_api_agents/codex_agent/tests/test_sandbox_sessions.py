@@ -468,6 +468,52 @@ def mcp_grant(name="gdpval_resources_server", *, required=True, url="http://reso
     }
 
 
+def sse_grant(name, *, required=True, url="http://memory.example:9000/sse"):
+    return {"kind": "mcp", "name": name, "required": required, "connection": {"transport": "sse", "url": url}}
+
+
+def stdio_grant(name, *, required=True, env=None):
+    connection = {"transport": "stdio", "command": "python3", "args": ["/opt/magic/server.py", "--quiet"]}
+    return {"kind": "mcp", "name": name, "required": required, "connection": connection | {"env": env or {}}}
+
+
+def test_a_stdio_grant_reaches_the_codex_config_as_a_command_codex_starts(setup):
+    """Codex starts a stdio grant's command itself, in the sandbox; a required one must connect before the first
+    model call, as for a streamable HTTP grant."""
+    agent, sandbox = setup
+    agent.config.mcp_tool_timeout_seconds = 300
+    body = seed().model_dump(mode="json")
+    body["tool_accesses"] = [stdio_grant("magic", env={"MAGIC_LOG": "/tmp/magic.log"})]
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=body).json()["agent_session_id"]
+        assert client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"}).status_code == 200
+        config = tomllib.loads(sandbox.files[f"{sandbox.directory}/home/.codex/config.toml"])
+        client.post("/v1/agent_sessions/close", json=close_body(session_id))
+    assert config["mcp_servers"] == {
+        "magic": {
+            "command": "python3",
+            "args": ["/opt/magic/server.py", "--quiet"],
+            "env": {"MAGIC_LOG": "/tmp/magic.log"},
+            "required": True,
+            "tool_timeout_sec": 300.0,
+        }
+    }
+
+
+def test_an_optional_sse_grant_is_left_out_with_a_gap(setup):
+    agent, sandbox = setup
+    body = seed().model_dump(mode="json")
+    body["tool_accesses"] = [mcp_grant(), sse_grant("memory", required=False)]
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=body).json()["agent_session_id"]
+        assert client.post("/ng-rollout/codex-smoke-a2/v1/responses", json={"input": "task"}).status_code == 200
+        config = tomllib.loads(sandbox.files[f"{sandbox.directory}/home/.codex/config.toml"])
+        closed = client.post("/v1/agent_sessions/close", json=close_body(session_id)).json()
+    assert list(config["mcp_servers"]) == ["gdpval_resources_server"]
+    gaps = [(gap["code"], gap["detail"]) for gap in closed["agent_observations"]["gaps"]]
+    assert ("mcp_server_skipped", "memory: Codex has no SSE MCP client") in gaps
+
+
 def test_mcp_grants_reach_the_sandbox_codex_config(setup):
     agent, sandbox = setup
     agent.config = CodexAgentConfig(
@@ -538,9 +584,15 @@ def test_mcp_grants_reach_the_sandbox_codex_config(setup):
     [
         (
             {"kind": "direct_http", "name": "resources.direct_http", "base_url": "http://r", "required": True},
-            "supports only MCP tool grants; required grants it cannot use: resources.direct_http",
+            "required grants it cannot use: resources.direct_http",
         ),
         (mcp_grant("resources.mcp"), "letters, digits, '-' and '_': resources.mcp"),
+        # Codex 0.144.4's MCP client speaks stdio and streamable HTTP only.
+        (
+            sse_grant("memory"),
+            "supports only stdio and streamable HTTP MCP tool grants (Codex has no SSE MCP client); required grants "
+            "it cannot use: memory (sse)",
+        ),
     ],
 )
 def test_unusable_required_tool_grants_are_rejected_before_connection(setup, grant, message):
@@ -2989,8 +3041,11 @@ def test_tool_egress_leaves_out_the_mcp_grants_codex_skips(setup):
     agent.config.network_access = "model_and_tools"
     sandbox.expected_workdir = "/workspace"
     body = owned_seed_with_search_grant()
-    # Codex leaves out an optional grant whose name config.toml cannot hold; its host must stay closed too.
+    # Codex leaves out an optional grant whose name config.toml cannot hold, and an optional SSE grant; their hosts
+    # must stay closed too. A stdio server runs in the sandbox and opens no host.
     body["tool_accesses"].append(mcp_grant("bad.name", required=False, url="http://skipped.example:7000/mcp"))
+    body["tool_accesses"].append(sse_grant("memory", required=False, url="http://sse.example:9000/sse"))
+    body["tool_accesses"].append(stdio_grant("magic"))
 
     spec, created = seed_owned(agent, sandbox, body)
 

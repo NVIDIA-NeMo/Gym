@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
@@ -316,4 +316,94 @@ test("setup errors never quote response bodies, header values or URL paths", asy
   const header = { ...f.config, headers: { "X-Session": "secret-token\nInjected: 1" } };
   await assert.rejects(registerGymTools(agent(), { tavily: header }), (error) =>
     /^tavily: TypeError/.test(error.message) && !error.message.includes("secret-token"));
+});
+
+// A stdio MCP server in Node: one tool, `echo`, that answers with its argument, the server's MAGIC variable and its
+// arguments. It asks the client for a ping before answering initialize, and writes a line that is not a message.
+const STDIO_SERVER = `
+  import { createInterface } from "node:readline";
+  import { writeFileSync } from "node:fs";
+  if (process.env.PID_FILE) writeFileSync(process.env.PID_FILE, String(process.pid));
+  const send = (message) => process.stdout.write(JSON.stringify(message) + "\\n");
+  let pinged;
+  const lines = createInterface({ input: process.stdin });
+  lines.on("close", () => process.exit(0));
+  lines.on("line", (line) => {
+    const message = JSON.parse(line);
+    if (message.id === "ping-1") return pinged(message);
+    if (message.method === "initialize") {
+      process.stdout.write("starting up\\n");
+      pinged = (reply) => send({ jsonrpc: "2.0", id: message.id, result: { protocolVersion: "2025-03-26", capabilities: {}, ping: reply } });
+      send({ jsonrpc: "2.0", id: "ping-1", method: "ping" });
+    } else if (message.method === "tools/list") {
+      send({ jsonrpc: "2.0", id: message.id, result: { tools: [{ name: "echo", inputSchema: { type: "object" } }] } });
+    } else if (message.method === "tools/call") {
+      const text = [message.params.arguments.text, process.env.MAGIC, ...process.argv.slice(2)].join(" ");
+      send({ jsonrpc: "2.0", id: message.id, result: { content: [{ type: "text", text }] } });
+    }
+  });
+`;
+
+function stdioServer(t, { env = {}, script = STDIO_SERVER } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "gym-mcp-stdio-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const path = join(dir, "server.mjs");
+  writeFileSync(path, script);
+  return { command: process.execPath, args: [path, "--flag"], env, timeout: 5000 };
+}
+
+test("starts a stdio server, answers its ping, and calls its tools over stdin and stdout", async (t) => {
+  const a = agent();
+  const server = stdioServer(t, { env: { MAGIC: "pineapple" } });
+  await registerGymTools(a, { magic: server });
+  assert.deepEqual(a.tools.map((tool) => tool.name), ["magic_echo"]);
+  const result = await a.tools[0].execute("a", { text: "hello" });
+  assert.equal(result.content[0].text, "hello pineapple --flag");
+  // Calls in flight at once are told apart by their ids.
+  const both = await Promise.all([a.tools[0].execute("b", { text: "one" }), a.tools[0].execute("c", { text: "two" })]);
+  assert.deepEqual(both.map((r) => r.content[0].text.split(" ")[0]), ["one", "two"]);
+});
+
+test("a stdio server that cannot start or exits fails a required server and skips an optional one", async (t) => {
+  const missing = { command: "/nonexistent/mcp-server", args: ["--token=secret"], env: {}, timeout: 5000 };
+  await assert.rejects(registerGymTools(agent(), { magic: missing }), (error) =>
+    error.message === 'magic: stdio server did not start (ENOENT) at stdio command "/nonexistent/mcp-server"');
+  const exits = stdioServer(t, { script: "process.exit(3);" });
+  const events = [];
+  await registerGymTools(agent(), { magic: { ...exits, required: false } }, { emit: (e) => events.push(e) });
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, "ng_gym_mcp_server_skipped");
+  // The command is quoted without its arguments, cut at 100 characters.
+  assert.equal(events[0].error, `stdio server exited (status 3) at stdio command ${JSON.stringify(process.execPath.slice(0, 100))}`);
+});
+
+test("a stdio tool call has a deadline", async (t) => {
+  const silent = STDIO_SERVER.replace('} else if (message.method === "tools/call") {', '} else if (false) {');
+  const a = agent();
+  await registerGymTools(a, { magic: { ...stdioServer(t, { script: silent }), timeout: 200 } });
+  await assert.rejects(a.tools[0].execute("a", { text: "x" }), (e) => e.name === "TimeoutError");
+});
+
+test("a started stdio server is stopped when another required server fails setup", async (t) => {
+  const pidDir = mkdtempSync(join(tmpdir(), "gym-mcp-pid-"));
+  t.after(() => rmSync(pidDir, { recursive: true, force: true }));
+  const pidFile = join(pidDir, "pid");
+  const port = await closedPort();
+  const down = { url: `http://127.0.0.1:${port}/mcp`, headers: {}, timeout: 1000 };
+  await assert.rejects(
+    registerGymTools(agent(), { magic: stdioServer(t, { env: { PID_FILE: pidFile } }), resources: down }),
+    /^Error: resources: TypeError \(ECONNREFUSED\)/,
+  );
+  const pid = Number(readFileSync(pidFile, "utf8"));
+  const deadline = Date.now() + 5000;
+  const alive = () => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  while (alive() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(alive(), false);
 });

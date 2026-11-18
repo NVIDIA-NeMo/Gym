@@ -3,9 +3,10 @@
 
 """Agent-visible tool access contracts."""
 
-from typing import Annotated, Literal
+from collections.abc import Collection, Iterable
+from typing import Annotated, Any, Literal
 
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Discriminator, Field, Tag
 
 
 # Direct HTTP has no field for a tool's error result, which MCP reports as `isError`, so a tool route that answers a
@@ -45,14 +46,61 @@ class MCPStreamableHTTPConnection(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
 
 
+class MCPSSEConnection(BaseModel):
+    """Connect to an MCP server over the HTTP+SSE transport: an event stream at ``url`` that names the endpoint the
+    client posts its messages to."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    transport: Literal["sse"] = "sse"
+    url: AnyHttpUrl
+    headers: dict[str, str] = Field(default_factory=dict)
+
+
+class MCPStdioConnection(BaseModel):
+    """Start an MCP server as a process that speaks MCP on its standard input and output.
+
+    The harness's MCP client starts ``command`` with ``args`` where the harness runs (inside the task sandbox for a
+    sandboxed harness, as the user the harness runs as), with ``env`` added to the environment the client gives
+    its servers, and stops it with the harness.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    transport: Literal["stdio"] = "stdio"
+    command: str = Field(min_length=1)
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+
+
+def _mcp_transport(connection: Any) -> str:
+    # A connection without a transport is a streamable HTTP one, as before the other transports existed.
+    if isinstance(connection, dict):
+        return connection.get("transport", "streamable_http")
+    return getattr(connection, "transport", "streamable_http")
+
+
+MCPConnection = Annotated[
+    Annotated[MCPStreamableHTTPConnection, Tag("streamable_http")]
+    | Annotated[MCPSSEConnection, Tag("sse")]
+    | Annotated[MCPStdioConnection, Tag("stdio")],
+    Discriminator(_mcp_transport),
+]
+MCPTransport = Literal["streamable_http", "sse", "stdio"]
+
+
 class MCPToolAccess(BaseModel):
     """Describe one named MCP server that an agent adapter must configure.
 
     Names are session-wide identifiers. Agent session requests reject duplicate names,
     and adapters must also reject collisions with their static tool configuration.
     Failure to establish a required server fails session seeding; an optional server may
-    be skipped. On agent-session close, adapters disconnect clients without stopping the
-    remote server.
+    be skipped. An adapter whose client cannot use a grant's transport refuses the seed when
+    the grant is required and leaves the grant out otherwise.
+
+    A streamable HTTP or SSE server runs elsewhere: on agent-session close, adapters disconnect
+    clients without stopping it. A stdio server is a process the harness's MCP client starts
+    for the session and that ends with the harness; adapters stop nothing remote.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -60,10 +108,44 @@ class MCPToolAccess(BaseModel):
     kind: Literal["mcp"] = "mcp"
     name: str = Field(min_length=1, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
     required: bool
-    connection: MCPStreamableHTTPConnection
+    connection: MCPConnection
 
 
 ToolAccess = Annotated[
     DirectHTTPToolAccess | MCPToolAccess,
     Field(discriminator="kind"),
 ]
+
+
+def mcp_grants_over(accesses: Iterable[ToolAccess], transports: Collection[MCPTransport]) -> list[MCPToolAccess]:
+    """The MCP grants in ``accesses`` whose connection uses one of ``transports``, in order.
+
+    A harness whose MCP client reaches servers only over ``transports`` configures these and leaves the other MCP
+    grants out; its seed refuses the required ones (:func:`unusable_required_grants`).
+    """
+    return [
+        access
+        for access in accesses
+        if isinstance(access, MCPToolAccess) and access.connection.transport in transports
+    ]
+
+
+def unusable_required_grants(accesses: Iterable[ToolAccess], transports: Collection[MCPTransport]) -> list[str]:
+    """The required grants in ``accesses`` that a harness whose MCP client reaches servers only over ``transports``
+    cannot use, sorted: a direct HTTP grant as its name, an MCP grant over another transport as ``name (transport)``.
+    """
+    unusable = []
+    for access in accesses:
+        if not access.required:
+            continue
+        if not isinstance(access, MCPToolAccess):
+            unusable.append(access.name)
+        elif access.connection.transport not in transports:
+            unusable.append(f"{access.name} ({access.connection.transport})")
+    return sorted(unusable)
+
+
+def mcp_server_urls(grants: Iterable[MCPToolAccess]) -> list[str]:
+    """The URLs of the servers ``grants`` reach over the network, in order: a stdio server runs beside the harness
+    and has none. A harness that restricts its sandbox's network allows these hosts."""
+    return [str(grant.connection.url) for grant in grants if not isinstance(grant.connection, MCPStdioConnection)]
