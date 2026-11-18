@@ -1,0 +1,60 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Compose with dsv41_flash.yaml and the selected policy-model configuration.
+question_bank_math:
+  resources_servers:
+    question_bank_judge:
+      entrypoint: app.py
+      grading_profile: math
+      judge_model_server: {type: responses_api_models, name: judge_model}
+      judge_model_revision: ${oc.env:STEM_JUDGE_MODEL_REVISION,null}
+      judge_responses_create_params: {input: [], temperature: 0, max_output_tokens: 8192}
+      judge_endpoint_max_concurrency: 8
+      judge_timeout_seconds: 300
+      judge_max_attempts: 2
+      library_verifier_timeout_seconds: 10
+      library_verifier_max_concurrency: 8
+      boxed_judge_input: box
+      max_answer_chars: 16000
+      judge_domain_instructions: {}
+      judge_source_instructions: {}
+      domain: math
+      verified: false
+      description: Last boxed mathematical answer checked by Math-Verify with structured judge fallback
+      value: Reuse mathematical equivalence verification with explicit unresolved judgments
+question_bank_semantic:
+  resources_servers:
+    question_bank_judge:
+      entrypoint: app.py
+      grading_profile: semantic
+      judge_model_server: {type: responses_api_models, name: judge_model}
+      judge_model_revision: ${oc.env:STEM_JUDGE_MODEL_REVISION,null}
+      judge_responses_create_params: {input: [], temperature: 0, max_output_tokens: 8192}
+      judge_endpoint_max_concurrency: 8
+      judge_timeout_seconds: 300
+      judge_max_attempts: 2
+      boxed_judge_input: box
+      max_answer_chars: 16000
+      judge_domain_instructions: {}
+      judge_source_instructions: {}
+      domain: knowledge
+      verified: false
+      description: Last boxed final answer graded with shared semantic rules and optional domain/source instructions
+      value: Grade answer-comparison data without per-row grading specifications
+question_bank_math_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server: {type: resources_servers, name: question_bank_math}
+      model_server: {type: responses_api_models, name: policy_model}
+question_bank_semantic_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server: {type: resources_servers, name: question_bank_semantic}
+      model_server: {type: responses_api_models, name: policy_model}
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/question_bank_judge/data/example.jsonl
+          license: Apache 2.0

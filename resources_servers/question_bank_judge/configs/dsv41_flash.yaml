@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.env:STEM_JUDGE_BASE_URL}
+      api_key: ${oc.env:STEM_JUDGE_API_KEY}
+      model: ${oc.env:STEM_JUDGE_MODEL,private/nemotron/deepseek-ai/deepseek-v4_1-flash}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      max_num_tries: 1
+      refit_output_budget_to_window: false
