@@ -1,13 +1,24 @@
-# OpenCode preset with upstream's two web tools: an opencode_agent session (opencode.yaml) whose only tool server
-# is resources_servers/hle_web_tools, which exposes exactly web_search and web_fetch over MCP behind the upstream
+# OpenCode preset with upstream's two web tools on upstream's sandbox: opencode_reference.yaml (the HLE-Diamond
+# reference image, Python 3.11.16 with upstream's twelve pinned packages and a shell, under the egress policy of
+# docs/evaluation-with-tools.md, network_access model_and_tools) with the Tavily tools replaced by
+# resources_servers/hle_web_tools, which exposes exactly web_search and web_fetch over MCP behind the upstream
 # docs/blocklist.json (all seven rule families, query and fetch refusals, content re-checks) with Tavily as the
 # search and extraction backend. The Environment Server seeds the hle_tools server for every episode and grants
-# its MCP tools to the agent (the agent's tool_servers), and the agent's sandbox reaches only the model and that
-# server. See benchmarks/hle_diamond/README.md > Sandboxed agents (with tools) > Upstream web tools.
+# its MCP tools to the agent (the agent's tool_servers); the sandbox reaches only the model server and that
+# server (the judge servers are pinned to loopback below). This is the preset that follows upstream's protocol
+# (sections 1-3) on every point Gym controls; benchmarks/hle_diamond/README.md > Sandboxed agents (with tools)
+# > Upstream web tools carries the fidelity table, requirement by requirement, against upstream commit
+# 22ed3074b1e7b134bcbc09028d0ba320839b0655.
+#
+# The agent keeps the reference preset's name (hle_diamond_opencode_reference_agent): the agent IS the reference
+# agent, the tool server is what differs, and sandbox_docker_local.yaml therefore refuses to compose with this
+# preset unless HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS=egress-not-restricted is exported (see that file). Not a
+# benchmark of its own (no dataset redeclared), exactly like opencode_search.yaml: selectable with --benchmark,
+# not listed.
 config_paths:
-- benchmarks/hle_diamond/opencode.yaml
-# The sandbox reaches the hle_tools server's MCP tools by address, so the Resources servers leave loopback too.
-absolute_ip_server_types: [responses_api_models, resources_servers]
+- benchmarks/hle_diamond/opencode_reference.yaml
+# The Tavily tool server of opencode_search.yaml is not started: hle_tools is the only tool server.
+tavily: null
 hle_tools:
   resources_servers:
     hle_web_tools:
@@ -17,16 +28,15 @@ hle_tools:
       expose_tools_over_mcp: true
       tavily_api_key: ${oc.env:TAVILY_API_KEY}
       verified: false
-hle_diamond_opencode_agent:
+hle_diamond_opencode_reference_agent:
   responses_api_agents:
     opencode_agent:
-      network_access: model_and_tools
-      # OpenCode's defaults (30 s to connect, 60 s per call) are short for a web_fetch of a long page or PDF; the run
-      # stays bounded by timeout.
-      mcp_tool_timeout_seconds: 300
-      system_prompt: |
-        Direct internet access is disabled on this machine. External information is available only through the web_search and web_fetch tools.
-        Scientific Python packages (including NumPy, SciPy, and SymPy), SageMath, and Lean/Mathlib are preinstalled. See /opt/science/README.md for available tools and usage.
       tool_servers:
       - type: resources_servers
         name: hle_tools
+      # Only what the reference protocol allows (no SageMath, Lean or /opt/science/README.md), and the two tools
+      # by the names OpenCode shows the model (<grant>_<tool>). Any note is extra prompt text upstream's model
+      # never saw; the README states it next to every number.
+      system_prompt: |
+        Direct internet access is disabled on this machine: no downloads and no package installation. External information is available only through the web_search and web_fetch tools of the hle_tools server (hle_tools_web_search and hle_tools_web_fetch).
+        Python 3.11 is installed with a shell and these packages: numpy, scipy, sympy, mpmath, networkx, pandas, matplotlib, pillow, scikit-learn, statsmodels, requests, pyyaml. Nothing else is installed.

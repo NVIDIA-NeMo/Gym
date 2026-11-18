@@ -18,9 +18,10 @@
 # --benchmark, not listed.
 #
 # Web tools: the Tavily search and page tools of opencode_search.yaml; the note below names neither
-# implementation. The hle_web_tools server (exactly web_search / web_fetch behind upstream's blocklist) is
-# its own preset, opencode_hle_tools.yaml, an opencode_agent session on the science image under the same
-# egress policy; running it on this reference image is a follow-up change.
+# implementation. opencode_hle_tools.yaml extends this preset and swaps the tool server for hle_web_tools
+# (exactly web_search / web_fetch behind upstream's blocklist), keeping this agent, image and egress policy;
+# it is the preset that follows upstream's protocol, and this one is the Tavily-tools comparison on the same
+# sandbox.
 config_paths:
 - benchmarks/hle_diamond/opencode_search.yaml
 hle_diamond_opencode_agent: null
