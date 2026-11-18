@@ -28,7 +28,7 @@ between is cancelled too.
 
 import shlex
 
-from nemo_gym.orchestration.executors.resume_script import JOB_CHAIN_NAME
+from nemo_gym.orchestration.executors.slurm.resume_script import JOB_CHAIN_NAME
 from nemo_gym.orchestration.jobs import BenchmarkJob
 
 
