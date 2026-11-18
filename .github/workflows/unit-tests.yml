@@ -241,6 +241,11 @@ jobs:
       - name: Reclaim runner disk
         run: ./scripts/ci/reclaim_runner_disk.sh
 
+      - name: Install Node.js for server tests
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+
       - name: Cache uv dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
@@ -385,6 +390,11 @@ jobs:
 
       - name: Reclaim runner disk
         run: ./scripts/ci/reclaim_runner_disk.sh
+
+      - name: Install Node.js for server tests
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
 
       - name: Cache uv dependencies
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4

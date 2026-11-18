@@ -6,12 +6,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId
 from nemo_gym.sandbox import SandboxExecResult
-from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
+from nemo_gym.server_runtime import (
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+    check_resources_session_contract,
+)
 from resources_servers.partner_if.evidence import EvidenceUnavailable
 from resources_servers.partner_if.prime_app import (
     TASK_PYTHON_DIRECTORY,
@@ -38,16 +43,13 @@ def sandbox_for_test():
     return sandbox
 
 
-async def lend_for_test(instance, body, sandbox, *, prepared=True):
-    """Admit a sandbox through the real lender without provisioning a remote provider."""
+async def lend_for_test(instance, body, sandbox):
+    """Seed through the real lifecycle without provisioning a remote provider."""
     with (
         patch(f"{LENDING}.AsyncSandbox", return_value=sandbox),
         patch(f"{LENDING}.get_global_config_dict", return_value={"sandbox": {"local": {}}}),
     ):
-        await instance._sandboxes.lend(body.resources_session_id, body.task_id)
-    instance._seeds[body.resources_session_id] = body.model_copy(deep=True)
-    if prepared:
-        instance._prepared.add(body.resources_session_id)
+        return await instance.seed_session(Request({"type": "http", "session": {}}), body)
 
 
 def capture():
@@ -209,11 +211,11 @@ async def test_failed_stop_retains_handle_for_close_retry():
     with pytest.raises(RuntimeError):
         await instance.close_resources_session(close)
     assert instance._sandboxes.get(body.resources_session_id) is sandbox
-    assert body.resources_session_id in instance._seeds
+    assert instance.session_identity(body.resources_session_id) == (body.episode_id, body.task_id)
     await instance.close_resources_session(close)
     assert instance._sandboxes.get(body.resources_session_id) is None
-    assert body.resources_session_id not in instance._seeds
-    assert body.resources_session_id not in instance._prepared
+    assert instance.session_identity(body.resources_session_id) is None
+    assert not instance.has_session_state(body.resources_session_id)
 
 
 @pytest.mark.asyncio
@@ -225,48 +227,8 @@ async def test_resource_verification_uses_shared_grading_and_masks_capture_error
 ):
     import json
 
-    from resources_servers.partner_if.app import VerifyRequest
-    from resources_servers.partner_if.tests.test_app import response
-
     instance = server()
-    contract = {
-        "task_id": "synthetic-parent-report",
-        "origin": "synthetic",
-        "source": "authored fixture",
-        "rubric_version": "test-v1",
-        "audit_signoff": True,
-        "data_kind": "synthetic_smoke",
-        "evidence_mode": "live_agent",
-        "prerequisites": [
-            {
-                "id": "delivered",
-                "constraint": "Send through IPython",
-                "verifier": {
-                    "id": "text_contains_v1",
-                    "params": {"source": "artifact:parent_send", "literal": "verified_parent_send"},
-                },
-            }
-        ],
-        "rubrics": [
-            {
-                "id": "content",
-                "constraint": "Report findings",
-                "dimension": "if",
-                "depends_on": ["delivered"],
-                "verifier": {
-                    "id": "text_contains_v1",
-                    "params": {"source": "artifact:parent_reports", "literal": "Task-specific findings"},
-                },
-            }
-        ],
-    }
-    body = VerifyRequest.model_validate(
-        {
-            "responses_create_params": {"input": [{"role": "user", "content": "Send your findings"}]},
-            "response": response().model_dump(),
-            "verifier_metadata": {"partner_if": contract},
-        }
-    )
+    body = verification_request()
     seeded = seed().model_copy(
         update={"task_data": {"verifier_metadata": body.verifier_metadata.model_dump(mode="json")}}
     )
@@ -318,22 +280,26 @@ async def test_failed_repository_setup_stops_the_sandbox():
             await instance.seed_session(Request({"type": "http", "session": {}}), body)
     sandbox.stop.assert_awaited_once()
     assert instance._sandboxes.get(body.resources_session_id) is None
-    assert body.resources_session_id not in instance._seeds
+    assert instance.session_identity(body.resources_session_id) is None
 
 
 @pytest.mark.asyncio
 async def test_failed_setup_handle_must_stop_before_replacement():
     instance, body = server(), seed()
     previous = sandbox_for_test()
-    await lend_for_test(instance, body, previous, prepared=False)
+    previous.exec.return_value = SandboxExecResult(return_code=1, stderr="checkout failed", stdout="")
     previous.stop.side_effect = RuntimeError("stop pending")
-    with patch(f"{LENDING}.AsyncSandbox") as allocate:
+    request = Request({"type": "http", "session": {}})
+    with patch(f"{LENDING}.AsyncSandbox", return_value=previous) as allocate:
+        with pytest.raises(RuntimeError, match="Repository setup"):
+            await instance.seed_session(request, body)
         with pytest.raises(RuntimeError, match="stop pending"):
-            await instance.seed_session(Request({"type": "http", "session": {}}), body)
-        allocate.assert_not_called()
-    previous.stop.assert_awaited_once()
+            await instance.seed_session(request, body)
+        allocate.assert_called_once()
+    assert previous.stop.await_count == 2
     assert instance._sandboxes.get(body.resources_session_id) is previous
-    assert body.resources_session_id not in instance._prepared
+    assert not instance.has_session_state(body.resources_session_id)
+    assert instance.session_identity(body.resources_session_id) == (body.episode_id, body.task_id)
 
 
 @pytest.mark.asyncio
@@ -344,10 +310,10 @@ async def test_partial_repository_is_not_reused_after_failed_cleanup():
     first.stop.side_effect = [RuntimeError("stop pending"), None]
     request = Request({"type": "http", "session": {}})
     with patch(f"{LENDING}.AsyncSandbox", side_effect=[first, replacement]) as allocate:
-        with pytest.raises(RuntimeError, match="stop pending"):
+        with pytest.raises(RuntimeError, match="Repository setup"):
             await instance.seed_session(request, body)
         assert instance._sandboxes.get(body.resources_session_id) is first
-        assert body.resources_session_id not in instance._prepared
+        assert not instance.has_session_state(body.resources_session_id)
         with pytest.raises(HTTPException, match="different task"):
             await instance.seed_session(request, body.model_copy(update={"task_data": {"other": True}}))
         await instance.seed_session(request, body)
@@ -355,7 +321,7 @@ async def test_partial_repository_is_not_reused_after_failed_cleanup():
     assert first.stop.await_count == 2
     assert instance._sandboxes.get(body.resources_session_id) is replacement
     assert replacement.exec.await_count == 2
-    assert body.resources_session_id in instance._prepared
+    assert instance.has_session_state(body.resources_session_id)
 
 
 @pytest.mark.asyncio
@@ -363,7 +329,7 @@ async def test_close_checks_episode_and_retirement_reclaims_the_sandbox():
     instance, body = server(), seed()
     sandbox = sandbox_for_test()
     await lend_for_test(instance, body, sandbox)
-    with pytest.raises(HTTPException, match="another episode"):
+    with pytest.raises(HTTPException, match="episode_id"):
         await instance.close_resources_session(
             ResourcesCloseSessionRequest(
                 resources_session_id=body.resources_session_id, episode_id=EpisodeId.from_capture_key("1-0")
@@ -372,8 +338,14 @@ async def test_close_checks_episode_and_retirement_reclaims_the_sandbox():
     await instance.retire_session_state(body.resources_session_id)
     sandbox.stop.assert_awaited_once()
     await instance.retire_session_state(body.resources_session_id)
-    with pytest.raises(HTTPException, match="closed"):
-        await instance.seed_session(Request({"type": "http", "session": {}}), body)
+    assert instance.session_identity(body.resources_session_id) is None
+    assert not instance.has_session_state(body.resources_session_id)
+    # The base retirement hook leaves restoration to the checkpoint router, without an extra close fence.
+    replacement = sandbox_for_test()
+    restored = body.model_copy(update={"episode_id": body.episode_id.model_copy(update={"attempt": 1})})
+    await lend_for_test(instance, restored, replacement)
+    assert instance.session_identity(body.resources_session_id) == (restored.episode_id, restored.task_id)
+    replacement.start.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -534,4 +506,284 @@ async def test_failed_task_python_setup_releases_its_sandbox():
             await instance.seed_session(Request({"type": "http", "session": {}}), body)
     sandbox.stop.assert_awaited_once()
     assert instance._sandboxes.get(body.resources_session_id) is None
-    assert body.resources_session_id not in instance._seeds
+    assert instance.session_identity(body.resources_session_id) is None
+
+
+def verification_request():
+    """A signed synthetic contract that grades corroborated delivery without a model."""
+    from resources_servers.partner_if.app import VerifyRequest
+    from resources_servers.partner_if.tests.test_app import response
+
+    contract = {
+        "task_id": "synthetic-parent-report",
+        "origin": "synthetic",
+        "source": "authored fixture",
+        "rubric_version": "test-v1",
+        "audit_signoff": True,
+        "data_kind": "synthetic_smoke",
+        "evidence_mode": "live_agent",
+        "prerequisites": [
+            {
+                "id": "delivered",
+                "constraint": "Send through IPython",
+                "verifier": {
+                    "id": "text_contains_v1",
+                    "params": {"source": "artifact:parent_send", "literal": "verified_parent_send"},
+                },
+            }
+        ],
+        "rubrics": [
+            {
+                "id": "content",
+                "constraint": "Report findings",
+                "dimension": "if",
+                "depends_on": ["delivered"],
+                "verifier": {
+                    "id": "text_contains_v1",
+                    "params": {"source": "artifact:parent_reports", "literal": "Task-specific findings"},
+                },
+            }
+        ],
+    }
+    return VerifyRequest.model_validate(
+        {
+            "responses_create_params": {"input": [{"role": "user", "content": "Send your findings"}]},
+            "response": response().model_dump(),
+            "verifier_metadata": {"partner_if": contract},
+        }
+    )
+
+
+def verification_seed(body):
+    return seed().model_copy(
+        update={"task_data": {"verifier_metadata": body.verifier_metadata.model_dump(mode="json")}}
+    )
+
+
+def test_prime_sessions_follow_gyms_http_close_contract():
+    instance = server()
+    body = verification_request()
+    with patch(f"{LENDING}.AsyncSandbox", side_effect=lambda *args, **kwargs: sandbox_for_test()):
+        check_resources_session_contract(
+            instance.setup_webserver(),
+            verification_seed(body),
+            keeps_state=True,
+            holds_state=instance.has_session_state,
+            verify_body=body.model_dump(mode="json"),
+        )
+
+
+def test_invalid_typed_contract_and_cookie_seed_are_rejected_before_allocating():
+    instance = server()
+    body = seed().model_copy(update={"task_data": {"verifier_metadata": {"partner_if": {}}}})
+    with patch(f"{LENDING}.AsyncSandbox") as allocate:
+        client = TestClient(instance.setup_webserver(), raise_server_exceptions=False)
+        assert client.post("/seed_session", json=body.model_dump(mode="json")).status_code == 422
+        assert client.post("/seed_session", json={}).status_code == 422
+    allocate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_queued_seeds_cannot_replace_the_winning_tasks_inputs():
+    instance, body = server(), seed()
+    sandbox = sandbox_for_test()
+    request = Request({"type": "http", "session": {}})
+    changed = body.model_copy(update={"task_data": {"changed": True}})
+    with patch(f"{LENDING}.AsyncSandbox", return_value=sandbox):
+        async with instance.session_lock(body.resources_session_id):
+            first = asyncio.create_task(instance.seed_session(request, body))
+            second = asyncio.create_task(instance.seed_session(request, changed))
+            await asyncio.sleep(0)
+        assert (await first).resources_session_id == body.resources_session_id
+        with pytest.raises(HTTPException, match="different task"):
+            await second
+    sandbox.start.assert_awaited_once()
+    assert instance.has_session_state(body.resources_session_id)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_setup_retains_failed_cleanup_for_the_owning_close():
+    instance, body = server(), seed()
+    sandbox = sandbox_for_test()
+    entered = asyncio.Event()
+
+    async def blocked_setup(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    sandbox.exec.side_effect = blocked_setup
+    sandbox.stop.side_effect = [RuntimeError("stop pending"), None]
+    with patch(f"{LENDING}.AsyncSandbox", return_value=sandbox):
+        pending = asyncio.create_task(instance.seed_session(Request({"type": "http", "session": {}}), body))
+        await asyncio.wait_for(entered.wait(), timeout=3)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+    assert instance.session_identity(body.resources_session_id) == (body.episode_id, body.task_id)
+    assert instance._sandboxes.get(body.resources_session_id) is sandbox
+    with pytest.raises(HTTPException, match="episode_id"):
+        await instance.close_resources_session(
+            ResourcesCloseSessionRequest(
+                resources_session_id=body.resources_session_id, episode_id=EpisodeId.from_capture_key("other")
+            )
+        )
+    await instance.close_resources_session(
+        ResourcesCloseSessionRequest(resources_session_id=body.resources_session_id, episode_id=body.episode_id)
+    )
+    assert sandbox.stop.await_count == 2
+    assert instance.session_identity(body.resources_session_id) is None
+    assert instance._sandboxes.get(body.resources_session_id) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_verification_releases_the_sandbox_and_retains_bound_report_evidence(cleanup_fails):
+    import json
+
+    instance, body = server(), verification_request()
+    seeded = verification_seed(body)
+    sandbox = sandbox_for_test()
+    await lend_for_test(instance, seeded, sandbox)
+    if cleanup_fails:
+        sandbox.stop.side_effect = [RuntimeError("stop pending"), None]
+    request = Request({"type": "http", "session": {"session_id": seeded.resources_session_id}})
+    with patch(
+        "resources_servers.partner_if.prime_app.read_text", AsyncMock(return_value=json.dumps(capture()))
+    ) as read:
+        first = await instance.verify(request, body)
+        assert first.reward == 1 and not first.mask_sample
+        assert instance.session_release_pending(seeded.resources_session_id) is cleanup_fails
+        repeated = await instance.verify(request, body)
+        assert repeated.reward == 1 and not repeated.mask_sample
+        read.assert_awaited_once()
+    assert instance._sandboxes.get(seeded.resources_session_id) is None
+    assert not instance.has_session_state(seeded.resources_session_id)
+    assert not instance.session_release_pending(seeded.resources_session_id)
+    assert instance.session_is_verified(seeded.resources_session_id)
+    assert sandbox.stop.await_count == (2 if cleanup_fails else 1)
+    with pytest.raises(HTTPException, match="verified"):
+        await instance.seed_session(request, seeded)
+    await instance.close_resources_session(
+        ResourcesCloseSessionRequest(resources_session_id=seeded.resources_session_id, episode_id=seeded.episode_id)
+    )
+    lost = await instance.verify(request, body)
+    assert lost.mask_sample and not lost.evaluation_completed
+    assert lost.failure_kind == "session_lost"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed_field", ["contract", "input"])
+async def test_retained_delivery_cannot_be_rebound_to_other_verification_inputs(changed_field):
+    import json
+
+    instance, body = server(), verification_request()
+    seeded = verification_seed(body)
+    await lend_for_test(instance, seeded, sandbox_for_test())
+    request = Request({"type": "http", "session": {"session_id": seeded.resources_session_id}})
+    with patch("resources_servers.partner_if.prime_app.read_text", AsyncMock(return_value=json.dumps(capture()))):
+        assert (await instance.verify(request, body)).reward == 1
+    changed = body.model_copy(deep=True)
+    if changed_field == "contract":
+        changed.verifier_metadata.partner_if.task_id = "another-task"
+    else:
+        changed.responses_create_params.input = "Another task"
+    result = await instance.verify(request, changed)
+    assert result.mask_sample and not result.evaluation_completed
+    assert result.if_result.status == "unscorable"
+    assert (await instance.verify(request, body)).reward == 1
+
+
+@pytest.mark.asyncio
+async def test_grading_exception_releases_state_and_retains_delivery_for_retry():
+    import json
+
+    instance, body = server(), verification_request()
+    seeded, sandbox = verification_seed(body), sandbox_for_test()
+    await lend_for_test(instance, seeded, sandbox)
+    request = Request({"type": "http", "session": {"session_id": seeded.resources_session_id}})
+    with (
+        patch(
+            "resources_servers.partner_if.prime_app.read_text", AsyncMock(return_value=json.dumps(capture()))
+        ) as read,
+        patch.object(type(instance), "grade_response", AsyncMock(side_effect=RuntimeError("judge unavailable"))),
+    ):
+        with pytest.raises(RuntimeError, match="judge unavailable"):
+            await instance.verify(request, body)
+        read.assert_awaited_once()
+    sandbox.stop.assert_awaited_once()
+    assert not instance.has_session_state(seeded.resources_session_id)
+    assert (await instance.verify(request, body)).reward == 1
+
+
+@pytest.mark.asyncio
+async def test_close_waits_for_in_flight_verification_before_releasing():
+    import json
+
+    instance, body = server(), verification_request()
+    seeded, sandbox = verification_seed(body), sandbox_for_test()
+    await lend_for_test(instance, seeded, sandbox)
+    request = Request({"type": "http", "session": {"session_id": seeded.resources_session_id}})
+    entered, proceed = asyncio.Event(), asyncio.Event()
+    original_grade = instance.grade_response
+
+    async def blocked_grade(_server, *args, **kwargs):
+        entered.set()
+        await asyncio.wait_for(proceed.wait(), timeout=3)
+        return await original_grade(*args, **kwargs)
+
+    with (
+        patch("resources_servers.partner_if.prime_app.read_text", AsyncMock(return_value=json.dumps(capture()))),
+        patch.object(type(instance), "grade_response", blocked_grade),
+    ):
+        verification = asyncio.create_task(instance.verify(request, body))
+        await asyncio.wait_for(entered.wait(), timeout=3)
+        closing = asyncio.create_task(
+            instance.close_resources_session(
+                ResourcesCloseSessionRequest(
+                    resources_session_id=seeded.resources_session_id, episode_id=seeded.episode_id
+                )
+            )
+        )
+        await asyncio.sleep(0)
+        sandbox.stop.assert_not_awaited()
+        proceed.set()
+        result, _ = await asyncio.wait_for(asyncio.gather(verification, closing), timeout=3)
+    assert result.reward == 1 and not result.mask_sample
+    sandbox.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_repeated_seed_cannot_replace_the_actors_input():
+    instance, body = server(), verification_request()
+    seeded = verification_seed(body).model_copy(
+        update={"responses_create_params": body.responses_create_params.model_dump(mode="json", exclude_unset=True)}
+    )
+    sandbox = sandbox_for_test()
+    await lend_for_test(instance, seeded, sandbox)
+    changed = seeded.model_copy(update={"responses_create_params": {"input": "A different task"}})
+    with patch(f"{LENDING}.AsyncSandbox") as allocate:
+        with pytest.raises(HTTPException, match="different task"):
+            await instance.seed_session(Request({"type": "http", "session": {}}), changed)
+    allocate.assert_not_called()
+    assert instance.has_session_state(seeded.resources_session_id)
+
+
+@pytest.mark.asyncio
+async def test_first_verification_cannot_replace_the_seeded_actors_input():
+    import json
+
+    instance, body = server(), verification_request()
+    seeded = verification_seed(body).model_copy(
+        update={"responses_create_params": body.responses_create_params.model_dump(mode="json", exclude_unset=True)}
+    )
+    await lend_for_test(instance, seeded, sandbox_for_test())
+    request = Request({"type": "http", "session": {"session_id": seeded.resources_session_id}})
+    changed = body.model_copy(deep=True)
+    changed.responses_create_params.input = "A different task"
+    with patch(
+        "resources_servers.partner_if.prime_app.read_text", AsyncMock(return_value=json.dumps(capture()))
+    ) as read:
+        rejected = await instance.verify(request, changed)
+        assert rejected.mask_sample and not rejected.evaluation_completed
+        assert (await instance.verify(request, body)).reward == 1
+        read.assert_awaited_once()

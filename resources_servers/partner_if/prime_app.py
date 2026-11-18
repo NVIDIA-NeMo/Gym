@@ -6,16 +6,17 @@ import json
 import re
 import shlex
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import ClassVar
 
 from fastapi import FastAPI, Request
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
-from pydantic import Field, PrivateAttr, field_validator, model_validator
+from pydantic import ConfigDict, Field, PrivateAttr, ValidationError, field_validator, model_validator
 
 from nemo_gym.client import SESSION_ID_KEY
-from nemo_gym.core import EpisodeId
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxAccess,
@@ -24,15 +25,14 @@ from nemo_gym.sandbox import (
     upload_text,
 )
 from nemo_gym.server_runtime import (
+    BaseSeedSessionRequest,
     LentSandboxes,
-    ResourcesCloseSessionRequest,
-    ResourcesCloseSessionResponse,
+    ResourcesSeedRejectedError,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
-    ResourcesSessionFences,
-    ResourcesSessionLocks,
     ReverifyMode,
+    lost_session_verification,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.partner_if.app import (
@@ -42,6 +42,7 @@ from resources_servers.partner_if.app import (
     VerifyResponse,
 )
 from resources_servers.partner_if.evidence import Artifact, EvidenceBundle, EvidenceUnavailable
+from resources_servers.partner_if.schema import VerifierMetadata
 
 
 TASK_PYTHON_DIRECTORY = "/tmp/partner-if-prime-python"
@@ -190,18 +191,39 @@ def delivered_report_evidence(capture: dict, context: list[dict]) -> EvidenceBun
         raise EvidenceUnavailable("Malformed Prime controller capture") from error
 
 
+class PrimeIFSeedRequest(BaseSeedSessionRequest):
+    """The task data bound to a prepared repository and its verification contract."""
+
+    # Preserve the other row fields so a repeated seed cannot replace the task's inputs.
+    model_config = ConfigDict(extra="allow")
+    verifier_metadata: VerifierMetadata | None = None
+    responses_create_params: NeMoGymResponseCreateParamsNonStreaming | None = None
+
+
+@dataclass
+class _PrimeTaskState:
+    task: PrimeIFSeedRequest
+    access: SandboxAccess | None = None
+
+
+@dataclass(frozen=True)
+class _PrimeVerificationEvidence:
+    verifier_metadata: VerifierMetadata | None
+    responses_create_params: NeMoGymResponseCreateParamsNonStreaming
+    bundle: EvidenceBundle | None
+    error: str | None
+
+
 class PrimeIFResourcesServer(PartnerIFResourcesServer):
     """Own the task sandbox, then grade only delivered report contents through the shared registry and judge."""
 
     config: PrimeIFConfig
     checkpoint_mode = "restart_only"
     checkpoint_verify = "wait"
+    seed_request_model: ClassVar[type[BaseSeedSessionRequest]] = PrimeIFSeedRequest
     _sandboxes: LentSandboxes = PrivateAttr()
-    _seeds: dict[str, ResourcesSeedSessionRequest] = PrivateAttr(default_factory=dict)
-    # Repository readiness is task state; LentSandboxes owns every sandbox handle.
-    _prepared: set[str] = PrivateAttr(default_factory=set)
-    _locks: ResourcesSessionLocks = PrivateAttr()
-    _fences: ResourcesSessionFences[EpisodeId] = PrivateAttr()
+    # Task data and prepared access only; the base owns identity, locks, fences and cleanup retries.
+    _tasks: dict[str, _PrimeTaskState] = PrivateAttr(default_factory=dict)
     _shutting_down: bool = PrivateAttr(default=False)
 
     def model_post_init(self, context: object) -> None:
@@ -214,8 +236,6 @@ class PrimeIFResourcesServer(PartnerIFResourcesServer):
             image=self.config.image,
             workdir=self.config.workdir,
         )
-        self._locks = ResourcesSessionLocks()
-        self._fences = ResourcesSessionFences(self.config.session_close_retry_window_seconds)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -228,11 +248,12 @@ class PrimeIFResourcesServer(PartnerIFResourcesServer):
                     yield state
             finally:
                 self._shutting_down = True
-                # Each seed records its owner before awaiting, including a setup whose cleanup is pending.
-                for identifier in list(self._seeds):
-                    async with self._locks.locked(identifier):
+                # Wait for each base-managed initializer/verification before stopping its sandbox.
+                for identifier in list(self._tasks):
+                    async with self.session_lock(identifier):
                         pass
                 await self._sandboxes.release_all()
+                self._tasks.clear()
 
         app.router.lifespan_context = lifecycle
         return app
@@ -268,89 +289,108 @@ class PrimeIFResourcesServer(PartnerIFResourcesServer):
             return access
         return access.model_copy(update={"env": {**access.env, "PYTHONPATH": TASK_PYTHON_DIRECTORY}})
 
+    def has_session_state(self, session_id: str) -> bool:
+        """Whether repository setup completed and the session can be verified."""
+        state = self._tasks.get(session_id)
+        return state is not None and state.access is not None
+
+    async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
+        """Prepare task state under the base lifecycle's lock and failure cleanup."""
+        if self._shutting_down:
+            raise ResourcesSessionConflictError("Prime resources server is shutting down")
+        identity = self.session_identity(session_id)
+        if identity is None:
+            raise ResourcesSeedRejectedError("Prime requires an environment server's typed episode seed")
+        if not isinstance(body, PrimeIFSeedRequest):
+            raise TypeError("Expected PrimeIFSeedRequest")
+        state = _PrimeTaskState(body.model_copy(deep=True))
+        self._tasks[session_id] = state
+        access = await self._sandboxes.lend(session_id, identity[1])
+        sandbox = self._sandboxes.get(session_id)
+        if sandbox is None:
+            raise RuntimeError("Lent Prime sandbox is unavailable during repository setup")
+        await self._prepare_repository(sandbox)
+        state.access = self._task_access(access)
+
+    async def release_session_state(self, session_id: str) -> None:
+        """Keep task and sandbox references until release succeeds, so the base can retry."""
+        await self._sandboxes.release(session_id)
+        self._tasks.pop(session_id, None)
+
     async def seed_session(self, request: Request, body: ResourcesSeedSessionRequest) -> ResourcesSeedSessionResponse:
-        identifier = body.resources_session_id
-        async with self._locks.locked(identifier):
-            if self._shutting_down:
-                raise ResourcesSessionConflictError("Prime Resources is shutting down")
-            self._fences.raise_if_fenced(identifier)
-            previous = self._seeds.get(identifier)
-            if previous is not None and previous != body:
-                raise ResourcesSessionConflictError("Resource session belongs to a different task")
-            # Retain the owner during setup and failed cleanup, so close and shutdown can find it.
-            self._seeds.setdefault(identifier, body.model_copy(deep=True))
-            if identifier in self._prepared:
-                access = await self._sandboxes.lend(identifier, body.task_id)
-            else:
-                # A prior checkout whose stop failed must not be lent as a prepared task.
-                await self._sandboxes.release(identifier)
-                try:
-                    access = await self._sandboxes.lend(identifier, body.task_id)
-                    sandbox = self._sandboxes.get(identifier)
-                    if sandbox is None:
-                        raise RuntimeError("Lent Prime sandbox is unavailable during repository setup")
-                    await self._prepare_repository(sandbox)
-                except BaseException:
-                    await self._sandboxes.release(identifier)
-                    self._seeds.pop(identifier, None)
-                    raise
-                self._prepared.add(identifier)
-            request.session[SESSION_ID_KEY] = identifier
-            return ResourcesSeedSessionResponse(
-                resources_session_id=identifier, sandbox_access=self._task_access(access)
-            )
-
-    async def _release(self, identifier: str) -> None:
-        await self._sandboxes.release(identifier)
-        self._prepared.discard(identifier)
-        self._seeds.pop(identifier, None)
-
-    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
-        identifier = body.resources_session_id
-        async with self._locks.locked(identifier):
-            seed = self._seeds.get(identifier)
-            episode = seed.episode_id if seed is not None else self._fences.get(identifier)
-            if episode is not None and episode != body.episode_id:
-                raise ResourcesSessionConflictError("Resource session belongs to another episode")
-            await self._release(identifier)
-            self._fences.fence(identifier, body.episode_id)
-        return ResourcesCloseSessionResponse(resources_session_id=identifier)
-
-    async def retire_session_state(self, session_id: str) -> None:
-        """A retired/checkpointed attempt must not leave a task sandbox running."""
-        async with self._locks.locked(session_id):
-            seed = self._seeds.get(session_id)
-            await self._release(session_id)
-            if seed is not None:
-                self._fences.fence(session_id, seed.episode_id)
+        """Use the inherited seed lifecycle and add the prepared sandbox's access."""
+        if self._shutting_down:
+            raise ResourcesSessionConflictError("Prime resources server is shutting down")
+        task_fields = body.task_data
+        if body.responses_create_params is not None:
+            task_fields = {**task_fields, "responses_create_params": body.responses_create_params}
+        try:
+            task = PrimeIFSeedRequest.model_validate(task_fields)
+        except ValidationError as error:
+            raise ResourcesSeedRejectedError(f"Invalid Prime task data: {error}") from error
+        previous = self._tasks.get(body.resources_session_id)
+        if previous is not None and previous.task != task:
+            raise ResourcesSessionConflictError("Resources session belongs to a different task")
+        response = await super().seed_session(body, request=request)
+        state = self._tasks.get(body.resources_session_id)
+        if state is None or state.access is None:
+            raise ResourcesSessionConflictError("Prime task sandbox is not prepared")
+        # Recheck after the base lock: concurrently queued seeds must agree with the winning initializer.
+        if state.task != task:
+            raise ResourcesSessionConflictError("Resources session belongs to a different task")
+        response.sandbox_access = state.access
+        return response
 
     async def verify(self, request: Request, body: VerifyRequest) -> VerifyResponse:
         identifier = request.session[SESSION_ID_KEY]
-        async with self._locks.locked(identifier):
-            try:
-                sandbox = self._sandboxes.get(identifier)
-                seed = self._seeds[identifier]
-                if sandbox is None or identifier not in self._prepared:
-                    raise EvidenceUnavailable("Prime task sandbox is not prepared")
-                from resources_servers.partner_if.schema import VerifierMetadata
-
-                if VerifierMetadata.model_validate(seed.task_data.get("verifier_metadata")) != body.verifier_metadata:
-                    raise EvidenceUnavailable("Verification contract differs from the seeded task")
-                capture = json.loads(await read_text(sandbox, path=f"{self.config.capture_directory}/capture.json"))
-                error = None
-            except (KeyError, OSError, ValueError, RuntimeError) as failure:
-                capture, error = None, str(failure)
+        async with self.verifying(identifier) as verification:
+            retained = verification.retained
+            if verification.is_live:
+                state = self._tasks[identifier]
+                params = state.task.responses_create_params or body.responses_create_params
+                bundle, error = None, None
+                try:
+                    sandbox = self._sandboxes.get(identifier)
+                    if sandbox is None:
+                        raise EvidenceUnavailable("Prime task sandbox is not prepared")
+                    capture = json.loads(
+                        await read_text(sandbox, path=f"{self.config.capture_directory}/capture.json")
+                    )
+                    bundle = delivered_report_evidence(
+                        capture, params.model_dump(mode="json", exclude_none=True)["input"]
+                    )
+                    for name in ("parent_send", "parent_reports"):
+                        bundle.artifact_text(name)
+                except (KeyError, OSError, ValueError, RuntimeError) as failure:
+                    bundle, error = None, str(failure)
+                retained = _PrimeVerificationEvidence(
+                    state.task.verifier_metadata,
+                    params.model_copy(deep=True),
+                    bundle,
+                    error,
+                )
+                # Retain bounded report evidence, not the SDK event stream or a live sandbox handle.
+                verification.retain(retained)
 
             def evidence() -> EvidenceBundle:
-                if error:
-                    raise EvidenceUnavailable(error)
-                return delivered_report_evidence(
-                    capture, body.responses_create_params.model_dump(mode="json", exclude_none=True)["input"]
-                )
+                if verification.is_lost or not isinstance(retained, _PrimeVerificationEvidence):
+                    raise EvidenceUnavailable(
+                        "Prime task sandbox is not prepared or its verification evidence expired"
+                    )
+                if retained.verifier_metadata != body.verifier_metadata:
+                    raise EvidenceUnavailable("Verification contract differs from the seeded task")
+                if retained.responses_create_params != body.responses_create_params:
+                    raise EvidenceUnavailable("Verification input differs from the retained task evidence")
+                if retained.error:
+                    raise EvidenceUnavailable(retained.error)
+                if retained.bundle is None:
+                    raise EvidenceUnavailable("Prime parent-delivery evidence is unavailable")
+                return retained.bundle
 
-            return VerifyResponse.model_validate(
-                body.model_dump() | await self.grade_response(body.verifier_metadata.partner_if, evidence)
-            )
+            fields = await self.grade_response(body.verifier_metadata.partner_if, evidence)
+            if verification.is_lost:
+                fields.update(lost_session_verification("Prime session is closed or its evidence expired"))
+            return VerifyResponse.model_validate(body.model_dump() | fields)
 
 
 if __name__ == "__main__":
