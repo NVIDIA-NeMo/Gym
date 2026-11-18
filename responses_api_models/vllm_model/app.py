@@ -1836,8 +1836,13 @@ class VLLMModel(SimpleResponsesAPIModel):
             metadata.pop("audio_path", None)
         elif metadata.get("audio_paths"):
             paths = metadata["audio_paths"]
-            if not isinstance(paths, list):
-                raise ValueError(f"metadata.audio_paths must be a list, got {type(paths).__name__}.")
+            if isinstance(paths, str):
+                try:
+                    paths = json.loads(paths)
+                except json.JSONDecodeError as error:
+                    raise ValueError("metadata.audio_paths must be a list or JSON-encoded list of paths") from error
+            if not isinstance(paths, list) or not paths or any(not isinstance(p, str) or not p for p in paths):
+                raise ValueError("metadata.audio_paths must be a nonempty list of path strings")
             audio_urls.extend(self._resolve_audio_path_to_url(p) for p in paths)
             metadata.pop("audio_paths", None)
         elif "audio_ref" in metadata:
