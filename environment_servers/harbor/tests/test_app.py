@@ -143,6 +143,31 @@ class TestRewardFile:
         (tmp_path / "reward.json").write_text(json.dumps({"reward": True, "details": {"a": 1}}))
         assert parse_reward_file(tmp_path)[0] is None
 
+    def test_the_dataset_reward_key_is_the_score_key_the_file_is_read_by(self, tmp_path):
+        """Under `reward_key` the file is read as it is read by `reward`: the key's number is the score and a
+        `details` block or a `reason` beside it is a metric left out, not a malformed file. A file without the key
+        holds no valid reward, so the exit-75 and timeout rules see it as such."""
+        (tmp_path / "reward.json").write_text(
+            json.dumps({"overall": 0.5, "accuracy": 1.0, "details": {"cases": [1, 2]}, "reason": "ok"})
+        )
+        rewards, problem = parse_reward_file(tmp_path, score_key="overall")
+        assert problem is None and rewards == {"overall": 0.5, "accuracy": 1.0}
+        assert select_reward(rewards, key="overall") == 0.5 and reward_components(rewards, key="overall") is None
+        (tmp_path / "reward.json").write_text(json.dumps({"overall": 0.5, "penalty": 0.0}))
+        rewards, _ = parse_reward_file(tmp_path, score_key="overall")
+        # The other keys sum to nothing here, so only the key decides that they are metrics, not components.
+        assert reward_components(rewards) == rewards and reward_components(rewards, key="overall") is None
+        (tmp_path / "reward.json").write_text(json.dumps({"accuracy": 1.0, "speed": 0.5}))
+        rewards, problem = parse_reward_file(tmp_path, score_key="overall")
+        assert (
+            rewards is None
+            and problem == "reward.json has no 'overall' key (the dataset's reward_key): ['accuracy', 'speed']"
+        )
+        (tmp_path / "reward.json").unlink()
+        (tmp_path / "reward.txt").write_text("1\n")
+        assert parse_reward_file(tmp_path, score_key="overall")[0] is None
+        assert parse_reward_file(tmp_path, score_key="reward") == ({"reward": 1.0}, None)
+
     def test_text_and_json(self, tmp_path):
         (tmp_path / "reward.txt").write_text("0.5\n")
         assert parse_reward_file(tmp_path) == ({"reward": 0.5}, None)
@@ -1781,6 +1806,54 @@ class TestVerify:
         assert result.reward == 0.0 and result.mask_sample is False
         assert result.failure_kind == "harbor:invalid_reward"
         assert "no 'overall' key" in result.failure_reason and "['accuracy', 'speed']" in result.failure_reason
+
+    async def test_a_details_block_beside_the_dataset_reward_key_keeps_the_score(self, tmp_path, monkeypatch):
+        """A non-numeric field beside the `reward_key` score is a metric, as it is beside a `reward` key; it used to
+        refuse the whole file (a measured 0 with `harbor:invalid_reward`), since the parser looked for `reward`."""
+        folder = tmp_path / "datasets" / "ds"
+        folder.mkdir(parents=True)
+        (folder / "dataset.toml").write_text('[gym.defaults]\nreward_key = "overall"\n')
+        reward_json = {"overall": 0.5, "accuracy": 1.0, "details": {"cases": [1, 2]}, "reason": "ok"}
+        sandbox = FakeSandbox(verifier_files={"reward.json": json.dumps(reward_json)})
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        result = response.result
+        assert result.reward == 0.5 and result.failure_kind is None and result.mask_sample is False
+        assert result.verifier_rewards == {"overall": 0.5, "accuracy": 1.0}
+
+    @pytest.mark.parametrize("reward_json", [{"overall": 0.5}, {"overall": 0.5, "penalty": 0.0}])
+    async def test_the_dataset_reward_key_names_no_components_even_when_they_would_sum(
+        self, tmp_path, monkeypatch, reward_json
+    ):
+        """These files sum to the score, so only `reward_key` keeps them from being named as components."""
+        folder = tmp_path / "datasets" / "ds"
+        folder.mkdir(parents=True)
+        (folder / "dataset.toml").write_text('[gym.defaults]\nreward_key = "overall"\n')
+        sandbox = FakeSandbox(verifier_files={"reward.json": json.dumps(reward_json)})
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        result = response.result
+        assert result.reward == 0.5 and result.failure_kind is None
+        assert result.reward_components is None and "reward_components" not in result.model_dump(mode="json")
+
+    async def test_a_file_without_the_dataset_reward_key_is_no_valid_reward_for_exit_75_or_a_timeout(
+        self, tmp_path, monkeypatch
+    ):
+        """Exit 75 and the verifier timeout apply to a run that left no valid reward. Under `reward_key` a file
+        without the key is not one: masked as unavailable on the separate path, a timeout past the deadline."""
+        no_key = {"reward.json": json.dumps({"accuracy": 1.0}), "test-stdout.txt": "judge unreachable"}
+        folder = tmp_path / "datasets" / "ds"
+        folder.mkdir(parents=True)
+        (folder / "dataset.toml").write_text('[gym.defaults]\nreward_key = "overall"\n')
+        exit_75 = SandboxExecResult(stdout="", stderr="", return_code=75)
+        result = (
+            await self.separately_verified(
+                tmp_path, monkeypatch, FakeSandbox(verifier_files=dict(no_key), test_result=exit_75)
+            )
+        ).result
+        assert result.mask_sample is True and result.failure_kind == "harbor:verifier_unavailable"
+        killed = SandboxExecResult(stdout="", stderr="", return_code=137)
+        sandbox = FakeSandbox(verifier_files=dict(no_key), test_result=killed, test_elapsed=120)
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        assert response.result.mask_sample is False and response.result.failure_kind == "harbor:verifier_timeout"
 
     async def test_missing_reward_scores_zero_and_is_measured(self, tmp_path, monkeypatch):
         sandbox = FakeSandbox(

@@ -101,15 +101,20 @@ VERIFIER_UNAVAILABLE_EXIT_CODE = 75
 VERIFIER_UNAVAILABLE_KIND = "harbor:verifier_unavailable"
 
 
-def parse_reward_file(directory: Path) -> tuple[dict[str, float] | None, str | None]:
-    """Read reward.json when present; only a missing JSON file falls back to reward.txt."""
+def parse_reward_file(directory: Path, *, score_key: str | None = None) -> tuple[dict[str, float] | None, str | None]:
+    """Read reward.json when present; only a missing JSON file falls back to reward.txt.
+
+    ``score_key`` is the dataset's ``reward_key``, the key that is the score (``reward`` when unset). A file without
+    it holds no valid reward, so it reads as ``None`` with the problem named, like any other invalid file; reward.txt
+    reads as a ``reward`` key and lands there too.
+    """
     for path in (directory / "reward.json", directory / "reward.txt"):
         if path.is_file():
-            return _parse_one_reward_file(path)
+            return _parse_one_reward_file(path, score_key)
     return None, "no reward.json or reward.txt was written"
 
 
-def _parse_one_reward_file(path: Path) -> tuple[dict[str, float] | None, str | None]:
+def _parse_one_reward_file(path: Path, score_key: str | None) -> tuple[dict[str, float] | None, str | None]:
     # The verifier wrote these bytes; never let a stray non-UTF-8 byte escape as an exception.
     text = path.read_text(errors="replace").strip()
     if not text:
@@ -120,11 +125,15 @@ def _parse_one_reward_file(path: Path) -> tuple[dict[str, float] | None, str | N
         return None, f"{path.name} is not valid: {exc}"
     if not isinstance(raw, dict) or not raw:
         return None, f"{path.name} must hold a non-empty JSON object"
+    if score_key is not None and score_key not in raw:
+        return None, f"{path.name} has no {score_key!r} key (the dataset's reward_key): {sorted(raw)}"
     rewards: dict[str, float] = {}
-    # With a numeric `reward`, the other keys are metrics: a verifier that writes a nested object or a string beside
-    # it (a `details` block, a `reason`) keeps its score, as Harbor keeps the file as written and reads `reward`.
-    # Without one, every key is a component of the score, so every key has to be a number.
-    scored = isinstance(raw.get("reward"), (int, float)) and not isinstance(raw.get("reward"), bool)
+    # With a numeric score key (`reward`, or the dataset's `reward_key`), the other keys are metrics: a verifier that
+    # writes a nested object or a string beside it (a `details` block, a `reason`) keeps its score, as Harbor keeps
+    # the file as written and reads `reward`. Without one, every key is a component of the score, so every key has to
+    # be a number.
+    score = raw.get(score_key or "reward")
+    scored = isinstance(score, (int, float)) and not isinstance(score, bool)
     for key, value in raw.items():
         if not isinstance(value, (int, float)):
             if scored:
@@ -599,6 +608,7 @@ class HarborVerificationMixin:
         task: HarborTask,
         logs_dir: Path,
         *,
+        reward_key: str | None,
         entrypoint_log: str | None = None,
     ) -> tuple[tuple[int, int | None] | None, dict[str, float] | None, str | None]:
         """Download the reward files and the wrapper's exit record, then whatever else the verifier wrote.
@@ -606,8 +616,9 @@ class HarborVerificationMixin:
         The reward and the exit record are the required transfer, whatever the exit code: a grader may
         have written its reward before a late exit, and a timed-out run's partial logs are still worth
         keeping. Optional diagnostics cannot invalidate a measured score. With ``entrypoint_log``, the
-        sandbox's entrypoint output lands under that name too. Returns the exit record (None when the
-        wrapper never reached its end), the rewards and the reward problem.
+        sandbox's entrypoint output lands under that name too. ``reward_key`` is the turn's score key, which
+        decides whether the file holds a valid reward (:func:`parse_reward_file`). Returns the exit record (None
+        when the wrapper never reached its end), the rewards and the reward problem.
         """
         await download_dir(
             sandbox,
@@ -616,7 +627,7 @@ class HarborVerificationMixin:
             names=("reward.json", "reward.txt", EXIT_RECORD_NAME),
         )
         exit_record = parse_exit_record(logs_dir)
-        rewards, problem = parse_reward_file(logs_dir)
+        rewards, problem = parse_reward_file(logs_dir, score_key=reward_key)
         try:
             await download_dir(sandbox, VERIFIER_LOGS_DIR, logs_dir, skip_unsafe=True, protect=SERVER_OWNED_LOG_NAMES)
         except Exception:
@@ -826,6 +837,7 @@ class HarborVerificationMixin:
                 verifier,
                 task,
                 logs_dir,
+                reward_key=settings.reward_key,
                 entrypoint_log=VERIFIER_ENTRYPOINT_LOG_NAME if verifier_entrypoint is not None else None,
             )
             if exit_record is None and result.error_type != "timeout":
@@ -1173,6 +1185,7 @@ class HarborVerificationMixin:
                 sandbox,
                 task,
                 logs_dir,
+                reward_key=settings.reward_key,
                 entrypoint_log=ENTRYPOINT_LOG_NAME if session.entrypoint is not None else None,
             )
             if exit_record is None and result.error_type != "timeout":
@@ -1267,18 +1280,15 @@ class HarborVerificationMixin:
                 else ""
             )
             return self._measured(0.0, kind, f"{problem}{ignored}; tail: {_stdout_tail(logs_dir)}") | extras
+        # A file without the dataset's `reward_key` already parsed as no valid reward (`parse_reward_file`).
         reward = select_reward(rewards, key=settings.reward_key)
         if reward is None:
-            if settings.reward_key is not None:
-                # reward.txt reads as a `reward` key, so a task that writes it lands here too.
-                reason = (
-                    f"no {settings.reward_key!r} key (the dataset's reward_key) in the reward file: {sorted(rewards)}"
-                )
-            else:
-                # Finite components whose sum overflows: a reward file no trainer can use, measured like any other
-                # invalid reward file.
-                reason = f"reward.json keys {sorted(rewards)} do not sum to a finite reward"
-            return self._measured(0.0, INVALID_REWARD_KIND, f"{reason}; tail: {_stdout_tail(logs_dir)}") | extras
+            # Finite components whose sum overflows: a reward file no trainer can use, measured like any other
+            # invalid reward file.
+            reason = (
+                f"reward.json keys {sorted(rewards)} do not sum to a finite reward; tail: {_stdout_tail(logs_dir)}"
+            )
+            return self._measured(0.0, INVALID_REWARD_KIND, reason) | extras
         outcome = {"reward": reward, "verifier_rewards": rewards}
         components = summing_components(reward, reward_components(rewards, key=settings.reward_key))
         if components is not None:
