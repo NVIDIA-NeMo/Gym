@@ -22,9 +22,7 @@ from pydantic import ValidationError
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from nemo_gym.client import ServerClient
-from nemo_gym.core.failure_kinds import MODEL_POLICY_RESPONSE_TIMEOUT
-from nemo_gym.core.failure_records import FailureReport
-from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
+from nemo_gym.core import MODEL_POLICY_RESPONSE_TIMEOUT, FailureHeader, FailureReport, FailureReportRow
 from nemo_gym.rollouts.harness_capabilities import Results
 from nemo_gym.sandbox import LocalProvider, SandboxHandle, register_provider
 

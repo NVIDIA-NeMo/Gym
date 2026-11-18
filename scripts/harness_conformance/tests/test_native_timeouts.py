@@ -14,8 +14,7 @@ from scripts.harness_conformance.native_timeouts import ReplyWitness, inspect_na
 from scripts.harness_conformance.registry import HARNESSES
 from scripts.harness_conformance.scenarios import SCENARIOS
 
-from nemo_gym.core.failure_records import FailureReport
-from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
+from nemo_gym.core import FailureHeader, FailureReport, FailureReportRow
 
 
 def case():
@@ -247,8 +246,7 @@ async def test_stall_expiration_records_actual_provider_response(tmp_path):
 async def test_worker_collection_accepts_only_witnessed_native_no_score(tmp_path, monkeypatch, condition):
     from scripts.harness_conformance.episode import _collect_episode
 
-    from nemo_gym.rollouts import RolloutCollectionHelper
-    from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
+    from nemo_gym.rollouts import IncompleteEvaluationError, RolloutCollectionHelper
 
     witness, _, _ = case()
     if condition == "setup":

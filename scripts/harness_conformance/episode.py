@@ -146,8 +146,7 @@ def _config(
 
 
 async def _collect_episode(config, probe, *, directory: Path, timeout: float, native_timeout: bool) -> None:
-    from nemo_gym.rollouts import RolloutCollectionHelper
-    from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
+    from nemo_gym.rollouts import IncompleteEvaluationError, RolloutCollectionHelper
 
     try:
         async with asyncio.timeout(timeout):
