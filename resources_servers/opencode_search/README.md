@@ -112,8 +112,9 @@ on a Gym rollout collection (both BrowseComp presets name the server instance
 NeMo RL masks a sample's loss by its `instance_config.mask_sample`, not by the row's own `mask_sample`,
 so a row whose reward is no outcome of the model also sets that field, over the request's other
 `instance_config` fields, as `judge_failsafe` does for its rows: a judge without a verdict under this
-policy, whatever the ending, and a lost session. A row whose judge never answered is masked the same way
-by `judge_failsafe`. A run that leaves the default trains on a rollout without a verdict as a 0. A
+policy, whatever the ending. A lost session is masked on its row only, so training keeps its reward.
+A row whose judge never answered is masked the same way by `judge_failsafe`. A run that leaves the
+default trains on a rollout without a verdict as a 0. A
 rollout that ended on its budget (`max_iteration`, `context_window`, `agent_timed_out`), with a verdict
 or without an answer, is the model's outcome: it is masked on its row only, which keeps it out of Gym's
 quality metrics, and training keeps its reward. The judge's failures count toward

@@ -2106,8 +2106,8 @@ def test_the_outcome_a_row_names_is_the_one_verify_applied_whatever_the_request_
 
 def test_a_row_left_without_a_grade_names_its_failure_and_gives_a_reason(workdir) -> None:
     """A lost session, a judge without a verdict and a judge that never answered each leave a row, not counted as
-    graded, that says why: the first and the last masked, also where NeMo RL reads the mask, and the judge without a
-    verdict scored 0 against the evaluation."""
+    graded, that says why: the first masked on its row only, the last also where NeMo RL reads the mask, and the judge
+    without a verdict scored 0 against the evaluation."""
     server = _server(workdir)
     client = TestClient(server.setup_webserver())
     assert client.post("/seed_session", json=_seed()).status_code == 200
@@ -2128,18 +2128,18 @@ def test_a_row_left_without_a_grade_names_its_failure_and_gives_a_reason(workdir
     reasons = [reply.json()["failure_reason"] for reply in replies]
     assert all(isinstance(reason, str) and reason.strip() for reason in reasons), reasons
     masks = [reply.json().get("instance_config") for reply in replies]
-    assert masks == [{"mask_sample": True}, None, {"mask_sample": True}]
+    assert masks == [None, None, {"mask_sample": True}]
 
 
 @pytest.mark.parametrize("instance_config", [None, {"split": "train"}], ids=["none_sent", "sent"])
-def test_only_a_row_whose_reward_is_no_model_outcome_sets_mask_sample_in_its_instance_config(
+def test_only_a_judge_without_a_verdict_under_mask_sets_mask_sample_in_its_instance_config(
     workdir, instance_config
 ) -> None:
     """NeMo RL masks a sample's loss by its instance_config.mask_sample, not by the row's mask_sample. Verify sets both,
-    over the request's own instance_config, on a row whose reward is no outcome of the model: a judge without a verdict
-    under the mask policy, also after a budget ending, and a lost session. A budget ending the judge graded, or with an
-    empty answer, is the model's outcome: it is masked on the row only, so training keeps its reward. Every row without
-    the training mask keeps the request's instance_config as it was sent."""
+    over the request's own instance_config, only on a row the judge gave no verdict under the mask policy, also after a
+    budget ending. A lost session, and a budget ending the judge graded or with an empty answer, are masked on the row
+    only, so training keeps their rewards. Every row without the training mask keeps the request's instance_config as
+    it was sent."""
     server = _server(workdir, unparseable_verdict_policy="mask")
     client = TestClient(server.setup_webserver())
     sent = {} if instance_config is None else {"instance_config": instance_config}
@@ -2153,7 +2153,7 @@ def test_only_a_row_whose_reward_is_no_model_outcome_sets_mask_sample_in_its_ins
     client.cookies.clear()
     assert client.post("/seed_session", json=_seed()).status_code == 200
     assert client.post("/close_session", json=_close()).status_code == 200
-    left_out.append(client.post("/verify", json=_verify_body(**sent)).json())
+    lost = client.post("/verify", json=_verify_body(**sent)).json()
     budget_endings = [
         verify(CORRECT, opencode_terminal_reason="max_iteration"),
         verify(WRONG, opencode_terminal_reason="agent_timed_out"),
@@ -2161,12 +2161,13 @@ def test_only_a_row_whose_reward_is_no_model_outcome_sets_mask_sample_in_its_ins
     ]
     unmasked = [verify(CORRECT), verify(WRONG), verify(CORRECT, "")]
 
-    assert [row["failure_kind"] for row in left_out] == ["judge_unparseable", "agent_limit", "session_lost"]
+    assert [row["failure_kind"] for row in left_out] == ["judge_unparseable", "agent_limit"]
+    assert lost["failure_kind"] == "session_lost"
     assert [row["failure_kind"] for row in budget_endings] == ["agent_limit", "agent_timeout", "model_context_limit"]
     assert [row["reward"] for row in budget_endings] == [1.0, 0.0, 0.0]
-    assert all(row["mask_sample"] for row in left_out + budget_endings)
-    assert [row["instance_config"] for row in left_out] == [(instance_config or {}) | {"mask_sample": True}] * 3
-    assert [row.get("instance_config") for row in budget_endings] == [instance_config] * 3
+    assert all(row["mask_sample"] for row in [*left_out, lost, *budget_endings])
+    assert [row["instance_config"] for row in left_out] == [(instance_config or {}) | {"mask_sample": True}] * 2
+    assert [row.get("instance_config") for row in [lost, *budget_endings]] == [instance_config] * 4
     assert [(row["mask_sample"], row.get("instance_config")) for row in unmasked] == [(False, instance_config)] * 3
 
 

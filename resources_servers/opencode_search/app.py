@@ -627,9 +627,9 @@ class SearchVerifyResponse(BaseVerifyResponse):
     # True when the reward is not a measurement of the answer: the session was lost before verify,
     # or the judge gave no verdict with unparseable_verdict_policy "mask" (reward 0). Also true when the rollout ran
     # out of budget rather than answering wrongly; that row keeps its judged reward. Gym's aggregate metrics leave
-    # masked rows out of the quality scores. The first two also set instance_config.mask_sample, where NeMo RL reads
-    # the training mask, whatever the ending; a budget ending's own mask does not, so training keeps its reward
-    # (_training_mask).
+    # masked rows out of the quality scores. Only the judge's missing verdict under "mask" also sets
+    # instance_config.mask_sample, where NeMo RL reads the training mask, whatever the ending; a lost session's and a
+    # budget ending's own masks do not, so training keeps their rewards (_training_mask).
     mask_sample: bool = False
     # Whether grading reached a result: the judge's verdict, or the empty answer that needs none.
     # False for a lost session, a judge that gave no verdict and an episode scored 0 for its plugin log.
@@ -707,14 +707,13 @@ _NOT_GRADED: Dict[str, Any] = {
 
 
 def _training_mask(body: SearchVerifyRequest, unmeasured: bool) -> Dict[str, Any]:
-    """For a row whose reward is no outcome of the model, the request's instance_config with mask_sample set; nothing
-    for another row.
+    """For a row the judge gave no verdict under unparseable_verdict_policy "mask", the request's instance_config with
+    mask_sample set; nothing for another row.
 
     NeMo RL masks a sample's loss by its instance_config.mask_sample rather than by the row's own mask_sample, so such a
-    row sets both, as judge_failsafe does for the rows it answers with: a lost session, and a judge without a verdict
-    under unparseable_verdict_policy "mask", whatever the ending. A rollout that ended on its budget is the model's
-    outcome: it sets only the row's mask_sample, which leaves it out of Gym's quality metrics, and training keeps its
-    reward.
+    row sets both, as judge_failsafe does for the rows it answers with, whatever the ending: its reward says nothing
+    about the model. A lost session and a rollout that ended on its budget set only the row's mask_sample, which leaves
+    them out of Gym's quality metrics, and training keeps their rewards.
     """
     if not unmeasured:
         return {}
@@ -1227,7 +1226,7 @@ class SearchResourcesServer(SimpleResourcesServer):
         async with self.verifying(session_id, allow_missing=True) as verification:
             lost = self._lost_session_reason(request, verification)
             if lost is not None:
-                lost_row = _NOT_GRADED | lost_session_verification(lost) | _training_mask(body, True)
+                lost_row = _NOT_GRADED | lost_session_verification(lost)
                 return SearchVerifyResponse(**(body.model_dump() | lost_row))
             evidence = verification.retained
             if not isinstance(evidence, _VerifyEvidence):

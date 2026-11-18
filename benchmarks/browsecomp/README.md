@@ -162,8 +162,8 @@ judge gave no verdict 0, which an evaluation counts in its score and its accepta
 fault. That 0 says nothing about the model, so a training run masks the rollout instead: set
 `unparseable_verdict_policy: mask` on the Resources Server, in NeMo RL's environment config (under `env.nemo_gym`) or
 with `++search_browsecomp_resources_server.resources_servers.opencode_search.unparseable_verdict_policy=mask` on a Gym
-rollout collection (see `resources_servers/opencode_search/README.md`). A row masked this way, and a lost session's,
-also sets `instance_config.mask_sample`, where NeMo RL reads the mask that keeps a sample out of the loss. A run that
+rollout collection (see `resources_servers/opencode_search/README.md`). A row masked this way also sets
+`instance_config.mask_sample`, where NeMo RL reads the mask that keeps a sample out of the loss. A run that
 ended on its budget, with a verdict or without an answer, is the model's outcome: it is masked on its row only, which
 keeps it out of Gym's quality metrics, and training keeps its reward.
 
