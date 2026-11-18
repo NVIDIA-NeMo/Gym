@@ -62,7 +62,7 @@ rename verifier outputs unless the report includes a mapping table.
   that only appears later.
 - Distinguish self-test success from verifier success.
 - If an error appears before the model's consequential action, do not attribute
-  that error to the later action; diagnose whether the model failed to retry,
+  that error to the later action. Diagnose whether the model failed to retry,
   verify, or recover instead.
 - Treat sometimes-pass tasks as primary diagnostic evidence, but inspect whether
   success came from real understanding, lucky output, or workflow variance.
@@ -98,7 +98,7 @@ Prefer a mixed label only when the evidence genuinely requires it, such as
   data from passing trajectories.
 - `BI`: shape the agent loop, add workflow checks, reward intermediate
   verification behavior, or simplify tool affordances.
-- `TI`: repair the task, verifier, timeout, or dependency; rerun baselines after
+- `TI`: repair the task, verifier, timeout, or dependency. Rerun baselines after
   repair.
 - `IR`: fix infrastructure, isolate flaky rows, and keep flake rates separate
   from model quality.

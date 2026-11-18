@@ -26,25 +26,25 @@ Known differences between Gym benchmarks and the published methods they follow, 
 
 ## GDPval (`benchmarks/gdpval`)
 
-- Rubric mode is the default; the reward is the judge's overall score.
+- Rubric mode is the default. The reward is the judge's overall score.
 - Comparison mode reports an Elo against reference models, with `normalized_elo = (elo - 500) / 2000`. Compare only with numbers computed against the same reference models and the same reference outputs.
 - The judge is sampled from a panel per call. The default is 1 repeat.
-- In comparison mode, the submission is judged against every saved output of every reference model for the task (one matchup each; a reference with none for the task is skipped silently), `num_comparison_trials` times per matchup. If any judge call in a matchup fails, or none of its replies can be read, the whole matchup is dropped and listed in `judge_response.ref_errors`, and the row is scored from the other matchups. So runs with the same completed rollouts can rest on different numbers of judge votes. A complete row has empty `ref_errors`, `total_invalid` (unreadable replies) of 0, and `total_judged` equal to `num_comparison_trials` × `ref_repeat_count`.
+- In comparison mode, the submission is judged against every saved output of every reference model for the task (one matchup each, and a reference with none for the task is skipped silently), `num_comparison_trials` times per matchup. If any judge call in a matchup fails, or none of its replies can be read, the whole matchup is dropped and listed in `judge_response.ref_errors`, and the row is scored from the other matchups. So runs with the same completed rollouts can rest on different numbers of judge votes. A complete row has empty `ref_errors`, `total_invalid` (unreadable replies) of 0, and `total_judged` equal to `num_comparison_trials` × `ref_repeat_count`.
 - Comparison-mode judge failures fail the rollout only when every matchup fails (an environment-server failure, or a terminal class from the next bullet when no retry can fix any of them) or when `strict_comparison_trials` rejects an incomplete result. `--judge-failed-only` reruns neither these failures nor dropped matchups.
-- In either mode, a payload the judge will always refuse becomes a terminal `permanent_judge_error` failure; in comparison mode, one that no judge can take becomes `transport_ineligible`. `--resume` reruns neither, though a multistage run's resume re-judges `transport_ineligible` rows.
-- Harnesses treat timeouts differently, and their default limits differ: 12,600 s for Stirrup (`sandbox_runner_timeout_seconds`) and 10,800 s for Pi (`benchmarks/gdpval/pi.yaml`). A Stirrup timeout (`stop_reason: wall_time`) becomes `agent_timeout` in the failures file, leaves the score and reruns on `--resume`. A Pi timeout is judged like a finished row: on the files named in a `finish` call it made before timing out (usually none, since `finish` ends a Pi run), or, in rubric mode with no files, on its reply text. Files left in the sandbox are not collected; `finish_params.json` in the row's `deliverables_dir` is `null` when no `finish` was recorded.
+- In either mode, a payload the judge will always refuse becomes a terminal `permanent_judge_error` failure, and in comparison mode, one that no judge can take becomes `transport_ineligible`. `--resume` reruns neither, though a multistage run's resume re-judges `transport_ineligible` rows.
+- Harnesses treat timeouts differently, and their default limits differ: 12,600 s for Stirrup (`sandbox_runner_timeout_seconds`) and 10,800 s for Pi (`benchmarks/gdpval/pi.yaml`). A Stirrup timeout (`stop_reason: wall_time`) becomes `agent_timeout` in the failures file, leaves the score and reruns on `--resume`. A Pi timeout is judged like a finished row: on the files named in a `finish` call it made before timing out (usually none, since `finish` ends a Pi run), or, in rubric mode with no files, on its reply text. Files left in the sandbox are not collected. `finish_params.json` in the row's `deliverables_dir` is `null` when no `finish` was recorded.
 - `+count_failure_classes_as_zero=[agent_timeout]` makes rubric mode score Stirrup timeouts as 0, but a Pi timeout can still earn credit for its reply text or submitted files. In comparison mode the flag adds zeros to `mean/reward` but no votes to the Elo, so Stirrup timeouts stay out of the Elo and Pi timeouts stay in.
 
 ## HLE (`benchmarks/hle`)
 
 - 2,158 text-only questions, 1 repeat. The dataset revision is not pinned.
 - The judge is the policy model unless the config overrides it, and no judge temperature is set. Ask which judge produced each number before comparing.
-- The server emits `mean/reward` and a judge parsing-issue rate. An unparseable verdict counts as wrong; a failed judge call becomes `judge_failed`.
-- HLE-Diamond (`benchmarks/hle_diamond`) is a 1,000-question subset of HLE, 272 of them with images; its text presets run 728. Compare it only with HLE-Diamond numbers over the same rows.
+- The server emits `mean/reward` and a judge parsing-issue rate. An unparseable verdict counts as wrong. A failed judge call becomes `judge_failed`.
+- HLE-Diamond (`benchmarks/hle_diamond`) is a 1,000-question subset of HLE, 272 of them with images. Its text presets run 728. Compare it only with HLE-Diamond numbers over the same rows.
 
 ## LiveCodeBench (`benchmarks/livecodebench`)
 
-- v5 covers problems dated 2024-08-01 to 2025-03-01 (279 problems); v6 covers 2024-08-01 to 2025-06-01. Both run 3 repeats, from a dataset pinned to a Hugging Face PR ref.
+- v5 covers problems dated 2024-08-01 to 2025-03-01 (279 problems), and v6 covers 2024-08-01 to 2025-06-01. Both run 3 repeats, from a dataset pinned to a Hugging Face PR ref.
 - Think tags left in the final answer, or more than one `<think>` or `</think>` in the reasoning, replace the reward with `reasoning_format_penalty` (default 0), so a correct solution scores 0.
 - Grader fixes changed scores: stdin handling (#2508, #2824), `sys.stdout.buffer` writes and a 1e-6 float tolerance (#2956), and case-insensitive Yes/No (#3051). Runs from before #3051 are not comparable with later ones.
 - Other LCB harnesses may still fail correct solutions that use fast I/O (`sys.stdin.buffer`, `sys.stdout.buffer`).
@@ -59,20 +59,20 @@ Known differences between Gym benchmarks and the published methods they follow, 
 
 - Reward is whether the instance resolved. A failed or inconclusive evaluation scores 0 and stays in the denominator. Pro first re-runs an inconclusive verification on a new sandbox up to 2 more times, each attempt capped at 1,200 s and all of them at 2,700 s.
 - Patch application falls back from `git apply` variants to `patch` with fuzz 5.
-- The Verified dataset is not pinned; Pro (731 instances) is. The OpenCode profiles run 3 repeats; `pro/hermes.yaml` runs 1.
+- The Verified dataset is not pinned, but Pro (731 instances) is. The OpenCode profiles run 3 repeats, and `pro/hermes.yaml` runs 1.
 - Validate the environments with golden patches before chasing a gap to a published number, and check that identical patches get identical rewards across runs.
 
 ## AA-Omniscience (`benchmarks/omniscience`)
 
 - Uses the AA-Omniscience v1.1 public set (300 questions). Scores are not comparable with runs on the v1 public set (600 questions, a different question per id), and Artificial Analysis publishes scores on its 3,000-question set.
 - The dataset revision is pinned. The default judge is `openai/gpt-oss-20b` at temperature 0, with 8 repeats. A different judge model gives different scores.
-- The grader expects the judge to reply with a single letter. When neither the reply nor its last line is a bare letter, it looks for A, B, C and D in that order anywhere in the reply, so any capital A (even in `Answer: B`) reads as CORRECT; with no letter at all it returns B. Check a sample of judge replies before trusting a surprising number.
+- The grader expects the judge to reply with a single letter. When neither the reply nor its last line is a bare letter, it looks for A, B, C and D in that order anywhere in the reply, so any capital A (even in `Answer: B`) reads as CORRECT, and with no letter at all it returns B. Check a sample of judge replies before trusting a surprising number.
 
 ## AA-LCR (`benchmarks/aalcr`)
 
-- 100 tasks × 16 repeats. The default (v1.0) judge is Qwen3-235B-A22B-Instruct-2507; `config_v1_1` pins a newer dataset revision and uses a different judge.
+- 100 tasks × 16 repeats. The default (v1.0) judge is Qwen3-235B-A22B-Instruct-2507, and `config_v1_1` pins a newer dataset revision and uses a different judge.
 - An empty answer scores 0 without a judge call.
-- v1.0 counts a malformed judge reply as wrong; v1.1 marks it `judge_failed`, which leaves the score. An empty judge reply is `judge_failed` in both.
+- v1.0 counts a malformed judge reply as wrong. v1.1 marks it `judge_failed`, which leaves the score. An empty judge reply is `judge_failed` in both.
 
 ## MMLU-Pro (`benchmarks/mmlu_pro`)
 

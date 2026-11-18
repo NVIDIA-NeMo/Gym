@@ -24,7 +24,7 @@ People who compare models, quantized exports, harnesses or runs, and the coding 
 
 ## Requirements
 
-- A NeMo Gym install (`pip install` or a checkout); the skill does not rely on files that exist only in a checkout.
+- A NeMo Gym install (`pip install` or a checkout). The skill does not rely on files that exist only in a checkout.
 - Network access to whatever the user's own run needs (model endpoint, benchmark data). The skill adds none of its own.
 
 ## Limits
@@ -35,12 +35,12 @@ People who compare models, quantized exports, harnesses or runs, and the coding 
 
 ## Safety
 
-- The skill contains instructions and reference text only; it ships no scripts and no credentials.
-- It reads finished run directories only; it needs no credentials and sends nothing anywhere.
+- The skill contains instructions and reference text only. It ships no scripts and no credentials.
+- It reads finished run directories only. It needs no credentials and sends nothing anywhere.
 - Commands it recommends that start jobs or change state are the user's own `gym` commands, run with the user's own account and cluster access.
 
 ## Evaluation
 
 - `evals/trigger-queries.json`: queries that should and should not trigger the skill.
 - `evals/evals.json`: draft task prompts with expected behavior. The with-skill versus without-skill comparison on Claude Code and Codex has not been run yet.
-- `BENCHMARK.md` is produced by the NVSkills CI pipeline after `/nvskills-ci`; it does not exist yet.
+- `BENCHMARK.md` is produced by the NVSkills CI pipeline after `/nvskills-ci`. It does not exist yet.

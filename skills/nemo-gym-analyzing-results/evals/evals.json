@@ -1,11 +1,11 @@
 {
   "skill_name": "nemo-gym-analyzing-results",
-  "status": "DRAFT: prompts and assertions only; needs golden-run fixtures (runs with known values) so findings can be checked against actual numbers; with-vs-without runs on Claude Code and Codex not done; schema to be checked against the NVIDIA skills guide",
+  "status": "DRAFT: prompts and assertions only. Needs golden-run fixtures (runs with known values) so findings can be checked against actual numbers. With-vs-without runs on Claude Code and Codex not done. Schema to be checked against the NVIDIA skills guide",
   "evals": [
     {
       "id": 1,
       "prompt": "My Gym GPQA score is 5 points below the model card. Both run directories are attached. Is it a real regression?",
-      "expected_output": "Quantifies noise first (repeat counts, standard error, interval), then checks code, data, method, failure accounting and health; ends with within noise, explained or not yet explained and one evidence-backed finding.",
+      "expected_output": "Quantifies noise first (repeat counts, standard error, interval), then checks code, data, method, failure accounting and health. Ends with within noise, explained or not yet explained and one evidence-backed finding.",
       "assertions": [
         "computes or reads the standard error before calling the gap real",
         "diffs the two resolved configs",
@@ -32,7 +32,7 @@
     {
       "id": 3,
       "prompt": "Which tasks does the model fail in results/run1, and why? Give me a short report.",
-      "expected_output": "Counts tasks, rollouts and missing rows; computes pass@1 and pass@k; buckets always, sometimes, never pass and missing; labels failures with one primary cause each; recommends one action per cause; cites row counts and task ids.",
+      "expected_output": "Counts tasks, rollouts and missing rows. Computes pass@1 and pass@k. Buckets always, sometimes, never pass and missing. Labels failures with one primary cause each. Recommends one action per cause. Cites row counts and task ids.",
       "assertions": [
         "buckets tasks into always-pass, sometimes-pass, never-pass and missing",
         "cites task ids or row counts for each claim",

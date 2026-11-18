@@ -17,7 +17,7 @@ description: >
 
 # Run a Gym evaluation to a result you can trust
 
-Take an evaluation from a request ("run model Y on benchmark Z") to a score with its health checked. Read only the reference the path needs; each reference is complete on its own.
+Take an evaluation from a request ("run model Y on benchmark Z") to a score with its health checked. Read only the reference the path needs. Each reference is complete on its own.
 
 ## 1. Pick the path
 
@@ -32,9 +32,9 @@ If the request does not say, ask for what decides it: where the model is served 
 
 ## 2. Rules that hold on every path
 
-1. **Smoke first.** Run 5 tasks with 1 repeat before anything large (`--limit 5 --num-repeats 1`). A smoke tells you the wiring works; its score is never the benchmark's score.
+1. **Smoke first.** Run 5 tasks with 1 repeat before anything large (`--limit 5 --num-repeats 1`). A smoke tells you the wiring works. Its score is never the benchmark's score.
 2. **Pin what you run.** Install Gym at a release (`nemo-gym==<version>`) or a full commit hash, never a moving branch, and write the version next to the score. A Slurm submit config pins `driver.gym_install.ref` to a full 40-character commit.
-3. **Do not change the evaluation.** The benchmark's data, prompts, grading, judge, token budgets and timeouts are what the score measures. Only `num_repeats` may change, and only upward; client concurrency may change. The model section is yours.
+3. **Do not change the evaluation.** The benchmark's data, prompts, grading, judge, token budgets and timeouts are what the score measures. Only `num_repeats` may change, and only upward. Client concurrency may change. The model section is yours.
 4. **Report what the score covers.** A score is the benchmark's only when it comes from every task at no fewer than the benchmark's `num_repeats` (its `manifest.yaml`). A `limit` or a subset is a smoke or a named subset score, labelled as one.
 5. **Health before score.** A run can be healthy and score low: that is the model or its deployment, so fix the deployment, not the evaluation. A run whose evaluation-side faults (judge, verifier, sandbox, harness, transport, model-server 5xx) reach 2% of the expected trials fails health, and a run whose grading was not recorded reads `UNVERIFIED`: report both with their counts, do not present them as verified.
 6. **Never touch a run's files.** Do not edit, delete or regenerate saved answers or journals. Recover through `gym eval resubmit ... --recover`, never plain `gym eval resubmit`.
@@ -64,7 +64,7 @@ Details, the env.yaml form, task folders and the failure table: [references/loca
    gym eval submit --config submit.yaml                   # submit; note the run's GYM_JOB_ID
    ```
 
-   Every long benchmark needs `resumable` set under `driver.benchmarks.<name>`; `max_walltime` is the whole chain's budget, not one job's.
+   Every long benchmark needs `resumable` set under `driver.benchmarks.<name>`. `max_walltime` is the whole chain's budget, not one job's.
 3. **Inspect, never guess.** The read-only inspection is your record and your next action:
 
    ```bash
@@ -72,7 +72,7 @@ Details, the env.yaml form, task folders and the failure table: [references/loca
      --score-agent <agent name> --score-key '["agent_metrics", "mean/reward"]'
    ```
 
-   Read `decision.action`, `gate_task.status` and `operator_verdict`; the exit code is 0 only on `SUCCESS`.
+   Read `decision.action`, `gate_task.status` and `operator_verdict`. The exit code is 0 only on `SUCCESS`.
 4. **Do the one action the decision table names**: run the same command without `--inspect`, with the option the row names and its reason. A decision with no row, or a stop you cannot explain: stop and report it. The table is in [references/slurm-run-and-recover.md](references/slurm-run-and-recover.md), section 4.
 5. **Done** only when the inspection says `SUCCESS`. A finished job or a full score is not acceptance.
 
@@ -80,24 +80,24 @@ Details, the env.yaml form, task folders and the failure table: [references/loca
 
 | Symptom | First thing to check |
 | --- | --- |
-| Endpoint unreachable, `500` on `/run`, or `model endpoint(s) never answered` | The URL and key in `env.yaml`; that the server is up. |
-| Answers end mid-thought, or are all empty | The output budget and `--max-model-len`; the reasoning parser and `uses_reasoning_parser`. |
+| Endpoint unreachable, `500` on `/run`, or `model endpoint(s) never answered` | The URL and key in `env.yaml`, and that the server is up. |
+| Answers end mid-thought, or are all empty | The output budget and `--max-model-len`, and the reasoning parser and `uses_reasoning_parser`. |
 | Tool-using benchmark scores about zero | The tool-call parser and the template's `tools` branch (model-config.md, sections 1 and 6). |
 | Job ends `TIMEOUT` or the chain stopped | Inspect, then the matching row of the decision table (slurm-run-and-recover.md, sections 2 and 4). |
 | `server_spinup_timeout` | `--recover --server-spinup-timeout-seconds N --spinup-timeout-reason "<why>"`. |
-| `UNVERIFIED` | The grading record: `trial_counts.unobserved_reason` names the server. Report it; no flag changes it. |
+| `UNVERIFIED` | The grading record: `trial_counts.unobserved_reason` names the server. Report it. No flag changes it. |
 | Slurm can't start the judge on CPU (`QOSMinGRES`) | Pass `--judge-partition` and `--judge-qos` (slurm-run-and-recover.md, section 4). |
 | A sandbox died during the task | Read the benchmark's notes before counting the score: [references/benchmark-notes.md](references/benchmark-notes.md), and section 7 of slurm-run-and-recover.md. |
 
 ## 6. Comparing models fairly
 
-Keep the benchmark config, sampling the benchmark sets, `num_repeats`, judge, token budgets, timeouts and Gym version identical; parallelism, instances, `--max-num-seqs` and concurrency may differ. A quantized export of a model you also run in BF16 uses the BF16 config except for the fields quantization requires: [references/model-config.md](references/model-config.md), sections 8 and 9. To read and compare the finished runs, use `nemo-gym-analyzing-results`.
+Keep the benchmark config, sampling the benchmark sets, `num_repeats`, judge, token budgets, timeouts and Gym version identical. Parallelism, instances, `--max-num-seqs` and concurrency may differ. A quantized export of a model you also run in BF16 uses the BF16 config except for the fields quantization requires: [references/model-config.md](references/model-config.md), sections 8 and 9. To read and compare the finished runs, use `nemo-gym-analyzing-results`.
 
 ## Exit checks
 
 - [ ] A smoke ran first and its health and answers looked right.
 - [ ] The Gym version or commit is pinned and recorded with the score.
-- [ ] The inspection (Slurm) shows `SUCCESS`, or the remaining stop is explained; a local run's aggregate metrics and health were read.
+- [ ] The inspection (Slurm) shows `SUCCESS`, or the remaining stop is explained, and a local run's aggregate metrics and health were read.
 - [ ] Every operator action (walltime, retries, repin, unsafe resume) has its reason in the report.
 - [ ] A reported score names its coverage (all tasks and repeats, or a smoke, or a named subset) and any `UNVERIFIED` or unhealthy count.
 

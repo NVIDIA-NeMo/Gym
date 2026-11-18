@@ -1,6 +1,6 @@
 {
   "skill_name": "nemo-gym-running-evals",
-  "status": "DRAFT: prompts and assertions only; with-vs-without runs on Claude Code and Codex not done; schema to be checked against the NVIDIA skills guide",
+  "status": "DRAFT: prompts and assertions only, with-vs-without runs on Claude Code and Codex not done, schema to be checked against the NVIDIA skills guide",
   "evals": [
     {
       "id": 1,
@@ -16,7 +16,7 @@
     {
       "id": 2,
       "prompt": "My Gym Slurm eval chain stopped after a TIMEOUT. The run id is gym-job-X, benchmark gpqa. What do I do?",
-      "expected_output": "Runs the read-only gym eval resubmit <id> <benchmark> --recover --inspect, reads decision.action and gate_task.status, then runs the one action the decision table names; never plain gym eval resubmit.",
+      "expected_output": "Runs the read-only gym eval resubmit <id> <benchmark> --recover --inspect, reads decision.action and gate_task.status, then runs the one action the decision table names. Never plain gym eval resubmit.",
       "assertions": [
         "starts with --recover --inspect and reads its output",
         "does not use plain gym eval resubmit",
@@ -38,7 +38,7 @@
     {
       "id": 4,
       "prompt": "I ran GPQA with limit 20 and got 62%. Can I put that in the report as the GPQA score?",
-      "expected_output": "No: a limit makes it a smoke; a benchmark score needs all tasks at no fewer than the benchmark's num_repeats, or a named versioned subset.",
+      "expected_output": "No: a limit makes it a smoke. A benchmark score needs all tasks at no fewer than the benchmark's num_repeats, or a named versioned subset.",
       "assertions": [
         "says the limited run is a smoke and not the benchmark score",
         "names num_repeats from the benchmark manifest as the minimum"
@@ -47,7 +47,7 @@
     {
       "id": 5,
       "prompt": "Compare my BF16 run and the NVFP4 export on IFBench fairly in Gym.",
-      "expected_output": "Same config except model, served name and cache dtypes cited from the export's recipe; no --quantization flag; same Gym commit and num_repeats; resolve both and diff; pair tags in MLflow.",
+      "expected_output": "Same config except model, served name and cache dtypes cited from the export's recipe. No --quantization flag. Same Gym commit and num_repeats. Resolve both and diff. Pair tags in MLflow.",
       "assertions": [
         "keeps the BF16 config except the fields quantization requires",
         "does not add --quantization",

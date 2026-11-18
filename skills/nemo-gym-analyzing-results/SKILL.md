@@ -29,19 +29,19 @@ Most reported gaps come from comparing unlike things (another code version, benc
 
 ## 2. Collect first
 
-For both sides of the comparison, get the numbers with their source (document and section, leaderboard page and date read, or a run directory) and the run directory itself: the rollouts JSONL, `*_failures.jsonl`, `*_materialized_inputs.jsonl`, `*_aggregate_metrics.json`, `*_resolved_config.yaml` and the health reports `quality_summary.json` and `rollout_verdicts.jsonl`. Also: the Gym commit and images, the model and its precision, the serving engine and parsers, sampling and limits, the agent harness, judge, tools, timeouts and the repeat count. A reference without a config or a date is a rough target, not a contract. If an artifact is missing, say which claim it leaves unsupported; do not fill the gap from memory.
+For both sides of the comparison, get the numbers with their source (document and section, leaderboard page and date read, or a run directory) and the run directory itself: the rollouts JSONL, `*_failures.jsonl`, `*_materialized_inputs.jsonl`, `*_aggregate_metrics.json`, `*_resolved_config.yaml` and the health reports `quality_summary.json` and `rollout_verdicts.jsonl`. Also: the Gym commit and images, the model and its precision, the serving engine and parsers, sampling and limits, the agent harness, judge, tools, timeouts and the repeat count. A reference without a config or a date is a rough target, not a contract. If an artifact is missing, say which claim it leaves unsupported, and do not fill the gap from memory.
 
 ## 3. Comparability triage
 
-Work from the top; run steps 2, 3 and 5 even when the gap looks like noise. Stop when the findings account for the gap.
+Work from the top. Run steps 2, 3 and 5 even when the gap looks like noise. Stop when the findings account for the gap.
 
-1. **Noise.** Get each side's repeat count and standard error. A gap under about twice the combined standard error is within noise (`sqrt(se_a^2 + se_b^2)`); with few repeats use the interval from `gym eval compare`. Spread across repeats is `std_across_repeats/mean/reward` in `*_aggregate_metrics.json`, not a repeat's own `std/reward` (the spread across tasks).
+1. **Noise.** Get each side's repeat count and standard error. A gap under about twice the combined standard error is within noise (`sqrt(se_a^2 + se_b^2)`). With few repeats use the interval from `gym eval compare`. Spread across repeats is `std_across_repeats/mean/reward` in `*_aggregate_metrics.json`, not a repeat's own `std/reward` (the spread across tasks).
 2. **Code.** Same Gym commit and images? If not, list the changes between them. To separate a scorer change from a generation change, re-score the old rollouts on the new commit with `gym eval reverify` where the resources server supports it.
 3. **Benchmark and reference.** Same dataset version, subset, date window and metric definition? Data comes from a prepare step, so two runs on one commit can still differ: compare the task sets and prompts in both `*_materialized_inputs.jsonl`.
 4. **Method.** Diff the two `*_resolved_config.yaml`: sampling, token limits, prompts, judge, tools, timeouts, max steps, harness, repeats.
-5. **Completeness and failure accounting.** Compare scored rollouts with materialized inputs; count the failure class of each unscored rollout; check whether either side counts failures as zero (a reference may count timeouts as failures where Gym leaves them out, or the reverse).
+5. **Completeness and failure accounting.** Compare scored rollouts with materialized inputs. Count the failure class of each unscored rollout. Check whether either side counts failures as zero (a reference may count timeouts as failures where Gym leaves them out, or the reverse).
 6. **Rollout health.** Read `quality_summary.json` and `rollout_verdicts.jsonl`. If they are missing or old, run `gym eval health-check <run_dir>` on a copy. Look yourself for answers that sit only in the reasoning field and for judge failures.
-7. **Scoring.** Read a sample of rollouts whose reward disagrees with what a person would judge; for judged benchmarks re-judge a sample with `gym eval reverify` and measure agreement.
+7. **Scoring.** Read a sample of rollouts whose reward disagrees with what a person would judge. For judged benchmarks re-judge a sample with `gym eval reverify` and measure agreement.
 8. **Serving.** Compare precision, engine, parsers and throughput. Timeouts turn slower serving into lower agentic scores. For quantized vs baseline, both runs need the same stack, config and Gym commit.
 
 The checks, where to find each factor in a run directory and how Gym counts failures are in [references/score-comparability.md](references/score-comparability.md).
@@ -62,7 +62,7 @@ It writes `compare_report.md` and `compare_report.json`: metric deltas with conf
 
 ## 5. Find which tasks fail and why
 
-When the runs are comparable and the question is the failure itself, follow [references/failure-diagnosis.md](references/failure-diagnosis.md): count tasks, rollouts and missing rows; compute pass@1 and pass@k; split tasks into always-pass, sometimes-pass, never-pass and missing; compare passing and failing trajectories of sometimes-pass tasks; read never-pass trajectories in order; label each failure with one primary cause (knowledge gap, unreliable knowledge, behavioral issue, task or verifier issue, infrastructure reliability, data artifact); map each cause to an action. Sometimes-pass tasks are the highest-signal slice for multi-repeat runs.
+When the runs are comparable and the question is the failure itself, follow [references/failure-diagnosis.md](references/failure-diagnosis.md). Count tasks, rollouts and missing rows. Compute pass@1 and pass@k. Split tasks into always-pass, sometimes-pass, never-pass and missing. Compare passing and failing trajectories of sometimes-pass tasks. Read never-pass trajectories in order. Label each failure with one primary cause (knowledge gap, unreliable knowledge, behavioral issue, task or verifier issue, infrastructure reliability, data artifact). Map each cause to an action. Sometimes-pass tasks are the highest-signal slice for multi-repeat runs.
 
 ## 6. Report back
 
@@ -82,8 +82,8 @@ A failure analysis follows the report structure in [references/failure-diagnosis
 | --- | --- |
 | `gym eval compare` has no confidence interval | A run has fewer than two repeats, or its `*_aggregate_metrics.json` is missing: run `gym eval aggregate` on it. |
 | Agent names differ between the runs | Select each side with `--baseline-agent` and `--candidate-agents`. |
-| Health reports are missing or provisional | `gym eval health-check <copy of run_dir>`; a run stopped by SIGTERM has only a provisional summary. |
-| The same output gets different rewards | A judged benchmark: re-judge a sample (`gym eval reverify`) and measure agreement; check the judge model and its settings. |
+| Health reports are missing or provisional | `gym eval health-check <copy of run_dir>`. A run stopped by SIGTERM has only a provisional summary. |
+| The same output gets different rewards | A judged benchmark: re-judge a sample (`gym eval reverify`) and measure agreement. Check the judge model and its settings. |
 | The gap is large and nothing in section 3 explains it | Say so: "not yet explained", with what was checked, and escalate to the benchmark owner. |
 | The run itself failed or is empty | `nemo-gym-debugging`. |
 

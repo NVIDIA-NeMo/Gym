@@ -30,5 +30,5 @@
     "review this PR to Gym",
     "analyze which tasks fail in my results"
   ],
-  "note": "DRAFT 11-18: 16 positive, 10 negative; not yet run against Claude Code or Codex"
+  "note": "DRAFT 11-18: 16 positive, 10 negative, not yet run against Claude Code or Codex"
 }
