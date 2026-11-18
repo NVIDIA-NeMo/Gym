@@ -87,6 +87,7 @@ from nemo_gym.server_runtime import (
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
     ResourcesSessionLostError,
     ResourcesTaskStateRelease,
     ReverifyMode,
@@ -1240,7 +1241,7 @@ class OfficeEnvSandboxResourcesServer(OfficeEnvResourcesServer):
         """Refuse a call of an episode whose verification has started, from which point its tools are closed."""
         if episode is not None and episode.grading:
             # neutral words: a process the harness left running in the sandbox may read them
-            raise HTTPException(status_code=409, detail="The task has ended: its tools are closed")
+            raise ResourcesSessionConflictError("The task has ended: its tools are closed")
 
     async def _episode_call(
         self,
@@ -1402,7 +1403,7 @@ class OfficeEnvSandboxResourcesServer(OfficeEnvResourcesServer):
         episode = self._episodes.get(session_id)
         grading = episode is not None and episode.grading
         if grading or (self.config.close_tools_on_task_end and self._task_ends.get(session_id, False)):
-            raise HTTPException(status_code=409, detail="The task has ended: its files are closed")
+            raise ResourcesSessionConflictError("The task has ended: its files are closed")
 
     async def _file_answer(self, session_id: str, call: Callable[[], Any]) -> Any:
         """What a file API call (OfficeEnv's file call, the agent's own action) answers, or the app's error with its
