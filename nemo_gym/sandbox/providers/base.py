@@ -14,12 +14,12 @@
 
 """Provider-facing sandbox protocol."""
 
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, get_args, runtime_checkable
 from urllib.parse import urlsplit
 
 from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED, FailureStage
@@ -412,6 +412,57 @@ class SandboxProvider(Protocol):
 
     async def aclose(self) -> None:
         """Close provider-scoped resources such as SDK clients."""
+        ...
+
+
+NetworkRule = Literal["inherit", "no_network", "model_only", "model_and_tools", "hosts_only"]
+"""The egress rule a sandbox starts with.
+
+``inherit`` keeps the provider's default. ``no_network`` allows no egress. ``model_only`` allows the model server,
+``model_and_tools`` the model server and the tool servers, and ``hosts_only`` only the hosts listed for the sandbox.
+Every restricted rule also allows the listed hosts.
+"""
+NETWORK_RULES: frozenset[str] = frozenset(get_args(NetworkRule))
+
+SnapshotContent = Literal["files", "processes"]
+Reconnect = Literal["always", "same_host", "never"]
+
+
+@dataclass(frozen=True)
+class SandboxCapabilities:
+    """What a provider can do beyond start, commands, file transfer and stop.
+
+    Every owner, typed config, ``OwnedSandboxes``, ``borrow()``, stop and shutdown sweep works on every provider. These
+    capabilities are needed only by servers that use them, which are refused as early as they can be known.
+
+    Attributes:
+        snapshot_keeps: What a snapshot of a sandbox keeps; empty when the provider takes no snapshots.
+        network_rules: The egress rules the provider can apply at creation (see :data:`NetworkRule`). A provider
+            that lists any rule besides ``inherit`` implements :class:`SupportsSandboxNetworkRules`.
+        reconnect: Where another process can connect to a sandbox by its descriptor, which lending needs:
+            ``always``, only on the ``same_host`` (and as the same user, or through the same Docker daemon), or
+            ``never``.
+        close_by_label: Whether the provider can close every sandbox that carries a label, so a live worker can stop
+            the sandboxes of one that died.
+    """
+
+    snapshot_keeps: frozenset[SnapshotContent] = frozenset()
+    network_rules: frozenset[NetworkRule] = frozenset({"inherit"})
+    reconnect: Reconnect = "always"
+    close_by_label: bool = False
+
+
+@runtime_checkable
+class SupportsSandboxNetworkRules(Protocol):
+    """A provider that applies egress rules besides ``inherit`` when it creates a sandbox."""
+
+    def network_options(
+        self, rule: NetworkRule, hosts: Sequence[str], provider_options: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """``provider_options`` with ``rule`` applied, allowing ``hosts``; only called for a rule it declares.
+
+        ``hosts`` are host names or addresses a sandbox on this provider can reach, already resolved by the owner.
+        """
         ...
 
 

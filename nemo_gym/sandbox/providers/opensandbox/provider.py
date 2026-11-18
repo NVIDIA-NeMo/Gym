@@ -23,7 +23,7 @@ import random
 import re
 import shlex
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
@@ -68,6 +68,8 @@ from nemo_gym.sandbox.attribution import (  # noqa: F401
 )
 from nemo_gym.sandbox.providers.base import (
     ORPHAN_REAP_TIMEOUT_S,
+    NetworkRule,
+    SandboxCapabilities,
     SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
@@ -92,6 +94,7 @@ from nemo_gym.telemetry.gym_metrics import record_sandbox_create_retry
 from nemo_gym.telemetry.setup import is_metrics_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.utils.exception_inspection import error_to_http_status, explicit_causes
+from nemo_gym.utils.network_policy import allowlist_policy
 
 
 LOGGER = logging.getLogger(__name__)
@@ -1185,7 +1188,24 @@ class OpenSandboxSharedStorageConfig:
 class OpenSandboxProvider:
     """Provider backed by the OpenSandbox SDK/server API."""
 
+    capabilities: ClassVar[SandboxCapabilities] = SandboxCapabilities(
+        snapshot_keeps=frozenset({"files"}),
+        network_rules=frozenset({"inherit", "no_network", "model_only", "model_and_tools", "hosts_only"}),
+    )
+
     name = "opensandbox"
+
+    def network_options(
+        self, rule: NetworkRule, hosts: Sequence[str], provider_options: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """``provider_options`` with a ``network_policy`` for ``rule``: deny by default and allow only ``hosts``.
+
+        ``inherit`` leaves them as they are. Every other rule is enforced by OpenSandbox's egress sidecar, so
+        ``no_network``, given no hosts, denies all egress.
+        """
+        if rule == "inherit":
+            return dict(provider_options)
+        return {**provider_options, "network_policy": allowlist_policy(hosts)}
 
     def __init__(
         self,
