@@ -11,7 +11,9 @@
 #
 # The image is the full node:22 Debian bookworm image, pinned by digest, that our agentic video training data was
 # generated in, so that evaluation and RL run in the same system: its shell, ImageMagick, git, compilers and other
-# programs. The tools stage installs the programs above, and the last stage copies them into that image.
+# programs. The tools stage installs the programs above, and the last stage copies them into that image and adds the
+# URW fonts that ImageMagick's labels default to. Unlike in that sandbox, the model's drawtext, montage and
+# convert -annotate commands work, and the video tools also read the files the model makes under /tmp/opencode.
 #
 # The first two stages build OpenCode's plugin dependencies from the lockfile in opencode/ (a copy of
 # benchmarks/agentic_if/opencode) as visual_coding_opencode/sandbox_image/Dockerfile does, so the archive matches its
@@ -36,16 +38,10 @@ RUN tar -C /build/opencode --sort=name --mtime=@1792627200 --owner=0 --group=0 -
     && echo "77b03eba45c8d7fe3d0a58bfc215f6fb99a1db4dd18a7e3d91fd29981fddafb1  /opencode-1.17.11-plugin-dependencies.tar.gz" \
         | sha256sum -c -
 
-# The static FFmpeg 7.0.2 build of johnvansickle.com, pinned by its SHA-256, for its decoder and area scaler.
-FROM debian:bookworm-slim AS ffmpeg
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
-    && rm -rf /var/lib/apt/lists/*
-RUN curl -fsSL -o /ffmpeg.tar.xz "https://johnvansickle.com/ffmpeg/releases/ffmpeg-7.0.2-amd64-static.tar.xz" \
-    && echo "abda8d77ce8309141f83ab8edf0596834087c52467f6badf376a6a2a4c87cf67  /ffmpeg.tar.xz" | sha256sum -c - \
-    && mkdir /ffmpeg \
-    && tar -xJf /ffmpeg.tar.xz -C /ffmpeg --strip-components=1 \
-        ffmpeg-7.0.2-amd64-static/ffmpeg ffmpeg-7.0.2-amd64-static/ffprobe
+# The static FFmpeg 7.0.2 build of mwader/static-ffmpeg, pinned by image digest here and by the binaries' SHA-256
+# below. Its decoders and area scaler give watch_video the same frames as the johnvansickle.com 7.0.2 build this image
+# used before (identical JPEG bytes on 50 requests); it also has libharfbuzz and fontconfig, so drawtext works.
+FROM mwader/static-ffmpeg:7.0.2@sha256:d9b22f65c2049d73bf8ae556bb4c5c7d45e9fb85939d87951ed98f22b0f19105 AS ffmpeg
 
 # Python 3.13 (the python image pinned by digest, so its files stay the same) with the tools' packages, ripgrep,
 # OpenCode and the video tools.
@@ -69,7 +65,9 @@ ENV OMP_NUM_THREADS=1 \
     NUMEXPR_NUM_THREADS=1 \
     VECLIB_MAXIMUM_THREADS=1
 
-COPY --from=ffmpeg /ffmpeg/ffmpeg /ffmpeg/ffprobe /usr/local/bin/
+COPY --from=ffmpeg /ffmpeg /ffprobe /usr/local/bin/
+RUN echo "babb8d45fab2016595558852d2935f69086bb1143a6a2a898390940ecca8bcd2  /usr/local/bin/ffmpeg" | sha256sum -c - \
+    && echo "66b8cb3851ac3ae77bb47b479315c62e1fc183fedab1fc7d4f33f941acde076f  /usr/local/bin/ffprobe" | sha256sum -c -
 
 # The glibc x86_64 build that opencode_agent's installer picks for this image. The build fails here unless the binary
 # matches the SHA-256 that the agentic configs pin (sandbox_executable_sha256).
@@ -104,6 +102,21 @@ ENV OMP_NUM_THREADS=1 \
     NUMEXPR_NUM_THREADS=1 \
     VECLIB_MAXIMUM_THREADS=1 \
     LANG=C.UTF-8
+
+# The URW fonts that ImageMagick's labels and annotations default to (Helvetica): without them, its montage and
+# convert -annotate abort. The build fails here unless the model's own commands work: drawtext with FFmpeg's default
+# font (DejaVu, which the image has), ripgrep, montage with a label and convert -annotate. The drawtext check leaves the
+# font cache of FFmpeg's own fontconfig, so the model's first drawtext does not scan the fonts.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends fonts-urw-base35 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ffmpeg -hide_banner -loglevel error -f lavfi -i color=c=black:s=64x32:d=1 -vf drawtext=text=ok \
+        -frames:v 1 -f null - \
+    && rg --version > /dev/null \
+    && convert -size 8x8 xc:red /tmp/check.png \
+    && montage -label '%f' /tmp/check.png /tmp/check.png -tile 2x1 -geometry +1+1 /tmp/check-montage.png \
+    && convert /tmp/check.png -annotate +0+4 ok /tmp/check-annotate.png \
+    && rm /tmp/check.png /tmp/check-montage.png /tmp/check-annotate.png
 
 RUN mkdir -m 1777 /testbed && mkdir /testbed/work
 
