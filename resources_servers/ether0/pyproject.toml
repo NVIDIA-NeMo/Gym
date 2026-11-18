@@ -25,6 +25,10 @@ dependencies = [
     "scipy",
     "joblib",
     "threadpoolctl",
+    # Local oracles (local_oracles.py): solubility, and the MolTrans forward-reaction model.
+    "molsol>=0.0.3",
+    "OpenNMT-py==2.3.0",
+    "torch==2.6.0",
 ]
 
 [tool.uv]
@@ -65,6 +69,9 @@ exclude-dependencies = [
     "werkzeug",
     "waitress",
     "diskcache",
+    # OpenNMT-py 2.3.0 imports pyonmttok only inside its tokenizer transform, which a
+    # pre-trained MolTrans checkpoint never builds; pyonmttok has no Python 3.13 wheels.
+    "pyonmttok",
 ]
 required-version = ">=0.13.4"
 

@@ -18,26 +18,40 @@ def _release(root: Path, count: int) -> None:
 def test_failed_conversion_leaves_no_prepared_file(tmp_path, monkeypatch) -> None:
     # An existing benchmark JSONL counts as prepared, so a crash must never leave a partial one behind.
     _release(tmp_path / "release", prepare_module.EXPECTED_TASKS)
-    output = tmp_path / "data" / "agentic_mme_benchmark.jsonl"
+    outputs = {
+        "OUTPUT_FPATH": tmp_path / "data" / "agentic_mme_benchmark.jsonl",
+        "OPENCODE_OUTPUT_FPATH": tmp_path / "data" / "agentic_mme_opencode_benchmark.jsonl",
+        "SERVER_TOOLS_OUTPUT_FPATH": tmp_path / "data" / "agentic_mme_server_tools_benchmark.jsonl",
+        "OPENCODE_SERVER_TOOLS_OUTPUT_FPATH": tmp_path / "data" / "agentic_mme_opencode_server_tools_benchmark.jsonl",
+    }
+    output = outputs["OUTPUT_FPATH"]
     calls = []
 
     def convert(task: dict, root: Path) -> dict:
         calls.append(task["task_id"])
         if len(calls) == 10:
             raise FileNotFoundError("missing image")
-        return {"task": task["task_id"]}
+        return {"task": task["task_id"], "verifier_metadata": {"task_id": task["task_id"]}}
 
     monkeypatch.setattr(prepare_module, "dataset_root", lambda: tmp_path / "release")
-    monkeypatch.setattr(prepare_module, "OUTPUT_FPATH", output)
+    for name, fpath in outputs.items():
+        monkeypatch.setattr(prepare_module, name, fpath)
     monkeypatch.setattr(prepare_module, "convert", convert)
+    monkeypatch.setattr(prepare_module, "opencode_row", lambda row, images_dir, task_key: {"image_files": []})
+    monkeypatch.setattr(prepare_module, "server_tools_row", lambda row, image_files: dict(row))
+    monkeypatch.setattr(prepare_module, "opencode_server_tools_row", lambda row, image_files: dict(row))
     with pytest.raises(FileNotFoundError):
         prepare_module.prepare()
-    assert not output.exists()
+    assert not any(fpath.exists() for fpath in outputs.values())
 
     calls.clear()
-    monkeypatch.setattr(prepare_module, "convert", lambda task, root: {"task": task["task_id"]})
+    monkeypatch.setattr(
+        prepare_module, "convert", lambda task, root: {"verifier_metadata": {"task_id": task["task_id"]}}
+    )
     assert prepare_module.prepare() == output
-    assert len(output.read_text().splitlines()) == prepare_module.EXPECTED_TASKS
+    for fpath in outputs.values():
+        assert len(fpath.read_text().splitlines()) == prepare_module.EXPECTED_TASKS
+        assert not fpath.with_suffix(".jsonl.partial").exists()
 
 
 def test_incomplete_release_is_refused(tmp_path, monkeypatch) -> None:

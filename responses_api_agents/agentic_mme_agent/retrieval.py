@@ -49,8 +49,8 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, m
 from yarl import URL
 
 from nemo_gym.client import request
+from resources_servers.agentic_mme.image_tools import ImageWorkspace
 from responses_api_agents.agentic_mme_agent.search_cache import shared_cache
-from responses_api_agents.agentic_mme_agent.tools import ImageWorkspace
 
 
 class SearchArgs(BaseModel):

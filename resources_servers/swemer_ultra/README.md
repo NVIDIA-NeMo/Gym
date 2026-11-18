@@ -92,7 +92,7 @@ concurrent sandboxes) took two rounds of fixes that still apply here:
 
 ```bash
 gym env start \
-  --config resources_servers/swemer_ultra/configs/swemer_ultra.yaml \
+  --config resources_servers/swemer_ultra/configs/swemer_ultra_legacy_agent.yaml \
   --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
 python resources_servers/swemer_ultra/apply_golden_patch.py \
@@ -108,9 +108,18 @@ silently corrupts the other's label.
 
 ## Running an agent
 
+`configs/swemer_ultra.yaml` is the default OpenCode session pairing for the example taskset.
+The resources-only configuration is now `configs/swemer_ultra_legacy_agent.yaml`; use it for
+golden-patch validation. `configs/swemer_ultra_opencode.yaml` retains the legacy relay pairing
+for the training dataset.
+
+```bash
+gym env start --config resources_servers/swemer_ultra/configs/swemer_ultra.yaml
+```
+
 `configs/swemer_ultra_opencode.yaml` wires the opencode sandboxed agent to
 `swemer_ultra_resources_server`, pointed at `data/swemer_ultra_training.jsonl`. It lives in a separate
-file rather than folded into `swemer_ultra.yaml` so golden-patch validation (which never touches an
+file rather than folded into `swemer_ultra_legacy_agent.yaml` so golden-patch validation (which never touches an
 agent) doesn't need to pull in the agent's much larger sandbox/permission config.
 
 ```bash

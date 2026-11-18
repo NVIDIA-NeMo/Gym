@@ -43,6 +43,7 @@ from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from nemo_gym.sandbox import SandboxHandle
 from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig, _sandbox_prepare_command
+from responses_api_agents.opencode_agent.legacy_app import OpenCodeLegacyAgent
 from responses_api_agents.opencode_agent.runtime import UNRESTRICTED_IMAGE_ATTACHMENT
 
 
@@ -1074,6 +1075,15 @@ def test_compaction_and_build_steps_reach_opencode(setup, mode):
     assert agent.config.opencode_config == {"compaction": {"auto": False}, "agent": {"build": {"steps": 8}}}
 
 
+_ANALYST = {
+    "mode": "subagent",
+    "steps": 10,
+    "permission": {"task": "deny"},
+    "description": "Inspects media and reports.",
+    "prompt": "Report only.",
+}
+
+
 def test_request_sampling_joins_the_configured_build_steps(setup):
     agent, sandbox = setup
     agent.config.opencode_config = {"agent": {"build": {"steps": 8}}}
@@ -1086,6 +1096,22 @@ def test_request_sampling_joins_the_configured_build_steps(setup):
     assert config["agent"]["plan"] == {"temperature": 0.6}
     # The request's sampling stays out of the configuration that later sessions copy.
     assert agent.config.opencode_config == {"agent": {"build": {"steps": 8}}}
+
+
+def test_subagent_definitions_reach_opencode_with_the_request_sampling(setup):
+    """A session's own subagents and hidden built-ins pass through, and the request's sampling joins each of them."""
+    agent, sandbox = setup
+    agent.config.opencode_config = {"agent": {"analyst": _ANALYST, "general": {"disable": True}}}
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task", "temperature": 0.6})
+        assert result.status_code == 200, result.text
+        config = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])
+    # The subagent inherits the session's model: no model of its own, the session's sampling.
+    assert config["agent"]["analyst"] == {**_ANALYST, "temperature": 0.6}
+    assert config["agent"]["general"] == {"disable": True, "temperature": 0.6}
+    assert config["agent"]["build"] == {"temperature": 0.6}
+    assert agent.config.opencode_config == {"agent": {"analyst": _ANALYST, "general": {"disable": True}}}
 
 
 def step_events(model_calls: int) -> str:
@@ -1170,10 +1196,19 @@ def test_step_limit_counts_compaction_passes_and_keeps_the_prompt(messages, pass
         ({"compaction": {"auto": False, "prune": True}}, "compaction supports only auto"),
         ({"compaction": {"auto": "false"}}, "compaction.auto must be true or false"),
         ({"compaction": None}, "compaction supports only auto"),
-        ({"agent": {"plan": {"steps": 4}}}, "agent supports only build"),
+        ({"agent": {"plan": {"steps": 4}}}, "agent.plan is not a subagent name"),
         ({"agent": {"build": {"prompt": "other"}}}, "agent.build supports only steps"),
         ({"agent": {"build": {"steps": 0}}}, "agent.build.steps must be a positive integer"),
         ({"agent": {"build": {"steps": True}}}, "agent.build.steps must be a positive integer"),
+        ({"agent": {"analyst": {"steps": 4}}}, "agent.analyst must be a subagent definition (mode: subagent)"),
+        ({"agent": {"analyst": {**_ANALYST, "model": "other/model"}}}, "unsupported: ['model']"),
+        ({"agent": {"analyst": {**_ANALYST, "temperature": 0.2}}}, "unsupported: ['temperature']"),
+        ({"agent": {"analyst": {**_ANALYST, "steps": 0}}}, "agent.analyst.steps must be a positive integer"),
+        ({"agent": {"analyst": {**_ANALYST, "prompt": " "}}}, "agent.analyst.prompt must be a non-empty string"),
+        ({"agent": {"analyst": {**_ANALYST, "permission": "allow"}}}, "agent.analyst.permission must be a mapping"),
+        ({"agent": {"Analyst": _ANALYST}}, "agent.Analyst is not a subagent name"),
+        ({"agent": {"general": {"disable": False}}}, "agent.general is not a subagent name"),
+        ({"agent": {"title": {"disable": True}}}, "agent.title is not a subagent name"),
     ],
 )
 def test_seed_rejects_opencode_config_outside_the_session_allowlist(setup, opencode_config, detail):
@@ -1196,7 +1231,10 @@ def test_token_capture_routes_every_opencode_model_call_to_the_rollout(setup):
     )
     with TestClient(agent.setup_webserver()) as client:
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
-        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        # An Environment Server activates a captured rollout on the tagged path; without the tag it would not capture.
+        result = client.post(
+            "/ng-rollout/opencode-smoke-a2/training-token-capture/v1/responses", json={"input": "task"}
+        )
         assert result.status_code == 200, result.text
         config = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])
     # OpenCode can reach only the Gym provider, for its main and small model alike.
@@ -1869,13 +1907,15 @@ def test_missing_workdir_is_rejected(tmp_path):
     assert not (tmp_path / "s").exists()
 
 
-def test_close_response_cookie_blocks_legacy_run(setup):
+@pytest.mark.parametrize(("agent_class", "expected_status"), [(OpenCodeAgent, 422), (OpenCodeLegacyAgent, 409)])
+def test_close_response_cookie_blocks_local_run(setup, agent_class, expected_status):
     agent, sandbox = setup
+    agent = agent_class(config=agent.config, server_client=agent.server_client)
     with TestClient(agent.setup_webserver()) as client:
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).raise_for_status()
         response = client.post("/run", json={"responses_create_params": {"input": "task"}})
-        assert response.status_code == 409
+        assert response.status_code == expected_status
     agent.server_client.post.assert_not_called()
 
 

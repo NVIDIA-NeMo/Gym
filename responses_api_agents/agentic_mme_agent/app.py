@@ -11,19 +11,37 @@ from time import perf_counter, time
 from typing import Any
 
 import cv2
-from aiohttp import ClientError
+from aiohttp import ClientError, ClientResponseError
 from fastapi import Request, Response
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym.agents import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AgentCloseSessionResponse,
+    AgentOutcome,
+    AgentSeedRejectedError,
+    AgentSeedSessionRequest,
+    AgentSessionConflictError,
+    AgentSessionState,
+    BaseResponsesAPIAgentConfig,
+    Body,
+    SimpleResponsesAPIAgent,
+)
+from nemo_gym.agents.agent_outcome import policy_timeout_failure
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
+    MODEL_CONTEXT_LIMIT,
+    MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
+    FailureHeader,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    RequestFailureLog,
     accumulate_response_usage,
+    report_for_current_request,
 )
 from nemo_gym.server_runtime import BaseRunRequest
 from nemo_gym.trajectory import (
@@ -34,9 +52,9 @@ from nemo_gym.trajectory import (
     ToolCallObservation,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from resources_servers.agentic_mme.app import AgenticMMEVerifyResponse
+from resources_servers.agentic_mme.app import TOOL_TRACE_METRICS_KEY, AgenticMMEVerifyResponse
+from resources_servers.agentic_mme.image_tools import IMAGE_TOOLS, ImageWorkspace, function_schema
 from responses_api_agents.agentic_mme_agent.retrieval import RETRIEVAL_TOOLS, Retrieval, RetrievalConfig
-from responses_api_agents.agentic_mme_agent.tools import IMAGE_TOOLS, ImageWorkspace, function_schema
 
 
 # Refusals that measure the policy: its own tool images and history outgrew the context or the
@@ -66,7 +84,8 @@ class AgenticMMEAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     # None removes the limit: the episode then ends when the model answers without a tool call,
-    # or when the model's context or request limit refuses the call, recorded as policy_error.
+    # or when the model's context or request limit refuses the call, recorded as policy_error. Under an agent
+    # session a failed call fails the response with its cause, and the Environment Server grades or retries.
     max_rounds: int | None = Field(default=15, ge=1, le=100)
     max_tool_calls: int | None = Field(default=15, ge=0, le=100)
     # Per worker: with num_workers > 1, each worker runs this many rollouts at once.
@@ -87,13 +106,98 @@ class AgenticMMERunRequest(BaseRunRequest):
     retrieval_replay: list[dict[str, Any]] = Field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class PolicyCallFailure:
+    """A policy-model call that failed and ended the episode, with its cause as Gym's shared agent outcome.
+
+    A refusal for the context or request size is ``model_context_limit``, so an outcome policy can tell it from any
+    other refusal (``model_request_error`` with its HTTP status). A model server that timed out waiting for the model
+    on every attempt reports ``model_policy_response_timeout``. A call that failed before a status (timeout, lost
+    connection) is a transport error, and a reply that is not a Response has an unknown cause.
+    """
+
+    message: str
+    outcome: AgentOutcome
+    # The failed call's failure report (the model server's report merged with this request's own), which recovery and
+    # health read from the response. None for a call that failed before a reply.
+    failure_report: dict[str, Any] | None = None
+
+    @property
+    def infrastructure(self) -> bool:
+        """False only for a context or request-size refusal, which ends the episode unanswered (the model's own
+        result). /run raises every other failure into the failures sidecar."""
+        return self.outcome.failure_kind != MODEL_CONTEXT_LIMIT
+
+    @classmethod
+    def from_reply(cls, error: ClientResponseError) -> "PolicyCallFailure":
+        """The failure for a model reply with an error status, as simple_agent classifies it under an agent session."""
+        content = getattr(error, "response_content", None)
+        detail = content.decode(errors="replace") if isinstance(content, bytes) else str(content or error.message)
+        timeout = policy_timeout_failure(error)
+        if is_context_limit(error.status, detail):
+            outcome = AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
+        elif timeout is not None:
+            # A policy timeout, or a model server queue timeout when every attempt waited in that server's queue.
+            outcome = AgentOutcome(failure_kind=timeout.failure_kind)
+        elif 400 <= error.status <= 599:
+            outcome = AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=error.status)
+        else:
+            # aiohttp raises ClientResponseError for a redirect loop too, with a 3xx status.
+            outcome = AgentOutcome(failure_kind="unknown")
+        log = RequestFailureLog.current()
+        report = log.reply_report(timeout or error) if log else report_for_current_request(timeout or error)
+        forwarded = FailureHeader.decode(error.headers)
+        if forwarded is not None:
+            report = report.merged(forwarded)
+        if outcome.failure_kind == MODEL_CONTEXT_LIMIT:
+            # The model server's report selects its refused request, a model_request_error. The Environment Server
+            # fails a reply whose selected cause does not match its outcome, so keep the events but select none: the
+            # outcome policy then grades the refusal as the model's own result.
+            report = report.model_copy(update={"failure_id": None})
+        return cls(f"HTTP {error.status}: {detail[:1000]}", outcome, report.model_dump(mode="json"))
+
+    def failed_response(self, response: NeMoGymResponse) -> NeMoGymResponse:
+        """Mark the episode's response failed with this cause.
+
+        The Environment Server then applies its outcome policy. ``configs/agentic_mme.yaml`` sets it to grade a
+        context-limit refusal as the model's own result and to fail any other rejected request (400, 413, 422)
+        ungraded, as ``/run`` does; a transport failure or a retryable status such as 429 or 503 is retried.
+        """
+        return NeMoGymResponse.model_validate(
+            response.model_dump()
+            | {
+                "status": "failed",
+                "incomplete_details": None,
+                "error": {"code": "server_error", "message": self.message},
+                "metadata": {
+                    **(response.metadata or {}),
+                    AGENT_OUTCOME_METADATA_KEY: self.outcome.model_dump_json(exclude_none=True),
+                },
+            }
+            | ({"failure_report": self.failure_report} if self.failure_report is not None else {})
+        )
+
+
+@dataclass
+class AgenticMMESessionState(AgentSessionState):
+    """One agent session runs one episode.
+
+    An identical retry of the activation joins the running episode, a different request is refused, and close
+    cancels it. The image tools run in this agent, so the session holds no tool grant and no sandbox.
+    """
+
+    activation_key: tuple[NeMoGymResponseCreateParamsNonStreaming, str] | None = None
+    execution: asyncio.Task[tuple[NeMoGymResponse, dict[str, str]]] | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class _EpisodeResult:
+    """One finished episode: the response, the model server's cookies, the policy-call failure that ended it (if
+    any), and the trajectory observations (None unless the caller asked to collect them)."""
+
     response: NeMoGymResponse
-    trace: list[dict[str, Any]]
     cookies: Any
-    policy_error: str | None
-    infrastructure_error: bool
+    policy_error: PolicyCallFailure | None
     observations: AgentObservationBundle | None
 
 
@@ -170,7 +274,6 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
         attempts = 0
         finished = False
         policy_error = None
-        infrastructure_error = False
         generated = None
         # No forced final-answer call: every model call sees the same tools and tool_choice, so each
         # call's prompt extends the previous one (NeMo RL token capture links a rollout's calls by
@@ -190,21 +293,21 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
                     json=new_params,
                     cookies=cookies,
                 )
-                if response.ok:
-                    reply = NeMoGymResponse.model_validate(await get_response_json(response))
-                else:
-                    error_body = (await response.read()).decode(errors="replace")
+                await raise_for_status(response)
+                reply = NeMoGymResponse.model_validate(await get_response_json(response))
+            except ClientResponseError as error:
+                # A context or request-size refusal (many tool images accumulated) ends the episode
+                # unanswered; any other status (a serving limit such as vLLM's per-prompt image limit, an
+                # unsupported parameter, 401, 429, 5xx) is infrastructure.
+                policy_error = PolicyCallFailure.from_reply(error)
+                break
             except (TimeoutError, ClientError, ValueError) as exc:
                 # The call failed without an HTTP status (connection lost, timeout after the client's
                 # retries, a body that is not JSON or not a Response): infrastructure, not the model.
-                policy_error = f"{type(exc).__name__}: {str(exc)[:1000]}"
-                infrastructure_error = True
-                break
-            if not response.ok:
-                # A context or request-size refusal (many tool images accumulated) ends the episode
-                # unanswered; any other status (401, 429, 5xx) is infrastructure.
-                policy_error = f"HTTP {response.status}: {error_body[:1000]}"
-                infrastructure_error = not is_context_limit(response.status, error_body)
+                kind = "unknown" if isinstance(exc, ValueError) else MODEL_TRANSPORT_ERROR
+                policy_error = PolicyCallFailure(
+                    f"{type(exc).__name__}: {str(exc)[:1000]}", AgentOutcome(failure_kind=kind)
+                )
                 break
             cookies = response.cookies
             generated = reply
@@ -323,7 +426,10 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
                     "output": [],
                 }
             )
-        result = generated.model_copy(update={"output": outputs, "usage": usage})
+        # The trace goes in metrics, which the model never sees, so that verify receives it on /run and under an
+        # agent session alike: a session's Environment Server sends verify only the task data and this response.
+        metrics = {**(generated.metrics or {}), TOOL_TRACE_METRICS_KEY: trace}
+        result = generated.model_copy(update={"output": outputs, "usage": usage, "metrics": metrics})
         if not finished and result.incomplete_details is None:
             # An episode that ends without an answer (tool or round budget used up, or a context-limit
             # refusal) is incomplete, but not a length cut: NeMo RL's overlong filtering and Gym's
@@ -335,20 +441,57 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
             observations.records = [
                 AgentInvocation(
                     invocation_id="root",
-                    status="failed" if infrastructure_error else "completed" if finished else "incomplete",
+                    status=(
+                        "failed"
+                        if policy_error is not None and policy_error.infrastructure
+                        else "completed"
+                        if finished
+                        else "incomplete"
+                    ),
                     model_calls=model_calls,
                     conversation=[*params.input, *outputs],
                 ),
                 *tool_observations,
             ]
-        return _EpisodeResult(
-            response=result,
-            trace=trace,
-            cookies=cookies,
-            policy_error=policy_error,
-            infrastructure_error=infrastructure_error,
-            observations=observations,
-        )
+        return _EpisodeResult(response=result, cookies=cookies, policy_error=policy_error, observations=observations)
+
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgenticMMESessionState:
+        if body.sandbox_access is not None:
+            raise AgentSeedRejectedError("Agentic-MME runs its image tools in the agent and does not use a sandbox")
+        if any(access.required for access in self.effective_tool_accesses(body)):
+            raise AgentSeedRejectedError("Agentic-MME does not use granted tools")
+        if self.config.retrieval.mode == "replay":
+            # The replay list is a field of the task row. An agent session receives only the model request.
+            raise AgentSeedRejectedError(
+                "retrieval.mode=replay reads retrieval_replay from the task row, which agent sessions do not "
+                "receive; use retrieval.mode=disabled or live under an environment server"
+            )
+        return AgenticMMESessionState(request=body)
+
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        if not isinstance(state, AgenticMMESessionState):
+            raise TypeError("Expected Agentic-MME session state")
+        execution = state.execution
+        if execution is not None:
+            if not execution.done():
+                execution.cancel()
+                done, _ = await asyncio.wait({execution}, timeout=self.config.session_close_timeout_seconds)
+                if not done:
+                    raise TimeoutError(
+                        "Agentic-MME episode did not stop within the session close timeout; close must retry"
+                    )
+            await asyncio.gather(execution, return_exceptions=True)
+        return AgentCloseSessionResponse(agent_session_id=state.request.agent_session_id)
+
+    async def _session_episode(
+        self, body: NeMoGymResponseCreateParamsNonStreaming, cookies: dict[str, str], model_url_path: str
+    ) -> tuple[NeMoGymResponse, dict[str, str]]:
+        episode = await self._episode(body, cookies, model_url_path=model_url_path)
+        result = episode.response
+        if episode.policy_error is not None:
+            # Report the cause, so the Environment Server's outcome policy decides between grading and retry.
+            result = episode.policy_error.failed_response(result)
+        return result, {name: getattr(value, "value", value) for name, value in (episode.cookies or {}).items()}
 
     async def responses(
         self,
@@ -356,12 +499,39 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        episode = await self._episode(
-            body, request.cookies, model_url_path=self.url_path_for_request("/v1/responses", request)
-        )
-        for name, value in (episode.cookies or {}).items():
+        """Run one episode: the image-tool loop, with every model call through the rollout's model route.
+
+        Under an agent session, the session runs one activation. An identical retry joins it, and a different
+        request, or one routed under another rollout, is refused with 409.
+        """
+        route = self.url_path_for_request("/v1/responses", request)
+        session_id = self._agent_session_id_from_request(request)
+        if session_id is None:
+            episode = await self._episode(body, request.cookies, model_url_path=route)
+            for name, value in (episode.cookies or {}).items():
+                response.set_cookie(name, value)
+            return episode.response
+        state = self._require_agent_session(session_id)
+        if not isinstance(state, AgenticMMESessionState):
+            raise TypeError("Expected Agentic-MME session state")
+        if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
+            raise AgentSessionConflictError("Agent session does not match the rollout route")
+        key = (body.model_copy(deep=True), route)
+        if state.activation_key is not None and state.activation_key != key:
+            raise AgentSessionConflictError("Session already has another activation")
+        if state.execution is None:
+            state.activation_key = key
+            state.execution = asyncio.create_task(self._session_episode(body, dict(request.cookies), route))
+        try:
+            result, model_cookies = await asyncio.shield(state.execution)
+        except asyncio.CancelledError:
+            request_task = asyncio.current_task()
+            if state.execution.cancelled() and request_task is not None and not request_task.cancelling():
+                raise AgentSessionConflictError("Agent session is closing") from None
+            raise
+        for name, value in model_cookies.items():
             response.set_cookie(name, value)
-        return episode.response
+        return result
 
     async def run(self, request: Request, body: AgenticMMERunRequest) -> AgenticMMEVerifyResponse:
         episode = await self._episode(
@@ -371,9 +541,9 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
             model_url_path=self.url_path_for_run("/v1/responses", body),
             collect_observations=True,
         )
-        if episode.infrastructure_error:
-            raise PolicyRequestError(episode.policy_error)
-        result, trace, policy_error = episode.response, episode.trace, episode.policy_error
+        result, policy_error = episode.response, episode.policy_error
+        if policy_error is not None and policy_error.infrastructure:
+            raise PolicyRequestError(policy_error.message)
         observed = (
             {"ng_agent_observations": episode.observations.model_dump(mode="json")}
             if episode.observations is not None
@@ -391,23 +561,11 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
             cookies=request.cookies,
         )
         await raise_for_status(verification)
+        # Verify returns the tool trace and its counts.
         verified = AgenticMMEVerifyResponse.model_validate(await get_response_json(verification))
-        successful = sum(bool(event["output"].get("ok")) for event in trace)
-        reference = (
-            (body.verifier_metadata.get("process_evaluation") or {}).get("efficiency", {}).get("reference_tool_calls")
-        )
-        overthink = None
-        if isinstance(reference, int) and not isinstance(reference, bool) and reference >= 0:
-            overthink = max(0, successful - reference) / (reference + 1)
         return verified.model_copy(
             update={
-                "tool_trace": trace,
-                "tool_call_count": len(trace),
-                "successful_tool_calls": successful,
-                "tool_error_count": len(trace) - successful,
-                "overthink": overthink,
-                "process_scores_available": False,
-                "policy_error": policy_error,
+                "policy_error": policy_error.message if policy_error else None,
                 **observed,
                 **({"failure_reason": "policy_error"} if policy_error else {}),
             }

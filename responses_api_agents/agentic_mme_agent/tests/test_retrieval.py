@@ -13,9 +13,9 @@ from PIL import Image
 from pydantic import ValidationError
 from yarl import URL
 
+from resources_servers.agentic_mme.image_tools import ImageWorkspace
 from responses_api_agents.agentic_mme_agent import retrieval
 from responses_api_agents.agentic_mme_agent.retrieval import Retrieval, RetrievalConfig, http_payload, public_url
-from responses_api_agents.agentic_mme_agent.tools import ImageWorkspace
 
 
 def live(**kwargs) -> RetrievalConfig:
