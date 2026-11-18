@@ -256,7 +256,8 @@ async def _upload_and_extract(
     """
     remote = f"/tmp/.nemo-gym-upload-{uuid4().hex}.tar.gz"
     size = archive.stat().st_size
-    timeout_s += size / GIB * seconds_per_gib
+    if seconds_per_gib:
+        timeout_s += size / GIB * seconds_per_gib
     if upload_part_bytes is not None and size > upload_part_bytes:
         await _upload_in_parts(
             sandbox, archive, remote, part_bytes=upload_part_bytes, timeout_s=timeout_s, what=what or archive

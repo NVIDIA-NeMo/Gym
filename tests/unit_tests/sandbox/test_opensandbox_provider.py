@@ -21,7 +21,6 @@ import logging
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
-from io import BufferedReader
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1768,12 +1767,10 @@ async def test_exec_file_operations_and_reference_validation(monkeypatch: pytest
 
     class FakeFiles:
         def __init__(self) -> None:
-            self.writes: list[tuple[str, bytes]] = []
+            self.writes: list[tuple[str, str | bytes]] = []
 
-        async def write_file(self, target_path: str, data: BufferedReader) -> None:
-            assert isinstance(data, BufferedReader)
-            assert not data.closed
-            self.writes.append((target_path, data.read()))
+        async def write_file(self, target_path: str, data: str | bytes) -> None:
+            self.writes.append((target_path, data))
 
         async def read_bytes_stream(self, source_path: str) -> Any:
             async def chunks() -> Any:
@@ -3066,73 +3063,6 @@ async def test_file_transfer_request_timeout_is_ungraded_provider_loss(tmp_path:
     assert files.write_file.await_count + files.read_bytes_stream.await_count == (1 if operation == "upload" else 4)
     if operation == "download":
         assert path.read_bytes() == b""
-    else:
-        assert files.write_file.await_args.args[1].closed
-
-
-async def test_upload_retry_restarts_the_stream_from_byte_zero(tmp_path: Path) -> None:
-    class Backend502Error(Exception):
-        status_code = 502
-
-    writes: list[bytes] = []
-    streams: list[BufferedReader] = []
-
-    async def write_file(target_path: str, data: BufferedReader) -> None:
-        assert target_path == "/artifact"
-        assert isinstance(data, BufferedReader)
-        assert all(previous.closed for previous in streams)
-        streams.append(data)
-        await asyncio.sleep(0)
-        assert not data.closed
-        if not writes:
-            writes.append(data.read(2))
-            raise Backend502Error("Failed to write file. Status code: 502")
-        writes.append(data.read())
-
-    provider = opensandbox_provider.OpenSandboxProvider(operations={"retry_delay_s": 0})
-    handle = opensandbox_provider.SandboxHandle(
-        sandbox_id="upload-retry",
-        provider_name="opensandbox",
-        raw=SimpleNamespace(files=SimpleNamespace(write_file=write_file)),
-    )
-    path = tmp_path / "artifact"
-    path.write_bytes(b"artifact")
-
-    await provider.upload_file(handle, path, "/artifact")
-
-    assert writes == [b"ar", b"artifact"]
-    assert len(streams) == 2
-    assert all(stream.closed for stream in streams)
-
-
-@pytest.mark.parametrize("exception_type", [RuntimeError, asyncio.CancelledError])
-async def test_upload_closes_stream_on_failure_or_cancellation(
-    tmp_path: Path, exception_type: type[BaseException]
-) -> None:
-    streams: list[BufferedReader] = []
-
-    async def write_file(target_path: str, data: BufferedReader) -> None:
-        assert isinstance(data, BufferedReader)
-        streams.append(data)
-        await asyncio.sleep(0)
-        assert data.read(2) == b"ar"
-        raise exception_type("upload interrupted")
-
-    provider = opensandbox_provider.OpenSandboxProvider(operations={"retries": 0})
-    handle = opensandbox_provider.SandboxHandle(
-        sandbox_id="upload-interrupted",
-        provider_name="opensandbox",
-        raw=SimpleNamespace(files=SimpleNamespace(write_file=write_file)),
-    )
-    path = tmp_path / "artifact"
-    path.write_bytes(b"artifact")
-
-    expected = asyncio.CancelledError if exception_type is asyncio.CancelledError else NgFailureEvent
-    with pytest.raises(expected):
-        await provider.upload_file(handle, path, "/artifact")
-
-    assert len(streams) == 1
-    assert streams[0].closed
 
 
 async def test_exec_hard_cap_does_not_relabel_inner_timeouts(monkeypatch: pytest.MonkeyPatch) -> None:

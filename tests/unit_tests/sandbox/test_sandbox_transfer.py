@@ -1118,6 +1118,30 @@ async def test_the_restore_deadline_grows_with_the_archive(tmp_path, monkeypatch
     assert extract_timeout == pytest.approx(600 + archive.stat().st_size / 1024 * 2)
 
 
+@pytest.mark.parametrize("entrypoint", ["directory", "path", "archive"])
+async def test_default_upload_preserves_integer_extract_timeout(tmp_path: Path, entrypoint: str) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "data.bin").write_bytes(b"payload")
+    target = tmp_path / "restored"
+    sandbox = RecordingSandbox()
+
+    if entrypoint == "directory":
+        await upload_dir(sandbox, source, str(target))
+    elif entrypoint == "path":
+        await upload_path(sandbox, source, str(target))
+    else:
+        archive = tmp_path / "archive.tar.gz"
+        _pack(source, archive)
+        assert await upload_archive(sandbox, archive, "dir", str(target))
+
+    assert (target / "data.bin").read_bytes() == b"payload"
+    (extract_timeout,) = [timeout for command, timeout in sandbox.execs if "tar -xzf" in command]
+    # Daytona's SDK validates this as StrictInt, so equality with 600 alone is insufficient.
+    assert type(extract_timeout) is int
+    assert extract_timeout == 600
+
+
 async def test_remote_size_bytes_reads_the_du_total_or_raises(tmp_path):
     (tmp_path / "tree").mkdir()
     (tmp_path / "tree" / "w.bin").write_bytes(b"x" * 10000)
