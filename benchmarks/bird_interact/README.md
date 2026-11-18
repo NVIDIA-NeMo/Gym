@@ -77,8 +77,12 @@ gym eval run --benchmark bird_interact --model-type vllm_model --split benchmark
 
 - **Simulator.** The server runs the ADK's simulator. For scores comparable with auto-ontology-eval's, set
   `user_model_name` to the ADK's default simulator model, `anthropic/claude-haiku-4-5-20251001` (BIRD-Interact's own
-  harness uses `gemini-2.0-flash-001`). Run the policy at temperature 0 with at most 4096 output tokens, as the ADK
-  runs its agent; the server's README says where to set them.
+  harness uses `gemini-2.0-flash-001`). An endpoint that returns a reasoning field with the reply, as some serve
+  Claude Haiku 5.5, also needs `user_model_uses_reasoning_parser=true`: with the parser off, the model server refuses
+  the reply. The simulator reads only the reply's text, and its token limits (500 and 1024) were set for a model that
+  does not think, so turn thinking off where the endpoint allows it, for example
+  `'++user_model.responses_api_models.vllm_model.extra_body={thinking:{type:disabled}}'`. Run the policy at
+  temperature 0 with at most 4096 output tokens, as the ADK runs its agent; the server's README says where to set them.
 - **Harnesses.** c-Interact needs an agent that resumes its session across turns and takes tool grants, such as
   `simple_agent`; a-Interact an agent that takes tool grants. The server's README lists which harnesses run each mode,
   and how to point the a-Interact server at an MCP-only harness such as Codex.
@@ -88,6 +92,21 @@ gym eval run --benchmark bird_interact --model-type vllm_model --split benchmark
 ## Results
 
 None published yet.
+
+## Known issues
+
+In 24 Lite tasks, a solution SQL does not run when a submission is graded. The server grades that submission as wrong,
+as the ADK's `ex_base` returns 0 when the solution fails, and lists the error in the rollout's `solution_errors`. No
+agent can pass that phase, so leave these tasks out when you compare against a score that excludes them.
+
+| Cause | Tasks (phase) |
+|---|---|
+| The ADK's `DISTINCT` removal, which Gym copies, turns `DISTINCT ON (...)` into `ON (...)` and `IS DISTINCT FROM` into `IS FROM` | `crypto_10` (2), `disaster_1` (2), `fake_5` (1, 2), `insider_M_4` (1, 2), `insider_M_6` (1, 2), `mental_4` (2), `mental_5` (1, 2), `mental_6` (1, 2), `mental_11` (1, 2), `museum_3` (2), `museum_5` (1, 2) |
+| The solution is not valid SQL: a comma before `FROM` (`archeology_7`, `fake_7`), a stray word (`alien_8`), a row where a number is needed (`cross_db_M_5`), a table that does not exist (`museum_7`) | `alien_8` (2), `archeology_7` (1), `cross_db_M_5` (2), `fake_7` (2), `museum_7` (2) |
+| Phase 2's solution uses a view, table or function that phase 1's solution creates; it fails when the agent's phase 1 SQL passed but created it with another name, columns or types | `archeology_M_3`, `crypto_M_2`, `disaster_M_2`, `disaster_M_3`, `gaming_M_2`, `mental_M_2`, `polar_M_4`, `polar_M_5` (2) |
+
+The first two causes fail every submission of that phase; the third only after some phase 1 submissions. Gym keeps
+the ADK's normalization, so its scores stay comparable with the ADK's and auto-ontology-eval's.
 
 ## Licensing
 
