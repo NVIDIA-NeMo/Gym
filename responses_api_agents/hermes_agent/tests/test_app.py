@@ -190,7 +190,8 @@ class TestSanity:
         assert state.session.workdir == "/app"
         assert state.session.session_dir.startswith("/tmp/nemo-gym-hermes-sessions/")
         assert len(state.session.session_dir.rsplit("/", 1)[-1]) == 32
-        assert sandbox.exec.await_count == 2
+        # Preparing the paths, the runtime's import check and the read of the task's task.json.
+        assert sandbox.exec.await_count == 3
         assert {call.args[0].name for call in sandbox.upload.await_args_list} == {
             "sandbox_runner.py",
             "sandbox_observer.py",
@@ -236,8 +237,9 @@ class TestSanity:
         install.assert_awaited_once_with(sandbox, timeout_s=123)
         # The pinned Hermes client requires the MCP 1 Streamable HTTP API.
         assert "mcp>=1.28.1,<2" in _HERMES_RUNTIME.requirements
-        # Seeding prepares paths from the root; it never runs in, or writes to, the task's working directory.
-        assert [call.kwargs["cwd"] for call in sandbox.exec.await_args_list] == ["/"]
+        # Seeding prepares paths and reads the task's task.json from the root; it never runs in, or writes to, the
+        # task's working directory.
+        assert [call.kwargs["cwd"] for call in sandbox.exec.await_args_list] == ["/", "/"]
         assert {call.args[0].name for call in sandbox.upload.await_args_list} == {
             "sandbox_runner.py",
             "sandbox_observer.py",

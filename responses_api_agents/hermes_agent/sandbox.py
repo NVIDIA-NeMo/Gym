@@ -16,6 +16,7 @@ from nemo_gym.agents import AgentSessionState, SandboxCommand, SandboxPythonRunt
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
+from responses_api_agents.hermes_agent.sandbox_runner import HERMES_HOME_FOLDER
 
 
 LOG = logging.getLogger(__name__)
@@ -82,6 +83,13 @@ class HermesSandboxSession(AgentSessionState):
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
     runtime_info: HarnessProcessInfo | None = None
+    # The task's ``skills_dir``, when the seed copied it into ``<HERMES_HOME>/skills``.
+    task_skills: str | None = None
+
+    @property
+    def hermes_home(self) -> str:
+        """The HERMES_HOME the sandbox runner gives Hermes: Hermes lists and loads skills from its ``skills`` folder."""
+        return f"{self.session.session_dir}/{HERMES_HOME_FOLDER}"
 
     async def install_runtime(self, *, install_timeout: float) -> None:
         """Reuse or install the pinned runtime and stage the Hermes harness files.

@@ -87,6 +87,16 @@ HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: th
 Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
 benchmark whose Resources server serves its tools over direct HTTP does not pair with it.
 
+A Harbor task that declares `skills_dir` is taken in a task sandbox, and the seed response declares
+`supports_task_skills`. At seed the adapter reads `skills_dir` from `/tmp/.nemo-gym/task.json` inside the sandbox and
+copies that folder to `<HERMES_HOME>/skills`, the skills folder of the session's Hermes home. The activation turns on
+Hermes' `skills` toolset (`skills_list`, `skill_view`, `skill_manage`) for that session, adding it to
+`enabled_toolsets` (a Harbor run keeps only `terminal`) or removing it from `disabled_toolsets`, so Hermes lists the
+skills in its system prompt and the model loads one with `skill_view`; every task that declares no `skills_dir` keeps
+the configured toolsets. The server makes a relative `skills_dir` absolute; a `skills_dir` only a shell resolves
+(starting with `~` or containing `$`) or one that is not a folder in the sandbox fails the seed with a terminal
+message. The task's MCP servers stay with grants, judged separately from its skills.
+
 ## Configuration example
 
 ```yaml
