@@ -40,3 +40,20 @@ hle_diamond_opencode_reference_agent:
       system_prompt: |
         Direct internet access is disabled on this machine: no downloads and no package installation. External information is available only through the web_search and web_fetch tools of the hle_tools server (hle_tools_web_search and hle_tools_web_fetch).
         Python 3.11 is installed with a shell and these packages: numpy, scipy, sympy, mpmath, networkx, pandas, matplotlib, pillow, scikit-learn, statsmodels, requests, pyyaml. Nothing else is installed.
+# The judge, on this preset only, as upstream's hle_eval/run_judge_results.py runs it on every point Gym controls:
+# - the judge's [question] is the bare dataset question. prompts/opencode.yaml folds the answer-format instruction
+#   after the question in the one user message, so the regex cuts it off (first capture group; no match leaves
+#   the text whole, so a bare question passes through unchanged);
+# - the judge call is capped at 4096 output tokens (upstream: max_completion_tokens=4096). A verdict cut off by
+#   the cap scores 0 as no_verdict, as it would upstream;
+# - the judge server stays on loopback: absolute_ip_server_types moves every Resources server to the routable
+#   address so the sandbox can reach hle_tools, and a server's own host wins over that, so the sandbox reaches
+#   exactly the model server and hle_tools (judge_openai.yaml pins its judge model the same way).
+hle_diamond_equivalence_llm_judge_resources_server:
+  resources_servers:
+    equivalence_llm_judge:
+      host: 127.0.0.1
+      question_extract_regex: '^(.*?)\n\nYour response should be in the following format:'
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 4096

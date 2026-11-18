@@ -527,6 +527,78 @@ class TestConfigs:
         differing = {key for key in set(agent_dict) | set(reference) if agent_dict.get(key) != reference.get(key)}
         assert differing - {"port"} == {"tool_servers", "system_prompt"}
 
+    def test_hle_tools_sandbox_reaches_exactly_the_model_server_and_the_tool_server(self, monkeypatch):
+        """`absolute_ip_server_types` moves every model and Resources server to the routable address, which the
+        egress policy then opens on every port. The judge resources server (preset) and the judge model
+        (judge_openai.yaml) pin their own loopback host, and a server's own host wins over the type-scoped
+        address, so the sandbox reaches exactly two hosts' ports: the model server's and hle_tools'."""
+        import nemo_gym.config.global_config as global_config
+        from nemo_gym.config import GlobalConfigDictParser
+
+        for name, value in {
+            "TAVILY_API_KEY": "unused",
+            "OPENSANDBOX_API_KEY": "unused",
+            "OPENSANDBOX_DOMAIN": "unused.invalid",
+        }.items():
+            monkeypatch.setenv(name, value)
+        monkeypatch.delenv("HLE_DIAMOND_JUDGE_MODEL", raising=False)
+        monkeypatch.setattr(global_config, "gethostbyname", MagicMock(return_value="192.0.2.20"))
+        monkeypatch.setattr(global_config, "_find_open_port_using_range", MagicMock(side_effect=range(12000, 13000)))
+        initial = OmegaConf.merge(
+            GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
+            {
+                "config_paths": [
+                    "benchmarks/hle_diamond/opencode_hle_tools.yaml",
+                    "benchmarks/hle_diamond/judge_openai.yaml",
+                ]
+            },
+        )
+        # The full parse (not the offline listing parse, which skips the use_absolute_ip host lookup).
+        config = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=initial,
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                dotenv_path=None,
+            )
+        )
+
+        hosts = {
+            name: get_first_server_config_dict(config, name)["host"]
+            for name in ("policy_model", "hle_tools", JUDGE_SERVER, "hle_diamond_judge_model", REFERENCE_AGENT)
+        }
+        assert hosts == {
+            "policy_model": "192.0.2.20",
+            "hle_tools": "192.0.2.20",
+            JUDGE_SERVER: "127.0.0.1",
+            "hle_diamond_judge_model": "127.0.0.1",
+            REFERENCE_AGENT: "127.0.0.1",
+        }
+        assert config["head_server"]["host"] == "127.0.0.1"
+
+    def test_hle_tools_judge_reads_the_bare_question_under_upstreams_output_cap(self):
+        """Upstream's judge sees question['question'] and runs under max_completion_tokens=4096. The opencode
+        prompt folds the answer-format instruction after the question in the one user message, so the preset's
+        regex cuts it off; a bare question (the default prompt's user message) passes through unchanged."""
+        from resources_servers.equivalence_llm_judge.app import _extract_question_text
+
+        judge = get_first_server_config_dict(_resolve("opencode_hle_tools.yaml"), JUDGE_SERVER)
+        assert judge["host"] == "127.0.0.1"
+        assert OmegaConf.to_container(judge["judge_responses_create_params"]) == {
+            "input": [],
+            "max_output_tokens": 4096,
+        }
+        regex = judge["question_extract_regex"]
+        question = "What is 2+2?\n\nAnswer in words: is it four?"
+        for prompt_file in ("opencode.yaml", "default.yaml"):
+            prompt = load_prompt_config(str(HLE_DIAMOND_PROMPTS / prompt_file))
+            params = NeMoGymResponseCreateParamsNonStreaming(input=fill_prompt(prompt, {"question": question}))
+            assert _extract_question_text(params, regex) == question, prompt_file
+        # The other presets keep the judge's defaults (the whole last user message, no output cap).
+        reference = get_first_server_config_dict(_resolve("opencode_reference.yaml"), JUDGE_SERVER)
+        assert reference["question_extract_regex"] is None
+        assert OmegaConf.to_container(reference["judge_responses_create_params"]) == {"input": []}
+
     @pytest.mark.parametrize(
         ("config_file", "with_search"),
         [("opencode_full.yaml", False), ("opencode_search_full.yaml", True)],
