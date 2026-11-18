@@ -17,11 +17,6 @@ from resources_servers.simpleqa.task_data import TaskData as SimpleQATaskData
 
 
 class TaskData(SimpleQATaskData):
-    task_id: Optional[str] = Field(
-        default=None,
-        description="Stable upstream task identifier, when the benchmark provides one.",
-        json_schema_extra={"consumed_by": ["provenance"]},
-    )
     subject: Optional[str] = Field(
         default=None,
         description=(

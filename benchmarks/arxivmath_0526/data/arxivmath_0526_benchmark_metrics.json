@@ -5,9 +5,7 @@
     "prepare_script": "benchmarks/arxivmath_0526/prepare.py",
     "prompt_config": "benchmarks/arxivmath_0526/prompts/default.yaml",
     "num_repeats": 1,
-    "prepare_project": null,
-    "prepare_dependencies": [],
-    "Number of examples": 40,
+    "Number of examples": 0,
     "Number of tools": {
         "Total # non-null values": 0,
         "Average": 0.0,
@@ -35,17 +33,5 @@
         "Min": 0.0,
         "Max": 0.0,
         "Standard deviation": 0.0
-    },
-    "task_id": {
-        "unique_count": 40,
-        "total_count": 40
-    },
-    "question": {
-        "unique_count": 40,
-        "total_count": 40
-    },
-    "expected_answer": {
-        "unique_count": 33,
-        "total_count": 40
     }
 }

@@ -202,50 +202,30 @@ def _install_parent_compatible(
         subprocess.run(command, cwd=project, env=env, check=True)
 
 
-def _package_indexes(project: Path) -> dict[str, str | None]:
-    """Map each locked package to its explicit index URL, or to None for the default index."""
-    indexes = tomllib.loads((project / "pyproject.toml").read_text()).get("tool", {}).get("uv", {}).get("index", [])
-    explicit = {index["url"].rstrip("/") for index in indexes if index.get("explicit")}
-    packages = tomllib.loads((project / "uv.lock").read_text()).get("package", [])
-    registries = {package["name"]: package.get("source", {}).get("registry", "") for package in packages}
-    return {name: registry if registry.rstrip("/") in explicit else None for name, registry in registries.items()}
-
-
 def _sync_from_mirror(command: list[str], project: Path, venv: Path, env: dict[str, str]) -> None:
-    """Install locked versions through the caller's package indexes, except index-pinned packages."""
+    """Install locked versions through the caller's configured package indexes."""
     lock_env = {key: value for key, value in env.items() if key not in INDEX_VARIABLES}
-    export = [value for value in command[2:] if value != "--inexact"]
-    export[export.index("--python") : export.index("--python") + 2] = []
-    python = command[command.index("--python") + 1]
-    subprocess.run(["uv", "venv", "--allow-existing", "--seed", "--python", python, str(venv)], env=env, check=True)
-    packages = _package_indexes(project)
     with TemporaryDirectory(prefix="gym-mirror-") as directory:
-        for number, index in enumerate(dict.fromkeys([None, *packages.values()])):
-            requirements = Path(directory) / f"requirements-{number}.txt"
-            flags = [f"--no-emit-package={name}" for name, other in packages.items() if other != index]
-            if index:
-                flags += ["--no-emit-project", "--no-emit-workspace"]
-            subprocess.run(
-                ["uv", "export", *export, *flags, "--output-file", str(requirements)],
-                env=lock_env,
-                cwd=project,
-                check=True,
-                stdout=subprocess.DEVNULL,
-            )
-            install = [
-                "uv",
-                "pip",
-                "install",
-                "--python",
-                str(venv / "bin/python"),
-                "--no-deps",
-                "-r",
-                str(requirements),
-            ]
-            if index:
-                install += ["--no-config", "--default-index", index]
-            # The caller's index variables and configured indexes would outrank --default-index.
-            subprocess.run(install, env=lock_env if index else env, cwd=project, check=True)
+        requirements = Path(directory) / "requirements.txt"
+        export = [value for value in command[2:] if value != "--inexact"]
+        export[export.index("--python") : export.index("--python") + 2] = []
+        subprocess.run(
+            ["uv", "export", *export, "--output-file", str(requirements)],
+            env=lock_env,
+            cwd=project,
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        python = command[command.index("--python") + 1]
+        subprocess.run(
+            ["uv", "venv", "--allow-existing", "--seed", "--python", python, str(venv)], env=env, check=True
+        )
+        subprocess.run(
+            ["uv", "pip", "install", "--python", str(venv / "bin/python"), "--no-deps", "-r", str(requirements)],
+            env=env,
+            cwd=project,
+            check=True,
+        )
 
 
 def _compatibility_identity(project: Path, requirements: list[str], constraints: list[str], extras: tuple) -> str:

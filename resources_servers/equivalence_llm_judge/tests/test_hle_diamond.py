@@ -74,7 +74,6 @@ UPSTREAM_SYSTEM_PROMPT = (
 )
 IMAGE_DATA_URI = "data:image/png;base64,iVBORw0KGgo="
 ROW_FIELDS = [
-    "task_id",
     "question",
     "expected_answer",
     "answer_type",
@@ -187,7 +186,6 @@ class TestPrepare:
         ]
         rows = _read_rows(output)
         assert [list(row) for row in rows] == [ROW_FIELDS + ["responses_create_params"]] * 4
-        assert all(row["task_id"] == row["uuid"] for row in rows)
         by_id = {row["uuid"]: row for row in rows}
 
         image_row = by_id["q-reasoning-image"]
@@ -258,7 +256,6 @@ class TestPrepare:
         rows = _read_rows(output)
         assert [row["uuid"] for row in rows] == ["q-reasoning-text", "q-knowledge-mc", "q-knowledge-text"]
         assert [list(row) for row in rows] == [ROW_FIELDS] * 3
-        assert all(row["task_id"] == row["uuid"] for row in rows)
         assert all(row["has_image"] is False for row in rows)
         assert IMAGE_DATA_URI not in output.read_text(encoding="utf-8")
 

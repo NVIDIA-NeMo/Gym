@@ -240,6 +240,9 @@ class JudgeJobs:
             # The receipt makes the job recompute the run's aggregate metrics and quality summary from the settled
             # rows (``_reverify_with_receipt``), as the judge-only job of a GPU run does.
             receipt = output.parent / "receipt.json"
+            # The receipt makes the job recompute the run's aggregate metrics and quality summary from the settled
+            # rows (``_reverify_with_receipt``), as the judge-only job of a GPU run does.
+            receipt = output.parent / "receipt.json"
             # Observability is on by default, and it needs a capture directory: the job's own folder, as a submitted
             # evaluation captures into its benchmark directory.
             run = _with_default_capture_dir(run, output.parent)

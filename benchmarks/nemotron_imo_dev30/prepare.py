@@ -140,10 +140,7 @@ def prepare() -> Path:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_FPATH, "w") as f:
         for tier, problem_id in DEVSET30:
-            f.write(
-                json.dumps({"task_id": problem_id, "problem_idx": problem_id, "tier": tier, **problems[problem_id]})
-                + "\n"
-            )
+            f.write(json.dumps({"problem_idx": problem_id, "tier": tier, **problems[problem_id]}) + "\n")
     print(f"Wrote {len(DEVSET30)} problems to {OUTPUT_FPATH}")
     return OUTPUT_FPATH
 
