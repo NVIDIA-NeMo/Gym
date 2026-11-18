@@ -28,7 +28,12 @@ ANSWER = {"object": "response", "id": "resp_saved", "status": "completed", "outp
 
 
 def _run(
-    tmp_path: Path, *, judge_failures: int, rollouts: int = 3, evidence: dict | None = None
+    tmp_path: Path,
+    *,
+    judge_failures: int,
+    rollouts: int = 3,
+    evidence: dict | None = None,
+    failure_fields: dict | None = None,
 ) -> tuple[Path, list[dict]]:
     """A managed run of ``rollouts`` rollouts: the first ``judge_failures`` failed to judge, the others scored 1.0."""
     rows = [{"_ng_task_index": i, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}} for i in range(rollouts)]
@@ -54,6 +59,7 @@ def _run(
                         "response": ANSWER,
                     }
                     | (evidence or {})
+                    | (failure_fields or {})
                 )
                 store.record_outcome(failure)
                 failures.append(failure)
@@ -143,6 +149,26 @@ def test_a_spent_judge_failure_is_left_out_of_the_binding_only_when_asked(tmp_pa
             judge_failed_only=True,
             skip_spent_judge_failures=True,
         )
+
+
+_UNPARSEABLE_JUDGE_FAILURE = {"_ng_failure_class": "judge_unparseable", "_ng_failure_legacy_class": "judge_failed"}
+
+
+def test_the_binding_takes_the_judge_failures_the_ordinary_selection_takes(tmp_path):
+    # A judge failure whose canonical class is judge_unparseable keeps judge_failed as its retained classification.
+    output, failures = _run(tmp_path, judge_failures=4, rollouts=6, failure_fields=_UNPARSEABLE_JUDGE_FAILURE)
+    expected = sorted(logical_rollout_id(failure) for failure in failures)
+    assert due_judge_failures(output) == expected  # the ordinary selection takes all four
+    assert sorted(bind_judge_failures(output)["failures"]) == expected  # and so does the binding
+
+
+def test_a_spent_judge_failure_with_a_retained_classification_is_still_spent(tmp_path, monkeypatch):
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "1")
+    output, _ = _run(tmp_path, judge_failures=1, failure_fields=_UNPARSEABLE_JUDGE_FAILURE)
+    assert due_judge_failures(output) == []
+    with pytest.raises(ConfigError, match="has spent its 1 saved failure attempts"):
+        bind_judge_failures(output)
+    assert bind_judge_failures(output, skip_spent=True)["failures"] == {}
 
 
 async def test_a_run_without_due_judge_failures_judges_nothing(tmp_path, monkeypatch):
