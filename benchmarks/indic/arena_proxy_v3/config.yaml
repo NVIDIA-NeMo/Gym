@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - benchmarks/indic/arena_proxy_v3/judge.yaml
+
+indic_arena_proxy_v3_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 1
+      resources_server:
+        type: resources_servers
+        name: indic_arena_proxy_v3_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: indic_arena_proxy_v3
+          type: benchmark
+          jsonl_fpath: benchmarks/indic/arena_proxy_v3/data/arena_proxy_v3_benchmark.jsonl
+          prepare_script: benchmarks/indic/arena_proxy_v3/prepare.py
+          # No prompt_config: the prepared input already contains the full conversation.
+          num_repeats: 1
+          license: unknown
+
+indic_arena_proxy_v3_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: indic_arena_proxy_v3_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: indic_arena_proxy_v3_agent
+      resources_tool_transports:
+        - direct_http

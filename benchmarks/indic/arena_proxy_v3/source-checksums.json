@@ -1,0 +1,204 @@
+{
+  "repo_id": "anushakamathofficial/indic-arena-proxy-v3",
+  "files": {
+    "lmarena_v3_chat400_en.jsonl": {
+      "sha256": "0de45ec444e439eaf2b3160d77dfe89b262931a9cd3ec17f859912dabceeb67e",
+      "bytes": 7304524,
+      "rows": 400
+    },
+    "lmarena_v3_chat400_bn.jsonl": {
+      "sha256": "335f74c088f8f8439cd41f5912af05e61bbc1d572ff5a95ead8a7933b9530fd3",
+      "bytes": 8673866,
+      "rows": 400
+    },
+    "lmarena_v3_chat400_gu.jsonl": {
+      "sha256": "d0b455444b323eb35de6a190b6550e6c93376aaa72bcacff2ac6de4696f03b5a",
+      "bytes": 8557048,
+      "rows": 400
+    },
+    "lmarena_v3_chat400_hi.jsonl": {
+      "sha256": "c44987444d4155ce0f2cf6b2e3f68854a004054948b4d7db9d8a915cf9a1d25a",
+      "bytes": 8618805,
+      "rows": 400
+    },
+    "lmarena_v3_chat400_kn.jsonl": {
+      "sha256": "543bb4e0691fe313b7bced19e901958921ee036a48b00662172a824f454091e5",
+      "bytes": 8816370,
+      "rows": 400
+    },
+    "lmarena_v3_chat400_ml.jsonl": {
+      "sha256": "2472094f0b296e780175761deb5c9266a2c5d36d0ce30b90ea6ffea79492567a",
+      "bytes": 9050730,
+      "rows": 400
+    },
+    "lmarena_v3_chat400_mr.jsonl": {
+      "sha256": "7552066ef06458b2b654508dc58e0cc28668752c22a2d7be5e50fb1608f738de",
+      "bytes": 8648147,
+      "rows": 400
+    },
+    "lmarena_v3_chat400_ne.jsonl": {
+      "sha256": "1c9424a847021f2ad9a2e9ef6fd5cc8736a9c3f75cfde0e2c719f6871ae3926f",
+      "bytes": 8632067,
+      "rows": 400
+    },
+    "lmarena_v3_chat400_or.jsonl": {
+      "sha256": "5cdddd85640ed6389a8f865e96f10fb5a25baac68a4ed817d620463033d5d53a",
+      "bytes": 8675273,
+      "rows": 400
+    },
+    "lmarena_v3_chat400_pa.jsonl": {
+      "sha256": "c066fc81a6ddabae5b3ebf12b1d2e2add44c52335a4488e65df8794080b61806",
+      "bytes": 8600262,
+      "rows": 400
+    },
+    "lmarena_v3_chat400_ta.jsonl": {
+      "sha256": "11bcca83a55e8d6f0cb128c1e7e35433aeb97c51469ac5708515891db0a91b73",
+      "bytes": 9039496,
+      "rows": 400
+    },
+    "lmarena_v3_chat400_te.jsonl": {
+      "sha256": "8f2fa86aec000fa4636ffe5c0b19d8ac1021dfe9f94f0a878e1260d5ba3db71c",
+      "bytes": 8795499,
+      "rows": 400
+    },
+    "lmarena_v3_chat400_ur.jsonl": {
+      "sha256": "e676834ddfeff68630d8c6922e2defa183bd4ce0089e0a83e9cb5deb23bc34f6",
+      "bytes": 8076395,
+      "rows": 400
+    },
+    "references/gpt-5.4-mini/en.jsonl": {
+      "sha256": "0e2d20c3d879d90c4b8a39645105d70ab7468f7148c228df37b2247b4aacba96",
+      "bytes": 2089546,
+      "rows": 400
+    },
+    "references/gpt-5.4-mini/bn.jsonl": {
+      "sha256": "09443c1ac1dd32ddc8fa8bde6ddd56beb01862cfb32773ea23fa7bb02e935ebe",
+      "bytes": 3508559,
+      "rows": 400
+    },
+    "references/gpt-5.4-mini/gu.jsonl": {
+      "sha256": "ac809c1305308d7786e561848965a6fb56ad1547405b96f1b18d536f3ee31113",
+      "bytes": 3215307,
+      "rows": 400
+    },
+    "references/gpt-5.4-mini/hi.jsonl": {
+      "sha256": "8f440f38989039d2cb1bd8b9215703d9fc2d731e13a76d5612bfceb8e0f2ed3a",
+      "bytes": 3349277,
+      "rows": 400
+    },
+    "references/gpt-5.4-mini/kn.jsonl": {
+      "sha256": "002ad61d7713a1a2acc220c6362f559cdab1b2e7343a1449859ad926bc1ef832",
+      "bytes": 3568906,
+      "rows": 400
+    },
+    "references/gpt-5.4-mini/ml.jsonl": {
+      "sha256": "25123447a3aae61e820390a24275dcc8e5f89a065df33d108e6421ad82eb5fab",
+      "bytes": 3781135,
+      "rows": 400
+    },
+    "references/gpt-5.4-mini/mr.jsonl": {
+      "sha256": "1690e60d251b09c1eda0e288ad989437a50eefd1282d74f479099897ad5e519e",
+      "bytes": 3421819,
+      "rows": 400
+    },
+    "references/gpt-5.4-mini/ne.jsonl": {
+      "sha256": "845e47bc7cae9a31935ca2af13659273c285d14a6ea3407639f877288f7ae7f6",
+      "bytes": 3328720,
+      "rows": 400
+    },
+    "references/gpt-5.4-mini/or.jsonl": {
+      "sha256": "7a1909a8ad2264084b563cbc604479e540e23fce552806c84e325a409d44718f",
+      "bytes": 3117332,
+      "rows": 400
+    },
+    "references/gpt-5.4-mini/pa.jsonl": {
+      "sha256": "5f81f0c724d5288dbfd101c7966978ac57f03249c9fcf5a42b82aa49cffa5a0f",
+      "bytes": 3214521,
+      "rows": 400
+    },
+    "references/gpt-5.4-mini/ta.jsonl": {
+      "sha256": "f911b182afd89db77da40217e0cd5dd41b098ac885b4a532969ff5113b0a8471",
+      "bytes": 3759480,
+      "rows": 400
+    },
+    "references/gpt-5.4-mini/te.jsonl": {
+      "sha256": "21120bfe62133b4fd228ceb116f0db39b349d06f211cfc55f6df0c48eae9ce8b",
+      "bytes": 3444151,
+      "rows": 400
+    },
+    "references/gpt-5.4-mini/ur.jsonl": {
+      "sha256": "34ebc9dc5bcd3755e6254b53c81d3de0094871277d802fcbb7ac6ff47cc0552f",
+      "bytes": 2688786,
+      "rows": 400
+    }
+  },
+  "languages": {
+    "en": {
+      "prompts": 400,
+      "references": 400,
+      "excluded_untranslated": []
+    },
+    "bn": {
+      "prompts": 400,
+      "references": 400,
+      "excluded_untranslated": []
+    },
+    "gu": {
+      "prompts": 400,
+      "references": 400,
+      "excluded_untranslated": []
+    },
+    "hi": {
+      "prompts": 400,
+      "references": 400,
+      "excluded_untranslated": []
+    },
+    "kn": {
+      "prompts": 400,
+      "references": 400,
+      "excluded_untranslated": []
+    },
+    "ml": {
+      "prompts": 400,
+      "references": 400,
+      "excluded_untranslated": []
+    },
+    "mr": {
+      "prompts": 400,
+      "references": 400,
+      "excluded_untranslated": []
+    },
+    "ne": {
+      "prompts": 400,
+      "references": 400,
+      "excluded_untranslated": []
+    },
+    "or": {
+      "prompts": 400,
+      "references": 400,
+      "excluded_untranslated": []
+    },
+    "pa": {
+      "prompts": 400,
+      "references": 400,
+      "excluded_untranslated": []
+    },
+    "ta": {
+      "prompts": 400,
+      "references": 400,
+      "excluded_untranslated": [
+        "019c83f8-0d3e-7703-9603-03d6478253e1"
+      ]
+    },
+    "te": {
+      "prompts": 400,
+      "references": 400,
+      "excluded_untranslated": []
+    },
+    "ur": {
+      "prompts": 400,
+      "references": 400,
+      "excluded_untranslated": []
+    }
+  }
+}

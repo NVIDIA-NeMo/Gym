@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: indic/arena_proxy_v3
+version: 1.0.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: other
+description: English and 12 Indic chat-400 conversation sets judged against frozen GPT-5.4-mini answers.
+modality: text
+licensing: unknown
+authors: [NVIDIA NeMo Gym contributors]
+reward:
+  range: [0, 1]
+  higher_is_better: true
+determinism: seeded
+resources_server: arena_judge
+agent_server: simple_agent
+model_server: policy_model
+datasets:
+  - name: indic_arena_proxy_v3
+    type: benchmark
+    jsonl_fpath: benchmarks/indic/arena_proxy_v3/data/arena_proxy_v3_benchmark.jsonl
+    prepare_script: benchmarks/indic/arena_proxy_v3/prepare.py
+    num_repeats: 1
+prompt_source: prepared
+canonical_split: chat400
+session_model: episode
+state: none
+lifecycle: active
