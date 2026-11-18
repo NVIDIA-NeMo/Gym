@@ -16,7 +16,9 @@ opencode_sandboxed_agent:
       # @bxyu-nvidia: This needs to be set appropriately for every model!
       opencode_max_context_window: 262144
 
-      opencode_model_call_timeout: 3600000  # In milliseconds e.g. 600000 is 10min. Leave null for no timeout. Default to 1hr
+      # Total time limit for each model request, in milliseconds (e.g. 600000 is 10 min). null (default) sets no limit;
+      # sandbox_timeout bounds the run and the stream idle timeout.
+      opencode_model_call_timeout: null
 
       remote_opencode_install_script_path: null
       remote_opencode_binary_path: null

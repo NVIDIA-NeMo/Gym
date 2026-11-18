@@ -101,9 +101,8 @@ omit a fixed output-token request. Configure the inference server for the intend
 remove a server-side default output cap.
 
 OpenCode also accepts `opencode_model_call_timeout` in milliseconds for each model
-request. The general-purpose OpenCode config defaults to one hour; these benchmark
-presets leave it unset, so the sandbox execution budget bounds the run. The stream
-idle timeout follows `sandbox_timeout`.
+request. It defaults to no limit, so the sandbox execution budget bounds the run.
+The stream idle timeout follows `sandbox_timeout`.
 
 Native agent prompts receive only a short note about network availability and the
 preinstalled scientific tools at `/opt/science/README.md`. The search variants
