@@ -971,14 +971,17 @@ def _rejudge_saved_judge_failures(
     else:
         run_config = dict(global_config_dict)
     scored = 0
+    raised = False
     try:
         scored = asyncio.run(rejudge_saved_judge_failures(run_config, output))
     except Exception as error:  # an optional pass after the run is saved; recovery still sees the failures
+        raised = True
         print(f"Saved judge failures were not re-judged: {type(error).__name__}: {error}", flush=True)
     # A pass that raised after saving its grades can still have completed a strict run: settled completeness,
-    # not a normal return, decides whether its metrics are rebuilt.
+    # not a normal return, decides whether its metrics are rebuilt. A strict pass that raised may also have saved
+    # grades before it raised, which the count it never returned does not show.
     complete = complete_only and _saved_run_complete(output)
-    if not scored and not complete:
+    if not scored and not complete and not (complete_only and raised):
         return complete
     if scored:
         print(f"Re-judged saved judge failures: {scored} rollout(s) settled from their saved answers", flush=True)
@@ -987,7 +990,7 @@ def _rejudge_saved_judge_failures(
     if complete_only and not complete:
         # A strict run that stays incomplete publishes no score, but its quality summary must describe the rows the
         # pass settled: the aggregation that rewrites it is skipped with the metrics.
-        if scored:
+        if scored or raised:
             _refresh_settled_source(run_config, output, workdir=output.parent, metrics=False)
         return complete
     try:

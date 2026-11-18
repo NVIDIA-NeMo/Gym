@@ -127,3 +127,34 @@ def test_an_incomplete_strict_run_refreshes_its_quality_summary_without_publishi
     assert all(call["metrics"] is False and call["workdir"] == tmp_path for call in calls)
     # An incomplete strict run still publishes no score.
     assert len(pass_settles_one_row) == (1 if run_is_complete or not complete_only else 0)
+
+
+@pytest.mark.parametrize(
+    "complete_only, run_is_complete, refreshed",
+    [
+        pytest.param(True, False, 1, id="incomplete-strict-run-describes-the-rows-settled-before-the-disconnect"),
+        pytest.param(True, True, 0, id="completed-run-gets-it-from-the-aggregation"),
+        pytest.param(False, False, 0, id="not-a-rejection-keeps-log-and-return"),
+    ],
+)
+def test_a_pass_that_settled_rows_and_then_disconnected_refreshes_the_quality_summary(
+    tmp_path, monkeypatch, pass_settles_one_row, complete_only, run_is_complete, refreshed
+) -> None:
+    from aiohttp import ServerDisconnectedError
+
+    async def rejudge(run_config, output):
+        raise ServerDisconnectedError()  # an earlier re-judgment was saved, the count is never returned
+
+    calls = []
+    monkeypatch.setattr("nemo_gym.eval.rollout_reverification.rejudge_saved_judge_failures", rejudge)
+    monkeypatch.setattr(eval_cli, "_saved_run_complete", lambda output: run_is_complete)
+    monkeypatch.setattr(eval_cli, "_refresh_settled_source", lambda *args, **kwargs: calls.append(kwargs) or {})
+
+    eval_cli._rejudge_saved_judge_failures(
+        {}, tmp_path / "rollouts.jsonl", SimpleNamespace(disable_aggregation=False), complete_only=complete_only
+    )
+
+    assert len(calls) == refreshed
+    assert all(call["metrics"] is False and call["workdir"] == tmp_path for call in calls)
+    # An incomplete strict run still publishes no score.
+    assert len(pass_settles_one_row) == (1 if run_is_complete else 0)
