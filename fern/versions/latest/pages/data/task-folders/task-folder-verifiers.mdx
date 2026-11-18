@@ -45,10 +45,27 @@ from a separately run verifier, which is masked (below).
 
 Two tasks of one dataset may write different keys. Gym pads no missing key and renames none.
 
+A verifier that writes several metrics and no `reward` key, such as `{"accuracy": 1.0, "overall": 0.85}`, would
+score their sum. To score one of them, set `reward_key` in `dataset.toml`, under `[gym.defaults]` for every task or
+under `[gym.tasks."<id>".verifier]` for one task:
+
+```toml
+[gym.defaults]
+reward_key = "overall"
+```
+
+That key is then read as `reward` is: its number is the score, and the other keys are metrics, kept in
+`verifier_rewards` (a `details` block beside it is left out), so the result names no `reward_components`. A scalar
+`min_reward` on a step gates this key. A file without the key holds no valid reward: a measured 0 with
+`harbor:invalid_reward`, or, past the timeout or after exit 75, the outcomes below. `reward.txt` reads as a `reward`
+key, so a task that writes it needs `reward_key` unset or `"reward"`. NeMo Gym ignores the key in a `task.toml`,
+with a warning, as Harbor does, so a task folder scores the same under both. Setting it changes every task's digest,
+and `gym dataset publish --harbor` leaves it out with the rest of the `[gym]` table.
+
 | Outcome | Reward | `failure_kind` |
 | --- | --- | --- |
 | No reward file | 0 | `harbor:missing_reward` |
-| An empty or malformed file, a value that is not a finite number, or components with no finite sum | 0 | `harbor:invalid_reward` |
+| An empty or malformed file, a value that is not a finite number, components with no finite sum, or a file without the dataset's `reward_key` | 0 | `harbor:invalid_reward` |
 | `test.sh` runs past `timeout_sec` (times the dataset's `timeout_multiplier`) without writing a reward | 0 | `harbor:verifier_timeout` |
 
 These rows count in the score, and a valid reward written before a timeout still stands. The first two rows have
@@ -102,8 +119,13 @@ available one to `**kwargs`), so the example above gets `workspace` and `task_da
 
 `verify` returns a finite number, or a dict of finite numbers. A `reward` key is the score and the other keys are
 metrics. Without `reward`, the dict must hold exactly one key, which is the score. Unlike in `reward.json`, several
-keys are not summed. An `async def verify` is awaited. A `verify` that raises, requires an argument the runner does
-not supply, or returns anything else writes no reward, which scores 0 with `harbor:missing_reward` and the error in
+keys are not summed. The runner writes a returned number as `reward`, so a task graded by a Python verifier, the
+task's own `tests/verifier.py` or the dataset's `verifier.py`, takes `reward_key = "reward"` or none. Any other
+value is refused when the dataset loads and the task is listed in `skipped.json`. In a dataset whose
+`[gym.defaults]` sets another key for its `test.sh` tasks, set `reward_key = "reward"` under
+`[gym.tasks."<id>".verifier]` for each Python-graded task; its `verify` must then return a number or a dict with a
+`reward` key. An `async def verify` is awaited. A `verify` that raises, requires an argument the runner does not
+supply, or returns anything else writes no reward, which scores 0 with `harbor:missing_reward` and the error in
 `test-stdout.txt`.
 
 The helpers use the standard library only:

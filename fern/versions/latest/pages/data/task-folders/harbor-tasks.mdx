@@ -136,10 +136,12 @@ else
 fi
 ```
 
-A verifier that writes no reward file scores 0. `reward.json` wins when both exist. Its `reward` key is the
-reward or, without one, the sum of all its values. To grade in Python instead, replace `tests/test.sh` with
-`tests/verifier.py`: when both exist, `test.sh` grades the task. See
-[Task Folder Verifiers](/main/data/task-folders/task-folder-verifiers).
+A verifier that writes no reward file scores 0. `reward.json` wins when both exist. Its `reward` key is the reward
+or, without one, the sum of all its values. A verifier that writes several metrics and no `reward` key names the one
+that is the score with `reward_key` in `dataset.toml`; see [Reward
+files](/main/data/task-folders/task-folder-verifiers#reward-files). To grade in Python instead, replace
+`tests/test.sh` with `tests/verifier.py`: when both exist, `test.sh` grades the task. See [Task Folder
+Verifiers](/main/data/task-folders/task-folder-verifiers).
 
 ### solution/
 
