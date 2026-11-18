@@ -121,6 +121,8 @@ _CONTEXT_WINDOW_PHRASES = (
     "context size",
     "maximum model length",
     "prompt is too long",
+    # vLLM's "max_tokens is too large: input length and max_tokens exceed the context": input and output together.
+    "exceed the context",
 )
 # How an endpoint refuses a request that the run's own settings make invalid, the same way on every call whatever the
 # conversation holds: an output limit above the model's cap (OpenAI and LiteLLM's "max_tokens is too large: N. This

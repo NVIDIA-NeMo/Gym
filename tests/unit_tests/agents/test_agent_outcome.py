@@ -244,6 +244,13 @@ REJECTED = {"failure_kind": "model_request_rejected"}
             "verify",
             id="vllm-budget-over-the-remaining-window",
         ),
+        pytest.param(
+            400,
+            "max_tokens is too large: input length and max_tokens exceed the context",
+            REQUEST_ERROR_400,
+            "verify",
+            id="input-and-output-over-the-context",
+        ),
         pytest.param(400, "max_tokens must be at least 1, got -5.", REQUEST_ERROR_400, "verify", id="vllm-no-room"),
         # Only a 400 is a configuration refusal.
         pytest.param(

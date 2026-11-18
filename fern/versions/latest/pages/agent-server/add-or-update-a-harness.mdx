@@ -802,7 +802,10 @@ selected failure disagrees with its outcome. Only a task-folder run (`gym eval r
 sets `forward_configuration_refusals`, and only for OpenCode and Pi
 (`CONFIGURATION_REFUSAL_HARNESSES` in `nemo_gym/data/tasks/harbor/prepare.py`), whose
 `report_outcome` passes on the provider's text; it also makes `openai_model` forward such a 400
-instead of answering HTTP 500. Every other run reports that 400 as a graded `model_request_error`.
+instead of answering HTTP 500. On every other run, `openai_model` answers that 400 with HTTP 500, and a Model Server
+that passes it on, such as `vllm_model`, has the harness report it as a graded `model_request_error`. OpenCode 2
+(`opencode_version` 2 or later) can report a provider error with a generic message such as `Bad request`, which
+`report_outcome` cannot read as a refusal, so such a refusal stays graded.
 
 `AgentOutcome.failure_kind` accepts names registered in `nemo_gym/core/failure_kinds.py`
 or `unknown`; unregistered names are rejected. The shared names describe causes,

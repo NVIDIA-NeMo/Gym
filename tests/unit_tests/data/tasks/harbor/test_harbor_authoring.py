@@ -1204,6 +1204,8 @@ class TestHelloMCPToolExample:
             "hello_tools_server", example / "environment" / "tools" / "server.py"
         )
         server = importlib.util.module_from_spec(spec)
+        # A __pycache__ beside server.py would join the image's build inputs and force a rebuild of a recorded image.
+        monkeypatch.setattr(sys, "dont_write_bytecode", True)
         spec.loader.exec_module(server)
         monkeypatch.setattr(server, "CALLS_LOG", tmp_path / str(server.CALLS_LOG).lstrip("/"))
         greeting = tmp_path / "workspace" / "tool-greeting.txt"

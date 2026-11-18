@@ -86,6 +86,11 @@ OUTPUT_CAP_REFUSAL = (
             b'{"error": {"message": "maximum context length is 32768 tokens", "code": "context_length_exceeded"}}',
             500,
         ),
+        (
+            True,
+            b'{"error": {"message": "max_tokens is too large: input length and max_tokens exceed the context"}}',
+            500,
+        ),
         # Without the setting even a configuration refusal stays a 500.
         (False, OUTPUT_CAP_REFUSAL, 500),
     ],

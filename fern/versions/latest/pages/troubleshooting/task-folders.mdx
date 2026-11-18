@@ -171,11 +171,14 @@ fewer, for example:
 | Claude | 64,000 or 128,000, depending on the model |
 
 A parameter the model does not accept, such as a `temperature` other than 1 on an OpenAI reasoning model, fails the
-same way. Any other 400, and a refusal that names the model's context window, is still graded.
+same way. Any other 400, and a refusal that names the model's context window, is handled as on any other run:
+`openai_model` answers it with HTTP 500, which the collector retries, and a Model Server that passes the 400 on, such
+as `vllm_model`, has it graded. OpenCode 2 (`opencode_version` 2 or later) can report a provider error with a
+generic message such as `Bad request`; such a refusal also stays graded, as before.
 
 **Fix.** Pass `--max-output-tokens <n>` with `n` at or below the model's cap, such as `--max-output-tokens 32768`
-for gpt-4.1. Your provider's model documentation gives the cap. The `environments/hello_*` commands pass 16384,
-which fits every model above.
+for gpt-4.1. Your provider's model documentation gives the cap. The OpenCode commands in `environments/hello_*` pass
+16384, which fits every model above.
 
 ## A harness cannot install its runtime in the sandbox
 
