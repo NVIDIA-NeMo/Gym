@@ -505,6 +505,8 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     system_prompt: Optional[str] = None
     system_prompt_mode: Literal["append", "replace"] = "append"
     timeout: int = 900
+    # Native per-model-call deadline; None leaves each path's existing timeout unchanged.
+    model_call_timeout_ms: int | None = Field(default=None, gt=0, strict=True)
     extra_args: list[str] = []
     opencode_config: dict[str, Any] = Field(default_factory=dict)
     context_window: int = 262144
@@ -737,6 +739,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             nemo.setdefault("options", {}).update(
                 {"baseURL": self._resolve_model_base_url(rollout_id), "apiKey": "EMPTY"}  # pragma: allowlist secret
             )
+            if self.config.model_call_timeout_ms is not None:
+                nemo["options"]["timeout"] = self.config.model_call_timeout_ms
             model = nemo.setdefault("models", {}).get(self.config.model, {})
             model.setdefault("interleaved", {"field": "reasoning_content"})
             self._deep_merge(
@@ -1857,7 +1861,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     "options": {
                         "baseURL": base_url,
                         "apiKey": "dummy_key",
-                        "timeout": False,
+                        "timeout": self.config.model_call_timeout_ms
+                        if self.config.model_call_timeout_ms is not None
+                        else False,
                     },  # pragma: allowlist secret
                     "models": {
                         self.config.sandbox_model_id: {

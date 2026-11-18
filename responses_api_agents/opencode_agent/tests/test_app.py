@@ -1509,3 +1509,24 @@ def test_session_ending_on_an_unavailable_tool_attributes_the_served_call(
     else:
         assert not verdict.attributed and "item_id_content_mismatch" in verdict.reason
         assert built[MASK_SAMPLE_KEY] is True
+
+
+@pytest.mark.parametrize("deadline", [None, 1000])
+def test_native_model_deadline_local_config(deadline):
+    agent = _make_agent(
+        model_call_timeout_ms=deadline, model_server=ModelServerRef(type="responses_api_models", name="policy")
+    )
+    with patch.object(agent, "_resolve_model_base_url", return_value="http://localhost:1/v1"):
+        options = agent._build_opencode_config()["provider"]["nemo"]["options"]
+    if deadline is None:
+        assert "timeout" not in options
+    else:
+        assert options["timeout"] == deadline
+
+
+@pytest.mark.parametrize("deadline", [True, 0, -1, "1000"])
+def test_native_model_deadline_rejects_invalid_units(deadline):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        _make_agent(model_call_timeout_ms=deadline)

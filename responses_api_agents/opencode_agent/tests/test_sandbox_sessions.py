@@ -584,9 +584,11 @@ def test_session_rejects_images_it_cannot_attach(setup, items):
 
 
 @pytest.mark.parametrize("output_budget", [4096, 32000])
-def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budget):
+@pytest.mark.parametrize("native_timeout", [None, 1000])
+def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budget, native_timeout):
     agent, sandbox = setup
     agent.config.max_output_tokens = output_budget
+    agent.config.model_call_timeout_ms = native_timeout
     with TestClient(agent.setup_webserver()) as client:
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         assert created.status_code == 200, created.text
@@ -613,6 +615,11 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
             "input": 32000,
             "output": output_budget,
         }
+        assert (
+            config["provider"]["nemo_gym"]["options"]["timeout"] is False
+            if native_timeout is None
+            else config["provider"]["nemo_gym"]["options"]["timeout"] == native_timeout
+        )
         assert payload["env"]["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] == str(output_budget)
         assert (
             config["provider"]["nemo_gym"]["options"]["baseURL"]
