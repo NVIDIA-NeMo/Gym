@@ -14,6 +14,7 @@
 # limitations under the License.
 """Remove and copy folder trees on storage that other tools and users also write to."""
 
+import errno
 import logging
 import os
 import shutil
@@ -83,15 +84,21 @@ def copy_tree(src: Path, dest: Path, *, stop: threading.Event | None = None) -> 
     cannot be read is skipped, so the rest is kept; a failure to write fails the copy, which removes what it copied.
     Setting ``stop`` from another thread ends the copy before its next entry: it removes what it copied and raises
     :class:`CopyStopped`.
+
+    The copy goes into ``<dest>.partial`` and is renamed to ``dest`` once it is complete, so ``dest`` only ever
+    holds a whole copy. A process killed mid-copy leaves a ``.partial`` folder, never one that looks complete.
     """
     unread: list[str] = []
+    staging = dest.with_name(dest.name + ".partial")
     created = False
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.mkdir()
+        if os.path.lexists(dest):
+            raise FileExistsError(errno.EEXIST, "The copy's destination already exists", str(dest))
+        staging.mkdir()
         created = True
         for root, dirs, files in os.walk(src, onerror=lambda error: unread.append(str(error.filename))):
-            target = dest / os.path.relpath(root, src)
+            target = staging / os.path.relpath(root, src)
             for entry in [*dirs, *files]:
                 if stop is not None and stop.is_set():
                     raise CopyStopped(f"Stopped copying {src} to {dest}")
@@ -113,17 +120,19 @@ def copy_tree(src: Path, dest: Path, *, stop: threading.Event | None = None) -> 
                     (target / entry).mkdir()
                 else:
                     logger.debug("Not copying %s: it is not a regular file, a folder or a symlink.", source)
+        # A rename fails onto a folder that is not empty, so it never replaces another copy.
+        os.rename(staging, dest)
     except CopyStopped:
         logger.info("Stopped copying %s to %s before it finished; removing what was copied.", src, dest)
         if created:
-            remove_tree(dest)
+            remove_tree(staging)
         raise
     except BaseException:
         # Logged here, since a caller that was cancelled while waiting no longer receives the error.
         logger.warning("Could not copy %s to %s", src, dest, exc_info=True)
-        # Only a folder this copy created: dest.mkdir() fails on one that was already there.
+        # Only a folder this copy created: staging.mkdir() fails on one that was already there.
         if created:
-            remove_tree(dest)
+            remove_tree(staging)
         raise
     if unread:
         logger.warning("Copied %s without %d entries it could not read, such as %s", src, len(unread), unread[0])

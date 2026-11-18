@@ -35,6 +35,7 @@ from nemo_gym.core.episode_context import rollout_context
 from nemo_gym.core.runtime_files import (
     async_remove_temp_dir,
     async_request_temp_dir,
+    async_session_temp_dir,
     process_temp_dir,
     remove_temp_dir,
     request_temp_dir,
@@ -84,6 +85,18 @@ def system_temp(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.Mo
 
 
 class TestDefaultTempDir:
+    def test_process_folders_are_private_under_a_configured_temp_dir(self, set_global_config, tmp_path: Path) -> None:
+        # A configured temp_dir, unlike the default, may be a folder other users can open.
+        set_global_config({"temp_dir": str(tmp_path)})
+        old_umask = os.umask(0o022)
+        try:
+            process = process_temp_dir("cache")
+        finally:
+            os.umask(old_umask)
+
+        assert stat.S_IMODE(os.lstat(process).st_mode) == 0o700
+        assert stat.S_IMODE(os.lstat(process.parent).st_mode) == 0o700
+
     def test_is_a_private_folder_per_user_in_the_system_temp(self, set_global_config, system_temp) -> None:
         set_global_config(None)
 
@@ -318,6 +331,42 @@ class TestRequestTempDir:
                 monkeypatch.setattr(shutil, "rmtree", deep)
                 raise RuntimeError("the request's own error")
 
+    def test_removing_leftovers_holds_up_no_other_parent_or_session_removal(
+        self, set_global_config, tmp_path: Path, monkeypatch
+    ) -> None:
+        set_global_config({"temp_dir": str(tmp_path / "first")})
+        session = session_temp_dir("session")
+        started, release = threading.Event(), threading.Event()
+        remove_stale = runtime_files._remove_stale_process_dirs
+
+        def slow_cleanup(parent: Path) -> list[Path]:
+            # Leftovers can be large trees of a dead process.
+            if parent.name == "second":
+                started.set()
+                release.wait(10)
+            return remove_stale(parent)
+
+        monkeypatch.setattr(runtime_files, "_remove_stale_process_dirs", slow_cleanup)
+        slow = threading.Thread(target=lambda: session_temp_dir("other", temp_dir=tmp_path / "second"))
+        slow.start()
+        try:
+            assert started.wait(5)
+            done = threading.Event()
+            other = threading.Thread(
+                target=lambda: (
+                    remove_temp_dir(session),
+                    session_temp_dir("third", temp_dir=tmp_path / "third"),
+                    done.set(),
+                )
+            )
+            other.start()
+            assert done.wait(2)
+        finally:
+            release.set()
+            slow.join(5)
+            other.join(5)
+        assert not session.exists()
+
     def test_concurrent_first_use_of_a_parent_loses_no_request(self, tmp_path: Path) -> None:
         count = 16
         start, written = threading.Barrier(count), threading.Barrier(count)
@@ -376,10 +425,10 @@ class TestAsyncRequestTempDir:
         create = runtime_files._create_temp_dir
         made: list[Path] = []
 
-        def slow_create(name: str, temp_dir: Path | None) -> Path:
+        def slow_create(name: str, temp_dir: Path | None, **kwargs: str) -> Path:
             started.set()
             release.wait(5)
-            made.append(create(name, temp_dir))
+            made.append(create(name, temp_dir, **kwargs))
             created.set()
             return made[0]
 
@@ -510,6 +559,55 @@ class TestSessionTempDir:
         assert remove_temp_dir(folder) is True
         assert not folder.exists()
         assert remove_temp_dir(folder) is True
+
+    async def test_a_coroutine_creates_a_session_folder_off_the_event_loop(
+        self, set_global_config, tmp_path: Path, monkeypatch
+    ) -> None:
+        set_global_config({"temp_dir": str(tmp_path / "temp")})
+        threads: list[str] = []
+        create = runtime_files._create_temp_dir
+
+        def recording_create(name: str, temp_dir: Path | None, **kwargs: str) -> Path:
+            threads.append(threading.current_thread().name)
+            return create(name, temp_dir, **kwargs)
+
+        monkeypatch.setattr(runtime_files, "_create_temp_dir", recording_create)
+
+        folder = await async_session_temp_dir("session")
+
+        assert threads and threads[0].startswith("nemo-gym-temp-dir")
+        assert folder.is_dir()
+        assert await async_remove_temp_dir(folder) is True
+
+    async def test_a_session_folder_created_after_its_caller_was_cancelled_is_removed(
+        self, set_global_config, tmp_path: Path, monkeypatch
+    ) -> None:
+        set_global_config({"temp_dir": str(tmp_path / "temp")})
+        started, release, created = threading.Event(), threading.Event(), threading.Event()
+        create = runtime_files._create_temp_dir
+        made: list[Path] = []
+
+        def slow_create(name: str, temp_dir: Path | None, **kwargs: str) -> Path:
+            started.set()
+            release.wait(5)
+            made.append(create(name, temp_dir, **kwargs))
+            created.set()
+            return made[0]
+
+        monkeypatch.setattr(runtime_files, "_create_temp_dir", slow_create)
+        task = asyncio.create_task(async_session_temp_dir("session"))
+        await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        release.set()
+        assert await asyncio.to_thread(created.wait, 5)
+        for _ in range(200):
+            if not made[0].exists():
+                break
+            await asyncio.sleep(0.01)
+
+        assert not made[0].exists()
 
     async def test_a_coroutine_removes_a_session_folder_off_the_event_loop(
         self, set_global_config, tmp_path: Path, monkeypatch
@@ -881,6 +979,27 @@ class TestSaveDir:
         assert not any((tmp_path / "results" / "swebench" / "verification" / "no-rollout").iterdir())
         assert caplog.text.count("Could not copy") == 1
 
+    async def test_a_copy_appears_under_its_name_only_when_complete(
+        self, set_global_config, tmp_path: Path, monkeypatch
+    ) -> None:
+        set_global_config({"results_dir": str(tmp_path / "results")})
+        logs = self._logs(tmp_path)
+        seen: list[list[str]] = []
+        copy = shutil.copyfileobj
+
+        def watching_copy(reader, writer, *args, **kwargs):
+            # What a reader of the results sees mid-copy, as when the process is killed here.
+            kept_root = tmp_path / "results" / "swebench" / "verification" / "no-rollout"
+            seen.append(sorted(path.name.rsplit("-", 1)[-1] for path in kept_root.iterdir()))
+            return copy(reader, writer, *args, **kwargs)
+
+        monkeypatch.setattr(shutil, "copyfileobj", watching_copy)
+        kept = await save_dir(logs, server_name="swebench", name="verification")
+
+        assert kept is not None and (kept / "report.json").exists()
+        assert seen and all(names == [kept.name.rsplit("-", 1)[-1] + ".partial"] for names in seen)
+        assert sorted(path.name for path in kept.parent.iterdir()) == [kept.name]
+
     async def test_a_failed_copy_never_removes_a_folder_it_did_not_create(
         self, set_global_config, tmp_path: Path, monkeypatch
     ) -> None:
@@ -1081,6 +1200,17 @@ class TestSaveDir:
             default.shutdown(wait=True)
 
         assert all(path is not None for path in kept)
+
+    async def test_a_long_rollout_id_still_keeps_the_files(self, set_global_config, tmp_path: Path) -> None:
+        set_global_config({"results_dir": str(tmp_path / "results")})
+        # Within the rollout id length limit, but three times as long once percent-encoded.
+        rollout = "/" * 200
+
+        with rollout_context(rollout):
+            kept = await save_dir(self._logs(tmp_path), server_name="swebench", name="verification")
+
+        assert kept is not None and (kept / "report.json").exists()
+        assert len(kept.parent.name.encode()) <= 255
 
     async def test_names_and_labels_stay_one_folder_under_the_root(self, set_global_config, tmp_path: Path) -> None:
         set_global_config({"results_dir": str(tmp_path / "results")})
