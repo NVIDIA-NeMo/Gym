@@ -341,17 +341,31 @@ def test_provider_failure_is_reported_and_replays_without_rerunning(agent, state
     state.session.sandbox.disconnect.assert_awaited_once()
 
 
-def test_a_400_after_the_model_answered_stays_a_graded_request_error(agent, state):
+@pytest.mark.parametrize(
+    "evidence,outcome,action",
+    [
+        # The transcript holds the model's earlier answer before the endpoint refused a later request.
+        ("answer", {"failure_kind": "model_request_error", "status_code": 400}, OutcomeAction.VERIFY),
+        # A compaction summary leaves no transcript message, but the observer recorded its response.
+        ("helper_call", {"failure_kind": "model_request_error", "status_code": 400}, OutcomeAction.VERIFY),
+        # A helper call that failed recorded no response: nothing answered before the 400.
+        ("failed_helper_call", {"failure_kind": "model_request_rejected"}, OutcomeAction.FAIL),
+    ],
+)
+def test_a_400_after_the_model_answered_stays_a_graded_request_error(agent, state, evidence, outcome, action):
     agent._initialize_agent_session_state = AsyncMock(return_value=state)
     state.upload_json = AsyncMock()
-    # The transcript holds the prompt and the model's earlier answer before the endpoint refused a later request.
-    messages = [{"role": "user", "content": "task"}, {"role": "assistant", "content": "Looking at the repository."}]
+    messages = [{"role": "user", "content": "task"}]
+    if evidence == "answer":
+        messages.append({"role": "assistant", "content": "Looking at the repository."})
+    response_ids = ["summary-response"] if evidence == "helper_call" else []
     mock_json_download(
         state.session.sandbox,
         side_effect=[
             {"cleanup_confirmed": True, "error": None},
             {
                 "result": {"failed": True, "error": "HTTP 400 controlled model failure", "messages": messages},
+                "observations": {"invocations": [{"invocation_id": "root", "model_response_ids": response_ids}]},
                 "runtime": {"hostname": "sandbox", "pid": 123},
             },
         ],
@@ -362,15 +376,15 @@ def test_a_400_after_the_model_answered_stays_a_graded_request_error(agent, stat
             f"/ng-rollout/{state.request.episode_id.capture_key}/v1/responses", json={"input": "task"}
         )
         assert response.status_code == 200
-        assert json.loads(response.json()["metadata"]["ng_agent_outcome"]) == {
-            "failure_kind": "model_request_error",
-            "status_code": 400,
-        }
-        assert agent_outcome_policy(NeMoGymResponse.model_validate(response.json())) == OutcomeAction.VERIFY
-        client.post(
+        assert json.loads(response.json()["metadata"]["ng_agent_outcome"]) == outcome
+        assert agent_outcome_policy(NeMoGymResponse.model_validate(response.json())) == action
+        close = client.post(
             "/v1/agent_sessions/close",
             json={"agent_session_id": "session", "episode_id": state.request.episode_id.model_dump()},
         )
+        assert close.status_code == 200
+        root = close.json()["agent_observations"]["records"][0]
+        assert [call["response_id"] for call in root["model_calls"]] == response_ids
 
 
 @pytest.mark.parametrize("runner_started", [False, True], ids=["not-launched", "cleanup-confirmed"])
