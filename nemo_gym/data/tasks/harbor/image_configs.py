@@ -592,8 +592,9 @@ def exec_as_any_user_sidecars(
     (:func:`~nemo_gym.sandbox.compose_config.adapt_non_root_sidecars`). Each sidecar is routed as
     :func:`check_task_compose_fields` routes it: to ``gpu_provider`` when ``task.toml`` declares GPUs or the sidecar
     reserves GPUs through ``deploy.resources``, else to ``provider``; ``document`` is one that check normalized, as
-    the routing reads ``deploy`` in its normalized form. Without a provider name (a provider instance in place of
-    the config) a sidecar is not counted."""
+    the routing reads ``deploy`` in its normalized form. A block given as a provider instance in place of its config
+    (tests) has no name: a sidecar routed to an unnamed ``provider`` is not counted, and with ``gpu_provider``
+    unnamed every sidecar is judged by ``provider``, as :func:`check_task_compose_fields` routes it then."""
     if gpu_provider is not None and task_declares_gpus(task):
         provider = gpu_provider
     sidecars: set[str] = set()

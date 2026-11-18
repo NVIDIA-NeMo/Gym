@@ -468,28 +468,48 @@ class DockerProvider:
         return {"run_args": ["--pull", policy]}
 
     async def _run(
-        self, argv: list[str], *, timeout_s: float | None, stdin: bytes | None = None
+        self,
+        argv: list[str],
+        *,
+        timeout_s: float | None,
+        stdin: bytes | None = None,
+        spawned: asyncio.Event | None = None,
     ) -> tuple[int, str, str]:
-        """Run a docker CLI command as (return_code, stdout, stderr); SIGKILL the group on timeout."""
-        async with self._semaphore:
-            proc = await asyncio.create_subprocess_exec(
-                *argv,
-                stdin=asyncio.subprocess.PIPE if stdin is not None else None,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-            )
-            try:
-                stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(input=stdin), timeout=timeout_s)
-            except asyncio.TimeoutError as e:
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                with contextlib.suppress(Exception):
-                    await proc.wait()
-                raise TimeoutError(f"docker command timed out after {timeout_s:g}s: {_redact_argv(argv)}") from e
+        """Run a docker CLI command as (return_code, stdout, stderr); SIGKILL the group on timeout.
 
-            return_code = proc.returncode if proc.returncode is not None else SANDBOX_RUNTIME_RETURN_CODE
-            return return_code, stdout_b.decode(errors="replace"), stderr_b.decode(errors="replace")
+        ``spawned``, when given, is set once the command holds a command slot and is about to start. From then on a
+        cancellation propagates only after the command has answered or timed out, because a command such as
+        ``docker run`` can still act after its caller stopped waiting. A wait for a slot is cancelled at once.
+        """
+        async with self._semaphore:
+            command = self._run_in_slot(argv, timeout_s=timeout_s, stdin=stdin)
+            if spawned is None:
+                return await command
+            spawned.set()
+            return await _finish_despite_cancellation(asyncio.ensure_future(command))
+
+    async def _run_in_slot(
+        self, argv: list[str], *, timeout_s: float | None, stdin: bytes | None
+    ) -> tuple[int, str, str]:
+        """``_run``'s command, once it holds a command slot."""
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.PIPE if stdin is not None else None,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(input=stdin), timeout=timeout_s)
+        except asyncio.TimeoutError as e:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            with contextlib.suppress(Exception):
+                await proc.wait()
+            raise TimeoutError(f"docker command timed out after {timeout_s:g}s: {_redact_argv(argv)}") from e
+
+        return_code = proc.returncode if proc.returncode is not None else SANDBOX_RUNTIME_RETURN_CODE
+        return return_code, stdout_b.decode(errors="replace"), stderr_b.decode(errors="replace")
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """Start a detached keep-alive container (image ENTRYPOINT overridden) and probe readiness.
@@ -498,8 +518,10 @@ class DockerProvider:
         exit). ``spec.provider_options`` may carry ``volumes`` (strings -> ``-v``, shared-storage mounts
         -> ``--mount``) and ``run_args`` (extra run flags). ``spec.metadata`` entries become container labels
         beside ``nemo-gym.sandbox=1``. A half-created container is force-removed on any failure. A cancelled create
-        leaves no container either: the ``docker run`` under way answers first, and the container is then removed,
-        once inspect shows it is this provider's, before the cancellation propagates, however often it repeats.
+        leaves no container either: once its ``docker run`` started, that run answers first (up to
+        ``create.start_timeout_s``), and the container is then removed, once inspect shows it is this provider's,
+        before the cancellation propagates, however often it repeats. A create cancelled while it waits for a command
+        slot ends at once, without a Docker call.
         """
         if spec.image is None:
             raise DockerCreateError("spec.image is required for the docker provider")
@@ -551,14 +573,17 @@ class DockerProvider:
             keepalive_cmd = f"sleep {max(1, math.ceil(spec.ttl_s))}" if enforce_ttl else cfg.keepalive_cmd
             argv += ["--entrypoint", cfg.keepalive_shell, image, "-c", keepalive_cmd]
 
+        reached_docker = asyncio.Event()
         try:
-            await self._run_create_with_reconciliation(argv, name=name, image=image)
+            await self._run_create_with_reconciliation(argv, name=name, image=image, spawned=reached_docker)
         except asyncio.CancelledError:
             # A caller's deadline (a Compose collection's startup timeout) expired while the container was being
-            # created. No caller will hold its handle, and a Compose service's keep-alive has no TTL to end it.
-            await _finish_despite_cancellation(
-                asyncio.ensure_future(self._remove_cancelled_create(name=name, image=image))
-            )
+            # created. No caller will hold its handle, and a Compose service's keep-alive has no TTL to end it. A
+            # create cancelled before its first `docker run` started has nothing to remove.
+            if reached_docker.is_set():
+                await _finish_despite_cancellation(
+                    asyncio.ensure_future(self._remove_cancelled_create(name=name, image=image))
+                )
             raise
 
         handle = SandboxHandle(
@@ -585,17 +610,20 @@ class DockerProvider:
     async def _remove_cancelled_create(self, *, name: str, image: str) -> None:
         """Remove the container a cancelled create left under ``name``, if inspect shows it is this provider's.
 
-        The ownership and image check is reconciliation's: a same-name container without them is left alone.
+        The ownership and image check is reconciliation's: a same-name container without them is left alone. An
+        error is logged rather than raised, so that the cancellation, not the error, reaches the caller.
         """
         try:
             state = await self._inspect_owned_container(name=name, image=image)
-        except DockerCreateError as exc:
+        except Exception as exc:
             LOGGER.warning("Leaving Docker container %s after a cancelled create: %s", name, exc)
             return
         if state is not None:
             await self._force_remove(name)
 
-    async def _run_create_with_reconciliation(self, argv: list[str], *, name: str, image: str) -> None:
+    async def _run_create_with_reconciliation(
+        self, argv: list[str], *, name: str, image: str, spawned: asyncio.Event
+    ) -> None:
         """Run ``docker run`` without leaking a container when its response is lost.
 
         A fixed, random name makes retry idempotent. After a timeout, transport
@@ -603,18 +631,16 @@ class DockerProvider:
         Reuse it only when both the Sandbox ownership label and requested image
         match; never remove an unrelated collision.
 
-        A cancellation that arrives during an attempt's ``docker run`` (its wait for a command slot included)
-        propagates only once the client has answered or timed out: until then it could still create the container,
-        after any removal the caller issued.
+        ``spawned`` is set once the first ``docker run`` starts. A cancellation that arrives after that, during an
+        attempt's ``docker run``, propagates only once the client has answered or timed out: until then it could still
+        create the container, after any removal the caller issued. A wait for a command slot is cancelled at once.
         """
         cfg = self._create_config
         last_detail = "docker run did not complete"
         last_cause: BaseException | None = None
         for attempt in range(cfg.transport_retries + 1):
             try:
-                code, _out, err = await _finish_despite_cancellation(
-                    asyncio.ensure_future(self._run(argv, timeout_s=cfg.start_timeout_s))
-                )
+                code, _out, err = await self._run(argv, timeout_s=cfg.start_timeout_s, spawned=spawned)
             except TimeoutError as exc:
                 last_cause = exc
                 last_detail = f"docker run timed out for image={image!r}: {exc}"

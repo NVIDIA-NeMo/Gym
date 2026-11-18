@@ -47,7 +47,7 @@ def make_provider(monkeypatch, responder, **kwargs):
     provider = docker_provider.DockerProvider(**kwargs)
     provider.calls = []
 
-    async def run(argv, *, timeout_s, stdin=None):
+    async def run(argv, *, timeout_s, stdin=None, spawned=None):
         provider.calls.append(list(argv))
         return responder(list(argv))
 
@@ -339,7 +339,14 @@ class FakeDockerDaemon:
             lambda match: match[0] if match[0].startswith("/dev/") else self.host_path(container, match[0]), text
         )
 
-    async def __call__(self, argv: list[str], *, timeout_s: float | None, stdin: bytes | None = None):
+    async def __call__(
+        self,
+        argv: list[str],
+        *,
+        timeout_s: float | None,
+        stdin: bytes | None = None,
+        spawned: asyncio.Event | None = None,
+    ):
         command = argv[1]
         if command == "version":
             return 0, "1.47\n", ""

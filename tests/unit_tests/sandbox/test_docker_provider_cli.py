@@ -482,6 +482,29 @@ async def test_a_create_cancelled_during_docker_run_leaves_a_same_name_container
     assert fake_docker.containers() == {created}
 
 
+@pytest.mark.asyncio
+async def test_a_create_cancelled_while_it_waits_for_a_command_slot_ends_at_once_without_a_docker_call(fake_docker):
+    """With the only command slot taken, a create waits for one. Cancelling it then ends it at once: nothing reached
+    Docker, so it neither runs ``docker run`` once the slot frees nor inspects or removes anything."""
+    provider = DockerProvider(exec={"exec_shell": "sh", "concurrency": 1})
+    holder = asyncio.create_task(provider.create(SandboxSpec(image="held-run")))
+    held = await fake_docker.held_run()
+    queued = asyncio.create_task(provider.create(SandboxSpec(image="image")))
+    try:
+        await asyncio.sleep(0.2)
+        assert not queued.done()
+        queued.cancel()
+        await asyncio.wait({queued}, timeout=2)
+        assert queued.cancelled()
+        assert [call[0] for call in fake_docker.calls()] == ["run"]
+    finally:
+        fake_docker.release_run()
+        handle = await holder
+    await provider.close(handle)
+    assert fake_docker.created() == [held]
+    assert [call[0] for call in fake_docker.calls()] == ["run", "exec", "rm"]
+
+
 # --------------------------------------------------------------------------- #
 # Compose services run detached and hold no exec slot
 # --------------------------------------------------------------------------- #

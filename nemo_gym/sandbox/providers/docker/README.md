@@ -86,7 +86,7 @@ docker:
 |---|---|---|
 | `keepalive_shell` | `/bin/sh` | Entrypoint the container is started with (overrides the image ENTRYPOINT). |
 | `keepalive_cmd` | `while :; do sleep …; done` | Long-lived PID 1 command that keeps the container up across `exec` calls. |
-| `start_timeout_s` | `600` | Max seconds for `docker run` (covers an implicit image pull; `None` = no timeout). |
+| `start_timeout_s` | `600` | Max seconds for `docker run` (covers an implicit image pull; `None` = no timeout). A create cancelled once its `docker run` started, such as by a Compose startup deadline, waits up to this long for the answer, then removes the container. |
 | `use_init` | `true` | Add `--init` (tini) to reap zombies from many short `docker exec` processes. |
 | `network` | `None` | `None` = default bridge (egress); `"none"` = no network; else a named network. |
 | `read_only` | `false` | Mount the container root filesystem read-only (`--read-only`). `/tmp` is then read-only too unless a tmpfs is mounted there (`extra_run_args: ["--tmpfs", "/tmp"]`); PTY sessions keep working, their pid record moves to `/dev/shm` (see PTY sessions). |

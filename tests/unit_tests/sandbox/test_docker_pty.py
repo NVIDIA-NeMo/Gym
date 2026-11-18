@@ -486,7 +486,7 @@ def _provider(monkeypatch: pytest.MonkeyPatch, responder=None, **kwargs):
     provider = docker_provider.DockerProvider(**kwargs)
     runs: list[list[str]] = []
 
-    async def run(argv, *, timeout_s, stdin=None):
+    async def run(argv, *, timeout_s, stdin=None, spawned=None):
         runs.append(list(argv))
         return responder(argv) if responder else (0, "", "")
 
@@ -879,7 +879,7 @@ def _live_kill_provider(
     pid_dir = Path(pid_dir or tmp_path)
     fallback = fallback_pid_path(pid_dir)
 
-    async def run(argv, *, timeout_s, stdin=None):
+    async def run(argv, *, timeout_s, stdin=None, spawned=None):
         command = argv[-1]
         commands.append(command)
         local = re.sub(r"/tmp/\.nemo-gym-pty-[0-9a-f]+\.pid", str(pid_dir / "pid"), command)
@@ -1331,7 +1331,7 @@ async def test_the_pid_read_exec_has_a_timeout_of_its_own(monkeypatch: pytest.Mo
         provider, _, spawned = _provider(monkeypatch, exec={"exec_shell": "bash", "default_timeout_s": default})
         timeouts: list[float | None] = []
 
-        async def run(argv, *, timeout_s, stdin=None):
+        async def run(argv, *, timeout_s, stdin=None, spawned=None):
             timeouts.append(timeout_s)
             return (0, "", "")
 
@@ -1706,7 +1706,7 @@ def _stand_in_provider(monkeypatch: pytest.MonkeyPatch, ns: StandInContainer):
     provider = docker_provider.DockerProvider(exec={"exec_shell": "sh"})
     execs: list[list[str]] = []
 
-    async def run(argv, *, timeout_s, stdin=None):
+    async def run(argv, *, timeout_s, stdin=None, spawned=None):
         execs.append(list(argv))
         user = exec_user(argv)
         return await ns.sh(argv[-1], user=None if user == "0" else int(user))
