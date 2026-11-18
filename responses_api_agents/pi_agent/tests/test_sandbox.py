@@ -3183,3 +3183,84 @@ def test_process_exit_before_promised_retry_is_execution_failure(setup):
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200
         assert closed.json()["agent_observations"]["records"][0]["status"] == "failed"
+
+
+def hold_task_context(sandbox, context: str, *, copy_code: int = 0) -> None:
+    """Make ``sandbox`` hold ``context`` as ``/tmp/.nemo-gym/task.json``, and answer the copy of the task's skills
+    with exit code ``copy_code``; every other command is answered as before."""
+
+    async def run(command, **kwargs):
+        if "task.json" in command:
+            return SimpleNamespace(error_type=None, return_code=0, stdout=context, stderr="")
+        if " cp -R -- " in command:
+            return SimpleNamespace(error_type=None, return_code=copy_code, stdout="", stderr="cp: not allowed")
+        return await sandbox.execute(command, **kwargs)
+
+    sandbox.exec.side_effect = run
+
+
+def run_task(agent, sandbox, context: str) -> tuple[dict, str, list[str]]:
+    """Seed and run one activation of a task whose ``task.json`` is ``context``; return the staged activation, the
+    session directory and every command the sandbox ran."""
+    hold_task_context(sandbox, context)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        session_id = created.json()["agent_session_id"]
+        directory = agent._session_records[session_id].state.session.session_dir
+        result = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "Use the skill"})
+        assert result.status_code == 200, result.text
+        client.post("/v1/agent_sessions/close", json=close_body(session_id)).raise_for_status()
+    return staged(sandbox), directory, [call.args[0] for call in sandbox.exec.await_args_list]
+
+
+def test_a_task_that_declares_skills_gets_them_in_pi_skills_folder_and_on_the_command_line(setup):
+    agent, sandbox = setup
+    payload, directory, commands = run_task(
+        agent, sandbox, json.dumps({"mcp_servers": [], "skills_dir": "/workspace/skills"})
+    )
+    skills = f"{directory}/home/.pi/agent/skills"
+    (copy,) = [command for command in commands if " cp -R -- " in command]
+    assert f"mkdir -p -- {skills} && cp -R -- /workspace/skills/. " in copy
+    assert copy.endswith(f" {skills}/")
+    # Discovery stays off; Pi loads the task's skills from the folder named after --skill, in PI_CODING_AGENT_DIR.
+    command = payload["command"]
+    assert "--no-skills" in command and command[command.index("--skill") + 1] == skills
+    assert payload["env"]["PI_CODING_AGENT_DIR"] + "/skills" == skills
+
+
+@pytest.mark.parametrize("context", ["", json.dumps({"mcp_servers": [{"name": "search"}], "skills_dir": None})])
+def test_a_task_without_skills_runs_pi_without_skills(setup, context):
+    agent, sandbox = setup
+    payload, _, commands = run_task(agent, sandbox, context)
+    assert "--no-skills" in payload["command"] and "--skill" not in payload["command"]
+    assert not any(" cp -R -- " in command for command in commands)
+
+
+def test_without_tools_pi_takes_no_task_skills(setup):
+    """Pi lists skills only for a model with its read tool, so with tools off it neither declares nor stages them."""
+    agent, sandbox = setup
+    agent.config.enable_tools = False
+    payload, _, commands = run_task(agent, sandbox, json.dumps({"skills_dir": "/workspace/skills"}))
+    assert agent.supports_task_skills() is False
+    assert asyncio.run(agent.agent_session_capabilities()).supports_task_skills is False
+    assert "--skill" not in payload["command"]
+    assert not any("task.json" in command or " cp -R -- " in command for command in commands)
+
+
+def test_skills_that_cannot_be_staged_refuse_the_seed_and_release_the_sandbox(setup):
+    agent, sandbox = setup
+    hold_task_context(sandbox, json.dumps({"skills_dir": "/workspace/skills"}), copy_code=2)
+    with TestClient(agent.setup_webserver()) as client:
+        refused = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+    assert refused.status_code == 422
+    assert "Could not stage the task's skills_dir '/workspace/skills'" in refused.json()["detail"]
+    sandbox.disconnect.assert_awaited_once()
+    assert not any(record.state is not None for record in agent._session_records.values())
+
+
+def test_the_harness_declares_that_it_stages_task_skills(setup):
+    agent, _ = setup
+    assert agent.supports_task_skills() is True
+    assert asyncio.run(agent.agent_session_capabilities()).supports_task_skills is True
+    assert agent.supports_task_tool_context() is False
