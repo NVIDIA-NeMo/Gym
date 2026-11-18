@@ -23,7 +23,7 @@ scheduler, and `info` describes one submission and where its parts are. What the
 
 import json
 
-from nemo_gym.cli.job_render import render_info, render_list, render_status
+from nemo_gym.orchestration.job_render import render_info, render_list, render_status
 from nemo_gym.orchestration.jobs import list_submissions
 
 

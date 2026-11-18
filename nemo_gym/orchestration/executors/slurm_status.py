@@ -28,7 +28,7 @@ import shlex
 from collections.abc import Iterable
 from pathlib import Path
 
-from nemo_gym.orchestration.executors.resume_script import JOB_CHAIN_NAME
+from nemo_gym.orchestration.executors.slurm.resume_script import JOB_CHAIN_NAME
 from nemo_gym.orchestration.jobs import CHAIN_INCOMPLETE_FILE, EVAL_EXIT_FILE, JobKey, JobRef, JobState, ObservedStatus
 
 

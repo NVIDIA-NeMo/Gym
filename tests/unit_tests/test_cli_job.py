@@ -23,9 +23,9 @@ from textwrap import dedent
 import pytest
 import yaml
 
-from nemo_gym.cli.job_render import render_info, render_list, render_status
 from nemo_gym.cli.main import _reject_overrides, main
 from nemo_gym.orchestration.executors.resume_script import JOB_CHAIN_NAME
+from nemo_gym.orchestration.job_render import render_info, render_list, render_status
 from nemo_gym.orchestration.jobs import (
     BenchmarkInfo,
     BenchmarkJob,
@@ -443,7 +443,7 @@ def test_the_renderers_import_nothing_that_talks_to_a_scheduler():
     checked without a cluster. Checked in a SUBPROCESS: this module imports the commands itself."""
     probe = (
         "import sys;"
-        "import nemo_gym.cli.job_render;"
+        "import nemo_gym.orchestration.job_render;"
         "bad = sorted(m for m in sys.modules if m == 'nemo_gym.orchestration.submit'"
         " or m.startswith('nemo_gym.orchestration.executors.slurm')"
         " or m.startswith('nemo_gym.orchestration.executors.kubernetes'));"

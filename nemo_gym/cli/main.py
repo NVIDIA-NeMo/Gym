@@ -855,17 +855,17 @@ def _add_limit_or_all(parser: argparse.ArgumentParser) -> None:
 
 def _job_list(args: argparse.Namespace, overrides: list[str]) -> None:
     _reject_overrides(args, overrides, "job list")
-    from nemo_gym.cli import job
+    from nemo_gym.orchestration import job_commands
 
-    job.list_command(limit=args.limit, as_json=getattr(args, "json", False))
+    job_commands.list_command(limit=args.limit, as_json=getattr(args, "json", False))
 
 
 @exit_cleanly_on_job_error
 def _job_status(args: argparse.Namespace, overrides: list[str]) -> None:
     _reject_overrides(args, overrides, "job status")
-    from nemo_gym.cli import job
+    from nemo_gym.orchestration import job_commands
 
-    job.status_command(
+    job_commands.status_command(
         args.gym_job_ids,
         benchmarks=_split_names(args.benchmark),
         limit=None if args.all else args.limit,
@@ -876,9 +876,9 @@ def _job_status(args: argparse.Namespace, overrides: list[str]) -> None:
 @exit_cleanly_on_job_error
 def _job_info(args: argparse.Namespace, overrides: list[str]) -> None:
     _reject_overrides(args, overrides, "job info")
-    from nemo_gym.cli import job
+    from nemo_gym.orchestration import job_commands
 
-    job.info_command(
+    job_commands.info_command(
         args.gym_job_id, benchmark=args.benchmark, show_config=args.config, as_json=getattr(args, "json", False)
     )
 
