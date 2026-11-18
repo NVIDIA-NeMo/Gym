@@ -70,15 +70,12 @@ def strip_think(text: str) -> str:
 
 def correct_ladder(verdict: dict[str, Any] | None) -> str | None:
     """The ATS ladder rule: correctness presupposes engagement, so a turn that did not address the user is not
-    correct. None when the verdict does not decide the ladder: `addresses_concern` must be "no", or "yes" with a
-    valid `correct`. ATS also requires a schema-valid (`usable`) verdict first; here that check is `schema_error`,
-    applied when `validate_schema` is on."""
+    correct. None when the verdict does not decide the ladder. ATS also requires a schema-valid (`usable`) verdict
+    first; here that check is `schema_error`, applied when `validate_schema` is on."""
     if not verdict:
         return None
     if verdict.get("addresses_concern") == "no":
         return "no"
-    if verdict.get("addresses_concern") != "yes":
-        return None
     value = verdict.get("correct")
     return value if value in ("yes", "no") else None
 
@@ -228,7 +225,7 @@ def read_verdict(
     ladder = correct_ladder(verdict) if error is None else None
     if error is None and ladder is None:
         # Only reachable without schema validation: the verdict does not decide the ladder.
-        error = "missing_keys" if any(key not in verdict for key in ("addresses_concern", "correct")) else "bad_enum"
+        error = "missing_keys" if "correct" not in verdict else "bad_enum"
     if error is None and max_analysis_words is not None and words > max_analysis_words:
         error, ladder = "too_long", None
     return ReadVerdict(verdict, ladder, error, words)

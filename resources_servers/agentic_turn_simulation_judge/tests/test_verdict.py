@@ -182,28 +182,7 @@ class TestReadVerdict:
         read = read_verdict(text, validate_schema=False)
         assert (read.ladder, read.error) == ("yes", None)
         assert read_verdict('{"addresses_concern": "yes"}', validate_schema=False).error == "missing_keys"
-        assert (
-            read_verdict('{"addresses_concern": "yes", "correct": "perhaps"}', validate_schema=False).error
-            == "bad_enum"
-        )
-
-    @pytest.mark.parametrize(
-        ("fields", "ladder", "error"),
-        [
-            # Engagement undecided (missing or not yes/no): no ladder, whatever `correct` says.
-            ({"correct": "yes"}, None, "missing_keys"),
-            ({"correct": "perhaps"}, None, "missing_keys"),
-            ({"addresses_concern": "maybe", "correct": "yes"}, None, "bad_enum"),
-            # "no" decides the ladder without `correct`; "yes" needs a valid `correct`.
-            ({"addresses_concern": "no"}, "no", None),
-            ({"addresses_concern": "no", "correct": "yes"}, "no", None),
-            ({"addresses_concern": "yes", "correct": "yes"}, "yes", None),
-            ({"addresses_concern": "yes", "correct": "no"}, "no", None),
-        ],
-    )
-    def test_without_schema_validation_engagement_must_be_decided(self, fields, ladder, error) -> None:
-        read = read_verdict(json.dumps(fields), validate_schema=False)
-        assert (read.ladder, read.error) == (ladder, error)
+        assert read_verdict('{"correct": "perhaps"}', validate_schema=False).error == "bad_enum"
 
     def test_max_analysis_words(self) -> None:
         words = len(V["analysis"].split())

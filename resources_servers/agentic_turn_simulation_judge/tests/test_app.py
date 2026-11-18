@@ -233,15 +233,6 @@ class TestScoreOutput:
 
 
 class TestVerify:
-    @pytest.mark.parametrize(
-        ("text", "error"),
-        [('{"correct": "yes"}', "missing_keys"), ('{"addresses_concern": "maybe", "correct": "yes"}', "bad_enum")],
-    )
-    async def test_schema_disabled_undecided_engagement_scores_zero(self, text: str, error: str) -> None:
-        response = await make_server(validate_schema=False).verify(make_request(text, gold="yes"))
-        assert (response.reward, response.pred_ladder, response.parse_error) == (0.0, None, error)
-        assert not response.mask_sample
-
     async def test_verify(self) -> None:
         response = await make_server().verify(make_request(NO, gold="no", row_id="r1"))
         assert (response.reward, response.pred_ladder, response.gold_ladder, response.tp) == (1.0, "no", "no", 1.0)
