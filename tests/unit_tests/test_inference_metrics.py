@@ -70,6 +70,8 @@ def test_labels_replicas_and_allowlist():
     values = collector.parse("replica0", GAUGES, 10)
     assert values == {
         "vllm/replica0/num_requests_running": 7,
+        "vllm/replica0/num_requests_running/engine/0": 3,
+        "vllm/replica0/num_requests_running/engine/1": 4,
     }
     assert set(values).isdisjoint(collector.parse("replica1", GAUGES, 10))
 
@@ -200,7 +202,14 @@ async def test_mooncake_scraped_once_and_does_not_change_vllm_aggregates(monkeyp
     if mooncake_rows:
         assert mooncake_rows[0]["mooncake/total/kv_cache_usage_perc"] == 0.75
     if not only_mooncake:
-        assert published[-1] == {"vllm/total/num_requests_running": 14, "vllm/mean/num_requests_running": 7}
+        assert published[-1] == {
+            "vllm/total/num_requests_running": 14,
+            "vllm/mean/num_requests_running": 7,
+            "vllm/total/num_requests_running/engine/0": 6,
+            "vllm/mean/num_requests_running/engine/0": 3,
+            "vllm/total/num_requests_running/engine/1": 8,
+            "vllm/mean/num_requests_running/engine/1": 4,
+        }
     assert not any(key.startswith(("vllm/total/allocated", "mooncake/mean/")) for row in published for key in row)
 
 
@@ -678,6 +687,51 @@ async def test_total_dbo_overlap_fraction_is_duration_weighted(monkeypatch):
     assert "vllm/mean/dbo_comm_overlap_fraction" not in result
 
 
+def test_cudagraph_padding_fraction_per_runtime_mode():
+    collector = InferenceMetricsCollector(config())
+
+    def scrape(unpadded, padded, now):
+        payload = ""
+        for name, value in (("unpadded", unpadded), ("padded", padded)):
+            payload += f"# TYPE vllm:cudagraph_{name}_tokens_total counter\n"
+            for engine in ("0", "1"):
+                payload += f'vllm:cudagraph_{name}_tokens_total{{engine="{engine}",runtime_mode="FULL"}} {value}\n'
+        return collector.parse("decode0", payload, now)
+
+    key = "vllm/decode0/cudagraph_padding_fraction/runtime_mode/FULL"
+    assert key not in scrape(100, 100, 10)
+    # Each engine adds 90 real tokens in 120 padded slots.
+    assert scrape(190, 220, 12)[key] == pytest.approx(0.25)
+    # Idle interval: no padded slots, so no fraction.
+    assert key not in scrape(190, 220, 14)
+
+
+async def test_total_cudagraph_padding_fraction_is_token_weighted(monkeypatch):
+    collector = InferenceMetricsCollector(
+        InferenceMetricsConfig(enabled=True, endpoints={"a": "http://localhost:1", "b": "http://localhost:2"})
+    )
+    stop = asyncio.Event()
+
+    async def scrape(replica, url):
+        stop.set()
+        unpadded, padded = (90, 100) if replica == "a" else (10, 100)
+        result = {
+            f"vllm/{replica}/cudagraph_unpadded_tokens_per_second/runtime_mode/FULL": unpadded,
+            f"vllm/{replica}/cudagraph_padded_tokens_per_second/runtime_mode/FULL": padded,
+        }
+        collector.add_derived_metrics(result, f"vllm/{replica}/")
+        return result
+
+    monkeypatch.setattr(collector, "scrape", scrape)
+    publish = MagicMock()
+    monkeypatch.setattr(metrics_module, "export_metrics", publish)
+    await collector.run(stop)
+    result = publish.call_args.args[0]
+    # Pooled tokens (100 real in 200 slots), not a sum or mean of the per-replica fractions.
+    assert result["vllm/total/cudagraph_padding_fraction/runtime_mode/FULL"] == pytest.approx(0.5)
+    assert "vllm/mean/cudagraph_padding_fraction/runtime_mode/FULL" not in result
+
+
 def test_derived_cache_and_source_prompt_metrics():
     collector = InferenceMetricsCollector(config())
 
@@ -884,7 +938,11 @@ async def test_inventory_default_off_never_requests_master(monkeypatch):
     collector = InferenceMetricsCollector(config(mooncake_endpoint="http://localhost:9003/metrics"))
     request = AsyncMock()
     monkeypatch.setattr(metrics_module, "request", request)
-    assert collector.parse("replica0", GAUGES + INVENTORY, 10) == {"vllm/replica0/num_requests_running": 7}
+    assert collector.parse("replica0", GAUGES + INVENTORY, 10) == {
+        "vllm/replica0/num_requests_running": 7,
+        "vllm/replica0/num_requests_running/engine/0": 3,
+        "vllm/replica0/num_requests_running/engine/1": 4,
+    }
     assert not collector.cache_layouts
     await collector.report_cache_inventory()
     request.assert_not_called()
