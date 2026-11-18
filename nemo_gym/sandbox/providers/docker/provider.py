@@ -476,7 +476,8 @@ class DockerProvider:
         ``spec.ttl_s`` bounds the lifetime (the keep-alive sleeps for it and ``--rm`` self-removes on
         exit). ``spec.provider_options`` may carry ``volumes`` (strings -> ``-v``, shared-storage mounts
         -> ``--mount``) and ``run_args`` (extra run flags). ``spec.metadata`` entries become container labels
-        beside ``nemo-gym.sandbox=1``. A half-created container is force-removed on any failure.
+        beside ``nemo-gym.sandbox=1``. A half-created container is force-removed on any failure, and a created one
+        whose readiness probe or shell detection is cancelled is removed before the cancellation propagates.
         """
         if spec.image is None:
             raise DockerCreateError("spec.image is required for the docker provider")
@@ -543,8 +544,16 @@ class DockerProvider:
         try:
             await self._verify_created_handle(handle)  # readiness via default sh (printf works there)
             handle.raw.shell = await self._resolve_shell(name)  # resolve real shell once exec is confirmed live
-        except Exception:
-            await self._cleanup_failed_create_handle(handle)
+        except BaseException:
+            # Also on cancellation (a caller's deadline expiring during the probe): the container is running and no
+            # caller holds its handle yet, so nothing else would remove it. A second cancellation waits for the
+            # removal before it propagates.
+            cleanup = asyncio.ensure_future(self._cleanup_failed_create_handle(handle))
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                await cleanup
+                raise
             raise
         return handle
 
