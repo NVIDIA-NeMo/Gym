@@ -233,6 +233,15 @@ class TestScoreOutput:
 
 
 class TestVerify:
+    @pytest.mark.parametrize(
+        ("text", "error"),
+        [('{"correct": "yes"}', "missing_keys"), ('{"addresses_concern": "maybe", "correct": "yes"}', "bad_enum")],
+    )
+    async def test_schema_disabled_undecided_engagement_scores_zero(self, text: str, error: str) -> None:
+        response = await make_server(validate_schema=False).verify(make_request(text, gold="yes"))
+        assert (response.reward, response.pred_ladder, response.parse_error) == (0.0, None, error)
+        assert not response.mask_sample
+
     async def test_verify(self) -> None:
         response = await make_server().verify(make_request(NO, gold="no", row_id="r1"))
         assert (response.reward, response.pred_ladder, response.gold_ladder, response.tp) == (1.0, "no", "no", 1.0)
@@ -318,7 +327,7 @@ class TestServer:
         assert reply.status_code == 422
 
     def test_reverifying_the_committed_example_rollouts(self) -> None:
-        """The example rollouts are a real policy's outputs (reasoning items included): /verify must reproduce them."""
+        """The example rollouts are hand-written verdicts (reasoning items included): /verify must reproduce them."""
         client = TestClient(make_server().setup_webserver())
         lines = [json.loads(line) for line in (ENV_DIR / "data" / "example_rollouts.jsonl").read_text().splitlines()]
         assert len(lines) == 5
@@ -401,6 +410,24 @@ class TestComputeMetrics:
         assert m["hand/kappa"] == pytest.approx(0.5)
         assert (m["hand/gold_accuracy"], m["hand/gold_kappa"]) == (1.0, 1.0)
         assert (m["field_acc/blocked_by"], m["field_acc/discard"]) == (0.5, 0.75)
+
+    def test_field_acc_counts_rollouts_without_a_prediction(self) -> None:
+        gold = {"correct": "yes"}
+        parsed = {**rollout("yes", "yes", fields={"correct": True}), "gold_fields": gold}
+        unscored = {"reward": 0.0, "gold_ladder": "yes", "gold_fields": gold}  # no verifier output
+        m = make_server().compute_metrics([[parsed], [unscored]])
+        assert m["field_acc/correct"] == pytest.approx(0.5)
+
+    def test_field_acc_needs_a_reference_value(self) -> None:
+        # No gold and no match data, a null gold value, or a non-verdict gold key: no denominator.
+        tasks = [
+            [rollout("yes", "yes", fields={"correct": True})],
+            [rollout("no", "yes")],
+            [{**rollout(None, "yes", error="bad_json"), "gold_fields": {"correct": None, "reason": "free text"}}],
+        ]
+        m = make_server().compute_metrics(tasks)
+        assert m["field_acc/correct"] == 1.0
+        assert "field_acc/reason" not in m
 
     def test_expect_labels(self) -> None:
         # A BAD stratum row (expect "no") the reference judge passed: the policy that fails it beats the label.

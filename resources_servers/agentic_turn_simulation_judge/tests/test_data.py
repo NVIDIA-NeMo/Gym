@@ -6,8 +6,10 @@ import re
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from nemo_gym.data import load_task_data_schema, validate_jsonl_rows
+from resources_servers.agentic_turn_simulation_judge.app import AgenticTurnSimulationJudgeRunRequest
 from resources_servers.agentic_turn_simulation_judge.scripts.validate_rows import validate_files
 
 
@@ -122,3 +124,40 @@ def test_report_file_is_private(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     assert json.loads(out.read_text())["all"]["rows"] == 5
     assert out.stat().st_mode & 0o777 == 0o600
     assert capsys.readouterr().out.splitlines()[0].startswith("example.jsonl {")
+
+
+@pytest.mark.parametrize("extra", [123, ["a"], {"k": "v"}])
+def test_gold_field_extras_must_be_strings(tmp_path: Path, extra) -> None:
+    """The file validator and the server's request model agree: extra gold_fields values are strings or null."""
+    row = copy.deepcopy(ROWS[0])
+    row["gold_fields"]["analysis"] = extra
+    with pytest.raises(SystemExit, match="gold_fields"):
+        validate_files([write(tmp_path, "rows.jsonl", [row])], agent="")
+    with pytest.raises(ValidationError):
+        AgenticTurnSimulationJudgeRunRequest.model_validate(row)
+
+
+def test_gold_field_string_and_null_extras_validate(tmp_path: Path) -> None:
+    row = copy.deepcopy(ROWS[0])
+    row["gold_fields"].update(reason="free text", analysis=None)
+    assert validate_files([write(tmp_path, "rows.jsonl", [row])], agent="")["all"]["rows"] == 1
+    AgenticTurnSimulationJudgeRunRequest.model_validate(row)
+
+
+def test_same_basename_files_stay_apart(tmp_path: Path) -> None:
+    def unsplit(row: dict, row_id: str) -> dict:
+        meta = {k: v for k, v in row["meta"].items() if k != "split"}
+        return {**row, "row_id": row_id, "group_id": "shared", "meta": meta}
+
+    yes, no = unsplit(ROWS[0], "a"), unsplit(ROWS[1], "b")
+    for d in ("train", "validation"):
+        (tmp_path / d).mkdir()
+    paths = [write(tmp_path, "train/rows.jsonl", [yes]), write(tmp_path, "validation/rows.jsonl", [no])]
+    report = validate_files(paths, agent="")
+    assert set(report) == {str(p.resolve()) for p in paths} | {"all"}
+    assert [report[str(p.resolve())]["rows"] for p in paths] == [1, 1]
+    assert report["all"]["rows"] == 2 and report["all"]["groups_in_multiple_splits"] == 1
+    # The same explicit split on both rows: the group is not in two splits.
+    for p, row in zip(paths, (yes, no)):
+        write(tmp_path, str(p.relative_to(tmp_path)), [{**row, "meta": {**row["meta"], "split": "train"}}])
+    assert validate_files(paths, agent="")["all"]["groups_in_multiple_splits"] == 0

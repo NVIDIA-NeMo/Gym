@@ -181,7 +181,10 @@ def validate_files(paths: list[Path], *, agent: str = AGENT) -> dict[str, Any]:
     total = Tally()
     prompts: Counter = Counter()
     group_splits: dict[str, set[str]] = defaultdict(set)
+    # Files that share a basename (train/rows.jsonl, val/rows.jsonl) are told apart by their full path.
+    basenames = Counter(path.name for path in paths)
     for path in paths:
+        file_key = str(path.resolve()) if basenames[path.name] > 1 else path.name
         tally = Tally()
         seen_ids: set[str] = set()
         with open(path, "rb", buffering=1 << 22) as f:
@@ -201,8 +204,8 @@ def validate_files(paths: list[Path], *, agent: str = AGENT) -> dict[str, Any]:
                 prompts[_prompt_key(row)] += 1
                 # A row without meta.split is in its file's split.
                 split = _split(task)
-                group_splits[task.group_id].add(path.name if split == "none" else split)
-        report[path.name] = tally.summary()
+                group_splits[task.group_id].add(file_key if split == "none" else split)
+        report[file_key] = tally.summary()
     leaked = sorted(g for g, splits in group_splits.items() if len(splits) > 1)
     report["all"] = {
         **total.summary(),

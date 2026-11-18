@@ -367,7 +367,12 @@ class AgenticTurnSimulationJudgeResourcesServer(SimpleResourcesServer):
 
         per_field: dict[str, list[bool]] = defaultdict(list)
         for r in rows:
-            for field_name, matched in (r.get("field_matches") or {}).items():
+            # A rollout with no prediction (unparsed, or no verifier output) misses every known reference field.
+            matches = dict(r.get("field_matches") or {})
+            for field_name, value in (r.get("gold_fields") or {}).items():
+                if field_name in VERDICT_FIELDS and value is not None:
+                    matches.setdefault(field_name, False)
+            for field_name, matched in matches.items():
                 per_field[field_name].append(bool(matched))
         for field_name, matches in sorted(per_field.items()):
             metrics[f"field_acc/{field_name}"] = sum(matches) / len(matches)

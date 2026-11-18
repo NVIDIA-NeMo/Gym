@@ -17,6 +17,8 @@ class GoldFields(BaseModel):
     """The reference verdict's fields (majority over the reference passes); values follow the ATS schema enums."""
 
     model_config = ConfigDict(extra="allow")
+    # Extra keys are allowed but, as on the wire (`gold_fields: dict[str, Optional[str]]`), must be strings or null.
+    __pydantic_extra__: dict[str, Optional[str]] = Field(init=False)
 
     addresses_concern: Optional[str] = None
     correct: Optional[str] = None

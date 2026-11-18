@@ -89,7 +89,7 @@ one-hots `tp`/`fp`/`fn`/`tn` with POSITIVE = ladder `no` (the judge catching a f
 - `expect/*`, the same against `meta.expect` (the expected verdict of a labelled behaviour stratum: a BAD turn should
   fail, a GOOD one pass). The reference judge is known to pass many BAD agentic turns, so `expect/fail_recall` next to
   `expect/gold_fail_recall` shows whether a policy is stricter or more lenient than its label.
-- `field_acc/<field>`: agreement with `gold_fields` per field.
+- `field_acc/<field>`: agreement with `gold_fields` per field (a rollout without a prediction counts as a miss).
 
 Key metrics: `mean/reward`, `accuracy`, `balanced_accuracy`, `kappa`, `parse_fail`, `leniency_gap`.
 
