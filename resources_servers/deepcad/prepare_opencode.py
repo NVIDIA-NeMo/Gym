@@ -128,7 +128,7 @@ def prepare(source: Path, output: Path, *, file_input: bool = False, harness: st
                             "content": "\n\n".join([instruction, *texts, "Target image files:\n" + "\n".join(paths)]),
                         }
                     ]
-                row["agent_ref"] = {"name": "deepcad_opencode_agent" if harness == "opencode" else f"{harness}_agent"}
+                row["agent_ref"] = {"name": f"deepcad_{harness}_agent"}
                 row["_ng_environment_server"] = f"deepcad_{harness}_environment_server"
             dst.write(json.dumps(row) + "\n")
             count += 1

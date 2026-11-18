@@ -147,10 +147,17 @@ def test_composed_config_resolves_offline_without_a_legacy_agent_relay(tmp_path,
         )
     )
     assert config.deepcad_opencode.resources_servers.deepcad.host == "127.0.0.1"
-    assert config.policy_model.responses_api_models.vllm_model.host == "192.0.2.10"
+    assert config.deepcad_policy_model.responses_api_models.vllm_model.host == "192.0.2.10"
     assert list(config.deepcad_opencode_environment_server.environment_servers) == ["single_agent_turn_legacy"]
-    assert config.policy_model.responses_api_models.vllm_model.return_token_id_information is True
-    assert config.policy_model.responses_api_models.vllm_model.supply_prefix_token_ids is True
+    assert config.deepcad_policy_model.responses_api_models.vllm_model.return_token_id_information is True
+    assert config.deepcad_policy_model.responses_api_models.vllm_model.supply_prefix_token_ids is True
+    from responses_api_models.vllm_model.app import VLLMModelConfig
+
+    model = VLLMModelConfig(
+        name="deepcad_policy_model",
+        **OmegaConf.to_container(config.deepcad_policy_model.responses_api_models.vllm_model, resolve=True),
+    )
+    assert model.inline_tool_output_images
     SingleAgentTurnLegacyEnvironmentServerConfig(
         name="deepcad_opencode_environment_server",
         **OmegaConf.to_container(
@@ -184,6 +191,10 @@ def test_resource_seed_keeps_original_images_after_flat_materialization(tmp_path
     assert resource_seed.target_images == row["target_images"]
     assert "responses_create_params" not in task_input.task_data
     if file_input:
+        assert len(task_input.responses_create_params.input) == 1
+        assert task_input.responses_create_params.input[0].role == "user"
+        serialized = task_input.responses_create_params.model_dump_json()
+        assert "input_image" not in serialized and "data:image" not in serialized
         prompt = task_input.responses_create_params.input[0].content
         assert isinstance(prompt, str)
         assert "/workspace/target-0.png" in prompt

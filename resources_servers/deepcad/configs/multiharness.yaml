@@ -12,12 +12,13 @@ config_paths:
 
 nooa_environment_server: null
 
-pi_agent:
+deepcad_pi_agent:
+  _inherit_from: pi_agent
   responses_api_agents:
     pi_agent:
       host: 127.0.0.1
       resources_server: null
-      model_server: {type: responses_api_models, name: policy_model}
+      model_server: {type: responses_api_models, name: deepcad_policy_model}
       timeout: 1800
       max_output_tokens: 32768
       context_window: 131072
@@ -28,14 +29,15 @@ deepcad_pi_environment_server:
   _copy: deepcad_opencode_environment_server
   environment_servers:
     single_agent_turn_legacy:
-      agent_server: {type: responses_api_agents, name: pi_agent}
+      agent_server: {type: responses_api_agents, name: deepcad_pi_agent}
 
-hermes_agent:
+deepcad_hermes_agent:
+  _inherit_from: hermes_agent
   responses_api_agents:
     hermes_agent:
       host: 127.0.0.1
       resources_server: null
-      model_server: {type: responses_api_models, name: policy_model}
+      model_server: {type: responses_api_models, name: deepcad_policy_model}
       sandbox_runner_timeout_seconds: 1800
       max_tokens: 32768
       context_length: 131072
@@ -46,14 +48,15 @@ deepcad_hermes_environment_server:
   _copy: deepcad_opencode_environment_server
   environment_servers:
     single_agent_turn_legacy:
-      agent_server: {type: responses_api_agents, name: hermes_agent}
+      agent_server: {type: responses_api_agents, name: deepcad_hermes_agent}
 
-codex_agent:
+deepcad_codex_agent:
+  _inherit_from: codex_agent
   responses_api_agents:
     codex_agent:
       host: 127.0.0.1
       resources_server: null
-      model_server: {type: responses_api_models, name: policy_model}
+      model_server: {type: responses_api_models, name: deepcad_policy_model}
       timeout: 1800
       model_context_window: 131072
       inherit_sandbox_environment: true
@@ -62,14 +65,15 @@ deepcad_codex_environment_server:
   _copy: deepcad_opencode_environment_server
   environment_servers:
     single_agent_turn_legacy:
-      agent_server: {type: responses_api_agents, name: codex_agent}
+      agent_server: {type: responses_api_agents, name: deepcad_codex_agent}
 
-claude_code_agent:
+deepcad_claude_code_agent:
+  _inherit_from: claude_code_agent
   responses_api_agents:
     claude_code_agent:
       host: 127.0.0.1
       resources_server: null
-      model_server: {type: responses_api_models, name: policy_model}
+      model_server: {type: responses_api_models, name: deepcad_policy_model}
       timeout: 1800
       claude_code_version: 2.1.108
       anthropic_api_key: ""
@@ -79,30 +83,33 @@ deepcad_claude_code_environment_server:
   _copy: deepcad_opencode_environment_server
   environment_servers:
     single_agent_turn_legacy:
-      agent_server: {type: responses_api_agents, name: claude_code_agent}
+      agent_server: {type: responses_api_agents, name: deepcad_claude_code_agent}
 
-openclaw_agent:
+deepcad_openclaw_agent:
+  _inherit_from: openclaw_agent
   responses_api_agents:
     openclaw_agent:
       host: 127.0.0.1
       resources_server: null
-      model_server: {type: responses_api_models, name: policy_model}
+      model_server: {type: responses_api_models, name: deepcad_policy_model}
       timeout: 1800
       context_window: 131072
       max_output_tokens: 32768
+      image_input: true
 
 deepcad_openclaw_environment_server:
   _copy: deepcad_opencode_environment_server
   environment_servers:
     single_agent_turn_legacy:
-      agent_server: {type: responses_api_agents, name: openclaw_agent}
+      agent_server: {type: responses_api_agents, name: deepcad_openclaw_agent}
 
-nooa_agent:
+deepcad_nooa_agent:
+  _inherit_from: nooa_agent
   responses_api_agents:
     nooa_agent:
       host: 127.0.0.1
       resources_server: null
-      model_server: {type: responses_api_models, name: policy_model}
+      model_server: {type: responses_api_models, name: deepcad_policy_model}
       nooa:
         execution_mode: sandboxed
       sandbox_runner_timeout_seconds: 1800
@@ -112,17 +119,17 @@ deepcad_nooa_environment_server:
   _copy: deepcad_opencode_environment_server
   environment_servers:
     single_agent_turn_legacy:
-      agent_server: {type: responses_api_agents, name: nooa_agent}
+      agent_server: {type: responses_api_agents, name: deepcad_nooa_agent}
 
-policy_model:
+deepcad_policy_model:
   responses_api_models:
     vllm_model:
       rollout_generation_budget:
         agent_servers:
           - deepcad_opencode_agent
-          - pi_agent
-          - hermes_agent
-          - codex_agent
-          - claude_code_agent
-          - openclaw_agent
-          - nooa_agent
+          - deepcad_pi_agent
+          - deepcad_hermes_agent
+          - deepcad_codex_agent
+          - deepcad_claude_code_agent
+          - deepcad_openclaw_agent
+          - deepcad_nooa_agent

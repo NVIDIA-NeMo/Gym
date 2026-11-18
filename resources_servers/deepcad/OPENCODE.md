@@ -52,15 +52,28 @@ paths as user text. The resource decodes targets to RGB PNG files in input order
 byte-identical inline delivery to every native model client. Without the flag,
 activation retains inline images; not every native adapter accepts that format.
 
-`--harness` selects the existing `agent_ref` and `_ng_environment_server` fields.
+`--harness` selects the task-scoped `deepcad_<harness>_agent` and
+`deepcad_<harness>_environment_server` routing fields.
 `task_source` remains `deepcad_opencode`, the shared resource. Prepare separate
 outputs for each harness and concatenate those rows to collect a mixed run; do
 not replace their routing with a single global `--agent` override.
 
+Load the model config first, then the CAD recipe, then benchmark profiles such as
+`benchmarks/hle/pi.yaml`. CAD inherits stock agents under task-scoped names, but
+reloading stock configs after a profile can overwrite that profile's settings.
+In particular, placing CAD after HLE resets HLE's Pi version, model and timeout;
+that ordering is not supported.
+
+`deepcad_policy_model` copies the selected `policy_model` backend while keeping
+CAD's generation budget, tool-image handling and token-capture options off the
+shared model instance. Training integrations must route CAD calls to this alias
+and include it in any explicitly required model-sampling list.
+
 Preparation moves existing `temperature`, `top_p`, and `max_output_tokens` values
 to `_ng_model_sampling`, rejecting conflicts with an existing marker. Lazy rows
 retain their raw fields and receive the same validated marker, which survives
-materialization and supplies the required model-sampling route. Preparation does
+materialization. The training framework supplies model sampling requirements;
+the recipe does not mandate them for ordinary evaluation. Preparation does
 not invent sampling values. For a 32,768-token per-call comparison, supply that
 explicit cap in the original request or marker before preparation. A smaller
 source cap stays smaller. Do not reintroduce unsupported activation parameters
