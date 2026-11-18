@@ -12,7 +12,7 @@ import yaml
 from pydantic import ValidationError
 
 from nemo_gym.config.config_types import AlmostServerError, ConfigInterpolationError
-from nemo_gym.environment.manifest import EnvironmentManifest, dump_manifest, load_manifest
+from nemo_gym.environment.manifest import EnvironmentManifest, ManifestSetup, dump_manifest, load_manifest
 from nemo_gym.environment.validation import (
     EnvironmentValidationError,
     ResolvedComponent,
@@ -22,7 +22,6 @@ from nemo_gym.environment.validation import (
     _only_delegates_to_super,
     _only_raises_not_implemented,
     _resolve_manifest_composition,
-    _validate_related_manifest,
     _with_component_root,
     resolve_config_servers,
     validate_environment,
@@ -1289,164 +1288,205 @@ def test_prepared_benchmark_rejects_non_mapping_task_input_with_row_context(tmp_
         _validate_dataset(dataset, standard_prompt_config=None, prompt_source="prepared")
 
 
-def _linked_manifest(tmp_path: Path, *, name: str = "demo/variant", **changes: object) -> Path:
-    """A second benchmark manifest beside the asset's, reusing its config and declaring a link."""
-    main_path = tmp_path / "benchmarks/demo/manifest.yaml"
+def _listing(
+    tmp_path: Path,
+    *,
+    listed_as: str = "setups",
+    name: str = "demo/variant",
+    config_name: str = "variant.yaml",
+    kind: str = "benchmark",
+    config_edit: tuple[str, str] | None = None,
+    **fields: object,
+) -> Path:
+    """The demo manifest with one more config listed, a copy of the demo config beside it, edited by ``config_edit``."""
+    main_path = tmp_path / ("benchmarks" if kind == "benchmark" else "environments") / "demo/manifest.yaml"
     if not main_path.is_file():
-        main_path = _asset(tmp_path, kind="benchmark")
-    linked = load_manifest(main_path).model_copy(update={"name": name, "config_path": "../config.yaml", **changes})
-    linked_path = main_path.parent / name.removeprefix("demo/") / "manifest.yaml"
-    linked_path.parent.mkdir()
-    linked_path.write_text(dump_manifest(linked), encoding="utf-8")
-    return linked_path
+        main_path = _asset(tmp_path, kind=kind)
+    config = main_path.with_name("config.yaml").read_text(encoding="utf-8")
+    if config_edit is not None:
+        assert config_edit[0] in config
+        config = config.replace(*config_edit)
+    (main_path.parent / config_name).write_text(config, encoding="utf-8")
+    raw = yaml.safe_load(main_path.read_text(encoding="utf-8"))
+    listed = {"name": name, "config_path": config_name, **fields}
+    if listed_as == "protocols":
+        listed.setdefault("description", "The demo benchmark under another prompt.")
+    raw.setdefault(listed_as, []).append(listed)
+    main_path.write_text(dump_manifest(raw), encoding="utf-8")
+    return main_path
 
 
-@pytest.mark.parametrize("field", ["setup_of", "protocol_of"])
-def test_setup_or_protocol_of_the_main_manifest_validates(field: str, tmp_path: Path) -> None:
-    report = validate_environment(_linked_manifest(tmp_path, **{field: "demo"}))
-
-    assert report.name == "demo/variant"
-
-
-def test_setup_of_needs_an_existing_manifest(tmp_path: Path) -> None:
-    with pytest.raises(EnvironmentValidationError, match="has no manifest"):
-        validate_environment(_linked_manifest(tmp_path, setup_of="missing"))
-
-
-@pytest.mark.parametrize(
-    ("target_link", "field"),
-    [("setup_of", "setup_of"), ("setup_of", "protocol_of"), ("protocol_of", "protocol_of")],
-)
-def test_links_never_name_a_setup_and_protocols_never_name_a_protocol(
-    target_link: str, field: str, tmp_path: Path
+@pytest.mark.parametrize("listed_as", ["setups", "protocols"])
+def test_a_listed_config_validates_by_name_and_the_main_manifest_still_validates(
+    listed_as: str, tmp_path: Path
 ) -> None:
-    _linked_manifest(tmp_path, **{target_link: "demo"})
+    main_path = _listing(tmp_path, listed_as=listed_as)
 
-    with pytest.raises(EnvironmentValidationError, match="itself a setup or protocol"):
-        validate_environment(_linked_manifest(tmp_path, name="demo/second", **{field: "demo/variant"}))
+    report = validate_environment(main_path, name="demo/variant")
+
+    assert (report.name, Path(report.config_path).name, report.manifest_path) == (
+        "demo/variant",
+        "variant.yaml",
+        str(main_path.resolve()),
+    )
+    assert validate_environment(main_path).name == "demo"
 
 
-def test_setup_may_run_a_protocol_under_another_harness(tmp_path: Path) -> None:
-    _linked_manifest(tmp_path, protocol_of="demo")
+def test_a_name_the_manifest_does_not_list_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(EnvironmentValidationError, match="lists no setup or protocol named 'demo/missing'"):
+        validate_environment(_listing(tmp_path), name="demo/missing")
 
-    report = validate_environment(_linked_manifest(tmp_path, name="demo/second", setup_of="demo/variant"))
 
-    assert report.name == "demo/second"
+def test_a_listed_config_keeps_the_name_the_catalog_gives_its_config(tmp_path: Path) -> None:
+    # Without a manifest the catalog lists benchmarks/demo/variant.yaml as demo/variant, and
+    # `gym eval run --benchmark demo/variant` runs it; a listing under another name would change that name.
+    main_path = _listing(tmp_path, name="demo/renamed")
+
+    with pytest.raises(EnvironmentValidationError, match="'demo/renamed' must be named 'demo/variant'"):
+        validate_environment(main_path)
+
+
+def test_a_listed_config_has_no_manifest_of_its_own(tmp_path: Path) -> None:
+    main_path = _listing(tmp_path)
+    own = main_path.parent / "variant/manifest.yaml"
+    own.parent.mkdir()
+    own.write_text(
+        dump_manifest(load_manifest(main_path).model_copy(update={"name": "demo/variant", "setups": []})),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(EnvironmentValidationError, match="also has a manifest of its own"):
+        validate_environment(main_path)
+
+
+def test_a_listed_config_must_exist(tmp_path: Path) -> None:
+    main_path = _listing(tmp_path)
+    (main_path.parent / "variant.yaml").unlink()
+
+    with pytest.raises(EnvironmentValidationError, match="config_path 'variant.yaml' was not found"):
+        validate_environment(main_path)
+
+
+def test_sync_writes_a_listed_configs_composition_into_its_entry_and_drops_it_once_it_matches(
+    tmp_path: Path,
+) -> None:
+    # A protocol may score under another grading mode, so this difference is one validation keeps.
+    main_path = _listing(tmp_path, listed_as="protocols", config_edit=("grading_mode: exact", "grading_mode: fuzzy"))
+
+    with pytest.raises(EnvironmentValidationError, match="composition of demo/variant is stale(.|\n)*grading_mode"):
+        validate_environment(main_path, name="demo/variant")
+    report = validate_environment(main_path, name="demo/variant", sync=True)
+
+    assert report.synchronized_fields == ("grading_mode",)
+    raw = yaml.safe_load(main_path.read_text(encoding="utf-8"))
+    assert raw["grading_mode"] == "exact"
+    assert raw["protocols"][0]["grading_mode"] == "fuzzy"
+
+    variant = main_path.with_name("variant.yaml")
+    variant.write_text(variant.read_text(encoding="utf-8").replace("fuzzy", "exact"), encoding="utf-8")
+    validate_environment(main_path, name="demo/variant", sync=True)
+
+    assert "grading_mode" not in yaml.safe_load(main_path.read_text(encoding="utf-8"))["protocols"][0]
 
 
 @pytest.mark.parametrize(
-    ("main_changes", "message"),
+    ("config_edit", "fields", "message"),
     [
-        ({"grading_mode": "fuzzy"}, "another resources server or grading mode"),
-        ({"resources_server": "other"}, "another resources server or grading mode"),
+        (("grading_mode: exact", "grading_mode: fuzzy"), {"grading_mode": "fuzzy"}, "another resources server or"),
         (
-            {"datasets": [{"name": "other", "type": "benchmark", "jsonl_fpath": "x.jsonl", "prepare_script": "p.py"}]},
+            ("data/example.jsonl", "data/other.jsonl"),
+            {
+                "datasets": [
+                    {
+                        "name": "example",
+                        "type": "benchmark",
+                        "jsonl_fpath": "benchmarks/demo/data/other.jsonl",
+                        "prepare_script": "benchmarks/demo/prepare.py",
+                    }
+                ]
+            },
             "other task datasets",
         ),
     ],
 )
-def test_setup_runs_the_same_tasks_and_scoring_as_its_main_manifest(
-    main_changes: dict, message: str, tmp_path: Path
+def test_a_setup_runs_the_main_manifests_tasks_and_scoring_and_a_protocol_need_not(
+    config_edit: tuple[str, str], fields: dict, message: str, tmp_path: Path
 ) -> None:
-    setup_path = _linked_manifest(tmp_path, setup_of="demo")
-    main_path = tmp_path / "benchmarks/demo/manifest.yaml"
-    raw = load_manifest(main_path).model_dump(mode="json", exclude_none=True) | main_changes
-    main_path.write_text(dump_manifest(raw), encoding="utf-8")
-
+    setup = _listing(tmp_path, config_edit=config_edit, **fields)
     with pytest.raises(EnvironmentValidationError, match=message):
-        validate_environment(setup_path)
+        validate_environment(setup, name="demo/variant")
 
-
-def test_protocol_may_run_its_own_copy_of_the_tasks(tmp_path: Path) -> None:
-    protocol_path = _linked_manifest(tmp_path, protocol_of="demo")
-    main_path = tmp_path / "benchmarks/demo/manifest.yaml"
-    raw = load_manifest(main_path).model_dump(mode="json", exclude_none=True)
-    raw["datasets"][0]["jsonl_fpath"] = "benchmarks/demo/data/other_copy.jsonl"
-    main_path.write_text(dump_manifest(raw), encoding="utf-8")
-
-    assert validate_environment(protocol_path).name == "demo/variant"
+    protocol = _listing(
+        tmp_path, listed_as="protocols", name="demo/other", config_name="other.yaml", config_edit=config_edit, **fields
+    )
+    (tmp_path / "benchmarks/demo/data/other.jsonl").write_text(
+        (tmp_path / "benchmarks/demo/data/example.jsonl").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    assert validate_environment(protocol, name="demo/other").name == "demo/other"
 
 
 def test_a_setup_keeps_the_benchmarks_prompt_template(tmp_path: Path) -> None:
-    # Same tasks, scorer and harness plus a system prompt changes the benchmark's rules: a protocol, not a setup.
+    # The same tasks, scorer and harness with a system prompt change the benchmark's rules: a protocol, not a setup.
     with_system = "benchmarks/demo/prompts/with_system.yaml"
-    setup = _linked_manifest(tmp_path, name="demo/as_setup", setup_of="demo", standard_prompt_config=with_system)
-    protocol = _linked_manifest(
-        tmp_path, name="demo/as_protocol", protocol_of="demo", standard_prompt_config=with_system
+    edit = (
+        "prepare_script: benchmarks/demo/prepare.py",
+        f"prepare_script: benchmarks/demo/prepare.py\n        prompt_config: {with_system}",
+    )
+    dataset = {
+        "name": "example",
+        "type": "benchmark",
+        "jsonl_fpath": "benchmarks/demo/data/example.jsonl",
+        "prepare_script": "benchmarks/demo/prepare.py",
+        "prompt_config": with_system,
+    }
+    main_path = _listing(
+        tmp_path, listed_as="protocols", config_edit=edit, standard_prompt_config=with_system, datasets=[dataset]
     )
     (tmp_path / with_system).write_text("system: Answer briefly.\nuser: '{question}'\n", encoding="utf-8")
+    assert validate_environment(main_path, name="demo/variant").name == "demo/variant"
 
+    _listing(tmp_path, name="demo/other", config_name="other.yaml", config_edit=edit, datasets=[dataset])
     with pytest.raises(EnvironmentValidationError, match="another prompt template"):
-        validate_environment(setup)
-    assert validate_environment(protocol).name == "demo/as_protocol"
-
-
-@pytest.mark.parametrize("absolute", [False, True], ids=["dot-relative", "absolute"])
-def test_a_link_is_written_as_the_targets_declared_name(absolute: bool, tmp_path: Path) -> None:
-    _asset(tmp_path, kind="benchmark")
-    written = str(tmp_path / "benchmarks/demo") if absolute else "./demo"
-
-    with pytest.raises(EnvironmentValidationError, match="must be written as the name"):
-        validate_environment(_linked_manifest(tmp_path, setup_of=written))
-
-
-@pytest.mark.parametrize("absolute", [False, True], ids=["parent-relative", "absolute"])
-def test_a_link_cannot_reach_a_manifest_outside_the_catalog(absolute: bool, tmp_path: Path) -> None:
-    # The manifest outside benchmarks/ declares exactly the string the link uses, so comparing names alone passes.
-    main_path = _asset(tmp_path, kind="benchmark")
-    written = str(tmp_path / "outside") if absolute else "../outside"
-    outside = tmp_path / "outside/manifest.yaml"
-    outside.parent.mkdir()
-    outside.write_text(dump_manifest(load_manifest(main_path).model_copy(update={"name": written})), encoding="utf-8")
-
-    with pytest.raises(EnvironmentValidationError, match="must be written as the name"):
-        validate_environment(_linked_manifest(tmp_path, protocol_of=written))
+        validate_environment(main_path, name="demo/other")
+    # Nor can a setup name another standard template: only a protocol may.
+    with pytest.raises(ValidationError, match="standard_prompt_config"):
+        ManifestSetup.model_validate(
+            {"name": "demo/other", "config_path": "other.yaml", "standard_prompt_config": with_system}
+        )
 
 
 def test_an_environment_setup_shares_its_example_datasets(tmp_path: Path) -> None:
     # An environment declares only example datasets, so those are what a setup must share.
-    main_path = _asset(tmp_path)
-    setup_path = main_path.parent / "variant/manifest.yaml"
-    setup_path.parent.mkdir()
-    setup = load_manifest(main_path).model_copy(
-        update={"name": "demo/variant", "config_path": "../config.yaml", "setup_of": "demo"}
+    main_path = _listing(tmp_path, kind="environment")
+    assert validate_environment(main_path, name="demo/variant").name == "demo/variant"
+
+    _listing(
+        tmp_path,
+        kind="environment",
+        name="demo/other",
+        config_name="other.yaml",
+        config_edit=("data/example.jsonl", "data/other.jsonl"),
+        datasets=[{"name": "example", "type": "example", "jsonl_fpath": "environments/demo/data/other.jsonl"}],
     )
-    setup_path.write_text(dump_manifest(setup), encoding="utf-8")
-    assert validate_environment(setup_path).name == "demo/variant"
-
-    raw = load_manifest(main_path).model_dump(mode="json", exclude_none=True)
-    raw["datasets"][0]["jsonl_fpath"] = "environments/demo/data/other.jsonl"
-    main_path.write_text(dump_manifest(raw), encoding="utf-8")
-
-    with pytest.raises(EnvironmentValidationError, match="other task datasets.*--sync"):
-        validate_environment(setup_path)
+    with pytest.raises(EnvironmentValidationError, match="other task datasets"):
+        validate_environment(main_path, name="demo/other")
 
 
 @pytest.mark.parametrize(("setup_target", "valid"), [("terminal_bench_4", True), ("terminal_bench_2_1", False)])
 def test_a_setup_of_a_harbor_backed_benchmark_runs_the_same_target(
     setup_target: str, valid: bool, tmp_path: Path
 ) -> None:
-    # Neither manifest declares datasets, so the Harbor target is what says which tasks they run.
+    # Neither declares datasets, so the Harbor target is what says which tasks they run.
     main_path = _harbor_asset(tmp_path, config_target="terminal_bench_4")
-    setup_path = main_path.parent / "other/manifest.yaml"
-    setup_path.parent.mkdir()
     config = yaml.safe_load(main_path.with_name("config.yaml").read_text(encoding="utf-8"))
     config["harbor_target"] = setup_target
-    setup_path.with_name("config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
-    setup = load_manifest(main_path).model_copy(
-        update={"name": "harbor_demo/other", "setup_of": "harbor_demo", "harbor_target": setup_target}
-    )
-    setup_path.write_text(dump_manifest(setup), encoding="utf-8")
+    main_path.with_name("other.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    raw = yaml.safe_load(main_path.read_text(encoding="utf-8"))
+    raw["setups"] = [{"name": "harbor_demo/other", "config_path": "other.yaml", "harbor_target": setup_target}]
+    main_path.write_text(dump_manifest(raw), encoding="utf-8")
 
     if valid:
-        assert validate_environment(setup_path).name == "harbor_demo/other"
+        assert validate_environment(main_path, name="harbor_demo/other").name == "harbor_demo/other"
     else:
         with pytest.raises(EnvironmentValidationError, match="another Harbor target"):
-            validate_environment(setup_path)
-
-
-def test_link_outside_a_catalog_directory_is_rejected(tmp_path: Path) -> None:
-    manifest = EnvironmentManifest.model_validate(_manifest() | {"name": "standalone", "setup_of": "demo"})
-
-    with pytest.raises(EnvironmentValidationError, match="in neither"):
-        _validate_related_manifest(tmp_path / "standalone/manifest.yaml", manifest)
+            validate_environment(main_path, name="harbor_demo/other")

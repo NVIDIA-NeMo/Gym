@@ -15,8 +15,10 @@ from nemo_gym.environment.manifest import (
     IntendedUse,
     ManifestError,
     dump_manifest,
+    load_listed_manifest,
     load_manifest,
     manifest_json_schema,
+    resolve_listed_manifest,
 )
 
 
@@ -519,8 +521,6 @@ def test_an_environment_without_a_target_needs_its_datasets(backend: str) -> Non
 
 
 CATALOG_FIELDS = (
-    "setup_of",
-    "protocol_of",
     "maintainers",
     "intended_use",
     "capabilities",
@@ -542,8 +542,6 @@ def test_catalog_fields_are_unknown_by_default_and_left_out_of_dumps() -> None:
 def test_catalog_fields_round_trip() -> None:
     raw = _manifest(kind="benchmark")
     raw.update(
-        name="my_eval/opencode",
-        setup_of="my_eval",
         maintainers=["alice-nv"],
         intended_use=["evaluation", "training"],
         capabilities=["coding/code_generation", "reasoning"],
@@ -587,36 +585,127 @@ def test_network_takes_a_harbor_network_mode_or_unknown(level: str) -> None:
     assert not list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))
 
 
+def _listing_manifest() -> dict:
+    """A benchmark with one setup that runs it under another harness and one protocol that adds a system prompt."""
+    raw = _manifest(kind="benchmark")
+    raw.update(
+        capabilities=["reasoning"], maintainers=["alice-nv"], requirements={"gpu": False, "network": "allowlist"}
+    )
+    raw["setups"] = [
+        {
+            "name": "my_eval/codex",
+            "config_path": "codex.yaml",
+            "description": "Competition mathematics run by Codex",
+            "integration_profile": "external-agent-loop",
+            "agent_server": "codex_agent",
+            # Codex reaches the model itself; null clears the main manifest's model server.
+            "model_server": None,
+            "requirements": {"gpu": False, "network": "public"},
+        }
+    ]
+    raw["protocols"] = [
+        {
+            "name": "my_eval/config_with_system",
+            "config_path": "config_with_system.yaml",
+            "description": "Competition mathematics with a system prompt",
+            "standard_prompt_config": "prompts/with_system.yaml",
+            "datasets": [{**raw["datasets"][0], "prompt_config": "prompts/with_system.yaml"}],
+        }
+    ]
+    return raw
+
+
+def test_a_listed_config_resolves_to_the_main_manifest_with_the_facts_it_sets() -> None:
+    main = EnvironmentManifest.model_validate(_listing_manifest())
+
+    setup, protocol = (resolve_listed_manifest(main, listed) for listed in main.listed_configs())
+
+    assert (setup.name, setup.config_path, setup.agent_server, setup.model_server) == (
+        "my_eval/codex",
+        "codex.yaml",
+        "codex_agent",
+        None,
+    )
+    assert setup.integration_profile == IntegrationProfile.EXTERNAL_AGENT_LOOP
+    assert setup.requirements is not None and setup.requirements.network == "public"
+    # What it leaves out is the main manifest's.
+    assert (setup.version, setup.capabilities, setup.maintainers, setup.reward) == (
+        main.version,
+        main.capabilities,
+        main.maintainers,
+        main.reward,
+    )
+    assert (protocol.standard_prompt_config, protocol.agent_server) == ("prompts/with_system.yaml", "simple_agent")
+    assert setup.setups == [] and protocol.protocols == []
+
+
+def test_a_listing_dumps_only_what_each_config_sets_and_round_trips() -> None:
+    raw = _listing_manifest()
+    manifest = EnvironmentManifest.model_validate(raw)
+
+    dumped = yaml.safe_load(dump_manifest(manifest))
+
+    assert dumped["setups"] == raw["setups"] and dumped["protocols"] == raw["protocols"]
+    assert EnvironmentManifest.model_validate(dumped) == manifest
+    assert not list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))
+    assert "setups" not in yaml.safe_load(dump_manifest(EnvironmentManifest.model_validate(_manifest())))
+
+
+def test_load_listed_manifest_returns_the_main_manifest_or_a_listed_config(tmp_path: Path) -> None:
+    path = tmp_path / "manifest.yaml"
+    path.write_text(dump_manifest(_listing_manifest()), encoding="utf-8")
+
+    assert load_listed_manifest(path, "my_eval") == load_manifest(path)
+    assert load_listed_manifest(path, "my_eval/codex").agent_server == "codex_agent"
+    with pytest.raises(ManifestError, match="lists no setup or protocol named 'my_eval/other'"):
+        load_listed_manifest(path, "my_eval/other")
+
+
 @pytest.mark.parametrize("backend", ["pydantic", "schema"])
 @pytest.mark.parametrize(
-    ("kind", "changes", "valid"),
+    ("change", "message"),
     [
-        ("environment", {"setup_of": "other"}, True),
-        ("benchmark", {"setup_of": "other"}, True),
-        ("benchmark", {"protocol_of": "other"}, True),
-        ("benchmark", {"setup_of": "other", "protocol_of": "other"}, False),
-        ("environment", {"protocol_of": "other"}, False),
+        # A protocol says how it scores differently, so it describes itself; a setup may keep the description.
+        (lambda raw: raw["protocols"][0].pop("description"), "description"),
+        # Only what can differ may be set: capabilities belong to the benchmark.
+        (lambda raw: raw["setups"][0].update(capabilities=["coding"]), "capabilities"),
+        (lambda raw: raw["setups"][0].update(standard_prompt_config="prompts/other.yaml"), "standard_prompt_config"),
+        (lambda raw: raw.update(kind="environment", canonical_split=None, standard_prompt_config=None), "protocols"),
     ],
 )
-def test_setup_and_protocol_links_are_exclusive_and_protocols_are_benchmark_only(
-    backend: str, kind: str, changes: dict, valid: bool
-) -> None:
-    raw = _manifest(kind=kind) | changes
+def test_a_listing_rejects_what_a_setup_or_protocol_cannot_say(backend: str, change, message: str) -> None:
+    raw = _listing_manifest()
+    change(raw)
+    raw = {key: value for key, value in raw.items() if value is not None}
+    if raw["kind"] == "environment":
+        raw["datasets"] = [{"name": "validation", "type": "validation", "jsonl_fpath": "data/validation.jsonl"}]
+        raw["protocols"][0].pop("datasets")
+        raw["protocols"][0].pop("standard_prompt_config")
+
     if backend == "schema":
-        assert (not list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))) is valid
-    elif valid:
-        EnvironmentManifest.model_validate(raw)
+        assert list(Draft202012Validator(manifest_json_schema()).iter_errors(raw))
     else:
-        with pytest.raises(ValidationError, match="setup_of or protocol_of|only valid for benchmarks"):
+        with pytest.raises(ValidationError, match=message):
             EnvironmentManifest.model_validate(raw)
 
 
-@pytest.mark.parametrize("field", ["setup_of", "protocol_of"])
-def test_manifest_cannot_link_to_itself(field: str) -> None:
-    raw = _manifest(kind="benchmark")
-    raw[field] = raw["name"]
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (lambda raw: raw["setups"][0].update(name="my_eval"), "their own name"),
+        (lambda raw: raw["protocols"][0].update(name="my_eval/codex"), "their own name"),
+        # The same file written another way is still the same config.
+        (lambda raw: raw["setups"][0].update(config_path="./config.yaml"), "their own config_path"),
+        # Each listed config must still make a complete manifest: a harness without an agent server cannot run.
+        (lambda raw: raw["setups"][0].update(agent_server=None), "my_eval/codex, combined with the main manifest: "),
+    ],
+)
+def test_a_listing_names_distinct_configs_that_each_make_a_valid_manifest(change, message: str) -> None:
+    raw = _listing_manifest()
+    raw["config_path"] = "config.yaml"
+    change(raw)
 
-    with pytest.raises(ValidationError, match="of itself"):
+    with pytest.raises(ValidationError, match=message):
         EnvironmentManifest.model_validate(raw)
 
 

@@ -411,6 +411,43 @@ class TestEnvironmentCatalog:
         assert entries[("benchmark", "suite/strict")].status == "no-manifest"
         assert ("benchmark", "suite/manifest") not in entries
 
+    def test_setups_and_protocols_a_manifest_lists_are_catalog_entries_of_their_own(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        listing = {
+            "setups": [
+                {"name": "suite/codex", "config_path": "codex.yaml", "agent_server": "codex", "description": "Codex"}
+            ],
+            "protocols": [
+                {
+                    "name": "suite/config_with_system",
+                    "config_path": "config_with_system.yaml",
+                    "description": "System prompt",
+                }
+            ],
+        }
+        manifest_path = _write_manifest(tmp_path, "benchmarks", "suite", _manifest("suite", "benchmark", **listing))
+        benchmark_config = "agent:\n  responses_api_agents:\n    a:\n      datasets:\n      - {type: benchmark}\n"
+        for name in ("codex", "config_with_system"):
+            manifest_path.with_name(f"{name}.yaml").write_text(benchmark_config, encoding="utf-8")
+        monkeypatch.setattr(registry_module, "component_search_roots", lambda: [tmp_path])
+
+        entries = {(entry.kind, entry.name): entry for entry in discover_environment_catalog()}
+
+        setup = entries[("benchmark", "suite/codex")]
+        protocol = entries[("benchmark", "suite/config_with_system")]
+        # Each is the main manifest's entry with what the listing sets, not a legacy entry for its config.
+        assert (setup.status, setup.manifest_path, setup.config_path) == (
+            "experimental",
+            manifest_path,
+            manifest_path.with_name("codex.yaml").resolve(),
+        )
+        assert (setup.agent_server, setup.description, setup.version) == ("codex", "Codex", "0.1.0")
+        assert (setup.setup_of, setup.protocol_of) == ("suite", None)
+        assert (protocol.setup_of, protocol.protocol_of) == (None, "suite")
+        assert (entries[("benchmark", "suite")].setup_of, entries[("benchmark", "suite")].protocol_of) == (None, None)
+        assert len([key for key in entries if key[1].startswith("suite")]) == 3
+
     def test_resolution_requires_kind_only_for_cross_kind_collision(self, tmp_path: Path, monkeypatch) -> None:
         _write_manifest(tmp_path, "environments", "shared", _manifest("shared"))
         _write_manifest(tmp_path, "benchmarks", "shared", _manifest("shared", "benchmark"))

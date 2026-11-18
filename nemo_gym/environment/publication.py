@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.environment.manifest import EnvironmentKind, load_manifest
+from nemo_gym.environment.manifest import EnvironmentKind, load_listed_manifest
 from nemo_gym.environment.onboarding import VerifierReport
 from nemo_gym.environment.registry import EnvironmentCatalogEntry, discover_environment_catalog
 from nemo_gym.environment.validation import EnvironmentValidationReport
@@ -49,7 +49,7 @@ def _is_placeholder(value: str | None) -> bool:
 def _publication_placeholders(entry: EnvironmentCatalogEntry) -> tuple[str, ...]:
     if entry.manifest_path is None:
         return ("manifest",)
-    manifest = load_manifest(entry.manifest_path)
+    manifest = load_listed_manifest(entry.manifest_path, entry.name)
     placeholders: list[str] = []
     if _is_placeholder(manifest.description):
         placeholders.append("description")

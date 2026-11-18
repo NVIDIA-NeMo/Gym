@@ -21,7 +21,13 @@ if TYPE_CHECKING:
         plan_benchmark,
         serve_benchmark,
     )
-    from nemo_gym.environment.manifest import EnvironmentManifest, load_manifest, resolve_manifest_config_path
+    from nemo_gym.environment.manifest import (
+        EnvironmentManifest,
+        load_listed_manifest,
+        load_manifest,
+        resolve_listed_manifest,
+        resolve_manifest_config_path,
+    )
     from nemo_gym.environment.registry import discover_environment_catalog
 
 
@@ -40,8 +46,10 @@ _PUBLIC_API = {
     "discover_agents": "agent_registry",
     "discover_environment_catalog": "registry",
     "is_deliverable": "deliverables",
+    "load_listed_manifest": "manifest",
     "load_manifest": "manifest",
     "plan_benchmark": "in_process",
+    "resolve_listed_manifest": "manifest",
     "resolve_manifest_config_path": "manifest",
     "serve_benchmark": "in_process",
 }
