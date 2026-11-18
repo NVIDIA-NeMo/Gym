@@ -346,3 +346,81 @@ def test_bundles_nested_in_a_reply_are_filled() -> None:
 
     filled = [reply["result"]["ng_agent_observations"], reply["result"]["turns"][0]["ng_agent_observations"]]
     assert [bundle["records"][0]["cpu_time_s"] for bundle in filled] == [3.0, 3.0]
+
+
+class OneShotAgent(Agent):
+    """Stops its sandbox in a shielded task created by the first close, as a sandbox session does."""
+
+    _release: asyncio.Event = PrivateAttr(default_factory=asyncio.Event)
+    _entered: asyncio.Event = PrivateAttr(default_factory=asyncio.Event)
+    _close_task: asyncio.Task | None = PrivateAttr(default=None)
+
+    async def _stop(self, state) -> None:
+        self._entered.set()
+        await self._release.wait()
+        await state.sandbox.stop()
+
+    async def _close_agent_session_state(self, state):
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._stop(state))
+        await asyncio.shield(self._close_task)
+        bundle = AgentObservationBundle(
+            source="test", records=[SandboxObservation(role="agent", sandbox_id=state.sandbox.sandbox_id)]
+        )
+        return AgentCloseSessionResponse(agent_session_id=state.request.agent_session_id, agent_observations=bundle)
+
+
+async def test_a_retried_one_shot_close_still_reports_the_usage() -> None:
+    agent = OneShotAgent(
+        config=BaseResponsesAPIAgentConfig(host="localhost", port=1, entrypoint="app.py", name="test"),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    body = AgentSeedSessionRequest(
+        agent_session_id="session",
+        episode_id={"rollout_id": "session"},
+        task_id={"taskset": "test", "task_id": "task"},
+    )
+    request = SimpleNamespace(session={}, headers={}, path_params={})
+    await agent.seed_agent_session(request, body)
+    close = AgentCloseSessionRequest(agent_session_id="session", episode_id=body.episode_id)
+
+    # The first waiter is cancelled while the shielded stop runs; the stop finishes into the session's record.
+    waiter = asyncio.create_task(agent.close_agent_session(request, close))
+    await agent._entered.wait()
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    agent._release.set()
+    receipt = await agent.close_agent_session(request, close)
+
+    (own,) = receipt.agent_observations.records
+    assert own.cpu_time_s == 3.0 and len(own.resource_usage) == 1
+
+
+def test_filling_keeps_fields_a_producer_set_and_adds_only_the_filled_keys() -> None:
+    usage = {"box": resource_usage_fields([_summary(CONTAINER)])}
+    produced = SandboxObservation(role="agent", sandbox_id="box", cpu_time_s=7.0)
+    raw = {"kind": "sandbox", "role": "agent", "sandbox_id": "box", "peak_memory_mib": 5.0}
+    invalid = {"kind": "sandbox", "role": "not-a-role", "sandbox_id": "box"}
+
+    fill_sandbox_usage(AgentObservationBundle(source="a", records=[produced]), usage)
+    fill_sandbox_usage({"source": "a", "records": [raw, invalid]}, usage)
+
+    assert produced.cpu_time_s == 7.0 and produced.peak_memory_mib == 1024.0 and produced.resource_usage
+    assert raw["peak_memory_mib"] == 5.0 and raw["cpu_time_s"] == 3.0
+    assert set(raw) == {"kind", "role", "sandbox_id", "peak_memory_mib"} | {
+        "cpu_time_s",
+        "resource_usage",
+        "resource_usage_source",
+    }
+    assert invalid == {"kind": "sandbox", "role": "not-a-role", "sandbox_id": "box"}
+
+
+def test_conversation_payloads_are_not_walked() -> None:
+    usage = {"box": resource_usage_fields([_summary(CONTAINER)])}
+    record = SandboxObservation(role="agent", sandbox_id="box").model_dump(mode="json")
+    reply = {"response": {"ng_agent_observations": {"source": "a", "records": [record]}}}
+
+    fill_reply_sandbox_usage(reply, usage)
+
+    assert reply["response"]["ng_agent_observations"]["records"][0]["cpu_time_s"] is None

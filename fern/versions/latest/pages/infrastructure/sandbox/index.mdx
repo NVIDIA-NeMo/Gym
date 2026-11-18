@@ -388,9 +388,16 @@ Servers need no code for it. After `stop()`, `sandbox.resource_usage` holds one 
   `SandboxObservation` with that `sandbox_id` in the agent observations it returns, whether built before or after
   the stop. An Environment Server that lends its sandbox to the agent (Harbor tasks) fills the agent's record.
 
-A sandbox stopped outside all of these, such as by a resources-session close or shutdown, is reported only on its
-span.
+A sandbox stopped outside all of these, such as at shutdown, is reported only on its span. So is a Resources
+Server's task sandbox stopped by its resources-session close, after verification has returned: every server built on
+`LentSandboxes` (such as `chartography` and `visual_coding_opencode`) and servers that keep their task sandbox until
+the close (such as `terminal_bench_2_1` and `officeqa`). A server that stops it during verification (such as
+`swebench_pro`) records it in that verification.
 Each sandbox's usage is recorded once, by the creator that stopped it.
+
+In a Harbor task's shared verifier mode, `tests/test.sh` runs in the agent's sandbox before cleanup stops it, so the
+agent's record includes the verifier's CPU and memory. A separate verifier's sandbox has no observation and is
+reported only on its span.
 
 | Provider | Source | Scope |
 | --- | --- | --- |
@@ -415,7 +422,7 @@ These lifetime summaries are separate from the live resource records OpenSandbox
 | --- | --- | --- |
 | Providers | Docker | OpenSandbox |
 | Mechanism | Lifetime accounting: cumulative CPU and peak memory, read after create and before close | Allocation plus instantaneous CPU % and memory in use, every `NEMO_GYM_OTEL_SANDBOX_RESOURCE_SAMPLE_INTERVAL_SECONDS` |
-| Output | `sandbox.resource_usage` and `gym.sandbox.stop` span attributes | `gym.sandbox.resource.*` spans and `gym.sandbox.*` gauges |
+| Output | `sandbox.resource_usage`, `gym.sandbox.stop` span attributes and `SandboxObservation.resource_usage` | `gym.sandbox.resource.*` spans and `gym.sandbox.*` gauges |
 | Needs an OTel exporter | No | Yes |
 
 Both are sampled only by the process that created the sandbox. They are expected to merge once one provider

@@ -115,7 +115,7 @@ from nemo_gym.server_runtime.base_resources_server import (
 from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.server_runtime.request_handling.model_sampling import ModelSamplingContextMiddleware
 from nemo_gym.server_runtime.request_handling.session_routing import SessionKind, SessionOwners
-from nemo_gym.server_runtime.sandbox_usage import fill_reply_sandbox_usage, stopped_sandbox_usage
+from nemo_gym.server_runtime.sandbox_usage import fill_reply_sandbox_usage, fill_sandbox_usage, stopped_sandbox_usage
 from nemo_gym.server_runtime.tool_access import ToolAccess
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
@@ -508,6 +508,9 @@ class _AgentSessionRecord:
     stop_reason: str | None = None
     # Installed by a checkpoint restore and not yet seeded again by its replacement attempt.
     restored: bool = False
+    # Usage of the sandboxes the close stopped, by sandbox id. Kept on the record because the stop may finish in a
+    # shielded task after the waiter that started it was cancelled; a retried close then finds the usage here.
+    sandbox_usage: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 # Sandbox providers whose processes share the host network namespace, so a loopback model URL still resolves
@@ -1144,10 +1147,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                     raise AgentSessionConflictError("Agent session is no longer available")
                 result = AgentCloseSessionResponse(agent_session_id=session_id)
             else:
-                with stopped_sandbox_usage() as stopped:
+                with stopped_sandbox_usage(registry=record.sandbox_usage):
                     result = await self._close_session_state(session_id, record)
                 # The session's own sandboxes stop during close; their usage joins the observations it returns.
-                fill_reply_sandbox_usage(result, stopped)
+                fill_sandbox_usage(result.agent_observations, record.sandbox_usage)
             if task.cancelling() > cancellations_at_entry:
                 raise asyncio.CancelledError
             record.state = None
@@ -1313,13 +1316,13 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
     async def _close_agent_session_record(self, record: _AgentSessionRecord) -> AgentCloseSessionResponse:
         # Collected inside this shielded, reusable task, so a retried close that joins it still gets the usage.
-        with stopped_sandbox_usage() as stopped:
+        with stopped_sandbox_usage(registry=record.sandbox_usage):
             await record.activations.close(timeout=self._continuation_close_timeout())
             assert record.state is not None
             # The adapter may release a borrowed connection after a final negative
             # termination receipt. Preserve that receipt; release errors still raise.
             result = await self._close_agent_session_state(record.state)
-        fill_reply_sandbox_usage(result, stopped)
+        fill_sandbox_usage(result.agent_observations, record.sandbox_usage)
         return result
 
     def parse_agent_context(self, request: AgentSeedSessionRequest) -> BaseModel | None:
