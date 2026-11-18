@@ -11,8 +11,10 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.orchestration.api import ResumeConfig, SubmitConfig
+from nemo_gym.orchestration.executors.connection import LocalConnection
+from nemo_gym.orchestration.executors.private_environment import stage_commands
 from nemo_gym.orchestration.executors.slurm.resume_script import EXPORT_RECEIPT_MISSING_REASON, INCOMPLETE_MARKER_NAME
-from nemo_gym.orchestration.executors.slurm.script import build_sbatch_script
+from nemo_gym.orchestration.executors.slurm.script import build_sbatch_script, task_environments
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
 from tests.helpers.recovery_store_runs import save_store_run
@@ -121,7 +123,13 @@ def test_mixed_saved_judge_and_missing_resumes_the_missing_work(tmp_path):
     assert "REACHED_WORK" in result.stdout
 
 
-def test_generated_container_command_invokes_preinstalled_reader_before_services(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "alias,expected",
+    [(None, None), ("RAY_ADDRESS", "192.0.2.1:6379"), ("JUDGE_HOST", "judge-node")],
+)
+def test_generated_container_command_invokes_preinstalled_reader_before_services(
+    tmp_path, monkeypatch, alias, expected
+):
     monkeypatch.setenv("SLURM_JOB_ID", "100")
     save_store_run(tmp_path, "missing", n=2)
     config = SubmitConfig.model_validate(
@@ -132,22 +140,53 @@ def test_generated_container_command_invokes_preinstalled_reader_before_services
             "job": {"output_path": str(tmp_path.parent)},
         }
     )
+    if alias is not None:
+        raw = config.model_dump(mode="json")
+        raw["services"] = {"ray": {"type": "ray", "container": "ray:test", "node_pools": ["gpu"]}}
+        raw["compute"]["cluster"]["node_pools"] = {"gpu": {"nodes": 1}, "judge": {"nodes": 1}}
+        raw["driver"]["env"] = {
+            alias: "runtime:" + ("GYM_RAY_ADDRESS_RAY" if alias == "RAY_ADDRESS" else "GYM_POOL_JUDGE_NODES")
+        }
+        config = SubmitConfig.model_validate(raw)
     bench = config.driver.benchmarks["task"]
     script = build_sbatch_script(config, "task", bench, config.compute["cluster"], tmp_path)
+    LocalConnection().run(
+        stage_commands(config, task_environments(config, "task", config.compute["cluster"], tmp_path), tmp_path)
+    )
+    prelude = script[: script.index("# --- Auto-resume chain ---")]
+    if alias is not None:
+        assert "export GYM_" in prelude
+        assert script.index("export GYM_") < script.index("_gym_admission_output=$(")
     start = script.index("_gym_admission_output=$(") + len("_gym_admission_output=$(")
     command = script[start : script.index(") || _gym_stop_incomplete", start)]
     # The generated command and entrypoint are unchanged. Only srun/container transport is substituted;
     # this process is the preinstalled Gym image boundary and imports the candidate source.
+    # The loader execs this driver interpreter only after restoring the private role.
+    # Check the value at that boundary while retaining the installed reader itself.
+    interpreter_dir = tmp_path / "admission-bin"
+    interpreter_dir.mkdir()
+    interpreter = interpreter_dir / "python"
+    check = f'test "${{{alias}}}" = {shlex.quote(expected)} || exit 97\n' if alias is not None else ""
+    interpreter.write_text("#!/bin/bash\n" + check + f'exec {shlex.quote(sys.executable)} "$@"\n')
+    interpreter.chmod(0o755)
     stub = tmp_path / "srun-stub"
     stub.write_text(
         "#!/bin/bash\nwhile [[ $1 == --* ]]; do shift; done\nexport PATH="
-        + shlex.quote(str(Path(sys.executable).parent))
+        + shlex.quote(str(interpreter_dir) + ":" + str(Path(sys.executable).parent))
         + ":$PATH\nexport PYTHONPATH="
         + shlex.quote(str(Path(__file__).resolve().parents[3]))
         + '\nexec "$@"\n'
     )
     stub.chmod(0o755)
     command = command.replace(" srun ", f" {shlex.quote(str(stub))} ", 1)
+    if alias is not None:
+        # Only scheduler and address discovery are simulated; the rendered prelude,
+        # private loader and installed saved-state reader all execute unchanged.
+        discovery = "scontrol() { printf 'gpu-node\\njudge-node\\n'; }; getent() { echo '192.0.2.1 gpu-node'; };\n"
+        runtime_name = "GYM_RAY_ADDRESS_RAY" if alias == "RAY_ADDRESS" else "GYM_POOL_JUDGE_NODES"
+        command = (
+            discovery + prelude + "\n" + f'test "${{{runtime_name}}}" = {shlex.quote(expected)} || exit 98\n' + command
+        )
     result = _run_prologue(
         tmp_path, ResumeConfig(max_retries=3), "FAILED", exit_code="75:0", admission_command=command
     )

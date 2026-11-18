@@ -178,7 +178,7 @@ def test_reader_srun_excludes_exported_credentials_and_keeps_allocation_context(
             f"json.dumps({{name: os.environ.get(name) for name in {context_names!r}}}))",
         ]
     )
-    command = slurm._reader_command(
+    command = slurm_reader._reader_command(
         entrypoint, tmp_path, "{}", bound_s=300, factor=1, token=token, step=slurm.reader_step()
     )
 

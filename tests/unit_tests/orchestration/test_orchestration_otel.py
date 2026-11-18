@@ -14,10 +14,12 @@
 # limitations under the License.
 
 import glob
+import json
 import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import time
 from pathlib import Path
@@ -39,12 +41,13 @@ from nemo_gym.orchestration.executors.otel import (
     resolve_token,
     scrape_targets,
 )
+from nemo_gym.orchestration.executors.private_environment import private_directory
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
 from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
 from nemo_gym.orchestration.executors.slurm import judge_job as slurm_judge_job
 from nemo_gym.orchestration.executors.slurm.resume_script import render_resume_epilogue
-from nemo_gym.orchestration.executors.slurm.script import _collector_command, build_sbatch_script
+from nemo_gym.orchestration.executors.slurm.script import _collector_command, build_sbatch_script, task_environments
 from nemo_gym.orchestration.jobs import RESOLVED_CONFIG_NAME
 
 
@@ -437,8 +440,45 @@ def test_script_starts_the_collector_before_the_model_service():
     assert script.index("# service: otel_collector") < script.index("# service: policy")
 
 
+def _step_command(script, name):
+    """Read one shell command, including the private loader's quoted multiline Python."""
+    lines = script.splitlines(keepends=True)
+    start = next(i for i, line in enumerate(lines) if f"--output=logs/{name}-$SLURM_JOB_ID.log" in line)
+    command = ""
+    for line in lines[start:]:
+        command += line
+        try:
+            argv = shlex.split(command)
+        except ValueError:
+            continue
+        assert "srun" in argv, command
+        return command.rstrip()
+    raise AssertionError(f"Unterminated {name} step")
+
+
+def _task_argv(script, name, role):
+    argv = shlex.split(_step_command(script, name))
+    loader = argv.index("python3")
+    assert argv[loader : loader + 2] == ["python3", "-c"]
+    assert argv[loader + 3 : loader + 5] == [str(private_directory(BENCH_DIR)), role]
+    return argv[loader + 5 : -1] if argv[-1] == "&" else argv[loader + 5 :]
+
+
+def _role_environment(config, role):
+    name = "otel_collector" if role == "collector" else role.removeprefix("service:")
+    _task_argv(_script(config), name, role)
+    return task_environments(config, "scicode", next(iter(config.compute.values())), BENCH_DIR)[role]
+
+
 def _collector_line(script):
-    return next(line for line in script.splitlines() if "--output=logs/otel_collector-$SLURM_JOB_ID.log" in line)
+    return _step_command(script, "otel_collector")
+
+
+def _collector_shell(script):
+    argv = _task_argv(script, "otel_collector", "collector")
+    assert argv[:2] == ["sh", "-c"]
+    assert len(argv) == 3
+    return argv[2]
 
 
 def test_script_pins_the_collector_to_one_node_of_a_multi_node_job():
@@ -464,18 +504,18 @@ def test_script_pins_the_collector_to_one_node_of_a_multi_node_job():
 def test_script_runs_the_collector_on_the_node_by_default():
     line = _collector_line(_script(_config()))
     assert "--container" not in line
-    assert line.startswith("env ")
-    assert " srun --overlap --account=acct --output=logs/otel_collector-$SLURM_JOB_ID.log sh -c " in line
+    assert line.startswith("srun --overlap --account=acct --output=logs/otel_collector-$SLURM_JOB_ID.log python3 -c ")
+    assert line.rstrip().endswith("&")
+    line = _collector_shell(_script(_config()))
     # A node-local copy of the binary runs, with its jsonl written beside it.
     assert "src=$(command -v otelcol-contrib)" in line
     assert 'dir=$(mktemp -d "/tmp/gym-otel-$SLURM_JOB_ID.XXXXXX") && cp "$src" "$dir"/otelcol-contrib' in line
     assert 'export GYM_OTEL_LOCAL_DIR="$dir"' in line
     assert f'"$dir"/otelcol-contrib --config {collector_config_path(BENCH_DIR)} & pid=$!' in line
-    assert line.rstrip().endswith("&")
 
 
 def test_script_appends_the_node_local_jsonl_into_the_job_directory_once_the_collector_stops():
-    line = _collector_line(_script(_config()))
+    line = _collector_shell(_script(_config()))
     copy = f'cat "$dir/$s.jsonl" >> {BENCH_DIR / "otel"}/"$s.jsonl" && rm -f "$dir/$s.jsonl"'
     assert f'for s in metrics traces logs; do if [ -e "$dir/$s.jsonl" ]; then {copy}; fi; done' in line
     assert line.index("wait $pid") < line.index('trap "" TERM INT') < line.index(copy)
@@ -551,37 +591,42 @@ def test_script_runs_the_collector_in_a_container_with_the_job_dir_mounted_when_
     # The job dir holds the config and receives the copied jsonl; the node-local dir is the container's own /tmp.
     assert f"--container-mounts={BENCH_DIR}:{BENCH_DIR}" in line
     assert f"--container-workdir={BENCH_DIR}" in line
-    assert "src=$(command -v /otelcol-contrib)" in line
-    assert f'"$dir"/otelcol-contrib --config {collector_config_path(BENCH_DIR)}' in line
     assert line.rstrip().endswith("&")
+    shell = _collector_shell(_script(config))
+    assert "src=$(command -v /otelcol-contrib)" in shell
+    assert f'"$dir"/otelcol-contrib --config {collector_config_path(BENCH_DIR)}' in shell
 
 
 def test_script_forwards_the_token_from_the_job_environment_not_a_literal(monkeypatch):
     monkeypatch.setenv("OTEL_TOKEN", "secret-token")
-    line = next(
-        line for line in _script(_config()).splitlines() if "--output=logs/otel_collector-$SLURM_JOB_ID.log" in line
-    )
-    assert "OTEL_TOKEN=${OTEL_TOKEN}" in line
-    assert "SLURM_JOB_ID=${SLURM_JOB_ID}" in line
-    assert "secret-token" not in line
+    config = _config()
+    assert _role_environment(config, "collector") == {
+        "OTEL_TOKEN": "runtime:OTEL_TOKEN",
+        "SLURM_JOB_ID": "runtime:SLURM_JOB_ID",
+    }
+    assert "secret-token" not in _script(config)
+    assert "OTEL_TOKEN=" not in _collector_line(_script(config))
 
 
 def test_local_only_script_keeps_collection_without_forwarding_the_token():
-    script = _script(_config(otel={"remote_export": False}, driver=_DRIVER_WITH_INSTALL))
+    config = _config(otel={"remote_export": False}, driver=_DRIVER_WITH_INSTALL)
+    script = _script(config)
     assert "--output=logs/otel_collector-$SLURM_JOB_ID.log" in script
-    assert "NEMO_GYM_OTEL_ENABLED=1" in _driver_line(script)
-    assert "OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318" in _driver_line(script)
+    environment = _role_environment(config, "driver")
+    assert environment["NEMO_GYM_OTEL_ENABLED"] == "1"
+    assert environment["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://localhost:4318"
     assert "OTEL_TOKEN" not in script
     assert "DRIVER_RC=$?" in script
 
 
 def test_script_copies_a_binary_on_shared_storage_and_never_runs_it_there():
     config = _config(otel={"binary": "/shared/tools/otelcol-contrib"})
-    line = _collector_line(_script(config))
+    script = _script(config)
+    line = _collector_shell(script)
     assert "src=$(command -v /shared/tools/otelcol-contrib)" in line
     assert "/shared/tools/otelcol-contrib --config" not in line
     assert f'"$dir"/otelcol-contrib --config {collector_config_path(BENCH_DIR)}' in line
-    assert "--container" not in line
+    assert "--container" not in _collector_line(script)
 
 
 def test_script_health_checks_the_collector_before_the_model_service():
@@ -639,10 +684,6 @@ def test_a_resumable_script_ends_its_own_chain_before_the_flush_reads_the_driver
     assert tail.rstrip().endswith("exit $DRIVER_RC")
 
 
-def _driver_line(script):
-    return next(line for line in script.splitlines() if "--output=logs/driver-$SLURM_JOB_ID.log" in line)
-
-
 _DRIVER_WITH_INSTALL = {
     "container": "gym:latest",
     "policy_model": "policy",
@@ -652,13 +693,14 @@ _DRIVER_WITH_INSTALL = {
 
 
 def test_script_switches_on_gym_lens_telemetry_toward_the_collector():
-    script = _script(_config(driver=_DRIVER_WITH_INSTALL))
-    line = _driver_line(script)
-    assert "NEMO_GYM_OTEL_ENABLED=1" in line
-    assert "NEMO_GYM_OTEL_RUN_ID=gym-job-20260921T100000Z-abc123" in line  # pragma: allowlist secret
-    assert "NEMO_GYM_OTEL_SPAN_GROUPS=default,verify" in line
-    assert "OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318" in line
-    assert "OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf" in line
+    config = _config(driver=_DRIVER_WITH_INSTALL)
+    script = _script(config)
+    environment = _role_environment(config, "driver")
+    assert environment["NEMO_GYM_OTEL_ENABLED"] == "1"
+    assert environment["NEMO_GYM_OTEL_RUN_ID"] == "gym-job-20260921T100000Z-abc123"  # pragma: allowlist secret
+    assert environment["NEMO_GYM_OTEL_SPAN_GROUPS"] == "default,verify"
+    assert environment["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://localhost:4318"
+    assert environment["OTEL_EXPORTER_OTLP_PROTOCOL"] == "http/protobuf"
     assert _sync_extras(script) == " --extra telemetry --extra ray"
 
 
@@ -704,32 +746,31 @@ def test_script_installs_mlflow_once_for_an_exporter_and_gitlab_storage():
 
 def test_script_lets_an_explicit_driver_env_win_over_telemetry_defaults():
     driver = {**_DRIVER_WITH_INSTALL, "env": {"OTEL_EXPORTER_OTLP_ENDPOINT": "lit:http://elsewhere:4318"}}
-    line = _driver_line(_script(_config(driver=driver)))
-    assert "OTEL_EXPORTER_OTLP_ENDPOINT=http://elsewhere:4318" in line
-    assert "OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318" not in line
-    assert "NEMO_GYM_OTEL_ENABLED=1" in line
+    environment = _role_environment(_config(driver=driver), "driver")
+    assert environment["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://elsewhere:4318"
+    assert environment["NEMO_GYM_OTEL_ENABLED"] == "1"
 
 
 def test_script_ships_gym_logs_by_default_and_can_switch_them_off():
-    line = _driver_line(_script(_config(driver=_DRIVER_WITH_INSTALL)))
-    assert "NEMO_GYM_OTEL_LOGS_ENABLED=1" in line
+    environment = _role_environment(_config(driver=_DRIVER_WITH_INSTALL), "driver")
+    assert environment["NEMO_GYM_OTEL_LOGS_ENABLED"] == "1"
     # No per-signal logs endpoint: the pinned nemo-lens builds the log exporter from
     # OTEL_EXPORTER_OTLP_PROTOCOL like the span and metric exporters, so logs follow the shared
     # endpoint and protocol in every environment.
-    assert "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT" not in line
-    assert "OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318" in line
-    assert "OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf" in line
+    assert "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT" not in environment
+    assert environment["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://localhost:4318"
+    assert environment["OTEL_EXPORTER_OTLP_PROTOCOL"] == "http/protobuf"
     off = _config(driver=_DRIVER_WITH_INSTALL, otel={"gym_logs": False})
-    assert "NEMO_GYM_OTEL_LOGS_ENABLED=0" in _driver_line(_script(off))
+    assert _role_environment(off, "driver")["NEMO_GYM_OTEL_LOGS_ENABLED"] == "0"
 
 
 def test_script_honours_configured_gym_span_groups():
     config = _config(driver=_DRIVER_WITH_INSTALL, otel={"gym_span_groups": "per_rollout,sandbox"})
-    assert "NEMO_GYM_OTEL_SPAN_GROUPS=per_rollout,sandbox" in _driver_line(_script(config))
+    assert _role_environment(config, "driver")["NEMO_GYM_OTEL_SPAN_GROUPS"] == "per_rollout,sandbox"
 
 
 def _policy_line(script):
-    return next(line for line in script.splitlines() if "--output=logs/policy-$SLURM_JOB_ID.log" in line)
+    return _step_command(script, "policy")
 
 
 def test_vllm_traces_are_off_by_default():
@@ -737,10 +778,12 @@ def test_vllm_traces_are_off_by_default():
 
 
 def test_vllm_traces_point_the_engine_at_the_collector_over_http():
-    line = _policy_line(_script(_config(otel={"vllm_traces": True})))
+    config = _config(otel={"vllm_traces": True})
+    line = _policy_line(_script(config))
     assert f"--otlp-traces-endpoint http://localhost:{OTLP_HTTP_PORT}/v1/traces" in line
-    assert "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf" in line
-    assert "OTEL_SERVICE_NAME=gym-vllm/policy" in line
+    environment = _role_environment(config, "service:policy")
+    assert environment["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] == "http/protobuf"
+    assert environment["OTEL_SERVICE_NAME"] == "gym-vllm/policy"
 
 
 def test_vllm_traces_keep_the_services_own_flags_and_let_its_env_win():
@@ -759,9 +802,9 @@ def test_vllm_traces_keep_the_services_own_flags_and_let_its_env_win():
     )
     line = _policy_line(_script(config))
     assert "--max-model-len 8192 --otlp-traces-endpoint" in line
-    assert "OTEL_SERVICE_NAME=mine" in line
-    assert "OTEL_SERVICE_NAME=engine/policy" not in line
-    assert "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf" in line
+    environment = _role_environment(config, "service:policy")
+    assert environment["OTEL_SERVICE_NAME"] == "mine"
+    assert environment["OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"] == "http/protobuf"
 
 
 def test_vllm_traces_need_the_collector():
@@ -813,7 +856,7 @@ def test_script_has_a_collector_without_a_model_service():
     config = _config(services={}, driver={"container": "gym:latest", "benchmarks": {"scicode": {}}})
     script = _script(config)
     assert "otel_collector" in script
-    assert "NEMO_GYM_OTEL_ENABLED=1" in _driver_line(script)
+    assert _role_environment(config, "driver")["NEMO_GYM_OTEL_ENABLED"] == "1"
 
 
 # ---------------------------------------------------------------------------
@@ -828,7 +871,29 @@ class _FakeConnection(LocalConnection):
 
     def run(self, commands):
         self.commands.append(commands)
-        return self._replies.pop(0)
+        scheduler = [command for command in commands if "sbatch --parsable " in command]
+        # Exercise the actual permission probe and private writer; only scheduler submission is simulated.
+        local = [command for command in commands if command not in scheduler]
+        output = super().run(local) if local else ""
+        return self._replies.pop(0) if scheduler else output
+
+
+def _scheduler_commands(conn):
+    commands = [command for batch in conn.commands for command in batch if "sbatch --parsable " in command]
+    assert len(commands) == 1
+    assert "env -i " in commands[0]
+    return commands
+
+
+def _private_payload(record):
+    directory = private_directory(Path(record.run_dir) / "scicode")
+    for path in [directory.parent, directory]:
+        assert stat.S_IMODE(path.stat().st_mode) & ~stat.S_ISGID == 0o700
+        assert path.stat().st_uid == os.geteuid()
+    path = directory / "environment.json"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert path.stat().st_uid == os.geteuid()
+    return json.loads(path.read_text())
 
 
 def _install(monkeypatch, conn, tmp_path):
@@ -876,7 +941,10 @@ def test_submit_without_a_token_stages_and_persists_local_only_collection(tmp_pa
     collector = yaml.safe_load((bench_dir / "otel" / "collector.yaml").read_text())
     assert set(collector["exporters"]) == {"file/metrics", "file/traces", "file/logs"}
     assert "OTEL_TOKEN" not in (bench_dir / "job.sh").read_text()
-    assert not conn.commands[0][0].startswith("export ")
+    payload = _private_payload(record)
+    assert "OTEL_TOKEN" not in payload["forwarded"]
+    assert "OTEL_TOKEN" not in payload["roles"]["collector"]
+    assert "OTEL_TOKEN" not in "\n".join(_scheduler_commands(conn))
     resolved = yaml.safe_load((Path(record.run_dir) / RESOLVED_CONFIG_NAME).read_text())
     assert resolved["otel"]["enabled"] is True
     assert resolved["otel"]["remote_export"] is False
@@ -914,7 +982,11 @@ def test_explicit_local_only_submit_ignores_available_credentials(tmp_path, monk
     collector = (Path(record.run_dir) / "scicode" / "otel" / "collector.yaml").read_text()
     assert "file/metrics" in collector
     assert "managed" not in collector
-    assert not conn.commands[0][0].startswith("export ")
+    payload = _private_payload(record)
+    assert "NVAUTH_TOKEN" not in payload["forwarded"]
+    assert "NVAUTH_TOKEN" not in payload["roles"]["collector"]
+    assert "unused-secret" not in "\n".join(_scheduler_commands(conn))
+    assert "unused-secret" not in (Path(record.run_dir) / "scicode" / "job.sh").read_text()
     assert not [r for r in caplog.records if r.name == obs_module.__name__]
 
 
@@ -927,7 +999,7 @@ def test_dry_run_prints_the_collector_config(tmp_path, monkeypatch, capsys):
     assert "secret-token" not in out
 
 
-def test_submit_stages_the_collector_config_and_exports_the_token_only_to_the_shell(tmp_path, monkeypatch):
+def test_submit_stages_the_collector_config_and_keeps_the_token_in_the_private_payload(tmp_path, monkeypatch):
     monkeypatch.setenv("OTEL_TOKEN", "secret-token")
     conn = _FakeConnection(["__GYM_JOB:scicode:0:111 "])
     _install(monkeypatch, conn, tmp_path)
@@ -941,9 +1013,14 @@ def test_submit_stages_the_collector_config_and_exports_the_token_only_to_the_sh
     assert "secret-token" not in (bench_dir / "otel" / "collector.yaml").read_text()
     assert "secret-token" not in (Path(record.run_dir) / RESOLVED_CONFIG_NAME).read_text()
 
-    commands = conn.commands[0]
-    assert commands[0] == "export OTEL_TOKEN=secret-token"
-    assert commands[1].startswith("out=$(sbatch --parsable ")
+    payload = _private_payload(record)
+    assert payload["forwarded"]["OTEL_TOKEN"] == "secret-token"
+    assert payload["roles"]["collector"] == {
+        "OTEL_TOKEN": "runtime:OTEL_TOKEN",
+        "SLURM_JOB_ID": "runtime:SLURM_JOB_ID",
+    }
+    assert "secret-token" not in "\n".join(_scheduler_commands(conn))
+    assert all(not command.startswith("export ") for batch in conn.commands for command in batch)
 
 
 def test_submit_without_otel_neither_stages_nor_exports(tmp_path, monkeypatch):
@@ -954,7 +1031,10 @@ def test_submit_without_otel_neither_stages_nor_exports(tmp_path, monkeypatch):
     record = SlurmExecutor().run(_executor_config(tmp_path, otel={"enabled": False}))
 
     assert not (Path(record.run_dir) / "scicode" / "otel").exists()
-    assert not conn.commands[0][0].startswith("export ")
+    payload = _private_payload(record)
+    assert "OTEL_TOKEN" not in payload["forwarded"]
+    assert "OTEL_TOKEN" not in payload["roles"]["collector"]
+    assert "OTEL_TOKEN" not in "\n".join(_scheduler_commands(conn))
 
 
 def _engine_rollout_id_statements(doc):

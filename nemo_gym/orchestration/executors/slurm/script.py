@@ -93,9 +93,9 @@ _SCRIPT_TEMPLATE = """\
 #!/bin/bash
 {directives}
 
-{resume_prologue}
-
 {ray_prelude}
+
+{resume_prologue}
 
 {service_commands}
 
