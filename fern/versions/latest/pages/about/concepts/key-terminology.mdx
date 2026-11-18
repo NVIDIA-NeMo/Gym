@@ -61,6 +61,8 @@ The **model** (also called the **policy**) is what you call for generation — l
 | **Verifier** | Scores a task attempt into a **reward** (typically 0–1) via `verify()` on the resources server, or by a task folder's `tests/` (or its dataset's shared `verifier.py`), run in the task's sandbox or a fresh one. Also called scorer or grader. See [Build Verifiers](/build-verifiers) and [Task Folder Verifiers](/main/data/task-folders/task-folder-verifiers). |
 | **Reward** | Numerical score (typically 0.0–1.0) for how well the attempt did — used as eval metrics and as the RL learning signal. |
 | **Sandbox** | Runtime with isolated execution per attempt (e.g. one container). Broader runtimes (local process, Docker, Apptainer) host execution. See [Sandboxes](/infrastructure/sandbox). |
+| **Sandbox owner** | The one server that starts a sandbox and stops it, through its `OwnedSandboxes` (`self.sandboxes`): the server that holds the episode's environment state for a task sandbox, or the agent server for a harness sandbox it starts because nothing was lent. |
+| **Lend** / **borrow** | The owner lends a sandbox by handing out operate-scope `SandboxAccess`; an agent that borrows it runs commands and transfers files in it, and never stops it. |
 
 ### Sessions
 
@@ -78,7 +80,7 @@ Resources servers and agent servers keep per-episode state in sessions. Use thes
 | **Saved reply** | The first close's response, which an agent server returns to a retried close. | close receipt, retained close response |
 | **Release** | Give up what a session or an episode holds, such as its sandbox and in-memory state. A worker also releases its ownership of a session ID, the opposite of acquiring it. | free |
 | **Lost** | The server no longer holds the session: a 404 on a tool call, or a masked verify with `session_lost`. An agent seed or close whose cookie names a lost agent session is refused with 409: the session is no longer available. | — |
-| **Owner** | With several workers, the worker that holds a session's state and serves its requests; its owner file names it. | claim, claimant |
+| **Owner** | With several workers, the worker that holds a session's state and serves its requests; its owner file names it. Not the **sandbox owner**. | claim, claimant |
 | **Claim** | Checkpoint restore only: a replacement attempt takes the restored record; one nobody took is **unclaimed**. | claim for routing ownership |
 | **Terminal** | A refusal the environment server does not retry. | final |
 | **Conflict** | A 409 refusal of a session request: resources servers raise `ResourcesSessionConflictError` and agent servers raise `AgentSessionConflictError`. Session routing answers its own 409s without these errors, such as for a cookie and body that name different sessions, or for a session ID another worker already owns. | `HTTPException(409, ...)` in session code |

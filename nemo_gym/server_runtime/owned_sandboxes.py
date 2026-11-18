@@ -1,19 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Checkpoint the sandboxes a server owns with partial-rollout checkpoints.
+"""The sandboxes a server owns: their start, lending, stop and partial-rollout checkpoints.
 
-A sandbox is session state outside Gym's process. Its owner, a resources server, an agent or an environment server,
-implements its participant's checkpoint hooks (``export_session_states`` and friends from ``nemo_gym.server_runtime._checkpoint``)
-by delegating to a :class:`SandboxSessionCheckpointer`. The checkpointer knows sandboxes by an opaque key, the
-owner's session ID or a name within it, and nothing about the owner's protocol.
+Every sandbox has one owner, the server that starts it. Each resources, environment and agent server holds an
+:class:`OwnedSandboxes` as ``SimpleServer.sandboxes`` to start, lend and stop the sandboxes it owns; servers move onto
+it one family at a time. It knows sandboxes by an opaque key, the owner's session ID or a name within it such as ``session/grader``, and nothing
+about the owner's protocol. Anyone else only borrows a sandbox, through the operate-scope access ``access`` gives.
+
+A sandbox is also session state outside Gym's process. An owner that checkpoints implements its participant's
+checkpoint hooks (``export_session_states`` and friends from ``nemo_gym.server_runtime._checkpoint``) by delegating
+to the same instance.
 
 The restore point of a sandbox is an explicit snapshot taken at commit: never the live sandbox, which keeps changing
 once the episode continues, and never a paused state, which the backend may consume on resume.
 
 A sandbox and a snapshot are two objects outside Gym with two lifetimes.
 
-A sandbox lives while its owner uses it. :meth:`~SandboxSessionCheckpointer.stop` stops it when its session ends
-or is retired, and :meth:`~SandboxSessionCheckpointer.aclose` stops every one left at the server's shutdown; a
+A sandbox lives while its owner uses it. :meth:`~OwnedSandboxes.stop` stops it when its session ends
+or is retired, and :meth:`~OwnedSandboxes.aclose` stops every one left at the server's shutdown; a
 restore stops the crashed process's sandboxes it supersedes. What a crashed process leaves running ends with the
 lifetime the provider gives a sandbox, the spec's ``ttl_s`` at the latest. A provider whose sandboxes would outlive
 a crashed process by that much should end them sooner, for example with a lease that only the creating process
@@ -21,11 +25,11 @@ renews; the provider's documentation says how. Forks made by a restore go throug
 lifetime.
 
 A snapshot lives while a checkpoint the controller may restore names it. No episode event deletes one: a checkpoint
-taken before a rollout finished still restores that rollout. Instead the checkpointer keeps an index on disk, an
+taken before a rollout finished still restores that rollout. Instead the owner keeps an index on disk, an
 empty file ``<state_dir>/<server>/snapshots/<checkpoint id>/<snapshot id>`` per snapshot, and the controller's
-release decides, through :meth:`~SandboxSessionCheckpointer.delete_snapshots`:
+release decides, through :meth:`~OwnedSandboxes.delete_snapshots`:
 
-- At commit, :meth:`~SandboxSessionCheckpointer.export` snapshots every live sandbox it is asked for. The moment the
+- At commit, :meth:`~OwnedSandboxes.export` snapshots every live sandbox it is asked for. The moment the
   service returns a snapshot's id, its file is written, before the snapshot is awaited; then the export waits until
   each snapshot is ready. A snapshot that fails or does not become ready in time is taken again, up to
   ``snapshot_attempts`` times, and every attempt is indexed. The sandbox keeps running; the episode continues in it
@@ -33,7 +37,7 @@ release decides, through :meth:`~SandboxSessionCheckpointer.delete_snapshots`:
   guarantees that for a resources server whose ``checkpoint_verify`` is ``"wait"``, the default. With ``"replay"``
   its ``/verify`` is admitted while a checkpoint is open, so an owner whose ``/verify`` runs commands in the
   sandbox, or stops it, must keep ``checkpoint_verify`` at ``"wait"``.
-- :meth:`~SandboxSessionCheckpointer.delete_snapshots` receives every checkpoint the controller may still restore
+- :meth:`~OwnedSandboxes.delete_snapshots` receives every checkpoint the controller may still restore
   and deletes the snapshots indexed under any other checkpoint, removing each file once the service confirms the
   snapshot is gone. It returns only once it has tried every delete, so the participant that awaits it admits no
   commit meanwhile and a later checkpoint is never among the ones it drops. The index outlives the process, so a
@@ -43,14 +47,14 @@ release decides, through :meth:`~SandboxSessionCheckpointer.delete_snapshots`:
   whose process died between the service's reply and the file write. That sweep relies on the provider keeping
   the name a snapshot is taken with (see :class:`~nemo_gym.sandbox.providers.base.SupportsSandboxSnapshot`): on a
   provider that drops it, such a snapshot is never found.
-- After a crash, :meth:`~SandboxSessionCheckpointer.restore` rebuilds each sandbox in a fresh process from its
+- After a crash, :meth:`~OwnedSandboxes.restore` rebuilds each sandbox in a fresh process from its
   snapshot (a fork), whatever happened to the live sandbox since. It validates every state first and installs all or
   nothing. The superseded sandboxes are stopped afterwards, best effort and off the restore's critical path. A
   restore deletes no snapshot.
 
-Nothing but a release deletes a snapshot: the checkpointer cannot tell which checkpoints the controller may still
+Nothing but a release deletes a snapshot: the owner cannot tell which checkpoints the controller may still
 restore, and it does not assume the provider expires snapshots. Under a controller that never releases, every
-commit therefore leaves one snapshot per live sandbox, for good, and :meth:`~SandboxSessionCheckpointer.export`
+commit therefore leaves one snapshot per live sandbox, for good, and :meth:`~OwnedSandboxes.export`
 warns once the index holds more than a few checkpoints. A job that ended without a last release leaves the
 snapshots of the checkpoints it had not dropped. Either way they are found by their name prefix and deleted with
 the provider's own tooling.
@@ -83,12 +87,14 @@ import time
 from collections.abc import AsyncIterator, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Callable, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, TypeAdapter, ValidationError
 
+from nemo_gym.config.config_types import BaseRunServerInstanceConfig
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.api import AsyncSandbox
+from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers.base import (
     ConnectableProvider,
     SandboxProvider,
@@ -97,6 +103,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxSpec,
     SupportsSandboxSnapshot,
 )
+from nemo_gym.sandbox.providers.registry import create_provider
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 
 
@@ -112,7 +119,7 @@ _UNRESTORED_PROVIDER_OPTIONS = ("image_auth", "snapshot_id")
 _STATE_DIR_ID_FILE = "state_dir_id"
 _HASH_CHARS = 8
 _MARK_ATTEMPTS = 10
-# What follows the prefix in a name this checkpointer gives: the checkpoint's hash, the key's hash and the attempt.
+# What follows the prefix in a name this owner gives: the checkpoint's hash, the key's hash and the attempt.
 _SNAPSHOT_NAME_SUFFIX = re.compile(rf"([0-9a-f]{{{_HASH_CHARS}}})-[0-9a-f]{{{_HASH_CHARS}}}-[1-9][0-9]*")
 # Pause between tries for the index lock while another release holds it.
 _LOCK_POLL_S = 0.1
@@ -375,13 +382,16 @@ class _Entry:
     spec: SandboxSpec
 
 
-class SandboxSessionCheckpointer:
-    """The sandboxes one server owns, by key, and their checkpoint operations.
+class OwnedSandboxes:
+    """The sandboxes one server owns on one provider, by key, and their checkpoint operations.
 
-    ``state_dir`` and ``server_name`` place the snapshot index at ``<state_dir>/<server_name>/snapshots``; see the
-    module docstring for what ``state_dir`` must be. Without a ``state_dir``, for a server whose checkpointing is off,
-    sandboxes are tracked and stopped but cannot be exported. ``parallelism`` bounds concurrent snapshot submits,
-    creates, stops and deletes against the backend; size it with the commit deadline.
+    A server reaches its instance as ``self.sandboxes`` (see :meth:`for_server`); tests and tools may build one
+    directly. ``state_dir`` and ``server_name`` place the snapshot index at ``<state_dir>/<server_name>/snapshots``;
+    see the module docstring for what ``state_dir`` must be. Without a ``state_dir``, for a server whose checkpointing
+    is off, sandboxes are tracked and stopped but cannot be exported. ``parallelism`` bounds concurrent snapshot
+    submits, creates, stops and deletes against the backend; size it with the commit deadline.
+    ``provider_config_ref`` names the provider's config block, which :meth:`access` hands to a borrower.
+    With ``owns_provider``, :meth:`aclose` closes the provider too; otherwise the caller that made it closes it.
     """
 
     def __init__(
@@ -393,6 +403,8 @@ class SandboxSessionCheckpointer:
         parallelism: int = 16,
         snapshot_attempts: int = 3,
         snapshot_retry_delay_s: float = 5.0,
+        provider_config_ref: Optional[str] = None,
+        owns_provider: bool = False,
     ) -> None:
         config = SandboxCheckpointConfig(
             parallelism=parallelism,
@@ -400,6 +412,10 @@ class SandboxSessionCheckpointer:
             snapshot_retry_delay_s=snapshot_retry_delay_s,
         )
         self._provider = provider
+        self._owns_provider = owns_provider
+        self._provider_config_ref = provider_config_ref
+        # Set by the server that holds this instance, so :meth:`on` can give its instance for another provider.
+        self._on: Optional[Callable[[str], "OwnedSandboxes"]] = None
         self._server_name = _path_component(server_name, "server name")
         self._snapshot_attempts = config.snapshot_attempts
         self._snapshot_retry_delay_s = config.snapshot_retry_delay_s
@@ -435,9 +451,57 @@ class SandboxSessionCheckpointer:
         *,
         state_dir: str | os.PathLike[str] | None,
         server_name: str,
-    ) -> "SandboxSessionCheckpointer":
-        """Build a checkpointer from a server's ``SandboxCheckpointConfig``; the rest as in the constructor."""
+    ) -> "OwnedSandboxes":
+        """Build an instance from a server's ``SandboxCheckpointConfig``; the rest as in the constructor."""
         return cls(provider, state_dir=state_dir, server_name=server_name, **config.model_dump())
+
+    @classmethod
+    def for_server(
+        cls,
+        *,
+        config: BaseRunServerInstanceConfig,
+        provider_field: str,
+        global_config: Mapping[str, Any],
+        on: Optional[Callable[[str], "OwnedSandboxes"]] = None,
+    ) -> "OwnedSandboxes":
+        """The instance a server holds for the provider its config names in ``provider_field``.
+
+        ``config`` is the server's config and ``global_config`` the merged global config, which resolves a named
+        provider and ``checkpoint.state_dir``. An instance for a field other than ``sandbox_provider`` gets its own
+        server name, ``<server>.<field>``, so its snapshot index and snapshot names stay apart. The instance owns the
+        provider it creates and closes it in :meth:`aclose`. ``on`` gives the server's instance for another field,
+        which :meth:`on` calls.
+
+        Raises:
+            ValueError: If the config has no field ``provider_field`` or leaves it unset, or checkpointing is on
+                without a valid ``checkpoint.state_dir``.
+        """
+        if provider_field not in type(config).model_fields:
+            raise ValueError(f"{config.name} has no config field {provider_field!r} naming a sandbox provider")
+        reference = getattr(config, provider_field, None)
+        if reference is None:
+            raise ValueError(f"{config.name} sets no {provider_field}, so it cannot own sandboxes on it")
+        provider = create_provider(resolve_provider_config(reference, global_config))
+        suffix = "" if provider_field == "sandbox_provider" else f".{provider_field}"
+        owned = cls(
+            provider,
+            state_dir=checkpoint_state_dir(global_config),
+            server_name=f"{config.name}{suffix}",
+            provider_config_ref=reference if isinstance(reference, str) else None,
+            owns_provider=True,
+        )
+        owned._on = on
+        return owned
+
+    def on(self, provider_field: str) -> "OwnedSandboxes":
+        """The same server's instance for the provider its config names in ``provider_field``, created on first use.
+
+        Raises:
+            RuntimeError: If no server holds this instance.
+        """
+        if self._on is None:
+            raise RuntimeError("only an instance a server holds as self.sandboxes knows the server's other providers")
+        return self._on(provider_field)
 
     @property
     def provider(self) -> SandboxProvider:
@@ -482,8 +546,8 @@ class SandboxSessionCheckpointer:
 
         The default user and working directory are the exception: an export reads them from the sandbox, so a fork
         runs commands as the sandbox did when it was exported, and takes only the rest of its spec from ``spec``.
-        The sandbox must run on this checkpointer's provider without owning it
-        (``AsyncSandbox(checkpointer.provider, spec, owns_provider=False)``): the provider is shared by every
+        The sandbox must run on this instance's provider without owning it
+        (``AsyncSandbox(owned.provider, spec, owns_provider=False)``): the provider is shared by every
         sandbox, and a sandbox that owned it would close it for all of them when stopped.
         """
         self._require_open()
@@ -491,11 +555,11 @@ class SandboxSessionCheckpointer:
             raise ValueError(f"{key!r} already has a sandbox")
         if sandbox.owns_provider:
             raise ValueError(
-                f"the sandbox of {key!r} owns its provider; create it with owns_provider=False on the checkpointer's "
+                f"the sandbox of {key!r} owns its provider; create it with owns_provider=False on the instance's "
                 "provider"
             )
         if sandbox.provider is not self._provider:
-            raise ValueError(f"the sandbox of {key!r} is not on the checkpointer's provider")
+            raise ValueError(f"the sandbox of {key!r} is not on this instance's provider")
         self._entries[key] = _Entry(sandbox=sandbox, spec=spec)
 
     async def create(self, key: str, spec: SandboxSpec) -> AsyncSandbox:
@@ -518,7 +582,7 @@ class SandboxSessionCheckpointer:
 
     def _require_open(self) -> None:
         if self._closed:
-            raise RuntimeError("the sandbox checkpointer is closed: it starts, adds and restores no more sandboxes")
+            raise RuntimeError("the owned sandboxes are closed: no sandbox is started, added or restored any more")
 
     def _take_keys(self, keys: Iterable[str]) -> None:
         self._pending.update(keys)
@@ -530,16 +594,25 @@ class SandboxSessionCheckpointer:
         if not self._pending:
             self._none_pending.set()
 
-    async def access(self, key: str, *, provider_config_ref: str, workdir: str) -> SandboxAccess:
+    async def access(self, key: str, *, workdir: str, provider_config_ref: Optional[str] = None) -> SandboxAccess:
         """Access to ``key``'s current sandbox for a borrower, such as an agent that runs a harness in it.
 
         A restore rebuilds the sandbox from its snapshot under a new id, so a borrower that kept an older access must
         be given the new one after a restore. The access lets the borrower operate the sandbox but not destroy it,
         on a provider that scopes descriptors: the owner still has to checkpoint it and stops it itself.
+        ``provider_config_ref`` defaults to the one this instance was built with.
+
+        Raises:
+            KeyError: If ``key`` has no sandbox.
+            ValueError: If neither this call nor the instance names the provider's config block, as for a server
+                whose ``sandbox_provider`` is an inline block rather than a named one.
         """
         entry = self._entries.get(key)
         if entry is None:
             raise KeyError(f"{key!r} has no sandbox")
+        provider_config_ref = provider_config_ref or self._provider_config_ref
+        if provider_config_ref is None:
+            raise ValueError("lending needs provider_config_ref: the borrower resolves the provider by that name")
         descriptor = await entry.sandbox.serialize(scope="operate")
         connection = DirectSandboxConnection(provider_config_ref=provider_config_ref, descriptor=descriptor)
         return SandboxAccess(connection=connection, workdir=workdir)
@@ -557,15 +630,15 @@ class SandboxSessionCheckpointer:
         await self._stop_forks()
 
     async def aclose(self) -> None:
-        """Stop every sandbox this checkpointer is responsible for; call it at the server's shutdown.
+        """Stop every sandbox this instance owns; call it at the server's shutdown.
 
         That is every key's sandbox and every fork a failed restore left running, after the background work has
-        ended. The checkpointer is closed first: ``create``, ``add`` and ``restore`` raise ``RuntimeError`` from
+        ended. The instance is closed first: ``create``, ``add`` and ``restore`` raise ``RuntimeError`` from
         then on, and the ones already running are waited for, so a restore that installs its forks during the
         shutdown has them stopped here. A sandbox whose stop fails or takes longer than ``STOP_TIMEOUT_S`` is
         logged and stays tracked (its key stays in :attr:`keys`), the others are still stopped, and calling this
-        again tries the rest again. Snapshots are not touched: the controller may still restore from them, and
-        only its release deletes them.
+        again tries the rest again. An instance that owns its provider closes it once every sandbox is stopped.
+        Snapshots are not touched: the controller may still restore from them, and only its release deletes them.
         """
         self._closed = True
         await self._none_pending.wait()
@@ -575,6 +648,11 @@ class SandboxSessionCheckpointer:
             if isinstance(outcome, BaseException):
                 LOGGER.warning("sandbox of %s was not stopped at shutdown; its lifetime ends it: %r", key, outcome)
         await self.settle()
+        if self._owns_provider and not self._entries and not self._unstopped_forks:
+            # Last, and only once nothing is left to stop, so a later call can still retry a failed stop. Closing
+            # runs the provider's own cleanup too, such as reaping a create the shutdown abandoned.
+            self._owns_provider = False
+            await self._provider.aclose()
 
     # -- commit -------------------------------------------------------------------------------------------------
 
@@ -922,7 +1000,7 @@ class SandboxSessionCheckpointer:
         for snapshot in listed:
             name = _SNAPSHOT_NAME_SUFFIX.fullmatch((snapshot.name or "")[len(prefix) :])
             if name is None:
-                continue  # not a name this checkpointer gives: leave it alone
+                continue  # not a name this owner gives: leave it alone
             if name.group(1) in kept_hashes or snapshot.snapshot_id in indexed:
                 continue
             unindexed.append(snapshot.snapshot_id)
