@@ -54,3 +54,15 @@ adopted_from:
   ref: 73dd424784fbdeab599557fcba3d77559c89d1ee  # pragma: allowlist secret
   reconciled: '2026-09-16'
 lifecycle: active
+protocols:
+- name: brokenarxiv_0626/config_with_system
+  config_path: config_with_system.yaml
+  description: BrokenArXiv June 2026 with a system prompt, false statements from recent arXiv papers that the model is asked to prove, judged on whether it notices with MathArena's 0-2 rubric.
+  datasets:
+  - name: brokenarxiv_0626
+    type: benchmark
+    jsonl_fpath: benchmarks/brokenarxiv_0626/data/brokenarxiv_0626_benchmark.jsonl
+    prepare_script: benchmarks/brokenarxiv_0626/prepare.py
+    prompt_config: benchmarks/brokenarxiv_0626/prompts/with_system.yaml
+    num_repeats: 1
+  standard_prompt_config: benchmarks/brokenarxiv_0626/prompts/with_system.yaml

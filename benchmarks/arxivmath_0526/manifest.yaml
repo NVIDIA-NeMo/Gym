@@ -52,3 +52,15 @@ adopted_from:
   ref: 69f701c7f266bfba235ef302ff9b19093f7455bb  # pragma: allowlist secret
   reconciled: '2026-09-12'
 lifecycle: active
+protocols:
+- name: arxivmath_0526/config_with_system
+  config_path: config_with_system.yaml
+  description: ArXivMath May 2026 with a system prompt, symbolic-first grading, and a Luna judge fallback with swapped-answer confirmation.
+  datasets:
+  - name: arxivmath_0526
+    type: benchmark
+    jsonl_fpath: benchmarks/arxivmath_0526/data/arxivmath_0526_withsys.jsonl
+    prepare_script: benchmarks/arxivmath_0526/prepare.py
+    prompt_config: benchmarks/arxivmath_0526/prompts/with_system.yaml
+    num_repeats: 1
+  standard_prompt_config: benchmarks/arxivmath_0526/prompts/with_system.yaml
