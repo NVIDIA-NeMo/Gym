@@ -191,6 +191,8 @@ class NeMoAgent(Agent):
         that field, including think-only responses. Sanitize at the adapter
         boundary and retry bad summaries before replacing any history.
         """
+        # A summary request that overflows drops turns from ``current_messages``; a failed compaction reports them all.
+        original_messages = list(messages)
         current_messages = messages
         while True:
             try:
@@ -260,7 +262,7 @@ class NeMoAgent(Agent):
                     raise CompactionSummaryError(
                         "Compaction summarizer produced no usable text after "
                         f"{len(attempts)} attempts; refusing to erase context",
-                        current_messages,
+                        original_messages,
                     )
 
                 summary_bridge_prompt = MESSAGE_SUMMARIZER_BRIDGE_TEMPLATE.format(summary=summary_content)
