@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import time
 from hashlib import sha256
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -384,3 +385,88 @@ def test_a_hosted_catalog_keeps_only_the_configured_model() -> None:
 
     assert served["listed"] == [provenance.ServedBackend(id="gpt-6-luna")]
     assert served["unlisted"] == [provenance.ServedBackend(unknown_reason="configured model not among 3 listed")]
+
+
+def test_provenance_copies_no_identifier_from_a_credential_or_environment_mapping() -> None:
+    config = {
+        "harbor": {"secrets": {"model": "sk-harbor"}},
+        "policy_model": {
+            "responses_api_models": {
+                "local_vllm_model": {"model": "nemotron", "vllm_serve_env_vars": {"model_name": "sk-env"}}
+            }
+        },
+        "sandbox": {"docker": {"images": {"auth": {"model": "sk-registry"}}}},
+        "router": {"session_id_headers": {"model": "sk-header"}},
+    }
+
+    dumped = provenance.build_provenance(config).model_dump_json()
+
+    assert all(secret not in dumped for secret in ("sk-harbor", "sk-env", "sk-registry", "sk-header"))
+    assert "nemotron" in dumped
+
+
+def test_a_protocol_relative_or_at_sign_password_leaves_no_credential() -> None:
+    record = provenance.build_provenance(
+        {
+            "checkpoint": "//user:hunter2@host.example/ckpt?token=abc",  # pragma: allowlist secret
+            "model": "user:p@ss@host/model",  # pragma: allowlist secret
+        }
+    )
+
+    assert record.models[provenance.TOP_LEVEL_PATH] == {"checkpoint": "//host.example/ckpt", "model": "host/model"}
+
+
+class _MalformedHandler(_ModelsHandler):
+    def do_GET(self) -> None:
+        body = orjson.dumps({"data": 123})
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def test_one_bad_backend_does_not_lose_the_others(tmp_path: Path) -> None:
+    good = HTTPServer(("127.0.0.1", 0), _ModelsHandler)
+    bad = HTTPServer(("127.0.0.1", 0), _MalformedHandler)
+    for server in (good, bad):
+        Thread(target=server.serve_forever, daemon=True).start()
+    good_url = f"http://127.0.0.1:{good.server_port}/v1"
+    rotating = tmp_path / "endpoint"
+    rotating.write_text("")
+    config = {
+        "malformed": {"responses_api_models": {"vllm_model": {"base_url": f"http://127.0.0.1:{bad.server_port}/v1"}}},
+        "unresolved": {"responses_api_models": {"vllm_model": {"base_url": "${oc.env:POLICY_URL}/v1"}}},
+        "rotating": {"responses_api_models": {"vllm_model": {"endpoint_file": str(rotating), "base_url": [good_url]}}},
+        "policy_model": {"responses_api_models": {"vllm_model": {"base_url": good_url}}},
+    }
+    try:
+        served = provenance.served_models(config)
+    finally:
+        good.shutdown()
+        bad.shutdown()
+
+    reported = provenance.ServedBackend(id="nemotron-super-3.5", root="/checkpoints/super-3/step-900")
+    assert served["malformed"] == [provenance.ServedBackend(unknown_reason="malformed /models answer")]
+    assert served["unresolved"] == [provenance.ServedBackend(unknown_reason="unresolved base_url")]
+    assert served["rotating"] == [reported]
+    assert served["policy_model"] == [reported]
+
+
+def test_backends_are_asked_at_once(monkeypatch) -> None:
+    def slow(base_url: str, api_key: object, configured: set[str]) -> list[provenance.ServedBackend]:
+        time.sleep(0.5)
+        return [provenance.ServedBackend(id=base_url)]
+
+    monkeypatch.setattr(provenance, "_ask_backend", slow)
+    urls = [f"http://10.0.0.{index}/v1" for index in range(provenance.SERVED_MODEL_BACKEND_LIMIT)]
+    config = {
+        "policy_model": {"responses_api_models": {"vllm_model": {"base_url": urls}}},
+        "judge_model": {"responses_api_models": {"vllm_model": {"base_url": urls[:2]}}},
+    }
+
+    started = time.monotonic()
+    served = provenance.served_models(config)
+
+    assert time.monotonic() - started < 2
+    assert [backend.id for backend in served["policy_model"]] == urls
+    assert [backend.id for backend in served["judge_model"]] == urls[:2]

@@ -7,16 +7,17 @@ resolved config with secrets masked."""
 import logging
 import urllib.request
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from hashlib import sha256
 from itertools import islice
 from pathlib import Path
 from typing import Literal
-from urllib.parse import urlsplit, urlunsplit
 
 import orjson
 from omegaconf import DictConfig, ListConfig, OmegaConf
 from pydantic import BaseModel, Field, JsonValue
 
+from nemo_gym.config.secret_utils import is_credential_name, looks_like_secret_key, url_without_credentials
 from nemo_gym.data.prompt import load_prompt_config
 from nemo_gym.package_info import __version__
 from nemo_gym.utils.gym_commit import installed_gym_commit
@@ -62,6 +63,8 @@ _MODEL_KEYS = frozenset(
 SERVED_MODEL_TIMEOUT_S = 5.0
 #: Backends asked per model server; a long `base_url` list is a replica set that normally agrees.
 SERVED_MODEL_BACKEND_LIMIT = 8
+#: Backends asked at once, so a run's unreachable backends cost about one timeout rather than one each.
+SERVED_MODEL_PROBE_WORKERS = 32
 
 
 class ServedBackend(BaseModel):
@@ -101,18 +104,10 @@ class RunProvenance(BaseModel):
     efb_config_ref: str | None = None
 
 
-def _identifier(value: str) -> str:
-    if "://" not in value:
-        userinfo, separator, remainder = value.partition("@")
-        if not (separator and "/" not in userinfo):
-            return value
-        parsed = urlsplit("//" + remainder)
-        host = parsed.hostname or ""
-        if not ("." in host or ":" in host or host == "localhost" or parsed.port is not None or ":" in userinfo):
-            return value
-        return urlunsplit(("", parsed.netloc, parsed.path, "", "")).removeprefix("//")
-    parsed = urlsplit(value)
-    return urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path, "", ""))
+def _private(key: object) -> bool:
+    """A mapping never searched for identifiers: whatever it holds can be a credential under any name."""
+    name = str(key).lower()
+    return looks_like_secret_key(key) or is_credential_name(key) or name == "env" or name.endswith("env_vars")
 
 
 def _sampling(config: Mapping) -> dict[str, JsonValue]:
@@ -130,14 +125,16 @@ def build_provenance(
     record = RunProvenance(gym_commit=installed_gym_commit())
     efb_config_ref = config.get("efb_config_ref")
     if isinstance(efb_config_ref, str):
-        record.efb_config_ref = _identifier(efb_config_ref)
+        record.efb_config_ref = url_without_credentials(efb_config_ref)
     seed = config.get("seed")
     if isinstance(seed, int) and not isinstance(seed, bool):
         record.seed = seed
 
     def visit(node: Mapping, path: str) -> None:
         model = {
-            key: _identifier(value) for key, value in node.items() if key in _MODEL_KEYS and isinstance(value, str)
+            key: url_without_credentials(value)
+            for key, value in node.items()
+            if key in _MODEL_KEYS and isinstance(value, str)
         }
         if model:
             record.models[path or TOP_LEVEL_PATH] = model
@@ -147,9 +144,9 @@ def build_provenance(
         for key, value in node.items():
             location = f"{path}.{key}" if path else str(key)
             if key in {"input_jsonl_fpath", "dataset_name", "dataset_id"} and isinstance(value, str):
-                record.datasets.append(_identifier(value))
+                record.datasets.append(url_without_credentials(value))
             if key == "prompt_config" and isinstance(value, str):
-                record.prompt_config_paths[location] = _identifier(value)
+                record.prompt_config_paths[location] = url_without_credentials(value)
             if (
                 key in {"chat_template", "chat_template_kwargs", "judge_prompt", "judge_prompt_template"}
                 and value is not None
@@ -164,14 +161,7 @@ def build_provenance(
                 ).hexdigest()
             elif key == "judge_prompt_version" and isinstance(value, (str, int)):
                 record.judge_prompt_versions[location] = str(value)
-            elif isinstance(value, Mapping) and key not in {
-                "env",
-                "headers",
-                "default_headers",
-                "openai_default_headers",
-                "metadata",
-                "extra_body",
-            }:
+            elif isinstance(value, Mapping) and key not in {"metadata", "extra_body"} and not _private(key):
                 visit(value, location)
             if key == "extra_body" and isinstance(value, Mapping):
                 selected = _sampling(value)
@@ -183,7 +173,7 @@ def build_provenance(
     if prompt_config:
         prompt = load_prompt_config(prompt_config)
         record.prompt_config = {
-            "path": _identifier(prompt_config),
+            "path": url_without_credentials(prompt_config),
             "sha256": sha256(orjson.dumps(prompt.model_dump(), option=orjson.OPT_SORT_KEYS)).hexdigest(),
         }
     if materialized_fpath is not None:
@@ -212,7 +202,7 @@ def build_provenance(
                     continue
                 source = row.get("task_source")
                 if isinstance(source, str):
-                    datasets.add(_identifier(source))
+                    datasets.add(url_without_credentials(source))
                 selected = _sampling(params)
                 extra = metadata.get("extra_body") or {}
                 if isinstance(extra, str):
@@ -233,7 +223,10 @@ def build_provenance(
 def _backend_urls(server: Mapping) -> list[str]:
     endpoint_file = server.get("endpoint_file")
     if isinstance(endpoint_file, str) and endpoint_file:
-        return [Path(endpoint_file).read_text(encoding="utf-8").strip()]
+        published = Path(endpoint_file).read_text(encoding="utf-8").strip()
+        # An empty file is unpublished, as the model server reads it: it keeps serving from its `base_url`.
+        if published:
+            return [published]
     # `base_url` (vLLM), `openai_base_url` (OpenAI-compatible), `switchyard_base_url`, ...
     base_url = next((value for key, value in server.items() if str(key).endswith("base_url") and value), None)
     urls = [base_url] if isinstance(base_url, str) else list(base_url or [])
@@ -241,23 +234,28 @@ def _backend_urls(server: Mapping) -> list[str]:
 
 
 def _ask_backend(base_url: str, api_key: object, configured: set[str]) -> list[ServedBackend]:
-    request = urllib.request.Request(base_url.rstrip("/") + "/models")
-    if isinstance(api_key, str) and api_key and not api_key.startswith("${"):
-        request.add_header("Authorization", f"Bearer {api_key}")
+    """What one backend serves; any failure, from an unresolved `${...}` URL to a malformed answer, is its own."""
+    if "${" in base_url:
+        return [ServedBackend(unknown_reason="unresolved base_url")]
     try:
+        request = urllib.request.Request(base_url.rstrip("/") + "/models")
+        if isinstance(api_key, str) and api_key and not api_key.startswith("${"):
+            request.add_header("Authorization", f"Bearer {api_key}")
         with urllib.request.urlopen(request, timeout=SERVED_MODEL_TIMEOUT_S) as response:
             models = orjson.loads(response.read()).get("data") or []
+        if not isinstance(models, list):
+            return [ServedBackend(unknown_reason="malformed /models answer")]
+        served = [
+            ServedBackend(
+                id=url_without_credentials(model["id"]) if isinstance(model.get("id"), str) else None,
+                root=url_without_credentials(model["root"]) if isinstance(model.get("root"), str) else None,
+            )
+            for model in models
+            if isinstance(model, Mapping)
+        ]
     except Exception as error:
         # The message may carry the URL and its credentials; keep only the type.
         return [ServedBackend(unknown_reason=type(error).__name__)]
-    served = [
-        ServedBackend(
-            id=_identifier(model["id"]) if isinstance(model.get("id"), str) else None,
-            root=_identifier(model["root"]) if isinstance(model.get("root"), str) else None,
-        )
-        for model in models
-        if isinstance(model, Mapping)
-    ]
     if len(served) > 1:
         # A hosted gateway lists its whole catalog; keep the configured model's entry. A single listed model is kept
         # as is, so a name or checkpoint that differs from the claim stays visible.
@@ -275,11 +273,13 @@ def served_models(config: Mapping[str, object]) -> dict[str, list[ServedBackend]
 
     `root` is the checkpoint a vLLM backend loaded; hosted APIs report no `root`, which stays unknown. Nothing is
     taken from the configured names, so a claimed model can be checked against the served one."""
-    result: dict[str, list[ServedBackend]] = {}
+    # Per model server, its entries in order: what is already known, or the index of a backend to ask.
+    plan: dict[str, list[ServedBackend | int]] = {}
+    probes: list[tuple[str, object, set[str]]] = []
     for name, node in config.items():
         if not _is_model_server(node):
             continue
-        backends: list[ServedBackend] = []
+        entries = plan.setdefault(str(name), [])
         for server in node["responses_api_models"].values():
             if not isinstance(server, Mapping):
                 continue
@@ -287,19 +287,26 @@ def served_models(config: Mapping[str, object]) -> dict[str, list[ServedBackend]
                 urls = _backend_urls(server)
                 api_key = next((value for key, value in server.items() if str(key).endswith("api_key")), None)
                 configured = {
-                    _identifier(value)
+                    url_without_credentials(value)
                     for key, value in server.items()
                     if key in ("model", "openai_model", "served_model_name") and isinstance(value, str)
                 }
             except Exception as error:
-                backends.append(ServedBackend(unknown_reason=type(error).__name__))
+                entries.append(ServedBackend(unknown_reason=type(error).__name__))
                 continue
             if not urls:
-                backends.append(ServedBackend(unknown_reason="no base_url"))
+                entries.append(ServedBackend(unknown_reason="no base_url"))
             for url in urls:
-                backends.extend(_ask_backend(url, api_key, configured))
-        result[str(name)] = backends
-    return result
+                entries.append(len(probes))
+                probes.append((url, api_key, configured))
+    answers: list[list[ServedBackend]] = []
+    if probes:
+        with ThreadPoolExecutor(max_workers=min(len(probes), SERVED_MODEL_PROBE_WORKERS)) as pool:
+            answers = list(pool.map(lambda probe: _ask_backend(*probe), probes))
+    return {
+        name: [backend for entry in entries for backend in (answers[entry] if isinstance(entry, int) else [entry])]
+        for name, entries in plan.items()
+    }
 
 
 def write_run_provenance(
@@ -321,7 +328,7 @@ def write_run_provenance(
             config, materialized_fpath=materialized_path_for(output_fpath), prompt_config=prompt_config
         )
         if input_jsonl_fpath is not None:
-            record.datasets = sorted({*record.datasets, _identifier(input_jsonl_fpath)})
+            record.datasets = sorted({*record.datasets, url_without_credentials(input_jsonl_fpath)})
         try:
             servers = config
             if not any(_is_model_server(node) for node in config.values()) and model_server_config is not None:
