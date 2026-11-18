@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Gym's provider supplies the unique /workspace bind and a fresh /proc mount.
+# Do not inherit site hooks, home, /run, credentials, GPU devices, or Slurm IPC.
+tmpfs        /dev          tmpfs x-create=dir,rw,nosuid,noexec,mode=755,private 0 -1
+/dev/null    /dev/null     none  x-create=file,bind,rw,nosuid,noexec,private 0 -1
+/dev/zero    /dev/zero     none  x-create=file,bind,rw,nosuid,noexec,private 0 -1
+/dev/full    /dev/full     none  x-create=file,bind,rw,nosuid,noexec,private 0 -1
+/dev/random  /dev/random   none  x-create=file,bind,rw,nosuid,noexec,private 0 -1
+/dev/urandom /dev/urandom  none  x-create=file,bind,rw,nosuid,noexec,private 0 -1
+tmpfs        /dev/shm      tmpfs x-create=dir,rw,nosuid,nodev,noexec,mode=1777,private 0 -1

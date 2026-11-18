@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from pathlib import Path
 from typing import Any
 
 import pytest
 from nooa import Agent
 from pydantic import ValidationError
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.nooa_agent.config import (
     NOOAAgentConfig,
     NOOAInvocationConfig,
@@ -83,6 +84,32 @@ def test_agent_config_rejects_unknown_fields() -> None:
     assert error["loc"] == ("max_step",)
 
 
+def test_agent_config_accepts_the_datasets_a_harbor_taskset_declares() -> None:
+    # `gym eval run <task folder>` declares the taskset's rows on the agent block, as nemo_gym.data.tasks.harbor
+    # writes them; rollout collection reads them from there.
+    entry = {"name": "mercor", "type": "benchmark", "verified": False, "jsonl_fpath": "/runs/tasks_agent.jsonl"}
+
+    datasets = agent_config(datasets=[entry]).datasets
+
+    assert [(dataset.name, dataset.type, str(dataset.jsonl_fpath)) for dataset in datasets] == [
+        ("mercor", "benchmark", "/runs/tasks_agent.jsonl")
+    ]
+    assert agent_config().datasets is None
+
+
+def test_agent_config_rejects_a_malformed_dataset_entry() -> None:
+    with pytest.raises(ValidationError, match="jsonl_fpath"):
+        agent_config(datasets=[{"name": "mercor", "type": "benchmark"}])
+
+
+def test_agent_config_accepts_and_validates_dataset_metadata() -> None:
+    assert agent_config().datasets is None
+    config = agent_config(datasets=[{"name": "harbor", "type": "benchmark", "jsonl_fpath": "tasks.jsonl"}])
+    assert config.datasets[0].jsonl_fpath == Path("tasks.jsonl")
+    with pytest.raises(ValidationError, match="jsonl_fpath"):
+        agent_config(datasets=[{"name": "harbor", "type": "benchmark"}])
+
+
 def test_agent_config_names_policy_call_budget_explicitly() -> None:
     assert agent_config().max_policy_calls is None
     assert agent_config(max_policy_calls=None).max_policy_calls is None
@@ -96,6 +123,14 @@ def test_agent_config_names_policy_call_budget_explicitly() -> None:
 def test_agent_config_rejects_nonpositive_policy_call_limits(limit: int) -> None:
     with pytest.raises(ValidationError, match="max_policy_calls"):
         agent_config(max_policy_calls=limit)
+
+
+def test_context_window_defaults_to_unknown_and_accepts_known_positive_limit() -> None:
+    assert agent_config().context_window is None
+    assert agent_config(context_window=262144).context_window == 262144
+    for invalid in (0, -1):
+        with pytest.raises(ValidationError, match="context_window"):
+            agent_config(context_window=invalid)
 
 
 def test_sandboxed_execution_mode_is_reserved_for_a_future_runner() -> None:
@@ -202,3 +237,16 @@ def test_shipped_yaml_declares_worker_and_close_defaults_below_episode_timeout()
     assert agent["session_close_timeout_seconds"] == defaults.session_close_timeout_seconds
     # These clocks start at different times; this does not reserve cleanup time within the episode.
     assert agent["sandbox_runner_timeout_seconds"] < environment["default_episode_timeout_seconds"]
+
+
+def test_runtime_wheelhouse_expands_user_and_resolves_absolute_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert agent_config(runtime_wheelhouse="~/bundle/../runtime").runtime_wheelhouse == tmp_path / "runtime"
+    assert agent_config(runtime_wheelhouse=tmp_path / "runtime").runtime_wheelhouse == tmp_path / "runtime"
+    for relative in ["bundle", "../bundle", Path(".")]:
+        with pytest.raises(ValidationError, match="must be an absolute path"):
+            agent_config(runtime_wheelhouse=relative)
+    with pytest.raises(ValidationError, match="Set NOOA_SWE_RUNTIME_WHEELHOUSE"):
+        agent_config(runtime_wheelhouse_required=True)

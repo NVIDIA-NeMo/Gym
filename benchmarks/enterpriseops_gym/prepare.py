@@ -52,7 +52,7 @@ def load_tool_snapshots() -> dict[str, list[dict[str, Any]]]:
     """Each gym server's tools, in the order its tools/list returns them."""
     from huggingface_hub import hf_hub_download
 
-    from nemo_gym.global_config import get_hf_token
+    from nemo_gym.config import get_hf_token
 
     tools: dict[str, list[dict[str, Any]]] = {}
     for name in TOOL_SNAPSHOTS:
@@ -118,7 +118,7 @@ def convert_task(
 def prepare() -> Path:
     from datasets import load_dataset
 
-    from nemo_gym.global_config import get_hf_token
+    from nemo_gym.config import get_hf_token
 
     tools_by_gym = load_tool_snapshots()
     splits = load_dataset(DATASET, "oracle", revision=DATASET_REVISION, token=get_hf_token())

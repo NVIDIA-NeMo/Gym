@@ -5,20 +5,24 @@
 import asyncio
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import PurePosixPath
+from time import monotonic
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agent_utils.sandbox_session import (
+from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
+    AgentSessionState,
     SandboxCommand,
     SandboxSession,
+    is_harness_termination_failure,
     shell_assignments,
 )
-from nemo_gym.base_responses_api_agent import AgentSessionState
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentObservationBundle
-from nemo_gym.sandbox.utils import read_text, upload_text
+from nemo_gym.core import MediaFile, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent
+from nemo_gym.sandbox import media_path, read_text, upload_bytes, upload_text
+from nemo_gym.trajectory import AgentObservationBundle
 
 
 LOG = logging.getLogger(__name__)
@@ -71,6 +75,8 @@ class OpenClawSandboxSession(AgentSessionState):
     runtime_info: HarnessProcessInfo | None = None
     observations: AgentObservationBundle | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
+    # An MCP probe whose termination is not yet confirmed; close stops it before releasing the sandbox.
+    probe: SandboxSession[dict[str, str]] | None = None
 
     async def upload_json(self, name: str, payload: JsonValue) -> None:
         """Stage adapter input using the shared text-transfer utility."""
@@ -81,7 +87,13 @@ class OpenClawSandboxSession(AgentSessionState):
         return await read_text(self.session.sandbox, path=f"{self.session.session_dir}/{name}")
 
     async def close(self, timeout: float) -> None:
-        """Capture and release before cancelling the HTTP activation."""
+        """Stop an MCP probe, then capture and release before cancelling the HTTP activation."""
+        if not self.session.launch_started:
+            # Before the agent run launches, the activation may still be staging or about to start an MCP probe.
+            # Join it first so no probe can start while release removes the session directory.
+            await self._join_activation(timeout)
+        if self.probe is not None:
+            await self._stop_probe(timeout)
         await self.session.close(timeout=timeout)
         if self.task is not None and not self.task.done() and not self.task.cancelling():
             self.task.cancel()
@@ -96,23 +108,79 @@ class OpenClawSandboxSession(AgentSessionState):
                     raise
                 # The agent base replays the activation error independently of close.
 
-    async def execute(self, payload: dict[str, JsonValue], *, timeout: float, close_timeout: float) -> dict[str, str]:
+    async def _join_activation(self, timeout: float) -> None:
+        """Cancel an unfinished activation and wait for it; a task that outlives the timeout fails close."""
+        if self.task is None or self.task.done():
+            return
+        if not self.task.cancelling():
+            self.task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(self.task), timeout=timeout)
+        except asyncio.CancelledError:
+            if not self.task.cancelled():
+                raise
+        except Exception:
+            if not self.task.done():
+                raise
+            # The agent base replays the activation error independently of close.
+
+    async def _stop_probe(self, timeout: float) -> None:
+        """Confirm an MCP probe stopped; unconfirmed termination fails close, which keeps the session for retry."""
+        probe = self.probe
+        assert probe is not None
+        # Cancelling the activation unwinds the probe's execute, which stops it and records its receipt.
+        await self._join_activation(timeout)
+        if not probe.cleanup_confirmed:
+            try:
+                await probe.stop_harness(timeout=timeout)
+            except NgFailureEvent as error:
+                if not is_harness_termination_failure(error):
+                    raise
+                # A final negative receipt cannot be retried. Release the borrowed sandbox as the agent run's
+                # session does, with cleanup reported unconfirmed; Resources tears the sandbox down.
+                LOG.exception("OpenClaw MCP probe termination unconfirmed; releasing for Resources teardown")
+                self.session.termination_error = error
+                self.probe = None
+                return
+        if not probe.cleanup_confirmed:
+            raise RuntimeError("OpenClaw MCP probe termination is unconfirmed")
+        self.probe = None
+
+    async def execute(
+        self,
+        payload: dict[str, JsonValue],
+        *,
+        media: Sequence[MediaFile] = (),
+        timeout: float,
+        close_timeout: float,
+    ) -> dict[str, str]:
         """Run through the common lifecycle; the adapter validates terminal events."""
         artifacts = await self.session.execute(
-            stage_activation=lambda: self.stage_activation(payload),
+            stage_activation=lambda: self.stage_activation(payload, media=media),
             collect=self.collect_artifacts,
             timeout=timeout,
             close_timeout=close_timeout,
+            deadline=monotonic() + timeout,
         )
         if self.session.closing:
             raise asyncio.CancelledError
         return artifacts
 
-    async def stage_activation(self, payload: dict[str, JsonValue]) -> SandboxCommand:
+    async def stage_activation(
+        self, payload: dict[str, JsonValue], *, media: Sequence[MediaFile] = ()
+    ) -> SandboxCommand:
         """Stage the invocation and return the OpenClaw worker command."""
         directory = self.session.session_dir
         await self.upload_json("home/.openclaw/openclaw.json", payload["config"])
-        await upload_text(self.session.sandbox, path=f"{directory}/prompt.txt", text=payload["prompt"])
+        prompt = payload["prompt"]
+        # The CLI only loads local images under its media allowlist. Session-owned files are
+        # removed on close; staging runs inside the shared close fence and activation deadline.
+        # OpenClaw deduplicates marker paths, so repeated images need separate files.
+        for index, file in enumerate(media, 1):
+            path = f"{directory}/home/.openclaw/media/{index}-{PurePosixPath(media_path(file)).name}"
+            await upload_bytes(self.session.sandbox, path=path, data=file.data)
+            prompt += f"\n[Image: source: {path}]"
+        await upload_text(self.session.sandbox, path=f"{directory}/prompt.txt", text=prompt)
         params = {
             "cwd": payload["cwd"],
             "command": payload["command"],

@@ -2,11 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """``gym.rollout.rewarded_total``: scored attempts by reward range, against a real in-memory reader."""
 
+from pathlib import Path
+from unittest.mock import AsyncMock
+
 import pytest
 
-from nemo_gym import rollout_collection
+from nemo_gym.rollouts import rollout_collection
 from nemo_gym.telemetry import gym_metrics
-from nemo_gym.telemetry.span_groups import GymSpanGroup
+from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, install_fake_server_client
+from tests.unit_tests.rollouts.test_rollout_recovery import runner_config  # noqa: F401 - fixture
 from tests.unit_tests.telemetry.test_sandbox_active import collected_metrics  # noqa: F401 - fixture
 
 
@@ -26,8 +30,8 @@ def _key(masked=False, **attrs):
     return tuple(sorted({DISPATCH: "env", MASKED: masked, **attrs}.items()))
 
 
-def _rollout_group_only(monkeypatch):
-    monkeypatch.setattr(rollout_collection, "is_span_group_enabled", lambda group: group == GymSpanGroup.ROLLOUT)
+def _metrics_exporting(monkeypatch, exporting=True):
+    monkeypatch.setattr(rollout_collection, "is_metrics_exporter_active", lambda: exporting)
 
 
 def test_rewards_are_counted_by_range_including_penalties(collected_metrics):  # noqa: F811
@@ -43,7 +47,7 @@ def test_rewards_are_counted_by_range_including_penalties(collected_metrics):  #
 
 
 def test_driver_records_scored_rewards_only(collected_metrics, monkeypatch):  # noqa: F811
-    _rollout_group_only(monkeypatch)
+    _metrics_exporting(monkeypatch)
     rollout_collection._record_rollout_outcome({"reward": 1.0}, "scored", "env")
     rollout_collection._record_rollout_outcome({"reward": 0}, "scored", "env")
     rollout_collection._record_rollout_outcome(
@@ -64,14 +68,47 @@ def test_driver_records_scored_rewards_only(collected_metrics, monkeypatch):  # 
 
 @pytest.mark.parametrize("result", [{}, {"reward": None}, {"reward": True}, {"reward": "1"}, {"reward": float("nan")}])
 def test_a_result_without_a_numeric_reward_is_not_a_zero(collected_metrics, monkeypatch, result):  # noqa: F811
-    _rollout_group_only(monkeypatch)
+    _metrics_exporting(monkeypatch)
     rollout_collection._record_rollout_outcome(result, "scored", "env")
     assert _values(collected_metrics, REWARDED) == {}
     # The attempt itself is still counted.
     assert len(collected_metrics()[gym_metrics.ROLLOUT_COMPLETED_INSTRUMENT]) == 1
 
 
-def test_nothing_is_recorded_when_the_rollout_group_is_off(collected_metrics, monkeypatch):  # noqa: F811
-    monkeypatch.setattr(rollout_collection, "is_span_group_enabled", lambda group: False)
+def test_nothing_is_recorded_without_a_metrics_exporter(collected_metrics, monkeypatch):  # noqa: F811
+    # Even with every span group on: span groups choose spans only.
+    monkeypatch.setattr(rollout_collection, "is_span_group_enabled", lambda group: True)
+    _metrics_exporting(monkeypatch, False)
     rollout_collection._record_rollout_outcome({"reward": 1.0}, "scored", "env")
     assert _values(collected_metrics, REWARDED) == {}
+
+
+async def test_collector_counts_saved_rewards_once_across_resume(collected_metrics, runner_config, monkeypatch):  # noqa: F811
+    _metrics_exporting(monkeypatch)
+    output = Path(runner_config.output_jsonl_fpath)
+    original_record = gym_metrics.record_rollout_reward
+    persisted_when_counted = []
+
+    def record(reward, **kwargs):
+        persisted_when_counted.append(len(output.read_text().splitlines()))
+        return original_record(reward, **kwargs)
+
+    monkeypatch.setattr(rollout_collection, "record_rollout_reward", record)
+
+    async def post(**kwargs):
+        task = kwargs["json"]["task"]
+        return FakeResponse(200, {"response": {}, "reward": [0.0, 0.5, 1.0][task], "mask_sample": task == 1})
+
+    client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    await rollout_collection.RolloutCollectionHelper().run_from_config(runner_config)
+    values = _values(collected_metrics, REWARDED)
+    assert values == {
+        tuple(sorted({DISPATCH: "my_agent", MASKED: False, RANGE: "zero"}.items())): 1,
+        tuple(sorted({DISPATCH: "my_agent", MASKED: True, RANGE: "partial"}.items())): 1,
+        tuple(sorted({DISPATCH: "my_agent", MASKED: False, RANGE: "full"}.items())): 1,
+    }
+    assert persisted_when_counted == [1, 2, 3]
+    runner_config.resume_from_cache = True
+    await rollout_collection.RolloutCollectionHelper().run_from_config(runner_config)
+    assert _values(collected_metrics, REWARDED) == values
+    assert client.post.call_count == 3

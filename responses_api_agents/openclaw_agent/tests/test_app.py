@@ -27,16 +27,16 @@ import psutil
 import pytest
 import yaml
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.rollout_observability import AgentInvocation, ObservationGap
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.trajectory import AgentInvocation, ObservationGap
 from responses_api_agents.openclaw_agent.app import (
     OpenClawAgent,
     OpenClawAgentConfig,
@@ -213,7 +213,7 @@ class TestParseOpenclawOutput:
     def test_empty(self) -> None:
         items, usage = parse_openclaw_output("")
         assert items == []
-        assert usage == {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0}
+        assert usage == {"input_tokens": 0, "output_tokens": 0, "cached_tokens": None}
 
     def test_text_message_and_usage(self) -> None:
         raw = _envelope(
@@ -227,6 +227,12 @@ class TestParseOpenclawOutput:
         assert usage["input_tokens"] == 105
         assert usage["output_tokens"] == 20
         assert usage["cached_tokens"] == 5
+
+    @pytest.mark.parametrize("usage", [{"input": 100, "output": 20, "cacheRead": 0}, {"input": 100, "output": 20}])
+    def test_unmeasured_cache_reads_are_unknown(self, usage) -> None:
+        # The pinned provider writes cacheRead=0 when the backend reported no cache details.
+        _, parsed = parse_openclaw_output(_envelope([{"text": "ok"}], usage=usage))
+        assert parsed["cached_tokens"] is None
 
     def test_no_text_no_items(self) -> None:
         raw = _envelope([], usage={"input": 1, "output": 0})
@@ -391,7 +397,10 @@ class TestBuildOpenclawConfig:
 
         request = MagicMock(path_params={"rollout_id": "7-2"})
         with patch.object(agent, "_run_openclaw", run_openclaw):
-            asyncio.run(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="solve")))
+            response = asyncio.run(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="solve")))
+
+        # No cache reads were reported, so the response does not claim zero.
+        assert response.usage.input_tokens_details.cached_tokens is None
 
     def test_user_deny_cannot_drop_headless_deny(self) -> None:
         agent = _make_agent(openclaw_config={"tools": {"deny": ["custom"]}})

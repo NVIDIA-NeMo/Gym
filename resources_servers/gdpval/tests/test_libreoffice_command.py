@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from resources_servers.gdpval import file_reader, preconvert, setup_libreoffice
 from resources_servers.gdpval.app import GDPValResourcesServer, GDPValResourcesServerConfig
 
@@ -220,6 +220,24 @@ def test_server_startup_probes_reference_deliverables_dirs(tmp_path, template_pd
             refs.chmod(0o755)
     # Neither creates a mistyped reference directory nor leaves probe files in the reference tree.
     assert not refs.exists() if reference == "missing" else list(refs.iterdir()) == []
+
+
+@pytest.mark.parametrize("sees_cache", [True, False])
+def test_server_startup_probes_the_cache_s3_references_download_into(tmp_path, template_pdf, sees_cache):
+    cache = tmp_path / "reference-cache"
+    script, _ = _converter(tmp_path / "bin", template_pdf, unseen=None if sees_cache else cache)
+    server_args = {
+        "reward_mode": "comparison",
+        "reference_deliverables_dir": "s3://bucket/anchors/model",
+        "reference_cache_dir": str(cache),
+    }
+    if sees_cache:
+        server = _gdpval_server(tmp_path / "persist", script, **server_args)
+        # Startup reads nothing from S3.
+        assert server._s3_references._client is None
+    else:
+        with pytest.raises(RuntimeError, match="startup check"):
+            _gdpval_server(tmp_path / "persist", script, **server_args)
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root can write a read-only directory")

@@ -21,15 +21,14 @@ from aiohttp import ClientResponseError
 from fastapi import HTTPException
 from starlette.responses import Response
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
 )
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.conversational_tool_use_simulation.app import (
     NG_FAILURE_CLASS_KEY,
     TRANSIENT_FAILURE_CLASS,
@@ -1013,6 +1012,8 @@ async def test_run_routes_rollout_5xx_to_transient_failure_sidecar_contract() ->
     assert result_payload[NG_FAILURE_CLASS_KEY] == TRANSIENT_FAILURE_CLASS
     assert result_payload["error_class"] == TRANSIENT_FAILURE_CLASS
     assert result_payload["error_stage"] == "rollout"
+    assert result_payload["failure_kind"] == "agent_route_failed"
+    assert result_payload["failure_reason"].startswith("rollout failed: ")
     assert "503" in result_payload["error_message"]
     assert result.mask_sample is True
     assert "instance_config" not in result.model_dump()
@@ -1071,6 +1072,8 @@ async def test_run_routes_seed_rate_limit_to_transient_failure_sidecar_contract(
 
     assert result_payload[NG_FAILURE_CLASS_KEY] == TRANSIENT_FAILURE_CLASS
     assert result_payload["error_stage"] == "seed_session"
+    assert result_payload["failure_kind"] == "environment_server_failed"
+    assert result_payload["failure_reason"].startswith("seed_session failed: ")
     assert "429" in result_payload["error_message"]
     assert result.mask_sample is True
     assert agent.server_client.post.await_count == 1
@@ -1101,6 +1104,8 @@ async def test_run_routes_verify_5xx_to_transient_failure_sidecar_contract() -> 
 
     assert result_payload[NG_FAILURE_CLASS_KEY] == TRANSIENT_FAILURE_CLASS
     assert result_payload["error_stage"] == "verify"
+    assert result_payload["failure_kind"] == "environment_server_failed"
+    assert result_payload["failure_reason"].startswith("verify failed: ")
     assert "502" in result_payload["error_message"]
     assert result.mask_sample is True
     assert agent.server_client.post.await_count == 4
@@ -1218,4 +1223,5 @@ async def test_responses_sums_policy_usage_and_details_across_calls(second_usage
 
     model_response = await agent.responses(RequestStub(), Response(), body)
 
+    expected = expected | {"input_tokens_details": expected["input_tokens_details"] | {"cache_write_tokens": None}}
     assert model_response.usage.model_dump(mode="json") == expected

@@ -3,20 +3,24 @@
 
 import asyncio
 import json
+from pathlib import Path
 from time import monotonic
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from aiohttp import ClientResponseError
+from fastapi.testclient import TestClient
 
 from environment_servers.swe_together import app, evaluation
 from environment_servers.swe_together.app import Episode, SWETConfig, SWETEnvironmentServer, memory_mib
 from environment_servers.swe_together.schemas import CandidateTurn, SWETRequest, UserTurn, episode_response
 from environment_servers.swe_together.simulator import UserAgent
 from environment_servers.swe_together.task import TaskData
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseUsage
-from nemo_gym.rollout_collection import _episode_record
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseUsage, current_verifier_invocation_id
+from nemo_gym.rollouts.rollout_collection import _episode_record
+from nemo_gym.sandbox import PLACEMENT_GROUP_KEY
+from nemo_gym.trajectory import TrajectoryRecord
 
 
 def activation(index=0, **kwargs):
@@ -81,6 +85,53 @@ def server(tmp_path, **updates):
         **updates,
     )
     return SWETEnvironmentServer.model_construct(config=config)
+
+
+@pytest.mark.parametrize("context", [None, {}, {"agent": {"values": {"tag": "figure"}}}])
+@pytest.mark.parametrize("nested", [False, True], ids=["flat", "task_data"])
+def test_run_rejects_unsupported_agent_context_before_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, context: object, nested: bool
+) -> None:
+    environment = server(tmp_path)
+    environment.server_client = SimpleNamespace(global_config_dict={})
+    run = AsyncMock()
+    monkeypatch.setattr(SWETEnvironmentServer, "run", run)
+    body = request().model_dump(mode="json")
+    task_input = body["task"]["task_input"]
+    target = task_input["task_data"] if nested else task_input
+    target["agent_context"] = context
+
+    with TestClient(environment.setup_webserver()) as client:
+        response = client.post("/run", json=body)
+
+    assert response.status_code == 422, response.text
+    location = ["body", "task", "task_input", *(["task_data"] if nested else []), "agent_context"]
+    assert any(error["loc"] == location and error["type"] == "extra_forbidden" for error in response.json()["detail"])
+    run.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("skip_token_capture", "activation_path"),
+    [
+        (False, "/ng-rollout/one/training-token-capture/v1/responses"),
+        (True, "/ng-rollout/one/v1/responses"),
+    ],
+)
+def test_an_episode_that_skips_token_capture_activates_the_candidate_without_the_training_tag(
+    tmp_path, skip_token_capture, activation_path
+):
+    env = server(tmp_path)
+    env.server_client = SimpleNamespace(
+        global_config_dict={
+            "token_id_capture": {"enabled": True, "all_agents": True},
+            "policy": {"responses_api_agents": {"codex_agent": {}}},
+        }
+    )
+
+    assert (
+        env._activation_path(request().model_copy(update={"skip_token_capture": skip_token_capture}))
+        == activation_path
+    )
 
 
 def state(tmp_path, decisions):
@@ -389,7 +440,7 @@ async def test_verify_keeps_judge_failure_cause_apart_from_valid_zero(tmp_path, 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failed_path", ["/v1/agent_sessions", "/ng-rollout/one-judge/v1/responses"])
+@pytest.mark.parametrize("failed_path", ["/v1/agent_sessions", "/ng-rollout/one-judge-test/v1/responses"])
 @pytest.mark.parametrize("close_failure", [None, "unconfirmed", "request_error"])
 async def test_verify_preserves_primary_judge_error_and_transport_classification(
     tmp_path, monkeypatch, failed_path, close_failure
@@ -526,7 +577,7 @@ async def test_sandbox_config_metadata_reaches_only_the_configured_role(tmp_path
         tmp_path,
         dependency_proxy_url="http://10.0.0.3:3128",
         sandbox_config={
-            "metadata": {"nemo.nvidia.com/oom-kill": "process", "role": "spoofed"},
+            "metadata": {"nemo.nvidia.com/oom-kill": "process", "role": "spoofed", PLACEMENT_GROUP_KEY: "wrong"},
             "provider_options": {"network_policy": policy},
         },
         judge_sandbox_config={"metadata": {}},
@@ -550,7 +601,8 @@ async def test_sandbox_config_metadata_reaches_only_the_configured_role(tmp_path
     episode = Episode(request(), request().task.task_input.task_data, tmp_path, tmp_path)
     episode.task_metadata = {"environment": {"memory": "4G"}}
     episode.runtime = SimpleNamespace(
-        metadata=lambda: {"placement": "shared"}, mount_options=lambda *_: {"volumes": []}
+        metadata=lambda overrides: {"placement": "shared"} | overrides | {PLACEMENT_GROUP_KEY: "runtime-group"},
+        mount_options=lambda *_: {"volumes": []},
     )
     episode.dependency_access = SimpleNamespace(
         certificate=AsyncMock(return_value="cert"), sandbox_settings=lambda token, policy, cert: (policy, {}, {})
@@ -560,31 +612,37 @@ async def test_sandbox_config_metadata_reaches_only_the_configured_role(tmp_path
     candidate, judge = specs["candidate"].metadata, specs["judge"].metadata
     assert candidate["nemo.nvidia.com/oom-kill"] == "process"
     assert candidate["placement"] == "shared" and judge["placement"] == "shared"
+    assert candidate[PLACEMENT_GROUP_KEY] == judge[PLACEMENT_GROUP_KEY] == "runtime-group"
     assert "nemo.nvidia.com/oom-kill" not in judge
     assert specs["candidate"].resources.memory_mib == 4096
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("activation_error", [False, True])
-async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, monkeypatch, activation_error):
+@pytest.mark.parametrize("activation_error,receipt_missing", [(False, False), (True, False), (False, True)])
+@pytest.mark.parametrize("trajectory_task_id", ["task", "wrong-task"])
+async def test_local_lifecycle_closes_candidate_before_verification(
+    tmp_path, monkeypatch, activation_error, receipt_missing, trajectory_task_id
+):
     environment = server(tmp_path)
     order = []
     sandbox = SimpleNamespace(serialize=AsyncMock(return_value={}))
-    candidate_trajectory = {
-        "task_id": "task",
-        "rollout_id": "one",
-        "turns": [
-            {
-                "invocation_id": "root",
-                "task_id": "task",
-                "rollout_id": "one",
-                "turn_no": 1,
-                "timestamp": 1.0,
-                "step_count": 0,
-                "answer": "candidate decision",
-            }
-        ],
-    }
+    candidate_trajectory = TrajectoryRecord.model_validate(
+        {
+            "task_id": trajectory_task_id,
+            "rollout_id": "one",
+            "turns": [
+                {
+                    "invocation_id": "root",
+                    "task_id": trajectory_task_id,
+                    "rollout_id": "one",
+                    "turn_no": 1,
+                    "timestamp": 1.0,
+                    "step_count": 0,
+                    "answer": "candidate decision",
+                }
+            ],
+        }
+    ).model_dump(mode="json")
 
     async def prepare(self, value):
         value.sandbox = sandbox
@@ -597,16 +655,58 @@ async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, mo
         value.cleanup_receipts[role + "_sandbox"] = {"cleanup_confirmed": True}
 
     async def verify(self, value, initial, activations):
+        assert current_verifier_invocation_id().startswith("verify-")
         assert order[-1] == "agent close"
         order.append("verify")
-        return {
+        model = {"type": "responses_api_models", "name": "judge-model"}
+        (tmp_path / "explicit-child.capture.jsonl").write_text(
+            json.dumps(
+                {
+                    "model_call_id": "judge-call",
+                    "model_ref": model,
+                    "status_code": 200,
+                    "request": {"messages": []},
+                    "response": {"id": "judge-response", "content": []},
+                }
+            )
+            + "\n"
+        )
+        verification = {
             "responses_create_params": initial,
             "response": activations[-1].response,
             "reward": 1,
             "judge_score": 1,
             "task_id": "task",
             "evaluation_completed": True,
+            "judge_capture_episode": "explicit-child",
+            "judge_close": {
+                "agent_session_id": "judge-session",
+                "cleanup_confirmed": True,
+                "agent_observations": {
+                    "source": "claude_code",
+                    "records": [
+                        {
+                            "kind": "agent_invocation",
+                            "invocation_id": "judge-invocation",
+                            "status": "completed",
+                            "model_calls": [{"model_ref": model, "response_id": "judge-response"}],
+                        }
+                    ],
+                },
+            },
         }
+        if receipt_missing:
+            verification.pop("judge_close")
+            verification.update(
+                reward=0,
+                judge_score=0,
+                mask_sample=True,
+                evaluation_completed=False,
+                judge_close_error="connection lost",
+                failure_kind=app.JUDGE_FAILED,
+                failure_reason="Judge cleanup was not confirmed",
+            )
+        return verification
 
     async def post(name, path, *, json, cookies, headers=None, _control=False):
         if path == "/v1/agent_sessions":
@@ -646,31 +746,44 @@ async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, mo
         return response.payload
 
     monkeypatch.setattr(app, "get_response_json", payload)
-    environment.server_client = SimpleNamespace(post=post)
+    environment.server_client = SimpleNamespace(
+        post=post,
+        global_config_dict={
+            "observability_enabled": True,
+            "model_call_capture_dir": str(tmp_path),
+        },
+    )
     req = request()
     result = await environment.run_request(req)
     collected = _episode_record(result.model_dump(mode="json"))
-    collector_task_id = "{'taskset': 'swet', 'task_id': 'task'}"
+    collector_task_id = trajectory_task_id
     assert collected["ng_trajectory"]["task_id"] == collector_task_id
     assert collected["ng_trajectory"]["turns"][0]["task_id"] == collector_task_id
-    assert collected["ng_trajectory"]["turns"][0]["answer"] == "candidate decision"
+    assert collected["ng_trajectory"]["turns"] == candidate_trajectory["turns"]
     raw_close = json.loads((tmp_path / "one" / "candidate-agent-close.json").read_text())
-    assert raw_close["trajectory"]["task_id"] == "task"
-    assert raw_close["trajectory"]["turns"][0]["task_id"] == "task"
+    assert raw_close["trajectory"] == candidate_trajectory
     if activation_error:
         assert result.result is None and result.failure.terminal
         assert result.failure.agent_close.cleanup_confirmed is True
         final = json.loads((tmp_path / "one" / "failure.json").read_text())
         assert final["agent_close"]["cleanup_confirmed"] is True
-        assert final["agent_close"]["trajectory"]["task_id"] == "task"
+        assert final["agent_close"]["trajectory"] == candidate_trajectory
         assert final["trajectory"]["task_id"] == collector_task_id
         assert final["cleanup_receipts"]["candidate_sandbox"]["cleanup_confirmed"] is True
         assert collected["ng_trajectory"]["rollout_id"] == "one"
         assert (tmp_path / "one" / "candidate-agent-close.json").exists()
         return
-    assert result.result and result.result.reward == 1
-    assert collected["reward"] == 1
-    assert result.result.ng_agent_close.trajectory.task_id == "task"
+    assert result.result and result.result.reward == (0 if receipt_missing else 1)
+    assert collected["reward"] == (0 if receipt_missing else 1)
+    if receipt_missing:
+        assert collected["mask_sample"] is True and collected["evaluation_completed"] is False
+        assert not collected["ng_trajectory"]["verifier_invocations"]
+        assert "judge_receipt_unavailable" in {gap["code"] for gap in collected["ng_trajectory"]["gaps"]}
+    else:
+        assert collected["ng_trajectory"]["verifier_invocations"][0]["invocation_id"] == "judge-invocation"
+    assert collected["ng_trajectory"]["model_calls"][0]["model_call_id"] == "judge-call"
+    assert (tmp_path / "one" / "judge-model-calls.json").exists()
+    assert result.result.ng_agent_close.trajectory.model_dump(mode="json") == candidate_trajectory
     assert result.result.ng_trajectory.rollout_id == "one"
     assert collected["ng_trajectory"]["rollout_id"] == "one"
     assert "ng_agent_observations" in collected
@@ -686,6 +799,127 @@ async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, mo
     assert result.result.cleanup_receipts["candidate_sandbox"]["cleanup_confirmed"]
 
 
+@pytest.mark.asyncio
+async def test_cleanup_timeout_after_verification_keeps_the_verdict(tmp_path, monkeypatch):
+    environment = server(tmp_path, cleanup_timeout_seconds=0.05)
+    releases = []
+
+    async def release(session_id):
+        releases.append(session_id)
+        await asyncio.sleep(1)
+
+    async def prepare(self, value):
+        value.sandbox = SimpleNamespace(serialize=AsyncMock(return_value={}))
+        value.runtime = SimpleNamespace(release=release)
+        value.task_metadata = {"agent_kwargs": {}}
+        value.prompt = "first instruction"
+
+    async def stop(self, value, role):
+        value.cleanup_receipts[role + "_sandbox"] = {"cleanup_confirmed": True}
+
+    async def verify(self, value, initial, activations):
+        return {
+            "responses_create_params": initial,
+            "response": activations[-1].response,
+            "reward": 1,
+            "judge_score": 0.9,
+            "task_id": "task",
+            "evaluation_completed": True,
+        }
+
+    async def post(name, path, *, json, cookies, headers=None, _control=False):
+        if path == "/v1/agent_sessions":
+            data = {
+                "agent_session_id": json.agent_session_id,
+                "capabilities": {"mode": "resume_harness_session", "observations": ["trajectory", "timing"]},
+            }
+        elif path == "/v1/agent_sessions/close":
+            data = {
+                "agent_session_id": json.agent_session_id,
+                "cleanup_confirmed": True,
+                "trajectory": {"task_id": "task", "rollout_id": "one", "turns": []},
+            }
+        else:
+            data = activation().response.model_dump(mode="json")
+        return SimpleNamespace(cookies={"agent_session_id": SimpleNamespace(value="cookie")}, payload=data)
+
+    async def payload(response):
+        return response.payload
+
+    monkeypatch.setattr(SWETEnvironmentServer, "_prepare", prepare)
+    monkeypatch.setattr(SWETEnvironmentServer, "_stop_owned_sandbox", stop)
+    monkeypatch.setattr(SWETEnvironmentServer, "_verify", verify)
+    monkeypatch.setattr(SWETEnvironmentServer, "_activation_path", lambda self, req: "/v1/responses")
+    monkeypatch.setattr(
+        SWETEnvironmentServer, "_next_user_turn", AsyncMock(return_value=UserTurn(activation_id=0, kind="stop"))
+    )
+    monkeypatch.setattr(app, "raise_for_status", AsyncMock())
+    monkeypatch.setattr(app, "get_response_json", payload)
+    environment.server_client = SimpleNamespace(post=post)
+
+    result = await environment.run_request(request())
+
+    assert result.failure is None
+    assert result.result.reward == 1 and result.result.judge_score == 0.9
+    assert result.result.cleanup_receipts["post_verification_error"] == "TimeoutError: "
+    # The release timed out once in the protocol, and final cleanup tried it again.
+    assert len(releases) == 2
+
+
+@pytest.mark.asyncio
+async def test_shutdown_releases_the_runtime_bundle_after_its_sandboxes_stop(tmp_path, monkeypatch):
+    """The shutdown sweep starts every cleanup at once, so the bundle's release waits for the sandbox stops."""
+    environment = server(tmp_path, cleanup_timeout_seconds=1)
+    order = []
+    activated = asyncio.Event()
+
+    async def release(session_id):
+        order.append("runtime released")
+
+    async def prepare(self, value):
+        value.sandbox = SimpleNamespace(serialize=AsyncMock(return_value={}))
+        value.judge_sandbox = SimpleNamespace()
+        value.runtime = SimpleNamespace(release=release)
+        value.task_metadata = {"agent_kwargs": {}}
+        value.prompt = "first instruction"
+
+    async def stop(self, value, role):
+        await asyncio.sleep(0.05)
+        order.append(role + " sandbox stopped")
+
+    async def post(name, path, *, json, cookies, headers=None, _control=False):
+        if path == "/v1/agent_sessions":
+            data = {
+                "agent_session_id": json.agent_session_id,
+                "capabilities": {"mode": "resume_harness_session", "observations": ["trajectory", "timing"]},
+            }
+        elif path == "/v1/agent_sessions/close":
+            data = {"agent_session_id": json.agent_session_id, "cleanup_confirmed": True}
+        else:
+            activated.set()
+            await asyncio.Event().wait()
+        return SimpleNamespace(cookies={"agent_session_id": SimpleNamespace(value="cookie")}, payload=data)
+
+    async def payload(response):
+        return response.payload
+
+    monkeypatch.setattr(SWETEnvironmentServer, "_prepare", prepare)
+    monkeypatch.setattr(SWETEnvironmentServer, "_stop_owned_sandbox", stop)
+    monkeypatch.setattr(SWETEnvironmentServer, "_activation_path", lambda self, req: "/v1/responses")
+    monkeypatch.setattr(app, "raise_for_status", AsyncMock())
+    monkeypatch.setattr(app, "get_response_json", payload)
+    environment.server_client = SimpleNamespace(post=post)
+    episode = asyncio.create_task(environment.run_request(request()))
+    await asyncio.wait_for(activated.wait(), 5)
+
+    await environment.finish_running_cleanups()
+    episode.cancel()
+    await asyncio.gather(episode, return_exceptions=True)
+
+    assert sorted(order[:2]) == ["candidate sandbox stopped", "judge sandbox stopped"]
+    assert order[2:] == ["runtime released"]
+
+
 @pytest.mark.parametrize(
     "native_outcome,confirmed",
     [("interrupted", True), ("not_started", True), ("failed", True), ("interrupted", False)],
@@ -693,7 +927,9 @@ async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, mo
 async def test_interaction_deadline_closes_remote_work_before_grading(
     tmp_path, monkeypatch, native_outcome, confirmed
 ):
-    environment = server(tmp_path, interaction_timeout_seconds=0.03, cleanup_timeout_seconds=1)
+    # The deadline must fire while the activation is in flight: 0.5 s leaves a loaded runner time to start it,
+    # and the remote work outlasts the deadline, so only the deadline close can end it.
+    environment = server(tmp_path, interaction_timeout_seconds=0.5, cleanup_timeout_seconds=1)
     remote = None
     close_count = 0
     verified = False
@@ -701,7 +937,7 @@ async def test_interaction_deadline_closes_remote_work_before_grading(
 
     async def work():
         nonlocal late_work
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(5)
         late_work = True
 
     async def prepare(self, value):
@@ -778,6 +1014,7 @@ async def test_interaction_deadline_closes_remote_work_before_grading(
     monkeypatch.setattr(app, "get_response_json", AsyncMock(side_effect=lambda response: response.payload))
     environment.server_client = SimpleNamespace(post=post)
     result = await environment.run_request(request())
+    assert remote is not None, "the activation did not start before the interaction deadline"
     assert remote.cancelled() and not late_work
     simulator.assert_not_awaited()
     if native_outcome == "interrupted" and confirmed:

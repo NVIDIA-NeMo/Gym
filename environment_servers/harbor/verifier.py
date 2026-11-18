@@ -47,12 +47,21 @@ from environment_servers.harbor.session import (
     HarborSession,
     resolve_env_templates,
 )
-from nemo_gym import __version__, failure_kinds
-from nemo_gym.atif_export import encode_atif_trajectory, transcript_to_atif
-from nemo_gym.episode_types import BaseEpisodeRequest
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
-from nemo_gym.sandbox.transfer import (
+from nemo_gym import __version__
+from nemo_gym.core import BaseEpisodeRequest, NeMoGymResponse, failure_kinds
+from nemo_gym.data.tasks.harbor import (
+    HarborArtifact,
+    HarborTask,
+    HarborTaskStep,
+    HarborTurn,
+    HarborVerifier,
+    VerifierShim,
+    is_ignored,
+    write_shim,
+)
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    SandboxExecResult,
     SandboxProbeError,
     SandboxTransferError,
     download_dir,
@@ -63,11 +72,7 @@ from nemo_gym.sandbox.transfer import (
     upload_dir,
     upload_path,
 )
-from nemo_gym.tasks.harbor import HarborTask
-from nemo_gym.tasks.harbor.digest import is_ignored
-from nemo_gym.tasks.harbor.models import HarborArtifact, HarborTaskStep, HarborVerifier
-from nemo_gym.tasks.harbor.python_verifier import VerifierShim, write_shim
-from nemo_gym.tasks.harbor.task import HarborTurn
+from nemo_gym.trajectory import encode_atif_trajectory, transcript_to_atif
 
 
 LOGGER = logging.getLogger(__name__)
@@ -86,6 +91,14 @@ TIMEOUT_WRAPPER_GUARD = "command -v timeout >/dev/null 2>&1 && command -v bash >
 VERIFIER_TIMEOUT_KIND = "harbor:verifier_timeout"
 MISSING_REWARD_KIND = "harbor:missing_reward"
 INVALID_REWARD_KIND = "harbor:invalid_reward"
+# A test.sh that exits 75 (EX_TEMPFAIL) without writing a valid reward could not grade: infrastructure it depends
+# on and the agent cannot influence (a judge service, a golden-asset download) was unavailable. Such a rollout is
+# masked, not scored 0. Every other exit without a reward stays a measured 0, since the agent can cause those.
+# A verifier timeout wins over the code. The code is honored only where the agent cannot have produced it: a
+# turn verified separately. In shared mode test.sh runs in the agent's sandbox, so a 75 there is ignored and the
+# turn is measured as on any other exit, with the ignored code named in the reason.
+VERIFIER_UNAVAILABLE_EXIT_CODE = 75
+VERIFIER_UNAVAILABLE_KIND = "harbor:verifier_unavailable"
 
 
 def parse_reward_file(directory: Path) -> tuple[dict[str, float] | None, str | None]:
@@ -108,8 +121,14 @@ def _parse_one_reward_file(path: Path) -> tuple[dict[str, float] | None, str | N
     if not isinstance(raw, dict) or not raw:
         return None, f"{path.name} must hold a non-empty JSON object"
     rewards: dict[str, float] = {}
+    # With a numeric `reward`, the other keys are metrics: a verifier that writes a nested object or a string beside
+    # it (a `details` block, a `reason`) keeps its score, as Harbor keeps the file as written and reads `reward`.
+    # Without one, every key is a component of the score, so every key has to be a number.
+    scored = isinstance(raw.get("reward"), (int, float)) and not isinstance(raw.get("reward"), bool)
     for key, value in raw.items():
         if not isinstance(value, (int, float)):
+            if scored:
+                continue
             return None, f"{path.name}: {key!r} is not a finite number"
         try:
             value = float(value)
@@ -470,7 +489,7 @@ class HarborVerificationMixin:
 
         It holds the ``test.sh`` that runs ``verify()`` inside the sandbox with the workspace path, the runner,
         a vendored ``nemo_gym.verifiers``, the task's fields and the agent's final response; no verifier code
-        runs on this host (:mod:`nemo_gym.tasks.harbor.python_verifier`). The shim is per episode (it embeds the
+        runs on this host (:mod:`nemo_gym.data.tasks.harbor.python_verifier`). The shim is per episode (it embeds the
         response), so it is written to a folder that lives only for the upload. ``False`` for a ``test.sh`` task.
         """
         task = session.task
@@ -585,7 +604,12 @@ class HarborVerificationMixin:
         sandbox's entrypoint output lands under that name too. Returns the exit record (None when the
         wrapper never reached its end), the rewards and the reward problem.
         """
-        await download_dir(sandbox, VERIFIER_LOGS_DIR, logs_dir, names=("reward.json", "reward.txt", EXIT_RECORD_NAME))
+        await download_dir(
+            sandbox,
+            VERIFIER_LOGS_DIR,
+            logs_dir,
+            names=("reward.json", "reward.txt", EXIT_RECORD_NAME),
+        )
         exit_record = parse_exit_record(logs_dir)
         rewards, problem = parse_reward_file(logs_dir)
         try:
@@ -831,7 +855,15 @@ class HarborVerificationMixin:
                     # the episode cleanup and shutdown retry it after.
                     LOGGER.exception(f"Could not stop the verifier sandbox for {task.task_id}")
         return self._score(
-            task, settings, result, logs_dir, started, timed_out=timed_out, rewards=rewards, problem=problem
+            task,
+            settings,
+            result,
+            logs_dir,
+            started,
+            timed_out=timed_out,
+            rewards=rewards,
+            problem=problem,
+            separate=True,
         )
 
     async def _reset_shared_verifier_dirs(self, sandbox: AsyncSandbox, *, keep: Sequence[str] = ()) -> None:
@@ -1151,7 +1183,15 @@ class HarborVerificationMixin:
             LOGGER.exception(f"Verification infrastructure failed for {task.task_id}")
             return self._masked(failure_kinds.PROVIDER_UNAVAILABLE, f"{type(exc).__name__}: {exc}")
         return self._score(
-            task, settings, result, logs_dir, started, timed_out=timed_out, rewards=rewards, problem=problem
+            task,
+            settings,
+            result,
+            logs_dir,
+            started,
+            timed_out=timed_out,
+            rewards=rewards,
+            problem=problem,
+            separate=False,
         )
 
     def _score(
@@ -1165,8 +1205,13 @@ class HarborVerificationMixin:
         timed_out: bool,
         rewards: dict[str, float] | None,
         problem: str | None,
+        separate: bool,
     ) -> dict[str, Any]:
-        """Turn the verifier's exit and the reward it wrote into the reward fields."""
+        """Turn the verifier's exit and the reward it wrote into the reward fields.
+
+        ``separate`` says which path ran this turn's test.sh (a fresh verifier sandbox, or the agent's), not the
+        task's mode: a multi-step task can mix the two. It decides whether an exit 75 is trusted.
+        """
         # Absolute, so the row names a folder that exists from wherever the run was launched; the server
         # process runs from its own folder, where a relative artifacts_dir would otherwise resolve.
         extras = {
@@ -1195,8 +1240,27 @@ class HarborVerificationMixin:
                 | extras
             )
         if rewards is None:
+            exit_record = parse_exit_record(logs_dir)
+            unavailable = exit_record is not None and exit_record[0] == VERIFIER_UNAVAILABLE_EXIT_CODE
+            if unavailable and separate:
+                # The verifier said it could not grade: the sample is masked like a lost sandbox, not scored 0.
+                # A malformed reward file beside the code is the verifier's own, so it does not change that.
+                return (
+                    self._masked(
+                        VERIFIER_UNAVAILABLE_KIND,
+                        f"test.sh exited {VERIFIER_UNAVAILABLE_EXIT_CODE} (EX_TEMPFAIL) without a valid reward: "
+                        f"infrastructure it depends on was unavailable; tail: {_stdout_tail(logs_dir)}",
+                    )
+                    | extras
+                )
             kind = MISSING_REWARD_KIND if "written" in (problem or "") else INVALID_REWARD_KIND
-            return self._measured(0.0, kind, f"{problem}; tail: {_stdout_tail(logs_dir)}") | extras
+            ignored = (
+                f" (test.sh exited {VERIFIER_UNAVAILABLE_EXIT_CODE} in the agent's sandbox, where the code is not "
+                "trusted; measured as on any other exit)"
+                if unavailable
+                else ""
+            )
+            return self._measured(0.0, kind, f"{problem}{ignored}; tail: {_stdout_tail(logs_dir)}") | extras
         reward = select_reward(rewards)
         if reward is None:
             # Finite components whose sum overflows: a reward file no trainer can use, measured like any other

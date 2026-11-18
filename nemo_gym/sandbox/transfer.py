@@ -10,7 +10,9 @@ user cannot write (``/tests``, ``/logs``) is still reachable. :func:`upload_path
 :func:`download_path` move a single file or a directory the same way, and :func:`remote_kind` tells
 which a path is. :func:`upload_archive` replays the archive a download kept (``archive_copy``) into
 another sandbox, so what the verifier receives is byte for byte what the agent's sandbox packed.
-:func:`tar_extract_command` is the shell line that unpacks an uploaded archive with GNU or BusyBox tar. :class:`SandboxTransferError` reports a transfer command that failed inside the
+:func:`tar_extract_command` is the shell line that unpacks an uploaded archive with GNU or BusyBox tar, and
+:func:`remote_size_bytes` measures a tree so a large transfer gets a deadline that fits it.
+:class:`SandboxTransferError` reports a transfer command that failed inside the
 sandbox, :class:`SandboxProbeError` a probe the sandbox could not answer, and
 :class:`SandboxUnavailableError` a command the provider could not run at all, which is Gym's outage
 rather than the task's. Environment servers and the agents that seed a sandbox share this module.
@@ -27,11 +29,13 @@ from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
-from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 
 
 LOGGER = logging.getLogger(__name__)
+
+GIB = 1024**3
 
 
 class SandboxTransferError(RuntimeError):
@@ -54,6 +58,11 @@ class SandboxProbeError(RuntimeError):
     Not a :class:`SandboxTransferError`: a caller that treats a failed transfer as "this artifact is
     not there" must not treat an outage the same way.
     """
+
+
+def _validate_upload_part_bytes(upload_part_bytes: int | None) -> None:
+    if upload_part_bytes is not None and upload_part_bytes <= 0:
+        raise ValueError("upload_part_bytes must be positive or None")
 
 
 def _pack(source: Path, archive: Path, *, ignore: Callable[[str], bool] | None = None) -> None:
@@ -128,22 +137,13 @@ def _unpack(
 # or `/logs`. Preserve the task's file modes. Some images run without the capability to switch
 # users at all; those fall back to the default user.
 TRANSFER_USER = "root"
-_NO_ROOT_MARKERS = ("CAP_SETUID", "identity switch", "switching to uid=0", "operation not permitted")
 
 
 async def exec_as_root(sandbox: AsyncSandbox, command: str, *, timeout_s: float) -> SandboxExecResult:
     """Run ``command`` as root, or as the default user when the sandbox cannot switch users."""
-    try:
-        result = await sandbox.exec(command, cwd="/", timeout_s=timeout_s, user=TRANSFER_USER)
-    except Exception as exc:  # the SDK surfaces the refusal as a runtime error on some servers
-        if not any(marker in str(exc) for marker in _NO_ROOT_MARKERS):
-            raise
-        # The fallback goes through the same provider-error check below as the result-shaped refusal does.
+    result = await sandbox.exec(command, cwd="/", timeout_s=timeout_s, user=TRANSFER_USER)
+    if result.error_type == "user_switch_unavailable":
         result = await sandbox.exec(command, cwd="/", timeout_s=timeout_s)
-    else:
-        text = f"{result.stderr or ''} {result.stdout or ''}"
-        if result.return_code and any(marker in text for marker in _NO_ROOT_MARKERS):
-            result = await sandbox.exec(command, cwd="/", timeout_s=timeout_s)
     if result.error_type:
         raise SandboxUnavailableError(
             f"The sandbox could not run {command[:80]!r}: {result.error_type}: {result.stderr or result.stdout or ''}"
@@ -199,6 +199,7 @@ async def upload_dir(
     make_readable: bool = False,
     ignore: Callable[[str], bool] | None = None,
     replace_links: bool = False,
+    upload_part_bytes: int | None = None,
 ) -> None:
     """Copy the contents of ``source`` into ``target`` inside the sandbox.
 
@@ -206,12 +207,16 @@ async def upload_dir(
     solution the task user must read; a verifier tree keeps its modes because tests may check them.
     ``ignore`` is called with each entry's path relative to ``source`` (posix form); an entry it names is left
     out, its subtree with it. The environment server passes the task digest's rule
-    (:func:`nemo_gym.tasks.harbor.digest.is_ignored`) for a task's own folders, so a ``tests/helper.pyc`` or an
+    (:func:`nemo_gym.data.tasks.harbor.digest.is_ignored`) for a task's own folders, so a ``tests/helper.pyc`` or an
     ``environment/__pycache__`` that the digest skips never reaches the sandbox; artifacts restored by
     :func:`upload_path` travel whole. ``replace_links`` is for a merge into a tree another user has written to:
     a symbolic link at any member's path is removed, as root, before the extraction, so the member lands where its
     name says on BusyBox tar as it does on GNU tar (:func:`tar_extract_command`).
+    ``upload_part_bytes`` opts into splitting the archive for a backend with a per-request size limit;
+    the default sends one archive through the provider. Splitting adds staging and reassembly work.
+    For a single file whose archive metadata is not needed, use :meth:`AsyncSandbox.upload` directly.
     """
+    _validate_upload_part_bytes(upload_part_bytes)
     with tempfile.TemporaryDirectory() as tmp:
         archive = Path(tmp) / "upload.tar.gz"
         # Archiving is blocking file work; keep it off the event loop.
@@ -219,7 +224,14 @@ async def upload_dir(
         # The readability fix-up is best effort, as the extraction's handling of the target folder is.
         fixup = f"chmod -R a+rX {shlex.quote(target)} 2>/dev/null || true; " if make_readable else ""
         await _upload_and_extract(
-            sandbox, archive, target, timeout_s=timeout_s, fixup=fixup, what=source, replace_links=replace_links
+            sandbox,
+            archive,
+            target,
+            timeout_s=timeout_s,
+            fixup=fixup,
+            what=source,
+            replace_links=replace_links,
+            upload_part_bytes=upload_part_bytes,
         )
 
 
@@ -232,10 +244,26 @@ async def _upload_and_extract(
     fixup: str = "",
     what: object = None,
     replace_links: bool = False,
+    seconds_per_gib: float = 0.0,
+    upload_part_bytes: int | None = None,
 ) -> None:
-    """Upload ``archive`` and extract it as root into ``target`` inside the sandbox, then remove the upload."""
+    """Upload ``archive`` and extract it as root into ``target`` inside the sandbox, then remove the upload.
+
+    With ``upload_part_bytes``, a larger archive travels in numbered parts that the sandbox joins before
+    extraction. Otherwise the provider uploads the archive in one request. ``seconds_per_gib`` extends
+    ``timeout_s`` by that much per GiB of archive, for the join and extraction of a large tree; it does not
+    change the provider's upload timeout.
+    """
     remote = f"/tmp/.nemo-gym-upload-{uuid4().hex}.tar.gz"
-    await sandbox.upload(archive, remote)
+    size = archive.stat().st_size
+    if seconds_per_gib:
+        timeout_s += size / GIB * seconds_per_gib
+    if upload_part_bytes is not None and size > upload_part_bytes:
+        await _upload_in_parts(
+            sandbox, archive, remote, part_bytes=upload_part_bytes, timeout_s=timeout_s, what=what or archive
+        )
+    else:
+        await sandbox.upload(archive, remote)
     # --no-overwrite-dir keeps the target folder's own ownership and mode: it may be a root-owned
     # world-writable folder the extracting user cannot chmod. GNU tar has the option; BusyBox tar
     # (Alpine images) rejects options it does not know, so it is passed only where `tar --help`
@@ -251,6 +279,52 @@ async def _upload_and_extract(
         raise SandboxTransferError(
             f"Failed to unpack {what or archive} into {target}: {result.stderr or result.stdout}"
         )
+
+
+async def _upload_in_parts(
+    sandbox: AsyncSandbox, archive: Path, remote: str, *, part_bytes: int, timeout_s: float, what: object
+) -> None:
+    """Upload ``archive`` to ``remote`` in bounded parts, then join them there in order.
+
+    Each part is removed once appended, so the sandbox holds about one archive's size plus one part.
+    """
+    uploaded: list[str] = []
+    quoted = shlex.quote(remote)
+    try:
+        with tempfile.TemporaryDirectory() as tmp, archive.open("rb") as stream:
+            staged = Path(tmp) / "part"
+            while chunk := await asyncio.to_thread(stream.read, part_bytes):
+                await asyncio.to_thread(staged.write_bytes, chunk)
+                part = f"{remote}.part{len(uploaded):05d}"
+                # A failed upload may have written a partial remote file.
+                uploaded.append(part)
+                await sandbox.upload(staged, part)
+        parts = " ".join(shlex.quote(part) for part in uploaded)
+        join = (
+            f': > {quoted} && for part in {parts}; do cat "$part" >> {quoted} && rm -f -- "$part" '
+            f"|| {{ rm -f -- {quoted} {parts}; exit 1; }}; done"
+        )
+        result = await exec_as_root(sandbox, join, timeout_s=timeout_s)
+        if result.return_code:
+            raise SandboxTransferError(
+                f"Failed to join the {len(uploaded)} upload parts of {what}: {result.stderr or result.stdout}"
+            )
+    except (Exception, asyncio.CancelledError):
+        # Bound cleanup and retain the original transfer failure or cancellation.
+        import anyio
+
+        parts = " ".join(shlex.quote(part) for part in uploaded)
+        try:
+            with anyio.CancelScope(shield=True):
+                async with asyncio.timeout(30):
+                    result = await exec_as_root(sandbox, f"rm -f -- {quoted} {parts}", timeout_s=30)
+                    if result.return_code:
+                        raise SandboxTransferError(
+                            f"Failed to remove interrupted upload parts: {result.stderr or result.stdout}"
+                        )
+        except (Exception, asyncio.CancelledError):
+            LOGGER.warning("Failed to remove interrupted upload parts", exc_info=True)
+        raise
 
 
 async def download_dir(
@@ -344,6 +418,20 @@ async def remote_kind(sandbox: AsyncSandbox, path: str) -> str | None:
     return None if kind[0] == "none" else kind[0]
 
 
+async def remote_size_bytes(sandbox: AsyncSandbox, path: str) -> int:
+    """The disk space ``path`` takes inside the sandbox (``du -sk``), in bytes.
+
+    ``du`` prints the total even when it could not read part of the tree, so that total counts; a sandbox that
+    gives no total raises :class:`SandboxProbeError`, as :func:`remote_kind` does.
+    """
+    result = await exec_as_root(sandbox, f"du -sk -- {shlex.quote(path)}", timeout_s=120)
+    lines = (result.stdout or "").strip().splitlines()
+    total = lines[-1].split()[0] if lines else ""
+    if not total.isdigit():
+        raise SandboxProbeError(f"Could not measure {path}: {result.return_code}: {result.stderr or result.stdout}")
+    return int(total) * 1024
+
+
 async def download_path(
     sandbox: AsyncSandbox,
     source: str,
@@ -353,14 +441,21 @@ async def download_path(
     links: str = "data",
     exclude: tuple[str, ...] = (),
     archive_copy: Path | None = None,
+    seconds_per_gib: float = 0.0,
 ) -> str | None:
     """Copy a file or directory out of the sandbox; returns what it was, or ``None`` when absent.
 
     A single file travels through the same archive as a directory, so its mode bits (an executable
     the agent built) arrive with it; ``exclude`` applies to directories only. ``archive_copy`` is
     passed to :func:`download_dir`: a file's archive holds that one member, named as the file is.
+    With ``seconds_per_gib``, what ``source`` holds is measured first (:func:`remote_size_bytes`) and the
+    archive's ``timeout_s`` grows by that much per GiB, so a multi-GB tree is not killed mid-archive.
     """
     kind = await remote_kind(sandbox, source)
+    if kind is not None and seconds_per_gib:
+        # Match tar -C: follow a directory root link, while preserving file and nested links.
+        size_source = f"{source}/" if kind == "dir" and not source.endswith("/") else source
+        timeout_s += await remote_size_bytes(sandbox, size_source) / GIB * seconds_per_gib
     if kind == "dir":
         await download_dir(
             sandbox, source, target, timeout_s=timeout_s, links=links, exclude=exclude, archive_copy=archive_copy
@@ -381,7 +476,14 @@ async def download_path(
     return kind
 
 
-async def upload_path(sandbox: AsyncSandbox, source: Path, target: str, *, timeout_s: float = 600) -> None:
+async def upload_path(
+    sandbox: AsyncSandbox,
+    source: Path,
+    target: str,
+    *,
+    timeout_s: float = 600,
+    upload_part_bytes: int | None = None,
+) -> None:
     """Restore a collected file or directory into the sandbox at ``target``.
 
     A directory replaces whatever the image ships at ``target`` (a file the agent deleted stays
@@ -390,20 +492,22 @@ async def upload_path(sandbox: AsyncSandbox, source: Path, target: str, *, timeo
     parent, which is created world-writable when missing; an existing parent is made world-writable
     when the sandbox can (``a+rwx`` keeps a sticky bit) and otherwise only has to be writable, so a
     root-owned ``/tmp`` keeps its mode and an image that cannot switch to root can still receive the
-    file. Modes travel in both cases.
+    file. Modes travel in both cases. ``upload_part_bytes`` opts into the bounded archive parts described
+    by :func:`upload_dir`.
     """
+    _validate_upload_part_bytes(upload_part_bytes)
     if source.is_symlink():
         raise SandboxTransferError(f"Refusing to restore {source} to {target}: it is a symbolic link")
     directory = await _prepare_restore_target(sandbox, source.is_dir(), target)
     if source.is_dir():
-        await upload_dir(sandbox, source, target, timeout_s=timeout_s)
+        await upload_dir(sandbox, source, target, timeout_s=timeout_s, upload_part_bytes=upload_part_bytes)
         return
     with tempfile.TemporaryDirectory() as tmp:
         # One-file staging folder: the archive carries the file's mode, and `--no-overwrite-dir` keeps the parent's.
         staged = Path(tmp) / "file"
         staged.mkdir()
         shutil.copy2(source, staged / PurePosixPath(target).name, follow_symlinks=False)
-        await upload_dir(sandbox, staged, directory, timeout_s=timeout_s)
+        await upload_dir(sandbox, staged, directory, timeout_s=timeout_s, upload_part_bytes=upload_part_bytes)
 
 
 async def _prepare_restore_target(sandbox: AsyncSandbox, is_dir: bool, target: str) -> str:
@@ -438,6 +542,8 @@ async def upload_archive(
     *,
     timeout_s: float = 600,
     keep_out: tuple[str, ...] = (),
+    seconds_per_gib: float = 0.0,
+    upload_part_bytes: int | None = None,
 ) -> bool:
     """Restore at ``target`` the archive another sandbox's root ``tar`` produced (a download's ``archive_copy``).
 
@@ -448,7 +554,8 @@ async def upload_archive(
     staging copy :func:`download_dir` unpacked beside the archive went through :func:`_unpack`'s
     filter, and the archive exists only because that copy was accepted. A file's archive holds the one
     member named as the file is, so it is extracted into ``target``'s parent, which ``target`` must
-    name the same way.
+    name the same way. ``seconds_per_gib`` extends the join/extraction deadline, not the provider upload
+    timeout. ``upload_part_bytes`` opts into bounded archive parts as described by :func:`upload_dir`.
 
     ``keep_out`` names directories the restore must land clear of when a link diverts it: before anything
     touches the target, the directory the archive would be extracted into is resolved in the sandbox to
@@ -459,11 +566,19 @@ async def upload_archive(
     whatever link sits in the path, with or without a trailing slash. A restore that lands where its
     name says is the caller's to judge by that name. Returns ``True`` once the archive is extracted.
     """
+    _validate_upload_part_bytes(upload_part_bytes)
     directory = target if kind == "dir" else str(PurePosixPath(target).parent)
     if keep_out and not await _lands_clear(sandbox, directory, keep_out):
         return False
     await _prepare_restore_target(sandbox, kind == "dir", target)
-    await _upload_and_extract(sandbox, archive, directory, timeout_s=timeout_s)
+    await _upload_and_extract(
+        sandbox,
+        archive,
+        directory,
+        timeout_s=timeout_s,
+        seconds_per_gib=seconds_per_gib,
+        upload_part_bytes=upload_part_bytes,
+    )
     return True
 
 

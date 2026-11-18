@@ -16,24 +16,31 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import ClassVar
 
-from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi import Body, HTTPException, Request
 
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_correlation import rollout_context
-from nemo_gym.rollout_observability import AgentInvocation
-from nemo_gym.sandbox import AsyncSandbox
-from nemo_gym.sandbox.config import resolve_provider_config
-from nemo_gym.sandbox.providers import create_provider
-from nemo_gym.tool_access import DirectHTTPToolAccess
+from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    rollout_context,
+)
+from nemo_gym.sandbox import AsyncSandbox, create_provider, resolve_provider_config
+from nemo_gym.server_runtime import DirectHTTPToolAccess
+from nemo_gym.trajectory import AgentInvocation
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
 from responses_api_agents.nooa_agent.result import finalize_run_result, is_transient_infrastructure_error
 from responses_api_agents.nooa_agent.runner import (
@@ -65,14 +72,20 @@ class NOOAAgent(SimpleResponsesAPIAgent):
     """Run one NOOA activation per Environment Server-owned episode."""
 
     config: NOOAAgentConfig
+    # Sandboxed mode runs NOOA inside the task sandbox, which calls the model server from there. Embedded mode
+    # calls it from this host, which reaches the advertised node address as well.
+    calls_model_from_sandbox: ClassVar[bool] = True
 
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-        app.router.routes = [route for route in app.router.routes if getattr(route, "path", None) != "/run"]
-        return app
-
-    async def run(self, body: object) -> None:
-        raise NotImplementedError("Use the single_agent_turn Environment Server")
+    def classify_outcome(self, native_result: Mapping[str, object]) -> AgentOutcome:
+        """Report a trusted model rejection; the environment owns grading and retry policy."""
+        status = native_result.get("model_status_code")
+        if (
+            native_result.get("termination_reason") == NOOATerminationReason.MODEL_REJECTED
+            and type(status) is int
+            and 400 <= status <= 599
+        ):
+            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+        return AgentOutcome(failure_kind="unknown")
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> NOOASessionState:
         accesses = self.effective_tool_accesses(body)
@@ -93,6 +106,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 server_client=self.server_client,
                 model_server_name=self.config.model_server.name,
                 max_policy_calls=self.config.max_policy_calls,
+                context_window=self.config.context_window,
             )
         else:
             if body.sandbox_access is None:
@@ -117,10 +131,14 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 timeout=self.config.sandbox_runner_timeout_seconds,
                 close_timeout=self.config.session_close_timeout_seconds,
                 max_policy_calls=self.config.max_policy_calls,
+                context_window=self.config.context_window,
             )
             state.runner = runner
             try:
-                runner.python = await prepare_nooa_runtime(sandbox)
+                runner.python = await prepare_nooa_runtime(
+                    sandbox,
+                    wheelhouse_path=self.config.runtime_wheelhouse,
+                )
                 await runner.prepare()
             except BaseException as error:
                 # Main retains this state for close while rejecting activation
@@ -133,20 +151,20 @@ class NOOAAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         session_id = self._agent_session_id_from_request(request)
         if session_id is None:
-            raise HTTPException(409, "NOOA requires an agent session")
+            raise AgentSessionConflictError("NOOA requires an agent session")
         state = self._require_agent_session(session_id)
         assert isinstance(state, NOOASessionState)
         if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
-            raise HTTPException(409, "Agent session does not match the rollout route")
+            raise AgentSessionConflictError("Agent session does not match the rollout route")
         if body.tools and state.tool_access is None:
             raise HTTPException(422, "Resource tools require a direct HTTP grant")
         route = self.url_path_for_request("/v1/responses", request)
         async with state.lock:
             if state.closing:
-                raise HTTPException(409, "Agent session is closing")
+                raise AgentSessionConflictError("Agent session is closing")
             key = (body.model_copy(deep=True), route)
             if state.activation_key is not None and state.activation_key != key:
-                raise HTTPException(409, "Session already has another activation")
+                raise AgentSessionConflictError("Session already has another activation")
             if state.execution is None:
                 state.activation_key = key
                 state.execution = asyncio.create_task(self._execute_session(state, body, route))
@@ -156,7 +174,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         except asyncio.CancelledError:
             request_task = asyncio.current_task()
             if state.closing and request_task is not None and not request_task.cancelling():
-                raise HTTPException(409, "Agent session is closing") from None
+                raise AgentSessionConflictError("Agent session is closing") from None
             raise
 
     async def _execute_session(
@@ -189,7 +207,13 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             if is_transient_infrastructure_error(error):
                 raise HTTPException(503, "NOOA dependency request failed") from error
             raise
-        return finalize_run_result(state.result)[0]
+        return self.report_outcome(
+            finalize_run_result(state.result)[0],
+            {
+                "termination_reason": state.result.termination_reason,
+                "model_status_code": state.result.model_status_code,
+            },
+        )
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         assert isinstance(state, NOOASessionState)
@@ -267,3 +291,6 @@ class NOOAAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     NOOAAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = NOOAAgent.run_webserver()  # noqa: F401

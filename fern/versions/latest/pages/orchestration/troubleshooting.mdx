@@ -70,9 +70,9 @@ Multi-node data parallelism places an equal share of replicas on each node. Chan
 
 ### Policy settings given twice
 
-**Error:** `Benchmark '<name>' run config already sets ['policy_base_url', ...] but driver.policy_model is also set`
+**Error:** `Benchmark '<name>' run config already sets ['policy_base_url', ...] but driver.policy_model is also set (...)`
 
-Remove either those keys from `run` or `driver.policy_model`. Submit does not choose between them.
+`run` sets a policy key to a value other than the one `driver.policy_model` gives; the message names each key with both values (an API key is shown as `<redacted>`, and a URL without its password or query values). Remove either those keys from `run` or `driver.policy_model`. Submit does not choose between them. A key set to the same value is accepted.
 
 ### A custom command combined with run or resumable
 
@@ -176,6 +176,8 @@ The service did not answer its health endpoint in time (`timeout_seconds / 5` at
 **Error (in the job output):** `service <service> exited (status N) while the driver was running; stopping the driver.`
 
 Read that service's log for the cause. The rollouts that were in flight left no row, so they run again when the job resumes or is resubmitted.
+
+This only applies while the evaluation runs. When a benchmark has [exports](/orchestration/configuration#export), the job creates `<benchmark dir>/eval.succeeded.<Slurm job id>` as soon as `gym eval run` exits with 0, and from then on a service that exits no longer stops the job: the exports do not use the model service, and the job ends with the evaluation's own exit code. The file belongs to one attempt, so one left by an earlier attempt does not affect a resumed job.
 
 ### The driver cannot find Gym
 

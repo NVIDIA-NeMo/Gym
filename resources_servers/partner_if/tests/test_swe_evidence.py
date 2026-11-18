@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The SWE adapter: it seeds an Environment Server session with the row's Scale-SWE sandbox for opencode_agent,
+"""The SWE adapter: it seeds an episode session with the row's Scale-SWE sandbox for opencode_agent,
 and grades the actor's visible trajectory against the system prompt the row's contract records."""
 
 import json
@@ -11,10 +11,9 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from nemo_gym.base_resources_server import ResourcesSeedSessionRequest, ReverifyMode
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.sandbox import SandboxExecResult
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime import ResourcesSeedSessionRequest, ReverifyMode, check_resources_session_contract
 from resources_servers.partner_if.swe_app import SWEIFResourcesServer
 
 
@@ -264,7 +263,7 @@ async def test_reverify_cannot_run_the_swe_verification_again():
 
 
 async def test_the_verifier_fixture_grades_its_cases_without_a_judge_or_a_sandbox():
-    from nemo_gym.verifier_fixture import exercise_verifier_fixture
+    from nemo_gym.verification import exercise_verifier_fixture
     from resources_servers.partner_if.swe_app import VERIFIER_FIXTURE
 
     with patch(JUDGE, new_callable=AsyncMock) as judge, patch(SCALE_SWE_VERIFY, AsyncMock()) as verify:

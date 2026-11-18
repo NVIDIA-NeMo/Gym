@@ -1,0 +1,4 @@
+interface:
+  display_name: "NeMo Gym Score Triage"
+  short_description: "Explain gaps between a Gym score and a reference or another run"
+  default_prompt: "Use $nemo-gym-score-triage to check whether a NeMo Gym score is comparable with a reference number and explain the gap."

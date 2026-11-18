@@ -8,7 +8,14 @@ version=$2
 source_binary=${3:-}
 source_sha256=${4:-}
 path_prefix=${5:-}
+# Optional SHA-256 of each release download, as "<asset arch>=<digest>" words, for example
+# "x64-baseline=89a6... arm64=c168...". When set, a download whose asset has no digest here is refused.
+release_digests=${6:-}
 if [ -n "$path_prefix" ]; then export PATH="$path_prefix:$PATH"; fi
+# OpenCode 1.x prints the bare version; 2.x prints "opencode v<version>".
+is_requested_version() {
+  [ "$1" = "$version" ] || [ "$1" = "opencode v$version" ]
+}
 
 [ "$(uname -s)" = Linux ] || { echo 'OpenCode sandbox execution requires a Linux task image' >&2; exit 1; }
 # A process as "PID START" from /proc, so a reused PID never matches its former owner; PID alone
@@ -90,7 +97,7 @@ if [ -n "$source_binary" ]; then
   fi
   chmod 755 "$staged"
   # The probe must exit successfully as well as print the exact version.
-  if ! actual=$("$staged" --version) || [ "$actual" != "$version" ]; then
+  if ! actual=$("$staged" --version) || ! is_requested_version "$actual"; then
     echo 'OpenCode executable version mismatch' >&2
     exit 1
   fi
@@ -99,7 +106,7 @@ if [ -n "$source_binary" ]; then
 fi
 cached=false
 # A cached binary must also exit successfully, not only print the version.
-if [ -x "$runtime/opencode" ] && actual=$("$runtime/opencode" --version) && [ "$actual" = "$version" ]; then
+if [ -x "$runtime/opencode" ] && actual=$("$runtime/opencode" --version) && is_requested_version "$actual"; then
   cached=true
 fi
 missing=()
@@ -126,9 +133,11 @@ if [ "${#missing[@]}" -gt 0 ]; then
       exit 1
     fi
 fi
-# Stock OpenCode can download ripgrep itself. A system copy avoids per-session
-# downloads, but must not make cached runtimes or non-root/RHEL images unusable.
-if ! command -v rg >/dev/null 2>&1; then
+# OpenCode's grep and glob tools run rg. Without one they fail inside the trajectory, where no
+# check sees them, so setup fails instead unless the owner lets OpenCode download rg on demand.
+# NG_OPENCODE_SKIP_RIPGREP=1: the adapter stages a pinned rg for the session instead.
+# NG_OPENCODE_ALLOW_RIPGREP_DOWNLOAD=1: a missing rg only warns, as OpenCode downloads one when it can.
+if [ "${NG_OPENCODE_SKIP_RIPGREP:-0}" != 1 ] && ! command -v rg >/dev/null 2>&1; then
   if [ "$(id -u)" = 0 ]; then
     if command -v apk >/dev/null 2>&1; then
       apk add --no-cache ripgrep || true
@@ -136,16 +145,41 @@ if ! command -v rg >/dev/null 2>&1; then
       (apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ripgrep) || true
     fi
   fi
-  command -v rg >/dev/null 2>&1 || echo 'Warning: optional ripgrep is unavailable; OpenCode can download it on demand' >&2
+  if ! command -v rg >/dev/null 2>&1; then
+    if [ "${NG_OPENCODE_ALLOW_RIPGREP_DOWNLOAD:-0}" = 1 ]; then
+      echo 'Warning: ripgrep is unavailable; OpenCode can download it on demand' >&2
+    else
+      echo 'OpenCode grep and glob tools need ripgrep: preinstall rg in the task image, pin one with sandbox_ripgrep_path and sandbox_ripgrep_sha256, or set sandbox_ripgrep_download: true if the sandbox can download it' >&2
+      exit 1
+    fi
+  fi
 fi
 if [ "$cached" = true ]; then
   exit 0
 fi
+expected_digest=
+if [ -n "$release_digests" ]; then
+  for entry in $release_digests; do
+    [ "${entry%%=*}" != "$arch" ] || expected_digest=${entry#*=}
+  done
+  [ -n "$expected_digest" ] || { echo "No pinned SHA-256 for opencode-linux-${arch}.tar.gz ${version}" >&2; exit 1; }
+  command -v sha256sum >/dev/null 2>&1 || { echo 'Verifying the OpenCode download requires sha256sum' >&2; exit 1; }
+fi
 curl -fSL --retry 3 "https://github.com/anomalyco/opencode/releases/download/v${version}/opencode-linux-${arch}.tar.gz" -o "$runtime/opencode.tar.gz"
-tar -xzf "$runtime/opencode.tar.gz" -C "$runtime" opencode
+if [ -n "$expected_digest" ]; then
+  digest=$(sha256sum "$runtime/opencode.tar.gz")
+  if [ "${digest%% *}" != "$expected_digest" ]; then
+    rm -f "$runtime/opencode.tar.gz"
+    echo "OpenCode download digest mismatch: expected $expected_digest, found ${digest%% *}" >&2
+    exit 1
+  fi
+fi
+# The archive records its builder's uid; as root inside a user namespace that does not map it (rootless Podman or
+# Docker), restoring that owner fails with EINVAL, so the binary is owned by whoever extracts it.
+tar --no-same-owner -xzf "$runtime/opencode.tar.gz" -C "$runtime" opencode
 chmod +x "$runtime/opencode"
 actual=$("$runtime/opencode" --version)
-if [ "$actual" != "$version" ]; then
+if ! is_requested_version "$actual"; then
   echo "OpenCode version mismatch: requested $version, found $actual" >&2
   exit 1
 fi

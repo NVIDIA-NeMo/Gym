@@ -43,9 +43,9 @@ from checkpoint_deployment import (
     weather_row,
 )
 
-import nemo_gym.server_utils as server_utils
-from nemo_gym._checkpoint import coordination
-from nemo_gym.episode_types import EpisodeId
+import nemo_gym.client.http_client
+from nemo_gym.core.episode_types import EpisodeId
+from nemo_gym.server_runtime._checkpoint import coordination
 
 
 # The policy model server runs in one process, or as a coordinator plus uvicorn workers.
@@ -62,14 +62,14 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(autouse=True)
 async def gym_http_client() -> AsyncIterator[None]:
     """Coordination calls go through Gym's global aiohttp client, which is bound to this test's loop."""
-    server_utils.set_global_aiohttp_client(server_utils.GlobalAIOHTTPAsyncClientConfig())
+    nemo_gym.client.http_client.set_global_aiohttp_client(nemo_gym.client.http_client.GlobalAIOHTTPAsyncClientConfig())
     yield
-    await server_utils._GLOBAL_AIOHTTP_CLIENT.close()
-    server_utils._GLOBAL_AIOHTTP_CLIENT = None
+    await nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT.close()
+    nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT = None
     # Coordination uses the reserved control pool, created on first use in this test's loop.
-    if server_utils._GLOBAL_AIOHTTP_CONTROL_CLIENT is not None:
-        await server_utils._GLOBAL_AIOHTTP_CONTROL_CLIENT.close()
-        server_utils._GLOBAL_AIOHTTP_CONTROL_CLIENT = None
+    if nemo_gym.client.http_client._GLOBAL_AIOHTTP_CONTROL_CLIENT is not None:
+        await nemo_gym.client.http_client._GLOBAL_AIOHTTP_CONTROL_CLIENT.close()
+        nemo_gym.client.http_client._GLOBAL_AIOHTTP_CONTROL_CLIENT = None
 
 
 async def lift_connection_limit() -> None:
@@ -78,10 +78,10 @@ async def lift_connection_limit() -> None:
     Each ``/run`` holds a connection until its episode replies,
     so a pool smaller than the rollouts in flight would leave the rest unsent.
     """
-    await server_utils._GLOBAL_AIOHTTP_CLIENT.close()
-    server_utils._GLOBAL_AIOHTTP_CLIENT = None
-    server_utils.set_global_aiohttp_client(
-        server_utils.GlobalAIOHTTPAsyncClientConfig(global_aiohttp_connector_limit_per_host=0)
+    await nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT.close()
+    nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT = None
+    nemo_gym.client.http_client.set_global_aiohttp_client(
+        nemo_gym.client.http_client.GlobalAIOHTTPAsyncClientConfig(global_aiohttp_connector_limit_per_host=0)
     )
 
 
@@ -361,8 +361,8 @@ async def test_resources_state_is_restored_with_the_episode(
         assert replacement.json()["reward"] == 1.0
     else:
         # The continued episode increments a fresh counter to 2 and verifies normally, with no reward.
-        # With several workers, nothing claims the old cookie's session,
-        # so the worker that serves its first request claims it, and the rest follow, as with one worker.
+        # With several workers, nobody owns the old cookie's session,
+        # so the worker that serves its first request becomes its owner, and the rest follow, as with one worker.
         assert replacement.status_code == 200, replacement.text
         assert replacement.json()["reward"] == 0.0
 
@@ -478,8 +478,8 @@ async def test_concurrent_sessions_across_workers_all_continue_after_a_crash(
         deployment.backend("/_ctl/step", {"calls": count})
         await wait_for_calls(deployment, 2 * count, timeout=60)
         replies = await checkpoint_replies(deployment, tmp_path / "ckpt", list(rows))
-        # Each worker holds the sessions it created, as its claims say.
-        holders = deployment.claims(session_kind)
+        # Each worker holds the sessions it created, as its owner files say.
+        holders = deployment.owner_files(session_kind)
         await crash_and_restore(deployment, tmp_path / "ckpt", list(rows), server_workers=workers_after)
         for run in runs:
             run.cancel()
@@ -491,7 +491,7 @@ async def test_concurrent_sessions_across_workers_all_continue_after_a_crash(
 
     rewards = [reward_of(result.json()) for result in results]
     assert replies[episode_owner]["episode_ids"] == sorted(rows)
-    # With one worker nothing is claimed; with several, the sessions come from every worker.
+    # With one worker nothing is owned; with several, the sessions come from every worker.
     assert len(holders) == (0 if workers_before == 1 else workers_before)
     assert len(session_records(tmp_path / "ckpt", session_kind)) == count
     assert rewards == [1.0] * count
@@ -864,7 +864,7 @@ async def test_a_retired_episode_stops_everywhere_and_leaves_nothing_behind(
         await wait_for_calls(deployment, 2)
         participants = await deployment.participants()
         # A retire whose deadline has passed only refuses the attempt: its resources session is marked,
-        # and counted as retired until a retire frees it, on whichever worker holds it.
+        # and counted as retired until a retire releases it, on whichever worker holds it.
         late_retire = await GymHTTP(deployment.url("resources"), timeout=10).post(
             "/ng-control/v1/checkpoint/retire",
             json={"checkpoint_id": "mark", "deadline_ts": time.time() - 1, "episode_ids": [{"rollout_id": "gone-1"}]},

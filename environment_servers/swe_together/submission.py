@@ -11,8 +11,7 @@ from uuid import uuid4
 from environment_servers.swe_together.evaluation import JudgeMeasurementError
 from environment_servers.swe_together.runtime import PYTHON, SUBMISSION_ROOT, RuntimeProvisioner
 from environment_servers.swe_together.submission_worker import task_roots
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
-from nemo_gym.sandbox.utils import read_text
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, read_text
 
 
 TRANSFER_TIMEOUT_S = 600
