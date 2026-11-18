@@ -14,10 +14,7 @@ from time import monotonic, time
 from typing import Any
 
 
-# Compaction compatibility: tested with hermes-agent 0.6.0 at cmunley1/hermes-agent@26bb847a.
-# The runtime is pinned in requirements.txt. Revalidate these hooks and session_*
-# counters, plus auxiliary.compression routing in sandbox_runner.py, when changing that pin.
-# Source: https://github.com/cmunley1/hermes-agent/tree/26bb847a
+# Revalidate these private hooks and session counters when updating the upstream pin.
 _COMPACTION_METHOD = "_compress_context"
 _CONTEXT_COMPRESSOR_ATTR = "context_compressor"
 _COMPRESSION_COUNT_ATTR = "compression_count"
@@ -45,11 +42,9 @@ _USAGE_DETAIL_FIELDS = (
 _SUMMARY_CAPTURE: ContextVar[Any] = ContextVar("gym_hermes_summary_capture", default=None)
 
 
-def _install_summary_capture() -> None:
+def _install_summary_capture(compressor: Any) -> None:
     # The pinned compressor calls this module-level function, including for
     # delegated agents. ContextVar keeps overlapping invocations separate.
-    import agent.context_compressor as compressor
-
     original = getattr(compressor, _SUMMARY_CALL_FUNCTION)
     if getattr(original, "_gym_observed", False):
         return
@@ -103,8 +98,11 @@ class SandboxHermesObserver:
         self._summary_details_unknown = False
         self._gaps: list[dict[str, Any]] = []
 
-    def instrument(self, agent: Any) -> "SandboxHermesObserver":
-        _install_summary_capture()
+    def instrument(self, agent: Any, *, capture_summaries: bool = False) -> "SandboxHermesObserver":
+        if capture_summaries:
+            import agent.context_compressor as compressor
+
+            _install_summary_capture(compressor)
         self._instrument(agent, "root", wrap_conversation=False)
         return self
 

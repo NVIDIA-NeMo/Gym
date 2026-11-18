@@ -3,9 +3,12 @@
 """Agent-server side of Hermes execution in borrowed or owned task sandboxes."""
 
 import asyncio
-import importlib.metadata
 import json
 import logging
+import os
+import subprocess
+import tarfile
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from shlex import quote
@@ -13,39 +16,77 @@ from shlex import quote
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
 from nemo_gym.agents import AgentSessionState, SandboxCommand, SandboxPythonRuntime, SandboxSession
+from nemo_gym.agents.utils.sandbox_python import SandboxPlatform
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
+from responses_api_agents.hermes_agent.runtime import HERMES_SOURCE, source_checkout, stage_source
 
 
 LOG = logging.getLogger(__name__)
 
 
-def _sandbox_hermes_requirement() -> str:
-    """Return the requirement the sandbox runtime is built from.
+class HermesPythonRuntime(SandboxPythonRuntime):
+    """Bundle the exact upstream lock and source tree for an offline task sandbox."""
 
-    It comes from the Hermes installed with this server, whose source is declared in ``pyproject.toml``, and
-    the sandbox runs the same Hermes as the host. A git install is fetched as a GitHub archive, so building it
-    does not need git. The ``mcp`` extra carries Hermes' MCP client, which episode tool grants use.
-    """
-    distribution = importlib.metadata.distribution("hermes-agent")
-    direct_url = json.loads(distribution.read_text("direct_url.json") or "{}")
-    commit = (direct_url.get("vcs_info") or {}).get("commit_id")
-    if commit is None:
-        return f"hermes-agent[mcp]=={distribution.version}"
-    url = str(direct_url.get("url") or "").removesuffix(".git")
-    if not url.startswith("https://github.com/"):
-        raise RuntimeError(f"Cannot build a sandbox install URL for hermes-agent installed from {url!r}")
-    return f"hermes-agent[mcp] @ {url}/archive/{commit}.tar.gz"
+    async def _build_site_packages(self, platform: SandboxPlatform, destination: Path) -> None:
+        await asyncio.to_thread(self.build_packages, platform.wheel_platform, destination)
+
+    def build_packages(self, wheel_platform: str, destination: Path) -> None:
+        """Create the relocatable package archive for one Python 3.14 platform."""
+        source = source_checkout(self.requirements[0])
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=destination.parent) as temporary:
+            scratch = Path(temporary)
+            requirements = scratch / "requirements.txt"
+            with requirements.open("w") as output:
+                subprocess.run(
+                    ["uv", "export", "--frozen", "--no-dev", "--extra", "mcp", "--no-emit-project"],
+                    cwd=source,
+                    stdout=output,
+                    check=True,
+                )
+            site = scratch / "python/lib/python3.14/site-packages"
+            # Export already applied the upstream overrides. Install exactly those hashes.
+            subprocess.run(
+                [
+                    "uv",
+                    "pip",
+                    "install",
+                    "--no-config",
+                    "--no-deps",
+                    "--require-hashes",
+                    "--only-binary",
+                    ":all:",
+                    "--python-platform",
+                    wheel_platform,
+                    "--python-version",
+                    self.python_version,
+                    "--target",
+                    str(site),
+                    "--link-mode",
+                    "copy",
+                    "-r",
+                    str(requirements),
+                ],
+                cwd=scratch,
+                check=True,
+            )
+            stage_source(source, site)
+            archive = scratch / "packages.tar.gz"
+            with tarfile.open(archive, "w:gz", compresslevel=1) as bundle:
+                bundle.add(scratch / "python", arcname="python")
+            os.replace(archive, destination)
 
 
-_HERMES_RUNTIME = SandboxPythonRuntime(
+_HERMES_RUNTIME = HermesPythonRuntime(
     harness="hermes",
-    # The pinned Hermes client requires the MCP 1 Streamable HTTP API.
-    requirements=(_sandbox_hermes_requirement(), "mcp>=1.28.1,<2"),
+    python_version="3.14.7",
+    requirements=(HERMES_SOURCE,),
+    constraints=(),
     import_check=(
         "import os; os.environ['HERMES_HOME'] = os.path.join(os.environ['HOME'], '.hermes'); "
-        "import run_agent; from mcp.client.streamable_http import streamablehttp_client"
+        "from run_agent import AIAgent; from tools.mcp_tool_discovery import discover_mcp_tools; import mcp"
     ),
 )
 _SANDBOX_RUNTIME_DIR = _HERMES_RUNTIME.directory

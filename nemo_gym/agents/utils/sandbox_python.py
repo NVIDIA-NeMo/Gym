@@ -59,11 +59,16 @@ _PYTHON_SHA256 = {
     "x86_64/musl": "c6b77767b2c97ce77c21496909396b6e056b96220b2cda45f2c93b654376dd93",  # pragma: allowlist secret
     "aarch64/musl": "960738ebde53abeceb5452b71c2217d50452023e3baf2439dc57290d07930637",  # pragma: allowlist secret
 }
+_PYTHON_314_SHA256 = {
+    "x86_64/gnu": "a3a4e4b81b138960c7c546694df8a77578c0b6aa46d47e96f49b9e10e8f860c9",  # pragma: allowlist secret
+    "aarch64/gnu": "f278d66c15e81f6c77719892e3eb32ff4bca5fc4ab424e171d14bc12bb88b4ee",  # pragma: allowlist secret
+    "x86_64/musl": "55aad270d776b9e5f983e5b1b2aba23433fca5f8f0b5ce423da5aafe2c784935",  # pragma: allowlist secret
+    "aarch64/musl": "b014b2aaa2e2b5b48739c751869de21e6cec94df720d56ecc9e5335a9a7dfe3c",  # pragma: allowlist secret
+}
 # UV_PYTHON_INSTALL_MIRROR replaces this base for HTTP(S) mirrors; file:// mirrors are not supported here.
 # Offline hosts can prepopulate cache_dir/sandbox_python with the pinned archive; checksums still apply.
 _PYTHON_DOWNLOADS = "https://github.com/astral-sh/python-build-standalone/releases/download"
 _PYTHON_FILE = "cpython-{version}%2B{release}-{arch}-unknown-linux-{libc}-install_only_stripped.tar.gz"
-_SITE_PACKAGES = f"python/lib/python{PYTHON_VERSION.rsplit('.', 1)[0]}/site-packages"
 _INSTALLER = Path(__file__).with_name("install_python_runtime.sh")
 # Prefer glibc evidence: Debian/Ubuntu can also install a musl loader alongside their system libc.
 # ldd is the fallback when getconf is absent; musl's ldd may print its version and exit nonzero.
@@ -181,12 +186,13 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-async def _python_archive(platform: SandboxPlatform) -> Path:
+async def _python_archive(platform: SandboxPlatform, *, version: str = PYTHON_VERSION) -> Path:
     """The pinned python-build-standalone archive for ``platform``, checked against its published SHA-256."""
-    expected = _PYTHON_SHA256.get(f"{platform.arch}/{platform.libc}")
+    checksums = {PYTHON_VERSION: _PYTHON_SHA256, "3.14.7": _PYTHON_314_SHA256}[version]
+    expected = checksums.get(f"{platform.arch}/{platform.libc}")
     if expected is None:
         raise RuntimeError(f"No pinned Python build for {platform.arch}/{platform.libc}")
-    name = _PYTHON_FILE.format(release=_PYTHON_RELEASE, version=PYTHON_VERSION, arch=platform.arch, libc=platform.libc)
+    name = _PYTHON_FILE.format(release=_PYTHON_RELEASE, version=version, arch=platform.arch, libc=platform.libc)
     url = f"{(os.environ.get('UV_PYTHON_INSTALL_MIRROR') or _PYTHON_DOWNLOADS).rstrip('/')}/{_PYTHON_RELEASE}/{name}"
     # A host that cannot download it can be given the file here.
     path = _cache_dir() / name.replace("%2B", "+")
@@ -268,6 +274,7 @@ class SandboxPythonRuntime:
     harness: str
     requirements: tuple[str, ...]
     import_check: str
+    python_version: str = PYTHON_VERSION
     overrides: tuple[str, ...] = ()
     constraints: tuple[str, ...] | None = None
 
@@ -285,7 +292,7 @@ class SandboxPythonRuntime:
         Server's environment, so a runtime baked into an image is reused only by an Agent Server environment with
         exactly those versions. The adapter may keep its own harness files here, beside ``python/``.
         """
-        inputs = [PYTHON_VERSION, _PYTHON_RELEASE, self.requirements, self.overrides, self.pins]
+        inputs = [self.python_version, _PYTHON_RELEASE, self.requirements, self.overrides, self.pins]
         key = hashlib.sha256(json.dumps(inputs).encode()).hexdigest()[:16]
         return f"/tmp/nemo-gym-{self.harness}-runtime-{key}"
 
@@ -323,7 +330,7 @@ class SandboxPythonRuntime:
         try:
             async with asyncio.timeout(timeout_s):
                 platform = await probe_sandbox_platform(sandbox)
-                python_archive = await _python_archive(platform)
+                python_archive = await _python_archive(platform, version=self.python_version)
                 site_packages_archive = await self._site_packages_archive(platform)
                 setup = f"{self.directory}/.setup-{uuid4().hex}"
                 try:
@@ -386,11 +393,11 @@ class SandboxPythonRuntime:
                 "--python",
                 sys.executable,
                 "--python-version",
-                PYTHON_VERSION,
+                self.python_version,
                 "--python-platform",
                 platform.wheel_platform,
                 "--target",
-                str(scratch / _SITE_PACKAGES),
+                str(scratch / "python/lib" / f"python{self.python_version.rsplit('.', 1)[0]}" / "site-packages"),
                 "--constraints",
                 str(constraints),
                 "--only-binary",

@@ -763,11 +763,14 @@ async def test_seed_import_check_ignores_task_hermes_home(tmp_path):
     private_home, task_home = tmp_path / "runtime-home", tmp_path / "task-home"
     private_home.mkdir()
     task_home.mkdir()
+    from responses_api_agents.hermes_agent.runtime import host_python
+
     code = (
-        hermes_sandbox._HERMES_RUNTIME.import_check + "; import json; print(json.dumps(str(run_agent._hermes_home)))"
+        hermes_sandbox._HERMES_RUNTIME.import_check
+        + "; import json, run_agent; print(json.dumps(str(run_agent._hermes_home)))"
     )
     process = await asyncio.create_subprocess_exec(
-        sys.executable,
+        str(host_python()),
         "-I",
         "-c",
         code,
@@ -1139,13 +1142,11 @@ async def test_host_and_sandbox_prepare_the_same_request(agent, state, monkeypat
     )
     original = body.model_dump()
     result = {"completed": True, "messages": [{"role": "assistant", "content": "done"}]}
-    runner = MagicMock()
-    runner.run_conversation.return_value = result
-    constructor = MagicMock(return_value=runner)
-    monkeypatch.setattr("run_agent.AIAgent", constructor)
-    monkeypatch.setattr(HermesAgent, "_ensure_sigterm_handler", lambda *_: None)
+    host_worker = AsyncMock(return_value=({"result": result}, False))
+    monkeypatch.setattr(HermesAgent, "_run_host_worker", host_worker)
     await agent.responses(SimpleNamespace(session={}), body)
-    user_message, system_message, history = runner.run_conversation.call_args.args
+    host = host_worker.await_args.args[0]
+    user_message, system_message, history = host["user_message"], host["system_message"], host["history"]
 
     agent._session_records["session"] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
     state.upload_json = AsyncMock()
@@ -1172,12 +1173,8 @@ async def test_host_and_sandbox_prepare_the_same_request(agent, state, monkeypat
         == system_message
         == ("Configured instruction\n\nRequest instruction\n\nInput system instruction")
     )
-    assert (
-        payload["temperature"]
-        == constructor.call_args.kwargs["temperature"]
-        == (temperature if temperature is not None else 0.7)
-    )
-    assert payload["max_tokens"] == constructor.call_args.kwargs["max_tokens"] == 500
+    assert payload["temperature"] == host["temperature"] == (temperature if temperature is not None else 0.7)
+    assert payload["max_tokens"] == host["max_tokens"] == 500
     assert body.model_dump() == original
     assert len(validations) == 2  # Exactly once per incoming request, not again in the runner.
 
@@ -1866,12 +1863,11 @@ async def test_images_reach_host_and_sandbox_without_dropping_history(agent, sta
             await agent.responses(request(state), body.model_copy(update={"instructions": "different"}))
         assert error.value.status_code == 409
     else:
-        runner = MagicMock()
-        runner.run_conversation.return_value = result
-        monkeypatch.setattr("run_agent.AIAgent", MagicMock(return_value=runner))
-        monkeypatch.setattr(HermesAgent, "_ensure_sigterm_handler", lambda *_: None)
+        host_worker = AsyncMock(return_value=({"result": result}, False))
+        monkeypatch.setattr(HermesAgent, "_run_host_worker", host_worker)
         await agent.responses(SimpleNamespace(session={}), body)
-        latest, _, history = runner.run_conversation.call_args.args
+        host = host_worker.await_args.args[0]
+        latest, history = host["user_message"], host["history"]
     expected = [
         {"type": "text", "text": "before"},
         {"type": "image_url", "image_url": {"url": _IMAGE_URI, "detail": "high"}},

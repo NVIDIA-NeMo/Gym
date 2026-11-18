@@ -133,8 +133,11 @@ def test_export_keeps_history_and_output_across_multiple_compactions():
 
 @pytest.mark.parametrize("usage", [True, False])
 def test_summary_calls_keep_invocation_identity_and_usage(monkeypatch, usage):
-    import agent.context_compressor as compressor
+    from types import SimpleNamespace
+
     from openai.types.chat import ChatCompletion
+
+    from responses_api_agents.hermes_agent.sandbox_observer import _install_summary_capture
 
     response = ChatCompletion.model_validate(
         {
@@ -160,7 +163,8 @@ def test_summary_calls_keep_invocation_identity_and_usage(monkeypatch, usage):
             else None,
         }
     )
-    monkeypatch.setattr(compressor, "call_llm", lambda **kwargs: response)
+    compressor = SimpleNamespace(call_llm=lambda **kwargs: response)
+    _install_summary_capture(compressor)
 
     class SummarizingAgent(_Agent):
         session_prompt_tokens = 100

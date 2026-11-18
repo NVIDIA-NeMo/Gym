@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -57,11 +58,9 @@ from responses_api_agents.hermes_agent.app import (
     _split_input_to_user_and_history,
     _trajectory_to_output_items,
 )
-from responses_api_agents.hermes_agent.observability import HermesAgentObserver
 from responses_api_agents.hermes_agent.sandbox import (
     _HERMES_RUNTIME,
     HermesSandboxSession,
-    _sandbox_hermes_requirement,
 )
 
 
@@ -150,7 +149,7 @@ class TestSanity:
         provider = AsyncMock()
         sandbox = AsyncMock()
         sandbox.exec.return_value = SandboxExecResult(stdout="", stderr="", return_code=0)
-        monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/v1")
+        monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args, **kwargs: "http://model:8000/v1")
         connect = AsyncMock(return_value=sandbox)
         monkeypatch.setattr(
             "responses_api_agents.hermes_agent.app.get_global_config_dict",
@@ -207,7 +206,7 @@ class TestSanity:
         install = AsyncMock()
         monkeypatch.setattr(SandboxPythonRuntime, "is_installed", is_installed)
         monkeypatch.setattr(SandboxPythonRuntime, "install", install)
-        monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/v1")
+        monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args, **kwargs: "http://model:8000/v1")
         monkeypatch.setattr(
             "responses_api_agents.hermes_agent.app.get_global_config_dict",
             lambda: {"runtime": {}},
@@ -234,8 +233,8 @@ class TestSanity:
 
         is_installed.assert_awaited_once_with(sandbox)
         install.assert_awaited_once_with(sandbox, timeout_s=123)
-        # The pinned Hermes client requires the MCP 1 Streamable HTTP API.
-        assert "mcp>=1.28.1,<2" in _HERMES_RUNTIME.requirements
+        assert _HERMES_RUNTIME.python_version.startswith("3.14.")
+        assert "mcp_tool_discovery" in _HERMES_RUNTIME.import_check
         # Seeding prepares paths from the root; it never runs in, or writes to, the task's working directory.
         assert [call.kwargs["cwd"] for call in sandbox.exec.await_args_list] == ["/"]
         assert {call.args[0].name for call in sandbox.upload.await_args_list} == {
@@ -274,7 +273,7 @@ class TestSanity:
         provider = AsyncMock()
         sandbox = AsyncMock()
         sandbox.exec.return_value = SandboxExecResult(stdout="", stderr="", return_code=0)
-        monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/v1")
+        monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args, **kwargs: "http://model:8000/v1")
         sandbox_factory = MagicMock(return_value=sandbox)
         original_config = hermes.config.sandbox_config.copy()
         monkeypatch.setattr(
@@ -772,8 +771,10 @@ class _FakeAgent:
     def __init__(self) -> None:
         self.interrupt_reason = None
 
-    def interrupt(self, reason: str) -> None:
-        self.interrupt_reason = reason
+    returncode = None
+
+    def terminate(self) -> None:
+        self.interrupt_reason = "timeout"
 
 
 class TestSigtermHandler:
@@ -856,15 +857,15 @@ class TestSigtermHandler:
         hermes = HermesAgent(config=_config(), server_client=server_client)
         monkeypatch.setattr(hermes, "_ensure_sigterm_handler", lambda: None)
 
-        class _FailingInterruptedAIAgent:
-            def __init__(self, **kwargs) -> None:
-                self._build_api_kwargs = lambda _messages: {}
+        process = MagicMock(returncode=1)
 
-            def run_conversation(self, *args, **kwargs) -> dict:
-                hermes.interrupted_agents.add(id(self))
-                raise RuntimeError("agent failed")
+        async def communicate(_):
+            hermes.interrupted_agents.add(id(process))
+            raise RuntimeError("agent failed")
 
-        monkeypatch.setattr("run_agent.AIAgent", _FailingInterruptedAIAgent)
+        process.communicate = communicate
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
+        monkeypatch.setattr("responses_api_agents.hermes_agent.app.host_python", lambda: "python")
 
         with pytest.raises(RuntimeError, match="agent failed"):
             asyncio.run(hermes.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
@@ -996,15 +997,12 @@ class TestResultClassification:
     @pytest.mark.parametrize("totals", [None, (0, 0), (20, 10)])
     async def test_host_path_retains_provider_failure_for_masked_verification(self, monkeypatch, totals) -> None:
         hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient, global_config_dict={}))
-        monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/v1")
+        monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args, **kwargs: "http://model:8000/v1")
         monkeypatch.setattr(HermesAgent, "_ensure_sigterm_handler", lambda *_: None)
-        runner = MagicMock()
-        runner.run_conversation.return_value = {"failed": True, "error": "HTTP 500", "messages": []}
+        result = {"failed": True, "error": "HTTP 500", "messages": []}
         if totals is not None:
-            runner.session_prompt_tokens, runner.session_completion_tokens = totals
-            runner.session_cache_read_tokens = 0
-            runner.session_reasoning_tokens = 0
-        monkeypatch.setattr("run_agent.AIAgent", MagicMock(return_value=runner))
+            result.update(prompt_tokens=totals[0], completion_tokens=totals[1])
+        monkeypatch.setattr(HermesAgent, "_run_host_worker", AsyncMock(return_value=({"result": result}, False)))
         response = await hermes._create_response(NeMoGymResponseCreateParamsNonStreaming(input="hi"))
         assert response.status == "failed"
         assert response.error.message == "HTTP 500"
@@ -1017,44 +1015,12 @@ class TestResultClassification:
             assert response.usage.total_tokens == sum(totals)
 
 
-class TestSandboxHermesRequirement:
-    """The sandbox runtime is built from the Hermes this server has installed; requirements.txt is the only pin."""
+def test_host_and_sandbox_share_an_immutable_runtime_source():
+    from responses_api_agents.hermes_agent.runtime import HERMES_COMMIT, HERMES_SOURCE
 
-    @staticmethod
-    def _installed(monkeypatch, *, version: str, direct_url: dict | None) -> None:
-        distribution = SimpleNamespace(
-            version=version,
-            read_text=lambda name: json.dumps(direct_url) if direct_url is not None else None,
-        )
-        monkeypatch.setattr("importlib.metadata.distribution", lambda name: distribution)
-
-    def test_git_install_becomes_a_github_archive(self, monkeypatch) -> None:
-        commit = "a" * 40
-        self._installed(
-            monkeypatch,
-            version="0.6.0",
-            direct_url={"url": "https://github.com/cmunley1/hermes-agent.git", "vcs_info": {"commit_id": commit}},
-        )
-
-        assert (
-            _sandbox_hermes_requirement()
-            == f"hermes-agent[mcp] @ https://github.com/cmunley1/hermes-agent/archive/{commit}.tar.gz"
-        )
-
-    def test_release_install_pins_the_version(self, monkeypatch) -> None:
-        self._installed(monkeypatch, version="0.7.1", direct_url=None)
-
-        assert _sandbox_hermes_requirement() == "hermes-agent[mcp]==0.7.1"
-
-    def test_git_install_outside_github_is_rejected(self, monkeypatch) -> None:
-        self._installed(
-            monkeypatch,
-            version="0.6.0",
-            direct_url={"url": "https://gitlab.example.com/hermes-agent", "vcs_info": {"commit_id": "abc"}},
-        )
-
-        with pytest.raises(RuntimeError, match="gitlab.example.com"):
-            _sandbox_hermes_requirement()
+    assert re.fullmatch("[0-9a-f]{40}", HERMES_COMMIT)
+    assert _HERMES_RUNTIME.requirements == (HERMES_SOURCE,)
+    assert HERMES_SOURCE.endswith("@" + HERMES_COMMIT)
 
 
 class TestSplitInputToUserAndHistory:
@@ -1205,16 +1171,11 @@ class TestRolloutCorrelation:
 
         seen: dict = {}
 
-        class _StubAIAgent:
-            def __init__(self, **kwargs) -> None:
-                seen["base_url"] = kwargs.get("base_url")
-                self._build_api_kwargs = lambda _messages: {}
-                self.compression_enabled = True
+        async def worker(_, payload):
+            seen["base_url"] = payload["model_base_url"]
+            return ({"result": {"messages": [{"role": "assistant", "content": "ok"}]}}, False)
 
-            def run_conversation(self, *args, **kwargs) -> dict:
-                return {"messages": [{"role": "assistant", "content": "ok"}]}
-
-        monkeypatch.setattr("run_agent.AIAgent", _StubAIAgent)
+        monkeypatch.setattr(HermesAgent, "_run_host_worker", worker)
         client = TestClient(agent.setup_webserver())
 
         assert client.post("/ng-rollout/rid/v1/responses", json={"input": "hi"}).status_code == 200
@@ -1248,16 +1209,11 @@ class TestMaxTokens:
 
         seen: dict = {}
 
-        class _StubAIAgent:
-            def __init__(self, **kwargs) -> None:
-                seen["max_tokens"] = kwargs.get("max_tokens")
-                self._build_api_kwargs = lambda _messages: {}
-                self.compression_enabled = True
+        async def worker(_, payload):
+            seen["max_tokens"] = payload["max_tokens"]
+            return ({"result": {"messages": [{"role": "assistant", "content": "ok"}]}}, False)
 
-            def run_conversation(self, *args, **kwargs) -> dict:
-                return {"messages": [{"role": "assistant", "content": "ok"}]}
-
-        monkeypatch.setattr("run_agent.AIAgent", _StubAIAgent)
+        monkeypatch.setattr(HermesAgent, "_run_host_worker", worker)
         return agent, seen
 
     def test_max_tokens_passed_to_ai_agent(self, monkeypatch) -> None:
@@ -1291,27 +1247,21 @@ class TestObservability:
         agent = HermesAgent(config=_config(terminal_backend=terminal_backend), server_client=server_client)
         monkeypatch.setattr(agent, "_ensure_sigterm_handler", lambda: None)
 
-        class _StubAIAgent:
-            def __init__(self, **kwargs) -> None:
-                self._build_api_kwargs = lambda _messages: {}
-
-            def run_conversation(self, *args, **kwargs) -> dict:
-                return {
-                    "completed": True,
-                    "messages": [
-                        {"role": "user", "content": "hi"},
-                        {"role": "assistant", "content": "ok"},
-                    ],
-                }
-
-        monkeypatch.setattr("run_agent.AIAgent", _StubAIAgent)
+        result = {
+            "completed": True,
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "ok"},
+            ],
+        }
+        monkeypatch.setattr(HermesAgent, "_run_host_worker", AsyncMock(return_value=({"result": result}, False)))
         body = NeMoGymResponseCreateParamsNonStreaming(input="hi")
         baseline = asyncio.run(agent.responses(request=None, body=body))
 
         def fail_finish(*args, **kwargs):
             raise RuntimeError("observer failed")
 
-        monkeypatch.setattr(HermesAgentObserver, "finish", fail_finish)
+        monkeypatch.setattr(HermesAgent, "_sandbox_observations", fail_finish)
         episode = asyncio.run(agent._create_episode(body=body, rollout_id="rid"))
 
         assert episode.response.output == baseline.output
@@ -1401,18 +1351,9 @@ class TestObservability:
         agent = HermesAgent(config=_config(), server_client=server_client)
         monkeypatch.setattr(agent, "_ensure_sigterm_handler", lambda: None)
 
-        class _FailingAIAgent:
-            def __init__(self, **kwargs) -> None:
-                self._build_api_kwargs = lambda _messages: {}
-
-            def run_conversation(self, *args, **kwargs) -> dict:
-                raise ValueError("agent failed")
-
-        monkeypatch.setattr("run_agent.AIAgent", _FailingAIAgent)
+        monkeypatch.setattr(HermesAgent, "_run_host_worker", AsyncMock(side_effect=ValueError("agent failed")))
         monkeypatch.setattr(
-            HermesAgentObserver,
-            "finish",
-            MagicMock(side_effect=RuntimeError("observer failed")),
+            HermesAgent, "_sandbox_observations", MagicMock(side_effect=RuntimeError("observer failed"))
         )
 
         with pytest.raises(ValueError, match="agent failed"):

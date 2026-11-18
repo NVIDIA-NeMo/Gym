@@ -7,7 +7,6 @@ version = "0.0.0"
 requires-python = ">=3.13.14"
 dependencies = [
     "nemo-gym[dev,sandbox]",
-    "hermes-agent@ git+https://github.com/cmunley1/hermes-agent@26bb847a88493342ca1b194e0455b479073ae21d",
     "mcp<2,>=1.28.1",
 ]
 
@@ -63,3 +62,7 @@ telemetry = ["nemo-gym[telemetry]"]
 
 [tool.uv.workspace]
 members = []
+
+[tool.nemo-gym.hermes]
+# Hermes 0.23.2 runs from this checkout in its own Python 3.14 environment.
+source = "git+https://github.com/NousResearch/hermes-agent.git@ae2a81ccc00e9b7c06301523e5bb09608397149c"
