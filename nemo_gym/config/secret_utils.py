@@ -13,9 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import re
-from typing import Any, List
+from typing import Any, List, NoReturn
 
 from omegaconf import DictConfig, ListConfig, open_dict
+from omegaconf._utils import split_key
+from omegaconf.errors import GrammarParseError
+from omegaconf.grammar.gen.OmegaConfGrammarParser import OmegaConfGrammarParser
+from omegaconf.grammar_parser import parse
+from omegaconf.grammar_visitor import GrammarVisitor
 
 
 MASKED_VALUE = "****"
@@ -47,6 +52,7 @@ _CAPTURE_PUBLIC_FIELDS = frozenset(
         "lineage_store",
         "rebuild_response",
         "parent_resolution",
+        "allow_system_suffix",
         "allow_unresolved_continuations",
         "delta_records",
         "mask_incomplete_when_attributed",
@@ -86,6 +92,259 @@ def looks_like_secret_key(key: object) -> bool:
     # OmegaConf allows non-string keys (ints, bools, enums), so match on their string form.
     lowered_key = str(key).lower()
     return any(substring in lowered_key for substring in _SECRET_KEY_SUBSTRINGS)
+
+
+# Narrower than _SECRET_KEY_SUBSTRINGS: key names whose values are credentials, for a config that clients still use
+# (the head server's copy feeds routing, assistant headers and token limits, so `header`, `key` and `tokens` stay
+# visible there). A bare `token` or a `*_token` name counts; `max_tokens` and `token_ids` do not.
+_CREDENTIAL_KEY_SUBSTRINGS = (
+    "api_key",
+    "apikey",
+    "api-key",
+    "access_key",
+    "private_key",
+    "secret",
+    "password",
+    "passwd",
+    "credential",
+    "bearer",
+    "authorization",
+    "cookie",
+)
+
+
+def looks_like_credential_key(key: object) -> bool:
+    lowered_key = str(key).lower()
+    return (
+        any(substring in lowered_key for substring in _CREDENTIAL_KEY_SUBSTRINGS)
+        or lowered_key == "token"
+        or lowered_key.endswith(("_token", "-token"))
+    )
+
+
+def _looks_like_header_credential(key: object) -> bool:
+    """Inside a headers mapping, a `*-key` / `*_key` header (e.g. LiteLLM's `x-litellm-key`) carries a credential."""
+    lowered_key = str(key).lower()
+    return lowered_key == "key" or lowered_key.endswith(("-key", "_key"))
+
+
+def mask_credentials(value: Any, under_credential_key: bool = False, in_headers: bool = False) -> Any:
+    """Copy a config without credential values, including their referenced source nodes.
+
+    Static OmegaConf references carry credential/header context to their targets without resolving any values.
+    Unrelated interpolations stay intact. Dynamic references and custom resolvers in credential-bearing paths
+    fail closed. Static ``oc.select`` and ``oc.env`` credential leaves are analyzed without evaluation;
+    ``oc.decode`` supports static inputs, refusing expressions whose decoded references depend on runtime values.
+    URL passwords are masked here even when interpolated; ``mask_url_passwords`` retains its existing behavior
+    for other callers.
+    Empty strings, MISSING, non-string leaves, ordinary headers and routing settings remain usable.
+    """
+    path_type = tuple[object, ...]
+    pending: list[tuple[path_type, bool, bool, bool]] = [((), under_credential_key, in_headers, False)]
+    visited: set[tuple[path_type, bool, bool, bool]] = set()
+    masked: set[path_type] = set()
+    urls: dict[path_type, str] = {}
+
+    def unsafe_reference() -> NoReturn:
+        # Never include an interpolation's text: resolver arguments can themselves contain credentials.
+        raise ValueError(
+            "Cannot safely mask a credential interpolation. Use static config references, oc.select or oc.env for "
+            "credential values, and static config references for header mappings."
+        )
+
+    def references(text: str, *, allow_env: bool, decoded: bool = False) -> tuple[list[tuple[str, bool, bool]], bool]:
+        if "${" not in text:
+            return [], False
+        try:
+            tree = parse(text)
+        except GrammarParseError:
+            unsafe_reference()
+        result: list[tuple[str, bool, bool]] = []
+        nodes = [tree]
+        while nodes:
+            node = nodes.pop()
+            if decoded and hasattr(node, "symbol") and node.symbol.type == OmegaConfGrammarParser.ESC_INTER:
+                unsafe_reference()
+            if isinstance(node, OmegaConfGrammarParser.InterpolationNodeContext):
+                # A config key containing an interpolation is dynamic, e.g. ${keys.${which}}.
+                if any(
+                    isinstance(child, OmegaConfGrammarParser.ConfigKeyContext)
+                    and isinstance(child.getChild(0), OmegaConfGrammarParser.InterpolationContext)
+                    for child in node.getChildren()
+                ):
+                    unsafe_reference()
+                result.append((node.getText()[2:-1], False, decoded))
+                continue
+            if isinstance(node, OmegaConfGrammarParser.InterpolationResolverContext):
+                name = node.getChild(1).getText()
+                if not allow_env or name not in ("oc.env", "oc.select", "oc.decode"):
+                    unsafe_reference()
+                sequence = node.getChild(3)
+                if not isinstance(sequence, OmegaConfGrammarParser.SequenceContext):
+                    unsafe_reference()
+                arguments = list(sequence.getChildren())
+                if not arguments or not isinstance(arguments[0], OmegaConfGrammarParser.ElementContext):
+                    unsafe_reference()
+                if name == "oc.select":
+                    # Parse the static selector with OmegaConf's grammar, refusing every interpolation callback.
+                    # This matches the builtin's root-relative lookup (unless the selector begins with a dot).
+                    selector = GrammarVisitor(
+                        node_interpolation_callback=lambda *_: unsafe_reference(),
+                        resolver_interpolation_callback=lambda **_: unsafe_reference(),
+                        memo=None,
+                    ).visit(arguments[0])
+                    if not isinstance(selector, str):
+                        unsafe_reference()
+                    result.append((selector, True, decoded))
+                elif name == "oc.decode":
+                    # decode reparses its result. Only static inputs can be inspected without running a resolver;
+                    # propagate this requirement through references/selectors, and refuse a second decode layer.
+                    if decoded or len(arguments) != 1:
+                        unsafe_reference()
+                    refs, _ = references(arguments[0].getText(), allow_env=True, decoded=True)
+                    result.extend(refs)
+                    continue
+                elif decoded:
+                    # An environment value could decode into an arbitrary config reference.
+                    unsafe_reference()
+                # An env variable's name is not a credential; an optional env/select default is. Inspect defaults
+                # even when a selector exists, since their literal sources must not survive elsewhere in the copy.
+                if decoded:
+                    for argument in arguments[2::2]:
+                        refs, _ = references(argument.getText(), allow_env=True, decoded=True)
+                        result.extend(refs)
+                else:
+                    nodes.extend(arguments[2:])
+                continue
+            if hasattr(node, "getChildren"):
+                nodes.extend(node.getChildren())
+        text_node = tree.getChild(0)
+        sole_reference = (
+            text_node.getChildCount() == 1
+            and isinstance(text_node.getChild(0), OmegaConfGrammarParser.InterpolationContext)
+            and isinstance(text_node.getChild(0).getChild(0), OmegaConfGrammarParser.InterpolationNodeContext)
+        )
+        if decoded:
+            sole_expression = text_node.getChildCount() == 1 and isinstance(
+                text_node.getChild(0), OmegaConfGrammarParser.InterpolationContext
+            )
+            if result and not sole_expression:
+                unsafe_reference()
+            if not result:
+                literal = GrammarVisitor(
+                    node_interpolation_callback=lambda *_: unsafe_reference(),
+                    resolver_interpolation_callback=lambda **_: unsafe_reference(),
+                    memo=None,
+                ).visit(tree)
+                if isinstance(literal, str) and "${" in literal:
+                    unsafe_reference()
+        return result, sole_reference
+
+    def get(path: path_type) -> Any:
+        node = value
+        for key in path:
+            node = node[key]
+        return node
+
+    def target(
+        reference: str,
+        origin: path_type,
+        active: frozenset[path_type] = frozenset(),
+        *,
+        optional: bool = False,
+    ) -> path_type | None:
+        parts = split_key(reference)
+        relative = 0
+        while parts and parts[0] == "":
+            relative += 1
+            parts.pop(0)
+        path = origin[:-1] if relative else ()
+        if relative > len(origin):
+            unsafe_reference()
+        if relative > 1:
+            path = path[: -(relative - 1)]
+        for part in parts:
+            # A path may traverse a container alias before reaching its leaf: ${alias.key}, alias=${shared}.
+            seen = set(active)
+            node = get(path)
+            while isinstance(node, str):
+                if path in seen:
+                    unsafe_reference()
+                seen.add(path)
+                refs, sole_reference = references(node, allow_env=False)
+                if not sole_reference or len(refs) != 1:
+                    if optional:
+                        return None
+                    unsafe_reference()
+                destination = target(refs[0][0], path, frozenset(seen))
+                assert destination is not None
+                path = destination
+                node = get(path)
+            if isinstance(node, dict) and part in node:
+                path += (part,)
+            elif isinstance(node, list) and part.isdecimal() and int(part) < len(node):
+                path += (int(part),)
+            else:
+                if optional:
+                    return None
+                unsafe_reference()
+        return path
+
+    def follow(refs: list[tuple[str, bool, bool]], origin: path_type, credential: bool, headers: bool) -> None:
+        for reference, optional, decoded in refs:
+            destination = target(reference, origin, optional=optional)
+            if destination is not None:
+                pending.append((destination, credential, headers, decoded))
+
+    while pending:
+        path, credential, headers, decoded = pending.pop()
+        context = path, credential, headers, decoded
+        if context in visited:
+            continue
+        visited.add(context)
+        node = get(path)
+        if decoded and isinstance(node, (dict, list)):
+            unsafe_reference()
+        if isinstance(node, dict):
+            pending.extend(
+                (
+                    path + (key,),
+                    credential or looks_like_credential_key(key) or (headers and _looks_like_header_credential(key)),
+                    str(key).lower().endswith("headers"),
+                    False,
+                )
+                for key in node
+            )
+        elif isinstance(node, list):
+            pending.extend((path + (index,), credential, headers, False) for index in range(len(node)))
+        elif isinstance(node, str):
+            if credential and node not in ("", "???"):
+                masked.add(path)
+            if credential or headers:
+                refs, _ = references(node, allow_env=credential, decoded=decoded)
+                follow(refs, path, credential, headers)
+            if not credential:
+
+                def mask_password(match: re.Match) -> str:
+                    password = match["password"]
+                    if not password or password == MASKED_VALUE:
+                        return match.group(0)
+                    refs, _ = references(password, allow_env=True)
+                    follow(refs, path, True, False)
+                    return f"{match['head']}:{MASKED_VALUE}@{match['host']}"
+
+                urls[path] = _URL_PASSWORD.sub(mask_password, node)
+
+    def copy(node: Any, path: path_type = ()) -> Any:
+        if path in masked:
+            return MASKED_VALUE
+        if isinstance(node, dict):
+            return {key: copy(child, path + (key,)) for key, child in node.items()}
+        if isinstance(node, list):
+            return [copy(child, path + (index,)) for index, child in enumerate(node)]
+        return urls.get(path, node)
+
+    return copy(value)
 
 
 def hide_secrets_in_overrides(tokens: List[str]) -> List[str]:

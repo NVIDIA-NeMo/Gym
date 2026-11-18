@@ -1,0 +1,13 @@
+You are an expert CAD engineer. Given {layout} of a mechanical part, write a CadQuery Python program that reproduces the geometry.
+
+{cameras}
+
+{convention} Match orientation exactly — world XYZ in your code must match world XYZ in the renders.
+
+Each view is 256x256 pixels, with a white background. Foreground colors are for visualization only; reproduce the geometry.
+
+Output ONLY a single ```python fenced block:
+- start with `import cadquery as cq`
+- store the final solid in `result`, a cadquery.Workplane or cadquery.Shape
+- no prose, no comments outside the fence
+- do not read files, download assets, display a viewer, or export files

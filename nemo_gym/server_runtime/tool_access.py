@@ -8,8 +8,22 @@ from typing import Annotated, Literal
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
 
 
+# Direct HTTP has no field for a tool's error result, which MCP reports as `isError`, so a tool route that answers a
+# call with an error result sets this header to "true".
+TOOL_ERROR_HEADER = "X-NeMo-Gym-Tool-Error"
+
+# The ID the model gave a tool call (its `call_id`), which an agent may send with a direct HTTP call, so the server can
+# join its record to the agent's trajectory.
+TOOL_CALL_ID_HEADER = "X-NeMo-Gym-Tool-Call-Id"
+
+
 class DirectHTTPToolAccess(BaseModel):
-    """Connect a trusted Python agent to typed tool routes."""
+    """Connect a trusted Python agent to typed tool routes.
+
+    A route answers a call whose result is an error with ``X-NeMo-Gym-Tool-Error: true`` (``TOOL_ERROR_HEADER``),
+    even when its status is 200. An agent may send the model's ``call_id`` in ``X-NeMo-Gym-Tool-Call-Id``
+    (``TOOL_CALL_ID_HEADER``).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
